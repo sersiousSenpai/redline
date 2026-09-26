@@ -3,51 +3,53 @@
 import { describe, expect, it } from "vitest";
 import {
   CHAT_CLOSED,
+  migrateChatPill,
+  pageChatIdentity,
   chatEntryFor,
   pruneChatState,
   withChatPatch,
   type ChatStateMap,
 } from "./browseChatState";
 
-const entry = (open: boolean, pill: "page" | "list", at: number) => ({
+const entry = (open: boolean, pill: "page" | "cart", at: number) => ({
   open,
   pill,
   at,
 });
 
 describe("chatEntryFor", () => {
-  it("defaults a never-opened tab to closed-on-page", () => {
+  it("defaults to closed before any panel is opened", () => {
     // The deliberate behavior change: switching to a tab that has never had
     // the chat open now CLOSES the panel.
-    expect(chatEntryFor({}, "b1")).toBe(CHAT_CLOSED);
-    expect(chatEntryFor({}, null)).toBe(CHAT_CLOSED);
+    expect(chatEntryFor({}, "b1")).toEqual(CHAT_CLOSED);
+    expect(chatEntryFor({}, null)).toEqual(CHAT_CLOSED);
   });
 
   it("remembers a tab's own pill", () => {
-    const state: ChatStateMap = { b1: entry(true, "list", 5) };
-    expect(chatEntryFor(state, "b1").pill).toBe("list");
-    expect(chatEntryFor(state, "b2").open).toBe(false);
+    const state: ChatStateMap = { b1: entry(true, "cart", 5) };
+    expect(chatEntryFor(state, "b1").pill).toBe("cart");
+    expect(chatEntryFor(state, "b2").open).toBe(true);
   });
 });
 
 describe("withChatPatch", () => {
   it("writes only the tab it names", () => {
     const state: ChatStateMap = { b1: entry(true, "page", 1) };
-    const next = withChatPatch(state, "b2", { open: true, pill: "list" }, 9);
+    const next = withChatPatch(state, "b2", { open: true, pill: "cart" }, 9);
     expect(next.b1).toBe(state.b1);
-    expect(next.b2).toEqual({ open: true, pill: "list", at: 9 });
+    expect(next.b2).toEqual({ open: true, pill: "cart", at: 9 });
   });
 
   it("returns the same map when nothing moved", () => {
     // usePersistedState writes to localStorage on every new object, so a
     // no-op click must not touch the disk.
-    const state: ChatStateMap = { b1: entry(true, "list", 1) };
+    const state: ChatStateMap = { b1: entry(true, "cart", 1) };
     expect(withChatPatch(state, "b1", { open: true }, 99)).toBe(state);
   });
 
   it("creates the entry for a tab it has never seen", () => {
-    expect(withChatPatch({}, "b1", { pill: "list" }, 4)).toEqual({
-      b1: { open: false, pill: "list", at: 4 },
+    expect(withChatPatch({}, "b1", { pill: "cart" }, 4)).toEqual({
+      b1: { open: false, pill: "cart", at: 4 },
     });
   });
 });
@@ -68,7 +70,7 @@ describe("pruneChatState", () => {
   });
 
   it("NEVER drops a tab that still exists, however stale", () => {
-    const state: ChatStateMap = { old: entry(true, "list", 0) };
+    const state: ChatStateMap = { old: entry(true, "cart", 0) };
     for (let i = 0; i < 10; i++) state[`b${i}`] = entry(true, "page", i + 100);
     const next = pruneChatState(state, ["old"], 2);
     expect(next.old).toBe(state.old);
@@ -80,7 +82,7 @@ describe("pruneChatState", () => {
     // every regular tab's memory and coming back would land on a closed
     // panel — the same round-trip amnesia this whole map exists to fix.
     const regular: ChatStateMap = {
-      r1: entry(true, "list", 1),
+      r1: entry(true, "cart", 1),
       r2: entry(true, "page", 2),
     };
     // In the mission, only the mission's tabs are live.
@@ -88,4 +90,19 @@ describe("pruneChatState", () => {
     expect(inMission.r1).toEqual(regular.r1);
     expect(inMission.r2).toEqual(regular.r2);
   });
+});
+
+it("migrates old pills without losing Cart memory", () => {
+  expect(migrateChatPill("list")).toBe("cart"); expect(migrateChatPill("linked")).toBe("page");
+});
+it("shares panel visibility while retaining each tab's pill", () => {
+  let state = withChatPatch({}, "one", { open: true, pill: "cart" }, 1);
+  expect(chatEntryFor(state, "two")).toMatchObject({ open: true, pill: "page" });
+  state = withChatPatch(state, "two", { open: false }, 2);
+  expect(chatEntryFor(state, "one")).toMatchObject({ open: false, pill: "cart" });
+});
+it("keeps and releases the linked thread while grounding on the active page", () => {
+  const linked = { browseId: "one", title: "One", originTabId: "t-one" };
+  expect(pageChatIdentity({ browseId: "two" }, "t-two", linked)).toEqual({ browseId: "one", label: "browser-t-two" });
+  expect(pageChatIdentity({ browseId: "two" }, "t-two", null)).toEqual({ browseId: "two", label: "browser-t-two" });
 });

@@ -526,21 +526,37 @@ pub(crate) async fn run_push(
     let committed: Option<String>;
     let committed_short: Option<String>;
     if !req.skip_commit {
-        // 4. Stage. Paths are validated (`safe_rel_path`) and passed after
-        //    `--`. A rename must have staged BOTH its old and new path — the
-        //    dialog sends both from the diff's file list.
-        let mut add_args: Vec<String> = vec!["add".into(), "-A".into()];
+        // 4. Stage both sides of renames, including deletions/old paths already
+        //    absent from the index. Missing paths use ignore-unmatch; present
+        //    paths (including broken symlinks) use add. Every scoped path is
+        //    literal so route brackets and pathspec magic cannot select siblings.
         if let Some(paths) = &req.paths {
             if paths.is_empty() {
                 return Err("no files selected to commit".to_string());
             }
-            add_args.push("--".into());
+            let mut present = vec!["add".to_string(), "-A".into(), "--".into()];
+            let mut missing = vec!["rm".to_string(), "--cached".into(), "-q".into(), "--ignore-unmatch".into(), "--".into()];
             for p in paths {
-                add_args.push(review::safe_rel_path(p)?.to_string());
+                let path = review::safe_rel_path(p)?;
+                let literal = format!(":(literal){path}");
+                if dir.join(path).symlink_metadata().is_ok() {
+                    present.push(literal);
+                } else {
+                    missing.push(literal);
+                }
             }
+            // An empty `git add -A --` would stage the entire repository.
+            if present.len() > 3 {
+                let args: Vec<&str> = present.iter().map(String::as_str).collect();
+                git_ok(dir, &args, None, LOCAL_TIMEOUT).await?;
+            }
+            if missing.len() > 5 {
+                let args: Vec<&str> = missing.iter().map(String::as_str).collect();
+                git_ok(dir, &args, None, LOCAL_TIMEOUT).await?;
+            }
+        } else {
+            git_ok(dir, &["add", "-A"], None, LOCAL_TIMEOUT).await?;
         }
-        let add_ref: Vec<&str> = add_args.iter().map(String::as_str).collect();
-        git_ok(dir, &add_ref, None, LOCAL_TIMEOUT).await?;
         step(
             &mut steps,
             "stage",
@@ -1205,6 +1221,79 @@ mod tests {
         assert_eq!(shown.stdout.trim(), "a.txt");
         let s = status_for(d).await;
         assert_eq!(s.untracked, 1);
+    }
+
+    #[tokio::test]
+    async fn push_scoped_paths_tolerate_an_already_staged_deletion() {
+        let td = temp_repo().await;
+        let d = td.path();
+        let _remote = bare_remote(d).await;
+        tokio::fs::create_dir_all(d.join("app/[id]")).await.unwrap();
+        tokio::fs::write(d.join("app/[id]/page.tsx"), "page\n").await.unwrap();
+        run(d, &["add", "-A"]).await;
+        run(d, &["commit", "-qm", "page"]).await;
+        run(d, &["rm", "--", "app/[id]/page.tsx"]).await;
+        tokio::fs::write(d.join("a.txt"), "changed\n").await.unwrap();
+        let mut r = req(d, "staged-deletion");
+        r.paths = Some(vec!["a.txt".into(), "app/[id]/page.tsx".into()]);
+        run_push(d, &r, &no_emit()).await.unwrap();
+        let shown = git_ok(d, &["show", "--format=", "--name-status", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        assert!(shown.stdout.contains("M\ta.txt"), "{}", shown.stdout);
+        assert!(shown.stdout.contains("D\tapp/[id]/page.tsx"), "{}", shown.stdout);
+    }
+
+    #[tokio::test]
+    async fn push_scoped_paths_tolerate_an_already_staged_rename() {
+        let td = temp_repo().await;
+        let d = td.path();
+        let _remote = bare_remote(d).await;
+        tokio::fs::write(d.join("old.txt"), "rename me\n").await.unwrap();
+        run(d, &["add", "old.txt"]).await;
+        run(d, &["commit", "-qm", "old file"]).await;
+        run(d, &["mv", "old.txt", "new.txt"]).await;
+        let mut r = req(d, "staged-rename");
+        r.paths = Some(vec!["new.txt".into(), "old.txt".into()]);
+        run_push(d, &r, &no_emit()).await.unwrap();
+        let shown = git_ok(d, &["show", "--format=", "--name-status", "-M", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        assert_eq!(shown.stdout.trim(), "R100\told.txt\tnew.txt");
+    }
+
+    #[tokio::test]
+    async fn push_scoped_paths_stage_an_unstaged_deletion() {
+        let td = temp_repo().await;
+        let d = td.path();
+        let _remote = bare_remote(d).await;
+        tokio::fs::remove_file(d.join("a.txt")).await.unwrap();
+        tokio::fs::write(d.join("unselected.txt"), "keep untracked\n").await.unwrap();
+        let mut r = req(d, "unstaged-deletion");
+        r.paths = Some(vec!["a.txt".into()]);
+        run_push(d, &r, &no_emit()).await.unwrap();
+        let shown = git_ok(d, &["show", "--format=", "--name-status", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        assert_eq!(shown.stdout.trim(), "D\ta.txt");
+        assert_eq!(status_for(d).await.untracked, 1, "missing-only scope cannot stage unrelated files");
+    }
+
+    #[tokio::test]
+    async fn push_scoped_bracket_paths_are_literal() {
+        let td = temp_repo().await;
+        let d = td.path();
+        let _remote = bare_remote(d).await;
+        for dir in ["x/[ab]", "x/a"] {
+            tokio::fs::create_dir_all(d.join(dir)).await.unwrap();
+            tokio::fs::write(d.join(dir).join("f.txt"), "before\n").await.unwrap();
+        }
+        run(d, &["add", "-A"]).await;
+        run(d, &["commit", "-qm", "routes"]).await;
+        for path in ["x/[ab]/f.txt", "x/a/f.txt"] {
+            tokio::fs::write(d.join(path), "after\n").await.unwrap();
+        }
+        let mut r = req(d, "literal-routes");
+        r.paths = Some(vec!["x/[ab]/f.txt".into()]);
+        run_push(d, &r, &no_emit()).await.unwrap();
+        let shown = git_ok(d, &["show", "--format=", "--name-only", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        assert_eq!(shown.stdout.trim(), "x/[ab]/f.txt");
+        let unstaged = git_ok(d, &["diff", "--name-only"], None, LOCAL_TIMEOUT).await.unwrap();
+        assert_eq!(unstaged.stdout.trim(), "x/a/f.txt");
     }
 
     #[tokio::test]

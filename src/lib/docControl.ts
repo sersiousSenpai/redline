@@ -29,6 +29,38 @@ export const DOC_PAD_R_NARROW = 32;
  *  stacked control (~30px) plus its inset and gap. */
 export const DOC_PAD_R_WIDE = 64;
 
+export const DOC_MEASURE_MIN = 820;
+export const DOC_MEASURE_DRAG_TRAVEL = 160;
+export const DOC_MEASURE_SNAP = 40;
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+export function docMeasureStart({ wide, measure, full }: { wide: boolean; measure: number; full: number }): number {
+  if (full <= DOC_MEASURE_MIN) return wide ? 1 : 0;
+  return wide ? 1 : clamp((measure - DOC_MEASURE_MIN) / (full - DOC_MEASURE_MIN), 0, 1);
+}
+
+export function docMeasureDrag({ t0, dy, full }: { t0: number; dy: number; full: number }) {
+  if (full <= DOC_MEASURE_MIN) return { px: DOC_MEASURE_MIN, atMax: false, atMin: true };
+  let px = Math.round(DOC_MEASURE_MIN + clamp(t0 - dy / DOC_MEASURE_DRAG_TRAVEL, 0, 1) * (full - DOC_MEASURE_MIN));
+  // In short ranges choose the closer pole, so overlapping snap zones are symmetric.
+  if (Math.min(px - DOC_MEASURE_MIN, full - px) <= DOC_MEASURE_SNAP) {
+    px = px - DOC_MEASURE_MIN <= full - px ? DOC_MEASURE_MIN : full;
+  }
+  return { px, atMax: px >= full, atMin: px <= DOC_MEASURE_MIN };
+}
+
+export function docMeasureSettle(px: number, full: number, prevMeasure: number) {
+  return full > DOC_MEASURE_MIN && px >= full
+    ? { wide: true, measure: prevMeasure }
+    : { wide: false, measure: Math.max(DOC_MEASURE_MIN, Math.min(px, full)) };
+}
+
+/** Shared by React and gesture writes: committing must not shift the article. */
+export function docArticleWidth(wide: boolean, measure: number) {
+  const safeMeasure = Number.isFinite(measure) ? Math.max(DOC_MEASURE_MIN, measure) : DOC_MEASURE_MIN;
+  return { maxWidth: wide ? "none" : `${safeMeasure}px`, paddingRight: `${wide ? DOC_PAD_R_WIDE : DOC_PAD_R_NARROW}px` };
+}
+
 /** The control's distance from the pane's right edge, px. */
 export const DOC_CTRL_INSET = 16;
 

@@ -28,6 +28,9 @@ import {
   useOrchestration,
   useOrchestrationRuns,
 } from "../hooks/useOrchestration";
+// Build Redline: the fourth execution mode. Off the boot path with the rest of
+// this surface, so it costs nothing until Runs is opened.
+import { BuildRedlinePanel } from "./BuildRedlinePanel";
 import {
   agentStalled,
   fileConflicts,
@@ -991,8 +994,8 @@ function WorkGraphPane({ graph }: { graph: WorkGraph }) {
 
 // --- the surface ------------------------------------------------------------
 
-type RunsTab = "live" | "history" | "work";
-const RUNS_TABS: readonly RunsTab[] = ["live", "history", "work"];
+type RunsTab = "live" | "history" | "work" | "build";
+const RUNS_TABS: readonly RunsTab[] = ["live", "history", "work", "build"];
 
 export interface OrchestrationSurfaceProps {
   /** Whether this surface is the one on screen — gates every poll. */
@@ -1012,6 +1015,9 @@ export interface OrchestrationSurfaceProps {
   /** "Go to Runs: Work" from the command palette. Nonce'd: a controlled prop
    *  would drag this surface back to that tab on every render. */
   tabRequest?: TabRequest | null;
+  /** Surface-level messages (Build Redline's long operations report through
+   *  this rather than growing their own notification channel). */
+  onToast?: (message: string) => void;
   /** A reviewed Orchestrate plan opens its durable draft directly. */
   nativeRunId?: string | null;
   onOpenPlanBlock?: (sessionId: string, blockId: string) => void;
@@ -1104,6 +1110,7 @@ export function OrchestrationSurface({
   onUnapprove,
   onStandDown,
   tabRequest = null,
+  onToast,
   nativeRunId = null,
   onOpenPlanBlock,
   onReviewSession,
@@ -1439,6 +1446,13 @@ export function OrchestrationSurface({
               </div>
             )}
           </>
+        ) : tab === "build" ? (
+          <BuildRedlinePanel
+            active={active}
+            planSessionId={activePlanSessionId ?? null}
+            planTitle={summaryFor(activePlanSessionId ?? null)?.planTitle ?? null}
+            onToast={(message) => onToast?.(message) ?? undefined}
+          />
         ) : workGraph == null ? (
           <div style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>
             Reading the work graph…

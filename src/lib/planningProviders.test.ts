@@ -46,7 +46,13 @@ describe("native planning provider contracts", () => {
       expect(cmd).toContain("'chosen-model'");
       expect(cmd).toContain("REDLINE_RESTORE:conversation-one");
       expect(cmd).not.toContain("claude --resume");
-      if (backend === "codex") expect(cmd).toContain(`-m 'chosen-model' -c 'model_reasoning_effort="high"' -s read-only -a never`);
+      if (backend === "codex") {
+        // The app-server launcher owns the read-only restore policy; these
+        // CLI arguments preserve the user's model and reasoning choice.
+        expect(cmd).toContain(`-m 'chosen-model' -c 'model_reasoning_effort="high"'`);
+        expect(cmd).toContain('redline-codex-launch.sh');
+        expect(cmd).toContain("resume 'conversation-one'");
+      }
       if (backend === "antigravity") expect(cmd).toContain("--conversation 'conversation-one' --mode=plan --add-dir '/tmp/project'");
     }
   });

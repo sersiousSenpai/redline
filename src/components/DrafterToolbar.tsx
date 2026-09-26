@@ -225,20 +225,41 @@ function Group({ id, children }: { id?: string; children: ReactNode }) {
 // option rows, swatch grids, etc. Closes on outside-click and Escape. The
 // trigger and its panel both suppress mousedown so the editor selection is
 // preserved while the user picks an option.
+export const RIBBON_POP_CHROME = 12; // .rl-ribbon-pop: 5px padding + 1px border per side.
+
+let ribbonScrollbarWidth: number | undefined;
+function useRibbonScrollbarWidth() {
+  const [width, setWidth] = useState(ribbonScrollbarWidth ?? 0);
+  useLayoutEffect(() => {
+    if (ribbonScrollbarWidth === undefined) {
+      const probe = document.createElement("div");
+      Object.assign(probe.style, { position: "absolute", width: "100px", height: "100px", overflow: "scroll", visibility: "hidden", pointerEvents: "none" });
+      document.body.appendChild(probe);
+      ribbonScrollbarWidth = probe.offsetWidth - probe.clientWidth;
+      probe.remove();
+    }
+    setWidth(ribbonScrollbarWidth);
+  }, []);
+  return width;
+}
+
 function RibbonMenu({
   label,
   title,
   minWidth,
+  panelWidth,
   disabled,
   children,
 }: {
   label: ReactNode;
   title: string;
   minWidth?: number;
+  panelWidth: number;
   disabled?: boolean;
   children: (close: () => void) => ReactNode;
 }) {
   const btnRef = useRef<HTMLButtonElement | null>(null);
+  const scrollbarWidth = useRibbonScrollbarWidth();
   // `useClickPopover` + `Panel` instead of a raw `position: absolute; left: 0`
   // panel, which fixes two bugs at once:
   //
@@ -250,8 +271,13 @@ function RibbonMenu({
   //     rest of the app hides it while a menu is open). `useClickPopover` calls
   //     it, which is most of why this moved.
   //
-  // `.rl-ribbon-pop` keeps its skin and loses its positioning.
-  const pop = useClickPopover(btnRef, "left", "below", minWidth ?? 200);
+  // Trigger minimum width and panel content width are independent: icon
+  // buttons are much narrower than their grids. Placement and render must
+  // use the same panelWidth so edge clamping remains accurate.
+  // A classic scrollbar consumes layout width (overlay scrollbars consume
+  // zero). Reserve it locally so even a scrolling table menu keeps all cells,
+  // and give the placement helper the same total width the panel renders.
+  const pop = useClickPopover(btnRef, "left", "below", panelWidth + scrollbarWidth);
 
   return (
     <div style={{ position: "relative" }}>
@@ -293,7 +319,7 @@ function RibbonMenu({
             role="menu"
             onMouseDown={(e) => e.preventDefault()}
             className="rl-ribbon-pop"
-            style={{ position: "static", minWidth: "100%" }}
+            style={{ position: "static", minWidth: "100%", scrollbarGutter: "stable" }}
           >
             {children(pop.close)}
           </div>
@@ -442,17 +468,22 @@ const BULLET_STYLES: { key: string; preview: string; label: string }[] = [
 ];
 
 // Word's "drag to size" table inserter: hover the grid to choose columns × rows.
+const MAX_ROWS = 8;
+const MAX_COLS = 10;
+const TABLE_CELL = 15;
+const TABLE_GAP = 3;
+const TABLE_PAD = 8;
+export const TABLE_GRID_WIDTH = MAX_COLS * TABLE_CELL + (MAX_COLS - 1) * TABLE_GAP + 2 * TABLE_PAD;
+
 function TableGrid({ onPick }: { onPick: (rows: number, cols: number) => void }) {
-  const MAX_ROWS = 8;
-  const MAX_COLS = 10;
   const [hover, setHover] = useState({ r: 0, c: 0 });
   return (
-    <div style={{ padding: "8px" }} onMouseLeave={() => setHover({ r: 0, c: 0 })}>
+    <div style={{ padding: TABLE_PAD }} onMouseLeave={() => setHover({ r: 0, c: 0 })}>
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: `repeat(${MAX_COLS}, 15px)`,
-          gap: "3px",
+          gridTemplateColumns: `repeat(${MAX_COLS}, ${TABLE_CELL}px)`,
+          gap: TABLE_GAP,
         }}
       >
         {Array.from({ length: MAX_ROWS * MAX_COLS }).map((_, i) => {
@@ -468,8 +499,8 @@ function TableGrid({ onPick }: { onPick: (rows: number, cols: number) => void })
                 onPick(r, c);
               }}
               style={{
-                width: "15px",
-                height: "15px",
+                width: TABLE_CELL,
+                height: TABLE_CELL,
                 borderRadius: "2px",
                 border: `1px solid ${
                   on ? "var(--color-info)" : "var(--color-rule)"
@@ -636,6 +667,7 @@ export function DrafterToolbar({
       <Group id="style">
         <RibbonMenu
           title="Paragraph style"
+          panelWidth={168}
           label={activeStyle?.label ?? "Normal"}
           minWidth={116}
           disabled={disabled}
@@ -664,6 +696,7 @@ export function DrafterToolbar({
       <Group id="type">
         <RibbonMenu
           title="Font"
+          panelWidth={220}
           label={activeFamilyLabel}
           minWidth={128}
           disabled={disabled}
@@ -697,6 +730,7 @@ export function DrafterToolbar({
         </RibbonMenu>
         <RibbonMenu
           title="Font size"
+          panelWidth={120}
           label={activeSizeLabel}
           minWidth={56}
           disabled={disabled}
@@ -777,6 +811,7 @@ export function DrafterToolbar({
       <Group id="color">
         <RibbonMenu
           title="Text color"
+          panelWidth={188}
           label={
             <Baseline
               size={ICON}
@@ -788,7 +823,7 @@ export function DrafterToolbar({
           disabled={disabled}
         >
           {(close) => (
-            <div style={{ width: "176px" }}>
+            <div>
               <MenuRow
                 onClick={() => {
                   editor?.chain().focus().unsetColor().run();
@@ -831,6 +866,7 @@ export function DrafterToolbar({
         </RibbonMenu>
         <RibbonMenu
           title="Highlight color"
+          panelWidth={180}
           label={
             <Highlighter
               size={ICON}
@@ -844,7 +880,7 @@ export function DrafterToolbar({
           disabled={disabled}
         >
           {(close) => (
-            <div style={{ width: "168px" }}>
+            <div>
               <MenuRow
                 onClick={() => {
                   editor?.chain().focus().unsetHighlight().run();
@@ -934,12 +970,13 @@ export function DrafterToolbar({
       <Group id="lists">
         <RibbonMenu
           title="Bulleted list"
+          panelWidth={160}
           label={<List size={ICON} strokeWidth={STROKE} />}
           minWidth={42}
           disabled={disabled}
         >
           {(close) => (
-            <div style={{ minWidth: "148px" }}>
+            <div>
               <MenuRow
                 active={inBullet}
                 onClick={() => {
@@ -976,12 +1013,13 @@ export function DrafterToolbar({
         </RibbonMenu>
         <RibbonMenu
           title="Numbered list"
+          panelWidth={184}
           label={<ListOrdered size={ICON} strokeWidth={STROKE} />}
           minWidth={42}
           disabled={disabled}
         >
           {(close) => (
-            <div style={{ minWidth: "170px" }}>
+            <div>
               <MenuRow
                 active={inOrdered}
                 onClick={() => {
@@ -1029,6 +1067,7 @@ export function DrafterToolbar({
         </ToolButton>
         <RibbonMenu
           title="Line spacing"
+          panelWidth={140}
           label={<MoveVertical size={ICON} strokeWidth={STROKE} />}
           minWidth={42}
           disabled={disabled}
@@ -1063,6 +1102,7 @@ export function DrafterToolbar({
       <Group id="insert">
         <RibbonMenu
           title="Table"
+          panelWidth={TABLE_GRID_WIDTH + RIBBON_POP_CHROME}
           label={<TableIcon size={ICON} strokeWidth={STROKE} />}
           minWidth={42}
           disabled={disabled}
@@ -1214,6 +1254,7 @@ export function DrafterToolbar({
         <Group id="mode">
           <RibbonMenu
             title="Editing mode — whether your edits are tracked"
+          panelWidth={240}
             label={
               <span
                 className="flex items-center gap-1"

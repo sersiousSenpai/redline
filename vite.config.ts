@@ -85,8 +85,11 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. Native changes belong to Tauri's watcher. README is imported as raw
+      // text by the help modal, so doc edits would otherwise reload the whole
+      // app and detach its terminal UI. Dev help refreshes on Vite restart;
+      // production builds still embed the current README.
+      ignored: ["**/src-tauri/**", "**/README.md", "**/docs/**"],
     },
   },
 }));

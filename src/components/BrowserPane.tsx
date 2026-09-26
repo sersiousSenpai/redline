@@ -1,23 +1,27 @@
+import { loadBrowserWorkspace, saveBrowserWorkspace, noteWorkspaceRevision, type SavedBrowserWorkspace } from "../lib/browserWorkspace";
+import { BrowserAppearanceMenu } from "./BrowserAppearanceMenu";
+import { appearanceCss, normalizeAppearance, siteKey, type BrowserAppearance } from "../lib/browserAppearance";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 
-import { rafCoalesce } from "../lib/raf";
-import {
-  ArrowLeft,
-  ArrowRight,
-  ChevronDown,
-  Link2,
-  ListChecks,
-  MessageSquare,
-  Palette,
-  Plus,
-  Settings,
-  Star,
-  Target,
-  X,
-} from "lucide-react";
+import { shortcutTabId, pageChatIdentity, type LinkedConversation } from "../lib/browseChatState";
+import { ensureCart } from "../lib/browseCart";
+import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
+import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
+import { BrowserFullscreenEdge } from "./BrowserFullscreenEdge";
+import { BrowserChrome } from "./BrowserChrome";
+import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "./BrowserPagePanels";
+import { BrowserDialog } from "./BrowserSurfaces";
+import "./BrowserWorkspace.css";
+import { BrowserTileStage } from "./BrowserTileStage";
+import { arrangementTiles, swapVisibleTiles, tileBadges, assignTile, canonicalTabId, restoreBrowserTabs, focusedWorkspaceTab, assignVisibleTile, DEFAULT_BROWSER_LAYOUT, MAX_MOSAIC_TILES, normalizeBrowserLayout, visibleGrid, visibleTileIds, type BrowserLayout } from "../lib/browserLayout";
+import { deleteMosaic, gridFor, isMosaicWorkspace, listMosaics, loadMosaic, mosaicFromWorkspace, mosaicLayout, mosaicTabs, mosaicWorkspaceId, saveMosaic, STARTUP_MOSAIC_KEY, type Mosaic, type MosaicSummary } from "../lib/browserMosaics";
+import { MosaicEditDialog, MosaicManagerDialog, type MosaicDraft } from "./MosaicDialogs";
+import { useElementPicker, inspectorSeed, PICKING_ERROR } from "../hooks/useElementPicker";
+import { reorderTabs, startTabPointerDrag } from "../lib/browserTabDrag";
+import { Target, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Window } from "@tauri-apps/api/window";
@@ -33,7 +37,7 @@ import {
   type ChatPill,
   type ChatStateMap,
 } from "../lib/browseChatState";
-import { isLocalhostUrl, sameTabUrl, templateFor } from "../lib/browseList";
+import { cartKey, sameTabUrl } from "../lib/browseList";
 import {
   autoSends,
   parseSelectionEvents,
@@ -50,11 +54,11 @@ import { SAFARI_UA } from "../lib/safariUA";
 // `BrowserPane` is a static import in App, so it sits in the boot path. The
 // list panel only exists once a user picks the pill, so it has no business
 // costing boot bytes — and `scripts/size-budget.json` has limited headroom.
-const BrowseList = lazy(() => import("./BrowseList"));
+const MissionFoundationPanel = lazy(() => import("./MissionFoundationPanel").then((module) => ({ default: module.MissionFoundationPanel })));
+const Cart = lazy(() => import("./Cart"));
 import type {
   BinaryFile,
   BrowseFocusTabEvent,
-  BrowseListView,
   BrowseOpenTabEvent,
   BrowseWakeTabEvent,
   Mission,
@@ -62,16 +66,14 @@ import type {
 import { onResizeSession } from "../lib/resizeSession";
 import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
-import { LinkedChat } from "./LinkedChat";
 import { MissionStartDialog } from "./MissionStartDialog";
 import { useMission } from "../hooks/useMission";
-import { useLinked } from "../hooks/useLinked";
 
 // A native child webview is an OS-level layer painted on top of the React DOM —
 // it does not flow inline. So this component renders an invisible placeholder
-// ("slot") and syncs the *active* tab's webview position/size to that slot's
-// bounding rect. Each tab is its own native child webview (label `browser-<id>`),
-// with only the active one shown. Unlike an <iframe>, a real child webview loads
+// ("slot") for each visible page and syncs native bounds to its clipped rect.
+// Each tab is its own native child webview (label `browser-<id>`),
+// with only the pages in the current arrangement shown. Unlike an <iframe>, a real child webview loads
 // any site (no X-Frame-Options blocking) and is scriptable from Rust via
 // webview.eval(...).
 //
@@ -90,9 +92,16 @@ const HOME = "https://www.google.com";
 // tab per `window.open`/`target=_blank`, so a buggy or hostile page could spam
 // them — the same thing browsers' popup blockers defend against.
 const MAX_TABS = 100;
-// Cap on simultaneously-live native webviews (active + MRU). The rest are
-// suspended to the snapshot cache. Tunable.
-const MAX_LIVE_WEBVIEWS = 3;
+// Floor on simultaneously-live native webviews (active + MRU). Every visible
+// tile is kept live on top of it — a mosaic raises the budget to its tile
+// count, up to MAX_MOSAIC_TILES. The rest are suspended to the snapshot cache.
+const MAX_LIVE_WEBVIEWS = 4;
+// Native webview creations in flight at once. Opening a 3×3 mosaic would
+// otherwise spawn nine WebContent processes in one frame.
+const MAX_CONCURRENT_CREATES = 3;
+// The startup mosaic opens on the browser's FIRST mount in an app session.
+// Module scope, because the lazy pane can remount.
+let startupMosaicApplied = false;
 // (The page-discussion split — and the ratio clamp that kept its chat side off
 // zero width — is gone: the four panels moved into the app's conversation
 // dock, whose own ceiling is `voicePaneMaxW`. The webview now has the whole
@@ -106,15 +115,9 @@ const MAX_LIVE_WEBVIEWS = 3;
 // user sees when they click Open.
 export { SAFARI_UA };
 
-/** Px the measured webview slot is inset from its frame element. The native
- *  webview is a square rect composited over a rounded plate (radius 10): a
- *  square inset by at least r·(1−1/√2) ≈ 3px can never cross the border curve,
- *  so 4px keeps the page clear of the plate's corners without reading as a
- *  gap. Exported (with the helper below) so the geometry is pinned by test. */
-export const WEBVIEW_PLATE_INSET = 4;
-/** Fullscreen is a square window takeover — no plate, no inset. */
-export const webviewSlotInset = (fullscreen: boolean): number =>
-  fullscreen ? 0 : WEBVIEW_PLATE_INSET;
+/** Browser pages have a square, edge-to-edge frame. */
+export const WEBVIEW_PLATE_INSET = 0;
+export const webviewSlotInset = (_fullscreen: boolean): number => 0;
 
 // Native webviews are expensive OS resources, and React StrictMode mounts →
 // unmounts → remounts effects synchronously in dev (a fast toggle off/on does
@@ -126,23 +129,6 @@ export const webviewSlotInset = (fullscreen: boolean): number =>
 // close (toggle off, no remount) lets the timer fire and frees the webviews.
 const TEARDOWN_GRACE_MS = 150;
 let pendingTeardown = 0;
-
-// View filters injected as a document-start user script in the native webview
-// (see browser_set_view in Rust), so they're applied before the page paints —
-// no flicker across navigation, and no browser extension to install/toggle.
-// "dark" is a universal smart-invert: invert + hue-rotate the page, then
-// re-invert media so photos/videos read normally. The rest are plain filters.
-const VIEW_CSS: Record<string, string> = {
-  none: "",
-  dark:
-    "html{-webkit-filter:invert(100%) hue-rotate(180deg);filter:invert(100%) hue-rotate(180deg);background:#fafafa!important}" +
-    "img,picture,video,canvas,svg,iframe,embed,object,[style*=\"background-image\"],[class*=\"logo\"]{-webkit-filter:invert(100%) hue-rotate(180deg);filter:invert(100%) hue-rotate(180deg)}",
-  sepia: "html{-webkit-filter:sepia(.6) contrast(.95) brightness(.96);filter:sepia(.6) contrast(.95) brightness(.96)}",
-  gray: "html{-webkit-filter:grayscale(1);filter:grayscale(1)}",
-  dim: "html{-webkit-filter:brightness(.75) contrast(1.05);filter:brightness(.75) contrast(1.05)}",
-  contrast: "html{-webkit-filter:contrast(1.25);filter:contrast(1.25)}",
-};
-const cssForView = (mode: string): string => VIEW_CSS[mode] ?? "";
 
 // Destroy a tab's native webview AND stop its audio/video. A bare
 // Webview.close() can leave WKWebView's media session alive — a YouTube tab
@@ -181,69 +167,28 @@ const newBrowseId = (): string =>
     ? crypto.randomUUID()
     : `b-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-const freshHomeTab = (): Tab => ({
-  id: "t0",
-  label: "browser-t0",
-  url: HOME,
-  title: hostnameOf(HOME),
-  browseId: newBrowseId(),
-});
+const freshHomeTab = (): Tab => {
+  const browseId = newBrowseId(); const id = canonicalTabId(browseId);
+  return { id, label: `browser-${id}`, url: HOME, title: hostnameOf(HOME), browseId };
+};
 
 function loadTabs(): Tab[] {
   try {
     const raw = localStorage.getItem(TABS_KEY);
     if (raw) {
-      const arr = JSON.parse(raw) as Partial<Tab>[];
-      if (Array.isArray(arr) && arr.length) {
-        return arr
-          .filter((t) => typeof t.id === "string" && typeof t.url === "string")
-          .map((t) => ({
-            id: t.id as string,
-            label: `browser-${t.id}`,
-            url: t.url as string,
-            title: t.title || hostnameOf(t.url as string),
-            browseId: t.browseId || newBrowseId(),
-          }));
+      const descriptors = JSON.parse(raw);
+      if (Array.isArray(descriptors)) {
+        const tabs = restoreBrowserTabs(descriptors, newBrowseId, hostnameOf);
+        // Migrate the active tab pointer together with legacy numeric tab IDs.
+        const active = localStorage.getItem(ACTIVE_KEY);
+        const previous = descriptors.find((tab) => tab?.id === active);
+        const migrated = tabs.find((tab) => tab.browseId === previous?.browseId);
+        if (migrated) localStorage.setItem(ACTIVE_KEY, migrated.id);
+        if (tabs.length) return tabs;
       }
     }
-  } catch {
-    /* fall through to a fresh tab */
-  }
+  } catch { /* malformed saved data falls back to a usable new tab */ }
   return [freshHomeTab()];
-}
-
-/** Next free `t<n>` sequence above any restored ids, so a new tab can't collide
- *  with a restored one. */
-function nextSeq(tabs: Tab[]): number {
-  let max = 0;
-  for (const t of tabs) {
-    const n = Number(t.id.replace(/^t/, ""));
-    if (Number.isFinite(n) && n > max) max = n;
-  }
-  return max + 1;
-}
-
-/** Move the tab `dragId` to sit immediately before `overId` (drag-to-reorder).
- *  Tab NUMBERS are purely positional — the strip shows `index + 1` and the
- *  daemon's `/v1/browser/tabs` derives `n` from list position — so reordering
- *  the array is all that's needed for "drag tab 9 onto tab 2 → it becomes tab
- *  2" to hold for both the user and the agent. Durable `id`/`browseId` ride
- *  along with each tab. Returns the same array reference when nothing moves. */
-export function reorderTabs<T extends { id: string }>(
-  tabs: T[],
-  dragId: string,
-  overId: string,
-): T[] {
-  if (dragId === overId) return tabs;
-  const from = tabs.findIndex((t) => t.id === dragId);
-  const to = tabs.findIndex((t) => t.id === overId);
-  if (from < 0 || to < 0) return tabs;
-  const next = tabs.slice();
-  const [moved] = next.splice(from, 1);
-  // After removing `from`, a rightward target shifts down by one; insert the
-  // dragged tab just before the hovered one either way.
-  next.splice(from < to ? to - 1 : to, 0, moved);
-  return next;
 }
 
 interface Bookmark {
@@ -254,9 +199,13 @@ interface Bookmark {
 interface BrowserPaneProps {
   /** Close the browser (toggle it off). */
   onClose: () => void;
+  onOpenDraft?: (draftId: string) => void;
+  onMissionContinue?: (missionId: string, destination: "plan" | "auto", body: string, handoffId: string) => void;
   /** When false (e.g. a modal/overlay covers the pane), the native webview is
    *  hidden so it doesn't paint over the overlay. Defaults to true. */
   visible?: boolean;
+  /** Surface selection, independent of temporary overlay occlusion. */
+  surfaceActive?: boolean;
   /** Active file-explorer folder, if one is open — passed to the page-discussion
    *  agent as its working directory. */
   projectDir?: string | null;
@@ -291,7 +240,7 @@ interface BrowserPaneProps {
   /** The conversation dock's slot for this pane's four panels.
    *
    *  They render INTO it through a portal rather than being lifted into App:
-   *  everything they need — the tab list, `useMission`, `useLinked`, the
+   *  everything they need — the tab list, `useMission`, the
    *  workspace swaps — is this pane's own state, and hoisting it would put the
    *  browser's state in two places to move its panels one level up. The pane
    *  keeps the state, the dock keeps the column. Null while the dock is closed
@@ -321,7 +270,10 @@ const hostnameOf = (u: string): string => {
 
 function BrowserPaneBase({
   onClose,
+  onOpenDraft,
+  onMissionContinue,
   visible = true,
+  surfaceActive = true,
   projectDir = null,
   onSendToRedline,
   onSendToDrafter,
@@ -336,19 +288,49 @@ function BrowserPaneBase({
   onDockState,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
+  const tileSlotsRef = useRef(new Map<string, HTMLDivElement>());
+  const tileIdsRef = useRef<string[]>([]);
+  const [stageWidth, setStageWidth] = useState(window.innerWidth);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [pageErrors, setPageErrors] = useState<Record<string, string>>({});
+  const pageErrorsRef = useRef(pageErrors); pageErrorsRef.current = pageErrors;
+  const nativeEpochRef = useRef(0);
+  const nativeMountedRef = useRef(false);
+  const surfaceActiveRef = useRef(surfaceActive); surfaceActiveRef.current = surfaceActive;
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [siteAppearances, setSiteAppearances] = usePersistedState<Record<string, BrowserAppearance>>("redline.browser.siteAppearance", {});
+  const siteAppearancesRef = useRef(siteAppearances);
+  siteAppearancesRef.current = siteAppearances;
+  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  const [workspaceKey, setWorkspaceKey] = useState("regular");
+  const [tileDragging, setTileDragging] = useState(false);
+  const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
+  const eventPagesRef = useRef(new Set<string>());
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
+  const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {});
+  const [linkedByWorkspace, setLinkedByWorkspace] = usePersistedState<Record<string, LinkedConversation | null>>("redline.browser.followByWorkspace", {});
+  const linkedConversation = linkedByWorkspace[workspaceKey] ?? null;
+  const setLinkedConversation = (value: LinkedConversation | null) => setLinkedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }));
+
   // id → live Webview handle. Kept in a ref (not state) because these are
   // native resources we create/destroy imperatively, not render outputs.
   const wvMapRef = useRef<Map<string, Webview>>(new Map());
   const creatingRef = useRef<Set<string>>(new Set());
+  const explicitlyClosedRef = useRef(new Set<string>());
   // Per-tab count of consecutive failed webview-creation attempts, so the
   // reconcile retry backs off and eventually gives up instead of spinning.
   // Reset to 0 the moment a webview is created successfully.
   const wakeAttemptsRef = useRef<Map<string, number>>(new Map());
+  // When a failed creation may next retry, so the staggered reconcile — which
+  // re-runs as each creation settles — still honors the backoff.
+  const retryAtRef = useRef<Map<string, number>>(new Map());
   // Restore the persisted tab list once (stable across renders), and seed the
   // new-tab sequence above any restored id.
   const initialTabsRef = useRef<Tab[] | null>(null);
   if (!initialTabsRef.current) initialTabsRef.current = loadTabs();
-  const seqRef = useRef(nextSeq(initialTabsRef.current));
   // Restore the last active tab (regular browsing) once, so a remount keeps the
   // view — and the single visible webview — on the tab the user was actually on,
   // not tab 0. Falls back to the first tab. Missions re-seed this via swap.
@@ -373,12 +355,6 @@ function BrowserPaneBase({
   );
   const mruRef = useRef<string[]>([initialActiveRef.current]);
   const rafRef = useRef(0);
-  // Last bounds pushed to the active webview, so we skip redundant native
-  // setPosition/setSize calls when nothing actually moved. Cleared (set null)
-  // whenever the active webview changes or is hidden, to force a re-apply.
-  const lastRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(
-    null,
-  );
   // True while the user is editing the URL field, so polling doesn't clobber
   // what they're typing.
   const addrFocusedRef = useRef(false);
@@ -394,6 +370,7 @@ function BrowserPaneBase({
     () => new Map(),
   );
   const scheduleCacheSnapshot = useCallback((id: string, delay = 800) => {
+    const captureMissionId = activeMissionIdRef.current;
     const timers = snapTimersRef.current;
     const prev = timers.get(id);
     if (prev) window.clearTimeout(prev);
@@ -407,16 +384,16 @@ function BrowserPaneBase({
         // has no way to know. Passing it lets the capture ride the same IPC
         // call that records the page — no window where the row exists without
         // its picture.
-        const onScreen = id === activeIdRef.current && visibleRef.current;
-        void invoke("browser_cache_snapshot", { label, onScreen }).catch(() => {});
+        const onScreen = tileIdsRef.current.includes(id) && visibleRef.current;
+        void invoke("browser_cache_snapshot", { label, onScreen, missionId: captureMissionId }).catch(() => {});
         // Piggyback a picture on the same settle. Only the tab that is
         // actually on screen: WebKit snapshots a hidden view blank, and a
         // blank stand-in is worse than none. Deliberately here rather than at
         // drag start — a capture then would be exactly the hitch we're
         // removing, so a drag uses whatever picture already exists.
-        if (id !== activeIdRef.current || !visibleRef.current) return;
+        if (!tileIdsRef.current.includes(id) || !visibleRef.current) return;
         const el = slotRef.current;
-        const width = Math.round(el?.getBoundingClientRect().width ?? 0);
+        const width = Math.round((tileSlotsRef.current.get(id) ?? el)?.getBoundingClientRect().width ?? 0);
         if (width < 64) return;
         void (async () => {
           try {
@@ -473,6 +450,7 @@ function BrowserPaneBase({
     liveIntentRef.current.add(id);
     if (!wvMapRef.current.has(id) && !creatingRef.current.has(id)) {
       wakeAttemptsRef.current.delete(id); // user action → fresh retry budget
+      retryAtRef.current.delete(id);
       setLiveVersion((v) => v + 1);
     }
   }, []);
@@ -483,6 +461,8 @@ function BrowserPaneBase({
 
   const [tabs, setTabs] = useState<Tab[]>(initialTabsRef.current);
   const [activeId, setActiveId] = useState(() => initialActiveRef.current!);
+  const picker = useElementPicker(`browser-${activeId}`, setWorkspaceError);
+  const pickerRef = useRef(picker); pickerRef.current = picker;
   // Which tab's DISCUSSION thread the chat pane shows. Normally equals activeId,
   // but they diverge when the agent opens a tab on the user's behalf: the new
   // tab becomes the visible/active page (activeId), while the conversation stays
@@ -545,6 +525,10 @@ function BrowserPaneBase({
     },
     [setChatState, onOpenDockPill, onCloseDock],
   );
+  // Dock tab clicks also update the current page's pill memory.
+  useEffect(() => {
+    if (dockPill && activeBrowseIdRef.current) setChatState(prev => withChatPatch(prev, activeBrowseIdRef.current!, { pill: dockPill }, Date.now()));
+  }, [dockPill, setChatState]);
   /** …and this one for the common case: the tab the user is on right now. */
   const setChatHere = useCallback(
     (patch: { open?: boolean; pill?: ChatPill }) =>
@@ -564,10 +548,11 @@ function BrowserPaneBase({
      *  nothing. See lib/browseSelection.ts. */
     autoSend?: boolean;
   } | null>(null);
-  // Which tabs are known to HAVE a list. Drives the auto-offer below and the
-  // "＋ Add as item" action in the page chat; `BrowseList` reports both
-  // directions so neither has to poll.
-  const [listedTabs, setListedTabs] = useState<Record<string, boolean>>({});
+  // Page actions must reveal their destination before a mounted background
+  // conversation can consume the seed (including one-tap auto-send actions).
+  const seedPageChat = useCallback((seed: NonNullable<typeof chatSeed>) => {
+    setChatSeed(seed);
+  }, []);
   // Bumped after a highlight writes into a list, so an already-open list panel
   // remounts and shows the item instead of silently going stale (it loads from
   // the DB on mount and has no reason to poll).
@@ -629,59 +614,34 @@ function BrowserPaneBase({
     [],
   );
 
-  /** ＋ List, from the in-page highlight bar.
-   *
-   *  `browse_list_add` refuses an item with no list (browse_list.rs) — which is
-   *  why the chat's "＋ Add as item" is offered only once one exists. From a
-   *  highlight, creating it IS the right move.
-   *
-   *  The item is the NOTE the user typed into the bar, not the passage they
-   *  highlighted: the passage is where they were pointing, and filing it as the
-   *  item wrote the page's own words into the user's list.
-   *
-   *  It reads the tab's real list
-   *  rather than trusting `listedTabs` (only populated once the panel has been
-   *  open) and rather than calling `browse_list_start` blindly, which would
-   *  silently re-point an existing list at the punch-list template. */
-  const addSelectionToList = useCallback(
-    async (browseId: string, ev: SelectionEvent) => {
-      try {
-        const existing = await invoke<BrowseListView | null>("browse_list_get", {
-          browseId,
-        });
-        const template = existing?.list.template ?? "punch-list";
-        if (!existing) {
-          await invoke("browse_list_start", {
-            browseId,
-            template,
-            title: ev.title.trim() || null,
-          });
-        }
-        // The bar's own `url`/`title` win over a fresh capture here: they were
-        // read at the instant of the tap, and an SPA route change between the
-        // tap and this write would file the item under the page they left.
-        const item = await invoke<{ id: string }>("browse_list_add", {
-          browseId,
-          kind: templateFor(template).defaultKind,
-          body: ev.note,
-          pageUrl: ev.url || null,
-          pageTitle: ev.title || null,
-          locator: fallbackLocator(ev.locator) || null,
-        });
-        refineLocator(item.id, ev.text, ev.locator);
-        setListedTabs((prev) => (prev[browseId] ? prev : { ...prev, [browseId]: true }));
-        setListReloadKey((n) => n + 1);
-        // Show where it went. A write with no visible landing place reads as a
-        // dropped tap, and the panel is one pill away regardless. The PANEL
-        // state is keyed on the active tab (that's whose pane this is), even
-        // when the item itself went to the anchored discussion's list.
-        setChatHere({ open: true, pill: "list" });
-      } catch (e) {
-        console.error("highlight ＋ List failed", e);
-      }
-    },
-    [setChatHere, refineLocator],
-  );
+  const addSelectionToCart = useCallback(async (ev: SelectionEvent) => {
+    const workspace = workspaceKey;
+    try {
+      await ensureCart(workspace);
+      const item = await invoke<{ id: string }>("browse_list_add", {
+        browseId: cartKey(workspace), kind: "note", body: ev.note,
+        pageUrl: ev.url || null, pageTitle: ev.title || null,
+        locator: fallbackLocator(ev.locator) || null,
+      });
+      refineLocator(item.id, ev.text, ev.locator);
+      if (workspaceKeyRef.current !== workspace) return;
+      setListReloadKey(n => n + 1);
+      setChatHere({ open: true, pill: "cart" });
+    } catch (error) { setWorkspaceError(`Could not add to Cart: ${String(error)}`); }
+  }, [workspaceKey, setChatHere, refineLocator]);
+
+  const addReplyToCart = async (body: string): Promise<boolean> => {
+    const workspace = workspaceKey;
+    const tab = tabsRef.current.find(page => page.id === activeIdRef.current);
+    const page = await capturePage();
+    try {
+      await ensureCart(workspace);
+      await invoke("browse_list_add", { browseId: cartKey(workspace), kind: "note", body,
+        pageUrl: page?.url ?? tab?.url ?? null, pageTitle: page?.title ?? tab?.title ?? null });
+      if (workspaceKeyRef.current === workspace) setListReloadKey(n => n + 1);
+      return true;
+    } catch (error) { setWorkspaceError(`Could not add to Cart: ${String(error)}`); return false; }
+  };
 
   /** One action off the in-page selection bar.
    *
@@ -703,74 +663,60 @@ function BrowserPaneBase({
         tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseIdRef.current;
       if (!browseId) return;
       if (ev.action === "list") {
-        void addSelectionToList(browseId, ev);
+        void addSelectionToCart(ev);
         return;
       }
-      setChatSeed({
+      seedPageChat({
         text: promptForSelection(ev),
         nonce,
         autoSend: autoSends(ev.action),
       });
       setChatHere({ open: true, pill: "page" });
     },
-    [tabs, discussionId, addSelectionToList, setChatHere],
+    [tabs, discussionId, addSelectionToCart, setChatHere, seedPageChat],
   );
   // The 250 ms poll below runs on a `[]`-deps effect; read through a ref so it
   // never has to resubscribe (same pattern as `openTabRef`).
   const dispatchSelectionRef = useRef(dispatchSelection);
   dispatchSelectionRef.current = dispatchSelection;
 
-  // The localhost auto-offer.
-  //
-  // On a tab showing the user's own dev server, with no list and no
-  // conversation yet, opening the panel lands on the List chooser rather than
-  // the page chat — because that is what people actually want there: not only
-  // a conversation, but a running tally of what needs to change.
-  //
-  // Strictly a FIRST-OPEN offer. Once a template is picked or a page message is
-  // sent, both probes come back non-empty and §2's remembered pill takes over;
-  // the probed set stops it re-firing within a session even before that, so a
-  // user who opens the panel and switches to This page isn't flipped back. A
-  // mode that fights the user is worse than no offer at all.
-  const offeredListRef = useRef<Set<string>>(new Set());
-  const activeTabUrl = (tabs.find((t) => t.id === activeId) ?? tabs[0])?.url ?? "";
-  useEffect(() => {
-    if (!chatOpen || !activeBrowseId) return;
-    if (!isLocalhostUrl(activeTabUrl)) return;
-    if (offeredListRef.current.has(activeBrowseId)) return;
-    offeredListRef.current.add(activeBrowseId);
-    const bid = activeBrowseId;
-    void Promise.all([
-      invoke<unknown | null>("browse_list_get", { browseId: bid }),
-      invoke<unknown[]>("get_browse_thread", { browseId: bid }),
-    ])
-      .then(([list, thread]) => {
-        if (list || (Array.isArray(thread) && thread.length > 0)) return;
-        // Still the tab the user is looking at? Two round-trips is enough time
-        // to have moved on, and yanking a pill on a tab they left is exactly
-        // the kind of thing that makes a surface feel possessed.
-        if (activeBrowseIdRef.current !== bid) return;
-        setChatFor(bid, { pill: "list" });
-      })
-      .catch(() => {});
-  }, [chatOpen, activeBrowseId, activeTabUrl, setChatFor]);
   // Research-mission state (active mission, its pins, the resumable list).
   // Mirrors itself to the backend so the daemon's /v1/mission/* routes can
   // answer the orchestrator. See useMission.
   const mission = useMission();
-  // Linked-discussion state (one continuous conversation across all tabs).
-  const linked = useLinked();
+  // Ownership changes only when the corresponding page set commits. A mission
+  // creation/restore can resolve before its tabs; never save the old pages to it.
+  const tileLayout = normalizeBrowserLayout(layouts[workspaceKey] ?? layouts.default ?? DEFAULT_BROWSER_LAYOUT);
+  const layoutsRef = useRef(layouts); layoutsRef.current = layouts;
+  const layoutSnapshotKey = JSON.stringify(tileLayout);
+  const updateTileLayout = (patch: Partial<BrowserLayout>) => setLayouts((prev) => ({ ...prev, [workspaceKey]: { ...normalizeBrowserLayout(prev[workspaceKey] ?? prev.default), ...patch } }));
+  // Escape (from Redline or from inside a page) restores a maximized tile.
+  const restoreTilesRef = useRef(() => {});
+  restoreTilesRef.current = () => { if (tileLayout.maximized) updateTileLayout({ maximized: null }); };
+
   // The "Start a mission" / "what's our goal" dialog.
   const [missionDialogOpen, setMissionDialogOpen] = useState(false);
+  const [missionFoundationOpen, setMissionFoundationOpen] = useState(false);
   const [missionMenuOpen, setMissionMenuOpen] = useState(false);
+  // Mosaics: the manager, the editor, the open mosaic's definition, and the
+  // workspace to return to when it closes (regular browsing or a mission).
+  const [mosaicsOpen, setMosaicsOpen] = useState(false);
+  const [mosaicList, setMosaicList] = useState<MosaicSummary[] | null>(null);
+  const [mosaicError, setMosaicError] = useState<string | null>(null);
+  const [mosaicEdit, setMosaicEdit] = useState<{ draft: MosaicDraft; previous: Mosaic | null } | null>(null);
+  const [activeMosaic, setActiveMosaic] = useState<Mosaic | null>(null);
+  const [startupMosaic, setStartupMosaic] = usePersistedState<string | null>(STARTUP_MOSAIC_KEY, null);
+  const mosaicReturnRef = useRef("regular");
+  // Adopted native pages of a just-opened mosaic still show wherever they
+  // were left; these tiles navigate back to their saved address once live.
+  const homeNavigateRef = useRef(new Set<string>());
   // The ▾ missions menu rides beside 🎯 only once at least one mission exists to
   // manage (switch / resume / delete / start another). With none, the bare 🎯
   // is "start a mission" and the caret would be a dead control.
-  const missionShowMenu = mission.missions.length > 0;
   // The active mission id, readable inside the `[tabs]`-keyed persistence effect
   // and the swap callbacks without adding mission state to their deps.
   const activeMissionIdRef = useRef<string | null>(null);
-  activeMissionIdRef.current = mission.activeMission?.missionId ?? null;
+  activeMissionIdRef.current = workspaceKey === "regular" || isMosaicWorkspace(workspaceKey) ? null : workspaceKey;
   // True during a full workspace swap, so the persistence effect doesn't write
   // the transient mid-swap tab state to a bucket. Cleared by the `[tabs]`
   // effect itself when the swapped-in set (held in `swapCommitRef`) commits —
@@ -789,52 +735,37 @@ function BrowserPaneBase({
   // resolves — by swapping, or by discovering the mission no longer exists.
   const missionRestorePendingRef = useRef<boolean | null>(null);
   if (missionRestorePendingRef.current === null) {
-    missionRestorePendingRef.current = mission.activeMissionId !== null;
+    missionRestorePendingRef.current = true;
   }
   // Debounce timer for saving the active mission's tab workspace.
   const missionTabsTimerRef = useRef<number | null>(null);
   // Tab drag-to-reorder. `tabDragging` hides the native webview during a drag
   // (so it doesn't swallow the pointer, same rule as the split divider);
-  // `dragOverId` is the tab the pointer is currently over (drop target).
   const [tabDragging, setTabDragging] = useState(false);
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
   // Live drag bookkeeping read by the window pointer listeners without stale
   // closures: the tab being dragged, whether the pointer has moved past the
   // click threshold, and the current drop target.
-  const tabDragRef = useRef<{ id: string; startX: number; moved: boolean } | null>(
-    null,
-  );
-  const dragOverIdRef = useRef<string | null>(null);
+
   // Set true on pointer-up of a real drag so the follow-up click doesn't also
   // fire `selectTab` (a drag shouldn't switch tabs).
   const suppressTabClickRef = useRef(false);
-  // True while a page is "in-window fullscreen" (a video player's fullscreen
-  // button, faked by the injected shim which sets window.__redline_fs). Polled
-  // from the active tab; when on, the slot expands to fill the whole window.
-  const [browserFullscreen, setBrowserFullscreen] = useState(false);
+  const videoFs = useVideoFullscreen(activeId, surfaceActive, setWorkspaceError);
+  const videoFsRef = useRef(videoFs); videoFsRef.current = videoFs;
+  const browserFullscreen = videoFs.stage !== "off";
+  const takeoverRef = useRef(false); takeoverRef.current = videoFs.stage === "screen";
+  const visibleBrowseIds = browserFullscreen ? [activeBrowseId!] : visibleTileIds(tileLayout, tabs.map((t) => t.browseId), activeBrowseId!, stageWidth);
+  const tilePages = visibleBrowseIds.map((id) => tabs.find((t) => t.browseId === id)!).filter(Boolean);
+  tileIdsRef.current = tilePages.map((t) => t.id);
+  // The grid actually drawn — narrowed to the stage, gone while one page fills
+  // it. A projection handed to the stage; the saved layout keeps its grid.
+  const stageGrid = browserFullscreen ? undefined : visibleGrid(tileLayout, tabs.map((t) => t.browseId), stageWidth);
+  const stageLayout = tileLayout.grid ? { ...tileLayout, grid: stageGrid } : tileLayout;
+  const tileGeometryKey = `${visibleBrowseIds.join(",")}|${tileLayout.horizontal}|${tileLayout.vertical}|${browserFullscreen}|${tileLayout.maximized}|${stageGrid ? `${stageGrid.rows}x${stageGrid.cols}` : ""}`;
+
   const [bookmarks, setBookmarks] = usePersistedState<Bookmark[]>(
     "redline.browser.bookmarks",
     [],
   );
-  // Active view filter ("none" | "dark" | "sepia" | "gray" | "dim" | "contrast"),
-  // applied to every tab and remembered across sessions.
-  const [viewMode, setViewMode] = usePersistedState<string>(
-    "redline.browser.viewMode",
-    "none",
-  );
-  const viewModeRef = useRef(viewMode);
-  viewModeRef.current = viewMode;
-  // Tandem agent mode: an agent-first browsing behavior. When on, every tab
-  // lands in a 50/50 browser | page-discussion split and the browse agent is
-  // told to open the best page for definition/concept/library questions and
-  // surface rateable sources. Toggled from the ⚙️ toolbar menu; persisted.
-  const [tandem, setTandem] = usePersistedState<boolean>(
-    "redline.browser.tandem",
-    false,
-  );
-  // Read inside the native settings-menu handler without re-subscribing.
-  const tandemRef = useRef(tandem);
-  tandemRef.current = tandem;
   // Highlight-to-chat: the in-page action bar that pops when you finish
   // selecting text (Ask about this · Define · Explain · Research · Copy ·
   // ＋ List). On by default — it replaces select/copy/open-chat/paste/type with
@@ -848,12 +779,6 @@ function BrowserPaneBase({
   // Read from tab creation and the settings-menu handler without re-subscribing.
   const selectionActionsRef = useRef(selectionActions);
   selectionActionsRef.current = selectionActions;
-  // Bookmarks open as a NATIVE popup menu (HTML can't overlay a native
-  // webview). Item clicks arrive as a `bookmark-menu-action` event; the
-  // handler reads these refs to stay current without re-subscribing.
-  const bookmarksRef = useRef(bookmarks);
-  bookmarksRef.current = bookmarks;
-
   // Mirror state into refs so the async webview callbacks read current values.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -872,9 +797,10 @@ function BrowserPaneBase({
     tabs.find((t) => t.id === discussionId) ??
     tabs.find((t) => t.id === activeId) ??
     tabs[0];
-  const dockBrowseId = dockDiscussionTab?.browseId ?? null;
-  const dockTitle = dockDiscussionTab?.title ?? null;
-  const dockLinkedId = linked.activeLinkedId ?? null;
+  const dockBrowseId = linkedConversation?.browseId ?? dockDiscussionTab?.browseId ?? null;
+  const dockTitle = linkedConversation?.title ?? dockDiscussionTab?.title ?? null;
+  const workspaceKeyRef = useRef(workspaceKey); workspaceKeyRef.current = workspaceKey;
+  const dockCartId = cartKey(workspaceKey);
   const dockMissionId = mission.activeMission?.missionId ?? null;
   const dockMissionTitle = mission.activeMission?.title ?? null;
   const dockMemoPill = chatHere.pill;
@@ -883,7 +809,7 @@ function BrowserPaneBase({
       browseId: dockBrowseId,
       title: dockTitle,
       pill: dockMemoPill,
-      linkedId: dockLinkedId,
+      cartId: dockCartId,
       missionId: dockMissionId,
       missionTitle: dockMissionTitle,
     });
@@ -892,22 +818,10 @@ function BrowserPaneBase({
     dockBrowseId,
     dockTitle,
     dockMemoPill,
-    dockLinkedId,
+    dockCartId,
     dockMissionId,
     dockMissionTitle,
   ]);
-  // The native webview is hidden whenever the pane is logically hidden, the
-  // chat divider is being dragged, or an HTML overlay we own is up (the mission
-  // start dialog / menu) — a native webview paints OVER React DOM, so it must
-  // step aside for those, the same reason bookmarks use a native popup menu.
-  const effectiveVisible =
-    visible &&
-    !tabDragging &&
-    !missionDialogOpen &&
-    !missionMenuOpen;
-  const visibleRef = useRef(effectiveVisible);
-  visibleRef.current = effectiveVisible;
-
   // True for the length of any drag anywhere in the app. The native webview
   // cannot ride a drag — it is a sibling OS view that always paints above the
   // main webview and steals the pointer at the OS level, so DOM pointer capture
@@ -915,6 +829,25 @@ function BrowserPaneBase({
   // rectangle: for the duration, the tab's last picture stands in.
   const [resizing, setResizing] = useState(false);
   useEffect(() => onResizeSession(setResizing), []);
+
+  // The native webview is hidden whenever the pane is logically hidden, the
+  // chat divider is being dragged, or an HTML overlay we own is up (the mission
+  // start dialog / menu) — a native webview paints OVER React DOM, so it must
+  // step aside for those, the same reason bookmarks use a native popup menu.
+  const effectiveVisible =
+    visible && surfaceActive && !resizing && !bookmarksOpen && !preferencesOpen &&
+    !tabDragging &&
+    !tileDragging &&
+    !layoutMenuOpen &&
+    !overflowOpen &&
+    !appearanceOpen &&
+    !missionDialogOpen &&
+    !missionFoundationOpen &&
+    !missionMenuOpen &&
+    !mosaicsOpen &&
+    !mosaicEdit;
+  const visibleRef = useRef(effectiveVisible);
+  visibleRef.current = effectiveVisible;
 
   // Persist the tab list (url/title/browseId) so a tab's discussion thread
   // reattaches after reload, and mirror it into the backend so the browse
@@ -948,10 +881,11 @@ function BrowserPaneBase({
         // A mission owns this workspace → persist to it (debounced SQLite write).
         if (missionTabsTimerRef.current) window.clearTimeout(missionTabsTimerRef.current);
         missionTabsTimerRef.current = window.setTimeout(() => {
-          void mission.setMissionTabs(mid, descs);
+          void mission.setMissionTabs(mid, descs).catch((e) => setWorkspaceError(String(e)));
         }, 500);
-      } else {
-        // Regular browsing → the global bucket.
+      } else if (workspaceKeyRef.current === "regular") {
+        // Regular browsing → the global bucket. (A mosaic persists only
+        // through its workspace row, saved below.)
         try {
           localStorage.setItem(TABS_KEY, JSON.stringify(descs));
         } catch {
@@ -978,6 +912,22 @@ function BrowserPaneBase({
     }).catch(() => {});
   }, [tabs]);
 
+  useEffect(() => {
+    if (missionRestorePendingRef.current || swappingRef.current) return;
+    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url })), layout: tileLayout } };
+    pendingWorkspaceSaveRef.current = pending;
+    const timer = window.setTimeout(() => {
+      if (pendingWorkspaceSaveRef.current === pending) pendingWorkspaceSaveRef.current = null;
+      void saveBrowserWorkspace(pending.workspaceId, pending.value).catch((error) => setWorkspaceError(`Workspace save failed: ${String(error)}`));
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [tabs, workspaceKey, layoutSnapshotKey]);
+  useEffect(() => () => {
+    const pending = pendingWorkspaceSaveRef.current;
+    pendingWorkspaceSaveRef.current = null;
+    if (pending) void saveBrowserWorkspace(pending.workspaceId, pending.value).catch((error) => console.error("Browser workspace could not be saved on close", error));
+  }, []);
+
   // Mirror the active tab into the backend so the browse agent's
   // `/v1/browser/*` daemon routes act on the tab the user is looking at.
   useEffect(() => {
@@ -989,7 +939,7 @@ function BrowserPaneBase({
     // mission restore is still pending — those states aren't the global
     // regular-browsing one.
     if (
-      !activeMissionIdRef.current &&
+      workspaceKeyRef.current === "regular" &&
       !swappingRef.current &&
       !missionRestorePendingRef.current
     ) {
@@ -1011,38 +961,41 @@ function BrowserPaneBase({
   const activeUrl = tabs.find((t) => t.id === activeId)?.url ?? "";
   const activeUrlRef = useRef(activeUrl);
   activeUrlRef.current = activeUrl;
-  const isBookmarked = bookmarks.some((b) => b.url === activeUrl);
 
-  // Position + show the active tab's webview over the slot; nothing else.
-  const syncBounds = useCallback(() => {
-    const el = slotRef.current;
-    const active = wvMapRef.current.get(activeIdRef.current);
-    if (!el || !active) return;
-    const r = el.getBoundingClientRect();
-    // Sliver / hidden-under-overlay: hide rather than zero-size.
-    if (!visibleRef.current || r.width < 2 || r.height < 2) {
-      void active.hide();
-      lastRectRef.current = null; // re-apply bounds on next show
-      return;
-    }
-    const next = {
-      x: Math.round(r.left),
-      y: Math.round(r.top),
-      w: Math.round(r.width),
-      h: Math.round(r.height),
-    };
-    const prev = lastRectRef.current;
-    void active.show();
-    // Only touch the native webview when the rect actually changed — redundant
-    // setPosition/setSize calls force WKWebView relayout and cause jank.
-    if (!prev || prev.x !== next.x || prev.y !== next.y) {
-      void active.setPosition(new LogicalPosition(next.x, next.y));
-    }
-    if (!prev || prev.w !== next.w || prev.h !== next.h) {
-      void active.setSize(new LogicalSize(next.w, next.h));
-    }
-    lastRectRef.current = next;
-  }, []);
+  // A shared per-label drain serializes geometry, show and hide, even when a
+  // view finishes creating after a workspace change or StrictMode cleanup.
+  const geometryRef = useRef<ReturnType<typeof createNativeBrowserGeometry<Webview>> | null>(null);
+  if (!geometryRef.current) geometryRef.current = createNativeBrowserGeometry<Webview>({
+    setPosition: (view, rect) => view.setPosition(new LogicalPosition(rect.x, rect.y)),
+    setSize: (view, rect) => view.setSize(new LogicalSize(rect.w, rect.h)),
+    show: (view) => view.show(), hide: (view) => view.hide(),
+    onError: (id) => {
+      if (nativeMountedRef.current && visibleRef.current && tileIdsRef.current.includes(id) && wvMapRef.current.has(id)) {
+        setPageErrors((prev) => prev[id] ? prev : { ...prev, [id]: "This page could not be displayed. Try opening it again." });
+      }
+    },
+  });
+  const geometry = geometryRef.current;
+  useLayoutEffect(() => {
+    nativeMountedRef.current = true; geometry.start();
+    return () => { nativeMountedRef.current = false; nativeEpochRef.current++; geometry.stop(); };
+  }, [geometry]);
+  const measureTiles = useCallback(() => [...wvMapRef.current].map(([id, view]) => ({ id, view,
+    rect: visibleRef.current && !pageErrorsRef.current[id] && tileIdsRef.current.includes(id)
+      ? takeoverRef.current && id === activeIdRef.current ? fullWindowRect({ width: window.innerWidth, height: window.innerHeight })
+        : measureNativeBrowserRect(tileSlotsRef.current.get(id), slotRef.current) : null,
+  })), []);
+  const syncBounds = useCallback(() => { geometry.sync(measureTiles()); }, [geometry, measureTiles]);
+  useLayoutEffect(() => { syncBounds(); }, [pageErrors, syncBounds]);
+  // Hide before paint whenever an overlay or another surface takes ownership.
+  useLayoutEffect(() => { if (!effectiveVisible) geometry.hideAll(); }, [effectiveVisible, geometry]);
+  useEffect(() => {
+    if (surfaceActive) return;
+    setOverflowOpen(false); setLayoutMenuOpen(false); setAppearanceOpen(false);
+    setBookmarksOpen(false); setPreferencesOpen(false); setMissionMenuOpen(false);
+    setMissionDialogOpen(false); setMissionFoundationOpen(false);
+    setMosaicsOpen(false); setMosaicEdit(null);
+  }, [surfaceActive]);
 
   // Coalesce the rapid bursts a divider drag produces into one update/frame.
   const scheduleSync = useCallback(() => {
@@ -1054,28 +1007,31 @@ function BrowserPaneBase({
   }, [syncBounds]);
 
   const ensureTab = useCallback(
-    async (tab: Tab, win: Window): Promise<Webview> => {
+    async (tab: Tab, win: Window): Promise<{ view: Webview; adopted: boolean }> => {
       // Reuse an existing webview with this label if one is still alive (a
       // StrictMode remount or cancelled teardown left it around) — recreating
       // it would either flash or error on the duplicate label.
+      const adopt = async (view: Webview) => {
+        await invoke("browser_enable_autoresize", { label: tab.label, enabled: false }).catch(() => {});
+        await Promise.all([
+          invoke("browser_enable_gestures", { label: tab.label }).catch(() => {}),
+          invoke("browser_install_shims", { label: tab.label, selectionActions: selectionActionsRef.current }).catch(() => {}),
+        ]);
+        return { view, adopted: true };
+      };
       const existing = await Webview.getByLabel(tab.label).catch(() => null);
-      if (existing) return existing;
-      const el = slotRef.current;
-      const r = el?.getBoundingClientRect();
+      if (existing) return adopt(existing);
       const opts = {
         url: tab.url,
-        x: Math.round(r?.left ?? 0),
-        y: Math.round(r?.top ?? 0),
-        width: Math.max(1, Math.round(r?.width ?? 800)),
-        height: Math.max(1, Math.round(r?.height ?? 600)),
+        x: -10000, y: -10000, width: 1, height: 1, focus: false,
         acceptFirstMouse: true,
         userAgent: SAFARI_UA,
       };
       const create = async (): Promise<Webview> => {
         const w = new Webview(win, tab.label, opts);
         await new Promise<void>((resolve, reject) => {
-          w.once("tauri://created", () => resolve());
-          w.once("tauri://error", (e) => reject(e));
+          void w.once("tauri://created", () => resolve()).catch(reject);
+          void w.once("tauri://error", (e) => reject(e)).catch(reject);
         });
         return w;
       };
@@ -1086,6 +1042,10 @@ function BrowserPaneBase({
       try {
         wv = await create();
       } catch (firstErr) {
+        // A background mission action may have created the same durable page
+        // after our lookup. Adopt it instead of retrying a duplicate native ID.
+        const raced = await Webview.getByLabel(tab.label).catch(() => null);
+        if (raced) return adopt(raced);
         const deadline = Date.now() + 3000;
         while (Date.now() < deadline) {
           const still = await Webview.getByLabel(tab.label).catch(() => null);
@@ -1102,9 +1062,9 @@ function BrowserPaneBase({
       void invoke("browser_enable_gestures", { label: tab.label }).catch(
         () => {},
       );
-      // Native-only: let macOS resize this webview with the window (smooth
-      // fullscreen/resize instead of laggy per-frame IPC repositioning).
-      void invoke("browser_enable_autoresize", { label: tab.label }).catch(
+      // Tile bounds are owned by the stage; full-window native autoresizing
+      // would expand each page over its neighbours during window resizing.
+      await invoke("browser_enable_autoresize", { label: tab.label, enabled: false }).catch(
         () => {},
       );
       // Native-only: install the in-window fullscreen shim (so a video player's
@@ -1114,7 +1074,7 @@ function BrowserPaneBase({
         label: tab.label,
         selectionActions: selectionActionsRef.current,
       }).catch(() => {});
-      return wv;
+      return { view: wv, adopted: false };
     },
     [],
   );
@@ -1125,41 +1085,51 @@ function BrowserPaneBase({
   // async and guarded against StrictMode double-mount.
   useEffect(() => {
     const win = Window.getCurrent();
-    for (const tab of tabs) {
+    const now = Date.now();
+    // The active page first, then the other visible tiles, then the rest.
+    const rank = (tab: Tab) => tab.id === activeIdRef.current ? 0 : tileIdsRef.current.includes(tab.id) ? 1 : 2;
+    for (const tab of [...tabs].sort((a, b) => rank(a) - rank(b))) {
       if (
         !liveIntentRef.current.has(tab.id) ||
         wvMapRef.current.has(tab.id) ||
-        creatingRef.current.has(tab.id)
+        creatingRef.current.has(tab.id) ||
+        (retryAtRef.current.get(tab.id) ?? 0) > now
       ) {
         continue;
       }
+      // Staggered: the next waiting page starts when one of these settles.
+      if (creatingRef.current.size >= MAX_CONCURRENT_CREATES) break;
       creatingRef.current.add(tab.id);
+      const epoch = nativeEpochRef.current;
       ensureTab(tab, win)
-        .then((wv) => {
+        .then(({ view: wv, adopted }) => {
           creatingRef.current.delete(tab.id);
-          // Tab was closed while we were creating — discard.
-          if (!tabsRef.current.some((t) => t.id === tab.id)) {
-            closeWebview(tab.label);
+          if (nativeMountedRef.current) setLiveVersion((v) => v + 1);
+          // A workspace may have left while creation was in flight. Preserve
+          // its native state for the background manager, but never show it here.
+          const stillWanted = tabsRef.current.some((t) => t.id === tab.id && t.browseId === tab.browseId);
+          if (!nativeMountedRef.current || epoch !== nativeEpochRef.current || !stillWanted) {
+            geometry.hide(tab.id, wv);
+            if (explicitlyClosedRef.current.has(tab.id)) closeWebview(tab.label);
+            else if (nativeMountedRef.current && stillWanted) setLiveVersion((v) => v + 1);
             return;
           }
+          setPageErrors((prev) => { if (!prev[tab.id]) return prev; const next = { ...prev }; delete next[tab.id]; return next; });
           wvMapRef.current.set(tab.id, wv);
           wakeAttemptsRef.current.delete(tab.id); // created → clear retry count
-          // Carry the active view filter onto the freshly created tab so new
-          // tabs match the others (the user script makes it survive navigation).
-          if (viewModeRef.current !== "none") {
-            void invoke("browser_set_view", {
-              label: tab.label,
-              css: cssForView(viewModeRef.current),
-              selectionActions: selectionActionsRef.current,
-            }).catch(() => {});
-          }
+          retryAtRef.current.delete(tab.id);
+          applySiteAppearanceRef.current(tab);
+          // A just-opened mosaic shows today's page, not where it was left: a
+          // fresh view already loads `tab.url`, an adopted one is sent there.
+          const goHome = homeNavigateRef.current.delete(tab.id);
+          if (goHome && adopted) void invoke("browser_navigate", { label: tab.label, url: tab.url }).catch(() => {});
           // If this tab was suspended, restore its scroll once the page loads.
           // There's no load event, so retry the scrollTo a few times.
           void invoke<[number, number] | null>("browser_consume_scroll", {
             label: tab.label,
           })
             .then((pos) => {
-              if (!pos) return;
+              if (!pos || goHome) return;
               const [sx, sy] = pos;
               let tries = 0;
               const apply = () => {
@@ -1172,13 +1142,13 @@ function BrowserPaneBase({
               apply();
             })
             .catch(() => {});
-          if (tab.id === activeIdRef.current) {
-            lastRectRef.current = null; // newly active webview — apply bounds
-            syncBounds();
-          } else void wv.hide();
+          syncBounds();
+          setLiveVersion((v) => v + 1);
         })
         .catch((e) => {
           creatingRef.current.delete(tab.id);
+          if (nativeMountedRef.current) setLiveVersion((v) => v + 1);
+          if (!nativeMountedRef.current || epoch !== nativeEpochRef.current || !tabsRef.current.some((t) => t.id === tab.id)) return;
           console.error("browser tab webview failed to create", e);
           // Don't strand the tab blank: a failed create is usually the prior
           // webview for this label still tearing down (suspend's close() is
@@ -1188,12 +1158,14 @@ function BrowserPaneBase({
           const n = (wakeAttemptsRef.current.get(tab.id) ?? 0) + 1;
           wakeAttemptsRef.current.set(tab.id, n);
           if (n <= 3 && tabsRef.current.some((t) => t.id === tab.id)) {
-            window.setTimeout(() => setLiveVersion((v) => v + 1), 300 * n);
-          }
+            retryAtRef.current.set(tab.id, Date.now() + 300 * n);
+            window.setTimeout(() => { if (nativeMountedRef.current && epoch === nativeEpochRef.current) setLiveVersion((v) => v + 1); }, 300 * n);
+          } else { retryAtRef.current.set(tab.id, Infinity); setPageErrors((prev) => ({ ...prev, [tab.id]: "This page could not be opened. Check the address or try again." })); }
         });
     }
-    for (const [id] of [...wvMapRef.current]) {
+    for (const [id, view] of [...wvMapRef.current]) {
       if (!tabs.some((t) => t.id === id)) {
+        geometry.hide(id, view);
         wvMapRef.current.delete(id);
         liveIntentRef.current.delete(id);
         closeWebview(`browser-${id}`);
@@ -1209,20 +1181,22 @@ function BrowserPaneBase({
   // turn, or a tab playing media.
   const enforceLiveBudget = useCallback(() => {
     const active = activeIdRef.current;
-    const keep = new Set(
-      [active, ...mruRef.current.filter((id) => id !== active)].slice(
-        0,
-        MAX_LIVE_WEBVIEWS,
-      ),
-    );
+    // Every visible tile stays live unconditionally; recency tops up the rest.
+    const budget = Math.min(MAX_MOSAIC_TILES, Math.max(MAX_LIVE_WEBVIEWS, tileIdsRef.current.length));
+    const keep = new Set([...tileIdsRef.current, active]);
+    for (const id of mruRef.current) {
+      if (keep.size >= budget) break;
+      keep.add(id);
+    }
     for (const [id] of [...wvMapRef.current]) {
       if (keep.has(id)) continue;
       void invoke<boolean>("browser_can_suspend", { label: `browser-${id}` })
         .then((ok) => {
           // Bail if it can't be suspended, became active, or is already gone.
-          if (!ok || id === activeIdRef.current || !wvMapRef.current.has(id)) {
+          if (!ok || tileIdsRef.current.includes(id) || id === activeIdRef.current || !wvMapRef.current.has(id)) {
             return;
           }
+          geometry.hide(id, wvMapRef.current.get(id)!);
           wvMapRef.current.delete(id);
           liveIntentRef.current.delete(id);
           void invoke("browser_suspend", { label: `browser-${id}` }).catch(
@@ -1252,11 +1226,10 @@ function BrowserPaneBase({
     touchMru(activeId);
     enforceLiveBudget();
     for (const [id, wv] of wvMapRef.current) {
-      if (id !== activeId) void wv.hide();
+      if (!tileIdsRef.current.includes(id)) geometry.hide(id, wv);
     }
     const t = tabsRef.current.find((x) => x.id === activeId);
     if (t) setAddr(t.url);
-    lastRectRef.current = null; // different webview — force a position/size apply
     syncBounds();
   }, [activeId, ensureLive, touchMru, enforceLiveBudget, syncBounds]);
 
@@ -1271,10 +1244,20 @@ function BrowserPaneBase({
   useEffect(() => {
     const el = slotRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(scheduleSync);
+    const ro = new ResizeObserver(() => { setStageWidth(el.getBoundingClientRect().width); scheduleSync(); });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [scheduleSync]);
+  }, [scheduleSync, chatOpen, dockSlot, browserFullscreen]);
+
+  useEffect(() => {
+    for (const id of tileIdsRef.current) ensureLive(id);
+    scheduleSync();
+  }, [tileGeometryKey, effectiveVisible, ensureLive, scheduleSync]);
+
+  useEffect(() => {
+    void invoke("browser_protect_tabs", { labels: effectiveVisible ? tileIdsRef.current.map((id) => `browser-${id}`) : [] }).catch(() => {});
+    return () => { void invoke("browser_protect_tabs", { labels: [] }).catch(() => {}); };
+  }, [tileGeometryKey, effectiveVisible]);
 
   // The JS webview API surfaces no navigation events, so poll the active tab's
   // real URL to keep the address bar and tab title honest as the page navigates
@@ -1315,7 +1298,7 @@ function BrowserPaneBase({
         /* webview gone mid-poll — ignore */
       }
     };
-    const interval = window.setInterval(tick, 1000);
+    const interval = window.setInterval(tick, 5000);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -1332,16 +1315,13 @@ function BrowserPaneBase({
   //    highlight action bar. Read-and-cleared in the same eval, so a dropped
   //    poll cycle loses nothing and a slow cycle can't double-dispatch.
   // Reuses the proven string-returning eval path — no new native plumbing.
-  // ~250ms keeps fullscreen and link-clicks responsive without churn.
+  // Native page events deliver promptly; this is a low-frequency recovery poll.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
-      // Hidden/backgrounded: nothing to expand — drop out of fullscreen layout.
-      if (!visibleRef.current || document.hidden) {
-        setBrowserFullscreen(false);
-        return;
-      }
+      // A temporary overlay does not end a video session.
+      if (!visibleRef.current || document.hidden) return;
       const id = activeIdRef.current;
       if (!wvMapRef.current.has(id)) return;
       try {
@@ -1352,14 +1332,14 @@ function BrowserPaneBase({
             'var s=window.__redline_selections||[];window.__redline_selections=[];' +
             'return JSON.stringify({fs:!!window.__redline_fs,tabs:q,sel:s})}catch(e){return "{}"}})()',
         });
-        if (cancelled) return;
+        if (cancelled || id !== activeIdRef.current) return;
         let sig: { fs?: boolean; tabs?: unknown; sel?: unknown } = {};
         try {
           sig = JSON.parse(raw || "{}");
         } catch {
           /* malformed — treat as no signal */
         }
-        setBrowserFullscreen(!!sig.fs);
+        if (typeof sig.fs === "boolean") videoFsRef.current.dispatch({ type: "page", tabId: id, on: sig.fs });
         if (Array.isArray(sig.tabs)) {
           for (const u of sig.tabs) {
             if (typeof u === "string" && /^https?:/i.test(u)) {
@@ -1377,19 +1357,72 @@ function BrowserPaneBase({
         /* webview gone mid-poll — ignore */
       }
     };
-    const interval = window.setInterval(tick, 250);
+    const interval = window.setInterval(tick, 5000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
   }, []);
 
-  // The slot moves (in/out of a fixed full-window overlay) when fullscreen
-  // toggles; re-sync the native webview to its new rect to be safe (the
-  // ResizeObserver usually catches it, but the transition can race the relayout).
+  useEffect(() => {
+    const subscription = listen<{ label: string; kind: string; url?: string; title?: string; fullscreen?: boolean; value?: unknown }>("browser-page-event", ({ payload: event }) => {
+      const tab = tabsRef.current.find((t) => t.label === event.label);
+      if (!tab) return;
+      eventPagesRef.current.add(tab.id);
+      if (event.kind === "state" && event.url) {
+        const url = event.url, title = event.title || hostnameOf(url);
+        setTabs((prev) => prev.map((t) => t.id === tab.id && (t.url !== url || t.title !== title) ? { ...t, url, title } : t));
+        if (tab.id === activeIdRef.current && !addrFocusedRef.current) setAddr(url);
+        if (typeof event.fullscreen === "boolean") {
+          videoFsRef.current.dispatch({ type: "page", tabId: tab.id, on: event.fullscreen });
+          if (!surfaceActiveRef.current) videoFsRef.current.dispatch({ type: "surface", active: false });
+          else if (event.fullscreen && tab.id !== activeIdRef.current) videoFsRef.current.dispatch({ type: "active", prev: tab.id, next: activeIdRef.current });
+          else if (tab.url !== url && videoFsRef.current.state.tabId === tab.id) videoFsRef.current.dispatch({ type: "exit" });
+        }
+        if (tab.url !== url) { scheduleCacheRef.current(tab.id); applySiteAppearanceRef.current({ ...tab, url }); }
+      } else if (event.kind === "interaction" || event.kind === "focus") {
+        if (visibleRef.current && tileIdsRef.current.includes(tab.id) && tab.id !== activeIdRef.current) selectTabRef.current(tab.id);
+      } else if (event.kind === "tabs" && typeof event.value === "string" && /^https?:/.test(event.value)) openTabRef.current(event.value);
+      else if (event.kind === "selection" && visibleRef.current) parseSelectionEvents([event.value]).forEach((selection, i) => dispatchSelectionRef.current(selection, Date.now() + i));
+      else if (event.kind === "shortcut" && tileIdsRef.current.includes(tab.id) && visibleRef.current) {
+        if (event.value === "location") focusAddressRef.current();
+        else if (event.value === "exit-focus") { if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" }); else { restoreTilesRef.current(); } }
+        else if (event.value === "toggle-video-screen") {
+          if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();
+          else if (videoFsRef.current.stage === "screen") void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
+        }
+        else if (event.value === "new-tab") openTabRef.current(HOME);
+        else if (event.value === "close-tab") closeTabRef.current(tab.id);
+        else if (event.value === "next-tab" || event.value === "previous-tab") {
+          const id = shortcutTabId(tabsRef.current.map((page) => page.id), tab.id, event.value);
+          if (id) selectTabRef.current(id);
+        }
+      }
+      else if (event.kind === "inspect" && event.value && typeof event.value === "object") {
+        if (!pickerRef.current.accept(event.label)) return;
+        setDiscussionId(tab.id);
+        setChatSeed(inspectorSeed({ ...(event.value as Record<string, unknown>), tabId: tab.id, browseId: tab.browseId }));
+        setChatFor(tab.browseId, { open: true, pill: "page" });
+      } else if (event.kind === "inspect-error" && pickerRef.current.accept(event.label)) setWorkspaceError(PICKING_ERROR);
+    });
+    return () => { void subscription.then((unlisten) => unlisten()).catch(() => {}); };
+  }, []);
+
+  useEffect(() => {
+    const subscription = listen<{ workspaceId: string; revision: number; tab: { browseId: string; id?: string; url: string; title?: string } }>("browser-workspace-tab-added", ({ payload }) => {
+      noteWorkspaceRevision(payload.workspaceId, payload.revision);
+      if (payload.workspaceId !== workspaceKeyRef.current || !payload.tab?.browseId) return;
+      const [tab] = restoreBrowserTabs([payload.tab], newBrowseId, hostnameOf);
+      if (!tab) return;
+      setTabs((prev) => prev.some((page) => page.browseId === tab.browseId) ? prev : [...prev, tab]);
+    });
+    return () => { void subscription.then((unlisten) => unlisten()).catch(() => {}); };
+  }, []);
+
+  // Stage two uses a native window rectangle; stage one follows the DOM slot.
   useEffect(() => {
     scheduleSync();
-  }, [browserFullscreen, scheduleSync]);
+  }, [videoFs.stage, scheduleSync]);
 
   // A surrounding App pane toggled (comment pane opened/closed, sidebar
   // collapsed, doc-split flipped, …). These reflow the slot WITHOUT a divider
@@ -1415,9 +1448,9 @@ function BrowserPaneBase({
   // changing it stops issuing setSize — no redundant same-rect calls (which
   // flicker WKWebView black) and no hide()/show() (same reason).
   useEffect(() => {
-    lastRectRef.current = null; // force the first position + size apply
     let raf = 0;
     let stableFrames = 0;
+    let previousMeasurement = "";
     let frames = 0;
     const tick = () => {
       // Hidden (overlay up, or mid-divider-drag): hide once and stop — there's
@@ -1427,16 +1460,10 @@ function BrowserPaneBase({
         syncBounds();
         return;
       }
-      const before = lastRectRef.current;
+      const measured = JSON.stringify(measureTiles().map(({ id, rect }) => [id, rect]));
       syncBounds();
-      const after = lastRectRef.current;
-      const unchanged =
-        !!before &&
-        !!after &&
-        before.x === after.x &&
-        before.y === after.y &&
-        before.w === after.w &&
-        before.h === after.h;
+      const unchanged = measured === previousMeasurement;
+      previousMeasurement = measured;
       stableFrames = unchanged ? stableFrames + 1 : 0;
       // Stop once the rect has held for ~5 frames, or after ~40 frames (~0.6s) —
       // long enough to outlast any pane open/close/resize reflow.
@@ -1460,21 +1487,22 @@ function BrowserPaneBase({
     // Close any stray browser-* webviews left over from a prior instance that
     // aren't part of the current tab set (bounds leaks from fast toggles).
     void (async () => {
+      const epoch = nativeEpochRef.current;
       const all = await Webview.getAll().catch(() => []);
+      if (!nativeMountedRef.current || nativeEpochRef.current !== epoch) return;
       const ours = new Set(tabsRef.current.map((t) => t.label));
-      const activeLabel = `browser-${activeIdRef.current}`;
       for (const wv of all) {
         if (!wv.label.startsWith("browser-")) continue;
         if (!ours.has(wv.label)) {
           // Stray from a prior instance whose tab set differs — free it.
-          closeWebview(wv.label);
-        } else if (wv.label !== activeLabel) {
+          geometry.hide(wv.label.slice("browser-".length), wv);
+        } else if (!tileIdsRef.current.some((id) => `browser-${id}` === wv.label)) {
           // Ours, but not the active tab. On a remount our wvMapRef starts
           // empty, so the previously-active webview from the old instance is
           // untracked and would stay SHOWN at its stale (full-column) bounds,
           // painting over the document. Only the active tab is ever shown, so
           // hide every other live webview now; syncBounds shows the active one.
-          void wv.hide();
+          geometry.hide(wv.label.slice("browser-".length), wv);
         }
       }
     })();
@@ -1494,6 +1522,7 @@ function BrowserPaneBase({
     // ANIMATES, so the final window size only lands a few hundred ms later.
     const trailing: number[] = [];
     const onNativeResize = () => {
+      void videoFsRef.current.observeWindow();
       scheduleSync();
       trailing.forEach(clearTimeout);
       trailing.length = 0;
@@ -1503,10 +1532,11 @@ function BrowserPaneBase({
       );
     };
     let unResized: (() => void) | undefined;
+    let resizeSubscriptionCancelled = false;
     void Window.getCurrent()
       .onResized(onNativeResize)
       .then((un) => {
-        unResized = un;
+        if (resizeSubscriptionCancelled) un(); else unResized = un;
       })
       .catch(() => {});
 
@@ -1514,6 +1544,7 @@ function BrowserPaneBase({
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       window.removeEventListener("resize", onWin);
       trailing.forEach(clearTimeout);
+      resizeSubscriptionCancelled = true;
       unResized?.();
       const map = wvMapRef.current;
       pendingTeardown = window.setTimeout(() => {
@@ -1540,73 +1571,35 @@ function BrowserPaneBase({
     touchMru(id);
     setActiveId(id);
     setDiscussionId(id);
+    const focused = tabsRef.current.find((t) => t.id === id)?.browseId ?? null;
+    if (focused && dockPillRef.current !== "mission") setChatFor(focused, { pill: linkedConversation ? "page" : chatEntryFor(chatState, focused).pill });
+    updateTileLayout({ focused, ...(tileLayout.maximized && tileLayout.maximized !== focused ? { maximized: null } : {}) });
   };
 
-  // Begin a potential tab drag-reorder. A small threshold distinguishes a drag
-  // from a click; only past it do we hide the webview, dim the dragged tab, and
-  // track a drop target (the tab under the pointer, found via `data-tab-id`).
-  // Reorders on release — tab numbers follow list position automatically.
+  const tabDragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => tabDragCleanupRef.current?.(), []);
   const startTabDrag = (e: React.PointerEvent, id: string) => {
-    if (e.button !== 0) return;
-    // A press that starts on the ✕ close button is a close, not a drag.
-    if ((e.target as HTMLElement).closest("button")) return;
-    tabDragRef.current = { id, startX: e.clientX, moved: false };
-    dragOverIdRef.current = null;
-    // `elementFromPoint` forces layout and `setDragOverId` re-renders the
-    // strip — both were running at raw pointer rate. One drop-target
-    // resolution per frame is all the highlight can show anyway.
-    const hitTest = rafCoalesce((x: number, y: number, selfId: string) => {
-      const el = document.elementFromPoint(x, y) as HTMLElement | null;
-      const over = el?.closest("[data-tab-id]") as HTMLElement | null;
-      const overId = over?.getAttribute("data-tab-id") ?? null;
-      dragOverIdRef.current = overId;
-      setDragOverId(overId ?? selfId);
-    });
-    const onMove = (ev: PointerEvent) => {
-      const st = tabDragRef.current;
-      if (!st) return;
-      if (!st.moved && Math.abs(ev.clientX - st.startX) < 5) return;
-      if (!st.moved) {
-        st.moved = true;
-        setTabDragging(true);
-        setDragOverId(st.id);
-      }
-      hitTest(ev.clientX, ev.clientY, st.id);
-    };
-    const onUp = () => {
-      // Resolve the final drop target before reading it below, so a release
-      // inside the same frame as the last move still lands on the right tab.
-      hitTest.flush();
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      const st = tabDragRef.current;
-      tabDragRef.current = null;
-      const overId = dragOverIdRef.current;
-      dragOverIdRef.current = null;
-      setTabDragging(false);
-      setDragOverId(null);
-      if (st?.moved) {
-        // Swallow the click that follows this pointer-up so it doesn't select.
-        // A drag ending on a DIFFERENT tab may fire no click at all, which would
-        // leave the flag stuck — so also clear it on the next macrotask (the
-        // real click, if any, fires synchronously before that and consumes it).
+    if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
+    tabDragCleanupRef.current?.();
+    tabDragCleanupRef.current = startTabPointerDrag(e.nativeEvent, e.currentTarget as HTMLElement, {
+      onDragging: setTabDragging,
+      onDrop: (overId, tileIndex) => flushSync(() => {
         suppressTabClickRef.current = true;
-        window.setTimeout(() => {
-          suppressTabClickRef.current = false;
-        }, 0);
-        if (overId && overId !== st.id) {
-          setTabs((ts) => reorderTabs(ts, st.id, overId));
-        }
-      }
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+        window.setTimeout(() => { suppressTabClickRef.current = false; }, 0);
+        const tab = tabsRef.current.find(page => page.id === id);
+        if (tileIndex !== null && tab) {
+          updateTileLayout(assignVisibleTile(tileLayout, visibleBrowseIds, tileIndex, tab.browseId));
+          setActiveId(tab.id); setDiscussionId(tab.id);
+        } else if (overId && overId !== id) setTabs(ts => reorderTabs(ts, id, overId));
+      }),
+    });
   };
 
+  /** Returns the browse ID of the tab opened or foregrounded. */
   const openTab = (
     url: string = HOME,
     opts: { anchorDiscussion?: boolean } = {},
-  ) => {
+  ): string | null => {
     // Opening an already-open URL foregrounds that tab instead of stacking a
     // duplicate — "Open" on a Localhost card (and any replayed request) would
     // otherwise accumulate tabs. `sameTabUrl`, not `===`: the poll below
@@ -1620,30 +1613,31 @@ function BrowserPaneBase({
         ensureLive(existing.id);
         touchMru(existing.id);
         setActiveId(existing.id);
+        updateTileLayout({ focused: existing.browseId, maximized: null });
         if (!opts.anchorDiscussion) setDiscussionId(existing.id);
-        return;
+        return existing.browseId;
       }
     }
-    if (tabsRef.current.length >= MAX_TABS) return;
-    const id = `t${seqRef.current++}`;
+    if (tabsRef.current.length >= MAX_TABS) return null;
+    const browseId = newBrowseId();
+    const id = canonicalTabId(browseId);
     const tab: Tab = {
       id,
       label: `browser-${id}`,
       url,
       title: hostnameOf(url),
-      browseId: newBrowseId(),
+      browseId,
     };
     markLive(id);
     touchMru(id);
     setTabs((ts) => [...ts, tab]);
     setActiveId(id);
+    updateTileLayout({ focused: browseId, maximized: null });
     // Move the conversation onto the new tab unless an agent opened it on behalf
     // of the current conversation (then it stays anchored to its origin tab).
     if (!opts.anchorDiscussion) setDiscussionId(id);
-    // Tandem mode is agent-first: every new tab lands in the split so the user
-    // can ask straight away. Written against the NEW tab's browseId, not the
-    // active one — `activeId` hasn't committed yet at this point.
-    if (tandemRef.current) setChatFor(tab.browseId, { open: true, pill: "page" });
+    if (dockPillRef.current !== "mission") setChatFor(browseId, { pill: "page" });
+    return browseId;
   };
 
   const closeTab = (id: string) => {
@@ -1669,6 +1663,11 @@ function BrowserPaneBase({
         );
       }
     }
+    explicitlyClosedRef.current.add(id);
+    const closedBrowseId = tabsRef.current.find((tab) => tab.id === id)?.browseId;
+    updateTileLayout({ tiles: tileLayout.tiles.filter((bid) => bid !== closedBrowseId),
+      maximized: tileLayout.maximized === closedBrowseId ? null : tileLayout.maximized,
+      focused: tileLayout.focused === closedBrowseId ? remaining[0]?.browseId ?? null : tileLayout.focused });
     setTabs(remaining);
   };
 
@@ -1685,23 +1684,10 @@ function BrowserPaneBase({
     browseId: t.browseId,
   });
 
-  // Rebuild Tab[] from saved descriptors: fresh `t<n>` ids (so no collision with
-  // any live tab) but the SAME `browseId` (so each discussion reattaches).
-  const rebuildTabs = (
-    descs: { url: string; title?: string; browseId?: string | null }[],
-  ): Tab[] => {
-    const built = descs
-      .filter((d) => d && typeof d.url === "string" && d.url.length > 0)
-      .map((d) => {
-        const id = `t${seqRef.current++}`;
-        return {
-          id,
-          label: `browser-${id}`,
-          url: d.url,
-          title: d.title || hostnameOf(d.url),
-          browseId: d.browseId || newBrowseId(),
-        } as Tab;
-      });
+  // Stable native labels derive from the durable conversation ID, so separate
+  // workspaces cannot collide on t0/t1 or change identity after a restart.
+  const rebuildTabs = (descs: { id?: string | null; url: string; title?: string; browseId?: string | null }[]): Tab[] => {
+    const built = restoreBrowserTabs(descs, newBrowseId, hostnameOf);
     return built.length ? built : [freshHomeTab()];
   };
 
@@ -1710,9 +1696,10 @@ function BrowserPaneBase({
   const saveCurrentWorkspace = async () => {
     const descs = tabsRef.current.map(descriptorOf);
     const mid = activeMissionIdRef.current;
+    await saveBrowserWorkspace(workspaceKeyRef.current, { tabs: descs, layout: tileLayout });
     if (mid) {
       await mission.setMissionTabs(mid, descs);
-    } else {
+    } else if (workspaceKeyRef.current === "regular") {
       try {
         localStorage.setItem(TABS_KEY, JSON.stringify(descs));
       } catch {
@@ -1723,31 +1710,61 @@ function BrowserPaneBase({
 
   // Tear down every live native webview (the swap rebuilds with new ids).
   const teardownLiveWebviews = () => {
-    for (const [id] of [...wvMapRef.current]) closeWebview(`browser-${id}`);
+    nativeEpochRef.current++;
+    geometry.hideAll();
     wvMapRef.current.clear();
-    creatingRef.current.clear();
+    setPageErrors({});
+    // In-flight creations settle against their stable browseId and hide if
+    // their workspace has left. The native manager owns inactive-page eviction.
   };
 
   // PURE load (callers save the outgoing workspace first): tear down the current
   // webviews, materialize the target's tabs, and flip the active mission.
+  const workspaceSwapEpoch = useRef(0);
   const swapWorkspace = async (
-    target: { kind: "mission"; id: string } | { kind: "regular" },
+    target: { kind: "mission"; id: string } | { kind: "mosaic"; id: string } | { kind: "regular" },
   ) => {
-    swappingRef.current = true;
-    if (missionTabsTimerRef.current) {
-      window.clearTimeout(missionTabsTimerRef.current);
-      missionTabsTimerRef.current = null;
+    const epoch = ++workspaceSwapEpoch.current;
+    let newSet: Tab[];
+    const destinationId = target.kind === "regular" ? "regular" : target.id;
+    let destinationLayout: BrowserLayout;
+    let definition: Mosaic | null = null;
+    try {
+      const savedWorkspace = await loadBrowserWorkspace(destinationId);
+      if (target.kind === "mosaic") {
+        // A mosaic opens from its definition: every cell at its saved address.
+        definition = mosaicFromWorkspace(destinationId, savedWorkspace);
+        if (!definition) throw new Error("This mosaic no longer exists.");
+        newSet = rebuildTabs(mosaicTabs(definition));
+        destinationLayout = mosaicLayout(definition);
+      } else {
+        newSet = savedWorkspace?.tabs.length ? rebuildTabs(savedWorkspace.tabs) : target.kind === "mission" ? rebuildTabs(await mission.getMissionTabs(target.id)) : loadTabs();
+        destinationLayout = normalizeBrowserLayout(savedWorkspace?.layout ?? layoutsRef.current[destinationId] ?? layoutsRef.current.default);
+      }
+      if (destinationId === "regular" && !destinationLayout.focused && !destinationLayout.maximized) {
+        let savedActive: string | null = null;
+        try { savedActive = localStorage.getItem(ACTIVE_KEY); } catch { /* optional legacy focus */ }
+        destinationLayout.focused = newSet.find((page) => page.id === savedActive)?.browseId ?? null;
+      }
+      if (epoch !== workspaceSwapEpoch.current) throw new Error("A newer workspace switch replaced this request");
+    } catch (error) {
+      if (epoch === workspaceSwapEpoch.current) setWorkspaceError(`The workspace could not be opened. Your current pages are still available. ${String(error)}`);
+      throw error;
     }
+    swappingRef.current = true;
+    missionRestorePendingRef.current = false;
+    if (missionTabsTimerRef.current) { window.clearTimeout(missionTabsTimerRef.current); missionTabsTimerRef.current = null; }
     teardownLiveWebviews();
-    const newSet =
-      target.kind === "mission"
-        ? rebuildTabs(await mission.getMissionTabs(target.id))
-        : loadTabs();
-    const active = newSet[0];
+    setLayouts((prev) => ({ ...prev, [destinationId]: destinationLayout }));
+    setWorkspaceKey(destinationId);
+    const active = focusedWorkspaceTab(newSet, destinationLayout)!;
     // Seed only the active tab live (mirror mount seeding); others lazy-wake.
-    liveIntentRef.current = new Set([active.id]);
+    // A mosaic is the exception: every tile is on screen, so all of them.
+    const mosaicTiles = definition ? newSet.filter((tab) => destinationLayout.tiles.includes(tab.browseId)).map((tab) => tab.id) : [];
+    liveIntentRef.current = new Set([active.id, ...mosaicTiles]);
     mruRef.current = [active.id];
-    lastRectRef.current = null;
+    homeNavigateRef.current = new Set(mosaicTiles);
+    setActiveMosaic(definition);
     // The swap ends when THIS array commits — the `[tabs]` effect matches it
     // by identity and clears `swappingRef` there. Resetting synchronously
     // here re-enabled persistence before that effect ran, leaking the
@@ -1760,6 +1777,7 @@ function BrowserPaneBase({
     setLiveVersion((v) => v + 1);
     if (target.kind === "mission") mission.resumeMission(target.id);
     else mission.closeMission();
+    if (target.kind !== "mosaic") mosaicReturnRef.current = "regular";
     // The tab that is now active. Returned rather than read back through
     // `activeBrowseIdRef`: the setState calls above haven't committed when this
     // returns, so a caller wanting to open the mission panel on the swapped-in
@@ -1771,17 +1789,23 @@ function BrowserPaneBase({
   // regular resets to a clean slate); from inside a mission, that one is saved
   // and the new one opens fresh.
   const startNewMission = async (title: string, goal: string) => {
-    const fromRegular = !activeMissionIdRef.current;
+    const fromRegular = workspaceKeyRef.current === "regular";
     const currentDescs = tabsRef.current.map(descriptorOf);
     await saveCurrentWorkspace();
-    const m = await mission.startMission(title, goal); // sets active = m
+    const m = await mission.startMission(title, goal, fromRegular ? currentDescs : [], projectDir); // sets active = m
     if (!m) return;
     if (fromRegular) {
+      setLinkedByWorkspace((prev) => ({ ...prev, [m.missionId]: prev.regular ?? null, regular: null }));
+      setWorkspaceKey(m.missionId);
+      setLayouts((prev) => ({ ...prev, [m.missionId]: tileLayout }));
+      await saveBrowserWorkspace(m.missionId, { tabs: currentDescs, layout: tileLayout });
       await mission.setMissionTabs(m.missionId, currentDescs);
+      const regularHome = freshHomeTab();
+      await saveBrowserWorkspace("regular", { tabs: [descriptorOf(regularHome)], layout: normalizeBrowserLayout(layoutsRef.current.default) });
       try {
         localStorage.setItem(
           TABS_KEY,
-          JSON.stringify([descriptorOf(freshHomeTab())]),
+          JSON.stringify([descriptorOf(regularHome)]),
         );
       } catch {
         /* ignore */
@@ -1811,18 +1835,83 @@ function BrowserPaneBase({
     await swapWorkspace({ kind: "regular" });
   };
 
-  // Convert a tab's page chat into the linked discussion — a fork, not a
-  // move (the tab chat and its session are kept) — then land in the linked
-  // panel, which shows the copied history behind a divider.
-  const continueTabAsLinked = async (tab: Tab) => {
-    const n = tabsRef.current.findIndex((t) => t.id === tab.id) + 1 || null;
-    const l = await linked.convertFromBrowse({
-      browseId: tab.browseId,
-      tabN: n,
-      tabTitle: tab.title,
-      tabUrl: tab.url,
-    });
-    if (l) setChatHere({ open: true, pill: "linked" });
+  const toggleLinked = () => {
+    setLinkedConversation(linkedConversation ? null : { browseId: dockBrowseId!, title: dockTitle ?? "Page", originTabId: dockDiscussionTab.id });
+    setDiscussionId(activeId);
+    setChatHere({ open: true, pill: "page" });
+  };
+
+  const conversationEventRef = useRef<(event: Event) => void>(() => {});
+  conversationEventRef.current = (event) => {
+    const detail = (event as CustomEvent<{ conversationKind?: string; conversationId?: string }>).detail;
+    if (!detail?.conversationId || !/^[a-zA-Z0-9_-]+$/.test(detail.conversationId)) return;
+    if (detail.conversationKind === "browse") {
+      const tab = tabsRef.current.find(item => item.browseId === detail.conversationId);
+      setLinkedConversation(null);
+      if (tab) selectTabRef.current(tab.id);
+      else setWorkspaceError("This page conversation's tab is no longer open.");
+      setChatHere({ open: true, pill: "page" });
+    }
+  };
+  useEffect(() => {
+    const conversation = (event: Event) => conversationEventRef.current(event);
+    const source = (event: Event) => {
+      const detail = (event as CustomEvent<{ browseId?: string; url?: string }>).detail;
+      const tab = tabsRef.current.find((page) => page.browseId === detail?.browseId);
+      if (tab) selectTabRef.current(tab.id);
+      else if (detail?.url && /^https?:\/\//i.test(detail.url)) openTabRef.current(detail.url, { anchorDiscussion: true });
+    };
+    window.addEventListener("redline-open-conversation", conversation);
+    window.addEventListener("redline-open-source-tab", source);
+    return () => { window.removeEventListener("redline-open-conversation", conversation); window.removeEventListener("redline-open-source-tab", source); };
+  }, []);
+
+  // --- Mosaics ---------------------------------------------------------------
+  // A saved grid of pages. Opening one swaps the workspace exactly like a
+  // mission; closing it returns to where you were.
+  const refreshMosaics = () => {
+    setMosaicError(null);
+    void listMosaics().then(setMosaicList).catch((error) => { setMosaicList((prev) => prev ?? []); setMosaicError(`Saved mosaics could not be loaded. ${String(error)}`); });
+  };
+  const openMosaicManager = () => { setMosaicsOpen(true); refreshMosaics(); };
+  const openMosaic = async (id: string) => {
+    const from = workspaceKeyRef.current;
+    // Reopening the open mosaic resets every tile to its saved address.
+    if (from !== id) await saveCurrentWorkspace();
+    await swapWorkspace({ kind: "mosaic", id });
+    if (!isMosaicWorkspace(from)) mosaicReturnRef.current = from;
+  };
+  const leaveMosaic = async (save = true) => {
+    const back = mosaicReturnRef.current;
+    if (save) await saveCurrentWorkspace();
+    if (back !== "regular" && mission.missions.some((item) => item.missionId === back)) await swapWorkspace({ kind: "mission", id: back });
+    else await swapWorkspace({ kind: "regular" });
+  };
+  const editMosaic = async (id: string) => {
+    const previous = await loadMosaic(id);
+    if (!previous) throw new Error("This mosaic no longer exists.");
+    setMosaicsOpen(false);
+    setMosaicEdit({ previous, draft: { id, name: previous.name, grid: previous.grid, entries: previous.cells.map((cell) => ({ url: cell.url, label: cell.label ?? "" })) } });
+  };
+  const newMosaic = (fromCurrentPages: boolean) => {
+    const pages = fromCurrentPages ? tabsRef.current.filter((tab) => /^https?:\/\//i.test(tab.url)).slice(0, MAX_MOSAIC_TILES) : [];
+    setMosaicsOpen(false);
+    setMosaicEdit({ previous: null, draft: { id: mosaicWorkspaceId(newBrowseId()), name: "", grid: pages.length ? gridFor(pages.length) : { rows: 2, cols: 2 }, entries: pages.map((tab) => ({ url: tab.url, label: "" })) } });
+  };
+  const saveMosaicEdit = async (next: Mosaic, isNew: boolean) => {
+    await saveMosaic(next);
+    setMosaicEdit(null);
+    // A new mosaic opens straight away; an edit of the open one reloads it.
+    if (isNew || next.id === workspaceKeyRef.current) void openMosaic(next.id).catch((error) => setWorkspaceError(String(error)));
+    else openMosaicManager();
+  };
+  const deleteMosaicFlow = async (id: string) => {
+    // Leave it first, without saving — its pages are being discarded.
+    if (id === workspaceKeyRef.current) await leaveMosaic(false);
+    await deleteMosaic(id);
+    if (startupMosaic === id) setStartupMosaic(null);
+    setLayouts((prev) => { if (!(id in prev)) return prev; const next = { ...prev }; delete next[id]; return next; });
+    refreshMosaics();
   };
 
   const deleteMissionFlow = async (id: string) => {
@@ -1839,17 +1928,29 @@ function BrowserPaneBase({
   useEffect(() => {
     if (initDoneRef.current) return;
     const pendingId = mission.activeMissionId;
+    const startup = startupMosaicApplied ? null : startupMosaic;
+    startupMosaicApplied = true;
+    if (startup) {
+      initDoneRef.current = true;
+      // Closing the startup mosaic returns to the mission it displaced, if any.
+      void swapWorkspace({ kind: "mosaic", id: startup })
+        .then(() => { if (pendingId) mosaicReturnRef.current = pendingId; })
+        .catch(() => swapWorkspace({ kind: "regular" }))
+        .catch(() => { missionRestorePendingRef.current = false; });
+      return;
+    }
     if (!pendingId) {
       initDoneRef.current = true;
-      missionRestorePendingRef.current = false;
+      void swapWorkspace({ kind: "regular" }).catch(() => { missionRestorePendingRef.current = false; });
       return;
     }
     if (mission.activeMission) {
       initDoneRef.current = true;
-      // swapWorkspace raises `swappingRef` synchronously, so clearing the
-      // restore gate here opens no unguarded window.
-      missionRestorePendingRef.current = false;
-      void swapWorkspace({ kind: "mission", id: pendingId });
+      // Keep regular pages out of mission persistence until the loaded
+      // workspace commits. On failure, retain regular browsing and report it.
+      void swapWorkspace({ kind: "mission", id: pendingId }).catch(() => {
+        missionRestorePendingRef.current = false; mission.closeMission();
+      });
     } else if (mission.missionsLoaded) {
       // The persisted mission no longer exists — resolve to regular browsing
       // rather than wedging the gate (which would silence persistence and
@@ -1866,10 +1967,12 @@ function BrowserPaneBase({
   // can't catch — so the keystroke is delivered as this event instead. Kept in
   // a ref so the once-subscribed listener always calls the latest closeTab
   // (which closes the pane via onClose when the last tab goes).
+  const closeTabRef = useRef(closeTab);
+  closeTabRef.current = closeTab;
   const closeActiveRef = useRef<() => void>(() => {});
   closeActiveRef.current = () => closeTab(activeIdRef.current);
   useEffect(() => {
-    const p = listen("menu-close-tab", () => closeActiveRef.current());
+    const p = listen("menu-close-tab", () => { if (surfaceActiveRef.current) closeActiveRef.current(); });
     return () => {
       void p.then((un) => un());
     };
@@ -1898,6 +2001,7 @@ function BrowserPaneBase({
         console.error("browser_navigate failed", e);
         // The webview vanished under us (e.g. its process was reclaimed and the
         // handle is stale) — drop the dead handle and recreate at `url`.
+        const view = wvMapRef.current.get(id); if (view) geometry.hide(id, view);
         wvMapRef.current.delete(id);
         ensureLive(id);
       },
@@ -1905,10 +2009,12 @@ function BrowserPaneBase({
   };
 
   const evalActive = (script: string) => {
-    void invoke("browser_eval", {
-      label: `browser-${activeIdRef.current}`,
-      script,
-    }).catch((e) => console.error("browser_eval failed", e));
+    const id = activeIdRef.current;
+    void invoke("browser_eval", { label: `browser-${id}`, script }).catch(() => {
+      if (nativeMountedRef.current && tabsRef.current.some((page) => page.id === id)) {
+        setPageErrors((prev) => ({ ...prev, [id]: "This page stopped responding. Try opening it again." }));
+      }
+    });
   };
 
   const saveBookmarkFor = (url: string, name: string) => {
@@ -1923,61 +2029,6 @@ function BrowserPaneBase({
 
   const removeBookmark = (url: string) =>
     setBookmarks((bs) => bs.filter((b) => b.url !== url));
-
-  // Native text prompt for naming (a native menu can't host an input).
-  const promptName = (message: string, def: string): Promise<string | null> =>
-    invoke<string | null>("prompt_text", { message, defaultValue: def }).catch(
-      () => null,
-    );
-
-  // Open the native bookmarks popup menu (floats over the webview). The menu
-  // is positioned at the ★ button (window coords) because the async command
-  // has no active NSEvent to anchor to. muda pins the menu's top-LEFT at this
-  // point and grows it right/down, and the ★ sits near the window's right edge,
-  // so clamp X to keep the menu fully on-screen instead of spilling off-right.
-  const MENU_WIDTH = 300;
-  const openBookmarksMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const margin = 8;
-    const maxX = window.innerWidth - MENU_WIDTH - margin;
-    const x = Math.max(margin, Math.min(r.left, maxX));
-    void invoke("show_bookmarks_menu", {
-      titles: bookmarksRef.current.map((b) => b.title || b.url),
-      currentBookmarked: bookmarksRef.current.some(
-        (b) => b.url === activeUrlRef.current,
-      ),
-      hasCurrent: !!activeUrlRef.current,
-      x: Math.round(x),
-      y: Math.round(r.bottom + 4),
-    }).catch((err) => console.error("show_bookmarks_menu failed", err));
-  };
-
-  // Act on a click from the native bookmarks menu. Reads refs so the listener
-  // never goes stale.
-  const handleBmAction = async (id: string) => {
-    if (id === "bm-add") {
-      const url = activeUrlRef.current;
-      const name = await promptName("Bookmark name:", hostnameOf(url));
-      if (name !== null) saveBookmarkFor(url, name);
-      return;
-    }
-    if (id === "bm-remove-current") {
-      removeBookmark(activeUrlRef.current);
-      return;
-    }
-    const m = id.match(/^bm-(open|newtab|rename|remove)-(\d+)$/);
-    if (!m) return;
-    const action = m[1];
-    const b = bookmarksRef.current[Number(m[2])];
-    if (!b) return;
-    if (action === "open") navigate(b.url);
-    else if (action === "newtab") openTab(b.url);
-    else if (action === "remove") removeBookmark(b.url);
-    else if (action === "rename") {
-      const name = await promptName("Rename bookmark:", b.title);
-      if (name !== null && name.trim()) saveBookmarkFor(b.url, name);
-    }
-  };
 
   // The browse agent opens a tab by emitting `browse-open-tab` (it can't create
   // a native webview itself — BrowserPane owns the tab list). Foreground the new
@@ -2047,679 +2098,146 @@ function BrowserPaneBase({
     };
   }, []);
 
-  // Subscribe once to native-menu clicks.
+  const applySiteAppearance = (tab: Tab) => {
+    const saved = siteAppearancesRef.current[siteKey(tab.url)];
+    const profile = normalizeAppearance(saved);
+    void invoke("browser_set_view", { label: tab.label, css: appearanceCss(profile), selectionActions: selectionActionsRef.current }).catch((e) => setWorkspaceError(String(e)));
+    void invoke("browser_set_appearance", { label: tab.label, website: profile.website, zoom: profile.zoom }).catch((e) => setWorkspaceError(String(e)));
+  };
+  const applySiteAppearanceRef = useRef(applySiteAppearance);
+  applySiteAppearanceRef.current = applySiteAppearance;
   useEffect(() => {
-    const p = listen<string>("bookmark-menu-action", (e) => {
-      void handleBmAction(e.payload);
-    });
-    return () => {
-      void p.then((un) => un());
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    for (const tab of tabsRef.current) if (wvMapRef.current.has(tab.id)) applySiteAppearanceRef.current(tab);
+  }, [siteAppearances, selectionActions]);
 
-  // Re-apply the chosen view filter to every live tab whenever it changes.
-  // The native command installs it as a document-start user script (no flash on
-  // later navigations) and also injects into the now-loaded page so it's instant.
+  const reloadPageRef = useRef(() => {});
+  reloadPageRef.current = () => { const tab = tabsRef.current.find((page) => page.id === activeIdRef.current); if (tab) { if (wvMapRef.current.has(tab.id) && !pageErrorsRef.current[tab.id]) evalActive("location.reload()"); else retryPage(tab.id); } };
+  const focusAddressRef = useRef(() => {});
+  focusAddressRef.current = () => {
+    if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" });
+    requestAnimationFrame(() => {
+      const input = document.querySelector<HTMLInputElement>('[aria-label="Address or search"]');
+      if (!input) return;
+      // DOM focus alone can leave AppKit's Edit commands aimed at the native
+      // page. Reclaim main as first responder, including repeated Cmd+L.
+      void Webview.getCurrent().setFocus().catch(() => {});
+      input.focus(); input.select();
+    });
+  };
   useEffect(() => {
-    const css = cssForView(viewMode);
-    for (const t of tabsRef.current) {
-      if (wvMapRef.current.has(t.id)) {
-        void invoke("browser_set_view", {
-          label: t.label,
-          css,
-          selectionActions: selectionActionsRef.current,
-        }).catch((e) => console.error("browser_set_view failed", e));
+    const key = (event: KeyboardEvent) => {
+      if (!surfaceActiveRef.current || event.defaultPrevented) return;
+      if (event.key === "Escape" && videoFsRef.current.stage !== "off") {
+        if (videoFsRef.current.stage === "browser" && (event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]")) return;
+        event.preventDefault(); event.stopImmediatePropagation(); videoFsRef.current.dispatch({ type: "exit" }); return;
       }
-    }
-  }, [viewMode]);
-
-  // Same shape for the highlight-action toggle. `browser_set_view` rebuilds the
-  // WHOLE user-script set, so it's also how the selection bar goes on and off —
-  // and it evals the change into the already-loaded page, so unchecking the
-  // setting is felt on the page you're reading rather than on the next
-  // navigation. Runs on mount too (harmless: it reinstalls the same set).
-  useEffect(() => {
-    const css = cssForView(viewModeRef.current);
-    for (const t of tabsRef.current) {
-      if (wvMapRef.current.has(t.id)) {
-        void invoke("browser_set_view", { label: t.label, css, selectionActions }).catch(
-          (e) => console.error("browser_set_view failed", e),
-        );
+      if (event.metaKey && event.ctrlKey && event.key.toLowerCase() === "f" && videoFsRef.current.stage !== "off") {
+        event.preventDefault();
+        if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();
+        else void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
+        return;
       }
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); openTabRef.current(HOME); return; }
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r") { event.preventDefault(); reloadPageRef.current(); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l") { event.preventDefault(); focusAddressRef.current(); }
+      if ((event.metaKey || event.ctrlKey) && event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
+        event.preventDefault(); const ids = tileIdsRef.current; const i = ids.indexOf(activeIdRef.current); const next = ids[(i + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length]; if (next) selectTabRef.current(next);
+      }
+      if (event.metaKey && event.shiftKey && ["BracketLeft", "BracketRight"].includes(event.code)) {
+        event.preventDefault(); const next = shortcutTabId(tabsRef.current.map((tab) => tab.id), activeIdRef.current, event.code === "BracketRight" ? "next-tab" : "previous-tab"); if (next) selectTabRef.current(next);
+      }
+      if (event.key === "Escape") {
+        pickerRef.current.cancel();
+        setLayoutMenuOpen(false); setOverflowOpen(false);
+        if (!(event.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]")) restoreTilesRef.current();
+      }
+    };
+    window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key);
+  }, []);
+
+  const retryPage = (id: string) => {
+    setPageErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
+    wakeAttemptsRef.current.delete(id);
+    const view = wvMapRef.current.get(id);
+    if (view) {
+      geometry.hide(id, view);
+      const tab = tabsRef.current.find((page) => page.id === id);
+      if (tab) navigate(tab.url, id);
     }
-  }, [selectionActions]);
-
-  // A click in the native View menu arrives here (HTML can't overlay the
-  // webview, so the picker is a native popup like bookmarks). "view-none" resets.
-  useEffect(() => {
-    const p = listen<string>("view-menu-action", (e) => {
-      const mode = e.payload === "view-none" ? "none" : e.payload.replace("view-", "");
-      setViewMode(mode in VIEW_CSS ? mode : "none");
-    });
-    return () => {
-      void p.then((un) => un());
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Open the native View-filter popup, dropping straight down from the 🎨
-  // button. muda pins the menu's top-LEFT at (x,y) and grows right/down; the
-  // button sits near the window's right edge, so RIGHT-align the menu to the
-  // button (left = buttonRight − menuWidth) instead of left-anchoring it (which
-  // left a big gap). VIEW_MENU_WIDTH is the menu's approx native width. Clamp
-  // so it never spills off either edge.
-  const VIEW_MENU_WIDTH = 160;
-  const openViewMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const margin = 8;
-    const maxX = window.innerWidth - VIEW_MENU_WIDTH - margin;
-    const x = Math.max(margin, Math.min(r.right - VIEW_MENU_WIDTH, maxX));
-    void invoke("show_view_menu", {
-      active: viewMode,
-      x: Math.round(x),
-      y: Math.round(r.bottom + 4),
-    }).catch((err) => console.error("show_view_menu failed", err));
+    ensureLive(id);
   };
-
-  // A click in the native browser Settings menu arrives here (same native-popup
-  // reason as bookmarks/view): tandem agent mode and the highlight action bar.
-  useEffect(() => {
-    const p = listen<string>("browser-settings-action", (e) => {
-      if (e.payload === "bset-tandem") setTandem((v) => !v);
-      else if (e.payload === "bset-highlight") setSelectionActions((v) => !v);
-    });
-    return () => {
-      void p.then((un) => un());
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Open the native browser Settings popup, right-aligned under the ⚙️ button
-  // (same anchoring math as the View menu).
-  const SETTINGS_MENU_WIDTH = 180;
-  const openSettingsMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const margin = 8;
-    const maxX = window.innerWidth - SETTINGS_MENU_WIDTH - margin;
-    const x = Math.max(margin, Math.min(r.right - SETTINGS_MENU_WIDTH, maxX));
-    void invoke("show_browser_settings_menu", {
-      tandem: tandemRef.current,
-      highlight: selectionActionsRef.current,
-      x: Math.round(x),
-      y: Math.round(r.bottom + 4),
-    }).catch((err) => console.error("show_browser_settings_menu failed", err));
-  };
-
-  // Tandem agent mode drives the layout: force the page discussion open the
-  // moment it turns on, so every browse/new-tab lands agent-first. Its width is
-  // the dock's own now — the user's one column width, not a second ratio this
-  // pane would snap out from under them.
-  useEffect(() => {
-    if (tandem) setChatHere({ open: true, pill: "page" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tandem]);
-
-  // Lucide icons render at size 14 inside these (stroke currentColor, so the
-  // active-state tinting keeps working); inline-flex centers icon and text
-  // buttons alike.
-  const chromeBtn: React.CSSProperties = {
-    fontSize: "13px",
-    lineHeight: 1,
-    padding: "3px 7px",
-    border: "1px solid var(--color-rule)",
-    background: "var(--color-bg-elevated)",
-    color: "var(--color-ink)",
-    borderRadius: "4px",
-    cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-  };
+  const openResearch = () => setMissionMenuOpen(true);
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      {/* Tab strip + toolbar — hidden while a page is in-window fullscreen so
-          the video fills the whole Redline window. */}
-      {!browserFullscreen && (
-        <>
-      {/* Tab strip — scrolls horizontally when the pane is too narrow to show
-          every tab (each tab keeps its width instead of being squeezed away),
-          with the bar itself hidden: a scrollbar drawn under a row of tabs is
-          chrome about chrome. Native `title=` tooltips here, not `.rl-tipwrap`,
-          so the overflow constraint documented at TerminalTileHeader doesn't
-          apply. */}
-      <div
-        className="rl-hide-scroll-x flex items-center gap-1 px-2 pt-2 overflow-x-auto"
-        style={{ background: "var(--color-bg-elevated)" }}
-      >
-        {tabs.map((tab, i) => {
-          const active = tab.id === activeId;
-          return (
-            <div
-              key={tab.id}
-              data-tab-id={tab.id}
-              onClick={() => selectTab(tab.id)}
-              onPointerDown={(e) => startTabDrag(e, tab.id)}
-              title={tab.url}
-              className={`flex items-center gap-1.5 rounded-t-md cursor-pointer${
-                mission.activeMission
-                  ? mission.pinnedBrowseIds.has(tab.browseId)
-                    ? " rl-tab--mission rl-tab--mined"
-                    : " rl-tab--mission"
-                  : ""
-              }`}
-              style={{
-                maxWidth: "180px",
-                flexShrink: 0,
-                padding: "5px 8px",
-                fontSize: "12px",
-                borderTop: "1px solid var(--color-rule)",
-                borderLeft:
-                  tabDragging && dragOverId === tab.id && tabDragRef.current?.id !== tab.id
-                    ? "2px solid var(--color-info)"
-                    : "1px solid var(--color-rule)",
-                borderRight: "1px solid var(--color-rule)",
-                background: active
-                  ? "var(--color-paper)"
-                  : "var(--color-bg-elevated)",
-                color: active ? "var(--color-ink)" : "var(--color-ink-muted)",
-                // Dim the tab being dragged; a subtle cue it's in motion.
-                opacity: tabDragging && tabDragRef.current?.id === tab.id ? 0.5 : 1,
-                // While reordering, the whole strip is a drag surface.
-                cursor: tabDragging ? "grabbing" : "pointer",
-                userSelect: "none",
-              }}
-            >
-              {/* 1-based tab number — the user's (and the agent's) handle for the
-                  tab ("tab 2"), and the only way to tell two same-host tabs apart.
-                  Positional/display-only; nothing durable keys on it. */}
-              <span
-                aria-hidden
-                style={{
-                  flexShrink: 0,
-                  minWidth: "13px",
-                  textAlign: "center",
-                  fontSize: "10px",
-                  fontVariantNumeric: "tabular-nums",
-                  lineHeight: "15px",
-                  borderRadius: "4px",
-                  border: "1px solid var(--color-rule)",
-                  background: active
-                    ? "var(--color-bg-elevated)"
-                    : "transparent",
-                  color: "var(--color-ink-muted)",
-                }}
-              >
-                {i + 1}
-              </span>
-              <span className="truncate">{tab.title || "New tab"}</span>
-              <button
-                type="button"
-                aria-label="Close tab"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTab(tab.id);
-                }}
-                style={{
-                  fontSize: "11px",
-                  lineHeight: 1,
-                  color: "var(--color-ink-muted)",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                  flexShrink: 0,
-                  display: "inline-flex",
-                  alignItems: "center",
-                }}
-              >
-                <X size={12} strokeWidth={2} />
-              </button>
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          title="New tab"
-          aria-label="New tab"
-          onClick={() => openTab()}
-          disabled={tabs.length >= MAX_TABS}
-          style={{
-            ...chromeBtn,
-            border: "none",
-            background: "transparent",
-            flexShrink: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            opacity: tabs.length >= MAX_TABS ? 0.4 : 1,
-            cursor: tabs.length >= MAX_TABS ? "default" : "pointer",
-          }}
-        >
-          <Plus size={15} strokeWidth={2} />
-        </button>
-      </div>
+    <div className="rb-workspace">
+      {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
+        onAddressFocus={(focused) => {
+          addrFocusedRef.current = focused;
+          if (focused) void Webview.getCurrent().setFocus().catch(() => {});
+        }} onNavigate={() => navigate(addr)}
+        onAddressCopyError={() => setWorkspaceError("Could not copy the selected address.")}
+        onBack={() => evalActive("history.back()")} onForward={() => evalActive("history.forward()")}
+        onReload={() => reloadPageRef.current()}
+        onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab()} onTabDrag={startTabDrag}
+        tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+        chatOpen={chatOpen} onToggleChat={() => {
+          if (chatOpen) setChatHere({ open: false });
+          else setChatHere({ open: true, pill: chatHere.pill });
+        }} split={tilePages.length > 1 || !!tileLayout.maximized} onArrange={() => setLayoutMenuOpen(true)}
+        onMosaics={openMosaicManager}
+        mosaic={isMosaicWorkspace(workspaceKey) ? { name: activeMosaic?.name ?? "Mosaic", onClose: () => void leaveMosaic().catch((error) => setWorkspaceError(String(error))) } : null}
+        menuOpen={overflowOpen} onMenu={setOverflowOpen} onBookmarks={() => setBookmarksOpen(true)}
+        onAppearance={() => setAppearanceOpen(true)} onPreferences={() => setPreferencesOpen(true)}
+        onInspect={() => void picker.start(tabs.find(tab => tab.id === activeId)?.url ?? "")}
+        onCloseBrowser={onClose}/>}
 
-      {/* Toolbar */}
-      <div
-        className="flex items-center gap-2 px-3 py-2"
-        style={{
-          borderTop: "1px solid var(--color-rule)",
-          borderBottom: "1px solid var(--color-rule)",
-          background: "var(--color-bg-elevated)",
-        }}
-      >
-        <button
-          type="button"
-          style={chromeBtn}
-          title="Back"
-          aria-label="Back"
-          onClick={() => evalActive("history.back()")}
-        >
-          <ArrowLeft size={14} strokeWidth={2} />
-        </button>
-        <button
-          type="button"
-          style={chromeBtn}
-          title="Forward"
-          aria-label="Forward"
-          onClick={() => evalActive("history.forward()")}
-        >
-          <ArrowRight size={14} strokeWidth={2} />
-        </button>
-        <form
-          className="flex-1 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            navigate(addr);
-          }}
-        >
-          <input
-            value={addr}
-            onChange={(e) => setAddr(e.target.value)}
-            onFocus={(e) => {
-              addrFocusedRef.current = true;
-              e.target.select();
-            }}
-            onBlur={() => {
-              addrFocusedRef.current = false;
-            }}
-            spellCheck={false}
-            autoCapitalize="off"
-            autoCorrect="off"
-            placeholder="Enter a URL"
-            className="flex-1 rounded-sm px-2 py-1 font-mono"
-            style={{
-              fontSize: "12px",
-              border: "1px solid var(--color-rule)",
-              background: "var(--color-paper)",
-              color: "var(--color-ink)",
-            }}
-          />
-          <button type="submit" style={chromeBtn} title="Go">
-            Go
-          </button>
-        </form>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: isBookmarked ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="Bookmarks"
-          aria-label="Bookmarks"
-          aria-haspopup="menu"
-          onClick={openBookmarksMenu}
-        >
-          <Star
-            size={14}
-            strokeWidth={2}
-            fill={isBookmarked ? "currentColor" : "none"}
-          />
-        </button>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: viewMode !== "none" ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="View filter (dark mode, sepia, …)"
-          aria-label="View filter"
-          aria-haspopup="menu"
-          onClick={openViewMenu}
-        >
-          <Palette size={14} strokeWidth={2} />
-        </button>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: tandem ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="Browser settings (tandem agent mode)"
-          aria-label="Browser settings"
-          aria-haspopup="menu"
-          onClick={openSettingsMenu}
-        >
-          <Settings size={14} strokeWidth={2} />
-        </button>
-        {/* 🎯 and the missions ▾ menu read as ONE control: a single bordered
-            chip with two borderless segments split by a hairline, so there's no
-            gap or double-border between them. The chip tints to the accent when
-            a mission is active; the pin count rides the top-right corner. */}
-        <div
-          className="relative flex items-stretch"
-          style={{
-            border: `1px solid ${
-              mission.activeMission ? "var(--color-info)" : "var(--color-rule)"
-            }`,
-            borderRadius: "4px",
-            background: "var(--color-bg-elevated)",
-          }}
-        >
-          <button
-            type="button"
-            style={{
-              border: "none",
-              background: "transparent",
-              cursor: "pointer",
-              lineHeight: 1,
-              padding: "3px 6px",
-              display: "inline-flex",
-              alignItems: "center",
-              // Fully rounded when it's the lone segment; left-rounded when the
-              // ▾ menu sits beside it.
-              borderRadius: missionShowMenu ? "3px 0 0 3px" : "3px",
-              color: mission.activeMission ? "var(--color-info)" : "var(--color-ink)",
-              opacity: mission.activeMission ? 1 : 0.85,
-            }}
-            title={
-              mission.activeMission
-                ? `Mission: ${mission.activeMission.title}`
-                : "Start a research mission across your tabs"
-            }
-            aria-label="Mission"
-            onClick={() => {
-              if (mission.activeMission) {
-                setChatHere({ open: true, pill: "mission" });
-              } else {
-                setMissionDialogOpen(true);
-              }
-            }}
-          >
-            <Target size={14} strokeWidth={2} />
-          </button>
-          {/* The ▾ missions menu (switch / resume / archive / start another)
-              only earns its place once a mission exists to manage; with none,
-              the bare 🎯 is "start a mission" and the caret would be dead. */}
-          {missionShowMenu && (
-            <>
-              <span aria-hidden style={{ width: "1px", background: "var(--color-rule)", margin: "3px 0" }} />
-              <button
-                type="button"
-                style={{
-                  border: "none",
-                  background: "transparent",
-                  cursor: "pointer",
-                  lineHeight: 1,
-                  padding: "0 4px",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  borderRadius: "0 3px 3px 0",
-                  color: mission.activeMission ? "var(--color-info)" : "var(--color-ink-muted)",
-                }}
-                title="Missions: start, switch, resume"
-                aria-label="Missions menu"
-                aria-haspopup="menu"
-                onClick={() => setMissionMenuOpen((x) => !x)}
-              >
-                <ChevronDown size={11} strokeWidth={2} />
-              </button>
-            </>
-          )}
-          {mission.activeMission && mission.findings.length > 0 && (
-            <span
-              aria-hidden
-              style={{
-                position: "absolute",
-                top: "-6px",
-                right: "-6px",
-                minWidth: "14px",
-                height: "14px",
-                padding: "0 3px",
-                borderRadius: "7px",
-                background: "var(--color-info)",
-                color: "var(--color-on-accent)",
-                fontSize: "9px",
-                lineHeight: "14px",
-                textAlign: "center",
-                fontVariantNumeric: "tabular-nums",
-                pointerEvents: "none",
-              }}
-            >
-              {mission.findings.length}
-            </span>
-          )}
-          {missionMenuOpen && (
-            <MissionMenu
-              missions={mission.missions}
-              activeId={mission.activeMission?.missionId ?? null}
-              onStartNew={() => {
-                setMissionMenuOpen(false);
-                setMissionDialogOpen(true);
-              }}
-              onResume={(id) => {
-                setMissionMenuOpen(false);
-                void switchToMission(id);
-              }}
-              onExit={() => {
-                setMissionMenuOpen(false);
-                void exitMission();
-              }}
-              onDelete={(id) => {
-                void deleteMissionFlow(id);
-              }}
-              onClose={() => setMissionMenuOpen(false)}
-            />
-          )}
-        </div>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: chatOpen && chatTab === "page" ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="Discuss this page with Claude (reads & drives the browser)"
-          aria-label="Discuss this page"
-          aria-pressed={chatOpen && chatTab === "page"}
-          onClick={() =>
-            chatOpen && chatTab === "page"
-              ? setChatHere({ open: false })
-              : setChatHere({ open: true, pill: "page" })
-          }
-        >
-          <MessageSquare size={14} strokeWidth={2} />
-        </button>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: chatOpen && chatTab === "list" ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="This tab's list — collect what needs to change, then hand it over in one piece"
-          aria-label="Tab list"
-          aria-pressed={chatOpen && chatTab === "list"}
-          onClick={() =>
-            chatOpen && chatTab === "list"
-              ? setChatHere({ open: false })
-              : setChatHere({ open: true, pill: "list" })
-          }
-        >
-          <ListChecks size={14} strokeWidth={2} />
-        </button>
-        <button
-          type="button"
-          style={{
-            ...chromeBtn,
-            color: chatOpen && chatTab === "linked" ? "var(--color-info)" : "var(--color-ink)",
-          }}
-          title="Linked discussion — one conversation that follows you across tabs"
-          aria-label="Linked discussion"
-          aria-pressed={chatOpen && chatTab === "linked"}
-          onClick={() =>
-            chatOpen && chatTab === "linked"
-              ? setChatHere({ open: false })
-              : // No lazy create here: with no active linked discussion the
-                // panel shows the empty state, whose primary action can carry
-                // the current tab's chat across (converting is a real choice,
-                // not a silent side effect of opening the panel).
-                setChatHere({ open: true, pill: "linked" })
-          }
-        >
-          <Link2 size={14} strokeWidth={2} />
-        </button>
-        <button
-          type="button"
-          style={chromeBtn}
-          title="Close browser"
-          aria-label="Close browser"
-          onClick={onClose}
-        >
-          <X size={14} strokeWidth={2} />
-        </button>
-      </div>
-        </>
-      )}
-
+      {videoFs.stage === "browser" && <BrowserFullscreenEdge title={tabs.find((tab) => tab.id === activeId)?.title ?? "Video"}
+        onScreen={() => void videoFs.requestScreen()} onExit={() => videoFs.dispatch({ type: "exit" })}/>}
       {/* The active tab's native webview is positioned to cover this slot. When
           the page-discussion panel is open, a SplitPane shrinks the slot so the
           webview shares the pane with the chat (the webview tracks the slot's
           rect, so it resizes automatically). */}
       {(() => {
-        // The stand-in. Shown only while the real webview is actually hidden,
-        // so it can never sit under a live page. `cover` + a top-left origin
-        // means it clips as the slot changes shape instead of distorting —
-        // the page appears to be masked by the drag, which is what a page
-        // being resized looks like. No fresh capture is taken here; if this
-        // tab has no picture yet the pane is blank exactly as before.
-        const shot = resizing && !effectiveVisible ? tabShots.get(activeId) : undefined;
-        const slot = (
-          // Frame + measured slot. The frame owns layout; the webview tracks
-          // the INNER div's rect, inset from the frame so the square native
-          // rect never pokes through the document plate's rounded corners.
-          <div
-            className={browserFullscreen ? "relative" : "flex-1 relative"}
-            style={
-              browserFullscreen
-                ? {
-                    // Above App's z-30 overlays so the video covers the window.
-                    background: "var(--color-paper)",
-                    position: "fixed",
-                    inset: 0,
-                    zIndex: 50,
-                  }
-                : { background: "var(--color-paper)" }
-            }
-          >
-            <div
-              ref={slotRef}
-              style={{
-                position: "absolute",
-                inset: `${webviewSlotInset(browserFullscreen)}px`,
-              }}
-            >
-              {shot && (
-                <img
-                  src={shot}
-                  alt=""
-                  aria-hidden
-                  draggable={false}
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                    objectPosition: "top left",
-                    pointerEvents: "none",
-                  }}
-                />
-              )}
-            </div>
-          </div>
-        );
-        // Fullscreen takes over the whole pane; a closed dock (or one holding
-        // another surface's conversation) leaves nowhere to portal into.
-        if (browserFullscreen || !chatOpen || !dockSlot) return slot;
+        const slot = <BrowserTileStage stageRef={slotRef} slots={tileSlotsRef} pages={tilePages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={browserFullscreen}
+          shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => !wvMapRef.current.has(page.id) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
+          onAssign={(index, browseId) => { const next = assignVisibleTile(tileLayout, visibleBrowseIds, index, browseId); updateTileLayout(next); const tab = tabs.find((t) => t.browseId === browseId); if (tab) selectTab(tab.id); }}
+          onAddPage={(index) => { const browseId = openTab(); if (browseId) updateTileLayout(assignTile(tileLayout, index, browseId)); }}
+          onSwap={(from, to) => updateTileLayout(swapVisibleTiles(tileLayout, visibleBrowseIds, from, to))}
+          hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+          onLayout={updateTileLayout} onDragging={setTileDragging}/>;
+        // The conversation remains mounted and visible during stage one.
+        if (!chatOpen || !dockSlot) return slot;
         const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
         // The chat shows the DISCUSSION tab's thread (usually the active tab, but
         // pinned to its origin when an agent opened the active tab). It still
         // grounds on the visible page via `label`.
         const discussionTab =
           tabs.find((t) => t.id === discussionId) ?? activeTab;
-        // The active (visible) tab's 1-based strip ordinal — what the linked
-        // agent and the user call "tab N".
-        const activeN =
-          tabs.findIndex((t) => t.id === activeId) + 1 || null;
         // No switcher of its own any more: the dock's context strip is the one
         // place in the app that says which conversation you are in.
         const chatPanel = (
-          <div className="flex flex-col h-full min-h-0">
-            <div className="flex-1 min-h-0">
-              {chatTab === "list" ? (
+          <div className="rb-chat-frame">
+            <div className="flex flex-1 flex-col min-w-0 min-h-0 overflow-hidden">
+              {chatTab === "cart" ? (
                 <Suspense fallback={<div className="h-full" />}>
-                  <BrowseList
-                    key={`${discussionTab.browseId}:${listReloadKey}`}
-                    browseId={discussionTab.browseId}
-                    source={{ url: discussionTab.url, title: discussionTab.title }}
+                  <Cart
+                    key={`${workspaceKey}:${listReloadKey}`}
+                    workspaceKey={workspaceKey}
+                    source={{ url: activeTab.url, title: activeTab.title }}
                     capturePage={capturePage}
                     onLocate={refineLocator}
                     onClose={() => setChatHere({ open: false })}
                     onSendToDrafter={onSendToDrafter}
                     onSendToRedline={onSendToRedline}
-                    onListChanged={(exists) =>
-                      setListedTabs((prev) => {
-                        if (!!prev[discussionTab.browseId] === exists) return prev;
-                        const next = { ...prev };
-                        if (exists) next[discussionTab.browseId] = true;
-                        else delete next[discussionTab.browseId];
-                        return next;
-                      })
-                    }
                     // `💬` on an item: the page agent already grounds on the
                     // live page and can read the repo, so it is the right
                     // colleague — this needs no backend of its own.
                     onDiscussItem={(quoted) => {
-                      setChatSeed({ text: quoted, nonce: Date.now() });
+                      seedPageChat({ text: quoted, nonce: Date.now() });
                       setChatHere({ open: true, pill: "page" });
                     }}
                   />
                 </Suspense>
-              ) : chatTab === "linked" ? (
-                linked.activeLinked ? (
-                  <LinkedChat
-                    key={linked.activeLinked.linkedId}
-                    linked={linked.activeLinked}
-                    tab={{
-                      label: `browser-${activeId}`,
-                      n: activeN,
-                      browseId: activeTab.browseId,
-                      url: activeTab.url,
-                      title: activeTab.title,
-                    }}
-                    projectDir={projectDir}
-                    onClose={() => setChatHere({ open: false })}
-                    onOpenLink={(url) => openTab(url)}
-                    onSendToRedline={onSendToRedline}
-                    onSendToDrafter={onSendToDrafter}
-                  />
-                ) : (
-                  <LinkedEmptyState
-                    onStart={() => void linked.startLinked()}
-                    onContinueFromTab={() => void continueTabAsLinked(discussionTab)}
-                    tabBrowseId={discussionTab.browseId}
-                    tabTitle={discussionTab.title}
-                  />
-                )
               ) : chatTab === "mission" ? (
                 mission.activeMission ? (
                   <MissionChat
@@ -2750,14 +2268,18 @@ function BrowserPaneBase({
                   <MissionEmptyState onStart={() => setMissionDialogOpen(true)} />
                 )
               ) : (
+                <div className="rb-chat-frame">
+                  <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden">
                 <BrowserChat
-                  key={discussionTab.browseId}
-                  browseId={discussionTab.browseId}
-                  label={`browser-${activeId}`}
+                  onResearch={openResearch}
+                  title={dockTitle ?? "Page chat"}
+                  key={dockBrowseId}
+                  {...pageChatIdentity(discussionTab, activeId, linkedConversation)}
+                  linked={!!linkedConversation} onToggleLinked={toggleLinked}
+                  workspaceId={workspaceKey}
                   projectDir={projectDir}
-                  tandem={tandem}
                   anchoredFromTitle={
-                    discussionTab.id !== activeId ? discussionTab.title : undefined
+                    linkedConversation?.title ?? (discussionTab.id !== activeId ? discussionTab.title : undefined)
                   }
                   onClose={() => setChatHere({ open: false })}
                   onOpenLink={(url) => openTab(url)}
@@ -2765,33 +2287,7 @@ function BrowserPaneBase({
                   onSendToDrafter={onSendToDrafter}
                   seed={chatSeed}
                   onSeedConsumed={() => setChatSeed(null)}
-                  onAddToList={
-                    // Offered only once the tab HAS a list: `browse_list_add`
-                    // refuses an orphan item, so without one the button could
-                    // only ever fail.
-                    listedTabs[discussionTab.browseId]
-                      ? (body) =>
-                          invoke("browse_list_add", {
-                            browseId: discussionTab.browseId,
-                            kind: "note",
-                            body,
-                          }).then(
-                            () => true,
-                            (e: unknown) => {
-                              console.error("browse_list_add failed", e);
-                              return false;
-                            },
-                          )
-                      : undefined
-                  }
-                  onContinueAsLinked={() => void continueTabAsLinked(discussionTab)}
-                  linkedExists={linked.linkedSessions.length > 0}
-                  onOpenExistingLinked={() => {
-                    if (linked.activeLinkedId === null && linked.linkedSessions[0]) {
-                      linked.resumeLinked(linked.linkedSessions[0].linkedId);
-                    }
-                    setChatHere({ pill: "linked" });
-                  }}
+                  onAddToCart={addReplyToCart}
                   onAddToMission={
                     mission.activeMission
                       ? (body) =>
@@ -2806,6 +2302,8 @@ function BrowserPaneBase({
                       : undefined
                   }
                 />
+                  </div>
+                </div>
               )}
             </div>
           </div>
@@ -2821,12 +2319,42 @@ function BrowserPaneBase({
         );
       })()}
 
+      {picker.picking && <div role="status" className="shrink-0 px-3 py-1 text-xs">Click an element · Esc to cancel <button type="button" onClick={picker.cancel}>Cancel</button></div>}
+      {workspaceError && <div role="alert" className="flex items-center justify-between px-3 py-2 text-xs" style={{ color: "var(--color-danger)", background: "var(--color-paper)" }}>{workspaceError}<button type="button" onClick={() => setWorkspaceError(null)}>Dismiss</button></div>}
+      {mission.error && <div role="alert" className="px-3 py-2 text-xs">{mission.error}<button type="button" onClick={() => void mission.refreshMissions()}>Retry</button></div>}
+      {appearanceOpen && <BrowserAppearanceMenu site={siteKey(activeUrl)} value={normalizeAppearance(siteAppearances[siteKey(activeUrl)])} onChange={(profile) => setSiteAppearances((prev) => ({ ...prev, [siteKey(activeUrl)]: profile }))} onClose={() => setAppearanceOpen(false)}/>}
+      {layoutMenuOpen && <BrowserLayoutDialog layout={tileLayout} available={tabs.length} tabs={tabs} activeBrowseId={activeBrowseId ?? ""} onClose={() => setLayoutMenuOpen(false)}
+        onChoose={(preset, count) => updateTileLayout({ ...tileLayout, grid: undefined, preset, maximized: null, tiles: arrangementTiles(tileLayout, tabs.map(tab => tab.browseId), activeBrowseId!, count) })}
+        onSaveDefault={() => setLayouts((prev) => ({ ...prev, default: { ...tileLayout, grid: undefined, tiles: [], maximized: null, focused: null } }))}/>}
+      {bookmarksOpen && <BrowserBookmarksDialog bookmarks={bookmarks} title={tabs.find((tab) => tab.id === activeId)?.title ?? activeUrl} url={activeUrl} onSave={saveBookmarkFor} onRemove={removeBookmark} onOpen={(url) => openTab(url)} onClose={() => setBookmarksOpen(false)}/>}
+      {preferencesOpen && <BrowserPreferencesDialog selectionActions={selectionActions} onSelectionActions={setSelectionActions} onClose={() => setPreferencesOpen(false)}/>}
+      {missionMenuOpen && <MissionMenu missions={mission.missions} activeId={mission.activeMission?.missionId ?? null}
+        onStartNew={() => { setMissionMenuOpen(false); setMissionDialogOpen(true); }}
+        onResume={(id) => { setMissionMenuOpen(false); void switchToMission(id).then(() => setChatHere({ open: true, pill: "mission" })).catch((error) => setWorkspaceError(String(error))); }}
+        onExit={() => { setMissionMenuOpen(false); void exitMission().catch((error) => setWorkspaceError(String(error))); }}
+        onDelete={(id) => { void deleteMissionFlow(id).catch((error) => setWorkspaceError(String(error))); }}
+        onOpenWorkspace={() => { setMissionMenuOpen(false); setMissionFoundationOpen(true); }} onClose={() => setMissionMenuOpen(false)}/>}
+      {mosaicsOpen && <MosaicManagerDialog mosaics={mosaicList} error={mosaicError} activeId={isMosaicWorkspace(workspaceKey) ? workspaceKey : null} activeName={activeMosaic?.name ?? null}
+        startupId={startupMosaic} canSaveCurrent={tabs.some((tab) => /^https?:\/\//i.test(tab.url))}
+        onOpen={(id) => { setMosaicsOpen(false); void openMosaic(id).catch((error) => setWorkspaceError(String(error))); }}
+        onEdit={(id) => { void editMosaic(id).catch((error) => setMosaicError(String(error))); }}
+        onNew={() => newMosaic(false)} onSaveCurrent={() => newMosaic(true)}
+        onDelete={(id) => { void deleteMosaicFlow(id).catch((error) => setMosaicError(`The mosaic could not be deleted. ${String(error)}`)); }}
+        onStartup={setStartupMosaic}
+        onLeave={() => { setMosaicsOpen(false); void leaveMosaic().catch((error) => setWorkspaceError(String(error))); }}
+        onClose={() => setMosaicsOpen(false)}/>}
+      {mosaicEdit && <MosaicEditDialog draft={mosaicEdit.draft} previous={mosaicEdit.previous} createId={newBrowseId}
+        onSave={(next) => saveMosaicEdit(next, !mosaicEdit.previous)}
+        onCancel={() => { setMosaicEdit(null); openMosaicManager(); }}/>}
+      {missionFoundationOpen && mission.activeMission && <BrowserDialog title="Research workspace" subtitle={mission.activeMission.title} width={1040} onClose={() => setMissionFoundationOpen(false)}>
+        <Suspense fallback={<div className="p-4">Opening saved research…</div>}><MissionFoundationPanel missionId={mission.activeMission.missionId} tabIds={tabs.map((t) => t.id)} initialBrief={mission.activeMission.goal} onOpenDraft={onOpenDraft} onContinue={(destination, body, handoffId) => onMissionContinue?.(mission.activeMission!.missionId, destination, body, handoffId)}/></Suspense>
+      </BrowserDialog>}
       {missionDialogOpen && (
         <MissionStartDialog
           onCancel={() => setMissionDialogOpen(false)}
           onStart={(title, goal) => {
             setMissionDialogOpen(false);
-            void startNewMission(title, goal);
+            void startNewMission(title, goal).catch((error) => setWorkspaceError(String(error)));
           }}
         />
       )}
@@ -2835,81 +2363,6 @@ function BrowserPaneBase({
 }
 
 
-/** Shown in the Linked tab before a linked discussion is created. When the
- *  current tab already has a page discussion going, the PRIMARY action is to
- *  continue that chat as the linked one (a fork — the tab chat is kept);
- *  starting empty stays available beneath it. */
-function LinkedEmptyState({
-  onStart,
-  onContinueFromTab,
-  tabBrowseId,
-  tabTitle,
-}: {
-  onStart: () => void;
-  onContinueFromTab?: () => void;
-  tabBrowseId?: string;
-  tabTitle?: string;
-}) {
-  // Only offer the continuation when there is a conversation to carry.
-  const [tabHasThread, setTabHasThread] = useState(false);
-  useEffect(() => {
-    setTabHasThread(false);
-    if (!tabBrowseId || !onContinueFromTab) return;
-    let alive = true;
-    void invoke<unknown[]>("get_browse_thread", { browseId: tabBrowseId })
-      .then((rows) => {
-        if (alive) setTabHasThread(rows.length > 0);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabBrowseId]);
-  return (
-    <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
-      <Link2 size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
-      <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
-        A linked discussion is one conversation that follows you across every tab.
-        Switch tabs and keep talking — it carries the thread and checks in with a
-        tab's own discussion when it needs to go deep.
-      </p>
-      {tabHasThread && onContinueFromTab && (
-        <button
-          type="button"
-          onClick={onContinueFromTab}
-          className="rounded px-3 py-1.5 font-medium"
-          style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
-        >
-          Continue {tabTitle ? `“${tabTitle}”` : "this tab's chat"} as Linked
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={onStart}
-        className="rounded px-3 py-1.5 font-medium"
-        style={
-          tabHasThread && onContinueFromTab
-            ? {
-                fontSize: "12px",
-                background: "var(--color-paper)",
-                color: "var(--color-ink)",
-                border: "1px solid var(--color-rule)",
-              }
-            : {
-                fontSize: "12px",
-                background: "var(--color-info)",
-                color: "var(--color-on-accent)",
-              }
-        }
-      >
-        Start a linked discussion
-      </button>
-    </div>
-  );
-}
-
-/** Shown in the Mission tab when no mission is active yet. */
 function MissionEmptyState({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
@@ -2933,105 +2386,30 @@ function MissionEmptyState({ onStart }: { onStart: () => void }) {
 /** Start / switch / resume dropdown hung off the toolbar 🎯. Rendered as React
  *  DOM with the native webview hidden (the pane drops `visible` while it's open),
  *  same reason bookmarks use a native popup. */
-function MissionMenu({
-  missions,
-  activeId,
-  onStartNew,
-  onResume,
-  onExit,
-  onDelete,
-  onClose,
-}: {
-  missions: Mission[];
-  activeId: string | null;
-  onStartNew: () => void;
-  onResume: (id: string) => void;
-  onExit: () => void;
-  onDelete: (id: string) => void;
-  onClose: () => void;
+function MissionMenu({ missions, activeId, onStartNew, onResume, onExit, onDelete, onOpenWorkspace, onClose }: {
+  missions: Mission[]; activeId: string | null; onStartNew: () => void;
+  onResume: (id: string) => void; onExit: () => void; onDelete: (id: string) => void;
+  onOpenWorkspace: () => void; onClose: () => void;
 }) {
-  return (
-    <>
-      {/* click-away backdrop */}
-      <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div
-        className="absolute z-50 rounded-md py-1"
-        style={{
-          top: "calc(100% + 4px)",
-          right: 0,
-          width: "17rem",
-          maxHeight: "60vh",
-          overflowY: "auto",
-          background: "var(--color-paper)",
-          border: "1px solid var(--color-rule)",
-          boxShadow: "0 8px 28px rgba(0,0,0,0.25)",
-        }}
-      >
-        <button
-          type="button"
-          onClick={onStartNew}
-          className="w-full text-left px-3 py-1.5"
-          style={{ fontSize: "12px", color: "var(--color-info)", fontWeight: 600 }}
-        >
-          + Start new mission
-        </button>
-        {activeId && (
-          <button
-            type="button"
-            onClick={() => {
-              onClose();
-              onExit();
-            }}
-            className="w-full text-left px-3 py-1.5"
-            style={{ fontSize: "12px", color: "var(--color-ink)" }}
-          >
-            ← Exit to regular browsing
-          </button>
-        )}
-        {missions.length > 0 && <div style={{ borderTop: "1px solid var(--color-rule)" }} />}
-        {missions.map((m) => (
-          <div
-            key={m.missionId}
-            className="flex items-center gap-1 px-3 py-1.5 group/m"
-            style={{ background: m.missionId === activeId ? "var(--color-bg-elevated)" : "transparent" }}
-          >
-            <button
-              type="button"
-              onClick={() => onResume(m.missionId)}
-              className="flex-1 min-w-0 text-left"
-              title={m.goal}
-            >
-              <div className="truncate" style={{ fontSize: "12px", color: "var(--color-ink)" }}>
-                {m.missionId === activeId ? "● " : ""}
-                {m.title}
-              </div>
-              <div className="truncate" style={{ fontSize: "9.5px", color: "var(--color-ink-muted)" }}>
-                {m.missionId === activeId ? "active" : "tap to resume"}
-              </div>
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (
-                  window.confirm(
-                    `Delete mission “${m.title}”? This removes its pins, chat, and saved tabs. This can't be undone.`,
-                  )
-                ) {
-                  onDelete(m.missionId);
-                }
-              }}
-              title="Delete this mission"
-              className="opacity-0 group-hover/m:opacity-100"
-              style={{ fontSize: "11px", color: "var(--color-warning)" }}
-            >
-              Delete
-            </button>
-          </div>
-        ))}
+  const [deleting, setDeleting] = useState<Mission | null>(null);
+  return <BrowserDialog title="Research missions" subtitle="Explore a question across pages and keep findings together." onClose={onClose}>
+    {deleting ? <div>
+      <h3 className="text-base font-medium">Delete “{deleting.title}”?</h3>
+      <p className="rb-help">This removes its saved findings, conversation and pages. This cannot be undone.</p>
+      <div className="flex gap-2 mt-4"><button type="button" className="rb-button" onClick={() => setDeleting(null)}>Keep research</button><button type="button" className="rb-button" style={{ color: "var(--color-danger)" }} onClick={() => { onDelete(deleting.missionId); setDeleting(null); }}>Delete research</button></div>
+    </div> : <>
+      <div className="flex flex-wrap gap-2 mb-3"><button type="button" className="rb-button rb-button-primary" onClick={onStartNew}>Start a research mission</button>
+        {activeId && <><button type="button" className="rb-button" onClick={onOpenWorkspace}>Open research workspace</button><button type="button" className="rb-button" onClick={onExit}>Return to regular browsing</button></>}
       </div>
-    </>
-  );
+      {missions.map((item) => <div key={item.missionId} className="rb-setting">
+        <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onResume(item.missionId)} style={{ background: "none", border: 0, color: "inherit", cursor: "pointer" }}>
+          <span className="truncate">{item.title}</span><small>{item.missionId === activeId ? "Current mission" : "Resume"}</small>
+        </button>
+        <button type="button" className="rb-icon-button" aria-label={`Delete ${item.title}`} onClick={() => setDeleting(item)}><X size={14}/></button>
+      </div>)}
+      {!missions.length && <p className="rb-help">Start with a question or a goal. Your research conversation can work across the pages you open.</p>}
+    </>}
+  </BrowserDialog>;
 }
 
 /** Memoized: one of the center-pane surfaces that used to reconcile on

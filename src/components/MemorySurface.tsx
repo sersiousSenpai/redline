@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -34,7 +34,8 @@ import {
 import type { TabRequest } from "../lib/navTarget";
 import { useShotCache } from "../hooks/useShotCache";
 import { MemoryAsk } from "./MemoryAsk";
-import { MemoryMapTab } from "./MemoryMap";
+import type { CosmosView } from "../lib/memoryMap3d";
+const MemoryMapTab = lazy(() => import("./MemoryMap").then(m => ({ default: m.MemoryMapTab })));
 import { rootMasses, type MemoryMapData } from "../lib/memoryMap";
 import { squarify } from "../lib/treemap";
 import {
@@ -2800,6 +2801,7 @@ export function MemorySurface({
   activeSessionName,
   tabRequest = null,
 }: MemorySurfaceProps) {
+  const cosmosView = useRef<CosmosView>({});
   const [storedTab, setTab] = usePersistedState<SurfaceTab>(
     "redline.memory.surfaceTab",
     "timeline",
@@ -2969,7 +2971,7 @@ export function MemorySurface({
       ) : tab === "catalog" ? (
         <CatalogTab />
       ) : tab === "map" ? (
-        <MemoryMapTab onFocus={cite} />
+        <Suspense fallback={<div style={{ padding: 20 }}>Opening Memory Cosmos…</div>}><MemoryMapTab onFocus={cite} view={cosmosView} /></Suspense>
       ) : (
         <HealthTab
           status={status}

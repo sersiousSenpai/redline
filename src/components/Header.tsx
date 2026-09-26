@@ -48,6 +48,7 @@ const ExtensionsPanel = lazy(() =>
 // surface radio group below composes them into one segmented control.
 
 interface HeaderProps {
+  onOpenIntegrationHooks?: () => void;
   session: ReviewSession | null;
   theme: ThemeName;
   onThemeChange: (name: ThemeName) => void;
@@ -183,6 +184,7 @@ export function Header({
   onJoinSession,
   canShare,
   onShareSnapshot,
+  onOpenIntegrationHooks,
 }: HeaderProps) {
   // Edit-in-place context menu: right-click a surface button to hide or move
   // it. Each action writes the workspace manifest — the file is the store.
@@ -408,6 +410,7 @@ export function Header({
           />
         )}
         <SettingsMenu
+          onOpenIntegrationHooks={onOpenIntegrationHooks}
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
           theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
           font={<FontPicker font={font} onFontChange={onFontChange} />}

@@ -11,6 +11,7 @@
     "core:window:allow-is-focused",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-set-fullscreen",
     "core:window:allow-destroy",
     "core:webview:default",
     "core:webview:allow-create-webview",

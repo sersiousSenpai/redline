@@ -11,11 +11,10 @@
 //! reader, `*-delta`/`*-done`/`*-error`/`*-cancelled` events, DB-persisted
 //! terminal turns) but is keyed by `mission_id` and reads *across* tabs: it
 //! reuses the existing `/v1/browser/*` daemon surface (tabs map, per-tab thread,
-//! snapshot) plus two new read-only mission routes (`/v1/mission/active`,
-//! `/v1/mission/findings`). The orchestrator's resumable session id lives on the
+//! snapshot) plus mission-addressed read routes (`/v1/missions/:id`,
+//! `/v1/missions/:id/findings`). The orchestrator's resumable session id lives on the
 //! `missions` row, so re-opening a mission resumes its conversation.
 
-use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -46,25 +45,21 @@ pub struct QueuedMissionSend {
 #[derive(Clone)]
 pub struct MissionState {
     turns: Arc<Turns<QueuedMissionSend>>,
-    db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
     /// Absolute path to the `claude` binary, resolved lazily on first use —
     /// same TCC reasoning as `browse::BrowseState`.
     claude_bin: Arc<OnceLock<String>>,
-    /// Missions whose in-flight turn is a SYNTHESIS — its completed reply is
-    /// the Drafter-ready brief. Held here (not in MissionChat state) so the
-    /// handoff survives the panel unmounting mid-turn; `read_mission` takes
-    /// the flag at terminal time (done → emit `mission-synthesize-done`,
-    /// error/cancel → dropped).
-    pending_synthesize: Arc<Mutex<HashSet<String>>>,
 }
 
 impl MissionState {
     pub fn new(db: Arc<Database>) -> Self {
+        if let Err(error) = crate::mission_context::recover_interrupted(&db) {
+            tracing::error!(%error, "mission recovery failed; subsequent mission operations will report persistence errors");
+        }
         Self {
             turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
-            pending_synthesize: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -105,9 +100,10 @@ impl MissionState {
             return Err("nothing to ask the colleague".to_string());
         }
         // Atomic reservation; early `?` returns release it via the guard's Drop.
-        let slot = self.turns.begin(&mission_id).map_err(|_| {
-            "the mission orchestrator is busy — try again in a moment".to_string()
-        })?;
+        let slot = self
+            .turns
+            .begin(&mission_id)
+            .map_err(|_| "the mission orchestrator is busy — try again in a moment".to_string())?;
         let prior_session = self.db.get_mission_session(&mission_id);
 
         let check_in = MissionMessage {
@@ -118,9 +114,9 @@ impl MissionState {
             status: "complete".to_string(),
             created_at: now_millis(),
         };
-        if let Err(e) = self.db.insert_mission_message(&check_in) {
-            tracing::warn!(error = %e, "failed to persist consult check-in");
-        }
+        self.db
+            .insert_mission_message(&check_in)
+            .map_err(|e| format!("failed to save mission check-in: {e}"))?;
 
         let framed = format!(
             "The user's COMPANION — their global cross-surface discussion — is \
@@ -136,11 +132,19 @@ impl MissionState {
                     .get_mission(&mission_id)
                     .map_err(|e| e.to_string())?
                     .ok_or_else(|| "mission not found".to_string())?;
-                let findings = self.db.list_findings(&mission_id).unwrap_or_default();
+                let findings = self
+                    .db
+                    .list_findings(&mission_id)
+                    .map_err(|e| e.to_string())?;
                 build_first_turn_prompt(&m.title, &m.goal, &findings, &framed)
             }
             Some(_) => framed.clone(),
         };
+        let prompt = scope_prompt(
+            &prompt,
+            &mission_id,
+            &crate::mission_context::resume_context(&self.db, &mission_id)?,
+        );
         crate::ledger::register_agent_prompt(&prompt);
 
         let args = crate::claude_proc::bridge_args("mission", prompt, prior_session.as_deref());
@@ -201,7 +205,9 @@ impl MissionState {
             return Err("the colleague produced no reply".to_string());
         };
         if let Some(sid) = &outcome.session {
-            let _ = self.db.set_mission_session(&mission_id, sid);
+            self.db
+                .set_mission_session(&mission_id, sid)
+                .map_err(|e| format!("failed to save resumed mission session: {e}"))?;
         }
         let reply = MissionMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -211,9 +217,9 @@ impl MissionState {
             status: "complete".to_string(),
             created_at: now_millis(),
         };
-        if let Err(e) = self.db.insert_mission_message(&reply) {
-            tracing::warn!(error = %e, "failed to persist consult reply");
-        }
+        self.db
+            .insert_mission_message(&reply)
+            .map_err(|e| format!("failed to save mission digest: {e}"))?;
         Ok(text)
     }
 }
@@ -281,6 +287,8 @@ struct MissionQueueAdvanced {
 struct MissionSynthesizeDone {
     mission_id: String,
     body: String,
+    draft_id: String,
+    handoff_id: String,
 }
 
 /// Render the current pins as a markdown list for the first-turn prompt. Each
@@ -291,7 +299,7 @@ fn render_findings(findings: &[MissionFinding]) -> String {
         return String::new();
     }
     let mut s = String::from("The user has pinned these findings so far:\n\n");
-    for (i, f) in findings.iter().enumerate() {
+    for (i, f) in findings.iter().take(40).enumerate() {
         s.push_str(&format!("{}. ", i + 1));
         if let Some(note) = f.note.as_deref().filter(|n| !n.trim().is_empty()) {
             s.push_str(&format!("**{}** — ", note.trim()));
@@ -310,6 +318,9 @@ fn render_findings(findings: &[MissionFinding]) -> String {
             s.push('\n');
         }
         s.push('\n');
+    }
+    if findings.len() > 40 {
+        s.push_str(&format!("{} additional findings remain in the mission's scoped findings endpoint. Retrieve relevant evidence as needed.\n",findings.len()-40));
     }
     s
 }
@@ -444,15 +455,49 @@ fn build_followup_prompt(pin_count: usize, text: &str) -> String {
     )
 }
 
+fn scope_prompt(prompt: &str, mission_id: &str, durable: &str) -> String {
+    // Rewrite only tool documentation, never quoted user goals or messages.
+    let boundary = prompt
+        .find("Mission: ")
+        .or_else(|| prompt.find("The mission's goal, in the user's words:"))
+        .or_else(|| {
+            prompt
+                .starts_with("(Mission continues")
+                .then(|| prompt.find("\n\n"))
+                .flatten()
+        })
+        .unwrap_or(0);
+    let (instructions, user_context) = prompt.split_at(boundary);
+    let scoped = instructions
+        .replace("/v1/mission/active", &format!("/v1/missions/{mission_id}"))
+        .replace(
+            "/v1/mission/findings",
+            &format!("/v1/missions/{mission_id}/findings"),
+        )
+        .replace(
+            "/v1/browser/tabs",
+            &format!("/v1/missions/{mission_id}/tabs"),
+        )
+        .replace(
+            "/v1/browser/open",
+            &format!("/v1/missions/{mission_id}/tabs"),
+        )
+        .replace("?tab=<n>", "?tab=<stable_id>");
+    format!("{scoped}{user_context}\n\nMission identity: {mission_id}. Workspace identity: {mission_id}. These identities remain fixed even when the user switches workspaces. Read the mission at GET /v1/missions/{mission_id}, its findings at GET /v1/missions/{mission_id}/findings, and its saved/live tabs at GET /v1/missions/{mission_id}/tabs. Open a source using POST /v1/missions/{mission_id}/tabs with JSON {{\"url\":\"https://example.com\"}}. Never resolve through the globally active mission. Browser operations must carry missionId and workspaceId and a stable tab ID. Re-read the current target before acting; if its workspace is unavailable, use saved evidence or report the recoverable limitation instead of controlling another workspace.\n\nDurable mission checkpoint and confirmed judgments (agent hypotheses are not user decisions):\n{durable}")
+}
+
 // --- Mission CRUD commands -------------------------------------------------
 
 /// Create a new mission and return it. The frontend then sets it active
 /// (mirroring it to the daemon) and opens the orchestrator chat.
 #[tauri::command]
-pub fn mission_create(
+pub async fn mission_create(
     mission: tauri::State<'_, MissionState>,
+    app: AppHandle,
     title: String,
     goal: String,
+    tabs: Option<Vec<MissionTab>>,
+    cwd: Option<String>,
 ) -> Result<Mission, String> {
     if goal.trim().is_empty() {
         return Err("a mission needs a goal".to_string());
@@ -472,15 +517,38 @@ pub fn mission_create(
         mission_id: uuid::Uuid::new_v4().to_string(),
         title,
         goal: goal.trim().to_string(),
-        status: "active".to_string(),
+        status: "preparing".to_string(),
         created_at: now,
         updated_at: now,
     };
+    let text=format!("Begin this research mission now. Establish the relevant sources and a concrete next step, then start investigating the goal: {}",m.goal);
+    let encoded = serde_json::to_string(&tabs.unwrap_or_default()).map_err(|e| e.to_string())?;
+    crate::mission_context::prepare_mission(&mission.db, &m, &encoded, &text)?;
+    let slot = mission
+        .turns
+        .begin(&m.mission_id)
+        .map_err(|_| "mission is already starting")?;
+    if let Err(error) = start_mission_turn(
+        app.clone(),
+        mission.inner().clone(),
+        m.mission_id.clone(),
+        QueuedMissionSend {
+            text,
+            cwd,
+            synthesize: Some(false),
+        },
+        slot,
+    )
+    .await
+    {
+        // The created workspace stays discoverable and explicitly retryable.
+        finish_error(&app, &mission.db, &m.mission_id, &error);
+    }
     mission
         .db
-        .insert_mission(&m)
-        .map_err(|e| format!("failed to create mission: {e}"))?;
-    Ok(m)
+        .get_mission(&m.mission_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "mission disappeared after creation".into())
 }
 
 /// All missions, newest/active first — for the start/switch/resume menu.
@@ -548,9 +616,18 @@ pub fn mission_get_tabs(
     mission: tauri::State<'_, MissionState>,
     mission_id: String,
 ) -> Result<Vec<MissionTab>, String> {
-    match mission.db.get_mission_tabs(&mission_id) {
-        Some(json) => serde_json::from_str(&json)
-            .map_err(|e| format!("failed to decode mission tabs: {e}")),
+    let c = mission.db.lock_conn();
+    let saved: Option<String> = c
+        .query_row(
+            "SELECT tabs_json FROM missions WHERE mission_id=?1",
+            rusqlite::params![mission_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("failed to load mission workspace: {e}"))?;
+    match saved {
+        Some(json) => {
+            serde_json::from_str(&json).map_err(|e| format!("failed to decode mission tabs: {e}"))
+        }
         None => Ok(Vec::new()),
     }
 }
@@ -583,8 +660,9 @@ pub fn mission_delete(
 
 /// Pin a finding (the user's "I like this part"). Captures the source tab so the
 /// orchestrator and findings board can attribute it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mission_add_finding(
+    app: AppHandle,
     mission: tauri::State<'_, MissionState>,
     mission_id: String,
     body: String,
@@ -596,6 +674,7 @@ pub fn mission_add_finding(
     if body.trim().is_empty() {
         return Err("nothing to pin".to_string());
     }
+    crate::mission_context::validate_scope(&mission.db, &mission_id, &mission_id)?;
     let f = MissionFinding {
         id: uuid::Uuid::new_v4().to_string(),
         mission_id,
@@ -606,28 +685,33 @@ pub fn mission_add_finding(
         note: note.filter(|s| !s.trim().is_empty()),
         created_at: now_millis(),
     };
-    mission
-        .db
-        .insert_finding(&f)
-        .map_err(|e| format!("failed to pin finding: {e}"))?;
     // Polis ledger: a pinned finding is a curation signal (what you valued).
     let ph = crate::ledger::decision_payload_hash(&[
         ("finding", &f.id),
         ("url", f.source_url.as_deref().unwrap_or("")),
         ("body", &f.body),
     ]);
-    if let Err(e) = crate::ledger::record_decision(
-        &mission.db,
-        crate::ledger::DecisionInput {
-            kind: crate::ledger::EventKind::Pin,
-            author: None,
-            session_id: Some(&f.mission_id),
-            ref_kind: "mission_finding",
-            ref_id: &f.id,
-            payload_hash: ph,
-        },
-    ) {
-        tracing::warn!(error = %e, "failed to record pin ledger event");
+    {
+        let mut c = mission.db.lock_conn();
+        let tx = c.transaction().map_err(|e| e.to_string())?;
+        tx.execute("INSERT INTO mission_findings(id,mission_id,browse_id,source_url,source_title,body,note,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",rusqlite::params![f.id,f.mission_id,f.browse_id,f.source_url,f.source_title,f.body,f.note,f.created_at]).map_err(|e|format!("failed to pin finding: {e}"))?;
+        let author = crate::ledger::local_author();
+        polis_store::PolisStore::append_ledger_event_locked(
+            &tx,
+            &crate::ledger::LedgerAppend {
+                kind: "pin",
+                author: &author,
+                ts: f.created_at,
+                prompt_id: None,
+                session_id: Some(&f.mission_id),
+                version_number: None,
+                ref_kind: Some("mission_finding"),
+                ref_id: Some(&f.id),
+                payload_hash: &ph,
+            },
+        )
+        .map_err(|e| format!("failed to preserve finding provenance: {e}"))?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
     // Companion journal: the user pinned a finding.
     let _ = mission.db.append_journal(
@@ -637,6 +721,11 @@ pub fn mission_add_finding(
         f.source_title.as_deref(),
         f.source_url.as_deref(),
     );
+    if let (Some(browse_id), Some(url)) = (&f.browse_id, &f.source_url) {
+        crate::mission_capture::capture_event(
+            app, mission.db.clone(), f.mission_id.clone(), format!("t-{browse_id}"), url.clone(),
+        );
+    }
     Ok(f)
 }
 
@@ -682,6 +771,7 @@ pub async fn mission_send(
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    crate::mission_context::validate_scope(&mission.db, &mission_id, &mission_id)?;
     let message_id = uuid::Uuid::new_v4().to_string();
     let payload = QueuedMissionSend {
         text: text.clone(),
@@ -747,7 +837,18 @@ pub async fn mission_send(
         .insert_mission_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
-    start_mission_turn(app, mission.inner().clone(), mission_id, payload, slot).await?;
+    if let Err(error) = start_mission_turn(
+        app.clone(),
+        mission.inner().clone(),
+        mission_id.clone(),
+        payload,
+        slot,
+    )
+    .await
+    {
+        finish_error(&app, &mission.db, &mission_id, &error);
+        return Err(error);
+    }
     Ok(SendOutcome {
         started: true,
         queued: false,
@@ -786,7 +887,10 @@ fn start_mission_turn(
                     .get_mission(&mission_id)
                     .map_err(|e| format!("failed to load mission: {e}"))?
                     .ok_or_else(|| "mission not found".to_string())?;
-                let findings = mission.db.list_findings(&mission_id).unwrap_or_default();
+                let findings = mission
+                    .db
+                    .list_findings(&mission_id)
+                    .map_err(|e| format!("failed to load mission evidence: {e}"))?;
                 build_first_turn_prompt(&m.title, &m.goal, &findings, &text)
             }
             Some(_) => {
@@ -794,10 +898,27 @@ fn start_mission_turn(
                     .db
                     .list_findings(&mission_id)
                     .map(|f| f.len())
-                    .unwrap_or(0);
+                    .map_err(|e| format!("failed to load mission evidence: {e}"))?;
                 build_followup_prompt(pin_count, &text)
             }
         };
+        let prompt = scope_prompt(
+            &prompt,
+            &mission_id,
+            &crate::mission_context::resume_context(&mission.db, &mission_id)?,
+        );
+        crate::mission_context::checkpoint(
+            &mission.db,
+            &mission_id,
+            "researching",
+            if synthesize.unwrap_or(false) {
+                "Prepare a source-linked research brief."
+            } else {
+                "Research the current goal and preserve evidence and unresolved questions."
+            },
+            None,
+            synthesize.unwrap_or(false),
+        )?;
 
         // Polis ledger: record the first-turn mission prompt with its thread
         // provenance (missions are usually roots — the browser pane is the active
@@ -884,18 +1005,15 @@ fn start_mission_turn(
             let _ = app.emit("mission-cancelled", MissionCancelled { mission_id });
             return Ok(());
         }
-        // Flag AFTER the spawn succeeded (a failed spawn must not strand a stale
-        // synthesize flag); a plain turn clears any leftover just in case.
-        {
-            let mut pending = mission.pending_synthesize.lock().unwrap();
-            if synthesize.unwrap_or(false) {
-                pending.insert(mission_id.clone());
-            } else {
-                pending.remove(&mission_id);
-            }
-        }
         tauri::async_runtime::spawn(read_mission(
-            app, mission, buf, token, mission_id, stdout, stderr,
+            app,
+            mission,
+            buf,
+            token,
+            mission_id,
+            stdout,
+            stderr,
+            synthesize.unwrap_or(false),
         ));
         Ok(())
     })
@@ -934,6 +1052,14 @@ pub fn mission_cancel(
     if let Some(mut child) = mission.turns.take(&mission_id).and_then(|p| p.child) {
         let _ = child.start_kill();
     }
+    crate::mission_context::checkpoint(
+        &mission.db,
+        &mission_id,
+        "paused",
+        "Resume research when ready.",
+        None,
+        false,
+    )?;
     Ok(())
 }
 
@@ -975,9 +1101,9 @@ async fn read_mission(
     mission_id: String,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    synthesize: bool,
 ) {
     let db = mission.db.clone();
-    let pending_synthesize = mission.pending_synthesize.clone();
     let stdout_fut = async {
         let mut reader = BufReader::new(stdout).lines();
         let mut session: Option<String> = None;
@@ -1024,7 +1150,10 @@ async fn read_mission(
                         },
                     );
                 }
-                StreamLine::Final { text, session_id: sid } => {
+                StreamLine::Final {
+                    text,
+                    session_id: sid,
+                } => {
                     if sid.is_some() {
                         session = sid;
                     }
@@ -1052,14 +1181,11 @@ async fn read_mission(
     // the terminal event. Token-matched: a reader outliving a cancel must
     // neither steal a successor turn's proc nor drain its queue.
     let (proc, next) = mission.turns.finish_and_pop(&mission_id, token);
-    let cancelled = proc.is_none() && final_text.is_none();
+    let cancelled = proc.is_none();
     let exit_ok = match proc.and_then(|p| p.child) {
         Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
-    // Take the synthesize flag exactly once, whatever this turn's outcome —
-    // error/cancel must not leave it armed for an unrelated later turn.
-    let synthesize = { pending_synthesize.lock().unwrap().remove(&mission_id) };
 
     // ABOVE the terminal branch, so success, error and cancelled all
     // book. A cancelled turn spent its input tokens too.
@@ -1068,7 +1194,7 @@ async fn read_mission(
         let _ = app.emit(
             "mission-meter",
             MissionMeter {
-                    mission_id: mission_id.clone(),
+                mission_id: mission_id.clone(),
                 meter: turn::MeterPayload {
                     rev: settled.rev,
                     meter: settled.clone(),
@@ -1097,14 +1223,14 @@ async fn read_mission(
         }
         if let Some(text) = final_text {
             if text.trim().is_empty() {
-                let row =
-                    finish_error(&app, &db, &mission_id, "claude produced an empty reply");
+                let row = finish_error(&app, &db, &mission_id, "claude produced an empty reply");
                 crate::meter::attach(&db, "mission", &row, &settled);
                 break 'terminal;
             }
             if let Some(sid) = &session {
                 if let Err(e) = db.set_mission_session(&mission_id, sid) {
-                    tracing::warn!(error = %e, "failed to persist mission session id");
+                    finish_error(&app,&db,&mission_id,&format!("Research finished, but its session could not be saved: {e}. Retry from the saved evidence."));
+                    break 'terminal;
                 }
             }
             let msg = MissionMessage {
@@ -1116,7 +1242,50 @@ async fn read_mission(
                 created_at: now_millis(),
             };
             if let Err(e) = db.insert_mission_message(&msg) {
-                tracing::warn!(error = %e, "failed to persist assistant message");
+                finish_error(&app,&db,&mission_id,&format!("Research finished, but its reply could not be saved: {e}. Retry to preserve the result."));
+                break 'terminal;
+            }
+            let handoff = if synthesize {
+                match crate::mission_context::prepare_handoff(
+                    &db,
+                    &mission_id,
+                    "drafter",
+                    &text,
+                    &[msg.id.clone()],
+                    &format!("synthesis-{}", msg.id),
+                ) {
+                    Ok(handoff) => Some(handoff),
+                    Err(error) => {
+                        finish_error(&app,&db,&mission_id,&format!("Your synthesis is saved in the conversation, but its source-linked brief could not be prepared: {error}. Retry Continue as… from this reply."));
+                        break 'terminal;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Err(error) = crate::mission_context::checkpoint(
+                &db,
+                &mission_id,
+                if synthesize {
+                    "completed"
+                } else {
+                    "waiting_for_input"
+                },
+                if synthesize {
+                    "Open or continue from the saved research brief."
+                } else {
+                    "Review the findings, refine the goal, or continue research."
+                },
+                None,
+                false,
+            ) {
+                finish_error(
+                    &app,
+                    &db,
+                    &mission_id,
+                    &format!("Reply saved, but the mission checkpoint failed: {error}"),
+                );
+                break 'terminal;
             }
             // The badge and the footer outlive the turn.
             crate::meter::attach(&db, "mission", &msg.id, &settled);
@@ -1130,12 +1299,14 @@ async fn read_mission(
                     body: text.clone(),
                 },
             );
-            if synthesize {
+            if let Some(handoff) = handoff {
                 let _ = app.emit(
                     "mission-synthesize-done",
                     MissionSynthesizeDone {
                         mission_id: mission_id.clone(),
                         body: text,
+                        draft_id: handoff["draftId"].as_str().unwrap_or_default().to_string(),
+                        handoff_id: handoff["id"].as_str().unwrap_or_default().to_string(),
                     },
                 );
             }
@@ -1213,6 +1384,16 @@ fn describe_turn_error(db: &Database, mission_id: &str, error: &str) -> String {
 
 /// Persist a failed turn as a terminal `error` row and emit `mission-error`.
 fn finish_error(app: &AppHandle, db: &Database, mission_id: &str, error: &str) -> String {
+    if let Err(save_error) = crate::mission_context::checkpoint(
+        db,
+        mission_id,
+        "failed",
+        "Retry this turn; the goal, sources, and previous checkpoints are preserved.",
+        Some(error),
+        false,
+    ) {
+        tracing::error!(%save_error,"could not persist the mission failure checkpoint");
+    }
     let msg = MissionMessage {
         id: uuid::Uuid::new_v4().to_string(),
         mission_id: mission_id.to_string(),
@@ -1240,6 +1421,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scoped_tools_keep_user_literals_and_never_open_the_active_workspace() {
+        let base = build_first_turn_prompt(
+            "Browser code",
+            "Inspect /v1/browser/open",
+            &[],
+            "Document /v1/browser/tabs",
+        );
+        let scoped = scope_prompt(&base, "mission-one", "{}");
+        assert!(scoped.contains("curl -s http://127.0.0.1:7676/v1/missions/mission-one/tabs"));
+        assert!(!scoped.contains("curl -s http://127.0.0.1:7676/v1/browser/open"));
+        assert!(scoped.contains("Inspect /v1/browser/open"));
+        assert!(scoped.contains("Document /v1/browser/tabs"));
+    }
+
+    #[test]
     fn transient_error_keeps_the_session_overflow_resets_it() {
         let db = Database::open_in_memory().unwrap();
         let m = Mission {
@@ -1255,7 +1451,10 @@ mod tests {
         db.set_mission_session("m-keep", "keep-sid").unwrap();
         let msg = describe_turn_error(&db, "m-keep", "error_during_execution");
         assert!(msg.to_lowercase().contains("again"));
-        assert_eq!(db.get_mission_session("m-keep").as_deref(), Some("keep-sid"));
+        assert_eq!(
+            db.get_mission_session("m-keep").as_deref(),
+            Some("keep-sid")
+        );
 
         // Explicit overflow: session forgotten so the next turn starts fresh.
         let m2 = Mission {
@@ -1322,11 +1521,7 @@ mod tests {
     #[test]
     fn first_turn_invariant_prefix_is_byte_stable() {
         fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
-            let n = a
-                .bytes()
-                .zip(b.bytes())
-                .take_while(|(x, y)| x == y)
-                .count();
+            let n = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
             &a[..n]
         }
         let pins = vec![finding("note", "Src", "https://s.example", "body")];

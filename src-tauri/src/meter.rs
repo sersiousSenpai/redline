@@ -998,7 +998,6 @@ mod tests {
     fn meter_settle_precedes_every_terminal_branch() {
         const READERS: &[(&str, &str)] = &[
             ("browse.rs", include_str!("browse.rs")),
-            ("linked.rs", include_str!("linked.rs")),
             ("mission.rs", include_str!("mission.rs")),
             ("memchat.rs", include_str!("memchat.rs")),
             ("companion.rs", include_str!("companion.rs")),

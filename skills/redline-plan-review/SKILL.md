@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 14
+version: 15
 ---
 
 # Redline review protocol
@@ -214,18 +214,22 @@ you to re-present your current plan. Two things are true of a resumed session:
   find you are not.
 
 Neither matters, because **Redline already holds your current plan and
-re-presents it itself** — a restore just needs you to re-establish the held
-`ExitPlanMode`. Do the minimum; do **not** fetch the plan from the daemon or
-retype it, and do not explore the codebase.
+re-presents it itself**, with the reviewer's comments and discussion threads —
+a restore just needs you to re-establish the held `ExitPlanMode`. The submitted
+body is ignored, so there is nothing to fetch or retype.
+
+Before resuming you, Redline rewrites your plan file to the marker. That is
+expected; don't put the old text back. Your plan remains safe in Redline. You can
+check the integration's `ExitPlanMode` and prompt hooks in
+`~/.claude/settings.json`. An earlier interrupted `ExitPlanMode` is the review
+this restore reopens.
 
 ### What arrives
 
 One compact line, e.g.
 
 ```
-Redline restore · 2026-09-04 15:10 — call ExitPlanMode now, as your very first
-action, with your plan file exactly as it stands. Nothing else — Redline
-re-presents the plan it holds and ignores what you submit.
+Redline restore · 2026-09-04 15:10 — reopening this plan for review. Redline has put its restore marker in your plan file and re-presents its own saved copy (nothing is lost), so call ExitPlanMode now as your first action with the file as it stands. (Enter plan mode first if you are not in it.)
 ```
 
 That is deliberately short. The full protocol reaches you separately as hidden
@@ -239,10 +243,9 @@ only the compact line arrives, it is complete on its own.
 
 Redline says which one you are in.
 
-**Primed** — Redline has already written your plan file for you. It contains
-exactly the `<!-- REDLINE_RESTORE:… -->` marker. **Call `ExitPlanMode` now, as
-your very first action**, with no other tool calls and no preamble. (Only if the
-file somehow does not contain that line, write it there first.)
+**Primed** — Redline has replaced your plan file with the
+`<!-- REDLINE_RESTORE:… -->` marker to reopen its saved copy. **Call
+`ExitPlanMode` now, with the file as it stands.**
 
 **Unprimed** — **write exactly the `<!-- REDLINE_RESTORE:… -->` marker the
 trigger gave you** as your plan file's contents, then call `ExitPlanMode`. It is

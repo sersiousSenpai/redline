@@ -883,7 +883,6 @@ function PromptDrafterBase({
         // over a sidecar read.
         const list = Array.isArray(rows) ? rows : [];
         setComments(list);
-        if (list.length > 0) setSidecarOpen(true);
       })
       // Background reconciliation stays quiet — the user didn't ask for this
       // and can't act on it — but it stops being invisible to us.

@@ -163,7 +163,7 @@ impl ForkState {
         let saved = self.db.load_session(&session_id)
             .map_err(|e| format!("failed to read the consulted plan: {e}"))?;
         let author = saved.as_ref().and_then(|session| session.backend.as_deref()).unwrap_or("claude-code");
-        let fresh_context = uses_claude_sidecar(author) || ForkBackend::from_stored(author) == ForkBackend::Codex;
+        let fresh_context = uses_claude_sidecar(author) || ForkBackend::from_stored(author) == ForkBackend::Codex || crate::claude_proc::find_transcript(&session_id).is_none();
         let framed = format!(
             "You are an ephemeral read-only fork of this planning session. The \
              user's COMPANION — their global cross-surface discussion — is \
@@ -179,7 +179,7 @@ impl ForkState {
         } else { framed };
         crate::ledger::register_agent_prompt(&framed);
 
-        let args = claude_plan_consult_args(author, &session_id, framed);
+        let args = if fresh_context { context_sidecar_args(framed) } else { claude_plan_consult_args(author, &session_id, framed) };
 
         let claude_bin = self.claude_bin().await?;
         let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
@@ -496,6 +496,10 @@ fn build_first_turn_prompt(
 /// `fork_drafter`) — unconfigured categories add no flags, so the thread
 /// inherits its parent surface exactly (see `seat.rs`).
 fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
+    discussion_fork_args_with(seat, prompt, None, None)
+}
+
+fn discussion_fork_args_with(seat: &str, prompt: String, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         prompt,
@@ -517,7 +521,7 @@ fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
-    args.extend(crate::seat::flag_args(seat));
+    args.extend(crate::seat::flag_args_override(seat, model, effort));
     args
 }
 
@@ -588,39 +592,51 @@ fn plan_discussion_model(
     model.map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
 }
 
+#[cfg(test)]
 fn claude_plan_discussion_args(
     author_backend: &str,
     author_session: &str,
     prior_sidecar: Option<&str>,
     prompt: String,
 ) -> Vec<String> {
+    claude_plan_discussion_args_with(author_backend, author_session, prior_sidecar, prompt, None, None, false)
+}
+
+fn claude_plan_discussion_args_with(author_backend: &str, author_session: &str, prior_sidecar: Option<&str>, prompt: String, model: Option<&str>, effort: Option<&str>, seeded: bool) -> Vec<String> {
     let mut args = if uses_claude_sidecar(author_backend) {
-        context_sidecar_args(prompt)
+        context_sidecar_args_from(prompt, crate::seat::flag_args_override("fork_plan", model, effort))
     } else {
-        discussion_fork_args("fork_plan", prompt)
+        discussion_fork_args_with("fork_plan", prompt, model, effort)
     };
     if let Some(id) = prior_sidecar.filter(|id| !uses_claude_sidecar(author_backend) || *id != author_session) {
         args.extend(["--resume".into(), id.into()]);
-    } else if !uses_claude_sidecar(author_backend) {
+    } else if !uses_claude_sidecar(author_backend) && !seeded {
         args.extend(["--resume".into(), author_session.into(), "--fork-session".into()]);
     }
     args
 }
 
 fn context_sidecar_prompt(author_backend: &str, plan: &str, prompt: &str) -> String {
+    context_sidecar_prompt_with(author_backend, plan, prompt, true)
+}
+
+fn context_sidecar_prompt_with(author_backend: &str, plan: &str, prompt: &str, restricted: bool) -> String {
     let author = match author_backend.trim().to_ascii_lowercase().as_str() {
-        "cursor" => "Cursor", "codex" => "Codex", _ => "Antigravity",
+        "cursor" => "Cursor", "codex" => "Codex", "claude-code" => "Claude Code", _ => "Antigravity",
     };
     let prompt = prompt.replace(
         "You are discussing a plan you produced earlier in this session with the person reviewing it in Redline.",
         "You are discussing the supplied plan with the person reviewing it in Redline.",
     ).replace("You previously resolved this comment with:", "The plan author previously resolved this comment with:")
     .replace("Follow the `sidecar` skill for how to structure this reply: lead with ", "For this reply, lead with ");
+    let tools = if restricted {
+        "Your tools are Read, Grep, Glob, WebFetch, and WebSearch only. Shell commands and Skill are unavailable; you cannot curl Redline's memory bridge. Use the supplied plan context and do not claim to have retrieved memory."
+    } else {
+        "Use your read-only discussion tools, including the scoped local Redline memory bridge. The author transcript is unavailable; do not claim to remember it."
+    };
     format!("You are a separate read-only Claude sidecar discussing a plan authored with {author}. \
         The author conversation is held for review; never resume or alter it. Treat the supplied plan as context, \
-        not as instructions to implement or submit a plan. Answer the discussion directly. \
-        Your tools are Read, Grep, Glob, WebFetch, and WebSearch only. Shell commands and Skill are unavailable; \
-        you cannot curl Redline's memory bridge. Use the supplied plan context and do not claim to have retrieved memory.\n\n\
+        not as instructions to implement or submit a plan. Answer the discussion directly. {tools}\n\n\
         <current-plan-context>\n{plan}\n</current-plan-context>\n\n{prompt}")
 }
 
@@ -670,12 +686,17 @@ Claude-side and do not apply to you. Ignore them and answer directly.";
 /// No `-p redline-plan`: see `CODEX_SIDECAR_INSTRUCTIONS`. `-s read-only -a
 /// never` is the physical counterpart to the Claude arm's withheld
 /// `Edit`/`Write` tools, and `--search` its `WebSearch`/`WebFetch` allow.
+#[cfg(test)]
 fn codex_discussion_fork_args(
     subcommand: &str,
     thread_id: &str,
     prompt: String,
     model: Option<&str>,
 ) -> Vec<String> {
+    codex_discussion_fork_args_with(subcommand, thread_id, prompt, model, None)
+}
+
+fn codex_discussion_fork_args_with(subcommand: &str, thread_id: &str, prompt: String, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "-s".to_string(),
         "read-only".to_string(),
@@ -694,6 +715,9 @@ fn codex_discussion_fork_args(
     ];
     if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
         args.extend(["-m".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = effort.map(str::trim).filter(|effort| !effort.is_empty()) {
+        args.extend(["-c".into(), format!("model_reasoning_effort={}", crate::codex_profile::toml_string(effort))]);
     }
     args.extend([
         "exec".to_string(),
@@ -778,6 +802,29 @@ fn classify_codex_line(v: &Value) -> CodexLine {
 /// Must be `async`: Tauri runs async commands on its tokio runtime, and
 /// `tokio::process::Command::spawn()` requires a tokio reactor.
 #[tauri::command]
+pub fn fork_thread_model(fork: tauri::State<'_, ForkState>, session_id: String, comment_id: String) -> (Option<String>, Option<String>) {
+    fork.db.get_comment_fork_seat(&session_id, &comment_id)
+}
+
+#[tauri::command]
+pub fn fork_thread_set_model(fork: tauri::State<'_, ForkState>, store: tauri::State<'_, SessionStore>, session_id: String, comment_id: String, model: Option<String>, effort: Option<String>) -> Result<(), String> {
+    let session = store.get(&session_id).ok_or("plan no longer exists")?;
+    if !session.revisions.iter().flat_map(|revision| &revision.comments).any(|comment| comment.id == comment_id) { return Err("comment no longer exists".into()); }
+    let clean = |value: Option<String>| value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let model = clean(model);
+    let effort = clean(effort);
+    if ForkBackend::from_stored(&store.backend_of(&session_id)) == ForkBackend::Claude {
+        if let Some(model) = model.as_deref() {
+            if !crate::seat::MODEL_OPTIONS.contains(&model) { return Err(format!("unknown Claude model `{model}`")); }
+        }
+    }
+    if let Some(effort) = effort.as_deref() {
+        if !crate::seat::EFFORT_OPTIONS.contains(&effort) { tracing::warn!(effort, "discussion: passing through an unrecognized effort"); }
+    }
+    fork.db.set_comment_fork_seat(&session_id, &comment_id, model.as_deref(), effort.as_deref()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn fork_thread_send(
     fork: tauri::State<'_, ForkState>,
     store: tauri::State<'_, SessionStore>,
@@ -820,10 +867,11 @@ pub async fn fork_thread_send(
     let author_backend = store.backend_of(&session_id);
     let context_sidecar = uses_claude_sidecar(&author_backend);
     let backend = ForkBackend::from_stored(&author_backend);
+    let (picked_model, picked_effort) = fork.db.get_comment_fork_seat(&session_id, &comment_id);
     let model = plan_discussion_model(
         backend,
-        session.model.as_deref(),
-        crate::seat::model_for("fork_plan").as_deref(),
+        picked_model.as_deref().or(session.model.as_deref()),
+        crate::seat::model_for_override("fork_plan", picked_model.as_deref(), picked_effort.as_deref()).as_deref(),
     );
 
     // The stored fork, and whether it is still usable. A fork id from the OTHER
@@ -842,9 +890,11 @@ pub async fn fork_thread_send(
     } else {
         stored_fork.map(|(id, _)| id)
     };
+    let seeded = backend == ForkBackend::Claude && !context_sidecar && prior_fork.is_none()
+        && crate::claude_proc::find_transcript(&session_id).is_none();
     // The turns already on screen, needed only when re-forking — reading them
     // otherwise would be a query per follow-up for nothing.
-    let carried = if mismatched || (context_sidecar && prior_fork.is_none()) {
+    let carried = if mismatched || ((context_sidecar || seeded) && prior_fork.is_none()) {
         fork.db
             .load_thread(&session_id, &comment_id)
             .unwrap_or_default()
@@ -895,8 +945,8 @@ pub async fn fork_thread_send(
         // itself — otherwise the fork never learns the path exists.
         Some(_) => format!("{text}{}", attachments_block(&turn_attachments)),
     };
-    let prompt = if context_sidecar {
-        context_sidecar_prompt(&author_backend, session.revisions.last().map(|revision| revision.raw_plan_markdown.as_str()).unwrap_or_default(), &prompt)
+    let prompt = if context_sidecar || seeded {
+        context_sidecar_prompt_with(&author_backend, session.revisions.last().map(|revision| revision.raw_plan_markdown.as_str()).unwrap_or_default(), &prompt, context_sidecar)
     } else { prompt };
 
     // Polis ledger: record the first-turn discussion prompt with its true
@@ -939,7 +989,7 @@ pub async fn fork_thread_send(
     // docs/protocol-verification.md Experiment (i).
     let spawn = match backend {
         ForkBackend::Claude => {
-            let args = claude_plan_discussion_args(&author_backend, &session_id, prior_fork.as_deref(), prompt);
+            let args = claude_plan_discussion_args_with(&author_backend, &session_id, prior_fork.as_deref(), prompt, picked_model.as_deref(), picked_effort.as_deref(), seeded);
             ForkSpawn {
                 backend,
                 seat: "fork_plan",
@@ -956,7 +1006,7 @@ pub async fn fork_thread_send(
                 None => ("fork", session_id.as_str()),
                 Some(fork_sid) => ("resume", fork_sid.as_str()),
             };
-            let args = codex_discussion_fork_args(subcommand, thread_id, prompt, model.as_deref());
+            let args = codex_discussion_fork_args_with(subcommand, thread_id, prompt, model.as_deref(), picked_effort.as_deref());
             ForkSpawn {
                 backend,
                 seat: "fork_plan",
@@ -2294,6 +2344,57 @@ fn finish_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_conversation_never_retries_an_identical_resume() {
+        let error = "error_during_execution: No conversation found with session ID: missing-author";
+        assert!(!should_retry(1, false, Some(error)));
+        assert!(!should_retry(2, false, Some(error)));
+    }
+
+    #[test]
+    fn missing_author_seeds_a_fresh_discussion_then_resumes_only_its_own_session() {
+        let prompt = context_sidecar_prompt_with("claude-code", "# Saved plan\n<!-- rl:blk-first -->", "Why this design?", false);
+        let first = claude_plan_discussion_args_with("claude-code", "missing-author", None, prompt.clone(), Some("sonnet"), Some("high"), true);
+        assert!(!first.iter().any(|a| a == "--resume" || a == "--fork-session" || a == "missing-author"));
+        assert!(first.iter().any(|a| a.contains("# Saved plan") && a.contains("rl:blk-first") && a.contains("Why this design?")));
+        assert!(prompt.contains("scoped local Redline memory bridge"));
+        assert!(!prompt.contains("Shell commands and Skill are unavailable"));
+        let next = claude_plan_discussion_args_with("claude-code", "missing-author", Some("seeded-thread"), "Follow up".into(), Some("sonnet"), Some("high"), true);
+        assert_eq!(&next[next.len()-2..], &["--resume", "seeded-thread"]);
+        assert!(!next.iter().any(|a| a == "--fork-session" || a == "missing-author"));
+    }
+
+    #[test]
+    fn discussion_model_effort_override_emits_once_for_first_and_followup() {
+        for backend in ["claude-code", "cursor"] {
+            for previous in [None, Some("discussion-id")] {
+                let args = claude_plan_discussion_args_with(backend, "author-id", previous, "question".into(), Some("sonnet"), Some("high"), false);
+                assert_eq!(args.iter().filter(|arg| *arg == "--model").count(), 1);
+                assert_eq!(args.iter().filter(|arg| *arg == "--effort").count(), 1);
+                assert!(args.windows(2).any(|pair| pair == ["--model", "sonnet"]));
+                assert!(args.windows(2).any(|pair| pair == ["--effort", "high"]));
+            }
+        }
+        let default = discussion_fork_args("fork_plan", "question".into());
+        assert_eq!(default, discussion_fork_args_with("fork_plan", "question".into(), None, None));
+        assert_eq!(default, discussion_fork_args_with("fork_plan", "question".into(), Some(" "), Some("")));
+        assert_eq!(crate::seat::model_for_override("fork_plan", Some("sonnet"), Some("high")), Some("sonnet".into()));
+    }
+
+    #[test]
+    fn codex_discussion_effort_is_a_top_level_setting_with_or_without_model() {
+        for model in [None, Some("gpt-6-astra")] {
+            for subcommand in ["fork", "resume"] {
+                let args = codex_discussion_fork_args_with(subcommand, "thread", "question".into(), model, Some("high"));
+                let at = args.iter().position(|arg| arg == "model_reasoning_effort=\"high\"").unwrap();
+                assert_eq!(args[at-1], "-c");
+                assert!(at < args.iter().position(|arg| arg == "exec").unwrap());
+                assert_eq!(args.iter().filter(|arg| arg.starts_with("model_reasoning_effort=")).count(), 1);
+                assert_eq!(args.iter().filter(|arg| *arg == "-m").count(), usize::from(model.is_some()));
+            }
+        }
+    }
 
     // stream-json line classification is covered by `claude_proc`'s own tests.
 

@@ -19,7 +19,6 @@
 //!    prefixed with the delta since its last turn ("while you were away") —
 //!    identical warmth to a background watcher at zero background token cost.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -30,8 +29,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin,
-    StreamLine,
+    bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin, StreamLine,
 };
 use crate::db::{Database, JournalRow};
 use crate::state::{now_millis, Companion, CompanionMessage};
@@ -53,17 +51,132 @@ const RECAP_EXCHANGES: usize = 3;
 const RECAP_BODY_CHARS: usize = 400;
 
 /// Everything a queued chat send needs to start later. Deliberately only the
-/// two things that are TRUE AT ENQUEUE TIME — what the user typed, and the
-/// working directory their window is pointed at. Everything else (the resumable
-/// session, the journal watermark, the ledger row, the surface they are on) is
+/// facts that are TRUE AT ENQUEUE TIME — what the user typed, the working
+/// directory, and a browser dock's explicit target. The resumable
+/// session, journal watermark, and ledger row are
 /// a START-time fact and is read inside `start_companion_turn`; see the comment
 /// there for why capturing them here would be wrong.
 pub struct QueuedCompanionSend {
     text: String,
     cwd: Option<String>,
-    /// `"plan" | "drafter"` when this turn is a graduation: its reply IS the
-    /// brief to hand onward.
-    handoff: Option<String>,
+    /// Never re-resolve the target when a queued turn starts: a workspace or
+    /// tab switch must not redirect an already-authorized page action.
+    browser_target: Option<CompanionBrowserTarget>,
+}
+
+#[derive(Clone, Debug)]
+// Retained for backend compatibility; Home-only chat makes the browser target unreachable from the UI.
+struct CompanionBrowserTarget {
+    label: String,
+    mission_id: Option<String>,
+    surface: SurfaceInfo,
+    captured_at: i64,
+}
+
+fn capture_browser_target(
+    surface: &SurfaceInfo,
+    label: Option<String>,
+    mission_id: Option<String>,
+) -> Option<CompanionBrowserTarget> {
+    if surface.kind != "browser" {
+        return None;
+    }
+    let label = label.filter(|label| label.starts_with("browser-") && label.len() > 8)?;
+    Some(CompanionBrowserTarget {
+        label,
+        mission_id,
+        surface: surface.clone(),
+        captured_at: now_millis(),
+    })
+}
+
+fn browser_turn_context(target: Option<&CompanionBrowserTarget>) -> String {
+    let Some(target) = target else {
+        return "\n\nBrowser authority for THIS turn: read-only. This message was sent outside an active browser dock target. Do not carry forward browser-action permission from an earlier turn.\n".into();
+    };
+    let example = serde_json::json!({"operationId":"a-new-unique-operation-id","label":target.label,"expectedRevision":null,"timeoutMs":5000,"operation":{"kind":"fill","selector":"input[name=search]","value":"the user's requested value"}});
+    format!("\n\nBrowser dock authority for THIS turn (captured at {}): the user sent this message while the selected discussion was docked to the browser. Stable target label: {}. Captured mission/workspace ID: {}. Captured page URL: {}. The general browser read-only rule above is overridden ONLY for the user's requested typed actions on this captured target during this turn.\nUse GET /v1/browser/snapshot?tab={} to re-read the exact page before acting. Use POST /v1/browser/action with the bearer-token convention above and JSON such as {}. Supported operations are navigate, click, fill, key, scroll, select, and wait. Supply a fresh operation ID and the current expectedRevision where available. Observe the returned completed/interrupted/failed outcome; an accepted dispatch does not prove completion. Never substitute the globally active tab or another label if this target is missing or its mission workspace changed. Preserve the captured identity when the user switches tabs or surfaces while you run. Do not replay uncertain side effects. Other browser write routes remain unavailable for this turn.\n",target.captured_at,target.label,target.mission_id.as_deref().unwrap_or("ambient browser workspace"),target.surface.detail.as_deref().unwrap_or("not captured"),target.label,example)
+}
+
+#[cfg(test)]
+mod browser_dock_tests {
+    use super::*;
+    #[test]
+    fn browser_authority_requires_browser_surface_and_stable_target() {
+        let mut surface = SurfaceInfo {
+            kind: "plan".into(),
+            ..SurfaceInfo::default()
+        };
+        assert!(capture_browser_target(&surface, Some("browser-page-one".into()), None).is_none());
+        surface.kind = "browser".into();
+        assert!(capture_browser_target(&surface, None, None).is_none());
+        let target = capture_browser_target(
+            &surface,
+            Some("browser-page-one".into()),
+            Some("mission-one".into()),
+        )
+        .unwrap();
+        let prompt = browser_turn_context(Some(&target));
+        assert!(prompt.contains("POST /v1/browser/action"));
+        assert!(prompt.contains("mission-one"));
+        assert!(browser_turn_context(None).contains("read-only"));
+        assert!(!browser_turn_context(None).contains("POST /v1/browser/action"));
+    }
+    #[test]
+    fn queued_browser_target_does_not_follow_later_tab_or_surface_switch() {
+        let turns: Arc<Turns<QueuedCompanionSend>> = Arc::new(Turns::new());
+        let active = turns.begin("chat").unwrap();
+        let token = active.token();
+        let surface = SurfaceInfo {
+            kind: "browser".into(),
+            detail: Some("https://first.test".into()),
+            ..SurfaceInfo::default()
+        };
+        let payload = QueuedCompanionSend {
+            text: "Fill the field".into(),
+            cwd: None,
+
+            browser_target: capture_browser_target(
+                &surface,
+                Some("browser-first".into()),
+                Some("mission-first".into()),
+            ),
+        };
+        assert!(matches!(
+            turns.begin_or_enqueue(
+                "chat",
+                QueuedTurn {
+                    message_id: "queued".into(),
+                    text: "Fill the field".into(),
+                    queued_at: 1
+                },
+                payload
+            ),
+            SendSlot::Enqueued
+        ));
+        let later_surface = SurfaceInfo {
+            kind: "browser".into(),
+            detail: Some("https://second.test".into()),
+            ..SurfaceInfo::default()
+        };
+        let later = capture_browser_target(
+            &later_surface,
+            Some("browser-second".into()),
+            Some("mission-second".into()),
+        )
+        .unwrap();
+        drop(active);
+        let (_, next) = turns.finish_and_pop("chat", token);
+        let (_, queued, _) = next.unwrap();
+        let captured = queued.browser_target.unwrap();
+        assert_eq!(captured.label, "browser-first");
+        assert_ne!(captured.label, later.label);
+        assert_eq!(captured.mission_id.as_deref(), Some("mission-first"));
+        assert_eq!(
+            captured.surface.detail.as_deref(),
+            Some("https://first.test")
+        );
+    }
 }
 
 /// Registry of running companion turns, keyed by `companion_id`, on the
@@ -72,11 +185,6 @@ pub struct QueuedCompanionSend {
 #[derive(Clone)]
 pub struct CompanionState {
     turns: Arc<Turns<QueuedCompanionSend>>,
-    /// The in-flight turn's graduation target per chat, armed after a
-    /// successful spawn and taken exactly once at terminal time — the mission
-    /// orchestrator's `pending_synthesize` idiom, so an errored or cancelled
-    /// handoff can never leave the flag armed for an unrelated later turn.
-    pending_handoff: Arc<Mutex<HashMap<String, String>>>,
     db: Arc<Database>,
     claude_bin: Arc<OnceLock<String>>,
 }
@@ -85,7 +193,6 @@ impl CompanionState {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
             turns: Arc::new(Turns::new()),
-            pending_handoff: Arc::new(Mutex::new(HashMap::new())),
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
@@ -176,23 +283,14 @@ struct CompanionStatus {
 }
 
 fn emit_companion_status(app: &AppHandle, companion_id: &str, label: &str) {
-    let _ = app.emit("companion-status", CompanionStatus {
-        companion_id: companion_id.to_string(), label: label.to_string(), at: now_millis(),
-    });
-}
-
-/// The completed reply WAS the brief — this chat is graduating into a plan
-/// session or a Drafter document. Emitted alongside `companion-done`, and
-/// listened for at App level (not in the room): the user may have switched
-/// surfaces while the distillation ran, and the handoff must survive that
-/// unmount. Mirrors `mission-synthesize-done`.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CompanionHandoffDone {
-    companion_id: String,
-    /// `"plan"` or `"drafter"`.
-    target: String,
-    markdown: String,
+    let _ = app.emit(
+        "companion-status",
+        CompanionStatus {
+            companion_id: companion_id.to_string(),
+            label: label.to_string(),
+            at: now_millis(),
+        },
+    );
 }
 
 // --- Surface + journal rendering ----------------------------------------------
@@ -359,7 +457,7 @@ pub(crate) fn routes_block() -> &'static str {
      curl -s http://127.0.0.1:7676/v1/surface/active\n\
      - Activity since a journal seq (your awareness feed, mid-conversation):\n  \
      curl -s 'http://127.0.0.1:7676/v1/journal/recent?since_seq=<n>'\n\
-     - Any surface's discussion thread (browse / linked / mission / drafter / \
+     - Any surface's discussion thread (browse / mission / drafter / \
      companion / a plan session's comment threads):\n  \
      curl -s 'http://127.0.0.1:7676/v1/context/threads/<kind>/<id>'\n\
      - The session tree around a node (its parent + children with recency):\n  \
@@ -391,7 +489,7 @@ pub(crate) fn routes_block() -> &'static str {
      --variable %REDLINE_DAEMON_TOKEN= \
      --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
-     -d '{\"surface\":\"<browse|plan|mission|linked|drafter>\",\"id\":\"<its id \
+     -d '{\"surface\":\"<browse|plan|mission|drafter>\",\"id\":\"<its id \
      — for browse, the tab number>\",\"question\":\"<what you need synthesized>\"}'\n\
      The response is {\"digest\":\"...\",\"surface\":\"...\",\"label\":\"...\"}. \
      A GLANCE (a fact, a title) you do yourself via the read routes above; a \
@@ -498,9 +596,22 @@ fn build_recap(thread: &[CompanionMessage]) -> String {
          you rely on it.\n\n",
     );
     for m in recent.into_iter().rev() {
-        let who = if m.role == "user" { "They said" } else { "You said" };
-        let body: String = m.body.replace('\n', " ").chars().take(RECAP_BODY_CHARS).collect();
-        let ellipsis = if m.body.chars().count() > RECAP_BODY_CHARS { "…" } else { "" };
+        let who = if m.role == "user" {
+            "They said"
+        } else {
+            "You said"
+        };
+        let body: String = m
+            .body
+            .replace('\n', " ")
+            .chars()
+            .take(RECAP_BODY_CHARS)
+            .collect();
+        let ellipsis = if m.body.chars().count() > RECAP_BODY_CHARS {
+            "…"
+        } else {
+            ""
+        };
         out.push_str(&format!("- {who}: {body}{ellipsis}\n"));
     }
     out
@@ -713,6 +824,68 @@ pub fn companion_get_thread(
         .map_err(|e| format!("failed to load thread: {e}"))
 }
 
+/// Original chat history is a display prelude and background for the plan voice agent.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginChat {
+    pub companion_id: String,
+    pub title: String,
+    pub messages: Vec<CompanionMessage>,
+}
+
+pub fn origin_chat_for_session(db: &Database, session_id: &str) -> Option<OriginChat> {
+    let (kind, companion_id) = db.session_tree_parent("session", session_id).ok()??;
+    if kind != "companion" { return None; }
+    let chat = db.list_companions().ok()?.into_iter().find(|chat| chat.companion_id == companion_id)?;
+    let messages = db.load_companion_thread(&companion_id).ok()?.into_iter()
+        .filter(|message| message.status == "complete" && matches!(message.role.as_str(), "user" | "assistant")).collect();
+    Some(OriginChat { companion_id, title: chat.title, messages })
+}
+
+/// UTF-8-safe bounded context: first user instruction plus the newest exchanges.
+pub fn origin_chat_excerpt(messages: &[CompanionMessage], max_bytes: usize) -> String {
+    fn clip(text: &str, bytes: usize) -> &str {
+        let mut end = bytes.min(text.len());
+        while !text.is_char_boundary(end) { end -= 1; }
+        &text[..end]
+    }
+    if max_bytes == 0 { return String::new(); }
+    let first = messages.iter().position(|message| message.role == "user");
+    let mut opening = first.map(|index| format!("User: {}", clip(&messages[index].body, 2048.min(max_bytes.saturating_sub(6))))).unwrap_or_default();
+    let mut tail = Vec::new();
+    let reserve = 64;
+    let mut used = opening.len() + reserve;
+    for (index, message) in messages.iter().enumerate().rev() {
+        if Some(index) == first { continue; }
+        let line = format!("{}: {}", if message.role == "user" { "User" } else { "Assistant" }, message.body);
+        if used + line.len() + 2 > max_bytes { break; }
+        used += line.len() + 2;
+        tail.push(line);
+    }
+    let omitted = messages.len().saturating_sub(tail.len() + usize::from(first.is_some()));
+    if omitted > 0 { opening.push_str(&format!("\n\n[… {omitted} earlier messages omitted …]")); }
+    for line in tail.into_iter().rev() { opening.push_str("\n\n"); opening.push_str(&line); }
+    clip(&opening, max_bytes).to_string()
+}
+
+#[tauri::command]
+pub fn plan_origin_chat(companion: tauri::State<'_, CompanionState>, session_id: String) -> Option<OriginChat> {
+    origin_chat_for_session(&companion.db, &session_id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionGraduation { session_id: String, title: String }
+
+#[tauri::command]
+pub fn companion_graduations(companion: tauri::State<'_, CompanionState>, companion_id: String) -> Result<Vec<CompanionGraduation>, String> {
+    let children = companion.db.session_tree_children("companion", &companion_id).map_err(|error| error.to_string())?;
+    Ok(children.into_iter().filter(|(kind, _, _)| kind == "session").filter_map(|(_, session_id, _)| {
+        let session = companion.db.load_session(&session_id).ok()??;
+        Some(CompanionGraduation { title: session.revisions.last().and_then(|revision| crate::parser::plan_title_from_markdown(&revision.raw_plan_markdown)).unwrap_or(session.project_name), session_id })
+    }).collect())
+}
+
 /// Rename a chat. `by_user` is the latch the auto-titling pass respects — a
 /// name the user typed is never overwritten by a model's proposal.
 #[tauri::command]
@@ -781,7 +954,6 @@ pub fn companion_delete(
     if let Some(mut child) = companion.turns.discard(&companion_id).and_then(|p| p.child) {
         let _ = child.start_kill();
     }
-    companion.pending_handoff.lock().unwrap().remove(&companion_id);
     // Nothing else to clean up: the rotation mark is a column on the row this
     // deletes, so a recreated chat cannot inherit it.
     companion
@@ -814,25 +986,27 @@ pub async fn companion_send(
     companion_id: String,
     text: String,
     cwd: Option<String>,
-    // `"plan"` / `"drafter"` when this turn is a graduation: its reply IS the
-    // brief. (A plain comment, not a doc comment — Rust forbids those on a
-    // function parameter.)
-    handoff: Option<String>,
     queue: Option<bool>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
     let message_id = uuid::Uuid::new_v4().to_string();
+    let surface = active_surface.get();
+    let browser_target = capture_browser_target(
+        &surface,
+        app.state::<crate::ActiveBrowser>().get(),
+        app.state::<crate::ActiveMission>().active_id(),
+    );
     let payload = QueuedCompanionSend {
         text: text.clone(),
         cwd,
-        handoff,
+
+        browser_target,
     };
     // The user row is tagged with where they were WHEN THEY TYPED IT, which is
     // the fact the bubble reports — unlike the prompt's "where they are now",
     // which is a start-time fact and is read again inside the starter.
-    let surface = active_surface.get();
 
     // Atomic reservation; early `?` returns release it via the guard's Drop.
     // Only opted-in sends queue — the busy error stays for everything else.
@@ -842,7 +1016,10 @@ pub async fn companion_send(
             text: text.clone(),
             queued_at: now_millis(),
         };
-        match companion.turns.begin_or_enqueue(&companion_id, turn, payload) {
+        match companion
+            .turns
+            .begin_or_enqueue(&companion_id, turn, payload)
+        {
             SendSlot::Began(slot, payload) => (slot, payload),
             SendSlot::Enqueued => {
                 // Persist the queued user row so a remount restores the
@@ -930,14 +1107,32 @@ fn start_companion_turn(
     slot: turn::SlotGuard<QueuedCompanionSend>,
 ) -> turn::BoxStartFuture {
     Box::pin(async move {
-        let QueuedCompanionSend { text, cwd, handoff } = payload;
+        let QueuedCompanionSend {
+            text,
+            cwd,
+
+            browser_target,
+        } = payload;
         emit_companion_status(&app, &companion_id, "Preparing chat context");
         // Read through the app handle rather than as command arguments: the
         // drain path has no `tauri::State` of its own, and both cells are
         // exactly the kind of "where are they NOW" fact that must not be
         // frozen at enqueue time.
-        let surface: SurfaceInfo = app.state::<crate::ActiveSurface>().get();
-        let mission = app.state::<crate::ActiveMission>().active_goal();
+        let surface: SurfaceInfo = browser_target
+            .as_ref()
+            .map(|target| target.surface.clone())
+            .unwrap_or_else(|| app.state::<crate::ActiveSurface>().get());
+        let mission = match &browser_target {
+            Some(target) => match &target.mission_id {
+                Some(id) => companion
+                    .db
+                    .get_mission(id)
+                    .map_err(|e| e.to_string())?
+                    .map(|mission| (mission.title, mission.goal)),
+                None => None,
+            },
+            None => app.state::<crate::ActiveMission>().active_goal(),
+        };
 
         let mut prior_session = companion.db.get_companion_session(&companion_id);
 
@@ -956,7 +1151,11 @@ fn start_companion_turn(
             .min(turns);
         let mut recap: Option<String> = None;
         if prior_session.is_some() && turns - rotated_at >= ROTATE_AFTER_ASSISTANT_TURNS {
-            tracing::info!(turns, rotated_at, "chat: rotating the CLI session for speed");
+            tracing::info!(
+                turns,
+                rotated_at,
+                "chat: rotating the CLI session for speed"
+            );
             reset_companion_session(&companion.db, &companion_id, turns);
             prior_session = None;
             recap = Some(build_recap(&thread));
@@ -972,7 +1171,11 @@ fn start_companion_turn(
         let journal_delta = render_journal_delta(&journal_rows, JOURNAL_DELTA_MAX_BYTES);
         let loaded_sessions = app.state::<crate::state::SessionStore>().list().len();
         let history_ground = plan_history_grounding(
-            companion.db.plan_history_counts().map_err(|e| e.to_string()), loaded_sessions,
+            companion
+                .db
+                .plan_history_counts()
+                .map_err(|e| e.to_string()),
+            loaded_sessions,
         );
         let journal_delta = format!("{journal_delta}\n\n{history_ground}");
         let head = journal_rows.last().map(|r| r.id);
@@ -1024,7 +1227,7 @@ fn start_companion_turn(
         }
         let prefetch_block = prefetch.and_then(|(b, _)| b);
 
-        let prompt = if first_turn {
+        let mut prompt = if first_turn {
             // Bake the catalog in, so the opening move can be an answer rather
             // than a tree walk.
             let catalog = companion
@@ -1053,6 +1256,7 @@ fn start_companion_turn(
         } else {
             build_followup_prompt(&surface, &companion_id, &journal_delta, &text)
         };
+        prompt.push_str(&browser_turn_context(browser_target.as_ref()));
 
         // The per-conversation seat override. Resolved HERE so a chat whose
         // model changed mid-conversation takes effect on the very next turn.
@@ -1130,19 +1334,6 @@ fn start_companion_turn(
             return Ok(());
         }
         emit_companion_status(&app, &companion_id, "Waiting for the model");
-        // Arm the handoff AFTER the spawn succeeded (a failed spawn must not
-        // strand a stale flag); a plain turn clears any leftover just in case.
-        {
-            let mut pending = companion.pending_handoff.lock().unwrap();
-            match handoff.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
-                Some(target) => {
-                    pending.insert(companion_id.clone(), target.to_string());
-                }
-                None => {
-                    pending.remove(&companion_id);
-                }
-            }
-        }
         tauri::async_runtime::spawn(read_companion(
             app,
             companion,
@@ -1156,7 +1347,6 @@ fn start_companion_turn(
         Ok(())
     })
 }
-
 
 /// Snapshot of this companion's turn for a remounting panel: whether a reply
 /// is streaming, since when, and the partial text streamed so far (with its
@@ -1253,7 +1443,11 @@ async fn read_companion(
         // rides an `assistant` line, which `classify_line` (rightly) ignores —
         // it carries no answer text.
         for (name, input) in crate::claude_proc::tool_uses(&v) {
-            emit_companion_status(&app, &companion_id, &crate::claude_proc::retrieval_status_label(&name, &input));
+            emit_companion_status(
+                &app,
+                &companion_id,
+                &crate::claude_proc::retrieval_status_label(&name, &input),
+            );
         }
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
@@ -1294,16 +1488,6 @@ async fn read_companion(
         Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
-    // Take the handoff flag exactly once, whatever this turn's outcome — an
-    // error or a cancel must not leave it armed for an unrelated later turn.
-    let handoff = {
-        companion
-            .pending_handoff
-            .lock()
-            .unwrap()
-            .remove(&companion_id)
-    };
-
     // ABOVE the terminal branch, so success, error and cancelled all
     // book. A cancelled turn spent its input tokens too.
     let settled = crate::meter::settle(&db, "companion", &buf);
@@ -1311,7 +1495,7 @@ async fn read_companion(
         let _ = app.emit(
             "companion-meter",
             CompanionMeter {
-                    companion_id: companion_id.clone(),
+                companion_id: companion_id.clone(),
                 meter: turn::MeterPayload {
                     rev: settled.rev,
                     meter: settled.clone(),
@@ -1399,16 +1583,6 @@ async fn read_companion(
                     opener,
                     text.clone(),
                 ));
-            }
-            if let Some(target) = handoff {
-                let _ = app.emit(
-                    "companion-handoff-done",
-                    CompanionHandoffDone {
-                        companion_id: companion_id.clone(),
-                        target,
-                        markdown: text,
-                    },
-                );
             }
             break 'terminal;
         }
@@ -1631,11 +1805,9 @@ async fn autotitle(
     else {
         return;
     };
-    let (Some(mut stdin), Some(stdout), Some(stderr)) = (
-        child.stdin.take(),
-        child.stdout.take(),
-        child.stderr.take(),
-    ) else {
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
         return;
     };
     let title_db = companion.db.clone();
@@ -1654,7 +1826,10 @@ async fn autotitle(
     let Some(title) = outcome.final_text.as_deref().and_then(clean_title) else {
         return;
     };
-    match companion.db.set_companion_title(&companion_id, &title, false) {
+    match companion
+        .db
+        .set_companion_title(&companion_id, &title, false)
+    {
         // `false` means the user had already named it — their name wins, and
         // there is nothing to tell the UI.
         Ok(true) => {
@@ -1908,7 +2083,10 @@ mod tests {
             describe_surface(&surface("browser", Some("Docs"), Some("https://x"))),
             "the embedded browser — Docs (https://x)"
         );
-        assert_eq!(describe_surface(&surface("welcome", None, None)), "the welcome screen");
+        assert_eq!(
+            describe_surface(&surface("welcome", None, None)),
+            "the welcome screen"
+        );
         // The chat room is a surface of its own now — without this arm the
         // agent's own room reported as the welcome screen.
         assert_eq!(
@@ -1969,7 +2147,9 @@ mod tests {
     #[test]
     fn routes_block_teaches_the_answer_pack_before_the_tree() {
         let b = routes_block();
-        let pack = b.find("/v1/memory/answer-pack").expect("answer-pack is taught");
+        let pack = b
+            .find("/v1/memory/answer-pack")
+            .expect("answer-pack is taught");
         let tree = b.find("/v1/memory/tree").expect("the tree walk survives");
         assert!(pack < tree, "the answer-pack must be taught FIRST");
         assert!(b.contains("/v1/memory/grep?q="), "literals need grep");
@@ -2017,7 +2197,9 @@ mod tests {
         assert!(p.contains("\"agentId\":\"companion\""));
         assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/doc"));
         assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions"));
-        assert!(p.contains("curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>'"));
+        assert!(
+            p.contains("curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>'")
+        );
         assert!(p.contains("\"source\":\"companion\""));
         assert!(p.contains("curl -s http://127.0.0.1:7676/v1/memory/proposals"));
         // The auth flags must survive verbatim as curl's own variable import:
@@ -2028,7 +2210,10 @@ mod tests {
              --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""
         ));
         assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
-        assert!(p.contains("/v1/sessions/<id>/suggestions"), "plan-suggestion exclusion");
+        assert!(
+            p.contains("/v1/sessions/<id>/suggestions"),
+            "plan-suggestion exclusion"
+        );
         assert!(p.contains("NEVER: /v1/browser/*"));
         // The old blanket read-only line is gone in favor of the new contract.
         assert!(p.contains("WRITE only at the user's explicit"));
@@ -2054,7 +2239,9 @@ mod tests {
         );
         let catalog = p.find("THEIR CATALOG").expect("catalog block");
         let recap = p.find("CONVERSATION SO FAR").expect("recap block");
-        let evidence = p.find("PREFETCHED EVIDENCE\n- searched").expect("evidence block");
+        let evidence = p
+            .find("PREFETCHED EVIDENCE\n- searched")
+            .expect("evidence block");
         let question = p.find("The user says:").expect("question");
         assert!(catalog < recap, "catalog above the recap");
         assert!(recap < evidence, "recap above the evidence");
@@ -2095,9 +2282,15 @@ mod tests {
         assert!(CHAT_INVESTIGATION_POLICY.contains("answer as soon as"));
         assert!(CHAT_INVESTIGATION_POLICY.contains("short public progress update"));
         assert!(CHAT_INVESTIGATION_POLICY.contains("never private reasoning"));
-        assert!(CHAT_INVESTIGATION_POLICY.contains("Do not repeat empty, unsupported, or permission-denied queries"));
+        assert!(CHAT_INVESTIGATION_POLICY
+            .contains("Do not repeat empty, unsupported, or permission-denied queries"));
         assert!(CHAT_INVESTIGATION_POLICY.contains("Preserve the work needed"));
-        let followup = build_followup_prompt(&surface("chat", None, None), SELF_ID, "", "Why is history empty?");
+        let followup = build_followup_prompt(
+            &surface("chat", None, None),
+            SELF_ID,
+            "",
+            "Why is history empty?",
+        );
         assert!(followup.contains(CHAT_INVESTIGATION_POLICY));
         // The policy is prompt framing only; model/effort argv stay on the
         // existing per-chat seat override path tested below.
@@ -2112,11 +2305,7 @@ mod tests {
     #[test]
     fn first_turn_invariant_prefix_is_byte_stable() {
         fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
-            let n = a
-                .bytes()
-                .zip(b.bytes())
-                .take_while(|(x, y)| x == y)
-                .count();
+            let n = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
             &a[..n]
         }
         let a = build_first_turn_prompt(
@@ -2160,7 +2349,10 @@ mod tests {
         // The surface id rides every turn — follow-up writes need it too.
         assert!(p.contains("[surface id: x-1]"));
         assert!(!p.contains("COMPANION"), "role is not re-embedded");
-        assert!(!p.contains("/v1/global/consult"), "routes are not re-embedded");
+        assert!(
+            !p.contains("/v1/global/consult"),
+            "routes are not re-embedded"
+        );
         assert!(p.ends_with("> and now?\n"));
     }
 
@@ -2182,7 +2374,10 @@ mod tests {
         thread.push(msg("u-last", "c1", "user", "q", 100));
         let mut done = msg("a-last", "c1", "assistant", "a", 101);
         thread.push(done.clone());
-        assert_eq!(completed_assistant_turns(&thread), ROTATE_AFTER_ASSISTANT_TURNS);
+        assert_eq!(
+            completed_assistant_turns(&thread),
+            ROTATE_AFTER_ASSISTANT_TURNS
+        );
         // A queued row and an errored row are not turns the CLI replays.
         done.id = "a-err".into();
         done.status = "error".into();
@@ -2205,9 +2400,19 @@ mod tests {
         db.set_companion_session("c1", "sid-1").unwrap();
         db.insert_companion_message(&thread[0]).unwrap();
         reset_companion_session(&db, "c1", ROTATE_AFTER_ASSISTANT_TURNS);
-        assert!(db.get_companion_session("c1").is_none(), "CLI session rotated");
-        assert_eq!(db.load_companion_thread("c1").unwrap().len(), 1, "history survives");
-        assert_eq!(db.get_companion_rotated_at("c1"), ROTATE_AFTER_ASSISTANT_TURNS);
+        assert!(
+            db.get_companion_session("c1").is_none(),
+            "CLI session rotated"
+        );
+        assert_eq!(
+            db.load_companion_thread("c1").unwrap().len(),
+            1,
+            "history survives"
+        );
+        assert_eq!(
+            db.get_companion_rotated_at("c1"),
+            ROTATE_AFTER_ASSISTANT_TURNS
+        );
     }
 
     /// The mark is PER THREAD. memchat's is a single global setting because Ask
@@ -2242,14 +2447,29 @@ mod tests {
         let long_body = "x".repeat(RECAP_BODY_CHARS * 3);
         let mut thread = Vec::new();
         for i in 0..10 {
-            thread.push(msg(&format!("u{i}"), "c1", "user", &format!("thought {i}"), i * 2));
-            thread.push(msg(&format!("a{i}"), "c1", "assistant", &long_body, i * 2 + 1));
+            thread.push(msg(
+                &format!("u{i}"),
+                "c1",
+                "user",
+                &format!("thought {i}"),
+                i * 2,
+            ));
+            thread.push(msg(
+                &format!("a{i}"),
+                "c1",
+                "assistant",
+                &long_body,
+                i * 2 + 1,
+            ));
         }
         let recap = build_recap(&thread);
         assert!(recap.contains("CONVERSATION SO FAR — rotated for speed"));
         assert!(recap.contains("needing re-verification"));
         // Only the tail, oldest-of-the-tail first.
-        assert!(recap.contains("thought 9"), "the newest exchange is carried");
+        assert!(
+            recap.contains("thought 9"),
+            "the newest exchange is carried"
+        );
         assert!(!recap.contains("thought 0"), "the head is not");
         assert_eq!(
             recap.matches("They said").count(),
@@ -2274,7 +2494,13 @@ mod tests {
     fn rotated_first_turn_carries_the_recap_between_catalog_and_question() {
         let thread = vec![
             msg("u1", "c1", "user", "what about the anchoring thing?", 1),
-            msg("a1", "c1", "assistant", "You landed on prepared overlays.", 2),
+            msg(
+                "a1",
+                "c1",
+                "assistant",
+                "You landed on prepared overlays.",
+                2,
+            ),
         ];
         let recap = build_recap(&thread);
         let p = build_first_turn_prompt(
@@ -2320,7 +2546,8 @@ mod tests {
         let payload = QueuedCompanionSend {
             text: "and the beta?".to_string(),
             cwd: None,
-            handoff: None,
+
+            browser_target: None,
         };
         match turns.begin_or_enqueue("c1", queued_turn, payload) {
             SendSlot::Enqueued => {}
@@ -2329,7 +2556,11 @@ mod tests {
         let mut queued_row = msg("m2", "c1", "user", "and the beta?", 2);
         queued_row.status = "queued".to_string();
         db.insert_companion_message(&queued_row).unwrap();
-        assert_eq!(turns.status("c1").queued.len(), 1, "the send is visible as queued");
+        assert_eq!(
+            turns.status("c1").queued.len(),
+            1,
+            "the send is visible as queued"
+        );
 
         // A remount sees the bubble.
         let thread = db.load_companion_thread("c1").unwrap();
@@ -2343,10 +2574,14 @@ mod tests {
         assert_eq!(drained.message_id, "m2");
         assert_eq!(payload.text, "and the beta?");
         assert!(
-            db.set_thread_message_status("companion", "m2", "complete").unwrap(),
+            db.set_thread_message_status("companion", "m2", "complete")
+                .unwrap(),
             "the `companion` kind must be mapped, or the drained row stays a phantom chip"
         );
-        assert_eq!(db.load_companion_thread("c1").unwrap()[0].status, "complete");
+        assert_eq!(
+            db.load_companion_thread("c1").unwrap()[0].status,
+            "complete"
+        );
 
         // And an unqueue takes the row with it.
         let turns2: Arc<Turns<QueuedCompanionSend>> = Arc::new(Turns::new());
@@ -2361,7 +2596,8 @@ mod tests {
             QueuedCompanionSend {
                 text: "wait, scratch that".to_string(),
                 cwd: None,
-                handoff: None,
+
+                browser_target: None,
             },
         );
         let mut row3 = msg("m3", "c1", "user", "wait, scratch that", 3);
@@ -2384,7 +2620,8 @@ mod tests {
         db.insert_companion(&chat("c1")).unwrap();
         assert_eq!(db.get_companion_seat("c1"), (None, None));
 
-        db.set_companion_seat("c1", Some("opus"), Some("high")).unwrap();
+        db.set_companion_seat("c1", Some("opus"), Some("high"))
+            .unwrap();
         let (model, effort) = db.get_companion_seat("c1");
         assert_eq!(model.as_deref(), Some("opus"));
         assert_eq!(effort.as_deref(), Some("high"));
@@ -2396,7 +2633,8 @@ mod tests {
 
         // The flags the spawn appends, and the model the lake records, both
         // follow the override rather than the seat.
-        let flags = crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref());
+        let flags =
+            crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref());
         assert_eq!(
             flags,
             vec!["--model", "opus", "--effort", "high"],
@@ -2420,12 +2658,15 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         db.insert_companion(&chat("c1")).unwrap();
         // The provisional title is replaceable by the titling pass…
-        assert!(db.set_companion_title("c1", "Anchoring rework", false).unwrap());
+        assert!(db
+            .set_companion_title("c1", "Anchoring rework", false)
+            .unwrap());
         assert_eq!(db.list_companions().unwrap()[0].title, "Anchoring rework");
         // …until the user names it themselves.
         assert!(db.set_companion_title("c1", "My thing", true).unwrap());
         assert!(
-            !db.set_companion_title("c1", "Something a model liked", false).unwrap(),
+            !db.set_companion_title("c1", "Something a model liked", false)
+                .unwrap(),
             "the auto-title must not overwrite a user-set name"
         );
         assert_eq!(db.list_companions().unwrap()[0].title, "My thing");
@@ -2460,8 +2701,9 @@ mod tests {
         let db = Arc::new(Database::open_in_memory().unwrap());
         db.insert_companion(&chat("c1")).unwrap();
         let state = CompanionState::new(db.clone());
-        let err = tauri::async_runtime::block_on(state.consult("c1".to_string(), "   ".to_string()))
-            .expect_err("an empty question is refused");
+        let err =
+            tauri::async_runtime::block_on(state.consult("c1".to_string(), "   ".to_string()))
+                .expect_err("an empty question is refused");
         assert!(err.contains("nothing to ask"));
         assert!(!state.is_running("c1"), "the slot was never reserved");
         assert!(db.load_companion_thread("c1").unwrap().is_empty());
@@ -2472,25 +2714,39 @@ mod tests {
     #[test]
     fn the_titling_spawn_has_no_tool_surface() {
         let args = title_args(None, Vec::new());
-        let tools = args.iter().position(|a| a == "--tools").expect("--tools is pinned");
-        assert_eq!(args[tools + 1], "", "an empty tool surface, not a narrowed one");
+        let tools = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("--tools is pinned");
+        assert_eq!(
+            args[tools + 1],
+            "",
+            "an empty tool surface, not a narrowed one"
+        );
         assert!(args.contains(&"--no-session-persistence".to_string()));
         assert!(args.contains(&"--strict-mcp-config".to_string()));
         // Unconfigured seat -> a fast model; a configured one wins outright.
-        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "haiku"));
         let configured = title_args(
             Some("opus".to_string()),
             vec!["--model".to_string(), "opus".to_string()],
         );
         assert!(
-            !configured.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"),
+            !configured
+                .windows(2)
+                .any(|w| w[0] == "--model" && w[1] == "haiku"),
             "a configured seat must not get a second --model: {configured:?}"
         );
     }
 
     #[test]
     fn a_title_is_squeezed_into_a_dropdown_row() {
-        assert_eq!(clean_title("Anchoring Rework").as_deref(), Some("Anchoring Rework"));
+        assert_eq!(
+            clean_title("Anchoring Rework").as_deref(),
+            Some("Anchoring Rework")
+        );
         // Quotes, emphasis, trailing punctuation and preamble lines all go.
         assert_eq!(
             clean_title("\n  **\"Anchoring Rework.\"**  \n").as_deref(),
@@ -2530,9 +2786,42 @@ mod tests {
             .expect("the voice arm exists");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "you");
-        assert_eq!(msgs[0].body, "read me the plan", "`text` reads through as `body`");
+        assert_eq!(
+            msgs[0].body, "read me the plan",
+            "`text` reads through as `body`"
+        );
         assert_eq!(db.thread_stats("voice", "plan-1").unwrap().0, 2);
         // …and the block that advertises it still does.
         assert!(routes_block().contains("/v1/context/threads/voice/<id>"));
     }
+    #[test]
+    fn origin_chat_excerpt_preserves_first_user_and_recent_messages_with_utf8_bounds() {
+        let mut messages = vec![msg("u1", "c1", "user", "First decision: local only 🧠", 1)];
+        for index in 0..50 { messages.push(msg(&format!("m{index}"), "c1", "assistant", &"🧠 recent context ".repeat(80), index + 2)); }
+        messages.push(msg("last", "c1", "user", "The latest direction", 100));
+        let text = origin_chat_excerpt(&messages, 4000);
+        assert!(text.len() <= 4000);
+        assert!(text.contains("First decision: local only 🧠"));
+        assert!(text.contains("The latest direction"));
+        assert!(text.contains("earlier messages omitted"));
+        for limit in 0..100 { assert!(origin_chat_excerpt(&messages, limit).len() <= limit); }
+    }
+
+    #[test]
+    fn origin_chat_uses_only_companion_parents_and_complete_messages() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_companion(&chat("c1")).unwrap();
+        db.insert_companion_message(&msg("u1", "c1", "user", "Our decision", 1)).unwrap();
+        let mut incomplete = msg("a1", "c1", "assistant", "Unfinished", 2);
+        incomplete.status = "error".into();
+        db.insert_companion_message(&incomplete).unwrap();
+        crate::ledger::record_session_link(&db, "session", "from-chat", "companion", "c1").unwrap();
+        crate::ledger::record_session_link(&db, "session", "from-draft", "drafter", "d1").unwrap();
+        let origin = origin_chat_for_session(&db, "from-chat").unwrap();
+        assert_eq!(origin.companion_id, "c1");
+        assert_eq!(origin.messages.len(), 1);
+        assert!(origin_chat_for_session(&db, "from-draft").is_none());
+        assert!(origin_chat_for_session(&db, "unlinked").is_none());
+    }
+
 }

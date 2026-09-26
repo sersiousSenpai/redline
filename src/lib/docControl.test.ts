@@ -117,3 +117,29 @@ describe("docControlPose — yields, never vanishes", () => {
     }
   });
 });
+
+import { DOC_MEASURE_MIN, docMeasureStart, docMeasureDrag, docMeasureSettle, docArticleWidth } from "./docControl";
+describe("continuous document width", () => {
+  it("starts at the current reading measure or full width without a jump", () => {
+    expect(docMeasureStart({ wide: true, measure: 900, full: 1220 })).toBe(1);
+    expect(docMeasureStart({ wide: false, measure: 1020, full: 1220 })).toBe(.5);
+    expect(docMeasureStart({ wide: false, measure: 1600, full: 1220 })).toBe(1);
+  });
+  it("drags up wider and snaps both ends", () => {
+    expect(docMeasureDrag({ t0: 0, dy: -160, full: 1220 })).toEqual({ px: 1220, atMax: true, atMin: false });
+    expect(docMeasureDrag({ t0: 1, dy: 160, full: 1220 })).toEqual({ px: 820, atMax: false, atMin: true });
+    expect(docMeasureDrag({ t0: 0, dy: -80, full: 1220 }).px).toBe(1020);
+    expect(docMeasureDrag({ t0: 0, dy: -10, full: 1220 }).atMin).toBe(true);
+    expect(docMeasureDrag({ t0: 1, dy: 10, full: 1220 }).atMax).toBe(true);
+  });
+  it("handles an empty range and preserves reading width at full", () => {
+    expect(docMeasureDrag({ t0: 1, dy: -100, full: 700 })).toEqual({ px: DOC_MEASURE_MIN, atMax: false, atMin: true });
+    expect(docMeasureSettle(1220, 1220, 960)).toEqual({ wide: true, measure: 960 });
+    expect(docMeasureSettle(1040, 1220, 960)).toEqual({ wide: false, measure: 1040 });
+  });
+  it("uses identical live and committed style strings", () => {
+    expect(docArticleWidth(false, 1040)).toEqual({ maxWidth: "1040px", paddingRight: "32px" });
+    expect(docArticleWidth(true, 1040)).toEqual({ maxWidth: "none", paddingRight: "64px" });
+    expect(docArticleWidth(false, NaN).maxWidth).toBe("820px");
+  });
+});

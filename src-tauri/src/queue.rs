@@ -511,6 +511,17 @@ pub fn queue_status(
     })
 }
 
+/// Stop dequeuing, with a reason the surface can show.
+///
+/// Shared by the user's own Stop and by the restart path, which has to stop
+/// admitting new overnight work before it starts saving and draining. The
+/// reason is what tells them apart afterwards.
+pub fn stop_dequeuing(db: &Database, rt: &QueueRuntime, reason: &str) {
+    if rt.running.swap(false, Ordering::SeqCst) {
+        set_stopped_reason(db, reason);
+    }
+}
+
 /// Stop dequeuing. In-flight runs finish on their own (killing a mid-edit
 /// child would leave a half-applied tree — worse than letting it park).
 #[tauri::command]
@@ -518,9 +529,7 @@ pub fn queue_stop(
     store: tauri::State<'_, SessionStore>,
     rt: tauri::State<'_, QueueRuntime>,
 ) -> Result<(), String> {
-    if rt.running.swap(false, Ordering::SeqCst) {
-        set_stopped_reason(&store.database(), "stopped by the user");
-    }
+    stop_dequeuing(&store.database(), &rt, "stopped by the user");
     Ok(())
 }
 

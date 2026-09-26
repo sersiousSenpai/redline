@@ -25,6 +25,8 @@ export interface SnapshotLink {
  *  fields bounded server-side so the prompt never balloons. */
 export interface PageSnapshot {
   url: string;
+  /** Native document/navigation identity; absent from older cached snapshots. */
+  revision?: string;
   title: string;
   selection: string;
   text: string;

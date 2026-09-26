@@ -37,7 +37,6 @@ import type { QueuedTurn, SendOutcome, TurnStatus } from "../types";
 
 export type AgentSurface =
   | "browse"
-  | "linked"
   | "mission"
   | "memchat"
   // The chat room. Every name already matches the convention — the backend

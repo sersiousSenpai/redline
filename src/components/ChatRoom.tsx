@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { ConversationSourceContext } from "./ContinueAs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, FileText, Mic, Plus, Rocket, X } from "lucide-react";
+import { Check, Mic, Plus, X } from "lucide-react";
 
 import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useDictation } from "../lib/useDictation";
 import { useReadAloud } from "../audio/useReadAloud";
-import { composePrompt } from "../lib/launch";
+import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
+import { chatSubmitAction } from "../lib/frontDoor";
+import { CONTINUE_EVENT, handoffGate, prepareConversationPreview, type ContinueDestination, type ContinuationMessage } from "../lib/conversationContinuation";
+import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { toolbarPose, type ToolbarPose } from "../lib/toolbarPose";
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/seatAssign";
 import { usePersistedState } from "../theme/usePersistedState";
@@ -48,21 +52,8 @@ import ChatTurnProgress, { type ChatProgressStatus } from "./ChatTurnProgress";
 // is keyed per chat and `usePersistedState` reads its key once, so switching
 // chats is a remount by design rather than a stale draft carried across.
 
-const HANDOFF_PROMPTS: Record<HandoffTarget, string> = {
-  drafter:
-    "Distill this conversation into a clean, Drafter-ready brief: what we're " +
-    "building and why, the decisions we actually reached (not the options we " +
-    "discarded), the open questions, and an outline for the work. Write it as " +
-    "the document itself — no preamble, no 'here's your brief'. Markdown only, " +
-    "no raw HTML.",
-  plan:
-    "Distill this conversation into a single prompt to hand to a fresh Claude " +
-    "Code planning session: what to build, the constraints and decisions we " +
-    "reached, and what to leave alone. Write it as the prompt itself — no " +
-    "preamble. Markdown only, no raw HTML.",
-};
-
-export type HandoffTarget = "plan" | "drafter";
+export interface ChatPlanReceipt { status: "starting" | "planning" | "error" | "done"; instruction: string; terminalId?: string; launchId?: string; sessionId?: string; title?: string; error?: string; blocked?: import("../lib/readiness").ReadinessItem }
+export interface ChatPlanRequest { companionId: string; messages: ContinuationMessage[]; instruction: string; project: ProjectChoice; title: string }
 
 export interface ChatRoomProps {
   /** The chat on screen. The parent remounts on change. */
@@ -86,10 +77,16 @@ export interface ChatRoomProps {
   cwd: string | null;
   /** False while the Voice panel owns the mic — one capture at a time. */
   dictationEnabled: boolean;
-  /** Present only while this room has the whole plate: shrink it back to the
-   *  conversation column. Absent in the column, where there is nothing to
-   *  shrink. */
-  onCollapse?: () => void;
+  projectOptions?: ProjectOption[];
+  lastLaunchProject?: string | null;
+  onPlan?: (request: ChatPlanRequest) => void;
+  onQueuePlan?: (request: ChatPlanRequest) => void;
+  queuedInstruction?: string | null;
+  onCancelQueuedPlan?: () => void;
+  receipt?: ChatPlanReceipt | null;
+  onShowTerminal?: (id: string) => void;
+  onOpenPlan?: (id: string) => void;
+  onFix?: (item: import("../lib/readiness").ReadinessItem) => Promise<boolean>;
   onClose: () => void;
 }
 
@@ -99,7 +96,9 @@ export function ChatRoom({
   onEmpty,
   cwd,
   dictationEnabled,
-  onCollapse,
+  projectOptions = [],
+  lastLaunchProject = null,
+  onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
   onClose,
   seed,
   onSeedConsumed,
@@ -113,6 +112,11 @@ export function ChatRoom({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [chats, setChats] = useState<Companion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mode, setMode] = useState<"chat" | "plan">("chat");
+  const [project, setProject] = usePersistedState<ProjectChoice>(`rl.chatProject.${companionId}`, null);
+  const [armedPlan, setArmedPlan] = useState<string | null>(null);
+  const [graduations, setGraduations] = useState<{ sessionId: string; title: string }[]>([]);
+  useEffect(() => { void invoke<typeof graduations>("companion_graduations", { companionId }).then(value => setGraduations(value ?? [])).catch(() => {}); }, [companionId, receipt?.status]);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   const me = useMemo(
@@ -149,14 +153,10 @@ export function ChatRoom({
     historyCmd: "companion_get_thread",
     historyArgs: { companionId },
     sendFailPrefix: "Couldn't reach the chat agent",
-    buildSendArgs: (text, extra) => ({
+    buildSendArgs: (text) => ({
       companionId,
       text,
       cwd,
-      // The backend owns the pending-handoff flag: the completed reply comes
-      // back as `companion-handoff-done` at App level, surviving this room's
-      // unmount while the distillation runs.
-      handoff: (extra as HandoffTarget | undefined) ?? null,
     }),
     makeMessage: ({ id, role, body, status }) => ({
       id,
@@ -220,14 +220,13 @@ export function ChatRoom({
 
 
   const send = useCallback(
-    (text: string, opts?: { localBody?: string; extra?: HandoffTarget }) => {
+    (text: string, opts?: { localBody?: string }) => {
       const composed = composePrompt(text, attachments);
       if (!composed) return;
       stick();
       setNotice(null);
       sendTurn(composed, {
         localBody: opts?.localBody ?? composed,
-        extra: opts?.extra,
       });
       setAttachments([]);
     },
@@ -248,6 +247,34 @@ export function ChatRoom({
   }, [seed, loaded, messages.length, sendTurn, onSeedConsumed]);
 
   const streaming = status === "streaming";
+  const canPlan = !!onPlan && messages.some(message => message.role === "assistant" && message.status === "complete");
+  const armedInstruction = queuedInstruction ?? armedPlan;
+  const planningProject = resolveLaunchProject([...messages.map(message => message.body), draft].join("\n"), project, { projectOptions, openFolder: null, lastLaunchProject });
+  const queued = messages.filter(message => message.status === "queued").length;
+  const plan = (instruction: string) => {
+    if (!canPlan || receipt?.status === "starting" || receipt?.status === "planning") return;
+    setMode("chat"); setDraft("");
+    if (!handoffGate(status, queued)) {
+      if (onQueuePlan) onQueuePlan({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+      else setArmedPlan(instruction);
+      return;
+    }
+    onPlan?.({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+  };
+  useEffect(() => {
+    if (armedPlan === null || !handoffGate(status, queued)) return;
+    const instruction = armedPlan;
+    setArmedPlan(null);
+    onPlan?.({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+  }, [armedPlan, status, queued, onPlan, companionId, messages, project, me?.title]);
+  const submit = (action: "chat" | "plan") => {
+    if (action === "plan") { plan(composePrompt(draft, attachments)); setAttachments([]); }
+    else if (draft.trim()) { send(draft); setDraft(""); }
+  };
+  const continueAs = (destination: ContinueDestination) => {
+    const request = prepareConversationPreview({ conversationKind: "companion", conversationId: companionId, messages });
+    window.dispatchEvent(new CustomEvent(CONTINUE_EVENT, { detail: { ...request, destination } }));
+  };
   // Read replies aloud. Persisted per install, not per chat: it is a property
   // of how the user likes to work, not of one conversation.
   const [speakReplies, setSpeakReplies] = usePersistedState<boolean>(
@@ -341,18 +368,6 @@ export function ChatRoom({
     [companionId, refreshChats],
   );
 
-  const graduate = useCallback(
-    (target: HandoffTarget) => {
-      send(HANDOFF_PROMPTS[target], {
-        localBody: target === "plan" ? "✦ Take this to a plan" : "✦ Take this to a draft",
-        extra: target,
-      });
-    },
-    [send],
-  );
-
-  const canGraduate = messages.some((m) => m.role === "assistant") && !streaming;
-
   // The header carries the same actions whether this room has the whole plate
   // or is the ~360px column beside a surface, and labelled they do not fit the
   // second — they used to run off the right edge, taking Close with them.
@@ -372,21 +387,22 @@ export function ChatRoom({
   const compact = pose === "compact";
 
   return (
-    <div className="flex h-full min-h-0 flex-col" style={{ background: "var(--color-paper)" }}>
+    <ConversationSourceContext.Provider value={{ conversationKind: "companion", conversationId: companionId, messages }}>
+    <div data-chat-room className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
       {/* Header: which chat, on what model, and the two ways out of it. */}
       <div
         ref={headerRef}
-        className="flex shrink-0 items-center gap-2 px-4 py-2"
-        style={{ borderBottom: "1px solid var(--color-rule)" }}
+        className="flex min-w-0 shrink-0 items-center gap-2 px-3 py-2"
+        style={{ borderBottom: "1px solid var(--color-rule)", flexWrap: "nowrap" }}
       >
-        <ChatsMenu
+        {<ChatsMenu
           chats={chats}
           activeId={companionId}
           onSelect={onSelectChat}
           onNew={newChat}
           onRename={rename}
           onDelete={remove}
-        />
+        />}
         <span
           className="font-sans truncate"
           style={{
@@ -402,52 +418,7 @@ export function ChatRoom({
         >
           {me?.title ?? "Chat"}
         </span>
-        <ModelChip
-          model={me?.model ?? null}
-          effort={me?.effort ?? null}
-          onChange={setModel}
-        />
-        {/* Read aloud. The Companion talks WITHOUT becoming a voice session:
-            a `companion:` key would have split this one conversation across
-            two thread tables (see useReadAloud's note). Speaking is stopped
-            by tapping it again, and by anything that ends the turn. */}
-        <ToolbarButton
-          label={readAloud.speaking ? "🔊 Stop" : "🔊"}
-          title={
-            speakReplies
-              ? "Stop reading replies aloud"
-              : "Read replies aloud as they arrive"
-          }
-          on={speakReplies}
-          onClick={() => {
-            if (readAloud.speaking) readAloud.stop();
-            else setSpeakReplies((v) => !v);
-          }}
-        />
-        <ToolbarButton
-          label={compact ? <Rocket size={13} strokeWidth={2} /> : "→ Plan"}
-          title="Distil this conversation into a prompt and launch a plan session from it"
-          disabled={!canGraduate}
-          onClick={() => graduate("plan")}
-        />
-        <ToolbarButton
-          label={compact ? <FileText size={13} strokeWidth={2} /> : "→ Draft"}
-          title="Distil this conversation into a Drafter document"
-          disabled={!canGraduate}
-          onClick={() => graduate("drafter")}
-        />
-        {onCollapse && (
-          <ToolbarButton
-            label="⤡"
-            title="Keep this conversation beside you instead of in front of you"
-            onClick={onCollapse}
-          />
-        )}
-        <ToolbarButton
-          label={compact ? <X size={13} strokeWidth={2} /> : "Close"}
-          title="Back to the document"
-          onClick={onClose}
-        />
+        <ToolbarButton label={compact ? <X size={13} strokeWidth={2} /> : "Close"} title="Close chat" onClick={onClose} />
       </div>
 
       {notice && (
@@ -457,6 +428,8 @@ export function ChatRoom({
             fontSize: 12,
             color: "var(--color-warning)",
             borderBottom: "1px solid var(--color-rule)",
+            maxHeight: 72,
+            overflowY: "auto",
           }}
         >
           {notice}
@@ -466,9 +439,10 @@ export function ChatRoom({
       {/* Thread */}
       <div
         ref={scrollRef}
+        data-chat-messages
         onScroll={onScroll}
         className="rl-thin-scroll-y"
-        style={{ flex: 1, minHeight: 0, overflowY: "auto" }}
+        style={{ flex: "1 1 0%", minHeight: 0, minWidth: 0, overflowY: "auto", overflowX: "hidden", overflowWrap: "anywhere" }}
       >
         <div
           style={{
@@ -499,6 +473,11 @@ export function ChatRoom({
               />
             ))
           )}
+          {armedInstruction !== null && <div className="rl-fd-morph" role="status">Will plan when this reply lands · <button type="button" onClick={() => { setDraft(previous => previous ? `${armedInstruction}\n\n${previous}` : armedInstruction); setArmedPlan(null); onCancelQueuedPlan?.(); }}>Cancel</button></div>}
+          {receipt && <div data-chat-plan-receipt={companionId} className="rl-fd-morph rl-fd-planning-prompt" role="status" style={{ padding: 16, border: "1px solid var(--color-rule)", borderRadius: 12 }}>
+            {receipt.status === "starting" ? "Starting…" : receipt.status === "planning" ? <>Planning: watch it in the terminal ↓ {receipt.terminalId && <button type="button" onClick={() => onShowTerminal?.(receipt.terminalId!)}>Show</button>}</> : receipt.status === "error" ? <>{receipt.error} <button type="button" onClick={() => plan(receipt.instruction)}>Retry</button>{receipt.blocked && onFix && <button type="button" onClick={() => void onFix(receipt.blocked!).then(fixed => { if (fixed) plan(receipt.instruction); })}>Fix</button>}</> : <>Became a plan: {receipt.title ?? "Plan"} {receipt.sessionId && <button type="button" onClick={() => onOpenPlan?.(receipt.sessionId!)}>Open →</button>}</>}
+          </div>}
+          {graduations.filter(item => item.sessionId !== receipt?.sessionId).map(item => <div key={item.sessionId} className="rl-fd-planning-prompt">Became a plan: {item.title} <button type="button" onClick={() => onOpenPlan?.(item.sessionId)}>Open →</button></div>)}
           {streaming && (
             <>
               {/* One shared bubble now. Note the change of behaviour here: the
@@ -522,12 +501,13 @@ export function ChatRoom({
 
       {/* Composer */}
       <div
-        className="shrink-0 px-5 py-2.5"
-        style={{ borderTop: "1px solid var(--color-rule)" }}
+        data-chat-composer
+        className="min-w-0 shrink-0 py-2.5"
+        style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
       >
         <div style={{ maxWidth: 780, margin: "0 auto" }}>
           {attachments.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
+            <div className="mb-1.5 flex min-w-0 flex-wrap gap-1.5" style={{ maxHeight: 64, overflowY: "auto" }}>
               {attachments.map((p) => (
                 <span
                   key={p}
@@ -537,9 +517,10 @@ export function ChatRoom({
                     fontSize: 10.5,
                     border: "1px solid var(--color-rule)",
                     color: "var(--color-ink-muted)",
+                    maxWidth: "100%",
                   }}
                 >
-                  {p.slice(p.lastIndexOf("/") + 1) || p}
+                  <span className="truncate">{p.slice(p.lastIndexOf("/") + 1) || p}</span>
                   <button
                     type="button"
                     title="Remove"
@@ -555,7 +536,7 @@ export function ChatRoom({
           {dictation.listening && (
             <div
               className="font-sans mb-1"
-              style={{ fontSize: 11.5, color: "var(--color-ink-muted)" }}
+              style={{ fontSize: 11.5, color: "var(--color-ink-muted)", maxHeight: 60, overflowY: "auto" }}
             >
               {dictation.partial || "Listening…"}
             </div>
@@ -567,31 +548,28 @@ export function ChatRoom({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  send(draft);
-                  setDraft("");
-                }
+                const action = chatSubmitAction({ key: e.key, shiftKey: e.shiftKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing }, mode);
+                if (action && action !== "newline") { e.preventDefault(); submit(action); }
               }}
-              placeholder={
-                streaming
-                  ? "Type ahead — this queues behind the reply…"
-                  : "Think out loud…"
-              }
+              placeholder={mode === "plan" ? "Any final instruction for the plan?" : streaming ? "Type ahead — this queues behind the reply…" : "Think out loud…"}
               rows={2}
               style={{
                 flex: 1,
                 minWidth: 0,
+                maxHeight: 160,
+                overflowY: "auto",
                 resize: "none",
                 padding: "7px 10px",
                 fontSize: 12.5,
                 lineHeight: 1.5,
                 color: "var(--color-ink)",
                 background: "var(--color-paper)",
-                border: "1px solid var(--color-rule)",
+                border: `1px solid ${mode === "plan" ? "var(--color-info)" : "var(--color-rule)"}`,
                 borderRadius: 8,
               }}
             />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
             <IconButton
               title="Attach files as context"
               onClick={() => void attach()}
@@ -610,14 +588,21 @@ export function ChatRoom({
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
+            <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={() => { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(value => !value); }} />
+            <ModelChip model={me?.model ?? null} effort={me?.effort ?? null} onChange={setModel} />
+            {mode === "plan" && <ProjectPicker value={planningProject} onChange={path => setProject({ path })} options={projectOptions} />}
+            <select aria-label="Continue conversation" value="" onChange={event => { if (event.target.value) continueAs(event.target.value as ContinueDestination); }} disabled={!canPlan || streaming}>
+              <option value="">More…</option><option value="drafter">Draft first…</option><option value="auto">Auto session…</option><option value="plan">Edit the brief…</option>
+            </select>
+            <div role="group" aria-label="Composer mode" style={{ display: "flex", marginLeft: "auto", gap: 6 }}>
+              <button type="button" aria-pressed={mode === "chat"} onClick={() => setMode("chat")}>Chat</button>
+              <button type="button" disabled={!canPlan} aria-pressed={mode === "plan"} onClick={() => setMode("plan")}>Plan</button>
+            </div>
             <button
               type="button"
               className="font-sans"
-              onClick={() => {
-                send(draft);
-                setDraft("");
-              }}
-              disabled={!draft.trim()}
+              onClick={() => submit(mode)}
+              disabled={mode === "chat" ? !draft.trim() : !canPlan || receipt?.status === "starting" || receipt?.status === "planning"}
               title={
                 streaming
                   ? "Queue this — it sends when the reply finishes"
@@ -634,12 +619,13 @@ export function ChatRoom({
                 opacity: draft.trim() ? 1 : 0.5,
               }}
             >
-              Send
+              {mode === "plan" ? "Plan" : "Send"}
             </button>
           </div>
         </div>
       </div>
     </div>
+    </ConversationSourceContext.Provider>
   );
 }
 
@@ -1090,7 +1076,7 @@ function ChatEmptyState({ onAsk }: { onAsk: (q: string) => void }) {
         A conversation with no fixed goal — for the half-formed idea that isn&rsquo;t a
         plan yet. It knows your record: the prompts you&rsquo;ve sent, the decisions
         you&rsquo;ve made, what you were researching, every plan session. When it turns
-        into something, <strong>→ Plan</strong> or <strong>→ Draft</strong> carries it
+        into something, select <strong>Plan</strong> in the composer or use <strong>More…</strong> to draft it
         onward, and the plan session it opens stays a child of this conversation.
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>

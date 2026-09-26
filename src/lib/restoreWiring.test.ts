@@ -37,19 +37,17 @@ describe("a restore runs in the background", () => {
     expect(restoreBody).not.toContain("suppressTerminalRevealFocus()");
   });
 
-  it("the background option skips tiling and nothing else", () => {
+  it("the background option reaches the shared session placement policy", () => {
     // The tab still exists, so its <TerminalView> still mounts and its PTY
     // still spawns — untiled wrappers are display:none, not unmounted. If this
     // ever became "don't create the tab", the restore would silently never run.
     const start = tabs.indexOf("openSessionTerminal: (cwd: string | null, opts)");
     expect(start).toBeGreaterThan(-1);
     const body = tabs.slice(start, tabs.indexOf("return id;", start));
-    // The tab is created unconditionally…
-    expect(body).toContain("setTabs((prev) => [...prev, { id, cwd }]);");
-    // …and only the TILING is conditional.
-    expect(body).toContain(
-      "if (!opts?.background) openTileRef.current(id, focusIdxRef.current);",
-    );
+    // Placement is behaviorally covered by TerminalTabs.lifecycle.test.tsx:
+    // background restore preserves existing work, while a pristine sole
+    // convenience shell yields its otherwise-empty tile.
+    expect(body).toContain("addSessionTab({ id, cwd }, opts?.background);");
   });
 
   it("keeps the banner up, because the banner is now the only narrator", () => {

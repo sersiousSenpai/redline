@@ -25,7 +25,7 @@ class StubResizeObserver {
 (globalThis as { ResizeObserver?: unknown }).ResizeObserver ??=
   StubResizeObserver;
 
-import { DrafterToolbar } from "./DrafterToolbar";
+import { DrafterToolbar, TABLE_GRID_WIDTH, RIBBON_POP_CHROME } from "./DrafterToolbar";
 import { drafterExtensions } from "../editor/extensions/drafterExtensions";
 
 const flush = () =>
@@ -159,5 +159,23 @@ describe("DrafterToolbar — the controls that never leave", () => {
     expect(groups).toContain("style");
     expect(groups).toContain("type");
     expect(groups.filter(Boolean).length).toBe(groups.length);
+  });
+});
+
+
+describe("DrafterToolbar — dropdown panels fit their content", () => {
+  it("gives every menu room independently of its trigger", async () => {
+    const triggers = [...host.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
+    expect(triggers).toHaveLength(10);
+    for (const trigger of triggers) {
+      await act(async () => trigger.click());
+      const panel = [...document.body.querySelectorAll<HTMLElement>('[role="menu"]')].find(el => el.getAttribute("aria-label") === trigger.getAttribute("aria-label"));
+      expect(panel, trigger.getAttribute("aria-label") ?? "menu").toBeDefined();
+      const width = parseFloat(panel!.style.width);
+      expect(width).toBeGreaterThanOrEqual(120);
+      if (parseFloat(trigger.style.minWidth) < 120) expect(width).not.toBe(parseFloat(trigger.style.minWidth));
+      if (trigger.getAttribute("aria-label") === "Table") expect(width).toBeGreaterThanOrEqual(TABLE_GRID_WIDTH + RIBBON_POP_CHROME);
+      await act(async () => trigger.click());
+    }
   });
 });

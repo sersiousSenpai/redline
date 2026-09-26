@@ -1060,7 +1060,7 @@ function PlanMenu({
  *  actually there and hands it back as `maxHeight`; the panel portals to
  *  `document.body`, so no ancestor's clip can cut it either. The glass look of
  *  the door's other menus is restored through `style` — Panel spreads it last. */
-function BackendMenu({
+export function BackendMenu({
   choice,
   onChange,
   modelCatalogs,

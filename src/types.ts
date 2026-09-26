@@ -603,6 +603,7 @@ export interface SkillStatus {
 export type PlanSubmissionMode = "ask" | "revise";
 
 export interface PlanReceivedEvent {
+  launchId?: string | null;
   sessionId: SessionId;
   version: number;
   isNewSession: boolean;
@@ -924,18 +925,6 @@ export interface MissionCancelledEvent {
   missionId: string;
 }
 
-/** A Linked discussion: ONE continuous conversation that follows the user across
- *  every browser tab (no goal, unlike a Mission). Mirrors the Rust `Linked`; the
- *  resumable session lives backend-side. */
-export interface Linked {
-  linkedId: string;
-  title: string;
-  /** "active" | "archived". */
-  status: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
 /** A Companion session — ONE global discussion that follows the user across
  *  every surface of the app. Mirrors the Rust `Companion`. */
 export interface Companion {
@@ -1007,50 +996,6 @@ export interface DraftComment {
   author: string | null;
   createdAt: number;
   forkSessionId: string | null;
-}
-
-/** One persisted turn in a linked discussion. Mirrors the Rust `LinkedMessage`.
- *  Each turn is tab-tagged (`tab*`) with the tab the user was on at the time, so
- *  the UI can show "on tab N — Title" per message. */
-export interface LinkedMessage {
-  id: string;
-  linkedId: string;
-  /** "user" | "assistant" | "system" (a conversion divider row). */
-  role: string;
-  body: string;
-  /** "complete" | "error". */
-  status: string;
-  tabBrowseId: string | null;
-  tabN: number | null;
-  tabTitle: string | null;
-  tabUrl: string | null;
-  createdAt: number;
-}
-
-/** A chunk of streaming linked-discussion text. */
-export interface LinkedDeltaEvent {
-  linkedId: string;
-  text: string;
-  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
-  seq: number;
-}
-
-/** A linked turn finished — `body` is the authoritative full reply. */
-export interface LinkedDoneEvent {
-  linkedId: string;
-  messageId: string;
-  body: string;
-}
-
-/** A linked turn failed; `error` is also persisted as a terminal row. */
-export interface LinkedErrorEvent {
-  linkedId: string;
-  error: string;
-}
-
-/** A linked turn was cancelled — nothing was persisted for it. */
-export interface LinkedCancelledEvent {
-  linkedId: string;
 }
 
 // --- Memory Ask thread (mirrors src-tauri/src/memchat.rs) --------------------

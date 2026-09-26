@@ -1,0 +1,126 @@
+{
+  "cli_version": "2.1.282",
+  "model": "claude-sonnet-5",
+  "effort": "xhigh",
+  "trials": [
+    {
+      "variant": "new",
+      "trial": 1,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 13.2,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "new",
+      "trial": 2,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 13.0,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "new",
+      "trial": 3,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 14.1,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "new",
+      "trial": 4,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 12.0,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "new",
+      "trial": 5,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 14.5,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "new",
+      "trial": 6,
+      "attempts": [],
+      "available_exit_tool": false,
+      "elapsed_seconds": 18.1,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 1,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 9.2,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 2,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 14.7,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 3,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 10.2,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 4,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 8.6,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 5,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 9.4,
+      "plan_is_marker": true
+    },
+    {
+      "variant": "old",
+      "trial": 6,
+      "attempts": [
+        "ExitPlanMode"
+      ],
+      "available_exit_tool": false,
+      "elapsed_seconds": 14.1,
+      "plan_is_marker": true
+    }
+  ],
+  "conclusion": "Weak eval: old and new each attempted ExitPlanMode first in 5/5 restricted-tool runs without Write/Edit. Current print-mode CLI disables ExitPlanMode before PreToolUse, so no captured handshake or reproduced injection refusal. Default-tool control confirms the same unavailable tool."
+}

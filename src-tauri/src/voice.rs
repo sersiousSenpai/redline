@@ -46,7 +46,7 @@ software and a real pursuit of excellent work: you have opinions and you share \
 them, you push back honestly when something is off, and you offer the sharper \
 idea instead of only agreeing. This is a free-flowing brainstorm — riff with \
 them, follow tangents, and let the conversation breathe; don't turn every reply \
-into a summary. The plan you are discussing is included below. They hear your \
+into a summary. The plan you are discussing is included below. Any source chat is background; the plan is the current truth. They hear your \
 replies spoken \
 aloud by a text-to-speech engine, so write for the ear: keep replies short and \
 conversational, and avoid markdown, code blocks, bulleted lists, and URLs \
@@ -223,6 +223,17 @@ the input is empty or just noise, return it unchanged.";
 /// while the registry's `std::Mutex` is only ever held for a tiny critical
 /// section. `in_flight` rejects overlapping turns; `primed` tracks whether the
 /// preamble has been sent.
+fn first_turn_text(session_id: &str, prime: Option<&str>, prior_chat: Option<&(String, String)>, text: &str) -> String {
+    let (preamble, bridge, doc_tag) = match drafter_key_id(session_id) {
+        Some(draft_id) => (DRAFTER_VOICE_PREAMBLE, drafter_bridge_preamble(draft_id), "DRAFT"),
+        None => (VOICE_PREAMBLE, bridge_preamble(session_id), "PLAN"),
+    };
+    let scope = scope_preamble();
+    let chat = prior_chat.map(|(title, excerpt)| format!("\n\n--- THE CHAT THIS PLAN CAME FROM: {title} ---\n{excerpt}\n--- END CHAT ---\nThe chat is background; the plan is the current truth.")).unwrap_or_default();
+    let document = prime.map(|doc| format!("\n\n--- {doc_tag} ---\n{doc}\n--- END {doc_tag} ---")).unwrap_or_default();
+    format!("{preamble}\n\n{bridge}\n\n{scope}{chat}{document}\n\n{text}")
+}
+
 struct VoiceProc {
     child: Child,
     stdin: Arc<AsyncMutex<ChildStdin>>,
@@ -232,6 +243,7 @@ struct VoiceProc {
     /// agent knows the plan without resuming the plan's own — possibly active —
     /// session). `None` when resuming the voice agent's own prior fork.
     prime: Option<String>,
+    prior_chat: Option<(String, String)>,
     /// Shared with the reader/drainer so `voice_session_probe` can report why a
     /// child that never reached `init` is stuck.
     stderr_tail: StderrTail,
@@ -517,6 +529,12 @@ pub async fn voice_session_start(
         }
     }
 
+    let prior_chat = if prior_fork.is_none() && drafter_key_id(&session_id).is_none() {
+        crate::companion::origin_chat_for_session(&voice.db, &session_id).map(|chat| {
+            let excerpt = crate::companion::origin_chat_excerpt(&chat.messages, 20_000);
+            (chat.title, excerpt)
+        })
+    } else { None };
     let claude_bin = voice.claude_bin().await?;
     let mut cmd = crate::claude_proc::claude_command_for_seat("voice", &claude_bin);
     let mut child = cmd
@@ -572,6 +590,7 @@ pub async fn voice_session_start(
                 in_flight: in_flight.clone(),
                 primed,
                 prime,
+                prior_chat,
                 stderr_tail: stderr_tail.clone(),
             },
         );
@@ -637,7 +656,7 @@ pub async fn voice_send(
     }
     // Captured before `text` is folded into the first-turn preamble below.
     let display = label.unwrap_or_else(|| text.clone());
-    let (stdin, in_flight, primed, prime) = {
+    let (stdin, in_flight, primed, prime, prior_chat) = {
         let guard = voice.procs.lock().unwrap();
         let proc = guard
             .get(&session_id)
@@ -647,6 +666,7 @@ pub async fn voice_send(
             proc.in_flight.clone(),
             proc.primed.clone(),
             proc.prime.clone(),
+            proc.prior_chat.clone(),
         )
     };
 
@@ -664,23 +684,7 @@ pub async fn voice_send(
     // by what was said rather than by the persona block wrapped around it.
     let spoken = text.clone();
     let send_text = if is_first_turn {
-        let (preamble, bridge, doc_tag) = match drafter_key_id(&session_id) {
-            Some(draft_id) => (
-                DRAFTER_VOICE_PREAMBLE,
-                drafter_bridge_preamble(draft_id),
-                "DRAFT",
-            ),
-            None => (VOICE_PREAMBLE, bridge_preamble(&session_id), "PLAN"),
-        };
-        // Persona, then this document's own bridge, then the whole-app scope
-        // (the Companion contract) — grounded here, reaching everywhere.
-        let scope = scope_preamble();
-        match &prime {
-            Some(doc) => format!(
-                "{preamble}\n\n{bridge}\n\n{scope}\n\n--- {doc_tag} ---\n{doc}\n--- END {doc_tag} ---\n\n{text}"
-            ),
-            None => format!("{preamble}\n\n{bridge}\n\n{scope}\n\n{text}"),
-        }
+        first_turn_text(&session_id, prime.as_deref(), prior_chat.as_ref(), &text)
     } else {
         text
     };
@@ -1635,4 +1639,14 @@ mod tests {
         assert!(DRAFTER_VOICE_PREAMBLE.contains("must not edit files or the document"));
         assert!(DRAFTER_VOICE_PREAMBLE.contains("never quiz them"));
     }
+    #[test]
+    fn origin_chat_only_primes_a_plan_when_present() {
+        let chat = ("Design notes".to_string(), "User: Keep it local".to_string());
+        let text = first_turn_text("session", Some("# Current plan"), Some(&chat), "Why?");
+        assert!(text.contains("THE CHAT THIS PLAN CAME FROM: Design notes"));
+        assert!(text.find("Keep it local").unwrap() < text.find("# Current plan").unwrap());
+        assert!(!first_turn_text("session", Some("# Plan"), None, "Why?").contains("THE CHAT"));
+        assert!(!first_turn_text("drafter:draft", Some("# Draft"), None, "Why?").contains("THE CHAT"));
+    }
+
 }

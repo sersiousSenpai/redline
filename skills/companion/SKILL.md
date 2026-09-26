@@ -17,7 +17,7 @@ description: >-
   callouts). Covers the spanning-app discipline, the while-you-were-away feed,
   the consult contract, writing at the user's direction, memory retrieval, and
   formatting.
-version: 5
+version: 6
 ---
 
 # Redline Companion
@@ -112,7 +112,7 @@ curl -s http://127.0.0.1:7676/v1/global/consult \
   --variable %REDLINE_DAEMON_TOKEN= \
   --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" -X POST \
   -H 'Content-Type: application/json' \
-  -d '{"surface":"<browse|plan|mission|linked|drafter|shipwright>","id":"<id — for browse, the tab number; for shipwright, `-` or a repo path>","question":"<what you need synthesized>"}'
+  -d '{"surface":"<browse|plan|mission|drafter|shipwright>","id":"<id — for browse, the tab number; for shipwright, `-` or a repo path>","question":"<what you need synthesized>"}'
 ```
 
 The response is `{"digest":"...","surface":"...","label":"..."}` — fold the

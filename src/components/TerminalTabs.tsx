@@ -66,11 +66,20 @@ import {
 } from "./TerminalTileMenu";
 import { TileGutter } from "./TileGutter";
 import { CloseConfirmModal } from "./CloseConfirmModal";
+import { replaceablePlaceholder } from "../lib/placeholderTerminal";
+import {
+  readTerminalWorkspace,
+  saveTerminalWorkspace,
+  type LivePty,
+  type TerminalWorkspace,
+} from "../lib/terminalWorkspace";
 
 interface Tab {
   id: string;
   /** cwd this tab's shell was spawned in (null = $HOME, resolved backend). */
   cwd: string | null;
+  /** The dock's auto-spawned convenience shell; cleared the moment the user touches it. */
+  placeholder?: boolean;
 }
 
 interface TerminalTabsProps {
@@ -177,7 +186,8 @@ export interface TerminalTabsHandle {
    *  `display:none`), it just doesn't take a tile out from under whatever the
    *  reviewer is watching. Used by a restore, whose terminal is machinery
    *  rather than a place to work; it stays in the tile menus and takes
-   *  held/unseen state normally, so `selectTab` promotes it on demand. */
+   *  held/unseen state normally, so `selectTab` promotes it on demand. A sole
+   *  untouched convenience shell yields its tile even to a background open. */
   openSessionTerminal: (
     cwd: string | null,
     opts?: { background?: boolean },
@@ -253,18 +263,64 @@ export const TerminalTabs = memo(
     }: TerminalTabsProps,
     ref,
   ) {
-  const [tabs, setTabs] = useState<Tab[]>(() => [
-    { id: crypto.randomUUID(), cwd: null },
-  ]);
+  const [initialWorkspace] = useState<TerminalWorkspace>(() => {
+    const saved = readTerminalWorkspace(MAX_TILES);
+    if (saved) return saved;
+    const tab: Tab = { id: crypto.randomUUID(), cwd: null, placeholder: true };
+    return { tabs: [tab], tiles: [tab.id], focusedTile: 0, zoomedId: null };
+  });
+  const [tabs, setTabsState] = useState<Tab[]>(initialWorkspace.tabs);
+  const tabsRef = useRef(tabs);
+  // Imperative launch/restore can open several terminals before React renders.
+  // Keep refs current at the mutation, so two launches cannot both replace
+  // the same placeholder or overwrite one another's tile slot.
+  const setTabs = useCallback((next: Tab[] | ((prev: Tab[]) => Tab[])) => {
+    const value = typeof next === "function" ? next(tabsRef.current) : next;
+    tabsRef.current = value;
+    setTabsState(value);
+  }, []);
   // The visible tiles: terminal ids in row-major grid order, 1..MAX_TILES.
-  // Tile count is deliberately NOT persisted — parity with the old dock,
-  // whose split didn't survive a reload either.
-  const [tiles, setTiles] = useState<readonly string[]>(() => [tabs[0].id]);
-  const [focusedTile, setFocusedTile] = useState(0);
+  const [tiles, setTilesState] = useState<readonly string[]>(initialWorkspace.tiles);
+  const tilesRef = useRef(tiles);
+  const setTiles = useCallback((next: readonly string[]) => {
+    tilesRef.current = next;
+    setTilesState(next);
+  }, []);
+  const [focusedTile, setFocusedTile] = useState(initialWorkspace.focusedTile);
   // One tile temporarily taking the whole dock (menu row / header
   // double-click). Stored as the terminal id and DERIVED against `tiles`, so
   // a closed terminal can never leave the dock stuck zoomed.
-  const [zoomedId, setZoomedId] = useState<string | null>(null);
+  const [zoomedId, setZoomedId] = useState<string | null>(initialWorkspace.zoomedId);
+  const workspaceRef = useRef<TerminalWorkspace>(initialWorkspace);
+  workspaceRef.current = { tabs, tiles, focusedTile, zoomedId };
+  useEffect(() => {
+    saveTerminalWorkspace(workspaceRef.current);
+  }, [tabs, tiles, focusedTile, zoomedId]);
+  useEffect(() => {
+    const save = () => saveTerminalWorkspace({
+      ...workspaceRef.current,
+      tabs: tabsRef.current,
+      tiles: tilesRef.current,
+    });
+    window.addEventListener("pagehide", save);
+    return () => {
+      window.removeEventListener("pagehide", save);
+      save();
+    };
+  }, []);
+  const [detached, setDetached] = useState<LivePty[]>([]);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
+  useEffect(() => {
+    let gone = false;
+    const owned = new Set(tabsRef.current.map((tab) => tab.id));
+    void invoke<LivePty[]>("pty_list").then((list) => {
+      if (!gone) setDetached(list.filter((pty) => pty.alive && !owned.has(pty.id)));
+    }).catch(() => {
+      if (!gone) setRecoveryError("Couldn't check for detached terminals.");
+    });
+    return () => { gone = true; };
+  }, []);
   const [fractionStore, setFractionStore] = usePersistedState<FractionStore>(
     "redline.terminalGrid.fractions",
     {},
@@ -297,10 +353,6 @@ export const TerminalTabs = memo(
   // Tile wrappers keyed by terminal ID, not index — the live drag path and the
   // hover outline write styles through this map without a render.
   const tileElsRef = useRef(new Map<string, HTMLElement>());
-  const tilesRef = useRef(tiles);
-  tilesRef.current = tiles;
-  const tabsRef = useRef(tabs);
-  tabsRef.current = tabs;
   const focusIdxRef = useRef(focusIdx);
   focusIdxRef.current = focusIdx;
 
@@ -454,6 +506,11 @@ export const TerminalTabs = memo(
     // close it from its tile or the menu.
   }, []);
 
+  const handleUserInput = useCallback((id: string) => {
+    if (!tabsRef.current.some((tab) => tab.id === id && tab.placeholder)) return;
+    setTabs((prev) => prev.map((tab) => tab.id === id ? { ...tab, placeholder: false } : tab));
+  }, [setTabs]);
+
   // Last window title each terminal announced (OSC 0/2) — "what is running in
   // here", for the tile menu. Stable identity, and it bails when the title
   // is unchanged, so a shell that rewrites the same title on every prompt costs
@@ -525,6 +582,10 @@ export const TerminalTabs = memo(
     () => new Map(),
   );
   const [homePath, setHomePath] = useState<string | null>(null);
+  const liveCwdsRef = useRef(liveCwds);
+  liveCwdsRef.current = liveCwds;
+  const homePathRef = useRef(homePath);
+  homePathRef.current = homePath;
   useEffect(() => {
     void homeDir()
       .then((h) => setHomePath(normPath(h)))
@@ -780,25 +841,37 @@ export const TerminalTabs = memo(
     void typeClaudeInto(id);
   };
 
-  const closeTab = (id: string) => {
+  const forgetTab = useCallback((id: string) => {
     // Through the lifecycle fence: closing a terminal the instant it opened
     // must not let the kill overtake the still-queued spawn (orphan shell).
     void enqueuePtyOp(id, () => invoke("pty_kill", { id }));
-    clearUnseen(id);
+    setUnseen((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     setUntiledMru((m) => (m.includes(id) ? m.filter((x) => x !== id) : m));
-    if (zoomedId === id) setZoomedId(null);
+    setZoomedId((prev) => prev === id ? null : prev);
+    setDetached((prev) => prev.filter((pty) => pty.id !== id));
+  }, []);
 
-    if (tabs.length === 1 && tabs[0].id === id) {
+  const closeTab = (id: string) => {
+    const current = tabsRef.current;
+    if (!current.some((tab) => tab.id === id)) return;
+    forgetTab(id);
+
+    if (current.length === 1 && current[0].id === id) {
       // Last terminal: never leave the dock empty — spawn a replacement.
       const newId = crypto.randomUUID();
-      setTabs([{ id: newId, cwd: null }]);
+      setTabs([{ id: newId, cwd: null, placeholder: true }]);
       setTiles([newId]);
       setFocusedTile(0);
       return;
     }
 
-    const idx = tabs.findIndex((t) => t.id === id);
-    const next = tabs.filter((t) => t.id !== id);
+    const idx = current.findIndex((t) => t.id === id);
+    const next = current.filter((t) => t.id !== id);
     setTabs(next);
 
     // Refill every tile that showed it (left neighbour, then right, skipping
@@ -910,6 +983,41 @@ export const TerminalTabs = memo(
   hailTileRef.current = hailTile;
   const openTileRef = useRef(openTerminalTile);
   openTileRef.current = openTerminalTile;
+  const addSessionTab = useCallback((tab: Tab, background = false) => {
+    const victim = replaceablePlaceholder(tabsRef.current, liveCwdsRef.current, homePathRef.current);
+    setTabs((prev) => [...prev.filter((existing) => existing.id !== victim), tab]);
+    if (victim) {
+      // A background restore must inherit this tile too: an empty dock is
+      // never useful, and the pristine shell was only holding its place.
+      setTiles(tilesRef.current.map((id) => id === victim ? tab.id : id));
+      forgetTab(victim);
+    } else if (!background) {
+      openTileRef.current(tab.id, focusIdxRef.current);
+    }
+  }, [setTabs, setTiles, forgetTab]);
+  const recoverDetached = async () => {
+    if (recovering) return;
+    setRecovering(true);
+    setRecoveryError(null);
+    try {
+      // Recheck on click so a process that exited since boot isn't silently
+      // replaced by a fresh shell under its old id.
+      const live = await invoke<LivePty[]>("pty_list");
+      // Snapshot ownership before replacement removes a placeholder; that
+      // shell can also appear later in this list and must not be resurrected.
+      const owned = new Set(tabsRef.current.map((tab) => tab.id));
+      for (const pty of live.filter((pty) => pty.alive && !owned.has(pty.id))) {
+        if (!tabsRef.current.some((tab) => tab.id === pty.id)) {
+          addSessionTab({ id: pty.id, cwd: pty.cwd }, tilesRef.current.length >= MAX_TILES);
+        }
+      }
+      setDetached([]);
+    } catch {
+      setRecoveryError("Couldn't recover detached terminals. Try again.");
+    } finally {
+      setRecovering(false);
+    }
+  };
   useImperativeHandle(
     ref,
     () => ({
@@ -923,16 +1031,11 @@ export const TerminalTabs = memo(
       },
       openSessionTerminal: (cwd: string | null, opts) => {
         const id = crypto.randomUUID();
-        setTabs((prev) => [...prev, { id, cwd }]);
-        // Prefer an empty slot in the grid over silently evicting whatever
-        // the reviewer was watching in the focused tile. Skipped entirely for
-        // a background terminal: the tab exists (so its PTY spawns and the
-        // menus list it), it simply occupies no tile until something asks.
-        if (!opts?.background) openTileRef.current(id, focusIdxRef.current);
+        addSessionTab({ id, cwd }, opts?.background);
         return id;
       },
     }),
-    [],
+    [addSessionTab],
   );
 
   // Guard the window close: like a real terminal app, confirm before tearing
@@ -1042,8 +1145,8 @@ export const TerminalTabs = memo(
   // ── Render ────────────────────────────────────────────────────────────────
 
   // Position each terminal's wrapper by its tile rect using CSS only — never
-  // by moving it to a different JSX parent, which would unmount/remount the
-  // TerminalView and kill its PTY. Untiled wrappers are display:none — a
+  // by moving it to a different JSX parent, which would recreate xterm and
+  // replay its PTY. Untiled wrappers are display:none — a
   // full-bleed invisible box would still hit-test over the visible tiles
   // (any tab later in `tabs` order) and swallow their clicks; their
   // TerminalView is display:none internally already, so nothing changes for
@@ -1073,6 +1176,14 @@ export const TerminalTabs = memo(
 
   return (
     <div data-tour="terminal" className="flex flex-col h-full">
+      {(detached.some((pty) => !tabs.some((tab) => tab.id === pty.id)) || recoveryError) && (
+        <div className="flex items-center gap-2 px-2 py-1 text-xs" role="status">
+          {recoveryError && <span>{recoveryError}</span>}
+          <button type="button" disabled={recovering} onClick={() => void recoverDetached()} className="underline">
+            {recovering ? "Reattaching…" : recoveryError ? "Retry terminal recovery" : `Reattach ${detached.filter((pty) => !tabs.some((tab) => tab.id === pty.id)).length} detached terminals`}
+          </button>
+        </div>
+      )}
       <TerminalMenuDataContext.Provider value={menuData}>
       <div ref={paneContainerRef} className="flex-1 relative">
         {tabs.map((t) => {
@@ -1116,7 +1227,7 @@ export const TerminalTabs = memo(
               {tiled && ident && (
                 // The boundary wraps the HEADER ELEMENT ONLY — around the
                 // whole wrapper it would unmount the TerminalView on a header
-                // crash, and unmounting a TerminalView kills its PTY. A
+                // crash, which would discard its local rendered history. A
                 // crashed header just disappears; the shell keeps running.
                 <ErrorBoundary fallback={() => null}>
                   <TerminalTileHeader
@@ -1149,6 +1260,7 @@ export const TerminalTabs = memo(
                   onExit={handleExit}
                   onTitle={handleTitle}
                   onPaneFocus={handlePaneFocus}
+                  onUserInput={handleUserInput}
                 />
               </div>
               {visible && heldTerminalIds?.has(t.id) && <InterceptStrip />}

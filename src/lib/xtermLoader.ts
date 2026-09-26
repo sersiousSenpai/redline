@@ -5,8 +5,8 @@
  * budget"). xterm + its addons (~380 kB rendered) stay off the main chunk;
  * the module set loads the first time any TerminalView mounts and is cached
  * for the app's lifetime. Laziness lives HERE, inside the module graph —
- * TerminalView itself is never lazily remounted (unmounting one kills its
- * PTY), so a loaded terminal constructs synchronously exactly as before.
+ * TerminalView itself stays mounted across visibility changes, preserving
+ * its rendered scrollback. A loaded terminal constructs synchronously.
  */
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";

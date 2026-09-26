@@ -57,13 +57,13 @@ const streamingAt = (seq: number, partial: string): TurnStatus => ({
 
 function makeCfg(over: Partial<AgentTurnConfig<TurnMessage>> = {}): AgentTurnConfig<TurnMessage> {
   return {
-    surface: "linked",
+    surface: "browse",
     key: "L1",
-    idField: "linkedId",
-    historyCmd: "linked_get_thread",
-    historyArgs: { linkedId: "L1" },
-    sendFailPrefix: "Couldn't reach the linked discussion",
-    buildSendArgs: (text) => ({ linkedId: "L1", text }),
+    idField: "browseId",
+    historyCmd: "get_browse_thread",
+    historyArgs: { browseId: "L1" },
+    sendFailPrefix: "Couldn't reach the browse discussion",
+    buildSendArgs: (text) => ({ browseId: "L1", text }),
     makeMessage: ({ id, role, body, status }) => ({ id, role, body, status, createdAt: 999 }),
     ...over,
   };
@@ -78,8 +78,8 @@ const flush = async () => {
 describe("mount ordering", () => {
   it("holds the history + status probes until every listener is registered", async () => {
     const { io, releases, invokeImpl, invoke, listen } = fakeIo({ holdListens: true });
-    invokeImpl.set("linked_get_thread", () => rows({ id: "a1" }));
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => rows({ id: "a1" }));
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     const attached = ctl.attach();
     await flush();
@@ -90,8 +90,8 @@ describe("mount ordering", () => {
     await attached;
     await flush();
     const cmds = invoke.mock.calls.map((c) => c[0]);
-    expect(cmds).toContain("linked_get_thread");
-    expect(cmds).toContain("linked_turn_status");
+    expect(cmds).toContain("get_browse_thread");
+    expect(cmds).toContain("browse_turn_status");
     expect(ctl.getState().loaded).toBe(true);
     expect(ctl.getState().messages.map((m) => m.id)).toEqual(["a1"]);
     ctl.detach();
@@ -99,8 +99,8 @@ describe("mount ordering", () => {
 
   it("restores a mid-turn stream from the probe, then folds only the new deltas", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => rows({ id: "u1", role: "user" }));
-    invokeImpl.set("linked_turn_status", () => streamingAt(2, "AB"));
+    invokeImpl.set("get_browse_thread", () => rows({ id: "u1", role: "user" }));
+    invokeImpl.set("browse_turn_status", () => streamingAt(2, "AB"));
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
@@ -108,19 +108,19 @@ describe("mount ordering", () => {
     expect(ctl.getState().liveText).toBe("AB");
     expect(ctl.getState().startedAt).toBe(500);
     // A delta the probe already folded in, then a genuinely new one.
-    emit("linked-delta", { linkedId: "L1", text: "B", seq: 2 });
-    emit("linked-delta", { linkedId: "L1", text: "C", seq: 3 });
+    emit("browse-delta", { browseId: "L1", text: "B", seq: 2 });
+    emit("browse-delta", { browseId: "L1", text: "C", seq: 3 });
     expect(ctl.getState().liveText).toBe("ABC");
     ctl.detach();
   });
 
   it("ignores events for other keys, and a singleton surface accepts everything", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
-    emit("linked-delta", { linkedId: "OTHER", text: "X", seq: 1 });
+    emit("browse-delta", { browseId: "OTHER", text: "X", seq: 1 });
     expect(ctl.getState().liveText).toBe("");
     ctl.detach();
 
@@ -152,12 +152,12 @@ describe("mount ordering", () => {
 describe("terminal events through the controller", () => {
   it("done lands the reply row built by makeMessage and settles idle", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
-    emit("linked-delta", { linkedId: "L1", text: "A", seq: 1 });
-    emit("linked-done", { linkedId: "L1", messageId: "a-db", body: "full" });
+    emit("browse-delta", { browseId: "L1", text: "A", seq: 1 });
+    emit("browse-done", { browseId: "L1", messageId: "a-db", body: "full" });
     const s = ctl.getState();
     expect(s.phase).toBe("idle");
     expect(s.liveText).toBe("");
@@ -168,11 +168,11 @@ describe("terminal events through the controller", () => {
 
   it("error appends the event's message as an error bubble", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
-    emit("linked-error", { linkedId: "L1", error: "boom" });
+    emit("browse-error", { browseId: "L1", error: "boom" });
     const s = ctl.getState();
     expect(s.phase).toBe("error");
     expect(s.messages[0].body).toBe("boom");
@@ -188,13 +188,13 @@ describe("self-heal", () => {
   it("settles a stuck stream after two consecutive idle probes, refetching the thread", async () => {
     const { io, emit, invokeImpl } = fakeIo();
     let thread = rows({ id: "u1", role: "user", body: "q" });
-    invokeImpl.set("linked_get_thread", () => thread);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => thread);
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
     // A turn starts streaming, then its terminal event is lost forever.
-    emit("linked-delta", { linkedId: "L1", text: "A", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "A", seq: 1 });
     expect(ctl.getState().phase).toBe("streaming");
     // The reader persisted the settled pair before we ever re-probe.
     thread = rows(
@@ -214,38 +214,38 @@ describe("self-heal", () => {
 
   it("a done event between misses disarms the counter (no spurious refetch)", async () => {
     const { io, emit, invokeImpl, invoke } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
     const historyCallsAfterMount = invoke.mock.calls.filter(
-      (c) => c[0] === "linked_get_thread",
+      (c) => c[0] === "get_browse_thread",
     ).length;
-    emit("linked-delta", { linkedId: "L1", text: "A", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "A", seq: 1 });
     await vi.advanceTimersByTimeAsync(HEAL_INTERVAL_MS); // miss 1
-    emit("linked-done", { linkedId: "L1", messageId: "a1", body: "full" }); // the race resolves
+    emit("browse-done", { browseId: "L1", messageId: "a1", body: "full" }); // the race resolves
     expect(ctl.getState().phase).toBe("idle");
     // The clock stops with the stream; no settle-refetch ever fires.
     await vi.advanceTimersByTimeAsync(HEAL_INTERVAL_MS * 4);
     expect(
-      invoke.mock.calls.filter((c) => c[0] === "linked_get_thread").length,
+      invoke.mock.calls.filter((c) => c[0] === "get_browse_thread").length,
     ).toBe(historyCallsAfterMount);
     ctl.detach();
   });
 
   it("a streaming probe refreshes the text and keeps the counter at zero", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
+    invokeImpl.set("get_browse_thread", () => []);
     let probes = 0;
-    invokeImpl.set("linked_turn_status", () => {
+    invokeImpl.set("browse_turn_status", () => {
       probes += 1;
       return probes <= 1 ? idle : streamingAt(5, "ABCDE");
     });
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
-    emit("linked-delta", { linkedId: "L1", text: "A", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "A", seq: 1 });
     await vi.advanceTimersByTimeAsync(HEAL_INTERVAL_MS);
     // The re-probe repaired the missed deltas 2..5.
     expect(ctl.getState().liveText).toBe("ABCDE");
@@ -257,17 +257,17 @@ describe("self-heal", () => {
 describe("send", () => {
   it("appends the optimistic row, dispatches the built args with queue: true, and reconciles the outcome id", async () => {
     const { io, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const sent: unknown[] = [];
-    invokeImpl.set("linked_send", (args) => {
+    invokeImpl.set("browse_send", (args) => {
       sent.push(args);
       return { started: true, queued: false, messageId: "u-db" };
     });
     const ctl = new AgentTurnController<TurnMessage>(
       () =>
         makeCfg({
-          buildSendArgs: async (text, extra) => ({ linkedId: "L1", text, extra: extra ?? null }),
+          buildSendArgs: async (text, extra) => ({ browseId: "L1", text, extra: extra ?? null }),
         }),
       io,
     );
@@ -278,7 +278,7 @@ describe("send", () => {
     expect(ctl.getState().messages[ctl.getState().messages.length - 1]?.body).toBe("✦ shown instead");
     await flush();
     expect(sent).toEqual([
-      { linkedId: "L1", text: "hello", extra: { synthesize: true }, queue: true },
+      { browseId: "L1", text: "hello", extra: { synthesize: true }, queue: true },
     ]);
     // The optimistic row now carries the persisted id.
     expect(ctl.getState().messages[0]?.id).toBe("u-db");
@@ -287,10 +287,10 @@ describe("send", () => {
 
   it("a send while streaming is type-ahead: it dispatches, queues the bubble, and leaves the stream alone", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
     const sent: unknown[] = [];
-    invokeImpl.set("linked_send", (args) => {
+    invokeImpl.set("browse_send", (args) => {
       sent.push(args);
       return { started: false, queued: true, messageId: "q-db" };
     });
@@ -298,7 +298,7 @@ describe("send", () => {
     await ctl.attach();
     await flush();
     // A turn is streaming…
-    emit("linked-delta", { linkedId: "L1", text: "partial ", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "partial ", seq: 1 });
     expect(ctl.getState().phase).toBe("streaming");
     // …and the user types ahead.
     ctl.send("next question");
@@ -311,7 +311,7 @@ describe("send", () => {
     expect(queuedRow?.id).toBe("q-db");
     expect(queuedRow?.status).toBe("queued");
     // The drain announces the queued turn going live.
-    emit("linked-queue-advanced", { linkedId: "L1", messageId: "q-db" });
+    emit("browse-queue-advanced", { browseId: "L1", messageId: "q-db" });
     expect(ctl.getState().messages[ctl.getState().messages.length - 1]?.status).toBe("complete");
     expect(ctl.getState().phase).toBe("streaming");
     ctl.detach();
@@ -319,18 +319,18 @@ describe("send", () => {
 
   it("unqueue restores the text and removes the queued row; a late unqueue leaves it", async () => {
     const { io, emit, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
-    invokeImpl.set("linked_send", () => ({ started: false, queued: true, messageId: "q-db" }));
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_send", () => ({ started: false, queued: true, messageId: "q-db" }));
     let queueText: string | null = "next question";
-    invokeImpl.set("linked_unqueue", (args) => {
-      expect(args).toEqual({ linkedId: "L1", messageId: "q-db" });
+    invokeImpl.set("browse_unqueue", (args) => {
+      expect(args).toEqual({ browseId: "L1", messageId: "q-db" });
       return queueText;
     });
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
-    emit("linked-delta", { linkedId: "L1", text: "busy", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "busy", seq: 1 });
     ctl.send("next question");
     await flush();
     expect(await ctl.unqueue("q-db")).toBe("next question");
@@ -345,9 +345,9 @@ describe("send", () => {
 
   it("a failed send lands the sendFailPrefix error bubble and marks the row unsent", async () => {
     const { io, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
-    invokeImpl.set("linked_send", () => {
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_send", () => {
       throw new Error("daemon down");
     });
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
@@ -357,7 +357,7 @@ describe("send", () => {
     await flush();
     const s = ctl.getState();
     expect(s.phase).toBe("error");
-    expect(s.messages[s.messages.length - 1]?.body).toMatch(/^Couldn't reach the linked discussion: /);
+    expect(s.messages[s.messages.length - 1]?.body).toMatch(/^Couldn't reach the browse discussion: /);
     // The user row is truthfully "unsent", ready for a resend affordance.
     expect(s.messages[0]?.status).toBe("unsent");
     ctl.detach();
@@ -365,9 +365,9 @@ describe("send", () => {
 
   it("drops a send whose args were still building when the panel went away", async () => {
     const { io, invokeImpl, invoke } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
-    invokeImpl.set("linked_send", () => undefined);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_send", () => undefined);
     let release!: (v: Record<string, unknown>) => void;
     const ctl = new AgentTurnController<TurnMessage>(
       () =>
@@ -380,31 +380,31 @@ describe("send", () => {
     await flush();
     ctl.send("hello");
     ctl.detach(); // tab switch mid-snapshot-capture
-    release({ linkedId: "L1", text: "hello" });
+    release({ browseId: "L1", text: "hello" });
     await flush();
-    expect(invoke.mock.calls.map((c) => c[0])).not.toContain("linked_send");
+    expect(invoke.mock.calls.map((c) => c[0])).not.toContain("browse_send");
   });
 });
 
 describe("cancel and clear", () => {
   it("cancel invokes the surface's cancel with the key args", async () => {
     const { io, invokeImpl, invoke } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => []);
-    invokeImpl.set("linked_turn_status", () => idle);
-    invokeImpl.set("linked_cancel", () => undefined);
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_cancel", () => undefined);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     ctl.cancel();
     await flush();
-    const call = invoke.mock.calls.find((c) => c[0] === "linked_cancel");
-    expect(call?.[1]).toEqual({ linkedId: "L1" });
+    const call = invoke.mock.calls.find((c) => c[0] === "browse_cancel");
+    expect(call?.[1]).toEqual({ browseId: "L1" });
     ctl.detach();
   });
 
   it("clear empties the thread but stays loaded (empty-state hint, not blank)", async () => {
     const { io, invokeImpl } = fakeIo();
-    invokeImpl.set("linked_get_thread", () => rows({ id: "a1" }));
-    invokeImpl.set("linked_turn_status", () => idle);
+    invokeImpl.set("get_browse_thread", () => rows({ id: "a1" }));
+    invokeImpl.set("browse_turn_status", () => idle);
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     await ctl.attach();
     await flush();
@@ -509,7 +509,7 @@ describe("the companion surface", () => {
   });
 
   it("carries the handoff target through as the send's extra", async () => {
-    // The graduation turn: `→ Draft` is an ordinary send whose extra flags the
+    // Surface-specific options are ordinary send extras whose flags the
     // backend's pending-handoff, so the reply comes back as
     // `companion-handoff-done` even if the room has since unmounted.
     const { io, invoke } = chatIo();

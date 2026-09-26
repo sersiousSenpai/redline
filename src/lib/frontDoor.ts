@@ -159,3 +159,10 @@ export function projectNameFromPrompt(text: string): string {
   const slug = chosen.join("-").slice(0, NAME_MAX).replace(/-+$/, "");
   return slug || "new-project";
 }
+
+/** Chat mode is one-shot when planning; IME/Shift retain normal editing. */
+export function chatSubmitAction(event: { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey?: boolean; isComposing?: boolean }, mode: "chat" | "plan"): "chat" | "plan" | "newline" | null {
+  if (event.isComposing || event.key !== "Enter") return null;
+  if (event.shiftKey) return "newline";
+  return event.metaKey || event.ctrlKey ? "plan" : mode;
+}

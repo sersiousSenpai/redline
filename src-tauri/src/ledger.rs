@@ -337,7 +337,6 @@ mod tests {
             ("ledger.rs", include_str!("ledger.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("librarian.rs", include_str!("librarian.rs")),
-            ("linked.rs", include_str!("linked.rs")),
             ("memchat.rs", include_str!("memchat.rs")),
             ("mission.rs", include_str!("mission.rs")),
             ("polis_host.rs", include_str!("polis_host.rs")),

@@ -7,6 +7,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import { acquireGraphics } from "../lib/graphicsAllocation";
 import type { WebglAddon } from "@xterm/addon-webgl";
 import { loadXterm, xtermMods, type XtermMods } from "../lib/xtermLoader";
 import { contrastRatio, luminance, mix } from "../theme/derive";
@@ -14,6 +15,7 @@ import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
 import type { HandoffDeps } from "../lib/terminalHandoff";
 import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
+import { terminalInputOrigin } from "../lib/terminalInput";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -42,6 +44,9 @@ interface TerminalViewProps {
    *  callback serves every tile in the grid (a per-tile closure would re-mint
    *  N functions per render and defeat the fleet's memo). */
   onPaneFocus?: (id: string) => void;
+  /** Keystrokes, paste and native file drops make a convenience shell the
+   *  user's terminal, so a subsequent launch must preserve it. */
+  onUserInput?: (id: string) => void;
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
@@ -49,13 +54,9 @@ function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
-// Per-terminal-id ordering fence for spawn/kill. React dev StrictMode mounts
-// every TerminalView twice — spawn → kill → spawn under one id — and the three
-// invokes race on the backend's command pool. If the respawn overtakes the
-// kill, pty_spawn no-ops (id still registered), the kill then destroys the
-// only shell, and the surviving mount's output channel was never bound: a
-// dead "[process exited]" terminal. Chaining each id's lifecycle ops makes
-// the order deterministic: spawn completes, then kill, then respawn.
+// Per-id ordering covers spawn/attach/detach/kill. Unmount releases the view,
+// preserving the shell for StrictMode, HMR and full webview reloads; only an
+// explicit close kills it. A new view always rebinds the output channel.
 // Cap on raw bytes stashed for a hidden terminal before the oldest are dropped.
 // ~2 MB comfortably covers a full screen + the 5000-line scrollback xterm keeps
 // after the drain, so the visible result is identical to never having hidden it
@@ -81,8 +82,7 @@ const COL_FIT_MIN_GAP_MS = 120;
  *  tile count, and this ceiling backstops even that: a terminal past it keeps
  *  xterm's DOM renderer — a deliberate fallback instead of a context loss that
  *  never comes back. */
-const MAX_WEBGL = 8;
-let liveWebglContexts = 0;
+// The shared graphics allocator also reserves the Memory Cosmos context.
 
 // The fence lives in src/lib/ptyFence.ts (pure, unit-tested); re-exported
 // here so existing importers keep their path.
@@ -192,13 +192,9 @@ function tapPtyOutput(id: string, bytes: Uint8Array) {
 export const tauriHandoffDeps: HandoffDeps = {
   whenSpawned: whenPtySpawned,
   isLive: (id) => invoke<boolean>("pty_is_live", { id }),
-  // The write rides the SAME per-id fence as spawn/kill/resize. Without it,
-  // dev StrictMode's double-mount queues [spawn₁, kill₁, spawn₂] and the
-  // handoff's write — released by spawn₁'s signal — races kill₁: when it wins
-  // the backend truthfully reports delivery into the doomed first shell, and
-  // the user watches the second come up empty (the lost-restore bug). Fenced,
-  // the write serializes behind the churn and lands in the surviving shell;
-  // rejection ("terminal not running") still reaches the handoff.
+  // Writes share the lifecycle fence so a handoff waits for the surviving
+  // mount's attachment during StrictMode churn. Rejection ("terminal not
+  // running") still reaches the handoff.
   writeChecked: (id, data) =>
     enqueuePtyOpChecked(id, () => invoke("pty_write_checked", { id, data })),
   awaitOutput: (id, match, timeoutMs) => awaitPtyOutput(id, match, timeoutMs),
@@ -361,6 +357,7 @@ export const TerminalView = memo(function TerminalView({
   onExit,
   onTitle,
   onPaneFocus,
+  onUserInput,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -456,10 +453,12 @@ export const TerminalView = memo(function TerminalView({
   const onActivityRef = useRef(onActivity);
   const onExitRef = useRef(onExit);
   const onTitleRef = useRef(onTitle);
+  const onUserInputRef = useRef(onUserInput);
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
   onExitRef.current = onExit;
   onTitleRef.current = onTitle;
+  onUserInputRef.current = onUserInput;
 
   // Raw PTY bytes that arrived while this tab was hidden. We skip xterm's ANSI
   // parse for off-screen terminals (the dominant background cost with a fleet
@@ -507,11 +506,18 @@ export const TerminalView = memo(function TerminalView({
     };
   }, [xt]);
 
-  // Create the terminal + PTY once.
+  // Create a view and either reattach its surviving shell or spawn one.
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !xt) return;
     const { Terminal, FitAddon } = xt;
+    let disposed = false;
+    const attachmentId = crypto.randomUUID();
+    let firstOutput = true;
+    let replaying = false;
+    // StrictMode keeps refs across its effect remount. The backend replays
+    // these bytes into the new xterm, so retaining them would replay twice.
+    pendingRef.current = { chunks: [], size: 0 };
 
     const term = new Terminal({
       fontFamily:
@@ -529,6 +535,7 @@ export const TerminalView = memo(function TerminalView({
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+    const inputOrigin = terminalInputOrigin(term, () => onUserInputRef.current?.(id));
 
     // OSC 0/2. Disposed with the terminal below, along with every other addon
     // and listener it owns.
@@ -541,7 +548,24 @@ export const TerminalView = memo(function TerminalView({
     // the byte count back and the backend only keeps reading while we keep up.
     const onOutput = new Channel<ArrayBuffer>();
     onOutput.onmessage = (buf) => {
+      if (disposed) return;
       const bytes = new Uint8Array(buf);
+      // Backend always sends one initial replay frame (empty for a fresh
+      // shell), before live bytes. Parse this bounded frame even when hidden
+      // so it never mixes with the deferred live buffer. xterm preserves write
+      // callback order, clearing this flag before subsequent live parsing.
+      // Replayed DSR/DA queries must not inject historical replies into the
+      // still-running process; genuine user input remains enabled throughout.
+      if (firstOutput) {
+        firstOutput = false;
+        if (!bytes.length) return;
+        replaying = true;
+        term.write(bytes, () => {
+          replaying = false;
+          if (!disposed) void invoke("pty_ack", { id, attachmentId, n: bytes.length }).catch(() => {});
+        });
+        return;
+      }
       // Observation tap first (no-op unless someone awaits this tab's
       // output), so hidden tabs are observable too.
       tapPtyOutput(id, bytes);
@@ -554,7 +578,7 @@ export const TerminalView = memo(function TerminalView({
         while (p.size > MAX_HIDDEN_BUFFER_BYTES && p.chunks.length > 1) {
           p.size -= p.chunks.shift()!.length;
         }
-        void invoke("pty_ack", { id, n: bytes.length }).catch(() => {});
+        void invoke("pty_ack", { id, attachmentId, n: bytes.length }).catch(() => {});
         onActivityRef.current(id);
         return;
       }
@@ -562,38 +586,54 @@ export const TerminalView = memo(function TerminalView({
       // preserved, then write this chunk (its ack gates the backend as before).
       drainPending();
       term.write(bytes, () => {
-        void invoke("pty_ack", { id, n: bytes.length }).catch(() => {});
+        if (!disposed) {
+          void invoke("pty_ack", { id, attachmentId, n: bytes.length }).catch(() => {});
+        }
       });
     };
 
     // A hidden (display:none / zero-height) host makes fit() compute 0×0; a
     // 0-row PTY corrupts output. Fall back to a sane size when spawning while
     // not yet visible — the [visible] effect re-fits once shown.
-    void enqueuePtyOp(id, () =>
-      invoke("pty_spawn", {
-        id,
-        cwd,
-        cols: term.cols || 80,
-        rows: term.rows || 24,
-        onOutput,
-      }).then(
-        () => spawnDeferred(id).resolve(),
-        (e) => {
-          spawnDeferred(id).reject(e);
-          // Skip the writeln if this mount was already torn down (StrictMode).
-          if (termRef.current === term) {
-            term.writeln(`\r\n[redline: failed to start shell: ${e}]`);
-          }
-        },
-      ),
-    );
-
-    const dataSub = term.onData((d) => {
-      void invoke("pty_write", { id, data: d }).catch(() => {});
+    void enqueuePtyOpChecked(id, async () => {
+      if (disposed) return;
+      const live = await invoke<boolean>("pty_is_live", { id });
+      if (disposed) return;
+      if (live) {
+        await invoke("pty_attach", { id, onOutput, attachmentId });
+      } else {
+        await invoke("pty_spawn", {
+          id,
+          cwd,
+          cols: term.cols || 80,
+          rows: term.rows || 24,
+          onOutput,
+          attachmentId,
+        });
+      }
+      if (disposed) return;
+      spawnDeferred(id).resolve();
+      // The saved shell may have had different geometry than this view.
+      // This resize follows attachment, never destroys/restarts the shell.
+      if (visibleRef.current) applyFit({ immediate: true });
+    }).catch((e) => {
+      if (disposed) return;
+      spawnDeferred(id).reject(e);
+      term.writeln(`\r\n[redline: failed to connect shell: ${e}]`);
     });
 
+    const dataSub = term.onData((d) => {
+      const userInput = inputOrigin.takeUserInput();
+      if (replaying && !userInput) return;
+      void invoke("pty_write", { id, data: d }).catch(() => {});
+    });
+    // onData also includes xterm's automatic replies to terminal queries
+    // (including replayed queries). Only actual input gestures claim a
+    // placeholder: keys, text paste/IME below, and native file drops.
+    const keySub = term.onKey(() => inputOrigin.noteGesture());
+
     const exitPromise = listen<{ id: string }>("pty-exit", (e) => {
-      if (e.payload.id !== id) return;
+      if (disposed || e.payload.id !== id) return;
       term.writeln("\r\n[process exited]");
       onExitRef.current(id);
     });
@@ -603,7 +643,7 @@ export const TerminalView = memo(function TerminalView({
     // Tauri's own event instead — it carries real absolute paths — and
     // type the quoted path(s) at the prompt (no Enter, so they're editable).
     const dropPromise = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
+      if (disposed || event.payload.type !== "drop") return;
       if (!visibleRef.current) return;
       const paths = event.payload.paths;
       if (!paths || paths.length === 0) return;
@@ -623,6 +663,7 @@ export const TerminalView = memo(function TerminalView({
       }
 
       const text = paths.map(shellQuote).join(" ") + " ";
+      onUserInputRef.current?.(id);
       void invoke("pty_write", { id, data: text }).catch(() => {});
       termRef.current?.focus();
     });
@@ -642,11 +683,16 @@ export const TerminalView = memo(function TerminalView({
       if (items && Array.from(items).some((it) => it.kind === "file")) {
         e.preventDefault();
         e.stopPropagation();
+        return;
       }
+      if (e.clipboardData?.getData("text/plain")) inputOrigin.noteGesture();
     };
+    const onInput = () => inputOrigin.noteGesture();
     host.addEventListener("dragover", swallowDrag);
     host.addEventListener("drop", swallowDrag);
     host.addEventListener("paste", onPaste, true);
+    host.addEventListener("input", onInput, true);
+    host.addEventListener("compositionstart", onInput, true);
 
     const ro = new ResizeObserver(() => {
       // A hidden view has no usable geometry; the [visible] effect re-fits
@@ -690,21 +736,26 @@ export const TerminalView = memo(function TerminalView({
     );
 
     return () => {
+      disposed = true;
       ro.disconnect();
       schedulerRef.current?.cancel();
       dataSub.dispose();
+      keySub.dispose();
+      inputOrigin.dispose();
       host.removeEventListener("dragover", swallowDrag);
       host.removeEventListener("drop", swallowDrag);
       host.removeEventListener("paste", onPaste, true);
+      host.removeEventListener("input", onInput, true);
+      host.removeEventListener("compositionstart", onInput, true);
       void exitPromise.then((un) => un());
       void dropPromise.then((un) => un());
       void focusPromise.then((un) => un());
-      void enqueuePtyOp(id, () => invoke("pty_kill", { id }));
+      void enqueuePtyOp(id, () => invoke("pty_detach", { id, attachmentId }));
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
     };
-    // Spawn once for this tab's lifetime; cwd/theme/visibility are applied via
+    // Connect once for this view's lifetime; cwd/theme/visibility are applied via
     // the effects below (and refs) without re-forking the shell. `xt` changes
     // at most once (null → loaded), and the body doesn't run until it has.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -723,21 +774,22 @@ export const TerminalView = memo(function TerminalView({
     if (!visible || !xt) return;
     const term = termRef.current;
     if (!term) return;
-    if (liveWebglContexts >= MAX_WEBGL) return;
+    const releaseGraphics = acquireGraphics("terminal");
+    if (!releaseGraphics) return;
     let addon: WebglAddon;
     try {
       addon = new xt.WebglAddon();
     } catch {
+      releaseGraphics();
       return; /* no WebGL here — xterm's default renderer stays active */
     }
-    liveWebglContexts++;
     // Shared by context loss and the hide/unmount cleanup, which can both fire
     // for one addon — the counter must move exactly once either way.
     let dropped = false;
     const drop = () => {
       if (dropped) return;
       dropped = true;
-      liveWebglContexts--;
+      releaseGraphics();
       try {
         addon.dispose();
       } catch {

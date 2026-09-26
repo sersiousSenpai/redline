@@ -254,7 +254,7 @@ describe("the second door adds no new probing", () => {
     expect(at, "launchPlan must be async to await the boundary").toBeGreaterThan(
       -1,
     );
-    const body = app.slice(at, at + 4000);
+    const body = app.slice(at, app.indexOf("\n  };", at) + 5);
     expect(body).toContain("await integrationHealth");
     expect(body).toContain("await ensureDaemonReady()");
     expect(body).toContain("readinessInputRef.current({");

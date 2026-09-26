@@ -1,0 +1,34 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, useEffect } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { MemoryMapTab } from "./MemoryMap";
+import type { MemoryMapData, MapNode } from "../lib/memoryMap";
+import type { CosmosView } from "../lib/memoryMap3d";
+const mocks=vi.hoisted(()=>({invoke:vi.fn(),listeners:new Map<string,()=>void>(),unlisten:vi.fn(),failScene:false}));
+vi.mock("@tauri-apps/api/core",()=>({invoke:mocks.invoke}));
+vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,fn:()=>void)=>{mocks.listeners.set(name,fn);return mocks.unlisten;})}));
+vi.mock("./memory-cosmos/MemoryCosmosScene",()=>({default:({onError,onSelect}:{onError:(error:string)=>void;onSelect:(id:string)=>void})=>{useEffect(()=>{if(mocks.failScene)onError("WebGL unavailable");},[onError]);return <button data-scene onClick={()=>onSelect("memory")}>Select planet</button>;}}));
+(globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
+const node:MapNode={id:"memory",label:"Remembered idea",kind:"class",mass:42,parentId:null,pinned:true,projectPath:null,classNodeId:"class-id",sessionId:null,browseId:null,threadId:null};
+const payload:MemoryMapData={generatedTs:0,nodes:[node],edges:[]};
+let root:Root,host:HTMLDivElement;
+const flush=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,20));});
+beforeEach(()=>{mocks.invoke.mockReset();mocks.invoke.mockResolvedValue(payload);mocks.listeners.clear();mocks.unlisten.mockClear();mocks.failScene=false;localStorage.clear();host=document.createElement("div");document.body.append(host);root=createRoot(host);});
+afterEach(()=>{act(()=>root.unmount());host.remove();vi.useRealTimers();});
+const render=async(onFocus=vi.fn(),view={current:{} as CosmosView})=>{await act(async()=>root.render(<MemoryMapTab onFocus={onFocus} view={view}/>));await flush();return{onFocus,view};};
+describe("Memory Cosmos host",()=>{
+  it("keeps selection in the scene and opens the exact Timeline focus only on request",async()=>{const {onFocus,view}=await render();await act(async()=>host.querySelector<HTMLButtonElement>("[data-scene]")!.click());expect(onFocus).not.toHaveBeenCalled();expect(view.current.selectedId).toBe("memory");expect(host.querySelector(".mc-inspector")!.textContent).toContain("42 memories");await act(async()=>host.querySelector<HTMLButtonElement>(".mc-inspector button")!.click());expect(onFocus).toHaveBeenCalledWith({classNodeId:"class-id",label:"Remembered idea"});});
+  it("restores selected memory from the surface-owned view",async()=>{const view={current:{selectedId:"memory",camera:{position:[1,2,3] as [number,number,number],target:[0,0,0] as [number,number,number]}}};await render(vi.fn(),view);expect(host.querySelector<HTMLSelectElement>("select")!.value).toBe("memory");expect(view.current.camera.position).toEqual([1,2,3]);});
+  it("preserves keyboard Timeline access when WebGL is unavailable",async()=>{mocks.failScene=true;const {onFocus}=await render();expect(host.querySelector("[role=alert]")!.textContent).toContain("WebGL unavailable");expect(host.querySelector("details")!.open).toBe(true);await act(async()=>{const select=host.querySelector<HTMLSelectElement>("select")!;select.value="memory";select.dispatchEvent(new Event("change",{bubbles:true}));});await act(async()=>host.querySelector<HTMLButtonElement>(".mc-list button")!.click());expect(onFocus).toHaveBeenCalledWith({classNodeId:"class-id",label:"Remembered idea"});});
+  it("handles empty memory and failed loading explicitly",async()=>{mocks.invoke.mockResolvedValueOnce({...payload,nodes:[]});await render();expect(host.textContent).toContain("No memories to map yet");});
+  it("shows an actionable loading failure",async()=>{mocks.invoke.mockRejectedValueOnce(new Error("offline"));await render();expect(host.querySelector("[role=alert]")!.textContent).toContain("offline");expect(host.textContent).toContain("Retry loading");});
+  it("discards stale requests after a newer refresh and unregisters event listeners",async()=>{
+    let finishFirst!:(value:MemoryMapData)=>void;
+    mocks.invoke.mockImplementationOnce(()=>new Promise(resolve=>{finishFirst=resolve;}));
+    await render();vi.useFakeTimers();
+    await act(async()=>{mocks.listeners.get("classmem-changed")!();await vi.advanceTimersByTimeAsync(850);});
+    await act(async()=>finishFirst({...payload,nodes:[]}));
+    expect(host.textContent).toContain("1 shown");expect(host.textContent).not.toContain("No memories to map yet");
+    act(()=>root.render(null));await act(async()=>{});expect(mocks.unlisten).toHaveBeenCalledTimes(2);
+  });
+});

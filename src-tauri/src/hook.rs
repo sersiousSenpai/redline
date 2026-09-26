@@ -87,16 +87,19 @@ pub fn get_status_at(path: &std::path::Path) -> HookStatus {
         };
     };
 
+    let mut matcher_found = false;
+    let mut conflicting_url = None;
     for entry in entries {
-        if entry.get("matcher").and_then(|v| v.as_str()) != Some("ExitPlanMode") {
+        if !crate::hook_conflicts::matcher_covers_plan(entry) {
             continue;
         }
+        matcher_found = true;
         let Some(hooks) = entry.get("hooks").and_then(|v| v.as_array()) else {
             continue;
         };
         for h in hooks {
             let url = h.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if url == HOOK_URL {
+            if url == HOOK_URL && h.get("type").and_then(Value::as_str) == Some("http") {
                 return HookStatus {
                     installed: true,
                     settings_path: path_str,
@@ -104,20 +107,15 @@ pub fn get_status_at(path: &std::path::Path) -> HookStatus {
                     conflicting_url: None,
                 };
             }
-            return HookStatus {
-                installed: false,
-                settings_path: path_str,
-                matcher_found: true,
-                conflicting_url: Some(url.to_string()),
-            };
+            if conflicting_url.is_none() && !url.is_empty() { conflicting_url = Some(url.to_string()); }
         }
     }
 
     HookStatus {
         installed: false,
         settings_path: path_str,
-        matcher_found: false,
-        conflicting_url: None,
+        matcher_found,
+        conflicting_url,
     }
 }
 
@@ -132,18 +130,20 @@ fn installed_timeout_at(path: &std::path::Path) -> Option<u32> {
     let content = fs::read_to_string(path).ok()?;
     let json: Value = serde_json::from_str(&content).ok()?;
     let entries = json.pointer("/hooks/PreToolUse")?.as_array()?;
+    let mut found = false;
     for entry in entries {
-        if entry.get("matcher").and_then(|v| v.as_str()) != Some("ExitPlanMode") {
-            continue;
-        }
-        let hooks = entry.get("hooks").and_then(|v| v.as_array())?;
+        if !crate::hook_conflicts::matcher_covers_plan(entry) { continue; }
+        let Some(hooks) = entry.get("hooks").and_then(Value::as_array) else { continue; };
         for h in hooks {
-            if h.get("url").and_then(|v| v.as_str()) == Some(HOOK_URL) {
-                return h.get("timeout").and_then(|v| v.as_u64()).map(|n| n as u32);
+            if h.get("type").and_then(Value::as_str) == Some("http")
+                && h.get("url").and_then(Value::as_str) == Some(HOOK_URL) {
+                found = true;
+                let timeout = h.get("timeout").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+                if timeout != Some(HOOK_TIMEOUT_SECS) { return timeout; }
             }
         }
     }
-    None
+    found.then_some(HOOK_TIMEOUT_SECS)
 }
 
 /// If the Redline hook is already installed but with a stale `timeout` (e.g. an
@@ -196,6 +196,13 @@ fn allow_present_at(path: &std::path::Path) -> bool {
 }
 
 fn ensure_restore_permission_at(path: &std::path::Path) {
+    if !get_status_at(path).installed || allow_present_at(path) { return; }
+    if let Err(error) = crate::hook_config::stage(path, |staged| { ensure_restore_permission_unlocked_at(staged); Ok(()) }) {
+        tracing::warn!(%error, "failed to backfill restore permission");
+    }
+}
+
+fn ensure_restore_permission_unlocked_at(path: &std::path::Path) {
     if !get_status_at(path).installed || allow_present_at(path) {
         return;
     }
@@ -357,7 +364,12 @@ pub fn apply_orchestrate_allows(rules: &[String]) -> Result<(), String> {
     apply_orchestrate_allows_at(&settings_path(), rules)
 }
 
-pub fn apply_orchestrate_allows_at(
+pub fn apply_orchestrate_allows_at(path: &std::path::Path, rules: &[String]) -> Result<(), String> {
+    if rules.is_empty() { return Ok(()); }
+    crate::hook_config::stage(path, |staged| apply_orchestrate_allows_unlocked_at(staged, rules))
+}
+
+fn apply_orchestrate_allows_unlocked_at(
     path: &std::path::Path,
     rules: &[String],
 ) -> Result<(), String> {
@@ -459,6 +471,11 @@ pub fn orchestrate_allow_candidates(project_dir: &std::path::Path) -> Vec<AllowC
 }
 
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
+    crate::hook_config::stage(path, install_unlocked_at)?;
+    Ok(get_status_at(path))
+}
+
+fn install_unlocked_at(path: &std::path::Path) -> Result<HookStatus, String> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -495,21 +512,25 @@ pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
 
     let mut replaced = false;
     for entry in pre_arr.iter_mut() {
-        if entry.get("matcher").and_then(|v| v.as_str()) == Some("ExitPlanMode") {
-            entry["hooks"] = json!([
-                { "type": "http", "url": HOOK_URL, "timeout": HOOK_TIMEOUT_SECS }
-            ]);
-            replaced = true;
-            break;
+        if !crate::hook_conflicts::matcher_covers_plan(entry) { continue; }
+        let handlers = entry.get_mut("hooks").and_then(Value::as_array_mut)
+            .ok_or("matching hook entry has no handler array")?;
+        for handler in handlers {
+            if handler.get("type").and_then(Value::as_str) == Some("http")
+                && handler.get("url").and_then(Value::as_str) == Some(HOOK_URL) {
+                handler["timeout"] = json!(HOOK_TIMEOUT_SECS);
+                replaced = true;
+            }
         }
     }
     if !replaced {
-        pre_arr.push(json!({
-            "matcher": "ExitPlanMode",
-            "hooks": [
-                { "type": "http", "url": HOOK_URL, "timeout": HOOK_TIMEOUT_SECS }
-            ]
-        }));
+        let handler = json!({ "type": "http", "url": HOOK_URL, "timeout": HOOK_TIMEOUT_SECS });
+        if let Some(entry) = pre_arr.iter_mut().find(|e| e.get("matcher").and_then(Value::as_str) == Some("ExitPlanMode")) {
+            entry.get_mut("hooks").and_then(Value::as_array_mut)
+                .ok_or("matching hook entry has no handler array")?.push(handler);
+        } else {
+            pre_arr.push(json!({ "matcher": "ExitPlanMode", "hooks": [handler] }));
+        }
     }
 
     let obj = root.as_object_mut().expect("checked above");
@@ -556,6 +577,12 @@ pub fn uninstall() -> Result<HookStatus, String> {
 /// containers left behind by the removal are dropped so the file doesn't
 /// accumulate stubs across install/remove cycles.
 pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
+    if !path.exists() { return Ok(get_status_at(path)); }
+    crate::hook_config::stage(path, uninstall_unlocked_at)?;
+    Ok(get_status_at(path))
+}
+
+fn uninstall_unlocked_at(path: &std::path::Path) -> Result<HookStatus, String> {
     let Ok(content) = fs::read_to_string(path) else {
         return Ok(get_status_at(path)); // nothing to remove
     };
@@ -569,17 +596,14 @@ pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
         .pointer_mut("/hooks/PreToolUse")
         .and_then(|v| v.as_array_mut())
     {
-        pre_arr.retain(|entry| {
-            let ours = entry.get("matcher").and_then(|v| v.as_str()) == Some("ExitPlanMode")
-                && entry
-                    .get("hooks")
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|hooks| {
-                        hooks
-                            .iter()
-                            .any(|h| h.get("url").and_then(|v| v.as_str()) == Some(HOOK_URL))
-                    });
-            !ours
+        pre_arr.retain_mut(|entry| {
+            if !crate::hook_conflicts::matcher_covers_plan(entry) { return true; }
+            let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) else { return true; };
+            let before = handlers.len();
+            handlers.retain(|h| !(h.get("type").and_then(Value::as_str) == Some("http")
+                && h.get("url").and_then(Value::as_str) == Some(HOOK_URL)));
+            let emptied = before > 0 && handlers.is_empty();
+            !emptied || entry.as_object().is_some_and(|obj| obj.keys().any(|k| k != "matcher" && k != "hooks"))
         });
     }
     if root
@@ -733,7 +757,7 @@ pub fn install_capture() -> Result<bool, String> {
 /// command from an older build self-heals); otherwise a new entry is appended.
 /// Preserves any other UserPromptSubmit hooks the user configured.
 pub fn install_capture_at(path: &std::path::Path) -> Result<bool, String> {
-    capture_spec().install_at(path)
+    edit_capture_at(path, true)
 }
 
 pub fn uninstall_capture() -> Result<bool, String> {
@@ -744,12 +768,96 @@ pub fn uninstall_capture() -> Result<bool, String> {
 /// containers so the file doesn't accumulate stubs (mirrors the ExitPlanMode
 /// uninstall cleanup). Returns whether the hook is still installed afterward.
 pub fn uninstall_capture_at(path: &std::path::Path) -> Result<bool, String> {
-    capture_spec().uninstall_at(path)
+    if !path.exists() { return Ok(false); }
+    edit_capture_at(path, false)
+}
+
+fn edit_capture_at(path: &std::path::Path, install: bool) -> Result<bool, String> {
+    let _guard = crate::hook_config::lock();
+    let original = crate::hook_config::read(path)?;
+    let mut root: Value = match &original {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|e| format!("invalid settings JSON: {e}"))?,
+        None => json!({}),
+    };
+    let object = root.as_object_mut().ok_or("settings root is not a JSON object")?;
+    if !install && !object.contains_key("hooks") { return Ok(false); }
+    let hooks = object.entry("hooks").or_insert_with(|| json!({})).as_object_mut().ok_or("hooks is not an object")?;
+    if !install && !hooks.contains_key("UserPromptSubmit") { return Ok(false); }
+    let entries = hooks.entry("UserPromptSubmit").or_insert_with(|| json!([])).as_array_mut().ok_or("UserPromptSubmit is not an array")?;
+    let mut found = false;
+    for entry in entries.iter_mut() {
+        let handlers = entry.get_mut("hooks").and_then(Value::as_array_mut).ok_or("capture matcher has no handler array")?;
+        handlers.retain_mut(|handler| {
+            let ours = handler.get("type").and_then(Value::as_str) == Some("command")
+                && handler.get("command").and_then(Value::as_str).is_some_and(|c| crate::hook_conflicts::targets_url(c, CAPTURE_INGEST_URL));
+            if !ours { return true; }
+            if !install || found { return false; }
+            handler["command"] = json!(capture_spec().command()); handler["timeout"] = json!(5);
+            found = true; true
+        });
+    }
+    if install && !found { entries.push(json!({"hooks":[{"type":"command","command":capture_spec().command(),"timeout":5}]})); }
+    entries.retain(|entry| !entry["hooks"].as_array().is_some_and(Vec::is_empty)
+        || entry.as_object().is_some_and(|o| o.keys().any(|k| k != "matcher" && k != "hooks")));
+    if entries.is_empty() { hooks.remove("UserPromptSubmit"); }
+    if hooks.is_empty() { root.as_object_mut().unwrap().remove("hooks"); }
+    crate::hook_config::replace(path, original.as_deref(), &root)?;
+    Ok(capture_installed_at(path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_matcher_status_install_timeout_and_uninstall_preserve_siblings() {
+        let path = tmppath();
+        let foreign = json!({"type":"command","command":"plannotator","timeout":345600});
+        let custom = json!({"type":"http","url":HOOK_URL,"timeout":600,"headers":{"custom":"keep"}});
+        let original = json!({"hooks":{"PreToolUse":[{"matcher":"Edit|ExitPlanMode","metadata":"keep","hooks":[foreign.clone(),custom]}]}});
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(get_status_at(&path).installed, "Redline can follow a foreign handler");
+        ensure_timeout_current_at(&path);
+        let updated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["hooks"]["PreToolUse"][0]["hooks"][0], foreign);
+        assert_eq!(updated["hooks"]["PreToolUse"][0]["hooks"][1]["timeout"], HOOK_TIMEOUT_SECS);
+        assert_eq!(updated["hooks"]["PreToolUse"][0]["hooks"][1]["headers"]["custom"], "keep");
+        uninstall_at(&path).unwrap();
+        let updated: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["hooks"]["PreToolUse"][0]["hooks"], json!([foreign]));
+        assert_eq!(updated["hooks"]["PreToolUse"][0]["metadata"], "keep");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn status_searches_later_matchers_and_timeout_refreshes_all_owned_handlers() {
+        let path = tmppath();
+        let original = json!({"hooks":{"PreToolUse":[
+            {"matcher":"ExitPlanMode","hooks":[{"type":"http","url":"http://elsewhere"}]},
+            {"matcher":"ExitPlanMode","hooks":[{"type":"http","url":HOOK_URL,"timeout":HOOK_TIMEOUT_SECS},{"type":"http","url":HOOK_URL,"timeout":600}]}
+        ]}});
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(get_status_at(&path).installed);
+        ensure_timeout_current_at(&path);
+        assert_eq!(installed_timeout_at(&path), Some(HOOK_TIMEOUT_SECS));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn capture_refresh_and_uninstall_preserve_shared_matcher_siblings() {
+        let path = tmppath();
+        let other = json!({"type":"command","command":"other-capture"});
+        std::fs::write(&path, serde_json::to_vec(&json!({"hooks":{"UserPromptSubmit":[{"custom":"keep","hooks":[other.clone(),{"type":"command","command":format!("curl {CAPTURE_INGEST_URL}"),"timeout":1}]}]}})).unwrap()).unwrap();
+        install_capture_at(&path).unwrap();
+        let root: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["hooks"]["UserPromptSubmit"][0]["hooks"][0], other);
+        assert!(capture_current_at(&path));
+        uninstall_capture_at(&path).unwrap();
+        let root: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root["hooks"]["UserPromptSubmit"][0]["hooks"], json!([other]));
+        assert_eq!(root["hooks"]["UserPromptSubmit"][0]["custom"], "keep");
+        let _ = std::fs::remove_file(&path);
+    }
 
     fn tmppath() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("redline-hook-{}.json", uuid::Uuid::new_v4()))
@@ -1032,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn install_replaces_conflicting_url() {
+    fn install_preserves_conflicting_url() {
         let path = tmppath();
         let existing = json!({
             "hooks": {
@@ -1062,7 +1170,8 @@ mod tests {
         let json: Value = serde_json::from_str(&content).unwrap();
         let arr = json["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["hooks"][0]["url"], HOOK_URL);
+        assert_eq!(arr[0]["hooks"][0]["url"], "http://elsewhere");
+        assert_eq!(arr[0]["hooks"][1]["url"], HOOK_URL);
 
         let _ = std::fs::remove_file(&path);
     }

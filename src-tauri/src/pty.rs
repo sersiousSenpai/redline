@@ -13,15 +13,15 @@
 //! thread renders, it never buffers unboundedly. The reader thread accumulates
 //! bytes in a [`Coalescer`]; a flusher thread drains them once per ~frame so a
 //! stdout burst becomes a few large messages instead of thousands of tiny ones.
-//! Flow control (ACK-based, [`Flow`]) pauses reading when the renderer falls
+//! Flow control (ACK-based, [`Pump`]) pauses reading when the renderer falls
 //! behind so an infinite firehose (`yes`) can't outrun xterm or grow memory
 //! without bound — the kernel PTY buffer fills and the child blocks instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -39,10 +39,14 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(8);
 /// the child process blocks on write, and the UI thread is never flooded.
 const FLOW_HIGH_WATER: usize = 256 * 1024;
 
-/// Safety valve: never let a wedged/throttled frontend permanently starve the
-/// child. If no ACK arrives within this window, read one more chunk anyway — a
-/// slow trickle (~one read per interval), not a flood.
-const FLOW_STALL_VALVE: Duration = Duration::from_millis(200);
+/// An unloaded webview can leave a channel whose sends succeed but whose ACKs
+/// never arrive. Suspend delivery after this grace period and keep draining
+/// into the bounded replay ring. A slow live renderer resumes on its next ACK;
+/// an unloaded renderer never grows an unbounded IPC queue or blocks its shell.
+const FLOW_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Retain only the newest raw output for a fresh xterm instance to replay.
+const REPLAY_CAPACITY: usize = 256 * 1024;
 
 /// Lock a mutex, recovering from poisoning. A panic on any thread that held a
 /// PTY lock poisons that mutex; propagating the poison (the old `.unwrap()`)
@@ -75,88 +79,228 @@ impl Coalescer {
     }
 }
 
-/// The reader→flusher hand-off buffer for one terminal. The reader thread
-/// `push`es; the flusher thread waits on `cond`, then drains.
-struct Pump {
-    buf: Mutex<Coalescer>,
-    cond: Condvar,
-    /// Set by the reader on EOF (or by kill) so the flusher exits after a final
-    /// drain rather than blocking on `cond` forever.
-    closed: AtomicBool,
-}
-
-impl Pump {
-    fn new() -> Arc<Self> {
-        Arc::new(Pump {
-            buf: Mutex::new(Coalescer::default()),
-            cond: Condvar::new(),
-            closed: AtomicBool::new(false),
-        })
-    }
-    fn push(&self, bytes: &[u8]) {
-        lock_ok(&self.buf).push(bytes);
-        self.cond.notify_one();
-    }
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-        self.cond.notify_one();
-    }
-}
-
-struct FlowInner {
-    /// Bytes sent to the frontend but not yet ACKed (written into xterm).
+/// Every byte enters replay exactly once, at read time. The pending buffer,
+/// channel and ACK credit share this lock so attach can discard pending bytes
+/// already covered by replay and send that replay before any later live bytes.
+struct OutputInner {
+    pending: Coalescer,
+    replay: VecDeque<u8>,
+    channel: Option<Channel<Response>>,
+    attachment_id: Option<String>,
+    /// Includes queued bytes as well as sent bytes, bounding the coalescer even
+    /// if the flusher is delayed. Replay is charged before sending it too.
     unacked: usize,
-    /// Set on kill/EOF so a reader parked in the flow gate can always exit.
+    last_ack: Instant,
+    suspended: bool,
+    /// Absolute stream offsets let a late ACK resume only output not delivered
+    /// during suspension, without duplicating the screen's existing history.
+    total_read: u64,
+    last_sent: u64,
     closed: bool,
 }
 
-/// ACK-based flow control between the reader thread (producer) and the frontend
-/// (consumer). The reader parks here while it's run too far ahead of the
-/// renderer; the frontend's `pty_ack` calls drain it.
-struct Flow {
-    inner: Mutex<FlowInner>,
-    cond: Condvar,
+impl OutputInner {
+    fn detach(&mut self) {
+        self.channel = None;
+        self.attachment_id = None;
+        self.pending.take();
+        self.unacked = 0;
+        self.suspended = false;
+    }
+
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let chunk = self.pending.take();
+        if self.send(chunk).is_ok() {
+            self.last_sent = self.total_read;
+        }
+    }
+
+    fn resume(&mut self) {
+        self.suspended = false;
+        let missing = self.total_read.saturating_sub(self.last_sent);
+        let retained = self.replay.len() as u64;
+        let mut bytes = Vec::new();
+        if missing > retained {
+            // The renderer was stalled longer than the ring could retain. A
+            // fresh terminal state plus the retained tail avoids appending an
+            // arbitrary suffix to a half-written escape sequence on screen.
+            bytes.extend_from_slice(b"\x1bc");
+        }
+        bytes.extend(
+            self.replay
+                .iter()
+                .skip(retained.saturating_sub(missing) as usize),
+        );
+        if bytes.is_empty() {
+            return;
+        }
+        self.unacked += bytes.len();
+        if self.send(bytes).is_ok() {
+            self.last_sent = self.total_read;
+        }
+    }
+
+    fn send(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        if let Some(channel) = &self.channel {
+            if let Err(error) = channel.send(Response::new(bytes)) {
+                self.detach();
+                return Err(format!("terminal output channel unavailable: {error}"));
+            }
+        }
+        Ok(())
+    }
 }
 
-impl Flow {
-    fn new() -> Arc<Self> {
-        Arc::new(Flow {
-            inner: Mutex::new(FlowInner {
+/// Reader → replay/coalescer → replaceable frontend channel. Losing a channel
+/// detaches its subscriber; only actual PTY EOF stops this pump.
+struct Pump {
+    inner: Mutex<OutputInner>,
+    cond: Condvar,
+    alive: Arc<AtomicBool>,
+}
+
+impl Pump {
+    fn new(alive: Arc<AtomicBool>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(OutputInner {
+                pending: Coalescer::default(),
+                replay: VecDeque::with_capacity(REPLAY_CAPACITY),
+                channel: None,
+                attachment_id: None,
                 unacked: 0,
+                last_ack: Instant::now(),
+                suspended: false,
+                total_read: 0,
+                last_sent: 0,
                 closed: false,
             }),
             cond: Condvar::new(),
+            alive,
         })
     }
-    /// Account bytes just sent to the frontend.
-    fn on_sent(&self, n: usize) {
-        lock_ok(&self.inner).unacked += n;
+
+    fn push(&self, bytes: &[u8]) {
+        let mut output = lock_ok(&self.inner);
+        output.total_read = output.total_read.saturating_add(bytes.len() as u64);
+        if bytes.len() >= REPLAY_CAPACITY {
+            output.replay.clear();
+            output
+                .replay
+                .extend(&bytes[bytes.len() - REPLAY_CAPACITY..]);
+        } else {
+            let excess = (output.replay.len() + bytes.len()).saturating_sub(REPLAY_CAPACITY);
+            output.replay.drain(..excess);
+            output.replay.extend(bytes);
+        }
+        if output.channel.is_some() && !output.suspended {
+            // The caller gates reads before reaching this point, so pending +
+            // sent credit cannot exceed the high-water mark plus one read.
+            if output.unacked == 0 {
+                output.last_ack = Instant::now();
+            }
+            output.pending.push(bytes);
+            output.unacked += bytes.len();
+            self.cond.notify_one();
+        }
     }
-    /// Frontend reports `n` bytes written into xterm — release that much credit.
-    fn ack(&self, n: usize) {
-        let mut g = lock_ok(&self.inner);
-        g.unacked = g.unacked.saturating_sub(n);
+
+    fn attach(
+        &self,
+        channel: Channel<Response>,
+        attachment_id: Option<String>,
+    ) -> Result<(), String> {
+        let mut output = lock_ok(&self.inner);
+        if output.closed || !self.alive.load(Ordering::Acquire) {
+            return Err("terminal is not running".into());
+        }
+        output.channel = Some(channel);
+        output.attachment_id = attachment_id;
+        output.pending.take();
+        let replay = output.replay.iter().copied().collect::<Vec<_>>();
+        output.unacked = replay.len();
+        output.suspended = false;
+        output.last_sent = output.total_read;
+        output.last_ack = Instant::now();
+        // Wire contract: EVERY subscriber gets exactly one first replay frame,
+        // including an empty frame for a fresh shell. TerminalView suppresses
+        // automatic replies to historical terminal queries only while parsing
+        // this frame. Sending it under the output lock keeps live bytes behind
+        // that boundary, independent of IPC command-response delivery order.
+        let result = output.send(replay);
         self.cond.notify_all();
+        result
     }
-    /// Unblock any parked reader (terminal killed / shell exited).
-    fn close(&self) {
-        lock_ok(&self.inner).closed = true;
-        self.cond.notify_all();
+
+    fn detach(&self, attachment_id: &str) {
+        let mut output = lock_ok(&self.inner);
+        if output.attachment_id.as_deref() == Some(attachment_id) {
+            output.detach();
+            self.cond.notify_all();
+        }
     }
-    /// Block while the renderer is more than `FLOW_HIGH_WATER` behind. Returns on
-    /// ACK progress, on close, or after `FLOW_STALL_VALVE` (safety valve).
-    fn wait_until_drained(&self) {
-        let mut g = lock_ok(&self.inner);
-        while g.unacked > FLOW_HIGH_WATER && !g.closed {
-            let (ng, res) = self
-                .cond
-                .wait_timeout(g, FLOW_STALL_VALVE)
-                .unwrap_or_else(|e| e.into_inner());
-            g = ng;
-            if res.timed_out() {
+
+    fn ack(&self, n: usize, attachment_id: Option<&str>) {
+        let mut output = lock_ok(&self.inner);
+        if output.channel.is_some() && output.attachment_id.as_deref() == attachment_id {
+            if n > 0 && output.unacked > 0 {
+                output.last_ack = Instant::now();
+            }
+            output.unacked = output.unacked.saturating_sub(n);
+            if n > 0 && output.suspended && output.unacked <= FLOW_HIGH_WATER {
+                output.resume();
+            }
+            self.cond.notify_all();
+        }
+    }
+
+    /// Return false on teardown. If ACKs stop, suspend delivery while the
+    /// reader maintains the bounded ring; a late ACK resumes the same view.
+    fn wait_until_drained(&self) -> bool {
+        let mut output = lock_ok(&self.inner);
+        while output.unacked > FLOW_HIGH_WATER && !output.closed && !output.suspended {
+            let remaining = FLOW_STALL_TIMEOUT.saturating_sub(output.last_ack.elapsed());
+            if remaining.is_zero() {
+                output.flush_pending();
+                output.suspended = output.channel.is_some();
                 break;
             }
+            let (next, _) = self
+                .cond
+                .wait_timeout(output, remaining)
+                .unwrap_or_else(|error| error.into_inner());
+            output = next;
         }
+        !output.closed
+    }
+
+    /// Park an idle flusher. It survives detach and wakes on reattach/live
+    /// output; only an actual close with all pending bytes drained ends it.
+    fn wait_for_output(&self) -> bool {
+        let mut output = lock_ok(&self.inner);
+        while output.pending.is_empty() && !output.closed {
+            output = self
+                .cond
+                .wait(output)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        !output.pending.is_empty()
+    }
+
+    fn flush(&self) {
+        let mut output = lock_ok(&self.inner);
+        if !output.pending.is_empty() {
+            output.flush_pending();
+            self.cond.notify_all();
+        }
+    }
+
+    fn close(&self) {
+        self.alive.store(false, Ordering::Release);
+        lock_ok(&self.inner).closed = true;
+        self.cond.notify_all();
     }
 }
 
@@ -164,9 +308,11 @@ struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
-    /// Flow-control credit shared with this tab's reader thread — looked up by
-    /// `pty_ack` and signalled on kill.
-    flow: Arc<Flow>,
+    /// Output, bounded replay, and subscriber-specific flow control.
+    output: Arc<Pump>,
+    /// Startup cwd survives reload independently of the shell's current cwd.
+    cwd: Option<String>,
+    alive: Arc<AtomicBool>,
     /// Child shell pid — used to read its live working directory so a new
     /// terminal can open wherever this one has `cd`'d to.
     pid: Option<u32>,
@@ -208,6 +354,42 @@ impl PtyState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The terminals that are live right now.
+    ///
+    /// Read when Redline is about to restart into a new version. A terminal is
+    /// a process with a shell in it: its scrollback, its child, its working
+    /// directory and whatever was half-typed do not survive the application
+    /// exiting, and the restart summary says so rather than implying they do.
+    pub fn live_ids(&self) -> Vec<String> {
+        self.entries()
+            .into_iter()
+            .filter(|entry| entry.alive)
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    fn entries(&self) -> Vec<PtyInfo> {
+        // Snapshot first: never wait on session I/O while holding the registry.
+        let sessions: Vec<_> = lock_ok(&self.0)
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect();
+        let mut entries: Vec<_> = sessions
+            .into_iter()
+            .map(|(id, session)| {
+                let session = lock_ok(&session);
+                PtyInfo {
+                    id,
+                    cwd: session.cwd.clone(),
+                    pid: session.pid,
+                    alive: session.alive.load(Ordering::Acquire),
+                }
+            })
+            .collect();
+        entries.sort_by(|a, b| a.id.cmp(&b.id));
+        entries
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -229,12 +411,26 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
     on_output: Channel<Response>,
+    attachment_id: Option<String>,
 ) -> Result<(), String> {
     let mut guard = lock_ok(&state.0);
-    if guard.contains_key(&id) {
-        // Already running for this id — treat spawn as idempotent so a
-        // component remount doesn't fork a second shell.
-        return Ok(());
+    while let Some(session) = guard.get(&id).cloned() {
+        // Spawn is idempotent AND rebinds the subscriber. A shell appearing
+        // between is_live and spawn must not leave the new view unattached.
+        drop(guard);
+        let output = lock_ok(&session).output.clone();
+        if output.alive.load(Ordering::Acquire) {
+            return output.attach(on_output, attachment_id);
+        }
+        // EOF can precede the reaper removing this entry. Allow a fresh spawn
+        // in that window without ever removing a concurrent successor.
+        guard = lock_ok(&state.0);
+        if guard
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            guard.remove(&id);
+        }
     }
 
     let size = PtySize {
@@ -256,7 +452,7 @@ pub fn pty_spawn(
         .filter(|d| !d.is_empty())
         .or_else(|| std::env::var("HOME").ok())
         .filter(|d| !d.is_empty());
-    if let Some(dir) = start_dir {
+    if let Some(dir) = &start_dir {
         cmd.cwd(dir);
     }
     cmd.env("TERM", "xterm-256color");
@@ -282,7 +478,7 @@ pub fn pty_spawn(
 
     let killer = child.clone_killer();
     let pid = child.process_id();
-    let mut reader = pair
+    let reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| format!("clone reader failed: {e}"))?;
@@ -291,8 +487,16 @@ pub fn pty_spawn(
         .take_writer()
         .map_err(|e| format!("take writer failed: {e}"))?;
 
-    let flow = Flow::new();
-    let pump = Pump::new();
+    let alive = Arc::new(AtomicBool::new(true));
+    let pump = Pump::new(alive.clone());
+    if let Err(error) = pump.attach(on_output, attachment_id) {
+        // The initial (possibly empty) replay frame can fail if the mounting
+        // webview disappeared during spawn. No registry/reaper owns this child
+        // yet, so reap it here instead of leaking an unreachable shell.
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     let expected_exit = Arc::new(AtomicBool::new(false));
     let expected_exit_for_reaper = expected_exit.clone();
@@ -303,7 +507,9 @@ pub fn pty_spawn(
             master: pair.master,
             writer,
             killer,
-            flow: flow.clone(),
+            output: pump.clone(),
+            cwd: start_dir,
+            alive: alive.clone(),
             pid,
             generation,
             expected_exit: expected_exit.clone(),
@@ -315,24 +521,7 @@ pub fn pty_spawn(
     // firehose can't outrun the renderer (the child blocks on a full PTY buffer
     // instead of flooding the UI thread or growing memory unbounded).
     let pump_for_reader = pump.clone();
-    let flow_for_reader = flow.clone();
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            flow_for_reader.wait_until_drained();
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    // Mark live-terminal activity so the memory keeper defers
-                    // while a shell is actively producing output.
-                    LAST_PTY_OUTPUT_MS.store(crate::ledger::now_millis(), Ordering::Relaxed);
-                    pump_for_reader.push(&buf[..n]);
-                }
-                Err(_) => break,
-            }
-        }
-        pump_for_reader.close();
-    });
+    std::thread::spawn(move || read_output(reader, pump_for_reader));
 
     // Flusher pump: drains the coalescer once per `COALESCE_WINDOW` and pushes
     // one raw-byte message per drain to this tab's Channel. One subscriber per
@@ -340,44 +529,21 @@ pub fn pty_spawn(
     let app_for_flusher = app.clone();
     let id_for_flusher = id.clone();
     std::thread::spawn(move || {
-        loop {
-            // Park until there's data (or the reader closed) — an idle terminal
-            // uses no CPU.
-            {
-                let mut b = lock_ok(&pump.buf);
-                while b.is_empty() && !pump.closed.load(Ordering::Acquire) {
-                    b = pump.cond.wait(b).unwrap_or_else(|e| e.into_inner());
-                }
-                if b.is_empty() {
-                    break; // closed and fully drained
-                }
-            }
-            // Let the rest of a burst land before draining, so it ships as one
-            // large message rather than many small ones.
+        while pump.wait_for_output() {
+            // Coalesce one frame of output. flush and attach use the same
+            // lock: nothing drained before attach can arrive after replay.
             std::thread::sleep(COALESCE_WINDOW);
-            let chunk = lock_ok(&pump.buf).take();
-            if chunk.is_empty() {
-                if pump.closed.load(Ordering::Acquire) {
-                    break;
-                }
-                continue;
-            }
-            let len = chunk.len();
-            if on_output.send(Response::new(chunk)).is_err() {
-                break; // frontend channel gone (tab unmounted)
-            }
-            flow.on_sent(len);
+            pump.flush();
         }
         // An intentional kill (remount cleanup, tab close, app exit) already
         // has a successor or no UI — only an *unexpected* shell death should
         // surface as "[process exited]".
-        if !expected_exit.load(Ordering::SeqCst) {
-            let _ = app_for_flusher.emit(
-                "pty-exit",
-                PtyExit {
-                    id: id_for_flusher,
-                },
-            );
+        let successor_exists = app_for_flusher
+            .try_state::<PtyState>()
+            .and_then(|state| session_of(&state, &id_for_flusher))
+            .is_some_and(|session| lock_ok(&session).generation != generation);
+        if !expected_exit.load(Ordering::SeqCst) && !successor_exists {
+            let _ = app_for_flusher.emit("pty-exit", PtyExit { id: id_for_flusher });
         }
     });
 
@@ -389,6 +555,7 @@ pub fn pty_spawn(
     let id_for_reaper = id;
     std::thread::spawn(move || {
         let status = child.wait();
+        alive.store(false, Ordering::Release);
         // An intentional kill (remount cleanup, tab close, app exit) is not
         // friction; a shell that died on its own is.
         if !expected_exit_for_reaper.load(Ordering::SeqCst) {
@@ -421,6 +588,21 @@ pub fn pty_spawn(
     });
 
     Ok(())
+}
+
+fn read_output(mut reader: Box<dyn Read + Send>, output: Arc<Pump>) {
+    let mut buf = [0u8; 8192];
+    while output.wait_until_drained() {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                LAST_PTY_OUTPUT_MS.store(crate::ledger::now_millis(), Ordering::Relaxed);
+                output.push(&buf[..n]);
+            }
+            Err(_) => break,
+        }
+    }
+    output.close();
 }
 
 /// Pull a session out of the registry without holding the outer lock across
@@ -550,10 +732,58 @@ pub fn pty_write_bytes_checked(state: &PtyState, id: &str, bytes: &[u8]) -> Resu
     write_chunk(&session, bytes)
 }
 
+/// A backend-owned terminal, including its original launch directory. A dead
+/// entry can appear during the short EOF→reaper window; callers must use alive.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PtyInfo {
+    id: String,
+    cwd: Option<String>,
+    pid: Option<u32>,
+    alive: bool,
+}
+
+#[tauri::command(async)]
+pub fn pty_list(state: tauri::State<'_, PtyState>) -> Vec<PtyInfo> {
+    state.entries()
+}
+
+fn attach_session(
+    state: &PtyState,
+    id: &str,
+    on_output: Channel<Response>,
+    attachment_id: String,
+) -> Result<(), String> {
+    let session = session_of(state, id).ok_or_else(|| format!("terminal {id} is not running"))?;
+    let output = lock_ok(&session).output.clone();
+    output.attach(on_output, Some(attachment_id))
+}
+
+/// Rebind an existing shell without forking it. Replay and live writes use one
+/// ordering lock, so the new xterm receives each retained byte exactly once.
+#[tauri::command(async)]
+pub fn pty_attach(
+    state: tauri::State<'_, PtyState>,
+    id: String,
+    on_output: Channel<Response>,
+    attachment_id: String,
+) -> Result<(), String> {
+    attach_session(&state, &id, on_output, attachment_id)
+}
+
+/// Unmount releases only this subscriber; an earlier mount's cleanup cannot
+/// detach the successor. The shell and bounded replay continue until close.
+#[tauri::command(async)]
+pub fn pty_detach(state: tauri::State<'_, PtyState>, id: String, attachment_id: String) {
+    if let Some(session) = session_of(&state, &id) {
+        let output = lock_ok(&session).output.clone();
+        output.detach(&attachment_id);
+    }
+}
+
 /// Registry membership — the handoff's spawn probe.
 #[tauri::command]
 pub fn pty_is_live(state: tauri::State<'_, PtyState>, id: String) -> bool {
-    session_of(&state, &id).is_some()
+    session_of(&state, &id).is_some_and(|session| lock_ok(&session).alive.load(Ordering::Acquire))
 }
 
 #[tauri::command(async)]
@@ -580,10 +810,15 @@ pub fn pty_resize(
 /// high-water mark. Trivial (lock + decrement), so it stays a sync command for
 /// lowest latency. A missing id is a soft no-op (tab already closed).
 #[tauri::command]
-pub fn pty_ack(state: tauri::State<'_, PtyState>, id: String, n: usize) {
+pub fn pty_ack(
+    state: tauri::State<'_, PtyState>,
+    id: String,
+    n: usize,
+    attachment_id: Option<String>,
+) {
     if let Some(session) = session_of(&state, &id) {
-        let flow = lock_ok(&session).flow.clone();
-        flow.ack(n);
+        let output = lock_ok(&session).output.clone();
+        output.ack(n, attachment_id.as_deref());
     }
 }
 
@@ -595,7 +830,7 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
     if let Some(session) = session {
         let mut s = lock_ok(&session);
         s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
-        s.flow.close(); // unpark the reader if it's gated on flow control
+        s.output.close(); // unpark the reader if it's gated on flow control
         let _ = s.killer.kill();
     }
     Ok(())
@@ -624,8 +859,7 @@ pub fn client_pid_and_terminal_for_port(
     else {
         return (None, None);
     };
-    let client_pid =
-        parse_lsof_client_pid(&String::from_utf8_lossy(&output.stdout), peer_port);
+    let client_pid = parse_lsof_client_pid(&String::from_utf8_lossy(&output.stdout), peer_port);
     let terminal = client_pid
         .filter(|_| !shells.is_empty())
         .and_then(|p| walk_to_terminal(p, &shells, ppid_of));
@@ -721,10 +955,7 @@ pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> 
 /// are simply absent from the map — absence is the "keep your last-known label"
 /// signal, never an error.
 #[tauri::command(async)]
-pub fn pty_cwds(
-    state: tauri::State<'_, PtyState>,
-    ids: Vec<String>,
-) -> HashMap<String, String> {
+pub fn pty_cwds(state: tauri::State<'_, PtyState>, ids: Vec<String>) -> HashMap<String, String> {
     let mut pid_to_id: HashMap<u32, String> = HashMap::new();
     for id in ids {
         if let Some(session) = session_of(&state, &id) {
@@ -780,6 +1011,342 @@ fn parse_lsof_cwds(output: &str) -> HashMap<u32, String> {
 mod tests {
     use super::*;
 
+    fn new_output() -> Arc<Pump> {
+        Pump::new(Arc::new(AtomicBool::new(true)))
+    }
+
+    fn recording_channel() -> (Channel<Response>, Arc<Mutex<Vec<u8>>>) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let recorded = bytes.clone();
+        let channel = Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Raw(chunk) = body else {
+                panic!("PTY channels must carry raw bytes");
+            };
+            lock_ok(&recorded).extend(chunk);
+            Ok(())
+        });
+        (channel, bytes)
+    }
+
+    #[test]
+    fn every_attachment_starts_with_one_replay_frame_even_when_empty() {
+        let output = new_output();
+        let frames = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let recorded = frames.clone();
+        let channel = Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Raw(bytes) = body else {
+                panic!("raw bytes")
+            };
+            lock_ok(&recorded).push(bytes);
+            Ok(())
+        });
+        output
+            .attach(channel.clone(), Some("first".into()))
+            .unwrap();
+        assert_eq!(*lock_ok(&frames), vec![Vec::<u8>::new()]);
+        output.push(b"live");
+        output.flush();
+        output.attach(channel, Some("second".into())).unwrap();
+        output.push(b"next");
+        output.flush();
+        assert_eq!(
+            *lock_ok(&frames),
+            vec![vec![], b"live".to_vec(), b"live".to_vec(), b"next".to_vec()]
+        );
+    }
+
+    #[test]
+    fn detached_output_retains_only_the_bounded_tail_without_pending_bytes() {
+        let output = new_output();
+        let bytes: Vec<u8> = (0..REPLAY_CAPACITY * 3).map(|i| (i % 251) as u8).collect();
+        for chunk in bytes.chunks(8192) {
+            assert!(output.wait_until_drained());
+            output.push(chunk);
+        }
+        {
+            let inner = lock_ok(&output.inner);
+            assert_eq!(inner.replay.len(), REPLAY_CAPACITY);
+            assert!(inner.pending.is_empty());
+            assert_eq!(inner.unacked, 0);
+        }
+        let (channel, replayed) = recording_channel();
+        output.attach(channel, Some("new-page".into())).unwrap();
+        assert_eq!(*lock_ok(&replayed), bytes[bytes.len() - REPLAY_CAPACITY..]);
+        assert_eq!(lock_ok(&output.inner).unacked, REPLAY_CAPACITY);
+    }
+
+    #[test]
+    fn reattach_replays_unflushed_output_once_before_live_bytes() {
+        let output = new_output();
+        let (first, old_bytes) = recording_channel();
+        output.attach(first, Some("old".into())).unwrap();
+        output.push(b"before-");
+        let (second, new_bytes) = recording_channel();
+        output.attach(second, Some("new".into())).unwrap();
+        output.flush();
+        output.push(b"after");
+        output.flush();
+        assert!(lock_ok(&old_bytes).is_empty());
+        assert_eq!(*lock_ok(&new_bytes), b"before-after");
+    }
+
+    #[test]
+    fn stale_ack_and_detach_cannot_affect_the_new_attachment() {
+        let output = new_output();
+        output
+            .attach(Channel::new(|_| Ok(())), Some("old".into()))
+            .unwrap();
+        output.push(b"history");
+        output
+            .attach(Channel::new(|_| Ok(())), Some("new".into()))
+            .unwrap();
+        output.ack(1000, Some("old"));
+        output.detach("old");
+        assert_eq!(lock_ok(&output.inner).unacked, 7);
+        assert!(lock_ok(&output.inner).channel.is_some());
+        output.ack(7, Some("new"));
+        assert_eq!(lock_ok(&output.inner).unacked, 0);
+        output.detach("new");
+        assert!(lock_ok(&output.inner).channel.is_none());
+        assert!(output.alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn failed_channel_detaches_without_stopping_the_pump() {
+        let output = new_output();
+        output
+            .attach(
+                Channel::new(|body| match body {
+                    tauri::ipc::InvokeResponseBody::Raw(bytes) if bytes.is_empty() => Ok(()),
+                    _ => Err(std::io::Error::other("gone").into()),
+                }),
+                None,
+            )
+            .unwrap();
+        output.push(b"before-");
+        output.flush();
+        assert!(lock_ok(&output.inner).channel.is_none());
+        assert!(!lock_ok(&output.inner).closed);
+        assert!(output.alive.load(Ordering::Acquire));
+        output.push(b"after");
+        let (channel, replayed) = recording_channel();
+        output.attach(channel, Some("reloaded".into())).unwrap();
+        assert_eq!(*lock_ok(&replayed), b"before-after");
+    }
+
+    #[test]
+    fn missing_ack_suspends_delivery_and_late_ack_resumes_only_missing_bytes() {
+        let output = new_output();
+        let (channel, received) = recording_channel();
+        output.attach(channel, Some("lost-page".into())).unwrap();
+        for _ in 0..=FLOW_HIGH_WATER / 8192 {
+            output.push(&[0; 8192]);
+        }
+        assert_eq!(
+            lock_ok(&output.inner).pending.buf.len(),
+            FLOW_HIGH_WATER + 8192
+        );
+        lock_ok(&output.inner).last_ack = Instant::now() - FLOW_STALL_TIMEOUT;
+        assert!(output.wait_until_drained());
+        {
+            let inner = lock_ok(&output.inner);
+            assert!(inner.channel.is_some());
+            assert!(inner.suspended);
+            assert!(inner.pending.is_empty());
+            assert_eq!(inner.unacked, FLOW_HIGH_WATER + 8192);
+            assert_eq!(inner.replay.len(), REPLAY_CAPACITY);
+        }
+        let sent_before = lock_ok(&received).len();
+        output.push(b"late bytes");
+        output.flush();
+        assert_eq!(lock_ok(&received).len(), sent_before);
+        output.ack(FLOW_HIGH_WATER + 8192, Some("lost-page"));
+        assert!(!lock_ok(&output.inner).suspended);
+        assert_eq!(&lock_ok(&received)[sent_before..], b"late bytes");
+        output.push(b" live");
+        output.flush();
+        assert_eq!(&lock_ok(&received)[sent_before..], b"late bytes live");
+    }
+
+    #[test]
+    fn resume_after_ring_overflow_resets_and_replays_only_retained_tail() {
+        let output = new_output();
+        let (channel, received) = recording_channel();
+        output.attach(channel, Some("slow".into())).unwrap();
+        output.push(b"old screen");
+        output.flush();
+        lock_ok(&output.inner).suspended = true;
+        output.push(&vec![b'x'; REPLAY_CAPACITY * 3]);
+        output.ack(10, Some("slow"));
+        let received = lock_ok(&received);
+        assert_eq!(&received[..12], b"old screen\x1bc");
+        assert_eq!(received.len(), 12 + REPLAY_CAPACITY);
+        assert!(received[12..].iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn first_output_after_idle_gets_a_fresh_ack_grace_period() {
+        let output = new_output();
+        output.attach(Channel::new(|_| Ok(())), None).unwrap();
+        lock_ok(&output.inner).last_ack = Instant::now() - FLOW_STALL_TIMEOUT;
+        output.push(b"first burst after an idle prompt");
+        assert!(lock_ok(&output.inner).last_ack.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn closed_output_rejects_attach_and_releases_read_and_flush_waiters() {
+        let output = new_output();
+        output.close();
+        assert!(!output.wait_until_drained());
+        assert!(!output.wait_for_output());
+        assert!(output.attach(Channel::new(|_| Ok(())), None).is_err());
+        assert!(!output.alive.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn concurrent_flush_and_reattach_preserve_byte_order() {
+        let output = new_output();
+        output
+            .attach(Channel::new(|_| Ok(())), Some("old".into()))
+            .unwrap();
+        output.push(b"prefix-");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker_output = output.clone();
+        let worker_barrier = barrier.clone();
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            worker_output.flush();
+            worker_output.push(b"concurrent-");
+            worker_output.flush();
+        });
+        let (channel, replayed) = recording_channel();
+        barrier.wait();
+        output.attach(channel, Some("new".into())).unwrap();
+        worker.join().unwrap();
+        output.push(b"last");
+        output.flush();
+        assert_eq!(*lock_ok(&replayed), b"prefix-concurrent-last");
+    }
+
+    /// A real shell/PTY, without starting Tauri or the application. Drop kills
+    /// and reaps it even if an assertion fails, so the test cannot orphan it.
+    struct TestPty {
+        state: PtyState,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        output: Arc<Pump>,
+    }
+
+    impl TestPty {
+        fn new() -> Self {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut command = CommandBuilder::new("/bin/sh");
+            command.args(["-c", "stty raw -echo; printf ready; exec cat"]);
+            command.cwd("/tmp");
+            let child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let output = new_output();
+            let state = PtyState::new();
+            lock_ok(&state.0).insert(
+                "real-pty".into(),
+                Arc::new(Mutex::new(PtySession {
+                    master: pair.master,
+                    writer,
+                    killer: child.clone_killer(),
+                    cwd: Some("/tmp".into()),
+                    pid: child.process_id(),
+                    generation: 1,
+                    alive: output.alive.clone(),
+                    output: output.clone(),
+                    expected_exit: Arc::new(AtomicBool::new(false)),
+                })),
+            );
+            let reader_output = output.clone();
+            std::thread::spawn(move || read_output(reader, reader_output));
+            let flusher_output = output.clone();
+            std::thread::spawn(move || {
+                while flusher_output.wait_for_output() {
+                    flusher_output.flush();
+                }
+            });
+            Self {
+                state,
+                child,
+                output,
+            }
+        }
+    }
+
+    impl Drop for TestPty {
+        fn drop(&mut self) {
+            self.output.close();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[test]
+    fn real_pty_rebind_keeps_pid_replays_history_and_lists_dead_entries() {
+        let mut terminal = TestPty::new();
+        let (sender, received) = std::sync::mpsc::channel();
+        let channel = Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Raw(bytes) = body else {
+                panic!("raw bytes")
+            };
+            sender.send(bytes).unwrap();
+            Ok(())
+        });
+        attach_session(&terminal.state, "real-pty", channel, "first".into()).unwrap();
+        let mut initial = Vec::new();
+        while initial.len() < 5 {
+            initial.extend(received.recv_timeout(Duration::from_secs(3)).unwrap());
+        }
+        assert_eq!(initial, b"ready");
+        let before = terminal.state.entries();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].cwd.as_deref(), Some("/tmp"));
+        assert_eq!(before[0].pid, terminal.child.process_id());
+        assert!(before[0].alive);
+        terminal.output.detach("first");
+        let (new_channel, replayed) = recording_channel();
+        attach_session(&terminal.state, "real-pty", new_channel, "second".into()).unwrap();
+        assert_eq!(*lock_ok(&replayed), b"ready");
+        assert_eq!(terminal.state.entries()[0].pid, before[0].pid);
+        pty_write_bytes_checked(&terminal.state, "real-pty", b"after").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while lock_ok(&replayed).len() < 10 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*lock_ok(&replayed), b"readyafter");
+        terminal.child.kill().unwrap();
+        terminal.child.wait().unwrap();
+        terminal.output.close();
+        assert!(!terminal.state.entries()[0].alive);
+        assert!(terminal.state.live_ids().is_empty());
+        assert!(attach_session(
+            &terminal.state,
+            "real-pty",
+            Channel::new(|_| Ok(())),
+            "dead".into()
+        )
+        .is_err());
+        assert!(attach_session(
+            &terminal.state,
+            "missing",
+            Channel::new(|_| Ok(())),
+            "none".into()
+        )
+        .is_err());
+    }
+
     #[test]
     fn pty_write_bytes_is_silent_noop_for_missing_id() {
         // The post-submit auto-continue inject calls this with a best-effort
@@ -827,7 +1394,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(chunks.len() > 1, "a 6 KB write must not go out in one piece");
+        assert!(
+            chunks.len() > 1,
+            "a 6 KB write must not go out in one piece"
+        );
         assert!(chunks.iter().all(|c| c.len() <= PTY_CHUNK));
         assert_eq!(
             chunks.concat(),
@@ -884,12 +1454,13 @@ mod tests {
     fn flow_ack_releases_credit_and_saturates_at_zero() {
         // Sent credit accrues; ACKs release it; over-ACK can't underflow (an
         // out-of-order or duplicate ack must not wrap to a huge unacked count).
-        let flow = Flow::new();
-        flow.on_sent(1000);
-        flow.ack(400);
-        assert_eq!(flow.inner.lock().unwrap().unacked, 600);
-        flow.ack(10_000);
-        assert_eq!(flow.inner.lock().unwrap().unacked, 0);
+        let output = new_output();
+        output.attach(Channel::new(|_| Ok(())), None).unwrap();
+        output.push(&[0; 1000]);
+        output.ack(400, None);
+        assert_eq!(lock_ok(&output.inner).unacked, 600);
+        output.ack(10_000, None);
+        assert_eq!(lock_ok(&output.inner).unacked, 0);
     }
 
     #[test]
@@ -897,7 +1468,8 @@ mod tests {
         // -iTCP:<port> matches BOTH endpoints of the loopback connection; the
         // strip must bind to the terminal hosting the *client* (claude), so
         // the parser must skip Redline's own server-side line.
-        let lsof = "p100\nn127.0.0.1:7676->127.0.0.1:54321\np200\nn127.0.0.1:54321->127.0.0.1:7676\n";
+        let lsof =
+            "p100\nn127.0.0.1:7676->127.0.0.1:54321\np200\nn127.0.0.1:54321->127.0.0.1:7676\n";
         assert_eq!(parse_lsof_client_pid(lsof, 54321), Some(200));
         // No client line at all (connection already gone) → None, never a
         // misattributed pid.
@@ -948,7 +1520,10 @@ mod tests {
         let lsof = "p100\nfcwd\nn/Users/dev/redline\np200\nfcwd\nn/Users/dev/api\n";
         let map = parse_lsof_cwds(lsof);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get(&100).map(String::as_str), Some("/Users/dev/redline"));
+        assert_eq!(
+            map.get(&100).map(String::as_str),
+            Some("/Users/dev/redline")
+        );
         assert_eq!(map.get(&200).map(String::as_str), Some("/Users/dev/api"));
     }
 
@@ -972,9 +1547,10 @@ mod tests {
     fn flow_gate_does_not_block_below_high_water() {
         // Under the high-water mark the reader must never park — interactive
         // output can't wait on an ACK that only comes after it's displayed.
-        let flow = Flow::new();
-        flow.on_sent(FLOW_HIGH_WATER / 2);
-        flow.wait_until_drained(); // returns promptly (no deadlock)
+        let output = new_output();
+        output.attach(Channel::new(|_| Ok(())), None).unwrap();
+        output.push(&vec![0; FLOW_HIGH_WATER / 2]);
+        assert!(output.wait_until_drained()); // returns promptly (no deadlock)
     }
 }
 
@@ -989,7 +1565,7 @@ pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
     for session in drained {
         let mut s = lock_ok(&session);
         s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
-        s.flow.close();
+        s.output.close();
         let _ = s.killer.kill();
     }
     Ok(())

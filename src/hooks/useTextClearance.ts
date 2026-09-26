@@ -141,6 +141,7 @@ export function useTextClearance({
     const onGeometry = rafCoalesce(recompute);
     const ro = new ResizeObserver(onGeometry);
     ro.observe(container);
+    ro.observe(text); // Width gestures move the text while its scroller stays still.
     ro.observe(ctrl); // the label's width moves with the user's font choice
     return () => {
       ro.disconnect();

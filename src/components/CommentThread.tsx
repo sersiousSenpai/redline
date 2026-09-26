@@ -17,6 +17,7 @@ import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import type { TurnMeter } from "../lib/turnMeter";
+import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface CommentThreadProps {
@@ -305,6 +306,7 @@ export const CommentThread = memo(function CommentThread({
         >
           💬 Discuss with {agent}
         </button>
+        <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
         {sidecar && <p style={{ color: "var(--color-ink-muted)", fontSize: "10px", marginTop: 5 }}>A separate read-only discussion seeded with this {author} plan.</p>}
       </div>
     );
@@ -386,6 +388,7 @@ export const CommentThread = memo(function CommentThread({
             stops propagation so it never toggles collapse. */}
         {expanded && (
           <div className="flex items-center gap-1 ml-auto">
+            <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
             <button
               type="button"
               onClick={(e) => {

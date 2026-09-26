@@ -1,3 +1,4 @@
+import { isGraduation } from "./launch";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
@@ -497,5 +498,16 @@ describe("extensionAddDirs", () => {
     expect(
       extensionAddDirs("extension", { ...probe, templateDir: null }),
     ).toEqual([probe.abiDir, probe.sdkDir]);
+  });
+});
+
+describe("chat graduation matching", () => {
+  it("requires the originating chat and matching launch token", () => {
+    const pending = { launchId: "first", chatId: "chat" };
+    expect(isGraduation(pending, { launchId: "first" })).toBe(true);
+    expect(isGraduation(pending, { launchId: "second" })).toBe(false);
+    expect(isGraduation(pending, {})).toBe(false);
+    expect(isGraduation({ launchId: "first" }, { launchId: "first" })).toBe(false);
+    expect(isGraduation(null, { launchId: "first" })).toBe(false);
   });
 });

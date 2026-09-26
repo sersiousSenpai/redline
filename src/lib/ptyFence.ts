@@ -1,20 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// The per-terminal PTY op fence. Spawn, kill and resize for one tab id are
-// chained through a single promise tail so lifecycle ops can never interleave
+// The per-terminal PTY op fence. Spawn, attach, detach, kill and resize for one
+// tab id are chained through a single promise tail so lifecycle ops never interleave
 // (a close racing a still-queued spawn used to orphan a shell). Pure module —
 // no xterm, no Tauri — so the ordering contract is unit-testable.
 //
-// Why WRITES must ride the fence too (the dev-mode lost-keystroke bug): under
-// React StrictMode a fresh terminal mounts twice, queueing [spawn₁, kill₁,
-// spawn₂] here. The verified handoff's spawn signal resolves on spawn₁, and an
-// UNFENCED write then races kill₁ — when it wins, the backend truthfully
-// reports the write delivered into pty₁, which kill₁ destroys a beat later;
-// the user watches pty₂ come up empty. A delivery that "succeeded" with no
-// evidence on screen. Fenced, the write serializes behind the churn and lands
-// in the surviving shell; in production (no double-mount) the fence is empty
-// and this is a pass-through.
+// Verified handoff writes use this fence too, so they follow any pending
+// connection work. Previously StrictMode teardown killed and respawned the
+// shell, letting an unfenced write land in the doomed process. Views now
+// detach and reattach instead; explicit closes still kill, and ordering the
+// handoff after queued lifecycle work remains necessary.
 
 const ptyLifecycle = new Map<string, Promise<unknown>>();
 

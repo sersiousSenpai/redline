@@ -22,6 +22,12 @@ The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API.
 
 Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.
 
+## While a version change is in progress
+
+Redline can build and install a replacement of itself (see `docs/self-develop.md`). During the two short windows around that — while it is saving and draining before the restart, and while a freshly installed release is proving it works — **every mutating request is refused with `503` and a `Retry-After: 5` header**, whatever its auth class, including the hook contract. Reads are unaffected.
+
+This is not a failure to report: anything written in either window could be taken away by a recovery the caller never asked for. The body carries a sentence explaining it. Retry.
+
 ## Routes
 
 | Method | Path | Auth | Purpose | Request | Response |
@@ -52,12 +58,17 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | POST | `/v1/browser/query` | token: `browser.drive` | Evaluate a DOM-extraction program on a live tab (wakes suspended tabs) | JSON {tab?, query program} | JSON extraction result |
 | POST | `/v1/browser/navigate` | token: `browser.drive` | Navigate a tab | JSON {tab?, url} | JSON navigation result |
 | POST | `/v1/browser/click` | token: `browser.drive` | Click an element on a live tab | JSON {tab?, selector/target} | JSON click result |
+| POST | `/v1/browser/action` | token: `browser.drive` | Run a serialized typed action on an explicit stable browser target with an observed outcome | JSON {operationId, label, expectedRevision?, timeoutMs?, operation:{kind: navigate/click/fill/key/scroll/select/wait, ...}}; no active-tab fallback | JSON {operationId, label, status, elapsedMs, observed, error}; repeat an identical operation ID to retrieve its retained outcome |
 | POST | `/v1/browser/open` | token: `browser.drive` | Open a new tab | JSON {url} | JSON new-tab summary |
 | POST | `/v1/browser/focus` | token: `browser.drive` | Focus a tab | JSON {tab} | JSON focus result |
 | POST | `/v1/browser/download` | token: `browser.drive` | Save the viewed page or a linked file to disk (the agent's only file-write path) | JSON {tab?, url?, destination} | JSON saved-file path |
-| GET | `/v1/mission/active` | open | The active research mission's goal and enrollment | — | JSON mission summary (or none) |
-| GET | `/v1/mission/findings` | open | The user's pinned findings for the active mission | — | JSON pin list |
-| POST | `/v1/linked/consult` | token: `consult` | Delegate a heavy tab to its own page-discussion agent for a digest (map-reduce) | JSON {tab, question} | JSON digest text |
+| GET | `/v1/mission/active` | open | The active research mission's goal and enrollment | —; legacy active lookup, use /v1/missions/:mission_id for immutable scope | JSON mission summary (or none) |
+| GET | `/v1/mission/findings` | open | The user's pinned findings for the active mission | —; legacy active lookup, use /v1/missions/:mission_id/findings for immutable scope | JSON pin list |
+| GET | `/v1/missions/:mission_id` | open | Read the exact research mission regardless of the workspace currently on screen | mission id in path | JSON mission or 404 |
+| GET | `/v1/missions/:mission_id/findings` | open | Read pinned findings belonging to the exact mission | mission id in path | JSON {missionId, workspaceId, findings} |
+| GET | `/v1/missions/:mission_id/tabs` | open | Read the mission's persisted page enrollment with stable browser labels | mission id in path | JSON {missionId, workspaceId, tabs:[{id, browseId, label, url, title, ...}]} |
+| POST | `/v1/missions/:mission_id/tabs` | token: `browser.drive` | Open or reuse an HTTP(S) page in the exact mission workspace and materialize its browser target | mission id in path; JSON {url} | JSON {ok, missionId, workspaceId, label, tab, revision} |
+| POST | `/v1/missions/:mission_id/foundation` | token: `memory.write` | Resolve immutable mission context or submit attributed runtime progress and evidence; user-only configuration, publication, judgments and handoffs are rejected | JSON {missionId, workspaceId, op, ...}; both IDs must match path; op: read/resolve/export/startRun/checkpointRun/finishRun/ingestFinding/observe/enqueueCapture/indexCapture/searchEvidence/curatedExamples; all operations require memory.write or master token | JSON operation result; 400 for path/body scope mismatch; 403 for user-only operations; 502 for operation failure; startRun freezes permitted context and is idempotent by key |
 | POST | `/v1/global/consult` | token: `consult` | Companion fan-out: consult any surface's agent for a digest | JSON {surface/agent, question} | JSON digest text |
 | GET | `/v1/global/agents` | open | The agent map: which per-surface agents exist right now | — | JSON agent list |
 | GET | `/v1/code/projects` | open | The user's known project folders (the browse agent's code map) | — | JSON project path list |
@@ -124,10 +135,10 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 - `plan.suggest` — `POST /v1/sessions/:session_id/suggestions`
 - `plan.comment` — `POST /v1/sessions/:session_id/comments`
 - `plan.offer` — `POST /v1/sessions/:session_id/comment-offers`
-- `browser.drive` — `POST /v1/browser/query`, `POST /v1/browser/navigate`, `POST /v1/browser/click`, `POST /v1/browser/open`, `POST /v1/browser/focus`, `POST /v1/browser/download`
-- `consult` — `POST /v1/linked/consult`, `POST /v1/global/consult`
+- `browser.drive` — `POST /v1/browser/query`, `POST /v1/browser/navigate`, `POST /v1/browser/click`, `POST /v1/browser/action`, `POST /v1/browser/open`, `POST /v1/browser/focus`, `POST /v1/browser/download`, `POST /v1/missions/:mission_id/tabs`
+- `consult` — `POST /v1/global/consult`
 - `memory.propose` — `POST /v1/memory/proposals`
-- `memory.write` — `POST /v1/memory/remember`, `POST /v1/memory/annotate`, `POST /v1/memory/events`, `POST /v1/memory/browse`, `POST /v1/memory/supersede`, `GET /v1/sync/chains`, `GET /v1/sync/segments/:chain`, `GET /v1/sync/segments/:chain/:from/:to`, `POST /v1/sync/segments`, `GET /v1/sync/redactions`, `GET /v1/sync/acks`, `POST /v1/sync/acks`
+- `memory.write` — `POST /v1/missions/:mission_id/foundation`, `POST /v1/memory/remember`, `POST /v1/memory/annotate`, `POST /v1/memory/events`, `POST /v1/memory/browse`, `POST /v1/memory/supersede`, `GET /v1/sync/chains`, `GET /v1/sync/segments/:chain`, `GET /v1/sync/segments/:chain/:from/:to`, `POST /v1/sync/segments`, `GET /v1/sync/redactions`, `GET /v1/sync/acks`, `POST /v1/sync/acks`
 - `memory.forget` — `POST /v1/memory/forget`
 - `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`, `POST /v1/memory/runs/:id/revert`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`

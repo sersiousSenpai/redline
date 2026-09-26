@@ -50,7 +50,6 @@ pub const ENV_CODEX_BIN: &str = "REDLINE_CODEX_BIN";
 pub const KNOWN_SEATS: &[&str] = &[
     "companion",
     "browse",
-    "linked",
     "mission",
     "voice",
     "drafter",
@@ -125,12 +124,6 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
         "Answers questions about the page open in one browser tab and drives \
          that tab through the local bridge.",
         "When you message a tab's page discussion.",
-    ),
-    (
-        "linked",
-        "Carries one conversation spanning all browser tabs, folding per-tab \
-         digests into a single thread.",
-        "When you message the linked discussion.",
     ),
     (
         "mission",

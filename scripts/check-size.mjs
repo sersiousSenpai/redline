@@ -85,6 +85,12 @@ function strayAnalysisArtifacts() {
 }
 
 const binaryPath = join(root, "src-tauri", "target", "release", "redline");
+// The activation helper ships INSIDE Redline.app (Contents/Resources), so it
+// is a shipped artifact with its own ceiling. Budgeted separately from the app
+// binary on purpose: the helper's defining property is that it does not link
+// the application it installs, and a dependency creeping in would show up here
+// as megabytes rather than as nothing at all.
+const helperPath = join(root, "src-tauri", "target", "release", "redline-activate");
 const boot = bootPathJs();
 const checks = [
   {
@@ -96,6 +102,12 @@ const checks = [
   // serves MCP itself at /mcp from polis-mcp, so there is no second binary to
   // budget. (Its lesson stays: a workspace-wide build feature-unifies reqwest
   // into every member — measure a member on its own feature set.)
+  {
+    name: "activation helper (src-tauri/target/release/redline-activate)",
+    actual: existsSync(helperPath) ? statSync(helperPath).size : null,
+    limit: budget.helperBinBytes,
+    hint: "built by `cargo build --release -p redline-activate`; `tauri build` alone does not produce it",
+  },
   {
     name: `boot-path JS (${boot ? boot.parts.join(" + ") : "dist/index.html entry + modulepreloads"})`,
     actual: boot ? boot.total : null,

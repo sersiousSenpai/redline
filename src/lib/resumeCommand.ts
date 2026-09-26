@@ -141,17 +141,17 @@ const compactRestorePrompt = (
 ): string => {
   const head = `${RESTORE_TRIGGER_PREFIX}${stamp} — `;
   const body = primed
-    ? "call ExitPlanMode now, as your very first action, with your plan file " +
-      "exactly as it stands."
+    ? "reopening this plan for review. Redline has put its restore marker in your plan file " +
+      "and re-presents its own saved copy (nothing is lost), so call ExitPlanMode now " +
+      "as your first action with the file as it stands."
     : `write exactly \`${restoreSentinel(sessionId)}\` as your plan file's ` +
-      "contents, then call ExitPlanMode.";
+      "contents, then call ExitPlanMode. Redline re-presents its own saved copy (nothing is lost).";
   // `--permission-mode plan` lands a RESUMED session in plan mode on 2.1.222
   // (it did not on 2.1.178), so this is a fallback clause, not a round trip.
   return (
     head +
     body +
-    " Nothing else — Redline re-presents the plan it holds and ignores what " +
-    "you submit. (Enter plan mode first if you are not in it.)"
+    " (Enter plan mode first if you are not in it.)"
   );
 };
 

@@ -40,7 +40,10 @@ pub struct QueuedBrowseSend {
     text: String,
     snapshot: Option<String>,
     cwd: Option<String>,
-    tandem: Option<bool>,
+    target_label: Option<String>,
+    following_tabs: bool,
+    mission_goal: Option<(String, String)>,
+    mission_id: Option<String>,
 }
 
 /// Registry of running browse turns, keyed by `browse_id` (the per-tab UUID),
@@ -93,10 +96,7 @@ impl BrowseState {
 
     /// "Check in with a colleague": run THIS tab's browse agent to completion
     /// with a synthesis-framed question and return only its digest. Backs the
-    /// `/v1/linked/consult` route — a linked discussion delegates a heavy tab to
-    /// its own page-discussion agent (which already holds that tab's full thread)
-    /// so only the boiled-down answer, not the raw thread, enters the linked
-    /// conversation's context.
+    /// Companion global consult route; the caller receives a digest of the page thread.
     ///
     /// Unlike `browse_send` (fire-and-forget, streamed via events), this awaits
     /// the whole turn inline behind a timeout so the calling curl blocks for the
@@ -129,7 +129,7 @@ impl BrowseState {
             id: uuid::Uuid::new_v4().to_string(),
             browse_id: browse_id.clone(),
             role: "user".to_string(),
-            body: format!("🔗 Linked discussion checking in — {}", question.trim()),
+            body: format!("Companion checking in — {}", question.trim()),
             status: "complete".to_string(),
             created_at: now_millis(),
         };
@@ -148,10 +148,10 @@ impl BrowseState {
              concise. Their question:\n\n{}",
             question.trim()
         );
-        // The consult already runs under the linked agent's mission-framed
+        // The consult already runs under the calling agent's mission-framed
         // question, so it needs no separate mission block of its own.
         let prompt = match &prior_session {
-            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None, None),
+            None => build_first_turn_prompt(snapshot.as_deref(), &framed, None),
             Some(_) => framed.clone(),
         };
 
@@ -202,7 +202,7 @@ impl BrowseState {
         }
 
         // Drive inline behind a ceiling so a stuck colleague can't block the
-        // linked agent's curl forever.
+        // calling agent's curl forever.
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
             drive_browse_stream(&app, &browse_id, &buf, stdout, stderr),
@@ -362,47 +362,9 @@ struct BrowseQueueAdvanced {
 /// grounding, how to drive the browser via the local curl endpoints, and the
 /// user's message. Follow-up turns send the user's text verbatim (the session
 /// already carries this context and can re-`curl /snapshot` for a fresh view).
-/// Turn the user's accumulated source thumbs into a one-line preference hint for
-/// the tandem agent prompt: the domains they most consistently thumbed up vs
-/// down. Returns None when there's nothing learned yet (no non-zero domains).
-fn build_pref_line(db: &Database) -> Option<String> {
-    let summary = db.domain_feedback_summary().ok()?;
-    // domain_feedback_summary is sorted score DESC; take the strongest of each.
-    let prefer: Vec<String> = summary
-        .iter()
-        .filter(|(_, score)| *score > 0)
-        .take(5)
-        .map(|(d, _)| d.clone())
-        .collect();
-    let avoid: Vec<String> = summary
-        .iter()
-        .rev()
-        .filter(|(_, score)| *score < 0)
-        .take(5)
-        .map(|(d, _)| d.clone())
-        .collect();
-    if prefer.is_empty() && avoid.is_empty() {
-        return None;
-    }
-    let mut line = String::from(
-        "Learned from the user's past thumbs on sources — weight your page choice accordingly:",
-    );
-    if !prefer.is_empty() {
-        line.push_str(" tends to PREFER ");
-        line.push_str(&prefer.join(", "));
-        line.push('.');
-    }
-    if !avoid.is_empty() {
-        line.push_str(" tends to AVOID ");
-        line.push_str(&avoid.join(", "));
-        line.push('.');
-    }
-    Some(line)
-}
-
 /// CACHE-STABLE ORDERING — all INVARIANT text (role intro, tool docs, the
-/// skill reference, the tandem-mode contract) forms one stable prefix, and
-/// every VARIABLE section (mission block, page snapshot, learned prefs, the
+/// skill reference) forms one stable prefix, and
+/// every VARIABLE section (mission block, page snapshot, the
 /// user's message) comes after it. Two first turns differing only in variable
 /// inputs share a byte-identical prefix, which is what lets the model-side
 /// prompt cache hit across sessions. Same information as before — only the
@@ -410,8 +372,6 @@ fn build_pref_line(db: &Database) -> Option<String> {
 fn build_first_turn_prompt(
     snapshot: Option<&str>,
     user_text: &str,
-    tandem: bool,
-    prefs: Option<&str>,
     mission: Option<(&str, &str)>,
 ) -> String {
     let mut p = String::from(
@@ -523,28 +483,6 @@ fn build_first_turn_prompt(
          drive the tab, and how to format your reply. Respond directly and \
          concisely in markdown; keep browser actions purposeful.\n\n",
     );
-    if tandem {
-        p.push_str(
-            "TANDEM AGENT MODE is ON. When the user asks about a definition, \
-             concept, library, tool, API, or anything that is better understood \
-             by looking at a web page, do this:\n\
-             1. Use WebSearch to find the strongest explainer, then `/navigate` \
-             the ACTIVE tab to that single best page (use /navigate, NOT /open — \
-             the page must fill the browser half the user is looking at).\n\
-             2. Answer the question concisely in markdown.\n\
-             3. Offer ~2 ALTERNATIVE sources for the user to choose from. Do NOT \
-             auto-open the alternates — the user opens them if they want.\n\
-             4. End your reply with a machine-readable sources block listing the \
-             page you opened (primary) and the alternates, in this exact fenced \
-             form (the app parses it and hides it from view — never describe it):\n\
-             ```rl-sources\n\
-             [{\"url\":\"https://…\",\"title\":\"…\",\"primary\":true},{\"url\":\"https://…\",\"title\":\"…\"},{\"url\":\"https://…\",\"title\":\"…\"}]\n\
-             ```\n\
-             Every source you cite (primary and alternates) MUST appear in that \
-             block. If the question is conversational and no page helps, skip the \
-             navigation and omit the block.\n\n",
-        );
-    }
     // --- variable content below; nothing invariant may follow ---
     p.push_str(&mission_context_block(mission));
     if let Some(snap) = snapshot {
@@ -552,14 +490,6 @@ fn build_first_turn_prompt(
             p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
             p.push_str(snap.trim());
             p.push_str("\n\n");
-        }
-    }
-    if tandem {
-        if let Some(prefs) = prefs {
-            if !prefs.trim().is_empty() {
-                p.push_str(prefs.trim());
-                p.push_str("\n\n");
-            }
         }
     }
     p.push_str("The user says:\n");
@@ -572,6 +502,27 @@ fn build_first_turn_prompt(
 }
 
 // --- Commands --------------------------------------------------------------
+
+/// A first-turn snapshot can finish after the same conversation moves to a
+/// different workspace. Resolve the captured owner, never a newer active goal.
+/// Missing workspace IDs retain the legacy active-mission fallback.
+fn captured_browse_mission(
+    db: &Database,
+    workspace_id: Option<&str>,
+    legacy_active_id: Option<&str>,
+) -> Result<Option<crate::state::Mission>, String> {
+    let id = match workspace_id {
+        Some("regular") => return Ok(None),
+        Some(id) if id.trim().is_empty() => return Err("Workspace ID cannot be empty".into()),
+        Some(id) => Some(id),
+        None => legacy_active_id,
+    };
+    let Some(id) = id else { return Ok(None) };
+    db.get_mission(id)
+        .map_err(|e| format!("Failed to read captured mission: {e}"))?
+        .map(Some)
+        .ok_or_else(|| "The captured mission no longer exists; send again from the intended workspace".into())
+}
 
 /// Send a turn to a tab's browse agent. The first turn starts a fresh `claude`
 /// session (capturing its id); later turns resume it. Streaming happens via
@@ -586,18 +537,25 @@ pub async fn browse_send(
     text: String,
     snapshot: Option<String>,
     cwd: Option<String>,
-    tandem: Option<bool>,
     queue: Option<bool>,
+    target_label: Option<String>,
+    following_tabs: Option<bool>,
+    workspace_id: Option<String>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
     let message_id = uuid::Uuid::new_v4().to_string();
+    let active_id = app.state::<crate::ActiveMission>().active_id();
+    let mission = captured_browse_mission(&browse.db, workspace_id.as_deref(), active_id.as_deref())?;
     let payload = QueuedBrowseSend {
         text: text.clone(),
         snapshot,
         cwd,
-        tandem,
+        target_label,
+        following_tabs: following_tabs.unwrap_or(false),
+        mission_goal: mission.as_ref().map(|m| (m.title.clone(), m.goal.clone())),
+        mission_id: mission.map(|m| m.mission_id),
     };
 
     // The reservation is atomic and spans the whole spawn; early `?` returns
@@ -685,40 +643,33 @@ fn start_browse_turn(
             text,
             snapshot,
             cwd,
-            tandem,
+                target_label,
+            following_tabs,
+            mission_goal,
+            mission_id,
         } = payload;
         // The drain path has no command-injected State params — reach the shared
         // singletons through the app handle instead.
-        let active_mission = app.state::<crate::ActiveMission>();
         let active_surface = app.state::<crate::ActiveSurface>();
 
         let prior_session = browse.db.get_browse_session(&browse_id);
 
-        // First turn wraps the message with the snapshot + tool docs; follow-ups
-        // are verbatim (the resumed session already carries that context). In tandem
-        // mode the first turn also carries the learned source-preference line so the
-        // agent biases its page picks toward domains the user has thumbed up.
-        let tandem = tandem.unwrap_or(false);
-        // When this tab lives inside an active mission, bake the goal in so the
-        // per-tab agent orients its help to what the user is researching.
-        let mission = active_mission.active_goal();
-        let prompt = match &prior_session {
-            None => {
-                let prefs = if tandem {
-                    build_pref_line(&browse.db)
-                } else {
-                    None
-                };
-                build_first_turn_prompt(
-                    snapshot.as_deref(),
-                    &text,
-                    tandem,
-                    prefs.as_deref(),
-                    mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
-                )
-            }
+        // A fresh conversation starts with its captured page and mission.
+        let mission = mission_goal;
+        let mut prompt = match &prior_session {
+            None => build_first_turn_prompt(snapshot.as_deref(), &text, mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str()))),
             Some(_) => text.clone(),
         };
+
+        if let Some(label) = target_label {
+            let target = serde_json::to_string(&label).unwrap_or_default();
+            prompt.push_str(&format!("\n\nBrowser context captured when this message was sent: target label {target}; conversation scope: {}. This remains the action target if the user changes tabs during this turn. Resolve this stable label against /v1/browser/tabs before acting; do not fall back to the globally active tab. Use explicit ?tab= selectors for reads and POST /v1/browser/action for mutations with operationId, label, expectedRevision, operation. Supported kinds: navigate, click, fill, key, scroll, select, wait. Check the returned status and observed state. Never replay an uncertain side effect automatically.\n", if following_tabs { "following tabs (same conversation)" } else { "pinned page" }));
+            if let Some(id) = &mission_id {
+                prompt.push_str(&format!("Captured mission/workspace ID: {id}. Read its goal and findings through GET /v1/missions/{id} and /v1/missions/{id}/findings. Do not substitute the globally active mission during this turn.\n"));
+            } else {
+                prompt.push_str("Captured workspace: regular browsing, with no mission. Do not inherit a mission activated after this message was sent.\n");
+            }
+        }
 
         // Polis ledger: record the first-turn page-discussion prompt WITH its
         // thread provenance (this tab's browse_id + resolved parent), and link the
@@ -728,12 +679,13 @@ fn start_browse_turn(
             let surface = active_surface.kind_and_id();
             let parent = crate::ledger::resolve_parent(
                 None,
-                active_mission.active_id().as_deref(),
+                mission_id.as_deref(),
                 surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
                 "browse",
             );
             if let Some((pk, pid)) = &parent {
-                let _ = crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
+                let _ =
+                    crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
             }
             crate::ledger::record_agent_prompt(
                 &browse.db,
@@ -847,10 +799,7 @@ fn start_browse_turn(
 /// is streaming, since when, and the partial text streamed so far (with its
 /// delta `seq`, the frontend's dedupe watermark).
 #[tauri::command]
-pub fn browse_turn_status(
-    browse: tauri::State<'_, BrowseState>,
-    browse_id: String,
-) -> TurnStatus {
+pub fn browse_turn_status(browse: tauri::State<'_, BrowseState>, browse_id: String) -> TurnStatus {
     browse.turns.status(&browse_id)
 }
 
@@ -982,7 +931,10 @@ async fn drive_browse_stream(
                         },
                     );
                 }
-                StreamLine::Final { text, session_id: sid } => {
+                StreamLine::Final {
+                    text,
+                    session_id: sid,
+                } => {
                     if sid.is_some() {
                         session = sid;
                     }
@@ -1135,8 +1087,14 @@ async fn read_browse(
                 message_id: queued.message_id.clone(),
             },
         );
-        if let Err(e) =
-            start_browse_turn(app.clone(), browse.clone(), browse_id.clone(), payload, slot).await
+        if let Err(e) = start_browse_turn(
+            app.clone(),
+            browse.clone(),
+            browse_id.clone(),
+            payload,
+            slot,
+        )
+        .await
         {
             // The slot released via the guard's Drop. Flip the row so the UI
             // offers "wasn't sent — resend"; no chain-drain (predictable
@@ -1203,12 +1161,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn captured_browse_workspace_wins_over_a_later_active_mission() {
+        let db = Database::open_in_memory().unwrap();
+        for id in ["old-mission", "new-mission"] {
+            db.insert_mission(&crate::state::Mission {
+                mission_id: id.into(), title: format!("Title for {id}"),
+                goal: format!("Goal for {id}"), status: "active".into(),
+                created_at: 1, updated_at: 1,
+            }).unwrap();
+        }
+        assert!(captured_browse_mission(&db, Some("regular"), Some("new-mission")).unwrap().is_none());
+        let original = captured_browse_mission(&db, Some("old-mission"), Some("new-mission")).unwrap().unwrap();
+        assert_eq!(original.mission_id, "old-mission");
+        assert_eq!(original.goal, "Goal for old-mission");
+        assert_eq!(captured_browse_mission(&db, None, Some("new-mission")).unwrap().unwrap().mission_id, "new-mission");
+        assert!(captured_browse_mission(&db, Some("deleted-mission"), Some("new-mission")).is_err());
+        assert!(captured_browse_mission(&db, Some(""), Some("new-mission")).is_err());
+    }
+
+    #[test]
     fn first_turn_prompt_embeds_snapshot_and_tools() {
         let p = build_first_turn_prompt(
             Some(r#"{"url":"https://example.com","title":"Example"}"#),
             "What is this page about?",
-            false,
-            None,
             None,
         );
         assert!(p.contains("https://example.com"));
@@ -1239,7 +1214,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
-        let p = build_first_turn_prompt(None, "open hacker news", false, None, None);
+        let p = build_first_turn_prompt(None, "open hacker news", None);
         assert!(p.contains("open hacker news"));
         assert!(p.contains("/v1/browser/navigate"));
         // No empty snapshot section header.
@@ -1254,9 +1229,10 @@ mod tests {
         let p = build_first_turn_prompt(
             None,
             "How does this page help?",
-            false,
-            None,
-            Some(("Data-breach page", "Draft my firm's data-breach practice page")),
+            Some((
+                "Data-breach page",
+                "Draft my firm's data-breach practice page",
+            )),
         );
         // The goal + mission title are baked in so the per-tab agent orients to it.
         assert!(p.contains("A research MISSION is currently active"));
@@ -1343,15 +1319,11 @@ mod tests {
         let a = build_first_turn_prompt(
             Some(r#"{"url":"https://one.example","title":"One"}"#),
             "first question",
-            false,
-            None,
             None,
         );
         let b = build_first_turn_prompt(
             Some(r#"{"url":"https://two.example","title":"Two"}"#),
             "second question, entirely different",
-            false,
-            None,
             Some(("Mission", "a goal")),
         );
         let shared = common_prefix(&a, &b);
@@ -1362,27 +1334,6 @@ mod tests {
         // And every variable section sits after it.
         assert!(!shared.contains("first question"));
         assert!(!shared.contains("MISSION is currently active"));
-        // Tandem mode widens the invariant prefix but stays stable within
-        // itself.
-        let t1 = build_first_turn_prompt(None, "q1", true, Some("prefers wikipedia"), None);
-        let t2 = build_first_turn_prompt(Some("{}"), "q2", true, None, None);
-        let tshared = common_prefix(&t1, &t2);
-        assert!(tshared.contains("TANDEM AGENT MODE is ON"));
-        assert!(!tshared.contains("prefers wikipedia"));
     }
 
-    #[test]
-    fn tandem_prompt_carries_sources_contract_and_prefs() {
-        let p = build_first_turn_prompt(
-            None,
-            "what is a DAG?",
-            true,
-            Some("Learned: tends to PREFER wikipedia.org."),
-            None,
-        );
-        assert!(p.contains("TANDEM AGENT MODE is ON"));
-        assert!(p.contains("rl-sources"));
-        assert!(p.contains("/navigate"));
-        assert!(p.contains("wikipedia.org"));
-    }
 }

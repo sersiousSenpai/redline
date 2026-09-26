@@ -20,11 +20,15 @@ default-run = "redline"
 members = [
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
+    "crates/redline-activation",
+    "crates/redline-activate",
 ]
 default-members = [
     ".",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
+    "crates/redline-activation",
+    "crates/redline-activate",
 ]
 
 [lib]
@@ -62,6 +66,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pulldown-cmark = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
+# `renamex_np(RENAME_SWAP)` — the atomic bundle exchange activation.rs performs,
+# and `fsync` on a directory so the activation journal survives a crash.
+libc = "0.2"
+# The activation protocol the out-of-process helper also speaks. Shared so the
+# two sides cannot drift; tiny, and deliberately free of any app dependency.
+redline-activation = { path = "crates/redline-activation" }
 # SHA-256 for the append-only prompt/decision ledger's hash chain
 # (entry_hash = sha256(prev_hash ‖ canonical-json(event))). Not previously a dep.
 sha2 = "0.10"

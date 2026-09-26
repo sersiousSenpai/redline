@@ -1,0 +1,12 @@
+{
+  "release_bytes": 37467840,
+  "release_sha256": "3c9d7191e39bc0dc37f3ef17f7e59ae3a5818795b85fa9946bb3c51c437ddcd5",
+  "signed_app_file_bytes": 37607943,
+  "boot_js_bytes": 589660,
+  "dist_bytes": 8363465,
+  "frontend_tests": 2053,
+  "frontend_files": 184,
+  "visual_checks": 102,
+  "visual_screenshots": 33,
+  "changed_sources_during_build": []
+}

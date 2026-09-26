@@ -11,6 +11,12 @@ version 2 adds separate `run_graphs`, `run_nodes`, `run_edges`, and `run_claims`
 tables. `work_items` remains a backlog with provenance, never process ownership.
 The JSON document, normalized rows and revision update in one transaction.
 
+Redline can also run agents against a candidate copy of its **own** source and
+build a complete replacement of itself from the result; that mode reuses this
+runner unchanged, with the candidate workspace as the project path. See
+[Build Redline inside Redline](self-develop.md) for the isolation, packaging
+and restart machinery around it.
+
 ## Execution and verification
 
 Tasks run Claude CLI turns, retain their child session for resume, and share one

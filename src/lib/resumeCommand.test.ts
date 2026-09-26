@@ -47,6 +47,7 @@ describe("buildResumeCommand", () => {
       // One line, and a short one.
       expect(prompt).not.toContain("\n");
       expect(prompt.length).toBeLessThan(320);
+      expect(prompt).toContain("nothing is lost");
     }
   });
 
@@ -106,7 +107,7 @@ describe("buildResumeCommand", () => {
     const primed = visiblePrompt(
       buildResumeCommand("abc-123", NOW, null, false, true),
     );
-    expect(primed).toContain("call ExitPlanMode now, as your very first action");
+    expect(primed).toContain("call ExitPlanMode now as your first action");
     // No Write step to pay for — and no marker to spell out, because the file
     // already holds it. (The hidden context names it for the "somehow not
     // there" case; the visible line does not spend a clause on it.)
@@ -298,4 +299,3 @@ describe("buildResumeCommand — the codex arm", () => {
     ).toBe(buildResumeCommand("abc-123", NOW, "/p"));
   });
 });
-

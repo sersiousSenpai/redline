@@ -57,6 +57,7 @@ export const SURFACE_INNER_TABS: Readonly<
     { id: "live", label: "Live" },
     { id: "history", label: "History" },
     { id: "work", label: "Work" },
+    { id: "build", label: "Build Redline" },
   ],
 };
 

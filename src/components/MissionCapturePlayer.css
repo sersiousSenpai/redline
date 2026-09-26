@@ -1,0 +1,10 @@
+.mission-capture-player { display: grid; gap: 8px; min-width: 0; }
+.mission-capture-player-heading, .mission-capture-player-controls { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mission-capture-player-heading > span { flex: 1; font-size: 11px; opacity: .75; }
+.mission-capture-player-image { display: grid; place-items: center; min-height: 120px; overflow: hidden; border: 1px solid var(--border, #7774); border-radius: 6px; }
+.mission-capture-player-image img { display: block; width: 100%; max-height: 360px; object-fit: contain; }
+.mission-capture-player-image > span, .mission-capture-player-image > div { padding: 12px; }
+.mission-capture-player output { font-variant-numeric: tabular-nums; font-size: 11px; }
+.mission-capture-player input[type=range] { width: 100%; padding: 0; accent-color: var(--accent, #ba5733); }
+.mission-capture-player pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; max-height: 180px; overflow: auto; }
+.mission-capture-player-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

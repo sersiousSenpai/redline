@@ -22,6 +22,7 @@ describe("innerTabs", () => {
       "live",
       "history",
       "work",
+      "build",
     ]);
   });
 
@@ -66,6 +67,7 @@ describe("navTargets", () => {
       { surface: "runs", tab: "live" },
       { surface: "runs", tab: "history" },
       { surface: "runs", tab: "work" },
+      { surface: "runs", tab: "build" },
     ]);
   });
 

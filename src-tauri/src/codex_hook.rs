@@ -98,7 +98,7 @@ fn upsert_command(entries: &mut Vec<Value>, url: &str, hook: Value) {
     for entry in entries.iter_mut() {
         if let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
             handlers.retain_mut(|handler| {
-                if !handler.get("command").and_then(Value::as_str).is_some_and(|cmd| cmd.contains(url)) {
+                if !handler.get("command").and_then(Value::as_str).is_some_and(|cmd| crate::hook_conflicts::targets_url(cmd, url)) {
                     return true;
                 }
                 if found { return false; }
@@ -114,6 +114,11 @@ fn upsert_command(entries: &mut Vec<Value>, url: &str, hook: Value) {
 }
 
 fn install_at(path: &Path) -> Result<CodexHookStatus, String> {
+    crate::hook_config::stage(path, install_unlocked_at)?;
+    Ok(get_status_at(path))
+}
+
+fn install_unlocked_at(path: &Path) -> Result<CodexHookStatus, String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -160,8 +165,8 @@ mod tests {
     fn updating_a_shared_matcher_preserves_other_handlers_and_removes_only_our_duplicates() {
         let foreign = json!({"type":"command","command":"plannotator","timeout":345600});
         let mut entries = vec![
-            json!({"matcher":"*","hooks":[foreign.clone(),{"type":"command","command":format!("old adapter {STOP_URL}")}]}),
-            json!({"hooks":[{"type":"command","command":format!("duplicate {STOP_URL}")}, {"type":"command","command":"another hook"}]}),
+            json!({"matcher":"*","hooks":[foreign.clone(),{"type":"command","command":format!("curl --max-time 600 {STOP_URL}")}]}),
+            json!({"hooks":[{"type":"command","command":format!("/usr/bin/curl {STOP_URL}")}, {"type":"command","command":"another hook"}]}),
         ];
         assert!(!entry_has_command(&entries[0], &stop_command(), false));
         let current = json!({"type":"command","command":stop_command(),"timeout":HOOK_TIMEOUT_SECS});

@@ -1,3 +1,10 @@
+import { useQueuedChatPlans } from "./hooks/useQueuedChatPlans";
+import type { ChatPlanReceipt, ChatPlanRequest } from "./components/ChatRoom";
+import { CONTINUE_EVENT, continuationKey, continuationOrigin, prepareConversationPreview, type ContinueRequest, type ContinueDestination } from "./lib/conversationContinuation";
+import { createPortal } from "react-dom";
+import { createBoundedPortalHost, PersistentPortalSlot } from "./components/PersistentPortalSlot";
+import { HookConflictWarning } from "./components/HookConflictWarning";
+import { useHookConflicts } from "./hooks/useHookConflicts";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
@@ -9,7 +16,8 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
-import { ChevronsLeftRight, ChevronsRightLeft } from "lucide-react";
+import { ZoomButton } from "./components/ZoomButton";
+import { DocWidthToggle } from "./components/DocWidthToggle";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,7 +37,7 @@ const PlanEditor = lazy(() =>
 import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
 import { EmptyState } from "./components/EmptyState";
-import { FrontDoor } from "./components/FrontDoor";
+import { FrontDoor, BackendMenu as PlanningModelMenu } from "./components/FrontDoor";
 import { ReadinessStrip } from "./components/ReadinessStrip";
 import {
   applySeed,
@@ -51,6 +59,7 @@ import {
   type LaunchOrigin,
   type LaunchRestore,
   type PendingLaunch,
+  isGraduation,
   type ProjectChoice,
 } from "./lib/launch";
 import {
@@ -92,23 +101,23 @@ import { deriveActiveSurface } from "./lib/activeSurface";
 import { documentPlateMode } from "./lib/documentPlate";
 import {
   BROWSER_DOCK_KINDS,
+  NO_BROWSER_DOCK,
   CONVERSATION_PIN_KEY,
   activeConversation,
   conversationContexts,
   conversationPose,
+  dockScope, withDockOpen, toggleDockIn, onScopeChange, type DockScope, type DockOpenBy,
   kindPill,
   migrateChatSurfaceOnce,
   pillKind,
   takeDockSeed,
   type ConversationKind,
 } from "./lib/conversationContext";
-import {
-  NO_BROWSER_DOCK,
-  type BrowserDockState,
-  type ChatPill,
+import type {
+  BrowserDockState,
+  ChatPill,
 } from "./lib/browseChatState";
 import { DockContextStrip } from "./components/DockContextStrip";
-import { AwayFeed } from "./components/AwayFeed";
 import { PresenceBar } from "./components/PresenceBar";
 import {
   collabRevisionKey,
@@ -217,6 +226,15 @@ const MemorySurface = lazy(() =>
 // should not carry at boot.
 const RunReport = lazy(() =>
   import("./components/RunReport").then((m) => ({ default: m.RunReport })),
+);
+
+// Build Redline's one piece outside Runs: the readiness indicator, the restart
+// confirmation, and the cover that goes up while Redline is saving its work or
+// checking a version it just installed. Lazy, and it stays unfetched on a
+// machine that never prepares a release — the boot path has single-digit KB of
+// headroom and this has no business on it.
+const ActivationBar = lazy(() =>
+  import("./components/ActivationBar").then((m) => ({ default: m.ActivationBar })),
 );
 
 // The Orchestrate preflight modal. Lazy because it is behind a click that
@@ -391,6 +409,7 @@ import {
   canonicalLayout,
   computePaneLayout,
   isLayoutAtRest,
+  paneCollapseOnMask,
   voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
@@ -452,6 +471,8 @@ import {
   DOC_PAD_R_NARROW,
   DOC_PAD_R_WIDE,
   docControlPose,
+  docArticleWidth,
+  DOC_MEASURE_MIN,
 } from "./lib/docControl";
 import {
   beginResizeSession,
@@ -544,6 +565,9 @@ const HookSetupModal = lazy(() =>
     default: m.HookSetupModal,
   })),
 );
+const HookConflictModal = lazy(() =>
+  import("./components/HookConflictModal").then((m) => ({ default: m.HookConflictModal })),
+);
 
 const BookshelfView = lazy(() =>
   import("./components/BookshelfView").then((m) => ({
@@ -632,47 +656,6 @@ interface ToastSpec {
   message: string;
   tone?: "success" | "info";
   action?: { label: string; onAction: () => void };
-}
-
-// A round control used by the floating document pill (zoom ±, width toggle).
-function ZoomButton({
-  label,
-  title,
-  onClick,
-  active,
-}: {
-  label: ReactNode;
-  title: string;
-  onClick: () => void;
-  /** Draw as engaged — a persistent mode is on, not a momentary press. */
-  active?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      aria-pressed={active}
-      style={{
-        width: "22px",
-        height: "22px",
-        borderRadius: "50%",
-        border: `1px solid ${active ? "var(--color-info)" : "var(--color-rule)"}`,
-        background: "var(--color-paper)",
-        color: active ? "var(--color-info)" : "var(--color-ink)",
-        fontSize: "13px",
-        lineHeight: 1,
-        cursor: "pointer",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-      }}
-    >
-      {label}
-    </button>
-  );
 }
 
 /** The standard per-surface crash-containment fallback (T2.1).
@@ -885,6 +868,16 @@ function App() {
   // Derived views of the single surface value — they keep the many read sites
   // below near-diff-free, and make disagreeing pane booleans unrepresentable.
   const browserOpen = mainSurface === "browser";
+  const [chatHost] = useState(() => createBoundedPortalHost("conversation"));
+  const [chatRegularSlot, setChatRegularSlot] = useState<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const target = chatRegularSlot;
+    if (target) target.appendChild(chatHost); else chatHost.remove();
+    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
+  }, [chatRegularSlot, chatHost]);
+  const [browserHost] = useState(() => createBoundedPortalHost("browser"));
+  const [browserMounted, setBrowserMounted] = useState(browserOpen);
+  useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
   const drafterOpen = mainSurface === "drafter";
   const reviewOpen = mainSurface === "review";
   const serversOpen = mainSurface === "servers";
@@ -896,6 +889,7 @@ function App() {
   // selectSurface — because entering a surface re-arms it. Never persisted:
   // "was immersive" is exactly the stale bit this design refuses to store.
   const [immersiveBroken, setImmersiveBroken] = useState(false);
+  const [panelBreaks, setPanelBreaks] = useState({ sidebar: false, pane: false });
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
     false,
@@ -919,10 +913,10 @@ function App() {
       // not state-driven, exactly like useAutoExitFullscreen: the rule fires
       // on the move and never fights the user afterwards.
       setImmersiveBroken(false);
+      setPanelBreaks({ sidebar: false, pane: false });
       // Leaving the plate the conversation had taken. It does NOT close — it
       // collapses into the dock and comes with you, which is the whole point
       // of there being one column: you walk out of the room still talking.
-      setExpandedKind(null);
       if (next === "review" && mainSurface !== "review") {
         setDiscussionPinned("review");
       } else if (next !== "review" && mainSurface === "review") {
@@ -1189,16 +1183,15 @@ function App() {
   // surfaces closed a conversation the user had deliberately left up. There is
   // one bit now, and `conversationContext.ts` decides WHICH conversation the
   // column is holding — the same shape `mainSurface` gave the center plate.
-  const [dockOpen, setDockOpen] = useState(() => takeDockSeed(localStorage));
+  const [dockOpenBy, setDockOpenBy] = useState<DockOpenBy>(() => takeDockSeed(localStorage) ? { home: true } : {});
+  const dockScopeRef = useRef<DockScope | null>(null);
+  const hasDockConversationRef = useRef(false);
   // The conversation the user asked to see as a ROOM rather than as the column
   // beside a surface — the kind, not a boolean, so the pose can be decided
   // before the context list exists (the mask is computed high up, and a read
   // above its block is a type error rather than a silently wrong value).
   // Never persisted, and cleared by `selectSurface`: coming back to the
   // document later must not find a room you did not ask to re-enter.
-  const [expandedKind, setExpandedKind] = useState<ConversationKind | null>(
-    null,
-  );
   // Which conversation the user pinned when a surface offers several. A
   // TIE-BREAK only (`activeConversation`), never an override: a pin naming a
   // kind this surface hasn't got is ignored rather than obeyed into an empty
@@ -1368,6 +1361,8 @@ function App() {
   const [chatsLoaded, setChatsLoaded] = useState(false);
   // The open conversation's name — the dock's tab label and the active-surface
   // cell's label, from one lookup.
+  const currentChatIdRef = useRef(chatId);
+  currentChatIdRef.current = chatId;
   const chatTitle =
     chats.find((c) => c.companionId === chatId)?.title ?? null;
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
@@ -1408,12 +1403,6 @@ function App() {
   // in-flight fetch is never mistaken for an empty one; with a genuinely empty
   // list the dock offers to start the first one rather than minting one nobody
   // asked for.
-  useEffect(() => {
-    if (!dockOpen || chatId || chatOpening || !chatsLoaded) return;
-    const recent = chats[0];
-    if (recent) setChatId(recent.companionId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dockOpen, chatId, chatOpening, chatsLoaded, chats]);
   // Belt and braces for the surface that moved into the dock: nothing in this
   // build selects `"chat"` any more and the boot migration rewrites the
   // persisted value, but a workspace manifest can still NAME a surface (its
@@ -1421,8 +1410,7 @@ function App() {
   useEffect(() => {
     if (mainSurface !== "chat") return;
     selectSurfaceRef.current("document");
-    setConversationPin("companion");
-    setDockOpen(true);
+    setDockOpenBy(state => withDockOpen(state, "home", true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainSurface]);
 
@@ -1434,6 +1422,9 @@ function App() {
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunch | null>(null);
   const pendingLaunchRef = useRef(pendingLaunch);
   pendingLaunchRef.current = pendingLaunch;
+  const launchedPlansRef = useRef(new Map<string, PendingLaunch>());
+  const [chatReceipts, setChatReceipts] = useState<Record<string, ChatPlanReceipt>>({});
+  const [planSwap, setPlanSwap] = useState<{ launchId: string; from: SwapRect } | null>(null);
   // Focus + seed handoff from the type-to-start listener (see lib/landing.ts).
   const [frontDoorFocus, setFrontDoorFocus] = useState(0);
   // "Can this machine actually deliver a plan" — null until the first probe
@@ -1894,25 +1885,19 @@ function App() {
   );
   // Sections for the drafter voice walkthrough — parsed backend-side from the
   // mirrored markdown, only while the voice drawer is open.
-  useEffect(() => {
-    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
-    let alive = true;
-    void invoke<Section[]>("parse_markdown_sections", {
-      markdown: drafterMarkdown,
-    })
-      .then((s) => alive && setDrafterSections(s))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
   // A plan sent from the browser page-discussion agent, held for a repo-confirm
   // step (SendToRedlineDialog) before it launches into a terminal — so it never
   // silently lands in $HOME.
   const [sendConfirm, setSendConfirm] = useState<{
     markdown: string;
     initialProject: string | null;
+    destination?: ContinueDestination;
+    source?: ContinueRequest["source"];
+    missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" };
   } | null>(null);
+  const [sendPending, setSendPending] = useState(false);
+  const sendPendingRef = useRef(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
@@ -1927,7 +1912,7 @@ function App() {
       // Surface-agnostic: one dock, one toggle. On a surface with no
       // conversation of its own it is simply inert — `voiceDocked` below needs
       // a context, not just the bit.
-      setDockOpen((v) => !v);
+      setDockOpenBy(state => toggleDockIn(state, dockScopeRef.current, hasDockConversationRef.current));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1994,6 +1979,7 @@ function App() {
   // a preference rather than a default — the narrow measure is the better read
   // for sustained prose, but a plan full of tables and code wants the room.
   const [docWide, setDocWide] = usePersistedState("redline.docWide", false);
+  const [docMeasure, setDocMeasure] = usePersistedState("redline.docMeasure", DOC_MEASURE_MIN);
   // The article's right padding, px (`pr-8` in normal view). Wide view widens it
   // to `pl-16`'s 64: the floating control lives in that gutter, and at full-bleed
   // width there is no empty margin left to host it otherwise. Shared with the
@@ -2200,6 +2186,36 @@ function App() {
   // once is what lets the conversation dock tell a plan (which has a
   // discussion) from a file (which has none).
   const plateMode = documentPlateMode(sidebarTab, activeId, activeFile);
+  useLayoutEffect(() => {
+    setPanelBreaks(state => state.pane ? { ...state, pane: false } : state);
+  }, [plateMode]);
+  const currentDockScope = dockScope(mainSurface, plateMode);
+  dockScopeRef.current = currentDockScope;
+  const dockOpen = currentDockScope !== null && !!dockOpenBy[currentDockScope];
+  const previousDockScope = useRef(currentDockScope);
+  useEffect(() => {
+    const previous = previousDockScope.current;
+    previousDockScope.current = currentDockScope;
+    setDockOpenBy(state => onScopeChange(state, previous, currentDockScope));
+  }, [currentDockScope]);
+  useEffect(() => {
+    if (!dockOpen || chatId || chatOpening || !chatsLoaded) return;
+    const recent = chats[0];
+    if (recent) setChatId(recent.companionId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dockOpen, chatId, chatOpening, chatsLoaded, chats]);
+  useEffect(() => {
+    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
+    let alive = true;
+    void invoke<Section[]>("parse_markdown_sections", {
+      markdown: drafterMarkdown,
+    })
+      .then((s) => alive && setDrafterSections(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
   // Whether a conversation may take the plate at all. The Front Door is the
   // plate at REST — no document, no draft, nothing of its own to cover — and
   // that is precisely what lets the door open INTO a conversation instead of
@@ -2208,15 +2224,18 @@ function App() {
   const conversationExpanded =
     conversationPose({
       open: dockOpen,
-      expandedKind,
       plateAtRest,
     }) === "expanded";
+  useLayoutEffect(() => {
+    if (conversationExpanded) setPanelBreaks({ sidebar: false, pane: false });
+  }, [conversationExpanded]);
+
 
   // ---- Immersive surfaces ---------------------------------------------------
   //
-  // A non-document surface takes the whole window: the periphery is masked on
-  // entry and comes back untouched on exit. The mask is DERIVED, never stored
-  // — see lib/immersive.ts for why a snapshot blob would go stale. The names
+  // Surface masks are derived from the current visit rather than a saved
+  // layout snapshot. The discussion preference also closes on entry, so
+  // leaving a masked surface does not reopen it. The names
   // below are the ORIGINAL flag names, so every read site downstream
   // (layoutFlagsRef, computePaneLayout, the JSX guards, browserVisible, the
   // useResizablePane wiring) reads the effective value with no diff at all.
@@ -2241,17 +2260,30 @@ function App() {
   // The second, NARROWER overlay: just the two side panels, leaving the header,
   // the footer and the terminal dock exactly where they are. The sessions list
   // is a document index and the discussion pane is a plan's margin, so on a
-  // surface with no document neither is about anything on screen. Same law as
-  // above — an overlay, never a write, so coming back is the mask lifting.
+  // surface with no document neither is about anything on screen. The overlay
+  // hides immediately; its rising edge also closes the discussion preference.
   // `docPinned` is read from the UNMASKED shape (this never touches it), so
   // there is no cycle.
   const pMask = panelMask({
     conversationExpanded,
     surface: mainSurface,
-    broken: immersiveBroken,
+    broken: panelBreaks,
     enabled: workspaceImmersive(workspace),
     docPinned: baseShape.docPinned,
   });
+  const noPlanPane = mainSurface === "document" && plateMode !== "plan" && !conversationExpanded && !panelBreaks.pane;
+  const combinedPaneMask = pMask.pane || noPlanPane;
+  const previousPaneMask = useRef(false);
+  useLayoutEffect(() => {
+    if (paneCollapseOnMask(previousPaneMask.current, combinedPaneMask)) {
+      setPaneCollapsed(true);
+    }
+    previousPaneMask.current = combinedPaneMask;
+  }, [combinedPaneMask, setPaneCollapsed]);
+  // Only surface masking defers intercepts to a toast. A new plan arriving
+  // on the Front Door can select its plan and open the pane in one batch.
+  const paneMaskedRef = useRef(pMask.pane);
+  paneMaskedRef.current = pMask.pane;
   const {
     sidebarCollapsed,
     paneCollapsed,
@@ -2259,7 +2291,7 @@ function App() {
     termCollapsed,
     termFullscreen,
     docPinned,
-  } = maskPanels(baseShape, pMask);
+  } = maskPanels(baseShape, { ...pMask, pane: combinedPaneMask });
   const panelsAreMasked = panelsMasked(pMask);
   const docVisible = mainSurface === "document" || docPinned;
 
@@ -2269,11 +2301,12 @@ function App() {
   // unhides, and the user wins for the rest of that visit. Nothing here writes
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
-    setImmersiveBroken(true);
+    setPanelBreaks(state => ({ ...state, sidebar: true }));
     setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
+  const openPanePref = useCallback(() => setPaneCollapsed(false), [setPaneCollapsed]);
   const revealPane = useCallback(() => {
-    setImmersiveBroken(true);
+    setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(false);
   }, [setPaneCollapsed]);
   const revealTerm = useCallback(() => {
@@ -2287,11 +2320,11 @@ function App() {
   // masked, the pane reads as closed, so the gesture means "open" — which is
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
-    setImmersiveBroken(true);
+    setPanelBreaks(state => ({ ...state, sidebar: true }));
     setSidebarCollapsed(!sidebarCollapsed);
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
-    setImmersiveBroken(true);
+    setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(!paneCollapsed);
   }, [paneCollapsed, setPaneCollapsed]);
   const toggleTerm = useCallback(() => {
@@ -2380,6 +2413,7 @@ function App() {
     // immersive surface would read "already closed" and do the wrong half of
     // the cycle.
     setImmersiveBroken(true);
+    setPanelBreaks({ sidebar: true, pane: true });
     if (
       isLayoutAtRest(
         {
@@ -3153,6 +3187,7 @@ function App() {
     docPinned,
     docPadR,
     docWide,
+    docMeasure,
   ]);
 
   // Position the latch over the visible remnant of the document. The doc
@@ -3718,7 +3753,10 @@ function App() {
       // front door's `/hooks` nudge is retired for good — and this launch, if
       // it was one, is over.
       setPlanEverArrived(true);
-      setPendingLaunch(null);
+      setPendingLaunch(previous => !payload.launchId || previous?.launchId === payload.launchId ? null : previous);
+      const arrivingLaunch = payload.launchId ? launchedPlansRef.current.get(payload.launchId) ?? null : null;
+      if (payload.launchId) launchedPlansRef.current.delete(payload.launchId);
+      const graduated = isGraduation(arrivingLaunch, payload);
       // A restore landed. Completed off the EVENT, not off a session-id match:
       // `restored` is set only for a re-presentation the daemon rebound to a
       // plan it was holding, and there is at most one restore in flight
@@ -3771,19 +3809,34 @@ function App() {
         // plan, so flip the sidebar back to Sessions and select it.
         const focusIntercepted = () => {
           selectSessions();
-          // …and open the pane the plan is reviewed in. On an immersive
-          // surface this is what stops the intercept landing invisibly: the
-          // periphery is masked, so a plan would otherwise arrive behind a
-          // full-bleed browser with only the window flash to announce it.
-          // Breaking out is the right call either way — an intercept is the
-          // app asking for the reviewer's attention.
-          revealPane();
+          // The intercept or its explicit Review action opens the discussion
+          // together with selecting the plan. A toast alone leaves it closed.
+          openPanePref();
           setActiveId(payload.sessionId);
           // Land on the clean latest, even if the reviewer was parked on a
           // historical version when the revision arrived.
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
         };
+        if (graduated && arrivingLaunch?.chatId) {
+          const chatId = arrivingLaunch.chatId;
+          const title = list.find(item => item.sessionId === payload.sessionId)?.planTitle ?? "Plan";
+          setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
+          setDockOpenBy(state => withDockOpen(state, "plan", true));
+          if (dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
+            const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
+            if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
+            selectSurfaceRef.current("document");
+            focusIntercepted();
+          } else {
+            setToast({ message: "Your chat is now a plan", action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
+          }
+          return;
+        }
+        if (paneMaskedRef.current) {
+          setToast({ message: "New plan intercepted", action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
+          return;
+        }
         // …with one exception. A plan for ANOTHER session, arriving while the
         // reviewer is mid-conversation in the discussion panel, must not yank
         // them away from it: the panel is keyed on the session, so the switch
@@ -3815,6 +3868,7 @@ function App() {
             label: "Review",
             onAction: () => {
               setToast(null);
+              selectSurfaceRef.current("document");
               focusIntercepted();
             },
           },
@@ -4507,7 +4561,7 @@ function App() {
     // views moves the text column's left edge from "centred" to the pane's edge
     // without resizing the scroller the observer watches, so the measurement has
     // to be asked for rather than waited on.
-    deps: [tocDocked, tocEligible, mainSurface, activeId, activeFile, docWide],
+    deps: [tocDocked, tocEligible, mainSurface, activeId, activeFile, docWide, docMeasure],
   });
 
   // The conversation dock's contexts. It sits at PLATE level — a sibling of
@@ -4534,7 +4588,7 @@ function App() {
         browseId: browserDock.browseId,
         browseTitle: browserDock.title,
         browsePill: browserDock.pill,
-        linkedId: browserDock.linkedId,
+        cartId: browserDock.cartId,
         missionId: browserDock.missionId,
         missionTitle: browserDock.missionTitle,
         companionId: chatId,
@@ -4555,6 +4609,7 @@ function App() {
     ],
   );
   const dockContext = activeConversation(dockContexts, conversationPin);
+  hasDockConversationRef.current = dockContext !== null;
   // Two poses, one thread. The plate is "at rest" only on the Front Door —
   // nothing of its own to cover — which is exactly what makes the door a way
   // IN to a conversation rather than a place you navigate away from.
@@ -4562,10 +4617,6 @@ function App() {
   // the user switches contexts from inside it — to one that cannot be a room,
   // or simply to another — the room folds back into the column rather than
   // quietly showing something else at plate scale.
-  useEffect(() => {
-    if (expandedKind && dockContext && dockContext.kind !== expandedKind)
-      setExpandedKind(null);
-  }, [expandedKind, dockContext]);
   // One source of truth for the JSX and for the surrounding layout, so the
   // dock, the divider and the pill can never disagree about whether the
   // column is up.
@@ -4579,10 +4630,9 @@ function App() {
   // action, because "close" must not mean two different things depending on
   // the pose: whichever you were in, you end up back where you were without it.
   const closeDock = useCallback(() => {
-    setDockOpen(false);
-    setExpandedKind(null);
+    setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, false));
   }, []);
-  const openDock = useCallback(() => setDockOpen(true), []);
+  const openDock = useCallback(() => setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true)), []);
   // Which of the browser pane's four panels the dock is showing, in the pane's
   // own vocabulary. Null whenever the column is closed or holding another
   // surface's conversation — which is exactly when the pane must not portal.
@@ -4592,22 +4642,18 @@ function App() {
       const kind = pillKind(pill);
       if (!kind) return;
       setConversationPin(kind);
-      setDockOpen(true);
+      setDockOpenBy(state => withDockOpen(state, "browser", true));
     },
     [setConversationPin],
   );
-  // The browser pane is mounted only while its surface is selected, so its
-  // description of itself has to be dropped when it leaves — otherwise a tab
-  // title outlives the tab it named.
-  useEffect(() => {
-    if (mainSurface !== "browser") setBrowserDock(NO_BROWSER_DOCK);
-  }, [mainSurface]);
+  // BrowserPane remains mounted with its durable pages. Keep its dock
+  // description too; conversationContexts only exposes it on the browser.
   // The dock's bodies are lazy chunks. Warm the room's when the COLUMN opens
   // rather than at the instant the Companion tab is picked, so stepping
   // sideways into it doesn't blank for a beat.
   useEffect(() => {
-    if (dockOpen && chatEnabled) prefetchSurfaceChunk("chat");
-  }, [dockOpen, chatEnabled]);
+    if (dockOpen && currentDockScope === "home" && chatEnabled) prefetchSurfaceChunk("chat");
+  }, [dockOpen, currentDockScope, chatEnabled]);
   // Go to a surface AND a tab inside it. `selectSurface` keeps its signature —
   // it is the one surface mutator and taking a second argument would make
   // every one of its ~30 call sites answer a question it doesn't have — so the
@@ -4765,7 +4811,8 @@ function App() {
   }, [joinedRoom, joinedPresence]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
-  // returned Comment), focus it and auto-open its discussion sidecar.
+  // returned Comment), focus and expand its card inside the discussion pane.
+  // The pane stays closed until the user opens it.
   useEffect(() => {
     const sid = session?.sessionId ?? null;
     const prev = seenCommentsRef.current;
@@ -4779,11 +4826,6 @@ function App() {
     }
     seenCommentsRef.current = { sid, ids };
     if (fresh) {
-      // Reveal the outer comment pane too — otherwise the card/thread expand
-      // inside a collapsed sidecar and nothing becomes visible (the common case
-      // while the user is just talking to the voice agent). Mirrors the
-      // `setPaneCollapsed(false)` that the manual `beginCompose` gesture does.
-      revealPane();
       setAutoOpenCommentId(fresh.id);
       setFocusedCommentId(fresh.id);
     }
@@ -5656,11 +5698,11 @@ function App() {
     userText?: string | null;
     restore: LaunchRestore;
   }): Promise<
-    | { ok: true; terminalId: string }
+    | { ok: true; terminalId: string; launchId: string }
     // `blocked` carries the readiness item itself, not just its label: a door
     // that can render the fix where the user is looking should not have to
     // re-derive which fault it was from a sentence.
-    | { ok: false; reason: string; blocked?: ReadinessItem }
+    | { ok: false; reason: string; blocked?: ReadinessItem; retryable?: boolean }
   > => {
     const trimmed = req.prompt.trim();
     if (!trimmed) return { ok: false, reason: "nothing to launch" };
@@ -5709,7 +5751,7 @@ function App() {
         console.error("integration health failed at launch", err);
         return null;
       });
-    if (!health) return { ok: false, reason: "Could not check the selected planning provider. Try again." };
+    if (!health) return { ok: false, reason: "Could not check the selected planning provider. Try again.", retryable: true };
     applyHealthRef.current(health);
     // A window that owns no port captures no plans: the session would run and
     // its plan would land in a different instance. Bounded — a bind that never
@@ -5765,7 +5807,7 @@ function App() {
     // No terminal means the command was never typed and nothing will ever
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
-    if (!terminalId) return { ok: false, reason: "couldn't open a terminal" };
+    if (!terminalId) return { ok: false, reason: "couldn't open a terminal", retryable: true };
 
     // Polis ledger: record the launched prompt (the plan session doesn't exist
     // yet, so this is the only place its body is first-class). `origin` is
@@ -5794,9 +5836,16 @@ function App() {
       model: choice.model,
       effort: choice.effort,
     }).then(() => null).catch((err: unknown) => String(err));
-    if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}` };
+    if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
-    typeIntoTerminal(terminalId, cmd, "Couldn't type the plan launch");
+    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
+    // Register before typing: an immediate intercept must be able to match the launch.
+    launchedPlansRef.current.set(launchId, pending);
+    const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId, [{ stage: "launch", data: cmd }]);
+    if (!delivery.ok) {
+      launchedPlansRef.current.delete(launchId);
+      return { ok: false, reason: `Couldn't type the plan launch (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
+    }
 
     // The displaced launch is NOT repaid. It is still running in its own
     // terminal tile with its own plan on the way; handing its sentence back
@@ -5804,18 +5853,11 @@ function App() {
     // shipped. `pendingLaunch` is a single slot — the older launch's status
     // lives in its tile, one click away.
     setReadinessNow(startedAt);
-    setPendingLaunch({
-      origin: req.origin,
-      prompt: trimmed,
-      startedAt,
-      terminalId,
-      draftId: req.draftId,
-      restore: req.restore,
-    });
+    if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
     setToast("Launching plan in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
-    return { ok: true, terminalId };
+    return { ok: true, terminalId, launchId };
   };
 
   // "Run" on a Localhost card: bring a dev server back without hunting for the
@@ -5880,33 +5922,135 @@ function App() {
       drafterProjectPath ??
       lastLaunchProject;
     selectSurface("document");
+    setSendError(null);
     setSendConfirm({ markdown, initialProject });
   };
 
+  useEffect(() => {
+    const continueConversation = (event: Event) => {
+      if (sendPendingRef.current) return;
+      const detail = (event as CustomEvent<ContinueRequest>).detail;
+      if (!detail?.source?.messageIds.length || !detail.markdown?.trim()) return;
+      const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
+      selectSurface("document");
+      setSendError(null);
+      setSendConfirm({ markdown: detail.markdown, initialProject: guessProjectForPlan(detail.markdown, projectOptions) ?? folder ?? lastLaunchProject, source: detail.source, destination: detail.destination ?? "drafter" });
+    };
+    window.addEventListener(CONTINUE_EVENT, continueConversation);
+    return () => window.removeEventListener(CONTINUE_EVENT, continueConversation);
+  }, [sidebarTab, projectOptions, lastLaunchProject]);
+
   // Repo confirmed in SendToRedlineDialog: bring the document pane forward and
   // launch the held plan in a terminal scoped to the chosen repo.
-  const confirmSendToRedline = async (project: string | null) => {
-    const markdown = sendConfirm?.markdown;
-    setSendConfirm(null);
-    if (!markdown) return;
-    selectSurface("document");
-    // draftId `null` — this plan was drafted while browsing, not in the
-    // Drafter, so inheriting whatever document happens to be open there would
-    // file it under an unrelated draft. (The "Open in Drafter" route mints a
-    // real document and keeps its own lineage.) It owes nothing back: the reply
-    // it came from is still in the browser's thread.
-    const r = await launchPlan({
-      origin: "browser",
-      prompt: markdown,
-      projectPath: project,
-      draftId: null,
-      restore: { kind: "none" },
-    });
-    if (!r.ok) {
-      setToast(`Couldn't launch the plan — ${r.reason}`);
-      setTimeout(() => setToast(null), 6000);
-    }
+  const runContinuation = async ({ markdown, source, destination, project, missionHandoff }: { markdown: string; source?: ContinueRequest["source"]; destination: ContinueDestination; project: string | null; missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" } }) => {
+    if (sendPendingRef.current || !markdown.trim()) throw new Error("Another continuation is starting; try again in a moment.");
+    let handoff = missionHandoff;
+    if (destination === "auto" && !project) throw new Error("Choose a project for the auto session.");
+    sendPendingRef.current = true; setSendPending(true); setSendError(null);
+    let claimToken: string | undefined;
+    let preparedDraftId: string | null = null;
+    let claimSettled = false;
+    try {
+      if (source?.conversationKind !== "companion") selectSurface("document");
+      if (source) {
+        const prepared = await invoke<{ id: string; scopeId: string; draftId: string }>("conversation_prepare_handoff", { request: { ...source, idempotencyKey: await continuationKey(source, markdown, destination), body: markdown, destination } });
+        preparedDraftId = prepared.draftId;
+        if (destination === "drafter") {
+          // The brief is already durable. A receipt failure must neither hide it
+          // nor pretend the save failed; retry only the receipt, never the save.
+          const receipt = { missionId: prepared.scopeId, workspaceId: prepared.scopeId, op: "deliverHandoff", handoffId: prepared.id, destinationId: prepared.draftId };
+          const recordReceipt = () => invoke("mission_foundation", { request: receipt });
+          const receiptFailed = (error: unknown) => setToast({ message: `Brief saved; its delivery receipt needs retry: ${String(error)}`, action: { label: "Retry receipt", onAction: () => { void recordReceipt().then(() => setToast(null)).catch(receiptFailed); } } });
+          await recordReceipt().catch(receiptFailed);
+          setSendConfirm(null); setDrafterDraftId(prepared.draftId); setDrafterShelfOpen(false); selectSurface("drafter");
+          return;
+        }
+        handoff = { missionId: prepared.scopeId, handoffId: prepared.id, destination };
+      }
+      if (handoff) {
+        const claim = await invoke<{ claimed: boolean; claimToken?: string; handoff: { status: string; destinationId?: string; draftId?: string } }>("mission_foundation", { request: { missionId: handoff.missionId, workspaceId: handoff.missionId, op: "claimHandoff", handoffId: handoff.handoffId } });
+        if (!claim.claimed || !claim.claimToken) {
+          let unavailable: string | null = null;
+          if (claim.handoff.status === "delivered" && claim.handoff.destinationId) {
+            try {
+              if (destination === "auto") {
+                const graph = await invoke<RunGraph>("runner_get", { runId: claim.handoff.destinationId });
+                setSendConfirm(null); showNativeRun(graph);
+              } else {
+                const live = await invoke<boolean>("pty_is_live", { id: claim.handoff.destinationId });
+                if (!live) throw new Error("The original plan terminal is no longer available.");
+                await showRawTerminal(claim.handoff.destinationId); setSendConfirm(null);
+              }
+              return;
+            } catch (error) { unavailable = String(error); }
+          }
+          setSendError(unavailable ?? `This handoff is already ${claim.handoff.status}; it has not been launched again.`);
+          const savedDraftId = preparedDraftId ?? claim.handoff.draftId;
+          if (savedDraftId) setToast({ message: "The source brief remains saved.", action: { label: "Open saved brief", onAction: () => { setSendConfirm(null); setDrafterDraftId(savedDraftId); setDrafterShelfOpen(false); selectSurface("drafter"); } } });
+          return;
+        }
+        claimToken = claim.claimToken;
+        preparedDraftId ??= claim.handoff.draftId ?? null;
+      }
+      if (handoff?.destination === "auto" && claimToken) {
+        const graph = await invoke<RunGraph>("mission_prepare_auto", { missionId: handoff.missionId, handoffId: handoff.handoffId, claimToken, projectPath: project });
+        claimSettled = true; setSendConfirm(null); showNativeRun(graph);
+        setToast("Execution brief prepared. Review the graph and use Run to start the auto session.");
+        return;
+      }
+      const result = await launchPlan({
+        origin: source ? continuationOrigin(source.conversationKind) : "browser", prompt: markdown, projectPath: project,
+        // Preserve the actual saved brief's lineage; unrelated open drafts
+        // are never inherited by a direct browser-reply launch.
+        draftId: preparedDraftId,
+        chatId: source?.conversationKind === "companion" ? source.conversationId : null,
+        restore: { kind: "none" },
+      });
+      if (result.ok) {
+        claimSettled = true; setSendConfirm(null);
+        if (handoff) {
+          const receipt = { missionId: handoff.missionId, workspaceId: handoff.missionId, op: "deliverHandoff", handoffId: handoff.handoffId, destinationId: result.terminalId, claimToken };
+          const recordReceipt = () => invoke("mission_foundation", { request: receipt });
+          const receiptFailed = (error: unknown) => setToast({ message: `Session started; its delivery receipt needs retry: ${String(error)}`, action: { label: "Retry receipt", onAction: () => { void recordReceipt().then(() => setToast(null)).catch(receiptFailed); } } });
+          await recordReceipt().catch(receiptFailed);
+        }
+      } else {
+        if (handoff) {
+          await invoke("mission_foundation", { request: { missionId: handoff.missionId, workspaceId: handoff.missionId, op: "releaseHandoff", handoffId: handoff.handoffId, claimToken, retryable: !!result.blocked || !!result.retryable, error: result.reason } });
+          claimSettled = true;
+        }
+        setSendError(`Couldn't launch the plan — ${result.reason}`);
+      }
+      return result;
+    } catch (error) {
+      // An unexpected failure after claiming may have crossed the launch
+      // boundary. Preserve an uncertain receipt instead of risking a replay.
+      if (handoff && claimToken && !claimSettled) await invoke("mission_foundation", { request: { missionId: handoff.missionId, workspaceId: handoff.missionId, op: "releaseHandoff", handoffId: handoff.handoffId, claimToken, retryable: false, error: String(error) } }).catch(() => {});
+      setSendError(`${preparedDraftId ? "The brief is saved, but continuation failed" : "Could not save the brief"}: ${String(error)}`);
+      throw error;
+    } finally { sendPendingRef.current = false; setSendPending(false); }
   };
+
+  const confirmSendToRedline = async (project: string | null) => {
+    if (!sendConfirm) return;
+    try { await runContinuation({ ...sendConfirm, destination: sendConfirm.destination ?? sendConfirm.missionHandoff?.destination ?? "plan", project }); }
+    catch (error) { setSendError(String(error)); }
+  };
+  const continueChatAsPlan = async (request: ChatPlanRequest) => {
+    const { companionId, instruction } = request;
+    setChatReceipts(previous => ({ ...previous, [companionId]: { status: "starting", instruction } }));
+    try {
+      const brief = prepareConversationPreview({ conversationKind: "companion", conversationId: companionId, messages: request.messages }, undefined, { instruction });
+      const project = resolveLaunchProject(brief.markdown, request.project, { projectOptions, openFolder: null, lastLaunchProject });
+      const result = await runContinuation({ ...brief, destination: "plan", project });
+      setChatReceipts(previous => previous[companionId]?.status === "done" && result?.ok && previous[companionId]?.launchId === result.launchId ? previous : ({ ...previous, [companionId]: result?.ok ? { status: "planning", instruction, terminalId: result.terminalId, launchId: result.launchId } : { status: "error", instruction, error: result && !result.ok ? result.reason : "The brief is saved; its existing launch is already claimed.", blocked: result && !result.ok ? result.blocked : undefined } }));
+    } catch (error) { setChatReceipts(previous => ({ ...previous, [companionId]: { status: "error", instruction, error: String(error) } })); }
+  };
+
+  const queuedChatPlans = useQueuedChatPlans(request => { void continueChatAsPlan(request); }, (request, error) => {
+    setChatReceipts(previous => ({ ...previous, [request.companionId]: { status: "error", instruction: request.instruction, error } }));
+    setToast({ message: error, action: { label: "Open chat", onAction: () => openChat(request.companionId) } });
+  });
 
   // Seed the Prompt Drafter with agent-authored markdown and pre-select the
   // repo guessed from the plan text, so the drafter's picker already shows the
@@ -5993,10 +6137,15 @@ function App() {
   const seedDrafterFromMissionRef = useRef(seedDrafterFromMission);
   seedDrafterFromMissionRef.current = seedDrafterFromMission;
   useEffect(() => {
-    const p = listen<{ missionId: string; body: string }>(
+    const p = listen<{ missionId: string; body: string; draftId?: string; handoffId?: string }>(
       "mission-synthesize-done",
       (e) => {
-        void seedDrafterFromMissionRef.current(e.payload.body);
+        if (e.payload.draftId) {
+          setDrafterDraftId(e.payload.draftId);
+          setDrafterShelfOpen(false);
+          selectSurface("drafter");
+          if (e.payload.handoffId) void invoke("mission_foundation", { request: { missionId: e.payload.missionId, workspaceId: e.payload.missionId, op: "deliverHandoff", handoffId: e.payload.handoffId, destinationId: e.payload.draftId } }).catch((error) => setToast(`Brief saved; delivery needs retry: ${String(error)}`));
+        } else void seedDrafterFromMissionRef.current(e.payload.body);
       },
     );
     return () => {
@@ -6363,6 +6512,7 @@ function App() {
   const tourActive =
     tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
   const browserOverlayActive =
+    !!sendConfirm ||
     showReadme ||
     showFeedback ||
     setupModalActive ||
@@ -6383,6 +6533,7 @@ function App() {
   // without changing the browser slot's rect, so the only fix is hiding the
   // native webview — it would otherwise paint above the fullscreen terminal.
   const browserVisible =
+    browserOpen &&
     !bootAnimating &&
     !browserOverlayActive &&
     !sidebarDragging &&
@@ -6489,6 +6640,7 @@ function App() {
     }),
     [workspace, frontDoorResolvedProject, frontDoorBackend.backend],
   );
+  const hookConflicts = useHookConflicts(healthQuery.backend, frontDoorResolvedProject, shellReady);
   const applyHealth = useCallback((health: IntegrationHealth) => {
     setPreflight(health.preflight);
     setHookStatus(health.hook);
@@ -6559,6 +6711,7 @@ function App() {
   // that an ad-hoc timestamp ref used to.
   useEffect(() => {
     const onFocus = () => {
+      void hookConflicts.refresh();
       void integrationHealth
         .ensure(healthQuery)
         .then(applyHealth)
@@ -6566,7 +6719,7 @@ function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [healthQuery, applyHealth]);
+  }, [healthQuery, applyHealth, hookConflicts.refresh]);
 
   // ONE construction site for the readiness derivation's input.
   //
@@ -6855,14 +7008,13 @@ function App() {
     );
     setQuietOpen(true);
     setChatOpening(true);
+    setPanelBreaks({ sidebar: false, pane: false });
     // The island EXPANDS into the room. It is the same conversation the dock
     // holds — one thread — but entering it deliberately is not a glance at a
     // column, it is going somewhere: the measured island rect above is the box
     // it grows out of, and `selectSurface` is deliberately not called, because
     // nothing is being navigated away from.
-    setConversationPin("companion");
-    setDockOpen(true);
-    setExpandedKind("companion");
+    setDockOpenBy(state => withDockOpen(state, "home", true));
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
       // `companion_create`. It is a placeholder, not a name: the backend
@@ -6875,6 +7027,7 @@ function App() {
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
       setChatSeed({ companionId: chat.companionId, text: prompt });
+      localStorage.setItem(`rl.chatProject.${chat.companionId}`, JSON.stringify(frontDoorProject));
       refreshChats();
       setFrontDoorText("");
       setFrontDoorAttachments([]);
@@ -6882,8 +7035,7 @@ function App() {
       // The sentence is still in the composer — nothing was taken away.
       setToast(`Couldn't start the chat — ${e}`);
       setTimeout(() => setToast(null), 6000);
-      setDockOpen(false);
-      setExpandedKind(null);
+      setDockOpenBy(state => withDockOpen(state, "home", false));
     } finally {
       setChatOpening(false);
     }
@@ -6896,13 +7048,9 @@ function App() {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
-    setConversationPin("companion");
-    setDockOpen(true);
-    // Opening a conversation FROM the door means going into it; opening one
-    // from anywhere else means bringing it alongside what you are doing. Same
-    // thread either way — the difference is only whether you are arriving or
-    // glancing.
-    if (plateAtRest) setExpandedKind("companion");
+    if (!plateAtRest) openFrontDoor();
+    setDockOpenBy(state => withDockOpen(state, "home", true));
+    setPanelBreaks({ sidebar: false, pane: false });
   };
   // The first conversation, from the dock's empty state. No seed and no
   // spring: the sentence-shaped way in is the Front Door's.
@@ -6926,55 +7074,6 @@ function App() {
   // mission's synthesis does: the distillation keeps running after the user
   // switches surfaces, and the handoff must still land when the panel that
   // asked for it is long unmounted.
-  const chatHandoff = async (payload: {
-    companionId: string;
-    target: string;
-    markdown: string;
-  }) => {
-    const markdown = payload.markdown.trim();
-    if (!markdown) return;
-    if (payload.target === "drafter") {
-      await openDrafterWithMarkdown(markdown);
-      setToast("Chat opened in the drafter ✍️");
-      setTimeout(() => setToast(null), 4000);
-      return;
-    }
-    const project = resolveLaunchProject(markdown, null, {
-      projectOptions,
-      openFolder: sidebarTab.kind === "folder" ? sidebarTab.id : null,
-      lastLaunchProject,
-    });
-    selectSurface("document");
-    const r = await launchPlan({
-      origin: "chat",
-      prompt: markdown,
-      projectPath: project,
-      // No document to inherit — and inheriting whatever the Drafter happens
-      // to have open would file this plan under an unrelated draft.
-      draftId: null,
-      chatId: payload.companionId,
-      // Nothing owed back: the conversation is untouched and still there.
-      restore: { kind: "none" },
-    });
-    if (!r.ok) {
-      setToast(`Couldn't launch the plan — ${r.reason}`);
-      setTimeout(() => setToast(null), 6000);
-    }
-  };
-  const chatHandoffRef = useRef(chatHandoff);
-  chatHandoffRef.current = chatHandoff;
-  useEffect(() => {
-    const p = listen<{ companionId: string; target: string; markdown: string }>(
-      "companion-handoff-done",
-      (e) => {
-        void chatHandoffRef.current(e.payload);
-      },
-    );
-    return () => {
-      void p.then((un) => un());
-    };
-  }, []);
-
   // Sending from the Drafter. The document STAYS — visible, editable, exactly
   // where it was. The front door clears its composer because the sentence moved
   // into the card; a document is not a sentence, and taking it away (or locking
@@ -7100,6 +7199,7 @@ function App() {
     sidebarTab.kind === "sessions" &&
     !joinedActive &&
     !browserOverlayActive &&
+    !hookConflicts.dialogOpen &&
     !howItWorksOpen &&
     !sendConfirm;
   const landingTypeEligibleRef = useRef(false);
@@ -7217,12 +7317,12 @@ function App() {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
             if (d) navigateTo({ surface: d.id, tab: t.tab });
           },
-          toggleDock: () => setDockOpen((v) => !v),
+          toggleDock: () => setDockOpenBy(state => toggleDockIn(state, dockScopeRef.current, hasDockConversationRef.current)),
           openConversation: (kind) => {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
-            setConversationPin(hit.kind);
-            setDockOpen(true);
+            if (kindPill(hit.kind)) setConversationPin(hit.kind);
+            setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true));
           },
           openChat,
           snapBack,
@@ -7232,7 +7332,7 @@ function App() {
           // The palette's word for "give me the panels back on this surface"
           // (and, pressed again on the same visit, hide them again). It flips
           // the break-out bit only — the persisted layout is never touched.
-          toggleImmersive: () => setImmersiveBroken((b) => !b),
+          toggleImmersive: () => { setImmersiveBroken(b => !b); setPanelBreaks(state => ({ sidebar: !state.sidebar, pane: !state.pane })); },
           setTheme: (name) => {
             if (isThemeName(name)) onThemeChange(name);
           },
@@ -7283,7 +7383,7 @@ function App() {
         // node is the right thing to render while it is loading or
         // between tabs — the column is the pane's, and only the
         // pane knows what belongs in it.
-        <div ref={setDockSlotEl} className="flex-1 min-h-0" />
+        <div ref={setDockSlotEl} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
       ) : dockContext.kind === "companion" ? (
         chatOpening ? (
           <EmptyState title="Chat" body="Starting a conversation…" />
@@ -7302,56 +7402,13 @@ function App() {
             }}
           />
         ) : (
-          // The news rides ABOVE the conversation, in the same
-          // column: the Companion is the one thing the user can
-          // reach from every surface, so it is where "here is what
-          // happened while you were elsewhere" finds them. It
-          // renders nothing when nothing happened.
-          <div className="flex h-full min-h-0 flex-col">
-          <AwayFeed
-            active={dockContext.kind === "companion"}
-            onOpenWork={() =>
-              navigateTo({ surface: "runs", tab: "work" })
-            }
-          />
-          <ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
-            <ChatRoom
-              // Keyed by the thread: the composer draft is stored
-              // per chat and `usePersistedState` reads its key
-              // once, so switching conversations is a REMOUNT by
-              // design rather than one chat's half-typed thought
-              // carried into another.
-              key={chatId}
-              companionId={chatId}
-              onSelectChat={openChat}
-              onEmpty={() => setChatId(null)}
-              // The agent's read-only file tools are scoped to
-              // whatever folder the user is browsing; HOME when
-              // there is none.
-              cwd={
-                sidebarTab.kind === "folder" ? sidebarTab.id : null
-              }
-              dictationEnabled={!dockOwnsMic}
-              // Only in the room: shrink it to the column beside the door,
-              // keeping the conversation up. The other way out is simply
-              // going somewhere — `selectSurface` collapses the room and the
-              // conversation comes with you.
-              onCollapse={
-                conversationExpanded ? () => setExpandedKind(null) : undefined
-              }
-              onClose={closeDock}
-              seed={
-                chatSeed?.companionId === chatId
-                  ? chatSeed.text
-                  : null
-              }
-              onSeedConsumed={() => setChatSeed(null)}
-            />
-          </ErrorBoundary>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <div ref={setChatRegularSlot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
           </div>
         )
       ) : (
       <VoicePanel
+        onOpenChat={openChat}
         // Remount cleanly when the conversation changes (a revision
         // arriving calls setActiveId; switching contexts changes the
         // kind) instead of mutating sessionId under a live warm
@@ -7390,7 +7447,7 @@ function App() {
 
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
-    <div className="h-full flex flex-col">
+    <div className="h-full min-h-0 min-w-0 flex flex-col overflow-hidden">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
           a render throw stays inside it. The terminal dock is deliberately a
@@ -7439,6 +7496,7 @@ function App() {
           header on the browser surface would simply be invisible. */}
       <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
       <Header
+        onOpenIntegrationHooks={hookConflicts.openDialog}
         session={session}
         theme={theme}
         onThemeChange={onThemeChange}
@@ -7524,6 +7582,7 @@ function App() {
         onOpenPalette={() => setPaletteOpen(true)}
       />
       </ChromeSlot>
+      <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
         <DecisionWindowBanner
           event={decisionWindow}
@@ -7556,7 +7615,7 @@ function App() {
           Fullscreen takeovers (terminal, discussion) are absolute inset-0
           against this element, so they cover the ring — plates only. */}
       <main
-        className="relative flex-1 overflow-hidden flex flex-col"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden flex flex-col"
         style={{ padding: `${SHELL_EDGE}px` }}
       >
         <ErrorBoundary
@@ -7571,7 +7630,7 @@ function App() {
             </div>
           )}
         >
-        <div className="flex-1 overflow-hidden flex">
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden flex">
         {!sidebarCollapsed && (
         // Clip wrapper for the drawer reveal. In curtain state (the doc is at
         // its floor) it reserves only the flow width and lets the full-width
@@ -7711,7 +7770,7 @@ function App() {
         />
         <div
           ref={docColumnRef}
-          className="flex-1 overflow-hidden flex relative rl-doc-column rl-plate"
+          className={`min-h-0 min-w-0 flex-1 overflow-hidden flex relative rl-doc-column${browserOpen ? "" : " rl-plate"}`}
           style={{ background: "var(--color-paper)" }}
         >
           {/* The document region: everything the doc column used to hold
@@ -7740,7 +7799,8 @@ function App() {
               816px while the words get bigger just gives you fewer words per
               line, which is the opposite of what zoom is for. */}
           <div
-            className="rl-surface-pane flex-1 min-w-0 overflow-hidden flex flex-col relative"
+            className="rl-surface-pane flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col relative"
+            data-main-surface={mainSurface}
             style={{ "--rl-doc-zoom": docZoom } as React.CSSProperties}
           >
           {/* Table-of-contents rail (Phase 2). Docked to the left of the
@@ -8239,6 +8299,7 @@ function App() {
                     onUnapprove={(sid) => void unapproveSession(sid)}
                     onStandDown={(sid) => void standDownRun(sid)}
                     tabRequest={runsOpen ? tabRequest : null}
+                    onToast={setToast}
                   />
                 </ErrorBoundary>
               </Suspense>
@@ -8306,9 +8367,8 @@ function App() {
                 // separates a squeezed column from a broken hero. Symmetric
                 // and slim; at full width the door caps at 42rem regardless,
                 // so this changes nothing visible on a roomy pane.
-                maxWidth: docSurfaceActive && !docWide ? "820px" : "none",
+                ...(docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
                 paddingLeft: docSurfaceActive ? undefined : "24px",
-                paddingRight: docSurfaceActive ? `${docPadR}px` : "24px",
                 // `--rl-doc-zoom` moved UP one level, to the ancestor every
                 // surface body shares — it was inert in the Drafter from here.
               } as React.CSSProperties
@@ -8513,57 +8573,7 @@ function App() {
           </article>
           </div>
               );
-            const browserBody = (
-              <Suspense fallback={null}>
-              <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
-                <BrowserPane
-                  onClose={() => selectSurface("document")}
-                  visible={browserVisible}
-                  projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
-                  // Drop a plan/prompt drafted while browsing into a fresh Redline
-                  // plan session: close the browser overlay, confirm the target
-                  // repo, then launch the plan in the terminal (see handler).
-                  onSendToRedline={sendBrowserDraftToRedline}
-                  // Or open the reply in the Prompt Drafter (repo pre-guessed)
-                  // to shape it before sending.
-                  onSendToDrafter={sendBrowserToDrafter}
-                  // A synthesized mission brief seeds the Prompt Drafter.
-                  onSynthesizeToDrafter={seedDrafterFromMission}
-                  // "Open" on a Localhost card. A prop, not an event: this pane
-                  // mounts only when the browser surface is selected, so an event
-                  // emitted at selection time would beat its own listener.
-                  openRequest={browserOpenRequest}
-                  // Cleared once acted on — a request that lingers replays on
-                  // every remount (the pane's nonce guard resets with it).
-                  onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
-                  // Re-sync the native webview whenever a surrounding pane toggles
-                  // and reflows the slot without a drag (e.g. closing the comment
-                  // pane, which otherwise leaves the webview stranded at its old
-                  // size with a gap of blank space).
-                  // Terminal state is part of the key: discrete opens (divider
-                  // caret, footer button, ⇧↓, programmatic runDevServer/restore)
-                  // reflow the slot with no drag, and without a re-sync the
-                  // native webview keeps painting at its old taller rect over
-                  // the terminal dock. The GRID key (tile count + rows) stands
-                  // where tab count used to: a new terminal that lands untiled
-                  // changes no geometry, while a tile row changes everything.
-                  // Immersive entry and every chrome reveal move the slot as
-                  // surely as a pane toggle does, and the native webview only
-                  // re-reads its rect when this key changes.
-                  layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
-                  // The pane's four panels render into the app's one
-                  // conversation column, through a portal — everything they
-                  // need (tabs, missions, the linked thread) is the pane's own
-                  // state, so the column borrows the DOM node, not the state.
-                  dockSlot={dockSlotEl}
-                  dockPill={dockPill}
-                  onOpenDockPill={openDockPill}
-                  onCloseDock={closeDock}
-                  onDockState={setBrowserDock}
-                />
-              </ErrorBoundary>
-              </Suspense>
-            );
+            const browserBody = <PersistentPortalSlot key="browser" name="browser" host={browserHost} />;
             // What the editor mounts with, resolved HERE rather than pushed at
             // it every 400ms. The session cache is strictly fresher than
             // `drafterLoaded` by construction, and reading it at the mount site
@@ -8641,7 +8651,7 @@ function App() {
               );
             if (secondaryBody) return secondaryBody;
             // No secondary pane open → the document is the default full view.
-            return documentBody;
+            return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{documentBody}</SpringSwap> : documentBody;
           })()}
           {/* The Discuss pill — the discussion entry on the document pane.
               Opens the plan's voice panel: the one discussion surface
@@ -8668,7 +8678,7 @@ function App() {
                     : undefined
                 }
                 textInset={64}
-                measureKey={docWide}
+                measureKey={`${docWide}:${docMeasure}`}
               />
             )}
           {/* Floating document zoom + line-width control — pinned to the pane
@@ -8723,21 +8733,12 @@ function App() {
                 {zoomColumn ? "" : "%"}
               </button>
               <ZoomButton label="+" title="Zoom in (⌘+)" onClick={zoomIn} />
-              <ZoomButton
-                active={docWide}
-                label={
-                  docWide ? (
-                    <ChevronsRightLeft size={12} strokeWidth={2} />
-                  ) : (
-                    <ChevronsLeftRight size={12} strokeWidth={2} />
-                  )
-                }
-                title={
-                  docWide
-                    ? "Narrow view — a centred reading column"
-                    : "Wide view — fill the pane with text"
-                }
-                onClick={() => setDocWide((w) => !w)}
+              <DocWidthToggle
+                wide={docWide}
+                measure={docMeasure}
+                articleRef={documentRef}
+                onToggle={() => setDocWide((w) => !w)}
+                onCommit={({ wide, measure }) => { setDocWide(wide); setDocMeasure(measure); }}
               />
             </div>
           )}
@@ -8773,18 +8774,21 @@ function App() {
               <div
                 ref={voiceDockRef}
                 data-rl-pane
-                className="shrink-0 flex flex-col overflow-hidden"
+                className="min-h-0 min-w-0 shrink-0 flex flex-col overflow-hidden"
               >
                 {/* Only when the surface offers a genuine choice — see the
                     strip. Selecting sets the PIN, which is a tie-break: it
                     follows you to the next surface that has the same kind and
                     is ignored by every surface that hasn't. */}
                 <DockContextStrip
-                  contexts={dockContexts}
+                  contexts={browserOpen ? dockContexts.map((context) => ({
+                    ...context,
+                    label: ({ browse: "Page chat", browselist: "Cart", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
+                  })) : dockContexts}
                   activeKey={dockContext.key}
-                  onSelect={(d) => setConversationPin(d.kind)}
+                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); }}
                 />
-                <div className="flex-1 min-h-0 flex overflow-hidden">
+                <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
                 {dockBody}
                 </div>
               </div>
@@ -9023,6 +9027,7 @@ function App() {
                   // Effective-value toggle, same rule as the pane's collapse:
                   // immersive masks fullscreen off, so ⤢ means "go fullscreen".
                   setImmersiveBroken(true);
+                  setPanelBreaks(state => ({ ...state, pane: true }));
                   setPaneFullscreen(!paneFullscreen);
                 }}
                 title={
@@ -9729,9 +9734,34 @@ function App() {
           options={projectOptions}
           initialProject={sendConfirm.initialProject}
           onConfirm={confirmSendToRedline}
-          onCancel={() => setSendConfirm(null)}
+          pending={sendPending}
+          error={sendError}
+          onCancel={() => { if (!sendPendingRef.current) setSendConfirm(null); }}
+          destination={sendConfirm.destination ?? sendConfirm.missionHandoff?.destination ?? "plan"}
+          onDestinationChange={sendConfirm.source ? destination => setSendConfirm(s => s && ({ ...s, destination })) : undefined}
+          onMarkdownChange={sendConfirm.missionHandoff ? undefined : markdown => setSendConfirm(s => s && ({ ...s, markdown }))}
+          onReturnToSource={sendConfirm.source ? () => {
+            const source = sendConfirm.source!; setSendConfirm(null);
+            if (source.conversationKind === "companion") openChat(source.conversationId);
+            else if (source.conversationKind === "drafter") { setDrafterDraftId(source.conversationId); setDrafterShelfOpen(false); selectSurface("drafter"); }
+            else { selectSurface("browser"); window.dispatchEvent(new CustomEvent("redline-open-conversation", { detail: source })); }
+          } : undefined}
+          modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate planning CLI", detail: "Choose the executable used for planning.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : frontDoorBackend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} />}
         />
       )}
+      {/* Persistent and unobtrusive: it announces a ready release once per
+          candidate, and "Later" means indefinitely. It also owns the two short
+          windows where the backend is refusing writes, because an editor that
+          silently drops what you type is worse than one that says why. */}
+      <Suspense fallback={null}>
+        <ActivationBar
+          onOpenBuildRedline={() => {
+            setTabRequest({ tab: "build", nonce: Date.now() });
+            selectSurface("runs");
+          }}
+          onToast={setToast}
+        />
+      </Suspense>
       {toast &&
         (typeof toast === "string" ? (
           <ApproveToast message={toast} />
@@ -9900,9 +9930,116 @@ function App() {
           <FeedbackModal onClose={() => setShowFeedback(false)} />
         </Suspense>
       )}
-      {setupModalActive && hookStatus && skillStatus && (
+      {chatId && (dockOpenBy.home || chatSeed) && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
+            <ChatRoom
+              // Keyed by the thread: the composer draft is stored
+              // per chat and `usePersistedState` reads its key
+              // once, so switching conversations is a REMOUNT by
+              // design rather than one chat's half-typed thought
+              // carried into another.
+              key={chatId}
+              companionId={chatId}
+              projectOptions={projectOptions}
+              lastLaunchProject={lastLaunchProject}
+              onPlan={request => { void continueChatAsPlan(request); }}
+              receipt={chatReceipts[chatId] ?? null}
+              onQueuePlan={queuedChatPlans.arm}
+              queuedInstruction={queuedChatPlans.queued[chatId]?.instruction ?? null}
+              onCancelQueuedPlan={() => { queuedChatPlans.cancel(chatId); }}
+              onShowTerminal={id => { void showRawTerminal(id); }}
+              onOpenPlan={id => { selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
+              onFix={applyReadinessFix}
+                            onSelectChat={openChat}
+              onEmpty={() => setChatId(null)}
+              // The agent's read-only file tools are scoped to
+              // whatever folder the user is browsing; HOME when
+              // there is none.
+              cwd={
+                sidebarTab.kind === "folder" ? sidebarTab.id : null
+              }
+              dictationEnabled={!dockOwnsMic && !!chatRegularSlot}
+              // Only in the room: shrink it to the column beside the door,
+              // keeping the conversation up. The other way out is simply
+              // going somewhere — `selectSurface` collapses the room and the
+              // conversation comes with you.
+              onClose={closeDock}
+              seed={
+                chatSeed?.companionId === chatId
+                  ? chatSeed.text
+                  : null
+              }
+              onSeedConsumed={() => setChatSeed(null)}
+            />
+</ErrorBoundary></Suspense>, chatHost)}
+      {browserMounted && createPortal(
+<Suspense fallback={null}>
+              <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
+                <BrowserPane
+                  onOpenDraft={(draftId) => { setDrafterDraftId(draftId); setDrafterShelfOpen(false); selectSurface("drafter"); }}
+                  onMissionContinue={(missionId, destination, body, handoffId) => {
+                    const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
+                    selectSurface("document");
+                    setSendError(null);
+                    setSendConfirm({ markdown: body, initialProject: guessProjectForPlan(body, projectOptions) ?? folder ?? lastLaunchProject, missionHandoff: { missionId, handoffId, destination } });
+                  }}
+                  onClose={() => selectSurface("document")}
+                  surfaceActive={browserOpen}
+                  visible={browserVisible && !hookConflicts.dialogOpen}
+                  projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+                  // Drop a plan/prompt drafted while browsing into a fresh Redline
+                  // plan session: close the browser overlay, confirm the target
+                  // repo, then launch the plan in the terminal (see handler).
+                  onSendToRedline={sendBrowserDraftToRedline}
+                  // Or open the reply in the Prompt Drafter (repo pre-guessed)
+                  // to shape it before sending.
+                  onSendToDrafter={sendBrowserToDrafter}
+                  // A synthesized mission brief seeds the Prompt Drafter.
+                  onSynthesizeToDrafter={seedDrafterFromMission}
+                  // "Open" on a Localhost card. A prop, not an event: this pane
+                  // mounts only when the browser surface is selected, so an event
+                  // emitted at selection time would beat its own listener.
+                  openRequest={browserOpenRequest}
+                  // Cleared once acted on — a request that lingers replays on
+                  // every remount (the pane's nonce guard resets with it).
+                  onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
+                  // Re-sync the native webview whenever a surrounding pane toggles
+                  // and reflows the slot without a drag (e.g. closing the comment
+                  // pane, which otherwise leaves the webview stranded at its old
+                  // size with a gap of blank space).
+                  // Terminal state is part of the key: discrete opens (divider
+                  // caret, footer button, ⇧↓, programmatic runDevServer/restore)
+                  // reflow the slot with no drag, and without a re-sync the
+                  // native webview keeps painting at its old taller rect over
+                  // the terminal dock. The GRID key (tile count + rows) stands
+                  // where tab count used to: a new terminal that lands untiled
+                  // changes no geometry, while a tile row changes everything.
+                  // Immersive entry and every chrome reveal move the slot as
+                  // surely as a pane toggle does, and the native webview only
+                  // re-reads its rect when this key changes.
+                  layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
+                  // The pane's four panels render into the app's one
+                  // conversation column, through a portal — everything they
+                  // need (tabs, missions, the linked thread) is the pane's own
+                  // state, so the column borrows the DOM node, not the state.
+                  dockSlot={dockSlotEl}
+                  dockPill={dockPill}
+                  onOpenDockPill={openDockPill}
+                  onCloseDock={() => setDockOpenBy(state => withDockOpen(state, "browser", false))}
+                  onDockState={setBrowserDock}
+                />
+              </ErrorBoundary>
+              </Suspense>
+      , browserHost)}
+      {hookConflicts.dialogOpen && (
+        <Suspense fallback={null}>
+          <HookConflictModal health={hookConflicts}/>
+        </Suspense>
+      )}
+      {setupModalActive && !hookConflicts.dialogOpen && hookStatus && skillStatus && (
           <Suspense fallback={null}>
           <HookSetupModal
+            hookConflictHealth={hookConflicts}
+            onReviewHookConflicts={hookConflicts.hasIssue ? hookConflicts.openDialog : undefined}
             phase={
               !hookStatus.installed ||
               !skillStatus.installed

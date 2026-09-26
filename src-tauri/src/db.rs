@@ -507,7 +507,7 @@ impl Database {
     /// `Transaction` is dropped during the unwind, so the `Connection` a
     /// poisoned lock hands back is a connection with no half-applied write on
     /// it — the panicking statement is simply undone.
-    fn lock_conn(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn lock_conn(&self) -> MutexGuard<'_, Connection> {
         match self.conn.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -607,12 +607,26 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 3;
+    const SCHEMA_VERSION: i64 = 4;
+
+    /// The schema version this build writes, for callers outside `db`.
+    ///
+    /// Read by the release pipeline, which compares it with the version a
+    /// *candidate's* source declares to work out what activating that
+    /// candidate would do to the user's stored data.
+    pub fn schema_version() -> i64 {
+        Self::SCHEMA_VERSION
+    }
 
     /// Ordered migration steps. `(target_version, step)`: running `step` takes
     /// a database from `target_version - 1` to `target_version`.
     const MIGRATIONS: &'static [(i64, fn(&Connection) -> rusqlite::Result<()>)] =
-        &[(1, Self::migrate_v1), (2, Self::migrate_v2), (3, Self::migrate_v3)];
+        &[
+            (1, Self::migrate_v1),
+            (2, Self::migrate_v2),
+            (3, Self::migrate_v3),
+            (4, Self::migrate_v4),
+        ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
     ///
@@ -673,11 +687,20 @@ impl Database {
                     )),
                 )
             })?;
+            // One exception to "run NO steps": tables this build owns outright
+            // and that a foreign lineage has never heard of. `releases` is not
+            // in `verify_schema`'s core set — Redline works perfectly well
+            // without it, it is just that Build Redline does not — so a
+            // forward-stamped database from the cockpit lineage would
+            // otherwise reach the feature and fail with "no such table". The
+            // step is `CREATE TABLE IF NOT EXISTS` only: over a genuinely
+            // newer schema it is a no-op, and it touches nothing that exists.
+            Self::migrate_v4(conn)?;
             tracing::warn!(
                 stamped = current,
                 understood = Self::SCHEMA_VERSION,
                 "database carries a newer/foreign schema stamp; schema verified, \
-                 running no migrations and leaving the stamp untouched"
+                 creating any missing additive tables and leaving the stamp untouched"
             );
             crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
             return Ok(());
@@ -818,6 +841,39 @@ impl Database {
         if !columns.iter().any(|c| c == "effort") {
             conn.execute("ALTER TABLE sessions ADD COLUMN effort TEXT", [])?;
         }
+        Ok(())
+    }
+
+    /// v3 → v4: candidate releases.
+    ///
+    /// One row per prepared replacement application. Deliberately its own
+    /// table rather than columns on `run_graphs`: a release can outlive the run
+    /// that produced it, several runs can contribute to one, and "the tasks
+    /// finished" is not "there is an installable application". The durable
+    /// *activation* state does not live here at all — it is a journal on disk,
+    /// because activating a release is one of the few things that can leave
+    /// this database unopenable.
+    fn migrate_v4(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS releases (
+                release_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                repository TEXT NOT NULL,
+                status TEXT NOT NULL,
+                candidate_root TEXT NOT NULL,
+                bundle_path TEXT,
+                manifest_json TEXT,
+                capture_json TEXT,
+                probe_json TEXT,
+                failure TEXT NOT NULL DEFAULT '',
+                step TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_releases_run ON releases(run_id);
+            CREATE INDEX IF NOT EXISTS idx_releases_status ON releases(status, updated_at DESC);
+        "#,
+        )?;
         Ok(())
     }
 
@@ -1693,6 +1749,8 @@ impl Database {
         // (`claude --resume <codex thread>` silently starts a FRESH session),
         // so the id alone cannot say which binary can resume it.
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN fork_backend TEXT", []);
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN fork_model TEXT", []);
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN fork_effort TEXT", []);
         // Sub-block-grained selection anchor (e.g. `blk-X.s3.w2-w4`). NULL
         // for pre-feature rows and for any selection that doesn't land on a
         // clean word / line / sentence boundary — the comment still has
@@ -3476,6 +3534,7 @@ impl Database {
     }
 
     /// A draft's discussion history, oldest-first.
+    #[cfg(test)]
     pub fn load_draft_chat_thread(
         &self,
         draft_id: &str,
@@ -3555,21 +3614,6 @@ impl Database {
              VALUES (?1, ?2)
              ON CONFLICT(draft_id) DO UPDATE SET last_doc_hash = excluded.last_doc_hash",
             params![draft_id, hash],
-        )?;
-        Ok(())
-    }
-
-    /// Drop a draft's discussion thread + resumable session (explicit draft
-    /// delete only — "New draft" keeps history).
-    pub fn delete_draft_chat(&self, draft_id: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
-            params![draft_id],
-        )?;
-        conn.execute(
-            "DELETE FROM draft_chat_threads WHERE draft_id = ?1",
-            params![draft_id],
         )?;
         Ok(())
     }
@@ -4147,16 +4191,6 @@ impl Database {
         Ok(conn.execute(&sql, params![message_id, meter_json])? > 0)
     }
 
-    /// One message row's stored meter, if it has one.
-    pub fn thread_message_meter(&self, kind: &str, message_id: &str) -> Option<String> {
-        let (table, _, _, _) = Self::thread_table(kind)?;
-        let conn = self.lock_conn();
-        let sql = format!("SELECT meter_json FROM {table} WHERE id = ?1");
-        conn.query_row(&sql, params![message_id], |r| r.get::<_, Option<String>>(0))
-            .ok()
-            .flatten()
-    }
-
     /// Every message row's meter for one thread, as `(id, meter_json)`. The
     /// surfaces load a thread in one call, so the meters come back the same
     /// way rather than one round-trip per bubble.
@@ -4510,6 +4544,7 @@ impl Database {
     // Polis ClassMemory (Phase 2): the catalog over the lake
     // ------------------------------------------------------------------
 
+    #[cfg(test)]
     pub fn reject_class_proposal(&self, id: i64) -> rusqlite::Result<()> {
         {
             let conn = self.lock_conn();
@@ -5476,6 +5511,15 @@ impl Database {
         Some((fork, backend))
     }
 
+    pub fn get_comment_fork_seat(&self, session_id: &str, comment_id: &str) -> (Option<String>, Option<String>) {
+        self.lock_conn().query_row("SELECT fork_model, fork_effort FROM comments WHERE session_id = ?1 AND id = ?2", params![session_id, comment_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or_default()
+    }
+
+    pub fn set_comment_fork_seat(&self, session_id: &str, comment_id: &str, model: Option<&str>, effort: Option<&str>) -> rusqlite::Result<()> {
+        self.lock_conn().execute("UPDATE comments SET fork_model = ?1, fork_effort = ?2 WHERE session_id = ?3 AND id = ?4", params![model, effort, session_id, comment_id])?;
+        Ok(())
+    }
+
     pub fn set_comment_fork(
         &self,
         session_id: &str,
@@ -5822,6 +5866,7 @@ impl Database {
     // (`mission_messages` + the `claude_session_id` on the row). Mirrors the
     // browse helpers above but keyed by `mission_id`. See mission.rs.
 
+    #[cfg(test)]
     pub fn insert_mission(&self, m: &Mission) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
@@ -5969,6 +6014,7 @@ impl Database {
 
     // --- Mission findings (pins) -------------------------------------------
 
+    #[cfg(test)]
     pub fn insert_finding(&self, f: &MissionFinding) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
@@ -7509,6 +7555,7 @@ impl Database {
     /// Filterable list over the graph. `status`/`project` are facets, both
     /// optional; ordered urgent-first (pinned, then P0-style priority, then
     /// age). Bounded by `limit`.
+    #[cfg(test)]
     pub fn list_work_items(
         &self,
         status: Option<&str>,
@@ -7548,36 +7595,6 @@ impl Database {
             Self::WORK_ITEM_COLS
         ))?;
         let rows = stmt.query_map(params![limit.max(1)], |r| Self::row_to_work_item(r))?;
-        rows.collect()
-    }
-
-    /// Everything the work graph did while the user was elsewhere: items that
-    /// ARRIVED or CLOSED at or after `since_ms`.
-    ///
-    /// One read rather than two because the feed shows them interleaved in
-    /// time, and paging two lists to a shared bound would drop the older half
-    /// of whichever moved more. The caller classifies each row by comparing
-    /// `closed_at`/`created_at` against the same `since_ms` — the row carries
-    /// both, so no second query is needed to tell an arrival from a closure.
-    ///
-    /// Newest-first (unlike the urgent-first graph reads): this is a feed, and
-    /// the most recent thing is the one worth reading.
-    pub fn list_work_items_since(
-        &self,
-        since_ms: i64,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM work_items
-             WHERE created_at >= ?1 OR (closed_at IS NOT NULL AND closed_at >= ?1)
-             ORDER BY MAX(created_at, COALESCE(closed_at, 0)) DESC
-             LIMIT ?2",
-            Self::WORK_ITEM_COLS
-        ))?;
-        let rows = stmt.query_map(params![since_ms, limit.max(1)], |r| {
-            Self::row_to_work_item(r)
-        })?;
         rows.collect()
     }
 
@@ -7869,6 +7886,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn get_seat_stat(&self, seat: &str) -> Option<SeatStatRow> {
         let conn = self.lock_conn();
         conn.query_row(
@@ -7968,6 +7986,7 @@ impl Database {
 
     /// Per-day totals across all seats (`seat` = None), newest day first,
     /// bounded by `limit`.
+    #[cfg(test)]
     pub fn seat_burn_totals_by_day(&self, limit: i64) -> rusqlite::Result<Vec<SeatBurnRow>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
@@ -13752,6 +13771,10 @@ mod tests {
         // Fresh comment: no fork yet.
         assert!(db.get_comment_fork("s-fork", "c-001").is_none());
         assert!(!db.is_known_fork_session("fork-xyz"));
+        assert_eq!(db.get_comment_fork_seat("s-fork", "c-001"), (None, None));
+        db.set_comment_fork_seat("s-fork", "c-001", Some("sonnet"), Some("high")).unwrap();
+        assert_eq!(db.get_comment_fork_seat("s-fork", "c-001"), (Some("sonnet".into()), Some("high".into())));
+        assert_eq!(db.get_comment_fork_seat("different-plan", "c-001"), (None, None));
 
         db.set_comment_fork("s-fork", "c-001", "fork-xyz", "claude-code")
             .unwrap();
@@ -13790,6 +13813,9 @@ mod tests {
         db.clear_comment_fork("s-fork", "c-001").unwrap();
         assert!(db.get_comment_fork("s-fork", "c-001").is_none());
         assert!(!db.is_known_fork_session("fork-xyz"));
+        assert_eq!(db.get_comment_fork_seat("s-fork", "c-001"), (Some("sonnet".into()), Some("high".into())), "discard clears the resume pointer, preserving the user's model choice");
+        db.set_comment_fork_seat("s-fork", "c-001", None, None).unwrap();
+        assert_eq!(db.get_comment_fork_seat("s-fork", "c-001"), (None, None));
         // Both halves went, not just the id.
         let leftover: Option<String> = {
             let conn = db.lock_conn();
@@ -14482,6 +14508,21 @@ body.
         }
         assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn comment_fork_seat_schema_survives_reopening_without_duplicate_columns() {
+        let path = tempfile_path();
+        for _ in 0..2 {
+            let db = Database::open(&path).unwrap();
+            let conn = db.lock_conn();
+            let mut query = conn.prepare("PRAGMA table_info(comments)").unwrap();
+            let columns: Vec<String> = query.query_map([], |row| row.get(1)).unwrap().collect::<Result<_, _>>().unwrap();
+            for column in ["fork_model", "fork_effort"] {
+                assert_eq!(columns.iter().filter(|name| name.as_str() == column).count(), 1, "{column}");
+            }
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -16213,6 +16254,108 @@ impl Database {
             .map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
             .collect()
     }
+    // --- candidate releases (Build Redline) --------------------------------
+
+    /// Insert or replace a release row. The status transition is checked by
+    /// the caller (`self_develop`), which owns the lifecycle; this is storage.
+    pub fn release_put(&self, release: &crate::self_develop::Release) -> Result<(), String> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO releases(release_id,run_id,repository,status,candidate_root,bundle_path,\
+             manifest_json,capture_json,probe_json,failure,step,created_at,updated_at) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
+             ON CONFLICT(release_id) DO UPDATE SET \
+             run_id=excluded.run_id, status=excluded.status, bundle_path=excluded.bundle_path, \
+             manifest_json=excluded.manifest_json, capture_json=excluded.capture_json, \
+             probe_json=excluded.probe_json, failure=excluded.failure, step=excluded.step, \
+             updated_at=excluded.updated_at",
+            params![
+                release.release_id,
+                release.run_id,
+                release.repository,
+                release.status,
+                release.candidate_root,
+                release.bundle_path,
+                release.manifest.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default()),
+                release.capture.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()),
+                release.probe.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default()),
+                release.failure,
+                release.step,
+                release.created_at,
+                release.updated_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn release_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::self_develop::Release> {
+        let manifest: Option<String> = row.get(6)?;
+        let capture: Option<String> = row.get(7)?;
+        let probe: Option<String> = row.get(8)?;
+        Ok(crate::self_develop::Release {
+            release_id: row.get(0)?,
+            run_id: row.get(1)?,
+            repository: row.get(2)?,
+            status: row.get(3)?,
+            candidate_root: row.get(4)?,
+            bundle_path: row.get(5)?,
+            manifest: manifest.and_then(|s| serde_json::from_str(&s).ok()),
+            capture: capture.and_then(|s| serde_json::from_str(&s).ok()),
+            probe: probe.and_then(|s| serde_json::from_str(&s).ok()),
+            failure: row.get(9)?,
+            step: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+        })
+    }
+
+    const RELEASE_COLUMNS: &'static str = "release_id,run_id,repository,status,candidate_root,\
+         bundle_path,manifest_json,capture_json,probe_json,failure,step,created_at,updated_at";
+
+    pub fn release_get(&self, release_id: &str) -> Result<Option<crate::self_develop::Release>, String> {
+        let conn = self.lock_conn();
+        let sql = format!("SELECT {} FROM releases WHERE release_id=?1", Self::RELEASE_COLUMNS);
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query_map([release_id], Self::release_row).map_err(|e| e.to_string())?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(|e| e.to_string())?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn release_list(&self, limit: usize) -> Result<Vec<crate::self_develop::Release>, String> {
+        let conn = self.lock_conn();
+        let sql = format!(
+            "SELECT {} FROM releases ORDER BY updated_at DESC LIMIT ?1",
+            Self::RELEASE_COLUMNS
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([limit as i64], Self::release_row)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    }
+
+    /// The release currently holding the activation, if any.
+    ///
+    /// One at a time is an invariant, not a convention: two exchanges racing
+    /// for `/Applications/Redline.app` is how one release silently loses the
+    /// other's features.
+    pub fn release_holding_activation(&self) -> Result<Option<crate::self_develop::Release>, String> {
+        Ok(self
+            .release_list(200)?
+            .into_iter()
+            .find(|r| r.status().holds_activation()))
+    }
+
+    pub fn release_delete(&self, release_id: &str) -> Result<(), String> {
+        self.lock_conn()
+            .execute("DELETE FROM releases WHERE release_id=?1", [release_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn runner_claims(
         &self,
         run_id: &str,

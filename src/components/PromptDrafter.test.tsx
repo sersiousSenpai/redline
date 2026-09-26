@@ -19,9 +19,8 @@ import type { Editor, JSONContent } from "@tiptap/react";
 // subscription and the ribbon FREEZES (strictly worse than the jank). Neither
 // test passes if you only fix one side.
 
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(() => Promise.resolve(null)),
-}));
+const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(() => Promise.resolve(() => {})),
 }));
@@ -60,6 +59,9 @@ let host: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  invokeMock.mockReset().mockImplementation(async (command) =>
+    command === "draft_turn_status" ? { streaming: false, instruct: null } : null,
+  );
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -103,6 +105,28 @@ async function mountDrafter(
   await flush();
   return editorFrom();
 }
+
+describe("PromptDrafter — comment visibility", () => {
+  it("loads existing comments quietly and reveals them only through the toggle", async () => {
+    invokeMock.mockImplementation(async (command) => command === "draft_comment_list" ? [{
+      id: "comment-1", draftId: "d1", blockId: null, selCharStart: null,
+      selCharEnd: null, selQuotedText: null, body: "Check the auth boundary",
+      author: "user", createdAt: 1, forkSessionId: null,
+    }] : command === "draft_turn_status" ? { streaming: false, instruct: null } : null);
+    await mountDrafter();
+    expect(invokeMock).toHaveBeenCalledWith("draft_comment_list", { draftId: "d1" });
+    expect(host.querySelector('[data-drafter-sidecar]')).toBeNull();
+    const toggle = host.querySelector<HTMLButtonElement>('button[aria-label="Comments anchored to this draft"]');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.textContent).toContain("1");
+    await act(async () => toggle!.click());
+    expect(host.querySelector('[data-drafter-sidecar]')?.textContent).toContain("Check the auth boundary");
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-drafter-sidecar] button[title="Close"]')!.click());
+    await mountDrafter({ draftId: "d2" });
+    expect(invokeMock).toHaveBeenCalledWith("draft_comment_list", { draftId: "d2" });
+    expect(host.querySelector('[data-drafter-sidecar]')).toBeNull();
+  });
+});
 
 describe("PromptDrafter — the jank, and its opposite", () => {
   it("typing inside one word does not re-render the surface", async () => {
@@ -321,6 +345,7 @@ function LiveHost() {
     onDismissPending: () => setPending(null),
     onLaunch: (prompt: string) =>
       setPending({
+        launchId: "launch-test",
         origin: "drafter",
         prompt,
         startedAt: Date.now(),
@@ -338,4 +363,3 @@ async function mountLive() {
   await flush();
   return editorFrom();
 }
-

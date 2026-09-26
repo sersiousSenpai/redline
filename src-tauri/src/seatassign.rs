@@ -129,14 +129,6 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         note: None,
     },
     SeatFact {
-        seat: "linked",
-        label: "Linked discussion",
-        role: "One conversation spanning all browser tabs, folding per-tab digests \
-               together; broader than a page discussion, narrower than the Companion.",
-        traits: &["interactive", "long_context"],
-        note: None,
-    },
-    SeatFact {
         seat: "mission",
         label: "Missions",
         role: "Research orchestrator holding one goal across tabs and pins, finishing \
@@ -1465,14 +1457,14 @@ That's it."#;
           {"seat":"drafter","rationale":"no fields set, so it writes nothing"},
           {"seat":"browse","model":"gpt-9","rationale":"off-menu model, nothing else set"},
           {"seat":"keeper","model":"gpt-9","effort":"low","rationale":"off-menu model, effort survives"},
-          {"seat":"linked","model":"sonnet","effort":"turbo","rationale":"bad effort only"}
+          {"seat":"memory","model":"sonnet","effort":"turbo","rationale":"bad effort only"}
         ]}"#;
         let r = parse_assignment(text, &models());
         let seats: Vec<&str> = r.picks.iter().map(|p| p.seat.as_str()).collect();
         // Dropped: the unknown seat (unwritable), the two without an auditable
         // rationale, the all-Default pick, and `browse` — whose only field was
         // an off-menu model, so stripping it leaves nothing to apply.
-        assert_eq!(seats, vec!["keeper", "linked"]);
+        assert_eq!(seats, vec!["keeper", "memory"]);
         // A bad field degrades to Default without discarding a sound rationale.
         assert_eq!(r.picks[0].model, None, "off-menu model degrades to Default");
         assert_eq!(r.picks[0].effort.as_deref(), Some("low"));

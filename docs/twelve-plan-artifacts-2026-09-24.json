@@ -1,0 +1,22 @@
+{
+  "files": {
+    "src-tauri/target/release/redline": {
+      "bytes": 38431936,
+      "sha256": "8fda2d7403426104dc70aa2d6a35e25fd69058e8eecf26812db518a81b020c15"
+    },
+    "src-tauri/target/release/redline-activate": {
+      "bytes": 546112,
+      "sha256": "b535105c508e521b8e57e62f660889b835867116f1a6dd2a5ae8b2c0d48de9bf"
+    },
+    "src-tauri/target/release/bundle/macos/Redline.app/Contents/MacOS/redline": {
+      "bytes": 38451024,
+      "sha256": "6d1ca3df89ffd63469b3b67b46bdb81b7221e01147e6bacc8b19b24e664150bb"
+    }
+  },
+  "distBytes": 8991623,
+  "bootJsBytes": 599304,
+  "bootFiles": [
+    "/assets/index-DpvoAzR7.js",
+    "/assets/applyTheme-DroP7-Dp.js"
+  ]
+}

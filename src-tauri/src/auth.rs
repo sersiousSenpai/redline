@@ -114,10 +114,10 @@ pub struct RouteSpec {
 /// `(method, path)` — so a flag in the body could never carry its own class.
 pub use redline_extension_abi::scopes::{
     BROWSER_DRIVE as SCOPE_BROWSER_DRIVE, CONSULT as SCOPE_CONSULT,
-    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, ORCH_REPORT as SCOPE_ORCH_REPORT, PLAN_COMMENT as SCOPE_PLAN_COMMENT,
-    PLAN_OFFER as SCOPE_PLAN_OFFER, PLAN_SUGGEST as SCOPE_PLAN_SUGGEST,
-    REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE, UI_PANEL as SCOPE_UI_PANEL,
-    WORK_CLAIM as SCOPE_WORK_CLAIM, WORK_FILE as SCOPE_WORK_FILE, KNOWN_SCOPES,
+    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, KNOWN_SCOPES, ORCH_REPORT as SCOPE_ORCH_REPORT,
+    PLAN_COMMENT as SCOPE_PLAN_COMMENT, PLAN_OFFER as SCOPE_PLAN_OFFER,
+    PLAN_SUGGEST as SCOPE_PLAN_SUGGEST, REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE,
+    UI_PANEL as SCOPE_UI_PANEL, WORK_CLAIM as SCOPE_WORK_CLAIM, WORK_FILE as SCOPE_WORK_FILE,
 };
 
 /// Redline's OWN rows of the frozen `/v1` contract, in router registration
@@ -351,6 +351,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "POST",
+        path: "/v1/browser/action",
+        class: RouteClass::Protected(SCOPE_BROWSER_DRIVE),
+        purpose: "Run a serialized typed action on an explicit stable browser target with an observed outcome",
+        request: "JSON {operationId, label, expectedRevision?, timeoutMs?, operation:{kind: navigate/click/fill/key/scroll/select/wait, ...}}; no active-tab fallback",
+        response: "JSON {operationId, label, status, elapsedMs, observed, error}; repeat an identical operation ID to retrieve its retained outcome",
+    },
+    RouteSpec {
+        method: "POST",
         path: "/v1/browser/open",
         class: RouteClass::Protected(SCOPE_BROWSER_DRIVE),
         purpose: "Open a new tab",
@@ -378,7 +386,7 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/mission/active",
         class: RouteClass::Open,
         purpose: "The active research mission's goal and enrollment",
-        request: "—",
+        request: "—; legacy active lookup, use /v1/missions/:mission_id for immutable scope",
         response: "JSON mission summary (or none)",
     },
     RouteSpec {
@@ -386,16 +394,48 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/mission/findings",
         class: RouteClass::Open,
         purpose: "The user's pinned findings for the active mission",
-        request: "—",
+        request: "—; legacy active lookup, use /v1/missions/:mission_id/findings for immutable scope",
         response: "JSON pin list",
     },
     RouteSpec {
+        method: "GET",
+        path: "/v1/missions/:mission_id",
+        class: RouteClass::Open,
+        purpose: "Read the exact research mission regardless of the workspace currently on screen",
+        request: "mission id in path",
+        response: "JSON mission or 404",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/missions/:mission_id/findings",
+        class: RouteClass::Open,
+        purpose: "Read pinned findings belonging to the exact mission",
+        request: "mission id in path",
+        response: "JSON {missionId, workspaceId, findings}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/missions/:mission_id/tabs",
+        class: RouteClass::Open,
+        purpose: "Read the mission's persisted page enrollment with stable browser labels",
+        request: "mission id in path",
+        response: "JSON {missionId, workspaceId, tabs:[{id, browseId, label, url, title, ...}]}",
+    },
+    RouteSpec {
         method: "POST",
-        path: "/v1/linked/consult",
-        class: RouteClass::Protected(SCOPE_CONSULT),
-        purpose: "Delegate a heavy tab to its own page-discussion agent for a digest (map-reduce)",
-        request: "JSON {tab, question}",
-        response: "JSON digest text",
+        path: "/v1/missions/:mission_id/tabs",
+        class: RouteClass::Protected(SCOPE_BROWSER_DRIVE),
+        purpose: "Open or reuse an HTTP(S) page in the exact mission workspace and materialize its browser target",
+        request: "mission id in path; JSON {url}",
+        response: "JSON {ok, missionId, workspaceId, label, tab, revision}",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/missions/:mission_id/foundation",
+        class: RouteClass::Protected(redline_extension_abi::scopes::MEMORY_WRITE),
+        purpose: "Resolve immutable mission context or submit attributed runtime progress and evidence; user-only configuration, publication, judgments and handoffs are rejected",
+        request: "JSON {missionId, workspaceId, op, ...}; both IDs must match path; op: read/resolve/export/startRun/checkpointRun/finishRun/ingestFinding/observe/enqueueCapture/indexCapture/searchEvidence/curatedExamples; all operations require memory.write or master token",
+        response: "JSON operation result; 400 for path/body scope mismatch; 403 for user-only operations; 502 for operation failure; startRun freezes permitted context and is idempotent by key",
     },
     RouteSpec {
         method: "POST",
@@ -833,9 +873,7 @@ fn bearer_of(req: &Request) -> Option<String> {
 fn bearer_of_headers(headers: &axum::http::HeaderMap) -> Option<String> {
     let header = headers.get(axum::http::header::AUTHORIZATION)?;
     let value = header.to_str().ok()?;
-    value
-        .strip_prefix("Bearer ")
-        .map(|t| t.trim().to_string())
+    value.strip_prefix("Bearer ").map(|t| t.trim().to_string())
 }
 
 /// The largest JSON-RPC body the MCP write gate will read before deciding.
@@ -859,7 +897,13 @@ pub fn mcp_write_route(body: &[u8]) -> Option<&'static str> {
         if m.get("method").and_then(|x| x.as_str()) != Some("tools/call") {
             continue;
         }
-        let Some(name) = m.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) else { continue };
+        let Some(name) = m
+            .get("params")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+        else {
+            continue;
+        };
         if !polis_mcp::WRITE_TOOLS.contains(&name) {
             continue;
         }
@@ -885,18 +929,32 @@ pub async fn require_mcp_write_token(req: Request, next: Next) -> Response {
     let bytes = match axum::body::to_bytes(body, MCP_BODY_CAP).await {
         Ok(b) => b,
         Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({ "error": "MCP body too large" }))).into_response();
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(json!({ "error": "MCP body too large" })),
+            )
+                .into_response();
         }
     };
     if let Some(route) = mcp_write_route(&bytes) {
         let bearer = bearer_of_headers(&parts.headers);
         if let Err(denial) = authorize(route, "POST", bearer.as_deref()) {
             let message = denial.message();
-            crate::db::note_friction("auth_denied", Some("daemon"), None, Some(&format!("POST /mcp (as {route}): {message}")));
-            return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": message }))).into_response();
+            crate::db::note_friction(
+                "auth_denied",
+                Some("daemon"),
+                None,
+                Some(&format!("POST /mcp (as {route}): {message}")),
+            );
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response();
         }
     }
-    next.run(Request::from_parts(parts, axum::body::Body::from(bytes))).await
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
 }
 
 /// Axum middleware applying `authorize` to every daemon request. Requests
@@ -909,6 +967,23 @@ pub async fn require_daemon_auth(req: Request, next: Next) -> Response {
     };
     let path = matched.as_str().to_string();
     let method = req.method().as_str().to_string();
+    // A version change in progress closes every write. Two windows need it:
+    // while the restart is saving and draining, and while a freshly installed
+    // release is still proving it works. Anything written in either would be
+    // taken away by a recovery the caller never asked for, so the honest
+    // answer is "not yet", with a reason and a retry.
+    //
+    // Reads stay open throughout: an agent can still look things up, and the
+    // window a caller is being asked to wait out is seconds long.
+    if crate::activation::mutations_gated() && !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS")
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "5")],
+            axum::Json(json!({ "error": crate::activation::gated_message() })),
+        )
+            .into_response();
+    }
     let bearer = bearer_of(&req);
     match authorize(&path, &method, bearer.as_deref()) {
         Ok(()) => next.run(req).await,
@@ -938,7 +1013,9 @@ pub async fn require_daemon_auth(req: Request, next: Next) -> Response {
 pub fn render_api_doc() -> String {
     let mut out = String::new();
     out.push_str("# Redline control-plane API — v1\n\n");
-    out.push_str("The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. ");
+    out.push_str(
+        "The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. ",
+    );
     out.push_str("This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in — `crates/polis-server/src/lib.rs` of https://github.com/sersiousSenpai/polis-memory, at the rev `src-tauri/Cargo.toml` pins) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.\n\n");
     out.push_str("## Auth classes\n\n");
     out.push_str("- **open** — no credential (read-only surface; may tokenize in a later pass).\n");
@@ -949,6 +1026,10 @@ pub fn render_api_doc() -> String {
     out.push_str("  Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.\n\n");
     out.push_str("- **token: master only** — requires the per-boot master token itself; extension tokens never qualify, whatever their scopes. Reserved for control-plane verbs (instance retirement). The token is also persisted to `<app_data_dir>/daemon.token` (0600) so a booting sibling's preflight — same user, no inherited env — can authenticate against a headless incumbent.\n\n");
     out.push_str("Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.\n\n");
+    out.push_str("## While a version change is in progress\n\n");
+    out.push_str("Redline can build and install a replacement of itself (see `docs/self-develop.md`). During the two short windows around that — while it is saving and draining before the restart, and while a freshly installed release is proving it works — **every mutating request is refused with `503` and a `Retry-After: 5` header**, whatever its auth class, including the hook contract. Reads are unaffected.\n\n");
+    out.push_str("This is not a failure to report: anything written in either window could be taken away by a recovery the caller never asked for. The body carries a sentence explaining it. Retry.\n\n");
+
     out.push_str("## Routes\n\n");
     out.push_str("| Method | Path | Auth | Purpose | Request | Response |\n");
     out.push_str("|---|---|---|---|---|---|\n");
@@ -1045,6 +1126,117 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn mission_routes_resolve_concrete_ids_and_enforce_runtime_scopes() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::{get, post};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        async fn owner(axum::extract::Path(id): axum::extract::Path<String>) -> String {
+            id
+        }
+        let app = axum::Router::new()
+            .route("/v1/missions/:mission_id", get(owner))
+            .route("/v1/missions/:mission_id/findings", get(owner))
+            .route("/v1/missions/:mission_id/tabs", get(owner).post(owner))
+            .route("/v1/missions/:mission_id/foundation", post(owner))
+            .route("/v1/browser/action", post(|| async { "observed" }))
+            .layer(axum::middleware::from_fn(require_daemon_auth));
+        for suffix in ["", "/findings", "/tabs"] {
+            let request = Request::builder()
+                .uri(format!("/v1/missions/stable-owner{suffix}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                &response.into_body().collect().await.unwrap().to_bytes()[..],
+                b"stable-owner"
+            );
+        }
+        for (uri, path, scope) in [
+            (
+                "/v1/browser/action",
+                "/v1/browser/action",
+                SCOPE_BROWSER_DRIVE,
+            ),
+            (
+                "/v1/missions/stable-owner/tabs",
+                "/v1/missions/:mission_id/tabs",
+                SCOPE_BROWSER_DRIVE,
+            ),
+            (
+                "/v1/missions/stable-owner/foundation",
+                "/v1/missions/:mission_id/foundation",
+                redline_extension_abi::scopes::MEMORY_WRITE,
+            ),
+        ] {
+            assert_eq!(
+                route_spec(path, "POST").unwrap().class,
+                RouteClass::Protected(scope)
+            );
+            for authenticated in [false, true] {
+                let mut request = Request::builder().method("POST").uri(uri);
+                if authenticated {
+                    request = request.header("authorization", format!("Bearer {}", daemon_token()));
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if authenticated {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    },
+                    "{uri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mission_runtime_token_does_not_grant_browser_writes() {
+        let _guard = grants_test_lock();
+        clear_grants_for_test();
+        register_grant(
+            "mission-runtime-test".into(),
+            ExtensionGrant {
+                name: "mission-runtime".into(),
+                scopes: vec![redline_extension_abi::scopes::MEMORY_WRITE.into()],
+            },
+        );
+        assert_eq!(
+            authorize(
+                "/v1/missions/:mission_id/foundation",
+                "POST",
+                Some("mission-runtime-test")
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            authorize(
+                "/v1/missions/:mission_id/tabs",
+                "POST",
+                Some("mission-runtime-test")
+            ),
+            Err(Denial::ScopeNotGranted {
+                scope: SCOPE_BROWSER_DRIVE
+            })
+        );
+        assert_eq!(
+            authorize("/v1/browser/action", "POST", Some("mission-runtime-test")),
+            Err(Denial::ScopeNotGranted {
+                scope: SCOPE_BROWSER_DRIVE
+            })
+        );
+        clear_grants_for_test();
+    }
+
     /// The polis rows are in the merged contract with their classes intact:
     /// the hook route open by design, the reads open, every write protected
     /// under the scope the polis table names.
@@ -1055,8 +1247,14 @@ mod tests {
             ROUTE_TABLE.len() + polis_server::ROUTES.len(),
             "every polis row is mapped, none twice"
         );
-        assert_eq!(route_spec("/v1/prompts/ingest", "POST").unwrap().class, RouteClass::HookContract);
-        assert_eq!(route_spec("/v1/memory/tree", "GET").unwrap().class, RouteClass::Open);
+        assert_eq!(
+            route_spec("/v1/prompts/ingest", "POST").unwrap().class,
+            RouteClass::HookContract
+        );
+        assert_eq!(
+            route_spec("/v1/memory/tree", "GET").unwrap().class,
+            RouteClass::Open
+        );
         assert_eq!(
             route_spec("/v1/memory/proposals", "POST").unwrap().class,
             RouteClass::Protected(redline_extension_abi::scopes::MEMORY_PROPOSE)
@@ -1065,7 +1263,12 @@ mod tests {
             route_spec("/v1/memory/forget", "POST").unwrap().class,
             RouteClass::Protected(redline_extension_abi::scopes::MEMORY_FORGET)
         );
-        assert!(ROUTE_TABLE.iter().all(|r| !r.path.starts_with("/v1/memory/")), "no memory row stays in Redline's own table");
+        assert!(
+            ROUTE_TABLE
+                .iter()
+                .all(|r| !r.path.starts_with("/v1/memory/")),
+            "no memory row stays in Redline's own table"
+        );
     }
 
     /// The scope strings polis-server writes are the strings the extension
@@ -1079,7 +1282,10 @@ mod tests {
         assert_eq!(polis_server::scopes::MEMORY_FORGET, abi::MEMORY_FORGET);
         assert_eq!(polis_server::scopes::MEMORY_ORGANIZE, abi::MEMORY_ORGANIZE);
         for scope in polis_server::scopes::ALL {
-            assert!(KNOWN_SCOPES.contains(scope), "polis scope {scope} is not a known extension scope");
+            assert!(
+                KNOWN_SCOPES.contains(scope),
+                "polis scope {scope} is not a known extension scope"
+            );
         }
     }
 
@@ -1108,7 +1314,9 @@ mod tests {
                 "/v1/memory/proposals" => r#"{"proposals":[]}"#,
                 "/v1/memory/remember" => r#"{"text":"kept","asUser":true}"#,
                 "/v1/memory/annotate" => r#"{"targetKind":"none","text":"note"}"#,
-                "/v1/memory/forget" => r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#,
+                "/v1/memory/forget" => {
+                    r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#
+                }
                 "/v1/memory/events" => r#"{"items":[{"body":"imported"}]}"#,
                 "/v1/memory/browse" => r#"{"url":"https://example.test","text":"page"}"#,
                 _ => "",
@@ -1123,9 +1331,17 @@ mod tests {
             let resp = rt.block_on(app.clone().oneshot(req)).unwrap();
             let status = resp.status();
             let bytes = rt.block_on(resp.into_body().collect()).unwrap().to_bytes();
-            assert_ne!(status, StatusCode::UNAUTHORIZED, "{} {} is served but not in all_routes(): {}", spec.method, spec.path, String::from_utf8_lossy(&bytes));
+            assert_ne!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{} {} is served but not in all_routes(): {}",
+                spec.method,
+                spec.path,
+                String::from_utf8_lossy(&bytes)
+            );
             assert!(
-                !(status == StatusCode::NOT_FOUND && bytes.is_empty()) && status != StatusCode::METHOD_NOT_ALLOWED,
+                !(status == StatusCode::NOT_FOUND && bytes.is_empty())
+                    && status != StatusCode::METHOD_NOT_ALLOWED,
                 "{} {} is in ROUTES but the merged router answered {status}",
                 spec.method,
                 spec.path
@@ -1133,10 +1349,24 @@ mod tests {
         }
         // And without the token, the classes hold across the merge: the hook
         // and the reads pass, a write bounces.
-        let open = Request::builder().uri("/v1/memory/verify").body(Body::empty()).unwrap();
-        assert_eq!(rt.block_on(app.clone().oneshot(open)).unwrap().status(), StatusCode::OK);
-        let write = Request::builder().method("POST").uri("/v1/memory/remember").header("content-type", "application/json").body(Body::from(r#"{"text":"x","asUser":true}"#)).unwrap();
-        assert_eq!(rt.block_on(app.clone().oneshot(write)).unwrap().status(), StatusCode::UNAUTHORIZED);
+        let open = Request::builder()
+            .uri("/v1/memory/verify")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            rt.block_on(app.clone().oneshot(open)).unwrap().status(),
+            StatusCode::OK
+        );
+        let write = Request::builder()
+            .method("POST")
+            .uri("/v1/memory/remember")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"text":"x","asUser":true}"#))
+            .unwrap();
+        assert_eq!(
+            rt.block_on(app.clone().oneshot(write)).unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// The MCP mount, through the merged router under THIS middleware: a real
@@ -1151,20 +1381,48 @@ mod tests {
     /// by its strongest element, and everything else passes.
     #[test]
     fn mcp_write_gate_maps_write_tools_to_their_http_routes() {
-        let call = |name: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#);
+        let call = |name: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+            )
+        };
         assert_eq!(mcp_write_route(call("memory_search").as_bytes()), None);
-        assert_eq!(mcp_write_route(call("memory_remember").as_bytes()), Some("/v1/memory/remember"));
-        assert_eq!(mcp_write_route(call("memory_ingest").as_bytes()), Some("/v1/memory/remember"));
-        assert_eq!(mcp_write_route(call("memory_annotate").as_bytes()), Some("/v1/memory/remember"));
-        assert_eq!(mcp_write_route(call("memory_supersede").as_bytes()), Some("/v1/memory/remember"));
-        assert_eq!(mcp_write_route(call("memory_forget").as_bytes()), Some("/v1/memory/forget"));
-        assert_eq!(mcp_write_route(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#), None);
-        assert_eq!(mcp_write_route(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
+        assert_eq!(
+            mcp_write_route(call("memory_remember").as_bytes()),
+            Some("/v1/memory/remember")
+        );
+        assert_eq!(
+            mcp_write_route(call("memory_ingest").as_bytes()),
+            Some("/v1/memory/remember")
+        );
+        assert_eq!(
+            mcp_write_route(call("memory_annotate").as_bytes()),
+            Some("/v1/memory/remember")
+        );
+        assert_eq!(
+            mcp_write_route(call("memory_supersede").as_bytes()),
+            Some("/v1/memory/remember")
+        );
+        assert_eq!(
+            mcp_write_route(call("memory_forget").as_bytes()),
+            Some("/v1/memory/forget")
+        );
+        assert_eq!(
+            mcp_write_route(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+            None
+        );
+        assert_eq!(
+            mcp_write_route(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+            None
+        );
         assert_eq!(mcp_write_route(b"not json"), None);
         let batch = format!("[{},{}]", call("memory_stats"), call("memory_forget"));
         assert_eq!(mcp_write_route(batch.as_bytes()), Some("/v1/memory/forget"));
         for w in polis_mcp::WRITE_TOOLS {
-            assert!(mcp_write_route(call(w).as_bytes()).is_some(), "{w} is gated");
+            assert!(
+                mcp_write_route(call(w).as_bytes()).is_some(),
+                "{w} is gated"
+            );
         }
     }
 
@@ -1185,15 +1443,22 @@ mod tests {
         let app = polis_server::router::<polis_server::PolisState>()
             .route(
                 "/mcp",
-                axum::routing::any_service(polis_mcp::http_service(api.clone())).layer(axum::middleware::from_fn(require_mcp_write_token)),
+                axum::routing::any_service(polis_mcp::http_service(api.clone()))
+                    .layer(axum::middleware::from_fn(require_mcp_write_token)),
             )
-            .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-                let probe = probe.clone();
-                async move {
-                    probe.lock().unwrap().push(req.extensions().get::<MatchedPath>().map(|m| m.as_str().to_string()));
-                    next.run(req).await
-                }
-            }))
+            .layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    let probe = probe.clone();
+                    async move {
+                        probe.lock().unwrap().push(
+                            req.extensions()
+                                .get::<MatchedPath>()
+                                .map(|m| m.as_str().to_string()),
+                        );
+                        next.run(req).await
+                    }
+                },
+            ))
             .layer(axum::middleware::from_fn(require_daemon_auth))
             .with_state(state);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1214,73 +1479,189 @@ mod tests {
         // initialize → 200 + Mcp-Session-Id, no token needed (an Open row).
         let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"redline-test","version":"0"}}}"#;
         let resp = rt.block_on(app.clone().oneshot(post(init, None))).unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "initialize through the merged router");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "initialize through the merged router"
+        );
         let session = resp
             .headers()
             .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
             .expect("initialize answers with an Mcp-Session-Id");
-        let body = String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes()).to_string();
-        assert!(body.contains("\"serverInfo\"") && body.contains("polis-memory"), "the initialize result rides the body: {body}");
+        let body =
+            String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes())
+                .to_string();
+        assert!(
+            body.contains("\"serverInfo\"") && body.contains("polis-memory"),
+            "the initialize result rides the body: {body}"
+        );
         // The client's initialized notification, then tools/list on the session.
-        let notified = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, Some(&session)))).unwrap();
-        assert!(notified.status().is_success(), "notifications/initialized: {}", notified.status());
-        let resp = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, Some(&session)))).unwrap();
+        let notified = rt
+            .block_on(app.clone().oneshot(post(
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                Some(&session),
+            )))
+            .unwrap();
+        assert!(
+            notified.status().is_success(),
+            "notifications/initialized: {}",
+            notified.status()
+        );
+        let resp = rt
+            .block_on(app.clone().oneshot(post(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                Some(&session),
+            )))
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes()).to_string();
-        for tool in ["memory_search", "memory_context", "memory_grep", "memory_tree", "memory_node", "memory_timeline", "memory_stats", "memory_verify", "answer_pack", "query_prompts"] {
-            assert!(body.contains(&format!("\"name\":\"{tool}\"")), "tools/list names {tool}: {body}");
+        let body =
+            String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes())
+                .to_string();
+        for tool in [
+            "memory_search",
+            "memory_context",
+            "memory_grep",
+            "memory_tree",
+            "memory_node",
+            "memory_timeline",
+            "memory_stats",
+            "memory_verify",
+            "answer_pack",
+            "query_prompts",
+        ] {
+            assert!(
+                body.contains(&format!("\"name\":\"{tool}\"")),
+                "tools/list names {tool}: {body}"
+            );
         }
         // E2: the five write tools ARE on this surface — gated below by the
         // same token and scope as their HTTP routes; revert never is.
         for tool in polis_mcp::WRITE_TOOLS {
-            assert!(body.contains(&format!("\"name\":\"{tool}\"")), "tools/list names the write tool {tool}");
+            assert!(
+                body.contains(&format!("\"name\":\"{tool}\"")),
+                "tools/list names the write tool {tool}"
+            );
         }
         assert!(!body.contains("revert"), "revert is never an MCP tool");
         // A write without a token is refused as its HTTP twin would be.
         let remember = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_remember","arguments":{"text":"gated","as_user":true}}}"#;
-        let denied = rt.block_on(app.clone().oneshot(post(remember, Some(&session)))).unwrap();
-        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED, "a write over MCP needs the token");
-        let denied_body = String::from_utf8_lossy(&rt.block_on(denied.into_body().collect()).unwrap().to_bytes()).to_string();
-        assert!(denied_body.contains("memory.write"), "the denial names the scope: {denied_body}");
+        let denied = rt
+            .block_on(app.clone().oneshot(post(remember, Some(&session))))
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::UNAUTHORIZED,
+            "a write over MCP needs the token"
+        );
+        let denied_body = String::from_utf8_lossy(
+            &rt.block_on(denied.into_body().collect())
+                .unwrap()
+                .to_bytes(),
+        )
+        .to_string();
+        assert!(
+            denied_body.contains("memory.write"),
+            "the denial names the scope: {denied_body}"
+        );
         let forget = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_forget","arguments":{"target_kind":"prompt","target_id":"1","confirm":"forget"}}}"#;
-        let denied = rt.block_on(app.clone().oneshot(post(forget, Some(&session)))).unwrap();
+        let denied = rt
+            .block_on(app.clone().oneshot(post(forget, Some(&session))))
+            .unwrap();
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-        let denied_body = String::from_utf8_lossy(&rt.block_on(denied.into_body().collect()).unwrap().to_bytes()).to_string();
-        assert!(denied_body.contains("memory.forget"), "forget is the forget scope: {denied_body}");
+        let denied_body = String::from_utf8_lossy(
+            &rt.block_on(denied.into_body().collect())
+                .unwrap()
+                .to_bytes(),
+        )
+        .to_string();
+        assert!(
+            denied_body.contains("memory.forget"),
+            "forget is the forget scope: {denied_body}"
+        );
         // With the master token the write goes through to the memory.
         let mut authed = post(remember, Some(&session));
-        authed.headers_mut().insert(axum::http::header::AUTHORIZATION, format!("Bearer {}", daemon_token()).parse().unwrap());
+        authed.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {}", daemon_token()).parse().unwrap(),
+        );
         let ok = rt.block_on(app.clone().oneshot(authed)).unwrap();
         assert_eq!(ok.status(), StatusCode::OK, "the tokened write is served");
         // The transport streams the result: the tool runs as the body is
         // produced, so read it to the end before looking for the row.
-        let ok_body = String::from_utf8_lossy(&rt.block_on(ok.into_body().collect()).unwrap().to_bytes()).to_string();
-        assert!(ok_body.contains("remembered"), "the write's receipt rides the stream: {ok_body}");
-        let found = api.search(&polis_core::api::SearchRequest { q: Some("gated".into()), ..Default::default() }).unwrap();
-        assert!(!found.prompt_hits.is_empty(), "the remembered row is in the lake");
+        let ok_body =
+            String::from_utf8_lossy(&rt.block_on(ok.into_body().collect()).unwrap().to_bytes())
+                .to_string();
+        assert!(
+            ok_body.contains("remembered"),
+            "the write's receipt rides the stream: {ok_body}"
+        );
+        let found = api
+            .search(&polis_core::api::SearchRequest {
+                q: Some("gated".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            !found.prompt_hits.is_empty(),
+            "the remembered row is in the lake"
+        );
         // …and the daemon's own router carries the same gate on its `/mcp`
         // route (a source scrape, the drift test's style): a mount without it
         // would serve `memory_forget` to any loopback process token-free.
         let lib_src = include_str!("lib.rs");
-        let mcp_line = lib_src.lines().find(|l| l.contains(".route(\"/mcp\"")).expect("lib.rs registers /mcp");
-        assert!(mcp_line.contains("require_mcp_write_token"), "the /mcp route must carry require_mcp_write_token: {mcp_line}");
+        let mcp_line = lib_src
+            .lines()
+            .find(|l| l.contains(".route(\"/mcp\""))
+            .expect("lib.rs registers /mcp");
+        assert!(
+            mcp_line.contains("require_mcp_write_token"),
+            "the /mcp route must carry require_mcp_write_token: {mcp_line}"
+        );
         // A read on the same session still needs no token.
         let stats = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"memory_stats","arguments":{}}}"#, Some(&session)))).unwrap();
         assert_eq!(stats.status(), StatusCode::OK, "reads stay open");
         // A sub-path is not a route: the router's own 404 (empty body), never
         // rmcp answering as if it were the mount.
-        let sub = rt.block_on(app.clone().oneshot(HttpRequest::builder().uri("/mcp/nope").header("host", "127.0.0.1:7676").body(Body::empty()).unwrap())).unwrap();
+        let sub = rt
+            .block_on(
+                app.clone().oneshot(
+                    HttpRequest::builder()
+                        .uri("/mcp/nope")
+                        .header("host", "127.0.0.1:7676")
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
         assert_eq!(sub.status(), StatusCode::NOT_FOUND);
         let sub_body = rt.block_on(sub.into_body().collect()).unwrap().to_bytes();
-        assert!(sub_body.is_empty(), "a sub-path is unrouted, not served: {}", String::from_utf8_lossy(&sub_body));
+        assert!(
+            sub_body.is_empty(),
+            "a sub-path is unrouted, not served: {}",
+            String::from_utf8_lossy(&sub_body)
+        );
         // The mount point's MatchedPath is "/mcp" — the three rows' key.
         let paths = seen.lock().unwrap().clone();
-        assert!(paths.iter().filter(|p| p.as_deref() == Some("/mcp")).count() >= 3, "every /mcp request matched \"/mcp\": {paths:?}");
-        assert!(paths.contains(&None), "the sub-path carried no MatchedPath: {paths:?}");
+        assert!(
+            paths
+                .iter()
+                .filter(|p| p.as_deref() == Some("/mcp"))
+                .count()
+                >= 3,
+            "every /mcp request matched \"/mcp\": {paths:?}"
+        );
+        assert!(
+            paths.contains(&None),
+            "the sub-path carried no MatchedPath: {paths:?}"
+        );
         for method in ["GET", "POST", "DELETE"] {
-            assert_eq!(route_spec("/mcp", method).map(|r| r.class), Some(RouteClass::Open), "{method} /mcp is an Open row");
+            assert_eq!(
+                route_spec("/mcp", method).map(|r| r.class),
+                Some(RouteClass::Open),
+                "{method} /mcp is an Open row"
+            );
         }
     }
 
@@ -1371,7 +1752,6 @@ mod tests {
             ("/v1/browser/navigate", "POST"),
             ("/v1/browser/query", "POST"),
             ("/v1/browser/download", "POST"),
-            ("/v1/linked/consult", "POST"),
             ("/v1/global/consult", "POST"),
             ("/v1/memory/proposals", "POST"),
             ("/v1/drafter/:draft_id/suggestions", "POST"),
@@ -1449,12 +1829,20 @@ mod tests {
             },
         );
         assert_eq!(
-            authorize("/v1/sessions/:session_id/comments", "POST", Some("tok-revoke-me")),
+            authorize(
+                "/v1/sessions/:session_id/comments",
+                "POST",
+                Some("tok-revoke-me")
+            ),
             Ok(())
         );
         assert_eq!(revoke_grant("shortlived"), 1);
         assert_eq!(
-            authorize("/v1/sessions/:session_id/comments", "POST", Some("tok-revoke-me")),
+            authorize(
+                "/v1/sessions/:session_id/comments",
+                "POST",
+                Some("tok-revoke-me")
+            ),
             Err(Denial::BadToken)
         );
         assert_eq!(revoke_grant("shortlived"), 0, "second revoke finds nothing");
@@ -1467,8 +1855,7 @@ mod tests {
     #[test]
     fn api_doc_golden_is_current() {
         let rendered = render_api_doc();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../docs/api-v1.md");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/api-v1.md");
         if std::env::var("UPDATE_GOLDEN").is_ok() {
             std::fs::write(&path, &rendered).expect("write api doc golden");
             return;

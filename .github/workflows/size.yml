@@ -41,6 +41,11 @@ jobs:
       - run: npm ci
       # Runs beforeBuildCommand (npm run build) itself, then the release
       # cargo build with assets embedded — the binary the budget means.
+      # The activation helper is a separate workspace member and a separate
+      # shipped artifact (it rides inside Redline.app). `tauri build` does not
+      # produce it, so without this the strict checker reports it missing.
+      - name: Build the activation helper
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml -p redline-activate
       - name: Release build
         run: npx tauri build --bundles app
       # `shell: bash` gives -o pipefail, so the tee can't mask a breach.

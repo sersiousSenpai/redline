@@ -18,10 +18,34 @@ import {
   computePaneLayout,
   docMinFor,
   isLayoutAtRest,
+  paneCollapseOnMask,
   voicePaneMaxW,
   type PaneLayoutInput,
   type RestingShapeInput,
 } from "./paneLayout";
+
+describe("paneCollapseOnMask", () => {
+  it.each([
+    { previous: false, next: false, collapse: false },
+    { previous: false, next: true, collapse: true },
+    { previous: true, next: true, collapse: false },
+    { previous: true, next: false, collapse: false },
+  ])("collapses only on entry: $previous → $next", ({ previous, next, collapse }) => {
+    expect(paneCollapseOnMask(previous, next)).toBe(collapse);
+  });
+
+  it("closes a boot on a masked surface and stays closed when returning to a plan", () => {
+    let previous = false;
+    let collapsed = false;
+    for (const masked of [true, true, false]) {
+      if (paneCollapseOnMask(previous, masked)) collapsed = true;
+      previous = masked;
+    }
+    expect(collapsed).toBe(true);
+    // Selecting an intercepted plan opens the preference as its mask falls.
+    expect(paneCollapseOnMask(true, false)).toBe(false);
+  });
+});
 
 // The shell's two constants are load-bearing for the plate look: the gutter is
 // the divider (PaneDivider's box spans it) and the edge ring is constant <main>

@@ -170,16 +170,21 @@ describe("panelMaskFor", () => {
 });
 
 describe("panelMask", () => {
-  const on = { surface: "browser" as const, broken: false, enabled: true, docPinned: false };
+  const on = { surface: "browser" as const, broken: { sidebar: false, pane: false }, enabled: true, docPinned: false };
 
   it("holds on a non-document surface", () => {
     expect(panelMask(on)).toEqual({ sidebar: true, pane: true });
     expect(panelsMasked(panelMask(on))).toBe(true);
   });
 
+  it("each panel break leaves the other panel masked", () => {
+    expect(panelMask({ ...on, broken: { sidebar: true, pane: false } })).toEqual({ sidebar: false, pane: true });
+    expect(panelMask({ ...on, broken: { sidebar: false, pane: true } })).toEqual({ sidebar: true, pane: false });
+  });
+
   it("breaking out wins for the rest of the visit", () => {
     // The user reopened something by hand. The next selectSurface re-arms.
-    expect(panelMask({ ...on, broken: true })).toEqual({ sidebar: false, pane: false });
+    expect(panelMask({ ...on, broken: { sidebar: true, pane: true } })).toEqual({ sidebar: false, pane: false });
   });
 
   it("the manifest opt-out turns it off everywhere", () => {
@@ -281,7 +286,7 @@ describe("maskPanels", () => {
 });
 
 describe("panelMask: a conversation that has taken the plate", () => {
-  const base = { surface: "document" as const, broken: false, enabled: true, docPinned: false };
+  const base = { surface: "document" as const, broken: { sidebar: false, pane: false }, enabled: true, docPinned: false };
 
   it("hides both panels, though the surface is still the document", () => {
     // The document surface normally keeps both — they are ABOUT the document.
@@ -301,7 +306,7 @@ describe("panelMask: a conversation that has taken the plate", () => {
 
   it("still yields to the user reopening something, and to the manifest", () => {
     expect(
-      panelMask({ ...base, broken: true, conversationExpanded: true }),
+      panelMask({ ...base, broken: { sidebar: true, pane: true }, conversationExpanded: true }),
     ).toEqual({ sidebar: false, pane: false });
     expect(
       panelMask({ ...base, enabled: false, conversationExpanded: true }),

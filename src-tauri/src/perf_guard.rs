@@ -32,6 +32,28 @@ mod tests {
     }
 
     #[test]
+    fn browser_persistence_and_hook_watches_stay_off_the_ui_thread() {
+        let workspace = include_str!("browser_workspace.rs");
+        for command in ["browser_workspace_read", "browser_workspace_write", "browser_workspace_list", "browser_workspace_delete"] {
+            assert_async_command(workspace, "browser_workspace.rs", command);
+        }
+        assert_async_command(include_str!("mission.rs"), "mission.rs", "mission_add_finding");
+        for command in ["watch_hook_conflicts", "unwatch_hook_conflicts"] {
+            assert_async_command(include_str!("hook_conflicts.rs"), "hook_conflicts.rs", command);
+        }
+    }
+
+    #[test]
+    fn capture_recovery_stays_after_the_first_actionable_frame() {
+        let startup = include_str!("lib.rs");
+        assert!(!startup.contains("mission_capture::resume("), "OCR recovery must not run in setup");
+        let postboot = include_str!("postboot.rs");
+        let ready = postboot.find("boot_trace::mark(boot_trace::POST_BOOT_DONE)").unwrap();
+        let recovery = postboot.find("crate::mission_capture::resume(").unwrap();
+        assert!(recovery > ready, "OCR recovery starts after boot readiness and the window reveal");
+    }
+
+    #[test]
     fn heavy_fsbrowse_commands_stay_async() {
         let src = include_str!("fsbrowse.rs");
         assert_async_command(src, "fsbrowse.rs", "list_dir");

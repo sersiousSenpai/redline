@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { usePersistedState } from "../theme/usePersistedState";
 import type { Mission, MissionFinding, MissionTab } from "../types";
@@ -15,6 +15,8 @@ export function useMission() {
     "redline.mission.activeId",
     null,
   );
+  const [error, setError] = useState<string | null>(null);
+  const findingsEpoch = useRef(0);
   const [missions, setMissions] = useState<Mission[]>([]);
   const [findings, setFindings] = useState<MissionFinding[]>([]);
   // True once the first `mission_list` has resolved — lets the mount-restore
@@ -28,23 +30,20 @@ export function useMission() {
     try {
       setMissions(await invoke<Mission[]>("mission_list"));
       setMissionsLoaded(true);
-    } catch {
-      /* ignore — empty list is a fine fallback; loaded stays false so the
-         mount-restore gate keeps waiting rather than declaring the mission
-         gone on a transient failure */
-    }
+      setError(null);
+    } catch (e) { setError(`Could not load research missions: ${String(e)}`); }
   }, []);
 
   const refreshFindings = useCallback(async (missionId: string | null) => {
+    const epoch = ++findingsEpoch.current;
     if (!missionId) {
       setFindings([]);
       return;
     }
     try {
-      setFindings(await invoke<MissionFinding[]>("mission_list_findings", { missionId }));
-    } catch {
-      setFindings([]);
-    }
+      const rows = await invoke<MissionFinding[]>("mission_list_findings", { missionId });
+      if (epoch === findingsEpoch.current) setFindings(rows);
+    } catch (e) { if (epoch === findingsEpoch.current) setError(`Could not load findings: ${String(e)}`); }
   }, []);
 
   // Load the mission list once on mount.
@@ -68,15 +67,13 @@ export function useMission() {
   }, [activeMissionId, refreshFindings]);
 
   const startMission = useCallback(
-    async (title: string, goal: string): Promise<Mission | null> => {
+    async (title: string, goal: string, tabs: MissionTab[] = [], cwd: string | null = null): Promise<Mission | null> => {
       try {
-        const m = await invoke<Mission>("mission_create", { title, goal });
+        const m = await invoke<Mission>("mission_create", { title, goal, tabs, cwd });
         await refreshMissions();
         setActiveMissionId(m.missionId);
         return m;
-      } catch {
-        return null;
-      }
+      } catch (e) { setError(`Could not start the mission: ${String(e)}`); return null; }
     },
     [refreshMissions, setActiveMissionId],
   );
@@ -108,9 +105,7 @@ export function useMission() {
     async (missionId: string) => {
       try {
         await invoke("mission_delete", { missionId });
-      } catch {
-        /* ignore */
-      }
+      } catch (e) { setError(`Could not delete the mission: ${String(e)}`); return; }
       if (activeMissionId === missionId) setActiveMissionId(null);
       await refreshMissions();
     },
@@ -123,18 +118,14 @@ export function useMission() {
   const getMissionTabs = useCallback(async (missionId: string): Promise<MissionTab[]> => {
     try {
       return await invoke<MissionTab[]>("mission_get_tabs", { missionId });
-    } catch {
-      return [];
-    }
+    } catch (e) { setError(`Could not load the workspace: ${String(e)}`); throw e; }
   }, []);
 
   const setMissionTabs = useCallback(
     async (missionId: string, tabs: MissionTab[]) => {
       try {
         await invoke("mission_set_tabs", { missionId, tabs });
-      } catch {
-        /* ignore — tabs still work in-memory */
-      }
+      } catch (e) { setError(`Could not save the workspace. Your current pages are still open: ${String(e)}`); throw e; }
     },
     [],
   );
@@ -180,6 +171,7 @@ export function useMission() {
   );
 
   return {
+    error,
     activeMission,
     /** Raw persisted active id — available before the mission list loads, so the
      *  BrowserPane can restore a mission's tabs on mount. */

@@ -1,22 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// The browser chat panel's memory, per tab.
-//
-// It used to be a plain `useState` pair in `BrowserPane` — and `BrowserPane` is
-// unmounted whenever the main surface changes (App mounts it only while
-// `mainSurface === "browser"`) and re-parented on every document-pin toggle. So
-// a round-trip to Code Review closed the chat, every time, with no way to say
-// "leave it as I had it".
-//
-// The key is `browseId`, the tab's DURABLE id: it survives the tab-id re-mint
-// that a reload and a mission restore both perform, so the panel reopens on the
-// tab the user actually left it open on rather than on whatever tab inherited
-// its slot.
-
-/** Which discussion the split shows. `list` is the fourth pill — a tab's
- *  working list, which is not a conversation at all. */
-export type ChatPill = "page" | "mission" | "linked" | "list";
+// Visibility belongs to the whole browser panel; each durable tab remembers
+// its page/Cart choice. Legacy saved pills are normalized on read.
+export type ChatPill = "page" | "cart" | "mission";
 
 export interface ChatEntry {
   open: boolean;
@@ -49,7 +36,7 @@ export function pruneChatState(
   liveBrowseIds: string[],
   keepIdle = KEEP_IDLE,
 ): ChatStateMap {
-  const live = new Set(liveBrowseIds);
+  const live = new Set(["$panel", ...liveBrowseIds]);
   const entries = Object.entries(state);
   const idle = entries.filter(([id]) => !live.has(id));
   if (idle.length <= keepIdle) return state; // identity → no needless persist
@@ -67,16 +54,14 @@ export function pruneChatState(
   return next;
 }
 
-/** Read a tab's panel state. The default is closed-on-page: a tab that has
- *  never had the chat open opens without one, which is the deliberate behavior
- *  change here — switching to such a tab now CLOSES the panel, where before it
- *  stayed open and swapped threads under you. */
+/** New tabs inherit panel visibility and start on their own page chat. */
 export function chatEntryFor(
   state: ChatStateMap,
   browseId: string | null | undefined,
 ): ChatEntry {
-  if (!browseId) return CHAT_CLOSED;
-  return state[browseId] ?? CHAT_CLOSED;
+  const entry = (browseId ? state[browseId] : undefined) ?? CHAT_CLOSED;
+  const latest = state.$panel ?? Object.values(state).reduce((a, b) => b.at > a.at ? b : a, CHAT_CLOSED);
+  return { ...entry, open: latest.open, pill: migrateChatPill(entry.pill) };
 }
 
 /** Apply a patch to one tab's entry, returning the map unchanged when nothing
@@ -88,22 +73,13 @@ export function withChatPatch(
   patch: Partial<Omit<ChatEntry, "at">>,
   now: number,
 ): ChatStateMap {
-  const cur = state[browseId];
+  const cur = chatEntryFor(state, browseId);
   const next: ChatEntry = { ...(cur ?? CHAT_CLOSED), ...patch, at: now };
   if (cur && cur.open === next.open && cur.pill === next.pill) return state;
-  return { ...state, [browseId]: next };
+  return { ...state, [browseId]: next, ...(patch.open === undefined ? {} : { $panel: { open: patch.open, pill: "page" as const, at: now } }) };
 }
 
-/** What the browser pane tells the conversation dock about itself.
- *
- *  The three browser conversations (this tab's page, the linked thread, the
- *  mission orchestrator) and the tab's working list all live in the dock now,
- *  but their state — tabs, `useLinked`, `useMission` — stays inside
- *  `BrowserPane`, which is the only thing that can own it. So the pane pushes
- *  up the handful of IDS the dock needs to build its context list, and renders
- *  the panels themselves into the dock through a portal. Small and
- *  serializable on purpose: anything richer would be the pane's state living
- *  in two places. */
+/** Serializable dock identities. BrowserPane owns and portals the panels. */
 export interface BrowserDockState {
   /** The tab whose conversation the pane is showing — usually the active tab,
    *  but pinned to its origin when an agent opened the visible tab. */
@@ -111,17 +87,24 @@ export interface BrowserDockState {
   title: string | null;
   /** The active tab's remembered pill, so the dock can lead with it. */
   pill: ChatPill;
-  linkedId: string | null;
+  cartId: string;
   missionId: string | null;
   missionTitle: string | null;
 }
 
-/** Nothing open — the shape App holds while the browser pane is unmounted. */
-export const NO_BROWSER_DOCK: BrowserDockState = {
-  browseId: null,
-  title: null,
-  pill: "page",
-  linkedId: null,
-  missionId: null,
-  missionTitle: null,
-};
+export { NO_BROWSER_DOCK } from "./conversationContext";
+
+export function migrateChatPill(pill: unknown): ChatPill {
+  return pill === "list" || pill === "cart" ? "cart" : pill === "mission" ? "mission" : "page";
+}
+
+export interface LinkedConversation { browseId: string; title: string; originTabId: string }
+export function pageChatIdentity(tab: { browseId: string }, activeId: string, linked: LinkedConversation | null) {
+  return { browseId: linked?.browseId ?? tab.browseId, label: `browser-${activeId}` };
+}
+
+/** Shortcut origin must belong to this workspace. */
+export function shortcutTabId(ids: string[], origin: string, direction: "next-tab" | "previous-tab"): string | null {
+  const i = ids.indexOf(origin);
+  return i < 0 ? null : ids[(i + (direction === "next-tab" ? 1 : ids.length - 1)) % ids.length] ?? null;
+}

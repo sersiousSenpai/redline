@@ -3,19 +3,17 @@
 import { describe, it, expect } from "vitest";
 import {
   WEBVIEW_PLATE_INSET,
-  reorderTabs,
   webviewSlotInset,
 } from "./BrowserPane";
+import { reorderTabs } from "../lib/browserTabDrag";
 
 // The native webview is a square rect composited over the rounded document
 // plate. The measured slot insets so the rect can never cross the plate's
 // corner curve: with radius r, any inset ≥ r·(1−1/√2) clears it.
 describe("webviewSlotInset", () => {
-  it("insets the docked slot past the 10px plate radius' corner curve", () => {
-    expect(webviewSlotInset(false)).toBe(WEBVIEW_PLATE_INSET);
-    expect(WEBVIEW_PLATE_INSET).toBeGreaterThanOrEqual(
-      Math.ceil(10 * (1 - 1 / Math.SQRT2)),
-    );
+  it("uses the browser's edge-to-edge square frame", () => {
+    expect(webviewSlotInset(false)).toBe(0);
+    expect(WEBVIEW_PLATE_INSET).toBe(0);
   });
 
   it("drops the inset in fullscreen — a square takeover has no plate", () => {
@@ -43,12 +41,17 @@ describe("reorderTabs", () => {
     expect(out[1].id).toBe("t9");
   });
 
-  it("drags an earlier tab toward a later slot", () => {
-    // t2 inserts just before t9.
+  it("drags an earlier tab into the requested later slot", () => {
+    // t2 lands in the ninth slot, matching the drag preview.
     const out = reorderTabs(make(10), "t2", "t9");
     expect(ids(out)).toEqual([
-      "t1", "t3", "t4", "t5", "t6", "t7", "t8", "t2", "t9", "t10",
+      "t1", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t2", "t10",
     ]);
+  });
+
+  it("moves tab 1 into position 2 without needing to drag to position 3", () => {
+    expect(ids(reorderTabs(make(3), "t1", "t2"))).toEqual(["t2", "t1", "t3"]);
+    expect(ids(reorderTabs(make(3), "t1", "t3"))).toEqual(["t2", "t3", "t1"]);
   });
 
   it("is a no-op when dropped on itself or an unknown tab", () => {

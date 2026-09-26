@@ -133,9 +133,16 @@ pub fn host_of(url: &str) -> Option<String> {
 /// the pixels are a redundant copy of them. Blocking the picture alone would
 /// look like privacy while storing the same information.
 pub fn capture_allowed(denylist: &str, url: &str) -> bool {
-    let Some(host) = host_of(url) else { return true };
+    let Some(host) = host_of(url) else {
+        return true;
+    };
     for line in denylist.lines() {
-        let entry = line.split('#').next().unwrap_or("").trim().to_ascii_lowercase();
+        let entry = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
         if entry.is_empty() {
             continue;
         }
@@ -223,6 +230,7 @@ pub fn shot_forget(
         return Err(format!("invalid shot key: {key}"));
     }
     let db = store.database();
+    crate::mission_context::forget_shot_reference(&db, &key)?;
     let cleared = db.clear_shot_key(&key).map_err(|e| e.to_string())?
         + db.clear_surface_shot(&key).map_err(|e| e.to_string())?;
     let path = shots_dir(&app)?.join(format!("{key}.png"));
@@ -289,7 +297,9 @@ pub async fn capture_redline_surface(
         return None;
     }
     let key = surface_key(surface, seq);
-    let bytes = crate::thumbs::capture_shot(app, "main", SHOT_WIDTH).await.ok()?;
+    let bytes = crate::thumbs::capture_shot(app, "main", SHOT_WIDTH)
+        .await
+        .ok()?;
     write_shot(app, &key, &bytes).ok()?;
     let theme = db.get_setting("redline.ui.theme");
     if let Err(e) = db.record_surface_shot(seq, surface, &key, theme.as_deref()) {
@@ -330,7 +340,8 @@ pub fn shots_set_policy(
 ) -> Result<(), String> {
     let db = store.database();
     if let Some(d) = denylist {
-        db.set_setting(SETTING_SHOT_DENYLIST, &d).map_err(|e| e.to_string())?;
+        db.set_setting(SETTING_SHOT_DENYLIST, &d)
+            .map_err(|e| e.to_string())?;
     }
     if let Some(e) = enabled {
         db.set_setting(SETTING_SHOTS_ENABLED, if e { "true" } else { "false" })
@@ -445,7 +456,9 @@ pub async fn shots_caption_run(
         if caption.is_empty() {
             continue;
         }
-        let Ok(Some(hash)) = db.context_hash_for_browse_id(id) else { continue };
+        let Ok(Some(hash)) = db.context_hash_for_browse_id(id) else {
+            continue;
+        };
         // Into `caption`, never into `text` — see `set_caption_for_hash`.
         if db.set_caption_for_hash(&hash, caption).is_ok() {
             captioned += 1;
@@ -458,13 +471,31 @@ pub async fn shots_caption_run(
 /// Run one retention sweep. Called from the keeper's watch bus — the stated
 /// scheduling vocabulary — never from a timer of its own.
 pub fn sweep(app: &AppHandle, db: &crate::db::Database) -> usize {
+    if let Err(error) = crate::mission_context::prune_all_captures(db) {
+        tracing::warn!(%error,"mission capture reference retention will retry on the next sweep");
+    }
     let Ok(dir) = shots_dir(app) else { return 0 };
-    let Ok(entries) = shots_list(app.clone()) else { return 0 };
+    let Ok(entries) = shots_list(app.clone()) else {
+        return 0;
+    };
     let on_disk: Vec<(String, u64, i64)> = entries
         .iter()
         .map(|e| (e.key.clone(), e.bytes, e.modified_ms))
         .collect();
-    let referenced = db.referenced_shot_keys().unwrap_or_default();
+    let mut referenced = match db.referenced_shot_keys() {
+        Ok(keys) => keys,
+        Err(error) => {
+            tracing::warn!(%error,"shot sweep skipped because source references could not be read");
+            return 0;
+        }
+    };
+    match crate::mission_capture::retained_frame_keys(db) {
+        Ok(keys) => referenced.extend(keys),
+        Err(error) => {
+            tracing::warn!(%error,"shot sweep skipped because recording references could not be read");
+            return 0;
+        }
+    }
     let plan = plan_sweep(
         &on_disk,
         &referenced,
@@ -474,6 +505,12 @@ pub fn sweep(app: &AppHandle, db: &crate::db::Database) -> usize {
     );
     let mut removed = 0usize;
     for key in &plan.delete {
+        if let Err(error) = crate::mission_context::forget_shot_reference(db, key) {
+            // Keep the evidence while its searchable derivative cannot yet be
+            // retired. A later keeper sweep retries the same key.
+            tracing::warn!(%error, %key, "screenshot retention deferred until mission derivatives can be retired");
+            continue;
+        }
         if std::fs::remove_file(dir.join(format!("{key}.png"))).is_ok() {
             removed += 1;
         }
@@ -520,15 +557,27 @@ mod tests {
         // Nothing user-supplied can escape into a path.
         assert!(!valid_key("../../etc/passwd"));
         assert!(!valid_key(""));
-        assert!(valid_key(&surface_key("../evil", 1)), "the key is sanitized, not rejected");
+        assert!(
+            valid_key(&surface_key("../evil", 1)),
+            "the key is sanitized, not rejected"
+        );
         assert_eq!(surface_key("../evil", 1), "rl-evil-1");
     }
 
     #[test]
     fn host_extraction_handles_the_shapes_a_denylist_meets() {
-        assert_eq!(host_of("https://www.Example.com/a/b?c=1").as_deref(), Some("example.com"));
-        assert_eq!(host_of("http://mail.google.com").as_deref(), Some("mail.google.com"));
-        assert_eq!(host_of("https://user:pw@host.example.com:8443/x").as_deref(), Some("host.example.com"));
+        assert_eq!(
+            host_of("https://www.Example.com/a/b?c=1").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            host_of("http://mail.google.com").as_deref(),
+            Some("mail.google.com")
+        );
+        assert_eq!(
+            host_of("https://user:pw@host.example.com:8443/x").as_deref(),
+            Some("host.example.com")
+        );
         assert_eq!(host_of("localhost:3000/dash").as_deref(), Some("localhost"));
         assert_eq!(host_of(""), None);
     }
@@ -562,13 +611,29 @@ mod tests {
             ("bs-orphan".to_string(), 40_000, now - day),
             ("bs-ancient".to_string(), 40_000, now - 400 * day),
         ];
-        let referenced: HashSet<String> =
-            ["bs-keep".to_string(), "bs-ancient".to_string()].into_iter().collect();
+        let referenced: HashSet<String> = ["bs-keep".to_string(), "bs-ancient".to_string()]
+            .into_iter()
+            .collect();
 
-        let plan = plan_sweep(&on_disk, &referenced, now, SHOTS_MAX_BYTES, SHOTS_MAX_AGE_DAYS);
-        assert!(plan.delete.contains(&"bs-orphan".to_string()), "unreferenced goes");
-        assert!(plan.delete.contains(&"bs-ancient".to_string()), "past the age cap goes");
-        assert!(!plan.delete.contains(&"bs-keep".to_string()), "a referenced, fresh shot stays");
+        let plan = plan_sweep(
+            &on_disk,
+            &referenced,
+            now,
+            SHOTS_MAX_BYTES,
+            SHOTS_MAX_AGE_DAYS,
+        );
+        assert!(
+            plan.delete.contains(&"bs-orphan".to_string()),
+            "unreferenced goes"
+        );
+        assert!(
+            plan.delete.contains(&"bs-ancient".to_string()),
+            "past the age cap goes"
+        );
+        assert!(
+            !plan.delete.contains(&"bs-keep".to_string()),
+            "a referenced, fresh shot stays"
+        );
 
         // At the real volume neither cap binds — which is the point of having
         // them: they are a promise about the ceiling, not a working policy.
@@ -577,7 +642,10 @@ mod tests {
             .collect();
         let all: HashSet<String> = year.iter().map(|(k, _, _)| k.clone()).collect();
         let quiet = plan_sweep(&year, &all, now, SHOTS_MAX_BYTES, SHOTS_MAX_AGE_DAYS);
-        assert!(quiet.delete.is_empty(), "a year of browsing is nowhere near the ceiling");
+        assert!(
+            quiet.delete.is_empty(),
+            "a year of browsing is nowhere near the ceiling"
+        );
     }
 
     #[test]

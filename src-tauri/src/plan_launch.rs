@@ -16,6 +16,7 @@ const MAX_PENDING: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchMetadata {
+    pub launch_id: String,
     pub body_hash: String,
     pub backend: String,
     pub model: Option<String>,
@@ -147,7 +148,7 @@ impl Registry {
         {
             return None;
         }
-        self.entries.remove(&id).map(|e| e.metadata)
+        self.entries.remove(&id).map(|mut e| { e.metadata.launch_id = id; e.metadata })
     }
 }
 fn registry() -> &'static Mutex<Registry> {
@@ -180,6 +181,7 @@ pub fn register(
         project: project_path.filter(|p| !p.is_empty()).map(canonical),
         session: None,
         metadata: LaunchMetadata {
+            launch_id: launch_id.into(),
             body_hash: body_hash.into(),
             backend: backend.into(),
             model: clean(model, 256)?,
@@ -235,6 +237,7 @@ mod tests {
             project: Some("/fixture/repo".into()),
             session: None,
             metadata: LaunchMetadata {
+                launch_id: String::new(),
                 body_hash: "same-prompt".into(),
                 backend: "codex".into(),
                 model: Some("chosen-model".into()),

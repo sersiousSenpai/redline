@@ -53,6 +53,11 @@ jobs:
       - name: cargo test
         working-directory: src-tauri
         run: cargo test
+      # Vision's cold model initialization needs an uncontended worker. Keep
+      # this native fixture mandatory without relaxing the production budget.
+      - name: Native OCR fixture (isolated)
+        working-directory: src-tauri
+        run: cargo test --lib capture_ocr::tests::vision_recognizes_local_text_image -- --ignored --exact --test-threads=1
 
   frontend:
     runs-on: ubuntu-latest

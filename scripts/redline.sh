@@ -85,41 +85,33 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
   exit 1
 fi
 
-# Sync JS dependencies before building. `npm run redline` is also the update path
-# (git pull && npm run redline, including the in-app "Check for Updates"), so a
-# package.json bump must land in node_modules here — otherwise the build links
-# against stale deps. Near-instant when already current.
-echo "Installing/refreshing JS dependencies…"
-npm install
-
-# Sign with a stable identity when one is available. macOS keys TCC folder
-# permissions (Downloads, Desktop, …) to the code signature; the default
-# ad-hoc signature changes on every build, so each reinstall would reset the
-# user's grants. Any local code-signing certificate (e.g. a self-signed
-# "Redline Dev" made in Keychain Access) keeps grants across rebuilds. With
-# no identity, fall back to ad-hoc exactly as before.
-if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-  if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Redline Dev"'; then
-    export APPLE_SIGNING_IDENTITY="Redline Dev"
-    echo "Signing with local identity: Redline Dev"
-  fi
-fi
-
-npm run tauri build
-# (The `-p redline-mcp` relink that used to follow retired 2026-09-07: the
-# daemon serves MCP itself at /mcp from polis-mcp; no second binary ships.)
-
-APP_SRC="src-tauri/target/release/bundle/macos/Redline.app"
+# Preparation and installation are now two things, and the split is the point.
+# `redline-build.sh` produces a complete, signed, verified application and
+# stops; this script then installs it through the activation helper, which
+# exchanges the bundles atomically instead of deleting the installed one and
+# hoping the copy lands.
+APP_SRC="$(bash scripts/redline-build.sh)"
 if [ ! -d "$APP_SRC" ]; then
-  echo "error: build finished but $APP_SRC was not produced" >&2
+  echo "error: preparation did not produce an application" >&2
   exit 1
 fi
 
 # Quit a running copy before replacing it, so the swap is clean.
 osascript -e 'tell application "Redline" to quit' >/dev/null 2>&1 && sleep 1 || true
 
-rm -rf /Applications/Redline.app
-ditto "$APP_SRC" /Applications/Redline.app
+HELPER="src-tauri/target/release/redline-activate"
+if [ -x "$HELPER" ]; then
+  # Atomic exchange, one installer at a time. There is no moment in here when
+  # /Applications/Redline.app does not exist.
+  "$HELPER" install "$APP_SRC" /Applications/Redline.app
+else
+  # The helper is built by redline-build.sh, so this should not happen — but a
+  # missing helper must not silently become the old destructive path.
+  echo "error: the activation helper was not built; refusing to install by deleting" >&2
+  echo "       your existing copy. Re-run 'npm run redline'." >&2
+  exit 1
+fi
+
 # Remove the build-output copy so Spotlight doesn't index two Redlines.
 rm -rf "$APP_SRC"
 open /Applications/Redline.app
@@ -127,3 +119,4 @@ open /Applications/Redline.app
 echo
 echo "Redline installed to /Applications and launched."
 echo "To update later: git pull && npm run redline"
+echo "After this install, prepared releases can also be applied from Runs → Build Redline."

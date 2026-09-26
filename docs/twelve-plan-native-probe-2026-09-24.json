@@ -1,0 +1,51 @@
+{
+  "app": "/Users/yusufalbazian/redline/src-tauri/target/release/bundle/macos/Redline.app",
+  "executableSha256": "6d1ca3df89ffd63469b3b67b46bdb81b7221e01147e6bacc8b19b24e664150bb",
+  "exitCode": 0,
+  "timedOut": false,
+  "elapsedSeconds": 3.179,
+  "profileIsolationVerified": true,
+  "inheritedSessionEnvScrubVerified": true,
+  "envScrubDiagnostic": "Redline cleared inherited Claude session variables: CLAUDECODE, CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ID, CLAUDE_EFFORT, CLAUDE_CODE_MESSAGING_TOKEN",
+  "database": "disposable SQLite backup of the existing user database",
+  "report": {
+    "profile": "probe on 127.0.0.1:60392",
+    "dataDir": "/var/folders/cw/9cr_94rn76dbkfks6yggdlj00000gn/T/redline-twelve-plan-probe-vofx0h98",
+    "daemonAddr": "127.0.0.1:60392",
+    "steps": [
+      {
+        "milestone": "started",
+        "atMs": 0,
+        "detail": "probe on 127.0.0.1:60392"
+      },
+      {
+        "milestone": "database",
+        "atMs": 198,
+        "detail": "opened and migrated"
+      },
+      {
+        "milestone": "daemon",
+        "atMs": 322,
+        "detail": "bound 127.0.0.1:60392"
+      },
+      {
+        "milestone": "frontend",
+        "atMs": 2358,
+        "detail": "rendered and completed an IPC round trip"
+      },
+      {
+        "milestone": "reads",
+        "atMs": 2610,
+        "detail": "281 plan sessions, 1 runs, settings readable: true"
+      },
+      {
+        "milestone": "shutdown",
+        "atMs": 2610,
+        "detail": "exiting on request"
+      }
+    ],
+    "ok": true,
+    "failure": "",
+    "interactiveMs": 2358
+  }
+}

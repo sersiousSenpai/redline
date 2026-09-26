@@ -1,0 +1,18 @@
+{
+  "installedApp": "/Applications/Redline.app",
+  "previousAppBackup": "/Users/yusufalbazian/Library/Application Support/com.redline.app/manual-build-backups/20260924-135844/Redline.app",
+  "executableSha256": "6d1ca3df89ffd63469b3b67b46bdb81b7221e01147e6bacc8b19b24e664150bb",
+  "signatureVerified": true,
+  "launchRequested": true,
+  "livenessVerified": true,
+  "liveness": {
+    "app": "redline",
+    "hasWindow": true,
+    "pid": 6036,
+    "version": "0.1.0"
+  },
+  "forkPlanSeatAfterLaunch": {
+    "model": "opus",
+    "effort": "xhigh"
+  }
+}

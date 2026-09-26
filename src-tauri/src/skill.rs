@@ -34,9 +34,6 @@ struct EmbeddedSkill {
 ///   (browser bridge vs WebSearch vs WebFetch), drives the tab, and formats.
 /// - `mission`: how the browser mission orchestrator holds a goal, gathers
 ///   across tabs + the user's pins, and synthesizes a Drafter-ready brief.
-/// - `linked`: how a linked discussion holds ONE conversation spanning all tabs
-///   (no goal), re-grounds on the current tab each turn, and checks in with a
-///   colleague (a tab's own page-discussion agent) via the consult endpoint.
 /// - `drafter`: the Prompt Drafter discussion agent — prompt-crafting
 ///   collaborator persona, the live-doc re-read discipline, and the tracked
 ///   write-suggestions contract (append/replace/insert/delete by block id).
@@ -57,7 +54,7 @@ struct EmbeddedSkill {
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 14,
+        version: 15,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
@@ -81,18 +78,13 @@ const SKILLS: &[EmbeddedSkill] = &[
         content: include_str!("../../skills/mission/SKILL.md"),
     },
     EmbeddedSkill {
-        name: "linked",
-        version: 3,
-        content: include_str!("../../skills/linked/SKILL.md"),
-    },
-    EmbeddedSkill {
         name: "drafter",
         version: 4,
         content: include_str!("../../skills/drafter/SKILL.md"),
     },
     EmbeddedSkill {
         name: "companion",
-        version: 5,
+        version: 6,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {
@@ -156,7 +148,7 @@ const SKILL_VERSION: u32 = SKILLS[0].version;
 /// and would delete a skill the user owns.
 /// `retired_names_never_overlap_shipped` guards against a shipped name landing
 /// here.
-const RETIRED_SKILLS: &[&str] = &["redline", "redline-review", "loop-orchestrator"];
+const RETIRED_SKILLS: &[&str] = &["redline", "redline-review", "loop-orchestrator", "linked"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -432,11 +424,9 @@ mod tests {
     }
 
     #[test]
-    fn linked_skill_teaches_the_consult_contract() {
-        let linked = SKILLS.iter().find(|s| s.name == "linked").unwrap();
-        // The linked skill must teach the "check in with a colleague" delegation.
-        assert!(linked.content.contains("/v1/linked/consult"));
-        assert!(linked.content.contains("digest"));
+    fn linked_skill_is_retired() {
+        assert!(RETIRED_SKILLS.contains(&"linked"));
+        assert!(!SKILLS.iter().any(|skill| skill.name == "linked"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
+import { Button } from "./ui/Button";
 
 // One "Settings" entry point that folds the formerly-loose header controls —
 // interception mode, theme, font, notifications — into a single dropdown, so
@@ -24,6 +25,8 @@ interface SettingsMenuProps {
   /** Extensions — the WASM extension host's management view. */
   extensions: ReactNode;
   notifications: ReactNode;
+  /** Opens the shared integration-hook modal after closing this menu. */
+  onOpenIntegrationHooks?: () => void;
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -57,6 +60,7 @@ export function SettingsMenu({
   surfaces,
   extensions,
   notifications,
+  onOpenIntegrationHooks,
 }: SettingsMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -148,6 +152,13 @@ export function SettingsMenu({
           <Row label="Surfaces">{surfaces}</Row>
           <Row label="Extensions">{extensions}</Row>
           <Row label="Notifications">{notifications}</Row>
+          {onOpenIntegrationHooks && <Row label="Integration hooks">
+            <Button ariaLabel="Review integration hooks" onClick={() => {
+              setOpen(false);
+              rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+              onOpenIntegrationHooks();
+            }}>Review…</Button>
+          </Row>}
         </MenuSurface>
       )}
     </div>

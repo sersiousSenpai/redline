@@ -3895,6 +3895,7 @@ dependencies = [
  "block2",
  "flate2",
  "http-body-util",
+ "libc",
  "notify-debouncer-mini",
  "objc2",
  "objc2-app-kit",
@@ -3912,6 +3913,7 @@ dependencies = [
  "polis-store",
  "portable-pty",
  "pulldown-cmark",
+ "redline-activation",
  "redline-extension-abi",
  "regex-lite",
  "reqwest",
@@ -3940,6 +3942,24 @@ dependencies = [
  "wasmi",
  "wat",
  "whisper-rs",
+]
+
+[[package]]
+name = "redline-activate"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "redline-activation",
+ "serde_json",
+]
+
+[[package]]
+name = "redline-activation"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

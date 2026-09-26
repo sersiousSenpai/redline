@@ -1,0 +1,15 @@
+import { describe, expect, it } from "vitest";
+import { isSceneClick, layoutMap3d, nodeFocus } from "./memoryMap3d";
+import type { MapNode, MemoryMapData } from "./memoryMap";
+const node = (id: string, parentId: string | null = null): MapNode => ({ id, parentId, mass: 20, kind: "class", label: id, pinned: false, projectPath: null, classNodeId: id, sessionId: null, browseId: null, threadId: null });
+const data = (nodes: MapNode[]): MemoryMapData => ({ generatedTs: 0, nodes, edges: [] });
+describe("memory cosmos layout", () => {
+  it("is deterministic and input-order independent", () => { const nodes = [node("a"), node("b", "a"), node("c"), node("d", "c")]; expect(layoutMap3d(data(nodes))).toEqual(layoutMap3d(data([...nodes].reverse()))); });
+  it("has genuine finite XYZ spread, separation and enclosing bounds", () => { const layout = layoutMap3d(data(Array.from({ length: 150 }, (_, i) => node(String(i), i > 8 ? String(i % 8) : null)))); expect(new Set(layout.nodes.map(n => n.z)).size).toBe(150); for (const n of layout.nodes) { expect([n.x,n.y,n.z,n.r].every(Number.isFinite)).toBe(true); expect(Math.hypot(n.x-layout.center.x,n.y-layout.center.y,n.z-layout.center.z)+n.r).toBeLessThanOrEqual(layout.radius+.001); } for (let i=0;i<layout.nodes.length;i++) for(let j=i+1;j<layout.nodes.length;j++){ const a=layout.nodes[i],b=layout.nodes[j]; expect(Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z)).toBeGreaterThan(a.r+b.r); } });
+  it("survives cycles, self-parents and missing parents", () => { const layout = layoutMap3d(data([node("a","b"),node("b","a"),node("c","c"),node("d","missing")])); expect(layout.nodes).toHaveLength(4); expect(layout.nodes.every(n => Number.isFinite(n.z))).toBe(true); });
+  it("caps at 150 and states hidden count even if caller requests more", () => { const layout = layoutMap3d(data(Array.from({ length: 190 }, (_,i) => node(String(i)))), [], 1000); expect(layout.nodes).toHaveLength(150); expect(layout.hidden).toBe(40); });
+  it("refresh retains positions, updates metadata and places new neighbors", () => { const first=layoutMap3d(data([node("a"),node("b","a")])); const second=layoutMap3d(data([{...node("a"),label:"Renamed"},node("b","a"),node("new","a")]),first.nodes); for(const old of first.nodes){ const n=second.nodes.find(n=>n.id===old.id)!; expect([n.x,n.y,n.z]).toEqual([old.x,old.y,old.z]); } expect(second.nodes.find(n=>n.id==="a")?.label).toBe("Renamed"); });
+  it("handles empty and single-node data", () => { expect(layoutMap3d(data([]))).toEqual({nodes:[],hidden:0,center:{x:0,y:0,z:0},radius:35}); expect(layoutMap3d(data([node("one")])).nodes).toHaveLength(1); });
+  it("maps every focus handle", () => { const base={...node("x"),classNodeId:null}; for(const key of ["classNodeId","sessionId","browseId","threadId"] as const) expect(nodeFocus({...base,[key]:"target"})).toEqual({[key]:"target",label:"x"}); expect(nodeFocus(base)).toBeNull(); });
+  it("separates selection from camera drags, including out-and-back movement", () => { expect(isSceneClick({x:0,y:0},{x:2,y:2})).toBe(true); expect(isSceneClick({x:0,y:0},{x:10,y:0})).toBe(false); expect(isSceneClick({x:0,y:0},{x:0,y:0},15)).toBe(false); });
+});

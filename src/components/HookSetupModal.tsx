@@ -3,11 +3,16 @@
 import type { ReactNode } from "react";
 import type { CodexHookStatus, HookStatus, SkillStatus } from "../types";
 import { CopyChip } from "./CopyChip";
+import type { HookConflictHealth } from "../hooks/useHookConflicts";
+import { HookConflictWarning } from "./HookConflictWarning";
 
 interface HookSetupModalProps {
   /** "setup" = the mandatory install screen; "done" = the post-install
    *  what-now explainer, shown once right after an in-app install. */
   phase: "setup" | "done";
+  /** Opens the shared hook-conflict modal without duplicating its contents. */
+  onReviewHookConflicts?: () => void;
+  hookConflictHealth?: HookConflictHealth;
   hookStatus: HookStatus;
   skillStatus: SkillStatus;
   codexHookStatus?: CodexHookStatus | null;
@@ -120,10 +125,12 @@ export function HookSetupModal({
   onDismiss,
   onShowHowItWorks,
   error,
+  onReviewHookConflicts,
+  hookConflictHealth,
 }: HookSetupModalProps) {
   const hookNote =
     hookStatus.matcherFound && hookStatus.conflictingUrl
-      ? `A different ExitPlanMode hook is configured (${hookStatus.conflictingUrl}). Installing replaces it with the Redline URL.`
+      ? `A different ExitPlanMode hook is configured (${hookStatus.conflictingUrl}). Installing adds Redline and preserves this hook.`
       : undefined;
   const skillNote = skillStatus.outdated
     ? "An older version of the skill is present. Installing updates it."
@@ -137,7 +144,9 @@ export function HookSetupModal({
       <div
         className="rounded-md shadow-xl border p-6"
         style={{
-          maxWidth: "520px",
+          maxWidth: "620px",
+          maxHeight: "90vh",
+          overflowY: "auto",
           borderColor: "var(--color-rule)",
           background: "var(--color-bg-elevated)",
         }}
@@ -165,6 +174,10 @@ export function HookSetupModal({
               Installing is one click; each piece is a plain file edit you can
               inspect or undo.
             </p>
+            {hookConflictHealth ? <HookConflictWarning health={hookConflictHealth}/> : onReviewHookConflicts && <p style={{ fontSize: 12, marginBottom: 14, color: "var(--color-warning)" }}>
+              Another hook configuration needs attention.{" "}
+              <button type="button" onClick={onReviewHookConflicts} style={{ color: "var(--color-info)", textDecoration: "underline" }}>Review integration hooks</button>
+            </p>}
             <div
               className="flex flex-col gap-3 rounded-md border p-3"
               style={{

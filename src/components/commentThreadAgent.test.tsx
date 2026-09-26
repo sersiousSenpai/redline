@@ -99,10 +99,15 @@ async function mount(backend: string | null) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   statusReply = idle;
   history = [];
   listenMock.mockImplementation(() => Promise.resolve(() => {}));
   invokeMock.mockImplementation((cmd: string) => {
+    if (cmd === "fork_thread_model") return Promise.resolve([null, null]);
+    if (cmd === "get_agent_seats") return Promise.resolve({ seats: { fork_plan: { model: "opus", effort: "xhigh" } } });
+    if (cmd === "claude_model_catalog") return Promise.resolve([{ id: "opus", label: "opus", alias: true }, { id: "sonnet", label: "sonnet", alias: true }]);
+    if (cmd === "codex_model_catalog") return Promise.resolve([{ slug: "gpt-fixture", displayName: "Fixture GPT", description: "", defaultEffort: "high", efforts: ["high", "ultra"] }]);
     if (cmd === "get_thread") return Promise.resolve(history);
     if (cmd === "fork_thread_status") return Promise.resolve(statusReply);
     return Promise.resolve(null);
@@ -118,6 +123,7 @@ afterEach(async () => {
   });
   host.remove();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("CommentThread names the agent that will actually answer", () => {
@@ -205,5 +211,27 @@ describe("CommentThread names the agent that will actually answer", () => {
     expect(note).toContain("Following a discussion with Codex:");
     expect(note).toContain("Codex: Because the parser needs it first.");
     expect(note).not.toContain("Claude");
+  });
+});
+
+describe("per-comment discussion model", () => {
+  it.each(["claude-code", "codex", "cursor", "antigravity"])("shows a picker beside Discuss for %s", async backend => {
+    await mount(backend);
+    expect(host.querySelector('[aria-label="Discussion model and effort"]')).not.toBeNull();
+    expect(text()).toContain(backend === "codex" ? "Default (Plan model)" : "Default (opus · xhigh)");
+  });
+  it("persists the comment pick and uses the Codex model's own efforts", async () => {
+    await mount("codex");
+    const trigger = host.querySelector<HTMLButtonElement>('[aria-label="Discussion model and effort"]')!;
+    trigger.getBoundingClientRect = () => ({ left: 20, right: 220, top: 20, bottom: 48, width: 200, height: 28, x: 20, y: 20, toJSON: () => ({}) });
+    await act(async () => trigger.click());
+    await flush();
+    const model = document.querySelector<HTMLSelectElement>('[aria-label="Discussion model"]')!;
+    expect([...model.options].map(option => option.value)).toContain("gpt-fixture");
+    await act(async () => { model.value = "gpt-fixture"; model.dispatchEvent(new Event("change", { bubbles: true })); });
+    const effort = document.querySelector<HTMLSelectElement>('[aria-label="Discussion effort"]')!;
+    expect([...effort.options].map(option => option.value)).toEqual(["", "high", "ultra"]);
+    await act(async () => { effort.value = "ultra"; effort.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(invokeMock).toHaveBeenCalledWith("fork_thread_set_model", { sessionId: SESSION, commentId: ITEM, model: "gpt-fixture", effort: "ultra" });
   });
 });

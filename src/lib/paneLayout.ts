@@ -158,11 +158,18 @@ export interface RestingShapeInput {
   surface: string;
 }
 
+/** Entering a hidden context closes the discussion preference, including a
+ *  boot straight onto a masked surface. Lifting or keeping the mask never
+ *  changes the preference, so only an intercept or a user gesture reopens it. */
+export function paneCollapseOnMask(previous: boolean, next: boolean): boolean {
+  return !previous && next;
+}
+
 /** Is the live layout already at the canonical resting shape? Drives the
  *  snap-back toggle: at rest, ⌘⇧0 closes the panes instead of re-snapping
  *  (messy → canonical → closed → canonical…). Derived, never stored — a
  *  stored "closed" bit would go stale the moment another flow forces a pane
- *  open (plan intercepts call setPaneCollapsed(false) directly).
+ *  open (plan intercepts call openPanePref when selecting the plan).
  *
  *  Shape flags ONLY, compared against the `canonical` object's fields (not
  *  literals, so this can never drift from canonicalLayout — including the

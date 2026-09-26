@@ -110,7 +110,7 @@ export interface PanelMask {
   pane: boolean;
 }
 
-const NO_MASK: PanelMask = { sidebar: false, pane: false };
+export const NO_MASK: PanelMask = { sidebar: false, pane: false };
 
 /** Which panels a surface hides, ignoring the gates. */
 export function panelMaskFor(s: MainSurface): PanelMask {
@@ -130,7 +130,10 @@ export function panelMaskFor(s: MainSurface): PanelMask {
   }
 }
 
-export interface PanelMaskInput extends ImmersiveInput {
+export interface PanelMaskInput {
+  surface: MainSurface;
+  enabled: boolean;
+  broken: PanelMask;
   /** The document is pinned alongside this surface, so the panels are about
    *  something on screen after all. Read from the EFFECTIVE shape, before
    *  masking — `maskPanels` never touches `docPinned`, so there is no cycle. */
@@ -141,21 +144,14 @@ export interface PanelMaskInput extends ImmersiveInput {
   conversationExpanded?: boolean;
 }
 
-const BOTH: PanelMask = { sidebar: true, pane: true };
+export const BOTH: PanelMask = { sidebar: true, pane: true };
 
 /** The mask actually in force: the surface's, unless a gate cancels it.
  *  Mirrors `isImmersive`, one tier narrower. */
 export function panelMask(i: PanelMaskInput): PanelMask {
-  if (!i.enabled || i.broken) return NO_MASK;
-  // A conversation that has taken the plate is a ROOM, and it outranks the
-  // surface's own answer. The surface is "document", which keeps both panels
-  // precisely because the document is what they are ABOUT — and right now
-  // there is no document, there is a conversation. Same overlay law as
-  // everything else here: nothing is stored, so collapsing back to the column
-  // is the overlay lifting, not a restore.
-  if (i.conversationExpanded) return BOTH;
-  if (i.docPinned) return NO_MASK;
-  return panelMaskFor(i.surface);
+  if (!i.enabled) return NO_MASK;
+  const mask = i.conversationExpanded ? BOTH : i.docPinned ? NO_MASK : panelMaskFor(i.surface);
+  return { sidebar: mask.sidebar && !i.broken.sidebar, pane: mask.pane && !i.broken.pane };
 }
 
 /** True when this mask hides anything — what the "where did the panels go"

@@ -1,3 +1,4 @@
+import { chatSubmitAction } from "./frontDoor";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { readFileSync } from "node:fs";
@@ -268,5 +269,16 @@ describe("front door clear-on-send wiring", () => {
     expect(fn).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(fn);
     expect(app.slice(fn, end)).not.toContain("repayPending(");
+  });
+});
+
+describe("chat composer submission", () => {
+  const enter = { key: "Enter", metaKey: false, shiftKey: false };
+  it("uses a one-shot mode and Cmd-Enter plans directly", () => {
+    expect(chatSubmitAction(enter, "chat")).toBe("chat");
+    expect(chatSubmitAction(enter, "plan")).toBe("plan");
+    expect(chatSubmitAction({ ...enter, metaKey: true }, "chat")).toBe("plan");
+    expect(chatSubmitAction({ ...enter, shiftKey: true }, "plan")).toBe("newline");
+    expect(chatSubmitAction({ ...enter, isComposing: true }, "plan")).toBeNull();
   });
 });

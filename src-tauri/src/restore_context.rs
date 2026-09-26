@@ -168,31 +168,33 @@ pub fn additional_context(meta: &RestoreMeta) -> String {
     let marker = format!("<!-- REDLINE_RESTORE:{} -->", meta.target);
     let mut s = String::new();
     s.push_str(
-        "[Redline restore protocol — injected by Redline, not typed by the user.]\n\n\
-         This plan session was reopened in Redline for continued review. Redline \
-         already holds your current plan and re-presents its own copy, so the body \
-         you submit is a marker, never the plan.\n\n\
-         - Do NOT fetch, read or retype the plan, and do not explore the codebase.\n\
-         - Do NOT emit a REDLINE_RESOLUTIONS block: a restore is a re-presentation, \
-         not a revision.\n\
-         - No preamble and no other tool calls.\n\n",
+        "[Redline restore — added by Redline's prompt hook because the user clicked Restore on this plan.]\n\n\
+         Your plan is safe: Redline holds it, with the reviewer's comments and \
+         discussion threads, and re-presents its own copy. The body you submit is \
+         ignored, so there's nothing to read, retype, restore or re-verify.\n\n",
     );
     if meta.primed {
         s.push_str(&format!(
-            "Your plan file has already been written for you — it contains exactly \
-             `{marker}`. Call ExitPlanMode now, as your very first action. (If your \
-             plan file somehow does not contain that line, write it there first.)\n\n"
+            "To reopen it, Redline replaced your plan file's contents with its \
+             restore marker `{marker}`. That edit is expected. \
+             Call ExitPlanMode now, with the file as it stands.\n\n"
         ));
     } else {
         s.push_str(&format!(
             "Write exactly `{marker}` as your plan file's contents, then call \
              ExitPlanMode. Write the id verbatim: it is the HELD plan's id, and it \
              is what lets Redline rebind the restore even though this resumed \
-             session may have been given a new one.\n\n"
+             session may have been given a new one. (Redline holds the real plan; \
+             the marker only says which plan to reopen.) This marker edit is expected.\n\n"
         ));
     }
     s.push_str(
-        "If you are not in plan mode, call EnterPlanMode first — `--permission-mode \
+        "You can check Redline's ExitPlanMode PreToolUse hook and this prompt hook \
+         in ~/.claude/settings.json; the handshake is §7 of the redline-plan-review \
+         skill. If your context shows an earlier ExitPlanMode as interrupted, that \
+         is the review this restore reopens.\n\n\
+         Leave out REDLINE_RESOLUTIONS — a restore re-presents, it doesn't revise.\n\n\
+         If you are not in plan mode, call EnterPlanMode first — `--permission-mode \
          plan` puts a resumed session in plan mode on Claude Code 2.1.222, so that \
          is a fallback rather than a step.\n\n",
     );
@@ -205,7 +207,9 @@ pub fn additional_context(meta: &RestoreMeta) -> String {
     }
     s.push_str(
         "Redline restores the plan it holds and ignores what you submit. Any actual \
-         changes flow through the normal review/revise loop once the plan reopens.",
+         changes flow through the normal review/revise loop once the plan reopens. \
+         A send-back denies ExitPlanMode with a line starting `✅ Plan returned to Redline`. \
+         That is the normal loop: fetch feedback with the curl it names and follow the skill.",
     );
     s
 }
@@ -370,9 +374,9 @@ mod tests {
             primed: true,
             rescinded: false,
         });
-        assert!(ctx.contains("already been written for you"));
+        assert!(ctx.contains("Redline replaced your plan file's contents"));
         assert!(ctx.contains("<!-- REDLINE_RESTORE:abc-123 -->"));
-        assert!(ctx.contains("Call ExitPlanMode now"));
+        assert!(ctx.contains("Call ExitPlanMode now, with the file as it stands"));
         assert!(
             !ctx.contains("Write exactly"),
             "a primed restore must not pay for a Write round trip"
@@ -484,17 +488,40 @@ mod tests {
     }
 
     #[test]
-    fn every_context_forbids_fetching_retyping_and_resolutions() {
+    fn every_context_explains_preservation_and_omits_resolutions() {
         for (primed, rescinded) in [(true, true), (true, false), (false, true), (false, false)] {
             let ctx = additional_context(&RestoreMeta {
                 target: "abc-123".into(),
                 primed,
                 rescinded,
             });
-            assert!(ctx.contains("do not explore the codebase"));
-            assert!(ctx.contains("Do NOT fetch"));
+            assert!(ctx.contains("nothing to read"));
+            assert!(ctx.contains("ignored"));
             assert!(ctx.contains("REDLINE_RESOLUTIONS"));
             assert!(ctx.contains("ignores what you submit"));
         }
+    }
+
+    #[test]
+    fn never_disclaims_user_authority() {
+        for primed in [true, false] {
+            let ctx = additional_context(&RestoreMeta {
+                target: "abc-123".into(), primed, rescinded: false,
+            });
+            assert!(!ctx.contains("not typed by the user"));
+            for evidence in ["clicked Restore", "redline-plan-review", "~/.claude/settings.json", "expected", "earlier ExitPlanMode as interrupted"] {
+                assert!(ctx.contains(evidence), "missing {evidence}");
+            }
+        }
+    }
+
+    #[test]
+    fn send_back_prefix_matches_the_actual_feedback_deny() {
+        let ctx = additional_context(&RestoreMeta {
+            target: "abc-123".into(), primed: true, rescinded: false,
+        });
+        let prefix = ctx.split("line starting `").nth(1).unwrap().split('`').next().unwrap();
+        let deny = crate::feedback_deny_reason(crate::SubmissionMode::Revise, "abc-123", "claude-code", "");
+        assert!(deny.starts_with(prefix), "restore context must describe the real deny");
     }
 }

@@ -28,6 +28,17 @@ const files = sourceFiles(SRC_ROOT).map((path) => ({
 }));
 
 describe("size guard", () => {
+  it("keeps Three.js behind the Map-only lazy scene boundary", () => {
+    const surface = files.find(({ rel }) => rel === "components/MemorySurface.tsx")!.text;
+    const map = files.find(({ rel }) => rel === "components/MemoryMap.tsx")!.text;
+    expect(surface).toMatch(/const MemoryMapTab = lazy\(/);
+    expect(map).toMatch(/const Scene = lazy\(/);
+    const offenders = files.filter(({ rel, text }) =>
+      !rel.startsWith("components/memory-cosmos/") && /from\s+["']three(?:\/[^"']*)?["']/.test(text),
+    ).map(({ rel }) => rel);
+    expect(offenders, "Three.js belongs inside the lazily loaded Cosmos renderer").toEqual([]);
+  });
+
   it("mermaid is never a static import (dynamic-only keeps it off the main chunk)", () => {
     const offenders = files
       .filter(({ text }) => /from\s+["']mermaid["']/.test(text))

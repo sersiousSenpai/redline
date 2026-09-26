@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { createContext, useContext, useEffect } from "react";
+import { createContext, useContext, useLayoutEffect } from "react";
 
 // The browser pane is a native child webview painted by the OS *above* all
 // React DOM, so a plain header dropdown (theme, mode, alerts, download) opens in
@@ -19,7 +19,7 @@ export const MenuOverlayProvider = MenuOverlayContext.Provider;
 // outside a provider.
 export function useMenuOverlay(open: boolean): void {
   const register = useContext(MenuOverlayContext);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open || !register) return;
     register(1);
     return () => register(-1);

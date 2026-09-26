@@ -16,7 +16,56 @@ use tokio::process::Command;
 // The stream-json line classifier is `polis_llm::claude_cli` since Session A4
 // of the Polis extraction; re-exported so every `crate::claude_proc::{…}`
 // import across the surfaces is unchanged.
-pub use polis_llm::claude_cli::{classify_line, StreamLine};
+pub use polis_llm::claude_cli::StreamLine;
+
+/// Preserve the CLI's diagnostic array, including non-retryable resume failures.
+pub fn classify_line(v: &Value) -> StreamLine {
+    match polis_llm::claude_cli::classify_line(v) {
+        StreamLine::Failed(reason) => {
+            let details = v.get("errors").and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(Value::as_str).map(str::trim)
+                    .filter(|item| !item.is_empty()).collect::<Vec<_>>().join("; "))
+                .unwrap_or_default();
+            StreamLine::Failed(if details.is_empty() { reason } else { format!("{reason}: {details}") })
+        }
+        other => other,
+    }
+}
+
+pub fn is_inherited_session_var(name: &str) -> bool {
+    matches!(name, "CLAUDECODE" | "CLAUDE_CODE_CHILD_SESSION" | "CLAUDE_CODE_ENTRYPOINT"
+        | "CLAUDE_CODE_EXECPATH" | "CLAUDE_CODE_SESSION_ID" | "CLAUDE_CODE_SSE_PORT"
+        | "CLAUDE_EFFORT" | "CLAUDE_PID")
+        || name.starts_with("CLAUDE_CODE_SESSION_") || name.starts_with("CLAUDE_CODE_MESSAGING_")
+}
+
+/// Called before runtime initialization while the process is single-threaded.
+pub fn scrub_inherited_session_env() {
+    let removed: Vec<_> = std::env::vars_os().map(|(name, _)| name)
+        .filter(|name| name.to_str().is_some_and(is_inherited_session_var)).collect();
+    for name in &removed { std::env::remove_var(name); }
+    if !removed.is_empty() { eprintln!("Redline cleared inherited Claude session variables: {}", removed.iter().map(|name| name.to_string_lossy()).collect::<Vec<_>>().join(", ")); }
+}
+
+pub(crate) fn is_plain_session_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub(crate) fn find_transcript(session_id: &str) -> Option<std::path::PathBuf> {
+    if !is_plain_session_id(session_id) { return None; }
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from)
+        .or_else(|| crate::fsbrowse::home_dir().map(|home| std::path::PathBuf::from(home).join(".claude")))?;
+    let file = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(config.join("projects")).ok()?.flatten() {
+        let candidate = entry.path().join(&file);
+        if candidate.is_file() { return Some(candidate); }
+    }
+    None
+}
+
+pub fn is_missing_conversation(error: &str) -> bool {
+    error.to_lowercase().contains("no conversation found")
+}
 
 /// Resolve the absolute path to the `claude` binary. A Finder-launched macOS
 /// app gets a minimal PATH with no shell rc, so `Command::new("claude")` can
@@ -434,6 +483,7 @@ pub fn is_context_overflow(error: &str) -> bool {
 /// retrying in a moment usually works. Account-level limits are transient-ish
 /// too (they reset), so they also land here rather than triggering a reset.
 pub fn is_transient(error: &str) -> bool {
+    if is_missing_conversation(error) { return false; }
     let e = error.to_lowercase();
     e.contains("error_during_execution")
         || e.contains("overloaded")
@@ -501,6 +551,11 @@ pub fn describe_turn_error(
             noun = copy.noun,
             next = copy.next,
         );
+    }
+    if is_missing_conversation(error) {
+        reset();
+        let _ = db.record_friction("missing_conversation", Some(copy.surface), copy.subject, Some(error));
+        return format!("The earlier conversation couldn't be found on disk, so I've reset it — send again and {}.", copy.next);
     }
     if is_transient(error) {
         let _ = db.record_friction(
@@ -622,6 +677,44 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherited_session_denylist_preserves_user_configuration() {
+        for name in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT", "CLAUDE_EFFORT", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"] {
+            assert!(is_inherited_session_var(name), "must scrub {name}");
+        }
+        for name in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_DISABLE_WORKFLOWS", "HOME", "PATH", "CLAUDE_MODEL", "REDLINE_AGENT_SEAT"] {
+            assert!(!is_inherited_session_var(name), "must preserve {name}");
+        }
+    }
+
+    #[test]
+    fn missing_conversation_preserves_real_cli_errors_and_resets_without_transient_copy() {
+        let fixture = serde_json::json!({"type":"result","subtype":"error_during_execution","is_error":true,"duration_ms":0,"result":"","errors":["No conversation found with session ID: 1777c1e5"]});
+        let StreamLine::Failed(error) = classify_line(&fixture) else { panic!("expected CLI failure") };
+        assert_eq!(error, "error_during_execution: No conversation found with session ID: 1777c1e5");
+        assert!(is_missing_conversation(&error));
+        assert!(!is_transient(&error));
+        assert!(!is_context_overflow(&error));
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut resets = 0;
+        let human = describe_turn_error(&db, TurnErrorCopy { surface: "fork", subject: Some("1777c1e5"), noun: "discussion", next: "I'll start with the saved plan" }, &error, || resets += 1);
+        assert_eq!(resets, 1);
+        assert!(human.contains("couldn't be found on disk"));
+        assert!(human.contains("saved plan"));
+        assert!(!human.contains("error_during_execution"));
+        assert!(!human.contains("temporary error"));
+    }
+
+    #[test]
+    fn result_error_array_joins_nonempty_strings_and_keeps_empty_fallback() {
+        for errors in [serde_json::json!([]), serde_json::json!([null, 3, "  "])] {
+            let result = serde_json::json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"","errors":errors});
+            assert_eq!(classify_line(&result), StreamLine::Failed("error_during_execution".into()));
+        }
+        let result = serde_json::json!({"type":"result","subtype":"error_during_execution","is_error":true,"result":"","errors":[" first ",null,"second"]});
+        assert_eq!(classify_line(&result), StreamLine::Failed("error_during_execution: first; second".into()));
+    }
 
     fn parse(line: &str) -> StreamLine {
         classify_line(&serde_json::from_str::<Value>(line).unwrap())

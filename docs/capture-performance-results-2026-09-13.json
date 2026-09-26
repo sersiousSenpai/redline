@@ -1,0 +1,398 @@
+{
+  "testBinary": "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+  "profile": "debug",
+  "binarySha256": "237f815fdfb752aa0165e2b161a47ae4001560eb8346545429e1179fd7631e96",
+  "platform": {
+    "system": "Darwin",
+    "version": "14.3",
+    "architecture": "arm64"
+  },
+  "iterations": 100,
+  "batches": 3,
+  "notes": "Synthetic PNG OCR and in-memory admission/index tests only; no live capture or UI latency. Darwin RSS is process peak bytes, including the test harness and framework initialization.",
+  "runs": [
+    {
+      "mode": "disabled",
+      "batch": 1,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.4548394160810858,
+      "processRealSeconds": 0.45,
+      "processUserSeconds": 0.1,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 16171008,
+      "payloads": [
+        {
+          "coldMs": 0.000166,
+          "coldSucceeded": null,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "disabled",
+          "modelVersion": "",
+          "outputBytes": 0,
+          "p50Ms": 0.0,
+          "p75Ms": 4.2e-05,
+          "p95Ms": 4.2e-05,
+          "recognizedRegions": 0,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "enabled",
+      "batch": 1,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 6.737388333072886,
+      "processRealSeconds": 6.73,
+      "processUserSeconds": 3.58,
+      "processSystemSeconds": 1.49,
+      "maximumResidentSetBytes": 352747520,
+      "payloads": [
+        {
+          "coldMs": 1659.91375,
+          "coldSucceeded": true,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "enabled",
+          "modelVersion": "Apple Vision VNRecognizeTextRequest revision 3; Version 14.3 (Build 23D56)",
+          "outputBytes": 773,
+          "p50Ms": 46.597458,
+          "p75Ms": 47.398917,
+          "p95Ms": 48.716791,
+          "recognizedRegions": 300,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "interface",
+      "batch": 1,
+      "test": "mission_context::tests::capture_interface_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "mission_context::tests::capture_interface_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.6199291250668466,
+      "processRealSeconds": 0.61,
+      "processUserSeconds": 0.27,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 26361856,
+      "payloads": [
+        {
+          "samplesPerMode": 100,
+          "disabledP50Us": 13,
+          "disabledP75Us": 13,
+          "disabledP95Us": 14,
+          "enabledP50Us": 785,
+          "enabledP75Us": 1039,
+          "enabledP95Us": 1201,
+          "simulatedPixelBytes": 890,
+          "sqliteAllocationBeforeBytes": 1159168,
+          "sqliteAllocationAfterBytes": 1261568,
+          "sqliteAllocationDeltaBytes": 102400,
+          "notMeasured": [
+            "native screenshot",
+            "OCR",
+            "real media storage",
+            "UI latency"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "disabled",
+      "batch": 2,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.45080391597002745,
+      "processRealSeconds": 0.44,
+      "processUserSeconds": 0.1,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 15974400,
+      "payloads": [
+        {
+          "coldMs": 4.1e-05,
+          "coldSucceeded": null,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "disabled",
+          "modelVersion": "",
+          "outputBytes": 0,
+          "p50Ms": 0.0,
+          "p75Ms": 4.2e-05,
+          "p95Ms": 4.2e-05,
+          "recognizedRegions": 0,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "enabled",
+      "batch": 2,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 6.75411087507382,
+      "processRealSeconds": 6.75,
+      "processUserSeconds": 3.57,
+      "processSystemSeconds": 1.5,
+      "maximumResidentSetBytes": 354435072,
+      "payloads": [
+        {
+          "coldMs": 1642.079875,
+          "coldSucceeded": true,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "enabled",
+          "modelVersion": "Apple Vision VNRecognizeTextRequest revision 3; Version 14.3 (Build 23D56)",
+          "outputBytes": 773,
+          "p50Ms": 46.856041,
+          "p75Ms": 47.643625,
+          "p95Ms": 48.625292,
+          "recognizedRegions": 300,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "interface",
+      "batch": 2,
+      "test": "mission_context::tests::capture_interface_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "mission_context::tests::capture_interface_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.6223913340363652,
+      "processRealSeconds": 0.61,
+      "processUserSeconds": 0.27,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 26263552,
+      "payloads": [
+        {
+          "samplesPerMode": 100,
+          "disabledP50Us": 13,
+          "disabledP75Us": 13,
+          "disabledP95Us": 14,
+          "enabledP50Us": 764,
+          "enabledP75Us": 1000,
+          "enabledP95Us": 1194,
+          "simulatedPixelBytes": 890,
+          "sqliteAllocationBeforeBytes": 1159168,
+          "sqliteAllocationAfterBytes": 1261568,
+          "sqliteAllocationDeltaBytes": 102400,
+          "notMeasured": [
+            "native screenshot",
+            "OCR",
+            "real media storage",
+            "UI latency"
+          ]
+        }
+      ]
+    },
+    {
+      "mode": "disabled",
+      "batch": 3,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.44664133293554187,
+      "processRealSeconds": 0.44,
+      "processUserSeconds": 0.1,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 15548416,
+      "payloads": [
+        {
+          "coldMs": 4.2e-05,
+          "coldSucceeded": null,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "disabled",
+          "modelVersion": "",
+          "outputBytes": 0,
+          "p50Ms": 0.0,
+          "p75Ms": 4.2e-05,
+          "p95Ms": 4.2e-05,
+          "recognizedRegions": 0,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "enabled",
+      "batch": 3,
+      "test": "capture_ocr::tests::ocr_fixture_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "capture_ocr::tests::ocr_fixture_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 6.965849875006825,
+      "processRealSeconds": 6.96,
+      "processUserSeconds": 3.78,
+      "processSystemSeconds": 1.44,
+      "maximumResidentSetBytes": 364363776,
+      "payloads": [
+        {
+          "coldMs": 1739.9715840000001,
+          "coldSucceeded": true,
+          "errors": 0,
+          "extractorVersion": "redline-apple-vision-ocr-v1",
+          "inputPngBytes": 31225,
+          "mode": "enabled",
+          "modelVersion": "Apple Vision VNRecognizeTextRequest revision 3; Version 14.3 (Build 23D56)",
+          "outputBytes": 773,
+          "p50Ms": 47.319374999999994,
+          "p75Ms": 48.52675,
+          "p95Ms": 59.449124999999995,
+          "recognizedRegions": 300,
+          "samples": 100
+        }
+      ]
+    },
+    {
+      "mode": "interface",
+      "batch": 3,
+      "test": "mission_context::tests::capture_interface_microbenchmark",
+      "command": [
+        "/usr/bin/time",
+        "-l",
+        "/Users/yusufalbazian/redline/src-tauri/target/debug/deps/redline_lib-34ba914a9ea22570",
+        "mission_context::tests::capture_interface_microbenchmark",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exitCode": 0,
+      "runnerWallSeconds": 0.6227134161163121,
+      "processRealSeconds": 0.61,
+      "processUserSeconds": 0.27,
+      "processSystemSeconds": 0.33,
+      "maximumResidentSetBytes": 26394624,
+      "payloads": [
+        {
+          "samplesPerMode": 100,
+          "disabledP50Us": 13,
+          "disabledP75Us": 13,
+          "disabledP95Us": 14,
+          "enabledP50Us": 771,
+          "enabledP75Us": 996,
+          "enabledP95Us": 1198,
+          "simulatedPixelBytes": 890,
+          "sqliteAllocationBeforeBytes": 1159168,
+          "sqliteAllocationAfterBytes": 1261568,
+          "sqliteAllocationDeltaBytes": 102400,
+          "notMeasured": [
+            "native screenshot",
+            "OCR",
+            "real media storage",
+            "UI latency"
+          ]
+        }
+      ]
+    }
+  ],
+  "environment": {
+    "machine": "Apple M3 Max",
+    "ramBytes": 51539607552,
+    "macOS": "14.3 (23D56)",
+    "architecture": "arm64",
+    "rustc": "1.95.0 (59807616e 2026-04-14)",
+    "buildProfile": "debug",
+    "heavyConcurrentBuilds": "paused during benchmark window"
+  },
+  "fixture": {
+    "path": "fixtures/mission/ocr-reference.png",
+    "bytes": 31225,
+    "width": 1200,
+    "height": 300,
+    "sha256": "295e10948a6d3c99c8028663f42019a4a4a4f181f19b39441bb0c2d2f85a3afe",
+    "knownTextLines": 3
+  },
+  "measurementDate": "2026-09-13",
+  "rawOutputDirectory": "/tmp/redline-capture-measurements-20260913-02",
+  "supersedes": {
+    "rawOutputDirectory": "/tmp/redline-capture-measurements-20260913-01",
+    "reason": "Final admission/index transactions, policy checks and retained-frame support changed; final benchmark adds p75 and SQLite allocation."
+  },
+  "sourceSha256": {
+    "src-tauri/src/capture_ocr.rs": "3637749cf617ff68b98ff6286088c308541fc6ff119781d75619ada80882cbfa",
+    "src-tauri/src/mission_context.rs": "efbcc04d2a40397df15f798cbd39c4a510a075645884520c4b5cc76841b67f40",
+    "src-tauri/src/mission_capture.rs": "26f1fa4f93820a9e8ee1a6f707bc50f9a97629e24426d36cfc41726aed8aa884",
+    "scripts/capture-performance.py": "67f51a9721ca76261f97e8a54c3bd9332a7dcbc2956f44d2107c610570243379"
+  }
+}

@@ -276,9 +276,107 @@ artifact is the real release binary (a 15–25 min build); it mirrors
 `scripts/redline.sh`'s sequence exactly (the joint `tauri build`; the lean
 `-p redline-mcp` relink that used to follow retired 2026-09-07 with the
 proxy) and runs `check-size.mjs --strict`, uploading the output as a
-`size-report` artifact. `release.yml` builds per-arch DMGs on
+`size-report` artifact — and it now builds `-p redline-activate` first, because
+`tauri build` alone does not produce the activation helper and `--strict`
+reports a missing artifact as a failure. `release.yml` builds per-arch DMGs on
 `v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
 Developer ID secrets land).
+
+### Build Redline (measured 2026-09-16)
+
+Three points, on one machine, same day:
+
+| Tree | Release binary | dist | Boot JS |
+|---|---|---|---|
+| Clean HEAD `260a90c`, in a worktree | 36,190,704 B | 8,276,563 B | — |
+| Working tree immediately before the feature | 37,467,840 B | 8,363,465 B | 589,660 B |
+| After the feature | 38,166,656 B | 8,383,222 B | 590,037 B |
+
+The clean-HEAD number is the same one the 2026-09-13 entry records, which is
+what makes the middle row trustworthy: the baseline has not moved, so the
+pre-feature measurement is comparable and the delta is attributable.
+
+**+698,816 B (+1.865%)** on the binary, for six backend modules
+(`runtime_profile`, `confine`, `release_manifest`, `probe`, `activation`,
+`self_develop`), the shared activation-protocol crate and a schema step.
+`binaryBytes` raised to 38,500,000 — 333,344 B (0.866%) of headroom, in line
+with the 0.616% the previous raise left.
+
+**+377 B on the boot path**, for a feature that builds and installs the
+application. That is the whole point of the island split: the release panel
+rides the already-lazy Runs chunk, and the readiness indicator is its own lazy
+island that a machine which never prepares a release never fetches.
+
+The activation helper is deliberately *not* in the binary number. It is a
+separate 546,112 B executable with its own `helperBinBytes` ceiling, because
+its defining property is that it does not link the application it installs —
+and a gate is what keeps that true. A dependency creeping in would show up
+there as megabytes rather than as nothing at all.
+
+### Four-plan implementation (measured 2026-09-13)
+
+The [browser layout and menu repair](browser-refresh-repair-2026-09-14.md) records the latest embedded-app measurements with these same ceilings.
+
+These measurements record the initial four-plan completion. The subsequent
+[hook-conflict modal repair](hook-conflict-modal-repair-2026-09-13.md) updates
+the artifact hash and frontend measurements and passes these same ceilings.
+
+The browser, hook-conflict, away-strip and mission/performance changes were
+measured against a clean detached worktree at the same HEAD,
+`260a90c44392eac2f5e2f783323506acebf2f8c0`. Both used
+`npx tauri build --bundles app`, arm64, rustc 1.95.0, the same installed frontend
+dependencies and the existing release profile. The Joey product plan was
+excluded. Standalone `cargo build --release` does not embed the frontend and
+is not the comparison used here.
+
+| Artifact | Same-HEAD baseline | Final | Delta |
+| --- | ---: | ---: | ---: |
+| Embedded release executable | 36,190,704 B | 37,467,840 B | +1,277,136 B (+3.529%) |
+| Tauri app bundle, before explicit signing | 36,309,359 B | 37,586,495 B | +1,277,136 B |
+| Frontend dist | 8,276,563 B | 8,339,191 B | +62,628 B |
+| Static boot JavaScript | 577,939 B | 591,051 B | +13,112 B |
+
+The old 36,050,000-byte binary ceiling already failed at the baseline by
+140,704 bytes. After an independent agent reread the artifact and reviewed
+the checker and budget policy, **binaryBytes increases to 37,700,000**.
+The 1,650,000-byte ceiling increase comprises that 140,704-byte pre-existing
+breach, the 1,277,136-byte measured feature delta, and 232,160 bytes of
+headroom (0.616%). This is the smallest 100 KB-rounded ceiling leaving at
+least 0.5% headroom. It is an explicit feature-budget increase, not a claim
+that the executable became smaller. Sharing request decoders saved 16,448
+bytes in paired shipping builds before the final capture integration;
+that intermediate saving is not attribution of the remaining size to any
+single feature.
+
+Both frontend ceilings remain unchanged: 660,000 bytes for boot JavaScript
+and 8,500,000 bytes for dist. Final headroom is 10.447% and 1.892%,
+respectively. The aspirational 15% boot headroom goal remains unmet; it was
+already unmet at the baseline (12.433%). The strict checker, panic unwind,
+thin LTO, single codegen unit, symbol stripping and dependency configuration
+were not weakened.
+
+The final release executable SHA-256 is
+`753bfbb7d308ca2fd0e79dd3850307a0f5c4c15a4af79c3a8bec07d395eb6825`;
+the baseline hash is
+`a048d0b7912ddec3aefc09b753ff4311618fbba9037a98afd84c8da396620617`.
+The original-ceiling strict check failed as expected; the same unchanged
+checker passes with the reviewed ceiling. Same-HEAD baseline artifacts and
+logs are preserved in `/tmp/redline-head-size-1789307892674706000` and final
+build/size logs in `/tmp/redline-swarm-final-app-build.log` and
+`/tmp/redline-swarm-final-size.log`.
+
+The default local build carried only the linker's executable signature, so
+strict bundle-signature verification initially failed. The already-built
+app was regenerated with
+`APPLE_SIGNING_IDENTITY=- npx tauri bundle --bundles app --ci`, using the
+repository's configured entitlements. `codesign --verify --deep --strict`
+then passed. That local ad-hoc signed bundle contains 37,607,943 file bytes
+and a 37,486,848-byte executable; its signature accounts for the difference
+from the size-checker's release executable. This is neither Developer ID
+signing nor notarization, and the app was not installed or launched.
+
+See [the implementation report](plan-swarm-implementation-2026-09-13.md)
+for verification and the remaining native walkthrough boundary.
 
 ### Baseline (measured 2026-08-06)
 
@@ -356,6 +454,44 @@ plus ~4.5 %, so the next unexplained megabyte fails again. Levers for a
 size session: MCP mounted only when enabled or without schema generation
 (~2.7 MB), the duplicate sha2 line, an audit of main's pre-program growth.
 
+## Restart budget
+
+The other kind of time the product asks for: [Build Redline](self-develop.md)
+prepares a replacement application in the background, and then asks to restart
+into it. Four numbers, measured separately because they fail differently:
+
+| Measure | What it is | Where it comes from |
+|---|---|---|
+| Preparation | Dependencies, checks, build, package, sign, probe | `release-manifest.json` — per-step `durationMs` |
+| Saving and draining | Flush, workspace snapshot, database snapshot, staging copy | The activation journal's timestamps, `Staged` → `HandedOff` |
+| **Downtime** | Old process exits → new workspace is interactive | The journal's `HandedOff` → the handshake's `Workspace` |
+| Recovery | A failed startup → the previous release is running again | `HandshakeFailed` → `RolledBack` |
+
+**Target: under 10 seconds from process exit to an interactive workspace** for
+a prepared release with unchanged persistent formats, on the reference Mac.
+A target to validate, not a guarantee — and the number the *user* is shown is
+not this one. It is the candidate probe's own measured time to interactive plus
+a bounded allowance for the exchange and launch, so a slow build says it is
+slow instead of promising ten seconds. With nothing measured it says "not
+measured yet".
+
+What makes the target reachable is a rule rather than an optimisation: **no
+dependency installation, compilation, signing or bulk application copying
+happens after the process exits.** The staging copy — the expensive part, tens
+of megabytes — is made while Redline is still usable, and what remains after
+the exit is one atomic exchange and a launch. Anything that creeps back over
+that line will show up here as downtime, not as a slower build.
+
+The quit-time database snapshot is skipped when the restart path has already
+taken one; a second `VACUUM INTO` of the same bytes is pure downtime, and
+downtime after the user has clicked Restart is the kind that shows.
+
+Preparation concurrency is the other side of it: preparing a release must not
+degrade the foreground app. Two concurrent editing agents and one heavyweight
+build is the starting point, and the main-thread rules above apply to the
+window the whole time a build is running — the build is in another process, and
+under an OS sandbox, precisely so that stays true.
+
 ## Memory latency budget
 
 The memory system (Polis Memory, linked from
@@ -384,3 +520,28 @@ benches over a seeded synthetic corpus, and a real-DB instrument
 A Redline path that calls into the memory (the sidecar's class-router reads,
 Memory Ask, the Companion's consults) inherits these rows; anything new that
 sits in front of them is budgeted as its own row here, with a measurement.
+
+
+## Memory Cosmos feature budget — reviewed 2026-09-24
+
+The twelve-plan implementation adds a Three.js renderer as expressly requested
+by the Memory Cosmos plan. An independent agent verified the build inventory,
+static boot closure and lazy source chain before the budget change.
+
+The available pre-task `dist` artifact measured **8,400,730 B**. The first
+integrated production build measured **8,990,298 B**, an increase of 589,568 B.
+The lazy Cosmos scene is 563,609 B (95.60% of that aggregate delta); its worker,
+Map host and CSS add 14,527 B. Removing just the scene chunk leaves 8,426,689 B,
+under the old 8.5 MB ceiling. These are whole-artifact comparisons, not a claim
+that the pre-task artifact was rebuilt from an isolated source baseline.
+
+`distTotalBytes` increases from **8,500,000 to 9,150,000 B**, leaving 159,702 B
+(1.745%) headroom on the independently reviewed artifact. The strict checker
+is unchanged. The boot ceiling stays at 660,000 B; the measured static closure
+is 599,267 B and contains neither Three.js nor OrbitControls. The import chain
+is App → lazy MemorySurface → lazy MemoryMap → lazy MemoryCosmosScene; a new
+source regression guard pins that boundary. The older aspirational 15% boot
+headroom target remains unmet, as it already was before this work.
+
+Final source validation, packaged binary measurements and native-probe results
+are recorded in [the implementation report](twelve-plan-implementation-2026-09-24.md).

@@ -3,18 +3,14 @@
 import { describe, expect, it } from "vitest";
 import type { BrowseListItem } from "../types";
 import {
-  FALLBACK_TEMPLATE,
   groupByPage,
+  cartKey,
   isLocalhostUrl,
-  nextKind,
   pageKeyOf,
   pageLabelOf,
   quoteItem,
   renderListMarkdown,
   sameTabUrl,
-  sectionFor,
-  templateFor,
-  TEMPLATES,
 } from "./browseList";
 
 const item = (
@@ -46,49 +42,6 @@ const onPage = (
   pageUrl: string,
   extra: Partial<BrowseListItem> = {},
 ): BrowseListItem => item(body, kind, sortIdx, false, { pageUrl, ...extra });
-
-describe("templateFor", () => {
-  it("finds a shipped template by id", () => {
-    expect(templateFor("bugs-fixes-improvements").kinds).toEqual([
-      "bug",
-      "fix",
-      "improvement",
-    ]);
-  });
-
-  it("falls back rather than stranding a row", () => {
-    // The rule: a rename or a removal in a later release must not make an
-    // existing list unrenderable. The fallback is flat, so nothing hides.
-    expect(templateFor("a-template-from-the-future")).toBe(FALLBACK_TEMPLATE);
-    expect(templateFor(null)).toBe(FALLBACK_TEMPLATE);
-    expect(templateFor(undefined)).toBe(FALLBACK_TEMPLATE);
-    expect(FALLBACK_TEMPLATE.kinds).toHaveLength(1);
-  });
-
-  it("every template's defaultKind is one it actually shows", () => {
-    for (const t of TEMPLATES) expect(t.kinds).toContain(t.defaultKind);
-  });
-});
-
-describe("sectionFor / nextKind", () => {
-  const bfi = templateFor("bugs-fixes-improvements");
-
-  it("keeps an item in its own section", () => {
-    expect(sectionFor(bfi, "improvement")).toBe("improvement");
-  });
-
-  it("re-homes an item whose kind this template doesn't show", () => {
-    // Switching template under a list must not make items disappear.
-    expect(sectionFor(bfi, "note")).toBe("bug");
-  });
-
-  it("cycles the chip through the template's kinds and wraps", () => {
-    expect(nextKind(bfi, "bug")).toBe("fix");
-    expect(nextKind(bfi, "improvement")).toBe("bug");
-    // A single-kind template cycles to itself rather than throwing.
-    expect(nextKind(FALLBACK_TEMPLATE, "note")).toBe("note");
-  });
-});
 
 describe("isLocalhostUrl", () => {
   it("accepts the dev servers people actually run", () => {
@@ -247,9 +200,9 @@ describe("renderListMarkdown", () => {
     // So "item 2" in the panel is "item 2" in the handoff — the panel numbers
     // per section too, and a section is now a page.
     const md = renderListMarkdown(list, items);
-    expect(md).toContain("1. **bug** · nav overlaps the logo");
-    expect(md).toContain("2. **improvement** · empty state has no copy");
-    expect(md).toContain("1. **fix** · debounce the search");
+    expect(md).toContain("- [ ] nav overlaps the logo");
+    expect(md).toContain("- [ ] empty state has no copy");
+    expect(md).toContain("- [ ] debounce the search");
   });
 
   it("marks which words are Redline's and which are the user's", () => {
@@ -258,9 +211,9 @@ describe("renderListMarkdown", () => {
     const md = renderListMarkdown(list, [
       onPage("line spacing is off", "bug", 0, jobs, { locator: "Search bar" }),
     ]);
-    expect(md).toContain("1. **bug** · [Search bar] — line spacing is off");
+    expect(md).toContain("- [ ] [Search bar] — line spacing is off");
     expect(md).toContain("resolved by Redline from the page");
-    expect(md).toContain("the user's own words");
+    expect(md).toContain("the user's note");
   });
 
   it("claims no legend it doesn't honour", () => {
@@ -270,27 +223,19 @@ describe("renderListMarkdown", () => {
       onPage("do the thing", "note", 0, jobs),
     ]);
     expect(md).not.toContain("resolved by Redline");
-    expect(md).toContain("1. do the thing");
+    expect(md).toContain("- [ ] do the thing");
   });
 
   it("strikes done items rather than dropping them", () => {
     // What was already handled is context the agent needs.
-    expect(renderListMarkdown(list, items)).toContain("2. **bug** · ~~second bug~~");
+    expect(renderListMarkdown(list, items)).toContain("- [x] second bug");
   });
 
   it("strikes the pointer along with the note, as one statement", () => {
     const md = renderListMarkdown(list, [
       item("fixed already", "bug", 0, true, { pageUrl: jobs, locator: "Search bar" }),
     ]);
-    expect(md).toContain("~~[Search bar] — fixed already~~");
-  });
-
-  it("carries a provenance line naming the tab", () => {
-    const md = renderListMarkdown(list, items, {
-      url: "http://localhost:5173/settings",
-      title: "Settings — MyApp",
-    });
-    expect(md).toContain("From **Settings — MyApp** — http://localhost:5173/settings");
+    expect(md).toContain("- [x] [Search bar] — fixed already");
   });
 
   it("orders by sortIdx, not by array position", () => {
@@ -305,7 +250,7 @@ describe("renderListMarkdown", () => {
     const md = renderListMarkdown({ template: "punch-list", title: null }, [
       item("first line\nsecond line", "note", 0),
     ]);
-    expect(md).toContain("1. first line second line");
+    expect(md).toContain("- [ ] first line second line");
   });
 
   it("still renders an item whose kind the template stopped showing", () => {
@@ -314,12 +259,12 @@ describe("renderListMarkdown", () => {
   });
 
   it("says so plainly when there is nothing on it", () => {
-    expect(renderListMarkdown(list, [])).toContain("nothing on the list yet");
+    expect(renderListMarkdown(list, [])).toContain("Cart is empty");
   });
 
   it("titles from the list, falling back to the template's label", () => {
     expect(renderListMarkdown({ template: "punch-list", title: "  " }, [])).toContain(
-      "# Punch list",
+      "# Cart",
     );
   });
 });
@@ -390,3 +335,5 @@ describe("sameTabUrl", () => {
     expect(sameTabUrl("not a url", "not a url")).toBe(true);
   });
 });
+
+it("keys carts by workspace rather than page", () => { expect(cartKey("regular")).toBe("cart:regular"); expect(cartKey("mission-1")).not.toBe(cartKey("regular")); });

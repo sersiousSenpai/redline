@@ -237,6 +237,7 @@ interface VoicePanelProps {
    *  wrong. Mirrors `TerminalTabs`' `onActivityChange`. */
   onActivityChange?: (active: boolean) => void;
   onClose: () => void;
+  onOpenChat?: (companionId: string) => void;
 }
 
 const SUMMARY_PROMPT =
@@ -258,6 +259,7 @@ function VoicePanelBase({
   liveMarkdown = null,
   onActivityChange,
   onClose,
+  onOpenChat,
 }: VoicePanelProps) {
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   /** A turn is in flight (sent, awaiting the agent's reply). */
@@ -274,6 +276,13 @@ function VoicePanelBase({
   liveMarkdownRef.current = liveMarkdown;
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [originChat, setOriginChat] = useState<{ companionId: string; title: string; messages: { id: string; role: string; body: string }[] } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    setOriginChat(null);
+    if (!sessionId.startsWith("drafter:")) void invoke<typeof originChat>("plan_origin_chat", { sessionId }).then(chat => { if (alive) setOriginChat(chat); }).catch(() => {});
+    return () => { alive = false; };
+  }, [sessionId]);
   const [streaming, setStreaming] = useState("");
   // The voice agent keeps its own hand-rolled listeners (the TTS SpeechQueue
   // coupling makes migrating it to `useAgentTurn` its own piece of work), but
@@ -1430,11 +1439,16 @@ function VoicePanelBase({
             className="flex-1 overflow-y-auto px-4 py-3 rl-thin-scroll-y"
             style={{ fontSize: "13px", lineHeight: 1.5 }}
           >
+            {originChat && <details key={originChat.companionId} open={transcript.length === 0} className="mb-3 rounded border p-2" style={{ borderColor: "var(--color-rule)" }}>
+              <summary style={{ cursor: "pointer" }}>From chat: {originChat.title}</summary>
+              {onOpenChat && <button type="button" onClick={() => onOpenChat(originChat.companionId)} style={{ color: "var(--color-info)", marginBlock: 8 }}>Open chat →</button>}
+              {originChat.messages.map(message => <div key={message.id} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginBlock: 10 }}><strong>{message.role === "user" ? "You" : "Assistant"}</strong><p>{message.body}</p></div>)}
+            </details>}
             {transcript.length === 0 && !streaming && (
               <p style={{ color: "var(--color-ink-muted, #888)" }}>
                 Hold the button below (or hold <strong>Space</strong>) and ask
-                anything about the plan — you're talking to the same Claude that
-                wrote it, and it can see your repo. Replies are spoken aloud. Turn
+                anything about the plan — this discussion has the current plan,
+                its source chat when available, and access to your repo. Replies are spoken aloud. Turn
                 on <strong>Hands-free</strong> to just talk — it sends when you
                 pause and listens again after each reply. Or tap a starter to
                 begin.

@@ -199,6 +199,8 @@ export type LaunchRestore =
   | { kind: "none" };
 
 export interface PendingLaunch {
+  launchId: string;
+  chatId?: string;
   origin: LaunchOrigin;
   /** The prompt as launched — what the card displays. */
   prompt: string;
@@ -371,4 +373,9 @@ export function launchReceipt(doc: unknown, text: string): LaunchReceipt {
   const blocks = Array.isArray(top) ? top.length : 0;
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
   return { words, blocks, aidsDropped };
+}
+
+/** Only the plan claimed by this launch can graduate its originating chat. */
+export function isGraduation(pending: { launchId?: string; chatId?: string } | null, payload: { launchId?: string | null }): boolean {
+  return !!pending?.chatId && !!pending.launchId && pending.launchId === payload.launchId;
 }
