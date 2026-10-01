@@ -10,9 +10,8 @@
 //! `bridge_args`, DB-persisted resumable session, `companion-*` events), with
 //! two load-bearing differences:
 //!
-//! 1. **The frontend passes NOTHING about location.** `companion_send` reads
-//!    the mirrored `ActiveSurface` cell itself, so every turn is grounded on
-//!    where the user actually is.
+//! 1. The frontend captures a surface with each send. Queued turns preserve
+//!    that immutable target and harness; later navigation cannot retarget them.
 //! 2. **Passive awareness is the context journal, not a ticking agent.** The
 //!    backend journals meaningful activity as it happens (surface switches,
 //!    revisions, navs, pins, verdicts, agent turns); each Companion turn is
@@ -22,11 +21,11 @@
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdout};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 use crate::claude_proc::{
     bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin, StreamLine,
@@ -47,8 +46,18 @@ use crate::SurfaceInfo;
 const ROTATE_AFTER_ASSISTANT_TURNS: i64 = 12;
 
 /// How many recent exchanges a rotation carries forward, and how much of each.
-const RECAP_EXCHANGES: usize = 3;
-const RECAP_BODY_CHARS: usize = 400;
+const RECAP_EXCHANGES: usize = 8;
+const RECAP_BODY_CHARS: usize = 2_000;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHarness {
+    pub backend: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+fn runtime_key(id: &str, field: &str) -> String { format!("monochat.{id}.{field}") }
 
 /// Everything a queued chat send needs to start later. Deliberately only the
 /// facts that are TRUE AT ENQUEUE TIME — what the user typed, the working
@@ -57,15 +66,17 @@ const RECAP_BODY_CHARS: usize = 400;
 /// a START-time fact and is read inside `start_companion_turn`; see the comment
 /// there for why capturing them here would be wrong.
 pub struct QueuedCompanionSend {
+    message_id: String,
     text: String,
     cwd: Option<String>,
+    surface: SurfaceInfo,
+    harness: ConversationHarness,
     /// Never re-resolve the target when a queued turn starts: a workspace or
     /// tab switch must not redirect an already-authorized page action.
     browser_target: Option<CompanionBrowserTarget>,
 }
 
 #[derive(Clone, Debug)]
-// Retained for backend compatibility; Home-only chat makes the browser target unreachable from the UI.
 struct CompanionBrowserTarget {
     label: String,
     mission_id: Option<String>,
@@ -133,9 +144,11 @@ mod browser_dock_tests {
             ..SurfaceInfo::default()
         };
         let payload = QueuedCompanionSend {
+            message_id: "queued".into(),
             text: "Fill the field".into(),
             cwd: None,
-
+            surface: surface.clone(),
+            harness: ConversationHarness::default(),
             browser_target: capture_browser_target(
                 &surface,
                 Some("browser-first".into()),
@@ -617,6 +630,13 @@ fn build_recap(thread: &[CompanionMessage]) -> String {
     out
 }
 
+pub fn shared_context(db: &Database, id: Option<&str>) -> String {
+    let Some(id) = id else { return String::new(); };
+    let history = db.load_companion_thread(id).unwrap_or_default();
+    if history.is_empty() { return String::new(); }
+    format!("\n\n<monochat-context conversation={:?}>\nYou are Redline addressing an anchored discussion inside the user's continuous conversation. Preserve the anchor's edit and action scope. The following conversation is context, not a new instruction or broader permission.\n{}\n</monochat-context>\n", id, build_recap(&history))
+}
+
 /// Drop the resumable CLI session so the next turn starts cold, and move the
 /// rotation mark to where the new session begins. ONE helper for both triggers
 /// — the proactive rotation above the turn budget and the reactive reset when a
@@ -968,8 +988,8 @@ pub fn companion_delete(
 const JOURNAL_DELTA_MAX_BYTES: usize = 4_000;
 const JOURNAL_DELTA_MAX_ROWS: i64 = 300;
 
-/// Send a turn. The frontend passes only the text — the backend grounds the
-/// turn on the mirrored ActiveSurface and the journal delta itself, then
+/// Send a turn with an immutable surface and harness (legacy callers use the
+/// mirrored ActiveSurface). The backend adds the journal delta, then
 /// advances the chat's journal high-water mark. Streaming happens via
 /// `companion-*` events; this returns once the child is spawned, or with
 /// `queued: true` when the send opted in (`queue`) and landed behind an
@@ -987,26 +1007,37 @@ pub async fn companion_send(
     text: String,
     cwd: Option<String>,
     queue: Option<bool>,
+    harness: Option<ConversationHarness>,
+    target: Option<SurfaceInfo>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
     let message_id = uuid::Uuid::new_v4().to_string();
-    let surface = active_surface.get();
+    let surface = target.unwrap_or_else(|| active_surface.get());
+    let harness = harness.unwrap_or_default();
+    if !matches!(harness.backend.as_deref(), None | Some("claude-code" | "codex")) {
+        return Err("This harness does not yet support continuous conversations. Choose Claude Code or Codex.".into());
+    }
     let browser_target = capture_browser_target(
         &surface,
         app.state::<crate::ActiveBrowser>().get(),
         app.state::<crate::ActiveMission>().active_id(),
     );
+    if !matches!(crate::monochat::classify(&text, &surface), crate::monochat::Intent::Navigate { .. }) || browser_target.is_none() {
+        crate::monochat::conversation_budget(&companion.db, &companion_id)?;
+    }
     let payload = QueuedCompanionSend {
+        message_id: message_id.clone(),
         text: text.clone(),
         cwd,
-
+        surface: surface.clone(),
+        harness,
         browser_target,
     };
     // The user row is tagged with where they were WHEN THEY TYPED IT, which is
-    // the fact the bubble reports — unlike the prompt's "where they are now",
-    // which is a start-time fact and is read again inside the starter.
+    // the fact the bubble and the prompt both report. A queued send must not
+    // follow a later tab or surface switch.
 
     // Atomic reservation; early `?` returns release it via the guard's Drop.
     // Only opted-in sends queue — the busy error stays for everything else.
@@ -1108,20 +1139,52 @@ fn start_companion_turn(
 ) -> turn::BoxStartFuture {
     Box::pin(async move {
         let QueuedCompanionSend {
+            message_id,
             text,
             cwd,
-
+            surface,
+            harness,
             browser_target,
         } = payload;
+        let intent = crate::monochat::classify(&text, &surface);
+        let provider = harness.backend.as_deref().unwrap_or("claude-code");
+        let mut trace = crate::monochat::Span::begin(companion.db.clone(), &companion_id, &message_id, &surface, &intent, provider);
+        if let (crate::monochat::Intent::Navigate { url }, Some(target)) = (&intent, &browser_target) {
+            trace.trace.provider = "redline-browser".into();
+            emit_companion_status(&app, &companion_id, "Opening the requested page");
+            let result = crate::browser_actions::execute(app.clone(), crate::browser_actions::ActionRequest {
+                operation_id: trace.trace.id.clone(), label: target.label.clone(), expected_revision: None,
+                timeout_ms: Some(15_000), operation: crate::browser_actions::Operation::Navigate { url: url.clone() },
+            }).await;
+            let token = slot.token();
+            let (owned, next) = companion.turns.finish_and_pop(&companion_id, token);
+            drop(slot);
+            let (body, status) = if owned.is_none() { ("Navigation was cancelled. Check the page before retrying.".to_string(), "cancelled") }
+                else { match result {
+                    Ok(result) if result.status == "completed" => (format!("Opened {}", result.observed["url"].as_str().unwrap_or(url)), "complete"),
+                    Ok(result) => (format!("Navigation was not confirmed: {}", result.error.as_deref().unwrap_or("inspect the page before retrying")), "error"),
+                    Err(error) => (format!("Could not open the page: {error}"), "error"),
+                }};
+            let msg = CompanionMessage { id: uuid::Uuid::new_v4().to_string(), companion_id: companion_id.clone(), role: "assistant".into(), body: body.clone(), status: status.into(), surface_kind: Some(surface.kind.clone()), surface_id: surface.id.clone(), surface_label: surface.label.clone(), created_at: now_millis() };
+            companion.db.insert_companion_message(&msg).map_err(|error| error.to_string())?;
+            trace.finish(status, None);
+            let _ = app.emit("companion-done", CompanionDone { companion_id: companion_id.clone(), message_id: msg.id, body });
+            if let Some((queued, payload, slot)) = next {
+                let _ = companion.db.set_thread_message_status("companion", &queued.message_id, "complete");
+                let _ = app.emit("companion-queue-advanced", CompanionQueueAdvanced { companion_id: companion_id.clone(), message_id: queued.message_id.clone() });
+                if let Err(error) = start_companion_turn(app.clone(), companion.clone(), companion_id.clone(), payload, slot).await {
+                    let _ = companion.db.set_thread_message_status("companion", &queued.message_id, "unsent");
+                    finish_error(&app, &companion.db, &companion_id, &surface, &error);
+                }
+            }
+            return Ok(());
+        }
+        crate::monochat::conversation_budget(&companion.db, &companion_id)?;
         emit_companion_status(&app, &companion_id, "Preparing chat context");
         // Read through the app handle rather than as command arguments: the
         // drain path has no `tauri::State` of its own, and both cells are
         // exactly the kind of "where are they NOW" fact that must not be
         // frozen at enqueue time.
-        let surface: SurfaceInfo = browser_target
-            .as_ref()
-            .map(|target| target.surface.clone())
-            .unwrap_or_else(|| app.state::<crate::ActiveSurface>().get());
         let mission = match &browser_target {
             Some(target) => match &target.mission_id {
                 Some(id) => companion
@@ -1131,10 +1194,17 @@ fn start_companion_turn(
                     .map(|mission| (mission.title, mission.goal)),
                 None => None,
             },
-            None => app.state::<crate::ActiveMission>().active_goal(),
+            None => None,
         };
 
-        let mut prior_session = companion.db.get_companion_session(&companion_id);
+        let codex = harness.backend.as_deref() == Some("codex");
+        let provider = if codex { "codex" } else { "claude-code" };
+        let previous_provider = companion.db.get_setting(&runtime_key(&companion_id, "provider"));
+        let handoff = previous_provider.as_deref().is_some_and(|previous| previous != provider);
+        let mut prior_session = if codex {
+            companion.db.get_setting(&runtime_key(&companion_id, "codex.thread")).filter(|value| !value.is_empty())
+        } else { companion.db.get_companion_session(&companion_id) };
+        if handoff { prior_session = None; }
 
         // Rotation: past the turn budget, retire the CLI session and start a
         // cold one carrying a clipped recap. The UI thread is untouched —
@@ -1149,7 +1219,7 @@ fn start_companion_turn(
             .db
             .get_companion_rotated_at(&companion_id)
             .min(turns);
-        let mut recap: Option<String> = None;
+        let mut recap: Option<String> = (prior_session.is_none() && turns > 0).then(|| build_recap(&thread));
         if prior_session.is_some() && turns - rotated_at >= ROTATE_AFTER_ASSISTANT_TURNS {
             tracing::info!(
                 turns,
@@ -1161,6 +1231,9 @@ fn start_companion_turn(
             recap = Some(build_recap(&thread));
         }
         let first_turn = prior_session.is_none();
+        let baseline = if codex && !first_turn {
+            companion.db.get_setting(&runtime_key(&companion_id, "codex.usage")).and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default()
+        } else { Value::Null };
 
         // The awareness feed: journal rows since this chat's last turn.
         let since = companion.db.get_companion_journal_seq(&companion_id);
@@ -1186,7 +1259,7 @@ fn start_companion_turn(
         // model turn saved on the turn where latency is most visible. A
         // follow-up fragment borrows the previous turn's terms, because a
         // fragment carries its subject implicitly.
-        let prefetch = if first_turn {
+        let prefetch = if first_turn || intent == crate::monochat::Intent::Recall {
             let prior_user_text = thread
                 .iter()
                 .rev()
@@ -1256,11 +1329,14 @@ fn start_companion_turn(
         } else {
             build_followup_prompt(&surface, &companion_id, &journal_delta, &text)
         };
+        if !first_turn { if let Some(block) = prefetch_block.as_deref() { prompt.push_str(block); } }
         prompt.push_str(&browser_turn_context(browser_target.as_ref()));
 
         // The per-conversation seat override. Resolved HERE so a chat whose
         // model changed mid-conversation takes effect on the very next turn.
-        let (model, effort) = companion.db.get_companion_seat(&companion_id);
+        let (saved_model, saved_effort) = companion.db.get_companion_seat(&companion_id);
+        let model = harness.model.or(if codex { None } else { saved_model });
+        let effort = harness.effort.or(if codex { None } else { saved_effort });
         let seat_flags =
             crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref());
 
@@ -1294,19 +1370,20 @@ fn start_companion_turn(
             let _ = companion.db.set_companion_journal_seq(&companion_id, h);
         }
 
-        let args = bridge_args_with_flags(prompt, prior_session.as_deref(), seat_flags);
         let cwd = cwd
             .filter(|c| !c.trim().is_empty())
             .or_else(|| std::env::var("HOME").ok())
             .unwrap_or_else(|| "/".to_string());
 
         emit_companion_status(&app, &companion_id, "Starting the selected model");
-        let claude_bin = companion.claude_bin().await?;
-        let mut cmd = crate::claude_proc::claude_command_for_seat("companion", &claude_bin);
+        let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline));
+        let binary = if codex { crate::codex_app_server::resolve_codex_bin() } else { companion.claude_bin().await? };
+        let mut cmd = if codex { tokio::process::Command::new(&binary) } else { crate::claude_proc::claude_command_for_seat("companion", &binary) };
+        let args = if codex { vec!["app-server".to_string()] } else { bridge_args_with_flags(prompt, prior_session.as_deref(), seat_flags) };
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
-            .stdin(Stdio::null())
+            .stdin(if codex { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -1314,16 +1391,18 @@ fn start_companion_turn(
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     format!(
-                        "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                         Install Claude Code, or launch Redline from a terminal \
-                         so it inherits your shell's PATH."
+                        "Could not find {provider} at {binary}. Open the harness menu to locate or install it."
                     )
                 } else {
-                    format!("failed to spawn claude: {e}")
+                    format!("Failed to start {provider}: {e}")
                 }
             })?;
-        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        let stdout = child.stdout.take().ok_or("harness stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("harness stderr unavailable")?;
+        let mut stdin = child.stdin.take();
+        if native.is_some() {
+            write_native(stdin.as_mut().ok_or("Codex input unavailable")?, &crate::codex_conversation::NativeTurn::initialize()).await?;
+        }
 
         let buf = slot.buf();
         let token = slot.token();
@@ -1343,6 +1422,9 @@ fn start_companion_turn(
             surface,
             stdout,
             stderr,
+            stdin,
+            native.take(),
+            trace,
         ));
         Ok(())
     })
@@ -1359,6 +1441,11 @@ pub fn companion_turn_status(
     companion.turns.status(&companion_id)
 }
 
+#[tauri::command]
+pub fn monochat_traces(companion: tauri::State<'_, CompanionState>, companion_id: String) -> Result<Vec<crate::monochat::Trace>, String> {
+    crate::monochat::recent(&companion.db, &companion_id)
+}
+
 /// Cancel the in-flight turn (the reader emits `companion-cancelled`). Queued
 /// sends stay queued — Stop cancels the CURRENT turn only, and the cancelled
 /// reader's terminal drain still advances them.
@@ -1367,6 +1454,9 @@ pub fn companion_cancel(
     companion: tauri::State<'_, CompanionState>,
     companion_id: String,
 ) -> Result<(), String> {
+    // The next Codex turn starts cold after interruption. Clear before freeing
+    // the slot so an immediate new send cannot inherit partial native history.
+    let _ = companion.db.set_setting(&runtime_key(&companion_id, "codex.thread"), "");
     if let Some(mut child) = companion.turns.take(&companion_id).and_then(|p| p.child) {
         let _ = child.start_kill();
     }
@@ -1398,6 +1488,13 @@ pub fn companion_kill_all(companion: tauri::State<'_, CompanionState>) {
 
 // --- Reader ---------------------------------------------------------------
 
+async fn write_native(stdin: &mut ChildStdin, value: &Value) -> Result<(), String> {
+    let wire = format!("{value}\n");
+    tokio::time::timeout(std::time::Duration::from_secs(10), stdin.write_all(wire.as_bytes()))
+        .await.map_err(|_| "Codex protocol write timed out".to_string())?
+        .map_err(|error| format!("Codex protocol connection closed: {error}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn read_companion(
     app: AppHandle,
@@ -1408,17 +1505,37 @@ async fn read_companion(
     surface: SurfaceInfo,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    mut stdin: Option<ChildStdin>,
+    mut native: Option<crate::codex_conversation::NativeTurn>,
+    mut trace: crate::monochat::Span,
 ) {
     let db = companion.db.clone();
     let mut lines = BufReader::new(stdout).lines();
-    let mut stderr_lines = BufReader::new(stderr).lines();
+    // Drain both pipes concurrently; a full stderr pipe must never stop tokens.
+    let mut stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut tail = std::collections::VecDeque::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tail.push_back(line.chars().take(1_000).collect::<String>());
+            if tail.len() > 16 { tail.pop_front(); }
+        }
+        tail.into_iter().collect::<Vec<_>>().join("\n")
+    });
+    let provider = if native.is_some() { "codex" } else { "claude-code" };
     let mut session: Option<String> = None;
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
     let mut saw_json = false;
     let mut pacer = turn::MeterPacer::default();
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let deadline = if native.as_ref().is_some_and(|turn| turn.turn_id.is_none()) { 45 } else { 600 };
+        let line = match tokio::time::timeout(std::time::Duration::from_secs(deadline), lines.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => { errored = Some(format!("Harness connection failed: {error}")); break; }
+            Err(_) => { errored = Some(format!("{provider} stopped responding. Your conversation is saved; retry after checking the harness connection.")); break; }
+        };
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1426,6 +1543,29 @@ async fn read_companion(
         // The raw wire, for the inspector. A no-op when it's off —
         // one relaxed atomic load, nothing buffered.
         crate::inspect::capture("companion", &companion_id, line.trim());
+        if let Some(turn) = native.as_mut() {
+            let step = turn.observe(&v);
+            for request in step.writes {
+                if let Some(pipe) = stdin.as_mut() {
+                    if let Err(error) = write_native(pipe, &request).await { errored = Some(error); break; }
+                }
+            }
+            if let Some(id) = step.thread { session = Some(id); }
+            if let Some(text) = step.delta {
+                let seq = turn::push_delta(&buf, &text);
+                let _ = app.emit("companion-delta", CompanionDelta { companion_id: companion_id.clone(), text, seq });
+            }
+            if let Some(label) = step.activity { emit_companion_status(&app, &companion_id, &label); }
+            if let Some(meter) = step.meter {
+                buf.lock().unwrap_or_else(|error| error.into_inner()).meter = meter.clone();
+                let payload = turn::MeterPayload { rev: meter.rev, meter, activity: None, discrete: true };
+                let _ = app.emit("companion-meter", CompanionMeter { companion_id: companion_id.clone(), meter: payload });
+            }
+            if step.final_text.is_some() { final_text = step.final_text; }
+            if step.error.is_some() { errored = step.error; }
+            if turn.completed || errored.is_some() { break; }
+            continue;
+        }
         // Second pass over the same value — the meter reads what
         // `classify_line` throws away. Mutate-then-emit, coalesced.
         if let Some(payload) = turn::push_meta(&buf, &v) {
@@ -1473,24 +1613,43 @@ async fn read_companion(
             StreamLine::Ignore => {}
         }
     }
-    let mut stderr_text = String::new();
-    while let Ok(Some(line)) = stderr_lines.next_line().await {
-        stderr_text.push_str(&line);
-        stderr_text.push('\n');
+    drop(stdin.take());
+
+    if let Some(turn) = &native {
+        companion.turns.with_owned(&companion_id, token, || {
+            let _ = db.set_setting(&runtime_key(&companion_id, "codex.usage"), &turn.total_usage.to_string());
+            if errored.is_some() || final_text.as_ref().is_none_or(|text| text.trim().is_empty()) {
+                let _ = db.set_setting(&runtime_key(&companion_id, "codex.thread"), "");
+            } else if let Some(id) = &session {
+                let _ = db.set_setting(&runtime_key(&companion_id, "codex.thread"), id);
+                let _ = db.set_setting(&runtime_key(&companion_id, "provider"), provider);
+            }
+        });
     }
 
     // Reap the proc + pop the queue in ONE critical section, BEFORE emitting
     // the terminal event. Token-matched: a reader outliving a cancel must
     // neither steal a successor turn's proc nor drain its queue.
     let (proc, next) = companion.turns.finish_and_pop(&companion_id, token);
-    let cancelled = proc.is_none() && final_text.is_none();
+    let cancelled = proc.is_none();
     let exit_ok = match proc.and_then(|p| p.child) {
-        Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
+        Some(mut child) => match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
+            Ok(result) => result.map(|status| status.success()).unwrap_or(false),
+            Err(_) => { let _ = child.kill().await; let _ = child.wait().await; false }
+        },
         None => false,
+    };
+    let stderr_text = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut stderr_task).await {
+        Ok(Ok(text)) => text,
+        _ => { stderr_task.abort(); String::new() }
     };
     // ABOVE the terminal branch, so success, error and cancelled all
     // book. A cancelled turn spent its input tokens too.
     let settled = crate::meter::settle(&db, "companion", &buf);
+    // Cancellation has no assistant row. Keep its measured spend on the
+    // originating user row so dispatch thresholds still count those tokens.
+    if cancelled && !settled.is_empty() { crate::meter::attach(&db, "companion", &trace.trace.message_id, &settled); }
+    trace.finish(if cancelled { "cancelled" } else if errored.is_some() || final_text.as_ref().is_none_or(|text| text.trim().is_empty()) { "error" } else { "complete" }, Some(settled.clone()));
     if !settled.is_empty() {
         let _ = app.emit(
             "companion-meter",
@@ -1524,20 +1683,23 @@ async fn read_companion(
         }
         if let Some(text) = final_text {
             if text.trim().is_empty() {
-                finish_error(
+                let row = finish_error(
                     &app,
                     &db,
                     &companion_id,
                     &surface,
-                    "claude produced an empty reply",
+                    "The selected harness produced an empty reply. Your message is saved; you can retry it.",
                 );
+                crate::meter::attach(&db, "companion", &row, &settled);
                 break 'terminal;
             }
-            if let Some(sid) = &session {
-                if let Err(e) = db.set_companion_session(&companion_id, sid) {
+            if let Some(sid) = session.as_ref().filter(|_| native.is_none()) {
+                let saved = db.set_companion_session(&companion_id, sid);
+                if let Err(e) = saved {
                     tracing::warn!(error = %e, "failed to persist companion session id");
                 }
             }
+            if native.is_none() { let _ = db.set_setting(&runtime_key(&companion_id, "provider"), provider); }
             let msg = CompanionMessage {
                 id: uuid::Uuid::new_v4().to_string(),
                 companion_id: companion_id.clone(),
@@ -1570,7 +1732,7 @@ async fn read_companion(
             // "this is the first reply" by counting completed assistant rows
             // (this one included), which is exactly one only on turn one.
             let thread = db.load_companion_thread(&companion_id).unwrap_or_default();
-            if completed_assistant_turns(&thread) == 1 {
+            if completed_assistant_turns(&thread) == 1 && native.is_none() {
                 let opener = thread
                     .iter()
                     .find(|m| m.role == "user" && !m.body.trim().is_empty())
@@ -1589,11 +1751,11 @@ async fn read_companion(
 
         let why = if !exit_ok && !stderr_text.trim().is_empty() {
             let detail: String = stderr_text.trim().chars().take(500).collect();
-            format!("claude exited abnormally: {detail}")
+            format!("{provider} exited abnormally: {detail}")
         } else if !saw_json {
-            "claude produced no parseable output".to_string()
+            format!("{provider} produced no parseable output. Check its version and connection in the harness menu.")
         } else {
-            "claude ended without producing a reply".to_string()
+            format!("{provider} ended without producing a reply")
         };
         finish_error(&app, &db, &companion_id, &surface, &why);
     }
@@ -2546,7 +2708,7 @@ mod tests {
         let payload = QueuedCompanionSend {
             text: "and the beta?".to_string(),
             cwd: None,
-
+            message_id: "m2".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
             browser_target: None,
         };
         match turns.begin_or_enqueue("c1", queued_turn, payload) {
@@ -2596,7 +2758,7 @@ mod tests {
             QueuedCompanionSend {
                 text: "wait, scratch that".to_string(),
                 cwd: None,
-
+                message_id: "m3".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
                 browser_target: None,
             },
         );

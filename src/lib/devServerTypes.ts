@@ -15,6 +15,13 @@ export interface ProbeView {
   scripts: string[];
   exists: boolean;
   packageManager: string;
+  suggestions?: LaunchOption[];
+}
+
+export interface LaunchOption {
+  projectPath: string;
+  command: string;
+  detail: string;
 }
 
 /** Script names are manifest data, not shell fragments. */

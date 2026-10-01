@@ -231,9 +231,9 @@ pub const SEAT_FACTS: &[SeatFact] = &[
     SeatFact {
         seat: "ai_commit",
         label: "Commit drafter",
-        role: "Drafts a commit message, branch name and PR description from the \
-               review diff for the push dialog; the user edits the result, so a \
-               fast good-enough draft beats a slow perfect one.",
+        role: "Drafts one short commit subject from a sampled review diff; branch \
+               and PR defaults are derived locally. Uses low effort with a \
+               15-second deadline; prioritize a fast model.",
         traits: &["interactive", "latency_sensitive"],
         note: None,
     },

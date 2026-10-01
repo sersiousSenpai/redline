@@ -36,6 +36,7 @@ export interface CodexProbe {
   source: string;
   usable: boolean;
   signedIn: boolean;
+  authState?: "signed-in" | "signed-out" | "unknown";
   version?: string | null;
   identity?: string | null;
   newerElsewhere?: { path: string; version: string } | null;
@@ -74,6 +75,8 @@ export interface PreflightStatus {
    *  `codex`: reading either runs the codex capability probe, so a Claude
    *  user's payload carries neither. */
   codexHook?: {
+    trust?: "trusted" | "needs-review" | "unknown";
+    trustDetail?: string | null;
     available: boolean;
     installed: boolean;
     hooksPath: string;
@@ -89,6 +92,7 @@ export interface PreflightStatus {
 }
 
 export type ReadinessId =
+  | "codex-hooks-trust"
   | "provider-missing" | "provider-logged-out" | "provider-integration-missing" | "codex-model-unavailable"
   | "mode-paused"
   | "claude-missing"
@@ -268,7 +272,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
           "Codex can preserve your revisions and begin building when you approve.",
         fix: { label: "Install integration", kind: "install-integration", backend: "codex" },
       });
-    } else if (!cx.signedIn) {
+    } else if (!cx.signedIn && cx.authState !== "unknown") {
       // The third silent-failure route, and the one this strip exists for: a
       // present, hooked, logged-OUT codex spins forever over nothing.
       items.push({
@@ -289,6 +293,9 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         detail: "Choose an available model or a newer Codex installation.",
         fix: { label: newer ? "Use newer Codex" : "Locate Codex…", kind: "locate-codex", path: newer?.path },
       });
+    }
+    if (cx?.usable && pf.codexHook?.installed && pf.codexHook.trust && pf.codexHook.trust !== "trusted") {
+      items.push({ id: "codex-hooks-trust", state: "blocked", label: pf.codexHook.trust === "needs-review" ? "Review Redline's hooks in Codex" : "Codex hook trust could not be verified", detail: pf.codexHook.trustDetail ?? "Review the Redline hooks in Codex /hooks, then verify the integration.", fix: { label: "Finish setup", kind: "install-integration", backend: "codex" } });
     }
   }
 
@@ -431,7 +438,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
     });
   }
 
-  if (backend === "codex" && input.requireIntegration && (!pf?.codexSkill?.installed || pf.codexSkill.outdated)) {
+  if (backend === "codex" && pf && input.requireIntegration && (!pf.codexSkill?.installed || pf.codexSkill.outdated)) {
     items.push({ id: "skill-stale", state: "blocked", label: "The Codex review skill needs installation", detail: "Install the current plan revision contract before launching.", fix: { label: "Install integration", kind: "install-integration", backend } });
   }
   return sortReadiness(items).map(item => item.fix?.kind === "install-integration" ? { ...item, fix: { ...item.fix, backend } } : item);

@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePersistedState } from "../theme/usePersistedState";
 import { DEFAULT_EDGE_TOGGLES, EDGE_KINDS, EDGE_LABEL, visibleEdges, type EdgeKind, type MapEdge, type MemoryMapData } from "../lib/memoryMap";
-import { layoutMap3d, nodeFocus, type CosmosLayout, type CosmosView } from "../lib/memoryMap3d";
+import { COSMOS_LAYOUT_VERSION, layoutMap3d, nodeFocus, type CosmosLayout, type CosmosView } from "../lib/memoryMap3d";
 import type { TimelineFocus } from "../lib/timeline";
 import "./memory-cosmos/cosmos.css";
 const Scene = lazy(() => import("./memory-cosmos/MemoryCosmosScene"));
@@ -46,18 +46,22 @@ export function MemoryMapTab({ onFocus, view: retainedView }: { onFocus: (f: Tim
   useEffect(() => {
     if (!data) return;
     const generation = ++layoutRequest.current;
+    const previous = view.current.layoutVersion === COSMOS_LAYOUT_VERSION ? view.current.positions : undefined;
+    // Replace retained coordinates from an older geometry once; subsequent
+    // refreshes and Timeline round trips preserve the new landmarks.
+    if (!previous && view.current.positions?.length) view.current.camera = undefined;
     const apply = (next: CosmosLayout) => {
       if (generation !== layoutRequest.current) return;
-      view.current.positions = next.nodes; setLayout(next);
+      view.current.positions = next.nodes; view.current.layoutVersion = COSMOS_LAYOUT_VERSION; setLayout(next);
       if (view.current.selectedId && !next.nodes.some(n => n.id === view.current.selectedId)) select(null);
     };
     const fallback = () => {
-      try { apply(layoutMap3d(data, view.current.positions)); } catch (e) { setError(`Unable to arrange memories: ${String(e)}`); }
+      try { apply(layoutMap3d(data, previous)); } catch (e) { setError(`Unable to arrange memories: ${String(e)}`); }
     };
     if (!worker.current) { fallback(); return; }
     worker.current.onmessage = event => { if (event.data.request !== generation) return; if (event.data.error) setError(event.data.error); else apply(event.data.layout); };
     worker.current.onerror = () => { worker.current?.terminate(); worker.current = null; fallback(); };
-    worker.current.postMessage({ request: generation, data, previous: view.current.positions ?? [] });
+    worker.current.postMessage({ request: generation, data, previous: previous ?? [] });
     return () => { if (layoutRequest.current === generation) ++layoutRequest.current; };
   }, [data, view, select]);
   const edges = useMemo(() => data && layout ? visibleEdges(data.edges, toggles, new Set(layout.nodes.map(n => n.id))) : [], [data, layout, toggles]);
@@ -85,7 +89,7 @@ export function MemoryMapTab({ onFocus, view: retainedView }: { onFocus: (f: Tim
           <button disabled={!focus} onClick={open}>Open in Timeline</button><p>{related.length} visible relationships</p>
           {related.slice(0, 20).map((edge, i) => <button key={i} aria-pressed={edge === selectedEdge} onClick={() => setSelectedEdge(edge)}>{EDGE_LABEL[edge.kind]} {edge.kind === "supersedes" ? "→ " : "· "}{layout?.nodes.find(n => n.id === (edge.from === selected.id ? edge.to : edge.from))?.label ?? "Memory"}</button>)}
           {related.length > 20 && <p>{related.length - 20} more visible connections</p>}
-        </> : <><h3>Your memory cosmos</h3><p>Select a planet to inspect it. Approach to explore its neighborhood, or open its memories in the Timeline.</p><p>Planet size reflects memory count. Gold marks pinned memories. Filaments show the selected relationship kinds.</p></>}
+        </> : <><span className="mc-eyebrow">A constellation of thought</span><h3>Your quantum cosmos</h3><p>Select a memory to trace its connections. Approach to explore its neighborhood, or open it in the Timeline.</p><div className="mc-legend"><span><i className="mc-legend-core" />Size reflects memory count</span><span><i className="mc-legend-pin" />Gold marks pinned memories</span><span><i className="mc-legend-fiber" />Arcs follow memory relationships</span></div></>}
         {selectedEdge && <div role="status"><h3>{EDGE_LABEL[selectedEdge.kind]}{selectedEdge.kind === "supersedes" ? " →" : ""}</h3><p>{layout?.nodes.find(n => n.id === selectedEdge.from)?.label} → {layout?.nodes.find(n => n.id === selectedEdge.to)?.label}</p><p>{selectedEdge.basis ?? "A recorded relationship between these memories."}{selectedEdge.kind === "co_occurs" ? " This connection is derived, not an asserted relationship." : ""}</p></div>}
       </aside>
     </div>

@@ -153,6 +153,20 @@ pub struct ClaudeJsonSchema {
     pub model: Option<String>,
     pub effort: Option<String>,
 }
+
+pub struct CodexJsonSchema { pub db: Arc<Database>, pub project_path: String, pub model: Option<String>, pub effort: Option<String> }
+impl ModelBackend for CodexJsonSchema {
+    fn complete<'a>(&'a self, prompt: &'a str, schema: &'a Value) -> ModelFuture<'a> {
+        Box::pin(async move {
+            let (text, meter) = crate::codex_app_server::run_with_schema(Path::new(&self.project_path), prompt, self.model.as_deref(), self.effort.as_deref(), Some(schema)).await?;
+            crate::meter::book(&self.db, "orchestrator", &meter);
+            let mut value = parse_json_output(&text)?;
+            let object = value.as_object_mut().ok_or("Codex returned a non-object structured response")?;
+            object.insert("_redlineMeter".into(), serde_json::to_value(meter).map_err(|error| error.to_string())?);
+            Ok(value)
+        })
+    }
+}
 impl ModelBackend for ClaudeJsonSchema {
     fn complete<'a>(&'a self, prompt: &'a str, schema: &'a Value) -> ModelFuture<'a> {
         Box::pin(async move {
@@ -333,8 +347,11 @@ fn model_backend(
     path: &str,
     node: Option<&RunNode>,
 ) -> Result<Box<dyn ModelBackend>, String> {
+    if node.and_then(|node| node.backend.as_deref()) == Some("codex") {
+        return Ok(Box::new(CodexJsonSchema { db: db.clone(), project_path: path.into(), model: node.and_then(|node| node.model.clone()), effort: node.and_then(|node| node.effort.clone()) }));
+    }
     if let Some(config) = db.get_setting("redline.runner.modelBackend") {
-        if !config.trim().is_empty() {
+        if !config.trim().is_empty() && node.and_then(|node| node.backend.as_deref()).is_none() {
             return Ok(Box::new(
                 serde_json::from_str::<OpenAICompatible>(&config)
                     .map_err(|e| format!("invalid model backend config: {e}"))?,
@@ -459,9 +476,15 @@ impl RunnerState {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let mut launches = Vec::new();
+            let policy = crate::monochat::policy(&self.db);
             let updated = self.db.runner_update(&run_id, None, |g, claims| {
+                if g.status == "running" && policy.run_token_budget.is_some_and(|limit| run_observed_tokens(g) >= limit) {
+                    g.status = "paused".into(); g.pause_reason = Some("Observed token threshold reached. Adjust capacity settings before resuming.".into());
+                }
                 if g.status == "running" {
                     for id in graph::ready_nodes(g, claims) {
+                        let candidate = g.nodes.iter().find(|node| node.id == id).unwrap();
+                        if !harness_has_capacity(g, candidate, &policy) { continue; }
                         let n = g.nodes.iter_mut().find(|n| n.id == id).unwrap();
                         if n.kind == "gate" {
                             n.status = "awaiting_human".into();
@@ -639,6 +662,18 @@ fn append_capped(output: &mut String, text: &str) {
         output.push_str(&text[..end]);
     }
 }
+fn run_observed_tokens(graph: &RunGraph) -> u64 {
+    graph.nodes.iter().flat_map(|node| &node.attempt_meters).filter_map(|value| serde_json::from_value::<crate::meter::TurnMeter>(value.clone()).ok()).map(|meter| meter.total_tokens()).sum()
+}
+fn harness_has_capacity(graph: &RunGraph, candidate: &RunNode, policy: &crate::monochat::Policy) -> bool {
+    if !matches!(candidate.kind.as_str(), "task" | "review") { return true; }
+    let codex = candidate.backend.as_deref() == Some("codex");
+    let same = |node: &&RunNode| matches!(node.kind.as_str(), "task" | "review") && (node.backend.as_deref() == Some("codex")) == codex;
+    // A limited harness does not strand independent work on another harness.
+    if graph.nodes.iter().filter(same).any(|node| node.status == "awaiting_human" && node.meter.as_ref().and_then(|meter| meter.get("rateLimited")).is_some_and(|value| !value.is_null())) { return false; }
+    let active = graph.nodes.iter().filter(same).filter(|node| graph::live(&node.status)).count();
+    active < if codex { policy.codex_parallelism } else { policy.claude_parallelism } as usize
+}
 #[derive(Default)]
 struct NodeResult {
     success: bool,
@@ -656,6 +691,7 @@ fn finish_node(g: &mut RunGraph, id: &str, result: &NodeResult) {
         return;
     }
     let is_check = g.nodes[index].kind == "check";
+    let rate_limited = !result.success && result.meter.as_ref().and_then(|meter| meter.get("rateLimited")).is_some_and(|value| !value.is_null());
     {
         let n = &mut g.nodes[index];
         n.output = result.output.clone();
@@ -665,7 +701,7 @@ fn finish_node(g: &mut RunGraph, id: &str, result: &NodeResult) {
         }
         n.meter = result.meter.clone();
         n.ended_at = Some(crate::state::now_millis());
-        n.status = if result.stopped {
+        n.status = if result.stopped || rate_limited {
             "awaiting_human"
         } else if result.success {
             "passed"
@@ -679,6 +715,8 @@ fn finish_node(g: &mut RunGraph, id: &str, result: &NodeResult) {
     }
     if result.stopped {
         g.status = "paused".into();
+    } else if rate_limited {
+        g.pause_reason = Some("A harness reached its usage limit. Independent work can continue; retry or reassign the waiting node after reviewing its usage.".into());
     } else if !result.success && is_check {
         match graph::attribute_failure(g, id) {
             graph::FailureAttribution::Retry(task) => {
@@ -798,11 +836,20 @@ pub fn claim_hook(
     }
 }
 
+fn claim_codex_paths(db: &Database, graph: &RunGraph, node: &RunNode, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() || paths.len() > 256 { return Err("Codex did not identify a bounded patch".into()); }
+    // Resolve every path (including rename destinations) before reserving any.
+    let paths = paths.iter().map(|path| normalize_claim(&graph.project_path, path)).collect::<Result<Vec<_>, _>>()?;
+    for path in paths { db.runner_claim(&graph.run_id, &node.id, &path, node.attempt)?; }
+    Ok(())
+}
+
 #[cfg(unix)]
 struct ProcessGroup(u32);
 #[cfg(unix)]
 impl ProcessGroup {
     fn kill(&self, signal: i32) {
+        if self.0 == 0 { return; }
         unsafe {
             unsafe extern "C" {
                 fn kill(pid: i32, sig: i32) -> i32;
@@ -818,7 +865,113 @@ impl Drop for ProcessGroup {
     }
 }
 impl RunnerState {
+    async fn execute_codex(&self, app: Option<&AppHandle>, g: &RunGraph, node: &RunNode, mut controls: mpsc::Receiver<Control>) -> NodeResult {
+        let result = self.execute_codex_inner(app, g, node, &mut controls).await;
+        result.unwrap_or_else(|error| NodeResult { output: error, ..Default::default() })
+    }
+
+    async fn execute_codex_inner(&self, app: Option<&AppHandle>, g: &RunGraph, node: &RunNode, controls: &mut mpsc::Receiver<Control>) -> Result<NodeResult, String> {
+        let bin = tokio::task::spawn_blocking(crate::codex_app_server::resolve_codex_bin).await.map_err(|error| error.to_string())?;
+        let runtime_key = format!("run.{}.{}.codex", g.run_id, node.id);
+        let previous_provider = self.db.get_setting(&format!("run.{}.{}.provider", g.run_id, node.id));
+        let resume = node.child_session_id.clone().filter(|_| previous_provider.as_deref() == Some("codex"));
+        let baseline = if resume.is_some() { self.db.get_setting(&runtime_key).and_then(|value| serde_json::from_str(&value).ok()).unwrap_or(Value::Null) } else { Value::Null };
+        let instructions = "You are Redline's Codex executor for one authorized run node. Complete only its supplied task. Leave changes uncommitted. Read and inspect through the read-only sandbox. Use apply_patch for every file mutation: Redline approves each exact patch after checking file ownership and scope. Never use shell commands, MCP tools, permission escalation, root grants, subagents, git reset, clean, or stash to bypass that boundary. A declined patch means a path is busy or outside scope; continue independent work. Redline schedules independent checks and reviews after you finish. Never claim verification you have not observed.";
+        let prompt = format!("Task: {}\n{}\nScope hints: {}\nEnforced scope: {}\n{}", node.title, node.brief, node.scope_hint.join(", "), node.enforce_scope, node.queued_messages.join("\n\n"));
+        let mut native = crate::codex_conversation::NativeTurn::new(g.project_path.clone(), prompt.clone(), resume, node.model.clone(), node.effort.clone(), baseline).task(instructions);
+        crate::ledger::register_agent_prompt(&prompt);
+        let mut command = tokio::process::Command::new(bin);
+        command.arg("app-server").current_dir(&g.project_path).env(ENV_RUN_ID, &g.run_id).env(ENV_RUN_NODE, &node.id).env(ENV_RUN_ATTEMPT, node.attempt.to_string()).env("REDLINE_AGENT_SEAT", "orchestrator").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        #[cfg(unix)] { use std::os::unix::process::CommandExt; command.as_std_mut().process_group(0); }
+        let mut child = command.spawn().map_err(|error| format!("Could not start the Codex node: {error}"))?;
+        #[cfg(unix)] let _process_group = ProcessGroup(child.id().unwrap_or(0));
+        let mut input = child.stdin.take().ok_or("Codex node input unavailable")?;
+        let mut output = BufReader::new(child.stdout.take().ok_or("Codex node output unavailable")?).lines();
+        let mut errors = BufReader::new(child.stderr.take().ok_or("Codex node diagnostics unavailable")?).lines();
+        let partial = Arc::new(Mutex::new(PartialBuf::new()));
+        let _booking = MeterBooking { db: self.db.clone(), seat: node.seat.as_deref().unwrap_or("orchestrator").into(), partial: partial.clone() };
+        self.inner.buffers.lock().unwrap().insert(key(&g.run_id, &node.id), partial.clone());
+        let conversation = g.plan_session_id.as_deref().and_then(|id| crate::companion::origin_chat_for_session(&self.db, id)).map(|origin| origin.companion_id).unwrap_or_else(|| g.run_id.clone());
+        let surface = crate::SurfaceInfo { kind: "runs".into(), id: Some(node.id.clone()), label: Some(node.title.clone()), project_path: Some(g.project_path.clone()), ..Default::default() };
+        let mut trace = crate::monochat::Span::begin(self.db.clone(), &conversation, &format!("{}:{}:{}",g.run_id,node.id,node.attempt), &surface, &crate::monochat::Intent::Discuss, "codex");
+        let mut result = NodeResult::default();
+        let mut stderr_open = true;
+        let mut request_id = 100u64;
+        let started = std::time::Instant::now();
+        let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let run = async {
+            input.write_all(format!("{}\n", crate::codex_conversation::NativeTurn::initialize()).as_bytes()).await.map_err(|error| error.to_string())?;
+            loop {
+                tokio::select! {
+                    line = output.next_line() => {
+                        let Some(line) = line.map_err(|error| error.to_string())? else { return Err("Codex disconnected before completing the node".to_string()); };
+                        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
+                        crate::inspect::capture("run", &node.id, &line);
+                        if event["id"].as_u64().is_some_and(|id| id >= 100) && event.get("error").is_some() { append_capped(&mut result.output, "\nThe live instruction was not accepted by Codex; resend it after this turn.\n"); }
+                        let step = native.observe(&event);
+                        for request in step.writes { input.write_all(format!("{request}\n").as_bytes()).await.map_err(|error| error.to_string())?; }
+                        if let Some(approval) = step.approval {
+                            let claim = claim_codex_paths(&self.db, g, node, &approval.paths);
+                            let response = json!({"id":approval.id,"result":{"decision":if claim.is_ok() { "accept" } else { "decline" }}});
+                            input.write_all(format!("{response}\n").as_bytes()).await.map_err(|error| error.to_string())?;
+                            if let Err(error) = claim { push_output(app, g, node, &partial, &mut result.output, &format!("\nPatch held: {error}\n")); }
+                        }
+                        if let Some(thread) = step.thread {
+                            self.db.set_setting(&format!("run.{}.{}.provider", g.run_id, node.id), "codex").map_err(|error| error.to_string())?;
+                            self.db.runner_update(&g.run_id, None, |graph, _| { if let Some(current) = graph.nodes.iter_mut().find(|current| current.id == node.id && current.attempt == node.attempt) { current.child_session_id = Some(thread); } consume_queued_prefix(graph, &node.id, node.attempt, &node.queued_messages) })?;
+                        }
+                        if let Some(text) = step.delta { push_output(app, g, node, &partial, &mut result.output, &text); }
+                        if let Some(meter) = step.meter { partial.lock().unwrap().meter = meter.clone(); if let Some(app) = app { let _ = app.emit("run-meter", json!({"runId":g.run_id,"nodeId":node.id,"attempt":node.attempt,"rev":meter.rev,"meter":meter})); } }
+                        if let Some(error) = step.error { return Err(error); }
+                        if let Some(text) = step.final_text { if result.output.is_empty() { push_output(app, g, node, &partial, &mut result.output, &text); } result.success = !text.trim().is_empty(); return Ok(()); }
+                    }
+                    line = errors.next_line(), if stderr_open => match line { Ok(Some(line)) => append_capped(&mut result.output, &format!("\n{line}")), _ => stderr_open = false },
+                    control = controls.recv() => match control {
+                        Some(Control::Steer(text)) => {
+                            if let (Some(thread), Some(turn)) = (&native.thread_id, &native.turn_id) {
+                                let request = json!({"id":request_id,"method":"turn/steer","params":{"threadId":thread,"expectedTurnId":turn,"input":[{"type":"text","text":text}]}}); request_id += 1;
+                                input.write_all(format!("{request}\n").as_bytes()).await.map_err(|error| error.to_string())?;
+                            } else { append_capped(&mut result.output, "\nCodex is still connecting. Resend the live instruction once it starts.\n"); }
+                        }
+                        Some(Control::Stop) | None => { result.stopped = true; return Ok(()); }
+                    },
+                    _ = tokio::time::sleep_until(startup_deadline), if native.turn_id.is_none() => return Err("Codex did not acknowledge the run node within 45 seconds".into()),
+                }
+            }
+        };
+        match tokio::time::timeout(NODE_TIMEOUT, run).await {
+            Ok(Err(error)) => append_capped(&mut result.output, &format!("\n{error}")),
+            Err(_) => { result.stopped = true; append_capped(&mut result.output, "\nCodex node exceeded its time limit."); }
+            Ok(Ok(())) => {}
+        }
+        let _ = child.kill().await; let _ = child.wait().await;
+        let _ = self.db.set_setting(&runtime_key, &native.total_usage.to_string());
+        let mut meter = partial.lock().unwrap().meter.clone(); meter.duration_ms = Some(started.elapsed().as_millis() as u64);
+        trace.finish(if result.stopped { "cancelled" } else if result.success { "complete" } else { "error" }, Some(meter.clone()));
+        result.meter = serde_json::to_value(meter).ok();
+        self.inner.buffers.lock().unwrap().remove(&key(&g.run_id, &node.id));
+        Ok(result)
+    }
+
     async fn execute(
+        &self,
+        app: Option<&AppHandle>,
+        g: &RunGraph,
+        node: &RunNode,
+        controls: mpsc::Receiver<Control>,
+    ) -> NodeResult {
+        // Codex tasks keep their native span inside the streaming driver.
+        if node.kind == "task" && node.backend.as_deref() == Some("codex") { return self.execute_codex(app, g, node, controls).await; }
+        let conversation = g.plan_session_id.as_deref().and_then(|id| crate::companion::origin_chat_for_session(&self.db, id)).map(|origin| origin.companion_id).unwrap_or_else(|| g.run_id.clone());
+        let surface = crate::SurfaceInfo { kind: "runs".into(), id: Some(node.id.clone()), label: Some(node.title.clone()), project_path: Some(g.project_path.clone()), ..Default::default() };
+        let provider = if node.kind == "check" { "shell" } else { node.backend.as_deref().unwrap_or("claude-code") };
+        let mut trace = crate::monochat::Span::begin(self.db.clone(), &conversation, &format!("{}:{}:{}", g.run_id, node.id, node.attempt), &surface, &crate::monochat::Intent::Discuss, provider);
+        let result = self.execute_inner(app, g, node, controls).await;
+        trace.finish(if result.stopped { "cancelled" } else if result.success { "complete" } else { "error" }, result.meter.as_ref().and_then(|meter| serde_json::from_value(meter.clone()).ok()));
+        result
+    }
+
+    async fn execute_inner(
         &self,
         app: Option<&AppHandle>,
         g: &RunGraph,
@@ -868,7 +1021,8 @@ impl RunnerState {
                 node.seat.as_deref().unwrap_or("orchestrator"),
                 &bin,
             );
-            cmd.args(ClaudeCli.argv(node, node.child_session_id.as_deref()));
+            let previous_provider = self.db.get_setting(&format!("run.{}.{}.provider", g.run_id, node.id));
+            cmd.args(ClaudeCli.argv(node, node.child_session_id.as_deref().filter(|_| previous_provider.as_deref() != Some("codex"))));
             cmd.args(["--settings", &crate::hook::runner_settings().to_string()]);
             cmd.env(ENV_RUN_ID, &g.run_id)
                 .env(ENV_RUN_NODE, &node.id)
@@ -999,7 +1153,7 @@ impl RunnerState {
                         }
                         }
                         match ClaudeCli.parse_event(&v) {
-                            Some(NodeEvent::Session(id))=>{ let _=self.db.runner_update(&g.run_id,None,|g,_|{if let Some(n)=g.nodes.iter_mut().find(|n|n.id==node.id){n.child_session_id=Some(id);}Ok(())}); },
+                            Some(NodeEvent::Session(id))=>{ let _=self.db.set_setting(&format!("run.{}.{}.provider",g.run_id,node.id), "claude-code"); let _=self.db.runner_update(&g.run_id,None,|g,_|{if let Some(n)=g.nodes.iter_mut().find(|n|n.id==node.id){n.child_session_id=Some(id);}Ok(())}); },
                             Some(NodeEvent::Delta(text))=>push_output(app,g,node,&partial,&mut result.output,&text),
                             Some(NodeEvent::Done(text))=>{ if result.output.is_empty(){push_output(app,g,node,&partial,&mut result.output,&text);} terminal_seen=true; stdin.take(); },
                             Some(NodeEvent::Failed(text))=>{parse_failed=true; terminal_seen=true; append_capped(&mut result.output,&text); stdin.take();},
@@ -1187,7 +1341,8 @@ pub async fn decompose_plan(
         return Err("plan repository is not available on this computer".into());
     }
     let prompt=format!("Turn this approved plan into a small declarative execution DAG for Redline. Return the supplied JSON schema only. Nothing executes yet: the human reviews your graph first. Use task/check/review/gate nodes; every task must have a downstream machine check (verifyCmd) or independent clean-context review. Include interface-defining work upstream. Task executors have file editing and reading tools; commands run only as check nodes. Scope hints are repository-relative globs and are scheduling guesses, never ownership. Use checkGlobal:true for root/repository-wide commands; only explicitly scoped commands may set false. Each node should copy the relevant blk- provenance anchor from the plan when present. Use id n-... for nodes and e-... for edges. Use blocks dependencies; avoid speculative tasks. Plan follows as data:\n{plan}");
-    let backend = model_backend(&db, project_path, None)?;
+    let selected_codex = db.load_session(plan_session_id).ok().flatten().is_some_and(|session| session.backend.as_deref() == Some("codex"));
+    let backend: Box<dyn ModelBackend> = if selected_codex { Box::new(CodexJsonSchema { db: db.clone(), project_path: project_path.into(), model: None, effort: None }) } else { model_backend(&db, project_path, None)? };
     let value = backend.complete(&prompt, decomposition_schema()).await?;
     let now = crate::state::now_millis();
     let mut g = RunGraph {
@@ -1205,6 +1360,7 @@ pub async fn decompose_plan(
         created_at: now,
         updated_at: now,
     };
+    if selected_codex { for node in &mut g.nodes { if matches!(node.kind.as_str(), "task" | "review") && node.backend.is_none() { node.backend = Some("codex".into()); } } }
     // Model-produced execution state can never authorize a process or claim.
     for n in &mut g.nodes {
         n.status = "pending".into();
@@ -1607,6 +1763,32 @@ mod tests {
     }
     fn fixture() -> RunGraph {
         serde_json::from_str(include_str!("../../src/lib/runner/fixtures/basic.json")).unwrap()
+    }
+    #[test]
+    fn harness_caps_and_limits_leave_independent_harness_work_eligible() {
+        let mut g=fixture();g.status="running".into();g.nodes[0].backend=Some("codex".into());g.nodes[0].status="running".into();
+        let policy=crate::monochat::Policy { codex_parallelism:1, claude_parallelism:1, ..Default::default() };
+        let mut codex=g.nodes[1].clone();codex.backend=Some("codex".into());
+        assert!(!harness_has_capacity(&g,&codex,&policy));
+        assert!(harness_has_capacity(&g,&g.nodes[1],&policy));
+        let mut meter=crate::meter::TurnMeter::new();meter.input_tokens=10;meter.output_tokens=2;meter.rate_limited=Some(crate::meter::RateLimit { status:"rejected".into(),resets_at:Some(100),kind:Some("primary".into()) });
+        finish_node(&mut g,"n-api",&NodeResult { meter:Some(serde_json::to_value(meter).unwrap()),..Default::default() });
+        assert_eq!(g.nodes[0].status,"awaiting_human");assert_eq!(g.status,"running");
+        assert!(!harness_has_capacity(&g,&codex,&policy));assert!(harness_has_capacity(&g,&g.nodes[1],&policy));
+        assert_eq!(run_observed_tokens(&g),12);
+    }
+    #[test]
+    fn codex_patches_cannot_cross_scope_claims_or_stale_attempts() {
+        let root=std::env::temp_dir().join(format!("redline-codex-claims-{}",uuid::Uuid::new_v4()));std::fs::create_dir_all(root.join("api")).unwrap();
+        let db=Database::open_in_memory().unwrap();let mut g=fixture();g.project_path=root.to_string_lossy().into_owned();g.status="running".into();
+        for node in g.nodes.iter_mut().take(2) { node.status="running".into();node.attempt=1; }
+        g.nodes[0].enforce_scope=true;db.runner_create(&g).unwrap();
+        assert!(claim_codex_paths(&db,&g,&g.nodes[0],&["api/file.rs".into()]).is_ok());
+        assert!(claim_codex_paths(&db,&g,&g.nodes[1],&["api/file.rs".into()]).is_err());
+        assert!(claim_codex_paths(&db,&g,&g.nodes[0],&["ui/file.rs".into()]).is_err());
+        assert!(claim_codex_paths(&db,&g,&g.nodes[0],&["../escape".into()]).is_err());
+        let mut stale=g.nodes[0].clone();stale.attempt=2;assert!(claim_codex_paths(&db,&g,&stale,&["api/new.rs".into()]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn meter_booking_survives_cancelled_future_once() {

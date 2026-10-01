@@ -580,6 +580,8 @@ export interface BootstrapState {
 }
 
 export interface CodexHookStatus {
+  trust?: "trusted" | "needs-review" | "unknown";
+  trustDetail?: string | null;
   available: boolean;
   installed: boolean;
   hooksPath: string;
@@ -1334,6 +1336,8 @@ export interface CommitDraft {
   branch: string;
   prTitle: string;
   prBody: string;
+  /** Explains when a basic local draft was used because AI timed out. */
+  notice?: string;
 }
 
 /** AI pre-review streaming events. */
@@ -1410,4 +1414,6 @@ export interface DevServerScan {
   running: RunningServer[];
   recent: RecentServer[];
   others: OtherListener[];
+  /** App infrastructure has no thumbnail, launch or stop controls. */
+  redline?: { port: number; role: string }[];
 }

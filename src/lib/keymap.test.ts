@@ -7,6 +7,7 @@ import {
   bindingKeys,
   globalShortcutGroups,
   isDockKey,
+  isFrontDoorKey,
   isNewPlanKey,
   isPaletteKey,
   isSnapBackKey,
@@ -112,6 +113,15 @@ describe("isDockKey", () => {
   });
 });
 
+describe("isFrontDoorKey", () => {
+  it("matches Shift+Enter while leaving Enter and modified sends alone", () => {
+    expect(isFrontDoorKey(combo({ key: "Enter", shiftKey: true }))).toBe(true);
+    for (const extra of [{ shiftKey: false }, { metaKey: true }, { ctrlKey: true }, { altKey: true }, { key: "j" }]) {
+      expect(isFrontDoorKey(combo({ key: "Enter", shiftKey: true, ...extra }))).toBe(false);
+    }
+  });
+});
+
 describe("the registry", () => {
   it("has unique ids", () => {
     const ids = GLOBAL_KEYMAP.map((b) => b.id);
@@ -120,7 +130,7 @@ describe("the registry", () => {
   it("wires exactly the globals this module dispatches — the rest is documentation", () => {
     expect(
       GLOBAL_KEYMAP.filter((b) => b.wired).map((b) => b.id).sort(),
-    ).toEqual(["dock", "new-plan", "palette", "snap-back"]);
+    ).toEqual(["dock", "front-door", "new-plan", "palette", "snap-back"]);
   });
   it("every binding renders: non-empty caps and label", () => {
     for (const b of GLOBAL_KEYMAP) {

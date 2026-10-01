@@ -3,7 +3,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryMapTab } from "./MemoryMap";
 import type { MemoryMapData, MapNode } from "../lib/memoryMap";
-import type { CosmosView } from "../lib/memoryMap3d";
+import { COSMOS_LAYOUT_VERSION, type CosmosView } from "../lib/memoryMap3d";
 const mocks=vi.hoisted(()=>({invoke:vi.fn(),listeners:new Map<string,()=>void>(),unlisten:vi.fn(),failScene:false}));
 vi.mock("@tauri-apps/api/core",()=>({invoke:mocks.invoke}));
 vi.mock("@tauri-apps/api/event",()=>({listen:vi.fn(async(name:string,fn:()=>void)=>{mocks.listeners.set(name,fn);return mocks.unlisten;})}));
@@ -19,6 +19,13 @@ const render=async(onFocus=vi.fn(),view={current:{} as CosmosView})=>{await act(
 describe("Memory Cosmos host",()=>{
   it("keeps selection in the scene and opens the exact Timeline focus only on request",async()=>{const {onFocus,view}=await render();await act(async()=>host.querySelector<HTMLButtonElement>("[data-scene]")!.click());expect(onFocus).not.toHaveBeenCalled();expect(view.current.selectedId).toBe("memory");expect(host.querySelector(".mc-inspector")!.textContent).toContain("42 memories");await act(async()=>host.querySelector<HTMLButtonElement>(".mc-inspector button")!.click());expect(onFocus).toHaveBeenCalledWith({classNodeId:"class-id",label:"Remembered idea"});});
   it("restores selected memory from the surface-owned view",async()=>{const view={current:{selectedId:"memory",camera:{position:[1,2,3] as [number,number,number],target:[0,0,0] as [number,number,number]}}};await render(vi.fn(),view);expect(host.querySelector<HTMLSelectElement>("select")!.value).toBe("memory");expect(view.current.camera.position).toEqual([1,2,3]);});
+  it("replaces legacy coordinates once while keeping the selected memory",async()=>{
+    const view={current:{selectedId:"memory",positions:[{...node,x:999,y:999,z:999,r:20,depth:0}],camera:{position:[1,2,3],target:[0,0,0]}} as CosmosView};
+    await render(vi.fn(),view);
+    expect(view.current.layoutVersion).toBe(COSMOS_LAYOUT_VERSION);
+    expect(view.current.positions?.[0].x).not.toBe(999);
+    expect(view.current.camera).toBeUndefined();expect(view.current.selectedId).toBe("memory");
+  });
   it("preserves keyboard Timeline access when WebGL is unavailable",async()=>{mocks.failScene=true;const {onFocus}=await render();expect(host.querySelector("[role=alert]")!.textContent).toContain("WebGL unavailable");expect(host.querySelector("details")!.open).toBe(true);await act(async()=>{const select=host.querySelector<HTMLSelectElement>("select")!;select.value="memory";select.dispatchEvent(new Event("change",{bubbles:true}));});await act(async()=>host.querySelector<HTMLButtonElement>(".mc-list button")!.click());expect(onFocus).toHaveBeenCalledWith({classNodeId:"class-id",label:"Remembered idea"});});
   it("handles empty memory and failed loading explicitly",async()=>{mocks.invoke.mockResolvedValueOnce({...payload,nodes:[]});await render();expect(host.textContent).toContain("No memories to map yet");});
   it("shows an actionable loading failure",async()=>{mocks.invoke.mockRejectedValueOnce(new Error("offline"));await render();expect(host.querySelector("[role=alert]")!.textContent).toContain("offline");expect(host.textContent).toContain("Retry loading");});

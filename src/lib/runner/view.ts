@@ -22,7 +22,7 @@ export function measuredSummary(doc: RunGraph, liveMeters: Record<string, TurnMe
 }
 /** Semantic diff adapted from app-map: positions and meters are not brief edits. */
 export function changedNodeIds(before: RunGraph, after: RunGraph): Set<string> {
-  const keys: (keyof RunNode)[] = ["title", "brief", "kind", "model", "effort", "seat", "scopeHint", "verifyCmd", "checkGlobal", "enforceScope"];
+  const keys: (keyof RunNode)[] = ["title", "brief", "kind", "backend", "model", "effort", "seat", "scopeHint", "verifyCmd", "checkGlobal", "enforceScope"];
   return new Set(after.nodes.filter((node) => {
     const old = before.nodes.find((n) => n.id === node.id);
     return !old || keys.some((key) => JSON.stringify(node[key]) !== JSON.stringify(old[key]));

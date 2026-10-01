@@ -15,6 +15,7 @@ import {
 } from "../lib/anchorPlacement";
 import { rafCoalesce } from "../lib/raf";
 import { useMenuOverlay } from "./menuOverlay";
+import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 
 // The floating-panel idiom extracted from RepoBubbles (a pure move): a
 // viewport-fixed, body-portalled panel with hover- and click-opened variants,
@@ -44,6 +45,7 @@ const MARGIN = 8;
 const ASSUMED_PANEL_HEIGHT = 320;
 
 export interface PanelProps {
+  className?: string;
   label: string;
   style: CSSProperties;
   panelRef: (el: HTMLDivElement | null) => void;
@@ -66,6 +68,7 @@ export interface PanelProps {
  *
  *  Styling follows the header dropdowns (LiveSessionMenu). */
 export function Panel({
+  className = "",
   label,
   style,
   panelRef,
@@ -73,12 +76,26 @@ export function Panel({
   onPointerLeave,
   children,
 }: PanelProps) {
+  const ownRef = useRef<HTMLDivElement>(null);
+  useNativeOverlayRegion(ownRef, className.includes("rl-composer-menu"));
+  useEffect(() => {
+    if (className.includes("rl-composer-menu")) (ownRef.current?.querySelector<HTMLElement>('[aria-checked="true"]:not(:disabled)') ?? ownRef.current?.querySelector<HTMLElement>("button:not(:disabled)"))?.focus({ preventScroll: true });
+  }, []);
   return createPortal(
     <div
-      ref={panelRef}
+      ref={element => { ownRef.current = element; panelRef(element); }}
       role="menu"
       aria-label={label}
-      className="rounded-md overflow-hidden font-sans"
+      className={`rounded-md overflow-hidden font-sans ${className}`}
+      onKeyDown={event => {
+        if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || (event.target as HTMLElement).matches("input, textarea, select")) return;
+        const items = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), [role="menuitem"]:not([aria-disabled="true"])')];
+        if (!items.length) return;
+        event.preventDefault();
+        const index = items.indexOf(document.activeElement as HTMLElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+        items[next].focus();
+      }}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
       style={{
@@ -304,7 +321,7 @@ export function useDismiss(
       close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") { e.preventDefault(); close(); refs[0]?.current?.focus({ preventScroll: true }); }
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -509,12 +526,13 @@ export function useClickPopover(
   align: "left" | "right",
   side: "below" | "above" = "below",
   width: number = PANEL_WIDTH,
+  nativeRegion = false,
 ) {
   const [open, setOpen] = useState(false);
   const [style, setStyle] = useState<CSSProperties>({});
   const panelRef = useRef<HTMLDivElement | null>(null);
 
-  useMenuOverlay(open);
+  useMenuOverlay(open && !nativeRegion);
 
   const close = useCallback(() => setOpen(false), []);
   // One expression for both the opening placement and every re-placement, so

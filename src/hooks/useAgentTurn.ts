@@ -95,6 +95,8 @@ export interface AgentTurnConfig<M extends TurnMessage> {
   /** Error-bubble prefix for a send that never reached the backend,
    *  e.g. "Couldn't reach the browse agent". */
   sendFailPrefix: string;
+  /** Restore a composer when dispatch was rejected before a turn began. */
+  onSendFailed?: (text: string, error: unknown) => void;
   /** This surface's key in the backend `thread_table` map (`browse` |
    *  `linked` | `mission` | `companion` | `memchat` | `drafter` | `fork`),
    *  used to load the settled rows' stored meters. Omit and the surface simply
@@ -345,6 +347,7 @@ export class AgentTurnController<M extends TurnMessage> {
     try {
       args = await cfg.buildSendArgs(text, extra);
     } catch (err) {
+      if (this.alive) cfg.onSendFailed?.(text, err);
       this.sendFailed(tmp, err);
       return;
     }
@@ -366,7 +369,7 @@ export class AgentTurnController<M extends TurnMessage> {
         });
       }
     } catch (err) {
-      if (this.alive) this.sendFailed(tmp, err);
+      if (this.alive) { cfg.onSendFailed?.(text, err); this.sendFailed(tmp, err); }
     }
   }
 

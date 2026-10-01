@@ -3,6 +3,7 @@
 import type { ThemeBase } from "./derive";
 
 export type ThemeName =
+  | "aurora"
   | "studio"
   | "basic"
   | "pro"
@@ -51,9 +52,18 @@ export interface ThemeEntry {
 // macOS Terminal.app's built-in profiles, as bg / fg / blue / yellow / green.
 // The remaining tokens are derived in derive.ts. The "studio" entry must match
 // the @theme defaults in styles.css so CSS-only paint is correct before JS
-// runs; the runtime first-launch default is Terminal (DEFAULT_THEME below,
+// runs; the runtime first-launch default is Aurora (DEFAULT_THEME below,
 // mirrored by index.html's first-launch fallback colors).
 export const THEMES: ThemeEntry[] = [
+  {
+    name: "aurora",
+    label: "Aurora",
+    base: {
+      bg: "#0b101b", fg: "#e4e9f3", blue: "#8abaf7",
+      yellow: "#e3bf85", green: "#7ce3c3", selection: "#bc9bff",
+    },
+    ansi: { black: "#050811", brightBlack: "#8491ab", blue: "#8abaf7", brightBlue: "#b2d6ff", cyan: "#7ce3c3", magenta: "#bc9bff" },
+  },
   // Studio — Redline's flagship dark mood. OKLCH-tuned accents (blue/yellow/
   // green) sit in the same harmonic family; selection is the warm "redline"
   // red-orange so commented spans and v-badges read with intent. The base
@@ -216,12 +226,12 @@ export const THEMES: ThemeEntry[] = [
 // has no saved choice yet, so existing installs keep their picked theme.
 // Terminal is the out-of-the-box look (the "techie" first impression); its
 // pre-JS fallback colors are mirrored in index.html's bootstrap.
-export const DEFAULT_THEME: ThemeName = "terminal";
+export const DEFAULT_THEME: ThemeName = "aurora";
 
 const BY_NAME = new Map(THEMES.map((t) => [t.name, t]));
 
 export function getTheme(name: string): ThemeEntry {
-  return BY_NAME.get(name as ThemeName) ?? THEMES[0];
+  return BY_NAME.get(name as ThemeName) ?? BY_NAME.get(DEFAULT_THEME)!;
 }
 
 export function isThemeName(value: unknown): value is ThemeName {

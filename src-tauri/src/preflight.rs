@@ -73,6 +73,7 @@ pub struct CodexProbe {
     /// *out* codex spins forever over nothing, which is the exact failure
     /// shape readiness exists to name.
     pub signed_in: bool,
+    pub auth_state: String,
     /// The config profile carrying the plan contract (`codex_profile`). Its
     /// own probe because `codex -p <name>` with no such file is SILENT: the
     /// session plans, looks fine, and then loses every block-identity sidecar
@@ -297,10 +298,16 @@ fn probe_codex() -> CodexProbe {
     };
     let usable = found && crate::codex_app_server::codex_capability(&resolved).0;
     let codex_home = crate::codex_profile::profile_path().parent().map(Path::to_path_buf);
-    let signed_in = codex_home.as_ref()
-        .map(|h| h.join("auth.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .is_some_and(|text| codex_auth_present(&text));
+    // The CLI knows file, keyring and ephemeral credential stores. Never
+    // inspect or return credential bytes, and never equate a timeout with logout.
+    let auth_state = if found {
+        match crate::binprobe::bounded_output(std::process::Command::new(&resolved).args(["login", "status"]), 4) {
+            Ok(output) if output.status.success() => "signed-in",
+            Ok(output) if String::from_utf8_lossy(&output.stderr).to_lowercase().contains("not logged in") || String::from_utf8_lossy(&output.stdout).to_lowercase().contains("not logged in") => "signed-out",
+            _ => "unknown",
+        }
+    } else { "unknown" };
+    let signed_in = auth_state == "signed-in";
     let version = found.then(|| crate::codex_app_server::codex_version(&resolved)).flatten();
     let usable = usable && crate::codex_app_server::supports_plan_handoff(version.as_ref());
     let resolved_target = std::fs::canonicalize(&resolved).ok();
@@ -333,6 +340,7 @@ fn probe_codex() -> CodexProbe {
         model_runnable,
         usable,
         signed_in,
+        auth_state: auth_state.into(),
         profile: crate::codex_profile::get_status(),
     }
 }
@@ -433,6 +441,7 @@ pub async fn preflight_status(
     settings: tauri::State<'_, crate::Settings>,
     backend: Option<String>,
     extension: Option<bool>,
+    project_path: Option<String>,
 ) -> Result<PreflightStatus, String> {
     // Post-boot maintenance repairs the hook files this very function is about
     // to read. Waiting here is what makes deferring those repairs safe: the
@@ -479,7 +488,10 @@ pub async fn preflight_status(
     };
 
     let (bins, files, curl, extension) = tokio::join!(bins, files, curl, ext);
-    let (claude, codex, codex_hook, codex_skill) = bins.map_err(|e| e.to_string())?;
+    let (claude, codex, mut codex_hook, codex_skill) = bins.map_err(|e| e.to_string())?;
+    if let (Some(probe), Some(hook)) = (&codex, &mut codex_hook) {
+        if probe.usable { if let Some(bin) = probe.path.as_deref() { crate::codex_hook::probe_trust(hook, bin, project_path.as_deref()).await; } }
+    }
     let (hook, skill) = files.map_err(|e| e.to_string())?;
     Ok(PreflightStatus {
         claude,

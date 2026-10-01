@@ -10,6 +10,28 @@ describe("memory cosmos layout", () => {
   it("caps at 150 and states hidden count even if caller requests more", () => { const layout = layoutMap3d(data(Array.from({ length: 190 }, (_,i) => node(String(i)))), [], 1000); expect(layout.nodes).toHaveLength(150); expect(layout.hidden).toBe(40); });
   it("refresh retains positions, updates metadata and places new neighbors", () => { const first=layoutMap3d(data([node("a"),node("b","a")])); const second=layoutMap3d(data([{...node("a"),label:"Renamed"},node("b","a"),node("new","a")]),first.nodes); for(const old of first.nodes){ const n=second.nodes.find(n=>n.id===old.id)!; expect([n.x,n.y,n.z]).toEqual([old.x,old.y,old.z]); } expect(second.nodes.find(n=>n.id==="a")?.label).toBe("Renamed"); });
   it("handles empty and single-node data", () => { expect(layoutMap3d(data([]))).toEqual({nodes:[],hidden:0,center:{x:0,y:0,z:0},radius:35}); expect(layoutMap3d(data([node("one")])).nodes).toHaveLength(1); });
+  it("keeps separate memory trees in distinct neighborhoods", () => {
+    const nodes = Array.from({ length: 8 }, (_, i) => [node(`root-${i}`), ...Array.from({ length: 8 }, (_, j) => node(`leaf-${i}-${j}`, `root-${i}`))]).flat();
+    const layout = layoutMap3d(data(nodes));
+    const roots = layout.nodes.filter(n => n.depth === 0);
+    const distance = (a: typeof roots[number], b: typeof roots[number]) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+    for (const root of roots) {
+      const members = layout.nodes.filter(n => n.parentId === root.id);
+      const extent = Math.max(...members.map(n => distance(root, n) + n.r));
+      for (const other of roots.filter(n => n.id !== root.id)) {
+        const otherExtent = Math.max(...layout.nodes.filter(n => n.parentId === other.id).map(n => distance(other, n) + n.r));
+        expect(distance(root, other)).toBeGreaterThan(extent + otherExtent);
+      }
+    }
+  });
+  it("anchors a new branch to its retained parent when root mass rankings change", () => {
+    const initial = [node("a"), node("a-child", "a"), node("b"), node("b-child", "b")];
+    const first = layoutMap3d(data(initial));
+    const next = layoutMap3d(data([...initial.map(n => n.id === "b" ? { ...n, mass: 200 } : n), node("new", "a-child")]), first.nodes);
+    for (const old of first.nodes) { const retained = next.nodes.find(n => n.id === old.id)!; expect([retained.x, retained.y, retained.z]).toEqual([old.x, old.y, old.z]); }
+    const child = next.nodes.find(n => n.id === "new")!, parent = next.nodes.find(n => n.id === "a-child")!;
+    expect(Math.hypot(child.x - parent.x, child.y - parent.y, child.z - parent.z)).toBeLessThan(150);
+  });
   it("maps every focus handle", () => { const base={...node("x"),classNodeId:null}; for(const key of ["classNodeId","sessionId","browseId","threadId"] as const) expect(nodeFocus({...base,[key]:"target"})).toEqual({[key]:"target",label:"x"}); expect(nodeFocus(base)).toBeNull(); });
   it("separates selection from camera drags, including out-and-back movement", () => { expect(isSceneClick({x:0,y:0},{x:2,y:2})).toBe(true); expect(isSceneClick({x:0,y:0},{x:10,y:0})).toBe(false); expect(isSceneClick({x:0,y:0},{x:0,y:0},15)).toBe(false); });
 });

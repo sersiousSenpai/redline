@@ -48,7 +48,7 @@ export interface BackendChoice {
   effort: string | null;
 }
 
-/** One row of `codex debug models`, as `codex_model_catalog` projects it.
+/** One row of harness metadata, as `model_catalog_snapshot` projects it.
  *  Mirrors Rust's `codex_app_server::CodexModel`. */
 export interface CodexModel {
   slug: string;
@@ -115,15 +115,14 @@ export function modelsFor(
   }));
 }
 
-/** The efforts offered for a backend+model. Claude's are global; Codex's are
- *  per-model and include levels Claude has never had (`ultra`). */
+/** Use model capabilities supplied by the harness, including Claude's. */
 export function effortsFor(
   backend: Backend,
   model: string | null,
   codexModels: CatalogInput,
 ): string[] {
   if (PLAN_BACKENDS[backend].effort === "none") return [];
-  if (backend === "claude-code") return [...EFFORT_OPTIONS];
+  if (backend === "claude-code" && Array.isArray(codexModels)) return [...EFFORT_OPTIONS];
   if (!model) return [];
   return catalogFor(backend, codexModels).find((m) => m.slug === model)?.efforts ?? [];
 }

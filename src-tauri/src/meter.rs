@@ -1024,10 +1024,11 @@ mod tests {
     /// through the drain itself. `collect_turn_seated` has exactly one exit,
     /// which is what makes that sound — but only if nobody quietly reverts to
     /// the unseated `collect_turn`.
+    /// ai_commit returns before EOF; its own collector tests verify booking on
+    /// both an early result and cancellation through its DraftMeter drop guard.
     #[test]
     fn silent_drains_use_the_seated_collector() {
         const SILENT: &[(&str, &str)] = &[
-            ("ai_commit.rs", include_str!("ai_commit.rs")),
             ("browse_locate.rs", include_str!("browse_locate.rs")),
             ("intake.rs", include_str!("intake.rs")),
             ("moot.rs", include_str!("moot.rs")),

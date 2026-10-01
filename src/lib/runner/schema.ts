@@ -55,7 +55,7 @@ export function validateGraph(doc: RunGraph): string | null {
     if (n.enforceScope && !n.scopeHint.length) return "Cannot enforce an empty scope";
     if (n.scopeHint.length > 64 || n.scopeHint.some((s) => new TextEncoder().encode(s).length > 1024)) return "Scope hints exceed the size limit";
     if (n.scopeHint.some((s) => s.startsWith("/") || s.split("/").includes(".."))) return "Scope hints must be repository relative";
-    if (n.kind === "task" && n.backend && n.backend !== "claude") return "Only the Claude task backend is available";
+    if ((n.kind === "task" || n.kind === "review") && n.backend && !["claude", "claude-code", "codex"].includes(n.backend)) return "Choose Claude Code or Codex for this node";
     if (n.position && (!Number.isFinite(n.position.x) || !Number.isFinite(n.position.y))) return "Invalid position";
   }
   const edgeIds = new Set<string>(), endpoints = new Set<string>();

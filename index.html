@@ -38,13 +38,9 @@
           var lint = localStorage.getItem("redline.lint");
           if (lint) el.setAttribute("data-lint", lint);
           if (!raw) {
-            /* First-ever launch: match the Terminal (default) theme's derived
-               canvas — the hull the plates sit on — so the first paint is its
-               deep blue-black, never white. Kept in sync with THEMES' terminal
-               entry (themes.ts) as mixed toward black by deriveTokens'
-               color-canvas (#0a0e16 → #07090e). */
-            el.style.backgroundColor = "#07090e";
-            el.style.color = "#d6e1ef";
+            /* Aurora's first paint. Existing users retain their cached theme. */
+            el.style.backgroundColor = "#070a12";
+            el.style.color = "#e4e9f3";
           }
         } catch (e) {
           /* localStorage unavailable — fall through to stylesheet defaults */

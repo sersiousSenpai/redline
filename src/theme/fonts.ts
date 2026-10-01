@@ -120,6 +120,7 @@ export const DEFAULT_FONT: FontName = "san-francisco";
 // onThemeChange). It never overrides an explicit font pick, so the font stays
 // fully independent of the color theme. Terminal reads best in monospace.
 export const SUGGESTED_FONT_FOR_THEME: Partial<Record<string, FontName>> = {
+  aurora: "san-francisco",
   terminal: "sf-mono",
 };
 

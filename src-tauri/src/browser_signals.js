@@ -42,6 +42,7 @@
     if (event.metaKey || event.ctrlKey) {
       const key = event.key.toLowerCase();
       if (key === "l") value = "location";
+      if (key === "j" && !event.shiftKey && !event.altKey) value = "toggle-monochat";
       if (key === "f" && event.metaKey && event.ctrlKey && window.__redline_fs) value = "toggle-video-screen";
       if (key === "t" && !event.shiftKey) value = "new-tab";
       if (key === "w" && !event.shiftKey) value = "close-tab";

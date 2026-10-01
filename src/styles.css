@@ -2,6 +2,58 @@
 /* Copyright 2026 Yusuf Al-Bazian */
 @import "tailwindcss";
 
+.rl-integration-dialog { margin: auto; width: min(510px, calc(100vw - 32px)); max-height: 88vh; overflow: auto; padding: 28px; color: var(--color-ink); background: var(--color-bg-elevated); border: 1px solid var(--color-rule); border-radius: 20px; box-shadow: 0 24px 100px #0006; }
+.rl-integration-dialog::backdrop { background: var(--color-overlay); backdrop-filter: blur(5px); }
+.rl-integration-eyebrow { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--color-info); }
+.rl-integration-dialog h2 { font-size: 23px; margin: 12px 0; font-weight: 600; }
+.rl-integration-dialog p { font-size: 12px; line-height: 1.7; color: var(--color-ink-muted); margin: 14px 0; white-space: pre-wrap; }
+.rl-integration-dialog code { overflow-wrap: anywhere; }
+.rl-integration-dialog summary { cursor: pointer; font-size: 11px; margin-top: 18px; }
+.rl-integration-pieces { border: 1px solid var(--color-rule); border-radius: 12px; padding: 8px 14px; }
+.rl-integration-pieces > div { display: flex; align-items: center; gap: 9px; font-size: 12px; padding: 10px 0; }
+.rl-integration-pieces span { color: var(--color-info); }
+.rl-integration-pieces small { margin-left: auto; color: var(--color-ink-muted); font-size: 10px; }
+.rl-integration-dialog p.rl-integration-error { color: var(--color-warning); }
+.rl-integration-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.rl-integration-actions button { border: 1px solid var(--color-rule); border-radius: 8px; padding: 8px 14px; font-size: 12px; cursor: pointer; }
+.rl-integration-actions button.primary { background: var(--color-info); color: var(--color-paper); border-color: transparent; }
+.rl-integration-actions button:disabled { opacity: .6; cursor: wait; }
+
+/* Aurora: a readable night canvas, with light restricted to the surface edges. */
+html[data-theme="aurora"] body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background:
+    radial-gradient(ellipse at 18% 0%, #5651c421, transparent 48%),
+    radial-gradient(ellipse at 90% 100%, #37cdb51a, transparent 48%),
+    radial-gradient(1px 1px at 17% 28%, #c9d6ff8a 45%, transparent 65%),
+    radial-gradient(1px 1px at 71% 63%, #b7efd95e 45%, transparent 65%);
+  background-size: auto, auto, 311px 227px, 419px 307px;
+}
+html[data-theme="aurora"] #root { position: relative; z-index: 1; }
+html[data-theme="aurora"] .rl-plate {
+  background: linear-gradient(150deg, #111527, #0b101bf5 55%, #0d1720);
+  border-color: #8fa7da29;
+  box-shadow: 0 0 25px #3ddbb10a, 0 8px 32px #02051165;
+}
+html[data-theme="aurora"] .rl-plate::after {
+  inset: -1px; padding: 1px; opacity: .46; border-radius: inherit;
+  background: linear-gradient(115deg, #69e3cc, #8bb7ff 23%, #bd8dff 47%, #eea0d5 67%, #6fe8c4 92%);
+  background-size: 280% 280%;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: rl-aurora-horizon 22s ease-in-out infinite;
+}
+html[data-theme="aurora"] .rl-plate:focus-within::after { opacity: .8; }
+@keyframes rl-aurora-horizon {
+  0%, 100% { background-position: 0% 30%; transform: scale(1); }
+  50% { background-position: 100% 70%; transform: scale(1.0015); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="aurora"] .rl-plate::after { animation: none; transform: none; }
+}
+
 @theme {
   --font-serif: ui-serif, "Source Serif 4", Georgia, Cambria, "Times New Roman",
     Times, serif;

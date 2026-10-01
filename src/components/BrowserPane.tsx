@@ -29,6 +29,7 @@ import { Webview } from "@tauri-apps/api/webview";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { usePersistedState } from "../theme/usePersistedState";
 import { resolveOmniboxInput } from "../lib/omnibox";
+import { BROWSER_HOME_URL as HOME, browserPageTitle, initialBrowserTitle } from "../lib/browserTitle";
 import {
   chatEntryFor,
   pruneChatState,
@@ -84,7 +85,6 @@ import { useMission } from "../hooks/useMission";
 // stays in the list and remains discussable (served from the cache) and drivable
 // (a query/action wakes it in the background). `liveIntentRef` tracks which tabs
 // should have a webview; `mruRef` is the recency order that picks suspend victims.
-const HOME = "https://www.google.com";
 // Not a UX limit — like Safari/Chrome there's no real cap on how many tabs you
 // keep, because idle tabs are SUSPENDED (only `MAX_LIVE_WEBVIEWS` are ever live
 // at once), so memory is bounded by live webviews, not by strip length. This
@@ -144,7 +144,7 @@ interface Tab {
   /** Native webview label — `browser-${id}`. */
   label: string;
   url: string;
-  /** Display label for the tab strip (derived host). */
+  /** Page title, or a stable initial label while the page loads. */
   title: string;
   /** Stable id for this tab's browse-agent discussion thread. Survives reload
    *  (persisted with the tab list) and the recreated native webview, so a tab's
@@ -169,7 +169,7 @@ const newBrowseId = (): string =>
 
 const freshHomeTab = (): Tab => {
   const browseId = newBrowseId(); const id = canonicalTabId(browseId);
-  return { id, label: `browser-${id}`, url: HOME, title: hostnameOf(HOME), browseId };
+  return { id, label: `browser-${id}`, url: HOME, title: initialBrowserTitle(HOME), browseId };
 };
 
 function loadTabs(): Tab[] {
@@ -178,7 +178,7 @@ function loadTabs(): Tab[] {
     if (raw) {
       const descriptors = JSON.parse(raw);
       if (Array.isArray(descriptors)) {
-        const tabs = restoreBrowserTabs(descriptors, newBrowseId, hostnameOf);
+        const tabs = restoreBrowserTabs(descriptors, newBrowseId, initialBrowserTitle);
         // Migrate the active tab pointer together with legacy numeric tab IDs.
         const active = localStorage.getItem(ACTIVE_KEY);
         const previous = descriptors.find((tab) => tab?.id === active);
@@ -1017,6 +1017,7 @@ function BrowserPaneBase({
           invoke("browser_enable_gestures", { label: tab.label }).catch(() => {}),
           invoke("browser_install_shims", { label: tab.label, selectionActions: selectionActionsRef.current }).catch(() => {}),
         ]);
+        await invoke("browser_overlay_attach", { label: tab.label }).catch(() => {});
         return { view, adopted: true };
       };
       const existing = await Webview.getByLabel(tab.label).catch(() => null);
@@ -1058,6 +1059,7 @@ function BrowserPaneBase({
           throw firstErr;
         }
       }
+      await invoke("browser_overlay_attach", { label: tab.label }).catch(() => {});
       // Native-only: turn on two-finger back/forward swipe (off by default).
       void invoke("browser_enable_gestures", { label: tab.label }).catch(
         () => {},
@@ -1269,11 +1271,14 @@ function BrowserPaneBase({
       if (!visibleRef.current || document.hidden) return;
       const id = activeIdRef.current;
       if (!wvMapRef.current.has(id)) return;
+      const requestedUrl = tabsRef.current.find((tab) => tab.id === id)?.url;
       try {
         const url = await invoke<string>("browser_url", {
           label: `browser-${id}`,
         });
         if (!url || url === "about:blank") return;
+        // A page event or explicit navigation may have overtaken this poll.
+        if (tabsRef.current.find((tab) => tab.id === id)?.url !== requestedUrl) return;
         const changed = tabsRef.current.find((t) => t.id === id)?.url !== url;
         // Only re-key state when the URL actually moved — `ts.map` would
         // otherwise allocate a fresh array every poll tick (once a second) and
@@ -1284,7 +1289,7 @@ function BrowserPaneBase({
             const i = ts.findIndex((t) => t.id === id);
             if (i === -1 || ts[i].url === url) return ts;
             const next = ts.slice();
-            next[i] = { ...next[i], url, title: hostnameOf(url) };
+            next[i] = { ...next[i], url, title: browserPageTitle(next[i], url) };
             return next;
           });
         }
@@ -1370,8 +1375,14 @@ function BrowserPaneBase({
       if (!tab) return;
       eventPagesRef.current.add(tab.id);
       if (event.kind === "state" && event.url) {
-        const url = event.url, title = event.title || hostnameOf(url);
-        setTabs((prev) => prev.map((t) => t.id === tab.id && (t.url !== url || t.title !== title) ? { ...t, url, title } : t));
+        // The transient document created before navigation isn't the tab's page.
+        if (event.url === "about:blank") return;
+        const url = event.url;
+        setTabs((prev) => prev.map((t) => {
+          if (t.id !== tab.id) return t;
+          const title = browserPageTitle(t, url, event.title);
+          return t.url !== url || t.title !== title ? { ...t, url, title } : t;
+        }));
         if (tab.id === activeIdRef.current && !addrFocusedRef.current) setAddr(url);
         if (typeof event.fullscreen === "boolean") {
           videoFsRef.current.dispatch({ type: "page", tabId: tab.id, on: event.fullscreen });
@@ -1386,6 +1397,8 @@ function BrowserPaneBase({
       else if (event.kind === "selection" && visibleRef.current) parseSelectionEvents([event.value]).forEach((selection, i) => dispatchSelectionRef.current(selection, Date.now() + i));
       else if (event.kind === "shortcut" && tileIdsRef.current.includes(tab.id) && visibleRef.current) {
         if (event.value === "location") focusAddressRef.current();
+        else if (event.value === "toggle-monochat") window.dispatchEvent(new Event("redline:toggle-monochat"));
+        else if (event.value === "open-front-door") window.dispatchEvent(new Event("redline:open-front-door"));
         else if (event.value === "exit-focus") { if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" }); else { restoreTilesRef.current(); } }
         else if (event.value === "toggle-video-screen") {
           if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();
@@ -1412,7 +1425,7 @@ function BrowserPaneBase({
     const subscription = listen<{ workspaceId: string; revision: number; tab: { browseId: string; id?: string; url: string; title?: string } }>("browser-workspace-tab-added", ({ payload }) => {
       noteWorkspaceRevision(payload.workspaceId, payload.revision);
       if (payload.workspaceId !== workspaceKeyRef.current || !payload.tab?.browseId) return;
-      const [tab] = restoreBrowserTabs([payload.tab], newBrowseId, hostnameOf);
+      const [tab] = restoreBrowserTabs([payload.tab], newBrowseId, initialBrowserTitle);
       if (!tab) return;
       setTabs((prev) => prev.some((page) => page.browseId === tab.browseId) ? prev : [...prev, tab]);
     });
@@ -1625,7 +1638,7 @@ function BrowserPaneBase({
       id,
       label: `browser-${id}`,
       url,
-      title: hostnameOf(url),
+      title: initialBrowserTitle(url),
       browseId,
     };
     markLive(id);
@@ -1687,7 +1700,7 @@ function BrowserPaneBase({
   // Stable native labels derive from the durable conversation ID, so separate
   // workspaces cannot collide on t0/t1 or change identity after a restart.
   const rebuildTabs = (descs: { id?: string | null; url: string; title?: string; browseId?: string | null }[]): Tab[] => {
-    const built = restoreBrowserTabs(descs, newBrowseId, hostnameOf);
+    const built = restoreBrowserTabs(descs, newBrowseId, initialBrowserTitle);
     return built.length ? built : [freshHomeTab()];
   };
 
@@ -1984,7 +1997,7 @@ function BrowserPaneBase({
     if (!url) return;
     setTabs((ts) =>
       ts.map((t) =>
-        t.id === id ? { ...t, url, title: hostnameOf(url) } : t,
+        t.id === id ? { ...t, url, title: browserPageTitle(t, url) } : t,
       ),
     );
     if (id === activeIdRef.current) setAddr(url);

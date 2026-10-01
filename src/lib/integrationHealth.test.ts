@@ -46,6 +46,14 @@ function deferredProbe() {
 }
 
 describe("integration health", () => {
+  it("does not reuse one project's hook trust for another project", async () => {
+    const { probe, calls } = deferredProbe(); const service = makeHealthService(probe);
+    const first = service.ensure({ ...CODEX, projectPath: "/repo/one" }, 1000);
+    const other = service.ensure({ ...CODEX, projectPath: "/repo/two" }, 1000);
+    expect(calls).toHaveLength(2);
+    calls[0].resolve(health("one")); calls[1].resolve(health("two"));
+    expect(await first).not.toBe(await other);
+  });
   it("concurrent askers of the same question share one probe", async () => {
     const { probe, calls } = deferredProbe();
     const service = makeHealthService(probe);

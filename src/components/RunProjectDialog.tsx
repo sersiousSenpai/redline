@@ -15,6 +15,7 @@ interface RunProjectDialogProps {
 export function RunProjectDialog({ options, onRun, onCancel }: RunProjectDialogProps) {
   const [project, setProject] = useState<string | null>(null);
   const [command, setCommand] = useState("");
+  const [runPath, setRunPath] = useState<string | null>(null);
   const [probe, setProbe] = useState<ProbeView | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +51,7 @@ export function RunProjectDialog({ options, onRun, onCancel }: RunProjectDialogP
     let cancelled = false;
     edited.current = false;
     setCommand("");
+    setRunPath(project);
     setProbe(null);
     setError(null);
     setLoading(project !== null);
@@ -57,7 +59,10 @@ export function RunProjectDialog({ options, onRun, onCancel }: RunProjectDialogP
       void invoke<ProbeView>("dev_server_probe", { projectPath: project }).then((next) => {
         if (cancelled) return;
         setProbe(next);
-        if (!edited.current) setCommand(next.runCommand);
+        if (!edited.current) {
+          setCommand(next.runCommand);
+          setRunPath(next.suggestions?.[0]?.projectPath ?? project);
+        }
       }).catch((e: unknown) => {
         if (!cancelled) setError(`Couldn't suggest a command: ${String(e)}`);
       }).finally(() => { if (!cancelled) setLoading(false); });
@@ -80,7 +85,7 @@ export function RunProjectDialog({ options, onRun, onCancel }: RunProjectDialogP
         style={{ width: "min(30rem, 92vw)", maxHeight: "90vh", overflowY: "auto",
           background: "var(--color-paper)", border: "1px solid var(--color-rule)",
           boxShadow: "0 12px 40px rgba(0,0,0,0.3)" }}
-        onSubmit={(e) => { e.preventDefault(); if (canRun && project) onRun(project, command.trim()); }}>
+        onSubmit={(e) => { e.preventDefault(); if (canRun && runPath) onRun(runPath, command.trim()); }}>
         <h2 id="run-project-title" style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-ink)" }}>Run a project</h2>
         <div style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>Choose a project or browse to its folder.</div>
         <ProjectPicker options={options} value={project} onChange={setProject} />
@@ -89,16 +94,27 @@ export function RunProjectDialog({ options, onRun, onCancel }: RunProjectDialogP
         {probe?.stack && <div style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>{probe.stack}</div>}
         {probe?.exists === false && <div role="alert" style={{ fontSize: "12px", color: "var(--color-danger)" }}>This folder no longer exists. Choose another project.</div>}
         {error && <div role="status" style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>{error} You can enter one below.</div>}
+        {Boolean(probe?.suggestions?.length) && <div aria-label="Suggested web commands" className="flex flex-col gap-1" style={{ maxHeight: "220px", overflowY: "auto", flexShrink: 0 }}>
+          {probe!.suggestions!.map((option, index) => <button key={`${option.projectPath}:${option.command}`} type="button"
+            aria-pressed={command === option.command && runPath === option.projectPath}
+            style={{ ...buttonStyle, textAlign: "left", borderColor: command === option.command && runPath === option.projectPath ? "var(--color-info)" : "var(--color-rule)" }}
+            onClick={() => { edited.current = true; setCommand(option.command); setRunPath(option.projectPath); }}>
+            <div style={{ fontFamily: "var(--font-mono, monospace)", fontSize: "12px", overflowWrap: "anywhere" }}>{option.command}{index === 0 && <span style={{ fontFamily: "inherit", fontSize: "10px", color: "var(--color-ink-muted)", marginLeft: "8px" }}>Suggested</span>}</div>
+            <div style={{ fontSize: "11px", color: "var(--color-ink-muted)", overflowWrap: "anywhere" }}>{option.projectPath === project ? option.detail : `${option.projectPath.slice((project?.length ?? 0) + 1)} · ${option.detail}`}</div>
+          </button>)}
+        </div>}
+        {probe?.exists && !loading && !probe.runCommand && <div role="status" style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>No web server command found. Choose a script or enter a command below.</div>}
         <label htmlFor="run-project-command" style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-ink)" }}>Command</label>
         <input id="run-project-command" value={command} autoComplete="off" spellCheck={false}
-          placeholder="npm run dev" disabled={!project}
+          placeholder="Enter a local web server command" disabled={!project}
           onChange={(e) => { edited.current = true; setCommand(e.target.value); }}
           style={{ padding: "8px", borderRadius: "4px", border: "1px solid var(--color-rule)",
             background: "var(--color-bg-elevated)", color: "var(--color-ink)", fontFamily: "var(--font-mono, monospace)", fontSize: "12px" }} />
-        {Boolean(probe?.scripts.length) && <div className="flex flex-wrap gap-1" aria-label="Project scripts">
+        {runPath && <div style={{ fontSize: "11px", color: "var(--color-ink-muted)", overflowWrap: "anywhere" }}>Runs in {runPath}{runPath !== project && <button type="button" style={{ ...buttonStyle, marginLeft: "6px", padding: "2px 6px" }} onClick={() => { edited.current = true; setRunPath(project); }}>Use project root</button>}</div>}
+        {Boolean(probe?.scripts.length) && <details><summary style={{ fontSize: "11px", color: "var(--color-ink-muted)", cursor: "pointer" }}>All project scripts</summary><div className="flex flex-wrap gap-1" aria-label="Project scripts" style={{ marginTop: "6px" }}>
           {probe!.scripts.map((script) => <button key={script} type="button" style={buttonStyle}
-            onClick={() => { edited.current = true; setCommand(scriptCommand(probe!.packageManager, script)); }}>{script}</button>)}
-        </div>}
+            onClick={() => { edited.current = true; setRunPath(project); setCommand(scriptCommand(probe!.packageManager, script)); }}>{script}</button>)}
+        </div></details>}
         <div className="flex items-center justify-end gap-2 mt-1">
           <button type="button" style={buttonStyle} onClick={onCancel}>Cancel</button>
           <button type="submit" disabled={!canRun} style={{ ...buttonStyle,

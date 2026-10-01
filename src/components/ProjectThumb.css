@@ -1,0 +1,100 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* A quiet Redline cover: fine drafting lines, warm light and the red strike. */
+.rl-project-art {
+  container-type: inline-size;
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  border-bottom: 1px solid var(--color-rule);
+  color: var(--color-ink);
+  background:
+    radial-gradient(ellipse at 9% 12%, #e5342b16, transparent 68%),
+    linear-gradient(145deg, var(--color-bg-elevated), var(--color-bg));
+}
+.rl-project-art::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--color-ink) 3%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--color-ink) 3%, transparent) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(135deg, #000, transparent 80%);
+}
+.rl-project-art-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  fill: none;
+  stroke: color-mix(in srgb, var(--color-ink) 7%, transparent);
+  stroke-width: 1;
+}
+.rl-project-art-lines .rl-project-art-strike {
+  stroke: #e5342b;
+  stroke-width: 3;
+  stroke-linecap: round;
+  opacity: .65;
+}
+.rl-project-art-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 13px;
+  width: 84%;
+  padding-block: 24px;
+  position: relative;
+}
+.rl-project-art-logo {
+  display: grid;
+  place-items: center;
+  width: clamp(64px, 28cqw, 112px);
+  height: clamp(64px, 28cqw, 112px);
+  padding: clamp(10px, 4cqw, 16px);
+  border: 1px solid #ffffff90;
+  border-radius: 22%;
+  background: linear-gradient(145deg, #fffdfb, #e6e2de);
+  box-shadow: 0 8px 28px #00000012, 0 1px 3px #0000000a;
+}
+.rl-project-art-logo img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  filter: drop-shadow(0 1px 1px #00000038);
+}
+.rl-project-art-name {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  max-width: 100%;
+  font-size: clamp(15px, var(--project-name-size), 44px);
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -.045em;
+  text-align: center;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.rl-project-art[data-has-logo="true"] .rl-project-art-name {
+  -webkit-line-clamp: 2;
+  font-size: clamp(12px, 4.7cqw, 18px);
+  font-weight: 550;
+  letter-spacing: -.015em;
+}
+.rl-project-art-rule {
+  position: absolute;
+  left: 20px;
+  bottom: 18px;
+  width: 22px;
+  height: 2px;
+  background: #e5342b;
+  border-radius: 1px;
+}

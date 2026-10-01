@@ -12,13 +12,19 @@
 // collapse, a fullscreen toggle), and an in-flight set keeps two panes asking
 // about the same directory from firing two calls.
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { RepoIconResult } from "../lib/repoIcon";
 
-const cache = new Map<string, RepoIconResult>();
+let cache = new Map<string, RepoIconResult>();
 const inFlight = new Set<string>();
+const subscribers = new Set<() => void>();
+const subscribe = (notify: () => void) => {
+  subscribers.add(notify);
+  return () => { subscribers.delete(notify); };
+};
+const getSnapshot = () => cache;
 
 /** Resolve each directory's repo mark, keyed by the directory asked about.
  *
@@ -29,9 +35,7 @@ const inFlight = new Set<string>();
 export function useRepoIcons(
   cwds: readonly (string | null)[],
 ): Map<string, RepoIconResult> {
-  const [snapshot, setSnapshot] = useState<Map<string, RepoIconResult>>(
-    () => new Map(cache),
-  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot);
   // The effect must key on the set of directories, not the array identity —
   // the caller rebuilds that array every render.
   const key = Array.from(new Set(cwds.filter((c): c is string => !!c)))
@@ -39,28 +43,26 @@ export function useRepoIcons(
     .join("\n");
 
   useEffect(() => {
-    let cancelled = false;
     const wanted = key ? key.split("\n") : [];
     for (const cwd of wanted) {
       if (cache.has(cwd) || inFlight.has(cwd)) continue;
       inFlight.add(cwd);
       void invoke<RepoIconResult>("repo_icon", { cwd })
         .then((res) => {
-          cache.set(cwd, res);
+          cache = new Map(cache).set(cwd, res);
         })
         .catch(() => {
           // A failed lookup is not worth retrying every poll — the tab keeps
           // its monogram, which is a perfectly good mark.
-          cache.set(cwd, { root: cwd, name: "", dataUrl: null });
+          cache = new Map(cache).set(cwd, { root: cwd, name: "", dataUrl: null });
         })
         .finally(() => {
           inFlight.delete(cwd);
-          if (!cancelled) setSnapshot(new Map(cache));
+          // The terminal and Localhost can request the same repo concurrently.
+          // Notify every mounted consumer, including those sharing this flight.
+          subscribers.forEach((notify) => notify());
         });
     }
-    return () => {
-      cancelled = true;
-    };
   }, [key]);
 
   return snapshot;

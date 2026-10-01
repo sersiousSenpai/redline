@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
+import { PerspectiveCamera, Vector3 } from "three";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, process.argv[2] ?? "docs/memory-cosmos-visual-qa-2026-09-24");
@@ -39,7 +40,7 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function bounds(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right,scrollHeight:e.scrollHeight,clientHeight:e.clientHeight,visible:r.width>0&&r.height>0,within:r.x>=-1&&r.y>=-1&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1};})()`); }
 try {
   await mkdir(output,{recursive:true});
-  for(const file of ["src/components/MemoryMap.tsx","src/lib/memoryMap3d.ts","src/components/memory-cosmos/scene.ts","src/components/memory-cosmos/planets.ts","src/components/memory-cosmos/filaments.ts"]) report.sourceSha256[file]=createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
+  for(const file of ["src/components/MemoryMap.tsx","src/lib/memoryMap3d.ts","src/components/memory-cosmos/MemoryCosmosScene.tsx","src/components/memory-cosmos/scene.ts","src/components/memory-cosmos/planets.ts","src/components/memory-cosmos/halos.ts","src/components/memory-cosmos/filaments.ts","src/components/memory-cosmos/cosmos.css"]) report.sourceSha256[file]=createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
   server=await createServer({configFile:false,root,cacheDir:path.join(temporary,"vite-cache"),optimizeDeps:{entries:["fixtures/memory-cosmos/index.html"]},plugins:[react()],resolve:{alias:[{find:"@tauri-apps/api/core",replacement:service},{find:"@tauri-apps/api/event",replacement:service}]},server:{host:"127.0.0.1",port:0,watch:{ignored:["**/src-tauri/**","**/docs/**"]}}});
   await server.listen(); const port=server.httpServer.address().port;
   report.fixtureUrl=`http://127.0.0.1:${port}/fixtures/memory-cosmos/`;
@@ -62,7 +63,12 @@ try {
   check("drag rotates camera without selecting",await cdp.evaluate(`JSON.stringify(window.__cosmos.view.current.camera)!==${JSON.stringify(original)} && !window.__cosmos.view.current.selectedId`));await screenshot("orbit-behind-clusters");
   await cdp.evaluate("document.querySelector('.mc-list').open=true; const select=document.querySelector('#cosmos-memory');select.value='memory-0';select.dispatchEvent(new Event('change',{bubbles:true}))");await settle();
   check("keyboard selection stays in cosmos",await cdp.evaluate("!!document.querySelector('.mc-canvas') && document.querySelector('.mc-inspector h3').textContent==='Research & evidence'"));
+  await cdp.evaluate("[...document.querySelectorAll('.mc-controls button')].find(b=>b.textContent==='Home').click()");await delay(800);await screenshot("focused-neighborhood");
   await cdp.evaluate("[...document.querySelectorAll('.mc-controls button')].find(b=>b.textContent==='Approach').click()");await delay(1000);await screenshot("close-range-planet");
+  const approached=await cdp.evaluate("({camera:window.__cosmos.view.current.camera,nodes:window.__cosmos.view.current.positions.filter(n=>n.id==='memory-0'||n.parentId==='memory-0')})");
+  const approachedBounds=await bounds(".mc-canvas"), approachedCamera=new PerspectiveCamera(48,approachedBounds.width/approachedBounds.height,.1,12000);
+  approachedCamera.position.fromArray(approached.camera.position);approachedCamera.lookAt(new Vector3().fromArray(approached.camera.target));approachedCamera.updateMatrixWorld();
+  check("Approach keeps the selected memory and its immediate branches in view",approached.nodes.every(n=>{const p=new Vector3(n.x,n.y,n.z).project(approachedCamera);return Math.abs(p.x)<.95&&Math.abs(p.y)<.95&&p.z>-1&&p.z<1;}),{memories:approached.nodes.length});
   const beforeTimeline=await cdp.evaluate("JSON.stringify(window.__cosmos.view.current.camera)");
   await cdp.evaluate("document.querySelector('.mc-inspector button').click()");await settle();
   check("Timeline receives exact class focus and releases context",await cdp.evaluate("window.__cosmos.getFocus().classNodeId==='class-0' && window.__cosmos.graphicsAllocation().cosmos===0"));

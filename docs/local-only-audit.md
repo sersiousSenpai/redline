@@ -157,10 +157,16 @@ instead of guessing. Three properties, stated so they aren't relaxed later:
 
 ## External-session capture toggle
 
-The UserPromptSubmit hook is global, so it also sees `claude` sessions outside
-Redline's tracked projects. Those are tagged `origin=external` and stored only
-while `redline.capture.externalSessions` is on (default on; toggle in the Ledger
-pane footer). Nothing about capture leaves the machine either way.
+Prompt capture applies to every connected harness with a prompt adapter,
+including Claude Code and Codex through UserPromptSubmit and Cursor through
+beforeSubmitPrompt. Prompts outside Redline's tracked projects are tagged
+`origin=external` and stored only while `redline.capture.externalSessions` is on
+(default on; “Capture external harness sessions” in Memory). The shared ingest
+observer applies the same setting to every provider; it is not a Claude-only
+filter. Each integration still needs its capture hook installed and enabled.
+Antigravity currently records Redline's initial launch request, but does not
+independently capture later prompts typed in external sessions. Nothing about
+capture leaves the machine either way.
 
 ## MCP server (the daemon's `/mcp` mount)
 

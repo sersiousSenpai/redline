@@ -101,7 +101,7 @@ export function Footer({
         fontSize: "var(--rl-text-sm)",
       }}
     >
-      <span className="flex items-center gap-2">
+      <span className="rl-footer-status flex items-center gap-2">
         <span
           aria-hidden
           style={{
@@ -186,7 +186,7 @@ export function Footer({
           </>
         )}
       </span>
-      <span data-tour="footer" className="flex items-center gap-2">
+      <span data-tour="footer" className="rl-footer-actions flex items-center gap-2">
         <Button
           size="sm"
           onClick={onSubmit}

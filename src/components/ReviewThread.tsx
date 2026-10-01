@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useState } from "react";
+import { useMonochat } from "./MonochatContext";
+import { useEffect } from "react";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { priorUserBody } from "../lib/agentTurn";
@@ -31,7 +33,8 @@ interface ReviewThreadProps {
 }
 
 export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: ReviewThreadProps) {
-  const [input, setInput] = useState("");
+  const monochat = useMonochat();
+  const [input, setInput] = useSharedDraft(`rl.reviewThread.${reviewId}.${annotationId}`);
   const inputRef = useAutoGrow<HTMLTextAreaElement>(input);
 
   const turn = useAgentTurn<ThreadMessage>({
@@ -55,10 +58,11 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
     // `Turns::begin` rejects-when-busy: no queue to type ahead into.
     queueing: false,
     sendFailPrefix: "Couldn't reach the review agent",
+    onSendFailed: text => setInput(current => current.trim() ? `${current}\n\n${text}` : text),
     buildSendArgs: (text) =>
       kind === "question"
-        ? { reviewId, questionId: annotationId, text }
-        : { reviewId, annotationId, text },
+        ? { reviewId, questionId: annotationId, text, harness: monochat?.harness, conversationId: monochat?.conversationId }
+        : { reviewId, annotationId, text, harness: monochat?.harness, conversationId: monochat?.conversationId },
     makeMessage: ({ id, role, body, status }) => ({
       id,
       sessionId: reviewId,
@@ -71,6 +75,7 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
   });
   const { messages, liveText } = turn;
   const streaming = turn.status === "streaming";
+  useEffect(() => { if (turn.loaded) monochat?.reportActivity?.(`${reviewId}:${annotationId}`, streaming); }, [turn.loaded, reviewId, annotationId, streaming, monochat?.reportActivity]);
 
   const send = () => {
     const text = input.trim();

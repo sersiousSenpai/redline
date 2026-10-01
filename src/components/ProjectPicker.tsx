@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Folder } from "lucide-react";
-import { Panel, useClickPopover } from "./popover";
+import { ComposerMenu } from "./ComposerMenu";
 
 /** Panel width, px. Exported for the same reason `PANEL_WIDTH` is: the
  *  placement clamp and the rendered panel must agree, or the clamp keeps a
  *  narrower box on screen than the one that paints. */
-export const PICKER_WIDTH = 280;
+export const PICKER_WIDTH = 304;
 
 export interface ProjectOption {
   /** Absolute directory path. */
@@ -71,10 +71,7 @@ export function ProjectPicker({
   onChange,
   onAfterPick,
   onNewProject,
-  chromeless = false,
 }: ProjectPickerProps) {
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const pop = useClickPopover(triggerRef, "left", "below", PICKER_WIDTH);
 
   // Dedupe by normalized path; sessions win over folders on a tie.
   const merged = useMemo(() => {
@@ -93,7 +90,6 @@ export function ProjectPicker({
     value === null ? "Home (~)" : basename(value);
 
   const browse = async () => {
-    pop.close();
     try {
       const picked = await openDialog({ directory: true, multiple: false });
       if (typeof picked === "string") onChange(picked);
@@ -104,161 +100,17 @@ export function ProjectPicker({
     }
   };
 
-  return (
-    <div data-no-drag="true">
-      <button
-        type="button"
-        ref={triggerRef}
-        onClick={pop.toggle}
-        aria-haspopup="menu"
-        aria-expanded={pop.open}
-        title="Choose the project to launch the plan in"
-        className={
-          chromeless
-            ? "rl-fd-tool is-wide"
-            : "flex items-center gap-1 rounded-sm px-2"
-        }
-        style={
-          chromeless
-            ? { maxWidth: "220px" }
-            : {
-                height: "30px",
-                maxWidth: "220px",
-                fontSize: "12px",
-                border: "1px solid var(--color-rule)",
-                background: "var(--color-bg-elevated)",
-                color: "var(--color-ink)",
-                cursor: "pointer",
-              }
-        }
-      >
-        {chromeless ? (
-          <Folder size={13} style={{ opacity: 0.65, flexShrink: 0 }} />
-        ) : (
-          <span style={{ opacity: 0.7 }}>📁</span>
-        )}
-        <span
-          style={{
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {label}
-        </span>
-        <span className={chromeless ? "rl-fd-caret" : undefined} style={chromeless ? undefined : { opacity: 0.6, fontSize: "10px" }}>
-          ▾
-        </span>
-      </button>
-      {pop.open && (
-        <Panel label="Choose project" {...pop.panelProps}>
-          <div
-            className="rl-thin-scroll-y"
-            // Bounded by Panel's placement-derived `maxHeight`; `minHeight: 0`
-            // is what lets this flex child shrink below its content and
-            // therefore scroll.
-            style={{
-              flex: "1 1 auto",
-              minHeight: 0,
-              overflowY: "auto",
-              padding: "4px",
-            }}
-          >
-            <MenuRow
-              label="Home (~)"
-              selected={value === null}
-              onClick={() => {
-                onChange(null);
-                pop.close();
-              }}
-            />
-            {merged.length > 0 && <RowDivider />}
-            {merged.map((opt) => (
-              <MenuRow
-                key={opt.path}
-                label={opt.name}
-                hint={
-                  opt.source === "session"
-                    ? "session"
-                    : opt.source === "folder"
-                      ? "open folder"
-                      : "project"
-                }
-                selected={
-                  (value?.replace(/\/+$/, "") || "") ===
-                  (opt.path.replace(/\/+$/, "") || "")
-                }
-                onClick={() => {
-                  onChange(opt.path);
-                  pop.close();
-                }}
-              />
-            ))}
-            <RowDivider />
-            {onNewProject && (
-              <MenuRow
-                label="＋ New project…"
-                onClick={() => {
-                  pop.close();
-                  onNewProject();
-                }}
-              />
-            )}
-            <MenuRow label="📁 Browse…" onClick={browse} />
-          </div>
-        </Panel>
-      )}
-    </div>
-  );
-}
-
-function RowDivider() {
-  return (
-    <div
-      aria-hidden
-      style={{ height: "1px", background: "var(--color-rule)", margin: "4px 0" }}
-    />
-  );
-}
-
-function MenuRow({
-  label,
-  hint,
-  selected,
-  onClick,
-}: {
-  label: string;
-  hint?: string;
-  selected?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1.5 text-left hover-elevated"
-      style={{
-        fontSize: "12px",
-        background: selected ? "var(--color-anchor-bg)" : "transparent",
-        color: selected ? "var(--color-anchor-text)" : "var(--color-ink)",
-        cursor: "pointer",
-        border: "none",
-      }}
-    >
-      <span
-        style={{
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {label}
-      </span>
-      {hint && (
-        <span style={{ opacity: 0.5, fontSize: "10px", flexShrink: 0 }}>
-          {hint}
-        </span>
-      )}
-    </button>
-  );
+  return <ComposerMenu label="Choose project" title="Choose the project to launch the plan in" value={value === null ? "home" : `path:${value.replace(/\/+$/, "")}`} icon={<Folder size={13}/>}
+    options={[
+      { value: "home", label: "Home (~)", detail: "Use your home directory" },
+      ...merged.map(option => ({ value: `path:${option.path.replace(/\/+$/, "")}`, label: option.name, detail: option.path, group: "Projects" })),
+      ...(onNewProject ? [{ value: "new", label: "New project…", detail: "Create a folder for this work", group: "Workspace" }] : []),
+      { value: "browse", label: "Browse…", detail: "Choose another folder", group: "Workspace" },
+    ]}
+    onChange={next => {
+      if (next === "browse") { void browse(); return; }
+      if (next === "new") { onNewProject?.(); return; }
+      onChange(next === "home" ? null : next.slice(5) || "/");
+      onAfterPick?.();
+    }}>{label}</ComposerMenu>;
 }

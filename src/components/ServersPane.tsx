@@ -11,14 +11,10 @@
 // ink / ink-muted text, no Tailwind color classes) so it inherits every theme
 // including the cycling one.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Globe, Play, RotateCw, Square } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Globe, Play, RotateCw, ShieldCheck, Square } from "lucide-react";
 import type { DevServerScan, OtherListener, RecentServer, RunningServer } from "../types";
-import { thumbKey } from "../lib/thumbs";
-import {
-  useThumbCapture,
-  type ThumbCaptureTarget,
-} from "../hooks/useThumbCapture";
+import { useRepoIcons } from "../hooks/useRepoIcons";
 import { ProjectThumb } from "./ProjectThumb";
 import type { StopPlan } from "../lib/devServerTypes";
 import type { ProjectOption } from "./ProjectPicker";
@@ -221,109 +217,36 @@ function CardBody({
 export interface ServersPaneProps {
   scan: DevServerScan | null;
   error: string | null;
-  /** Whether this surface is the one on screen. Gates the capture queue: a
-   *  webview must never park over a pane the user isn't looking at. */
-  active: boolean;
   onRefresh: () => void;
   onStop: (pid: number, port: number, projectPath: string | null) => void | Promise<void>;
   onPlanStop: (pid: number, port: number, projectPath: string | null) => Promise<StopPlan | null>;
   projectOptions: ProjectOption[];
   onRun: (projectPath: string, runCommand: string) => void;
   onOpenUrl: (url: string) => void;
-  /** Persist a fresh capture against its remembered row, so the picture
-   *  outlives the process it depicts. Reported by card identity, not by the
-   *  hashed thumbnail key — the hash is one-way, and `(projectPath, port)` is
-   *  what the row is keyed on. */
-  onThumbCaptured: (projectPath: string, port: number, path: string) => void;
 }
 
 export function ServersPane({
   scan,
   error,
-  active,
   onRefresh,
   onStop,
   onPlanStop,
   projectOptions,
   onRun,
   onOpenUrl,
-  onThumbCaptured,
 }: ServersPaneProps) {
   const [runDialogOpen, setRunDialogOpen] = useState(false);
-  // Memoized on the scan itself, not spelled inline: `scan?.running ?? []`
-  // mints a fresh array on every render while the scan is null, which would
-  // change `targets`' identity every render and re-enter the capture queue
-  // continuously.
   const running = useMemo(() => scan?.running ?? [], [scan]);
   const recent = useMemo(() => scan?.recent ?? [], [scan]);
+  const repoPaths = useMemo(() => [...running, ...recent].map((server) => server.projectPath), [running, recent]);
+  const repoIcons = useRepoIcons(repoPaths);
   const others = scan?.others ?? [];
   const empty = running.length === 0 && recent.length === 0;
 
-  // Every card that could carry a thumbnail. Running ones are capture targets;
-  // dead ones are listed too so their stored picture is kept (and not pruned)
-  // even though they'll never be captured.
-  const targets = useMemo<ThumbCaptureTarget[]>(
-    () => [
-      ...running.map((s) => ({
-        key: thumbKey(s.projectPath, s.port),
-        url: s.url,
-        live: true,
-      })),
-      ...recent.map((s) => ({
-        key: thumbKey(s.projectPath, s.port),
-        url: s.url,
-        live: false,
-      })),
-    ],
-    [running, recent],
-  );
-  // The capture layer only ever knows a card by its hashed key, so keep the
-  // reverse map here, where the cards are.
-  const identityByKey = useMemo(() => {
-    const m = new Map<string, { projectPath: string; port: number }>();
-    for (const s of [...running, ...recent]) {
-      m.set(thumbKey(s.projectPath, s.port), {
-        projectPath: s.projectPath,
-        port: s.port,
-      });
-    }
-    return m;
-  }, [running, recent]);
-  const identityByKeyRef = useRef(identityByKey);
-  identityByKeyRef.current = identityByKey;
-
-  const handleCaptured = useCallback((key: string, path: string) => {
-    const id = identityByKeyRef.current.get(key);
-    if (id) onThumbCapturedRef.current(id.projectPath, id.port, path);
-  }, []);
-  const onThumbCapturedRef = useRef(onThumbCaptured);
-  onThumbCapturedRef.current = onThumbCaptured;
-
-  const capture = useThumbCapture(targets, active, handleCaptured);
-
-  const thumb = (
-    s: {
-      projectPath: string;
-      port: number;
-      stack: string;
-      projectName: string;
-    },
-    live: boolean,
-  ) => {
-    const key = thumbKey(s.projectPath, s.port);
-    return (
-      <ProjectThumb
-        thumbKey={key}
-        stack={s.stack}
-        projectName={s.projectName}
-        dataUrl={capture.thumbs.get(key) ?? null}
-        capturing={capture.capturingKey === key}
-        live={live}
-        canRefresh={live && !capture.unsupported}
-        registerRect={capture.registerRect}
-        onRefresh={capture.refresh}
-      />
-    );
+  const artwork = (server: RunningServer | RecentServer) => {
+    const repo = repoIcons.get(server.projectPath);
+    return <ProjectThumb projectName={repo?.name || server.projectName}
+      logo={repo?.dataUrl ?? null} />;
   };
 
   return (
@@ -361,6 +284,16 @@ export function ServersPane({
         onCancel={() => setRunDialogOpen(false)}
         onRun={(path, command) => { onRun(path, command); setRunDialogOpen(false); }} />}
 
+      {Boolean(scan?.redline?.length) && <div aria-label="Redline services" style={{
+        display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px 14px",
+        padding: "9px 11px", border: "1px solid var(--color-rule)", borderRadius: "6px",
+        fontSize: "11px", color: "var(--color-ink-muted)",
+      }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", color: "var(--color-ink)", fontWeight: 600 }}><ShieldCheck size={14} />Redline</span>
+        {scan!.redline!.map((service) => <span key={service.port}>{service.role} <span style={{ fontFamily: "var(--font-mono, monospace)" }}>:{service.port}</span></span>)}
+        <span style={{ marginLeft: "auto" }} title="These services keep Redline running and cannot be stopped here.">Managed by Redline</span>
+      </div>}
+
       {error && (
         <div
           style={{
@@ -382,7 +315,7 @@ export function ServersPane({
           <div className="rl-server-grid">
             {running.map((s: RunningServer) => (
               <div key={`${s.projectPath}:${s.port}`} style={cardStyle}>
-                {thumb(s, true)}
+                {artwork(s)}
                 <CardBody stack={s.stack} args={s.args} projectPath={s.projectPath}>
                   <PortLine
                     url={s.url}
@@ -419,7 +352,7 @@ export function ServersPane({
           <div className="rl-server-grid">
             {recent.map((s: RecentServer) => (
               <div key={s.id} style={cardStyle}>
-                {thumb(s, false)}
+                {artwork(s)}
                 <CardBody stack={s.stack} projectPath={s.projectPath}>
                   <div
                     style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}

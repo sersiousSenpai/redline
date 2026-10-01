@@ -19,6 +19,8 @@ import TurnFooter from "./TurnFooter";
 import type { TurnMeter } from "../lib/turnMeter";
 import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { useMonochat } from "./MonochatContext";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -65,6 +67,7 @@ export const CommentThread = memo(function CommentThread({
   autoOpen = false,
   onAutoOpenConsumed,
 }: CommentThreadProps) {
+  const monochat = useMonochat();
   const commentId = comment.id;
   // Derived ONCE and threaded through every label below: the entry button, the
   // bubbles, the collapsed summary, the sidecar status copy and the escalated
@@ -81,7 +84,7 @@ export const CommentThread = memo(function CommentThread({
   // at full height (structured replies + diagrams are meant to be read in full).
   // The reviewer can still collapse to compact via the ⤡ button.
   const [enlarged, setEnlarged] = useState(true);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useSharedDraft(`redline.sidecarDraft.${sessionId}.${commentId}`);
   // Attachments ride the optimistic user row. `makeMessage` reads this the
   // instant `turn.send` mints that row — synchronously — and `send` clears it
   // immediately after, so it can never leak into a later turn.
@@ -116,12 +119,14 @@ export const CommentThread = memo(function CommentThread({
     cancelArgs: { sessionId, commentId },
     queueing: false,
     sendFailPrefix: "Couldn't reach the discussion fork",
+    onSendFailed: text => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
     buildSendArgs: (text, extra) => {
       const attachments = (extra as CommentAttachment[] | undefined) ?? [];
       return {
         sessionId,
         commentId,
         text,
+        conversationId: monochat?.conversationId,
         // The fork has `Read`, so naming the paths is all it needs to look at
         // what the reviewer just dropped in.
         attachments: attachments.length > 0 ? attachments : null,
@@ -139,6 +144,7 @@ export const CommentThread = memo(function CommentThread({
     }),
   });
   const { messages, liveText, loaded, retrying } = turn;
+  useEffect(() => { if (loaded) monochat?.reportActivity?.(`${sessionId}:${commentId}`, turn.status === "streaming"); }, [loaded, sessionId, commentId, turn.status, monochat?.reportActivity]);
   const status: ThreadStatus = turn.status;
   // When the current wait began — drives the WorkingIndicator's elapsed
   // counter through the dead air before the first delta. Backend clock now,

@@ -10,11 +10,13 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, CornerDownLeft, Mic, Plus, X } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
-import { useMenuOverlay } from "./menuOverlay";
+import { ComposerMenu } from "./ComposerMenu";
+import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
+import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
 import { useDictation } from "../lib/useDictation";
 import {
@@ -64,6 +66,11 @@ function basename(path: string): string {
 }
 
 export interface FrontDoorProps {
+  /** The single floating entry point; omit the retired landing-page furniture. */
+  floating?: boolean;
+  autoFocusOnShow?: boolean;
+  chatPending?: boolean;
+  accessories?: React.ReactNode;
   /** The shell's core bootstrap has resolved — session summaries are in and
    *  the door knows which project it would launch into. Drives the entrance
    *  transition and, more importantly, the autofocus: the whole promise of
@@ -125,6 +132,8 @@ export interface FrontDoorProps {
    *  a hardcoded list — it ships with the ChatGPT app and changes under us. */
   modelCatalogs: ModelCatalogs;
   modelError?: string;
+  modelStatus?: ModelCatalogStatus;
+  onRefreshModels?: () => void;
   providerInfo?: { path: string | null; version?: string | null; source: string };
   /** Fetch the catalog. Called when the picker opens rather than at boot, so
    *  a Claude-only user never spawns a codex child process. */
@@ -171,6 +180,10 @@ export interface FrontDoorProps {
 export function FrontDoor(props: FrontDoorProps) {
   const {
     visible,
+    floating = false,
+    autoFocusOnShow = true,
+    chatPending = false,
+    accessories,
     text,
     onTextChange,
     choice,
@@ -196,6 +209,8 @@ export function FrontDoor(props: FrontDoorProps) {
     onBackendChange,
     modelCatalogs,
     modelError,
+    modelStatus,
+    onRefreshModels,
     providerInfo,
     onNeedModels,
     onCancelPending,
@@ -253,8 +268,8 @@ export function FrontDoor(props: FrontDoorProps) {
   // compact flash before the observer fires would be worse than a late one.
   const compact = width !== null && width < 560;
   const tight = width !== null && width < 430;
-  const short = height !== null && height < 620;
-  const squat = height !== null && height < 460;
+  const short = !floating && height !== null && height < 620;
+  const squat = !floating && height !== null && height < 460;
   // The blocker ⏎ was refused on, surfaced inside the island.
   const [blocked, setBlocked] = useState<ReadinessItem | null>(null);
   // The "build this in a new folder" offer: `launchAfter` distinguishes the
@@ -304,13 +319,19 @@ export function FrontDoor(props: FrontDoorProps) {
     refuse(refusal.reason ?? undefined);
   }, [refusal, refuse]);
 
-  // The composer's growth cap, as ONE number. It was a hard 300 in the effect
-  // below AND a hard 300px in `.rl-fd-input`, which agreed only by accident and
-  // was wrong in the same way on a short pane: 300px of textarea inside a 420px
-  // pane leaves nothing for the island's own chrome, so the island grew past
-  // the frame. Follow the pane instead — 38% of it, floored at ~3 lines — and
-  // publish it so the stylesheet reads the same value rather than a copy.
-  const inputCap = height ? Math.max(88, Math.round(height * 0.38)) : 300;
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  useEffect(() => {
+    if (!floating) return;
+    const resize = () => setViewportHeight(window.innerHeight);
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [floating]);
+  // Let the focused input grow to half the viewport, while reserving room for
+  // tools, attachments and the return pill. CSS and auto-grow share this cap.
+  const inputCap = floating
+    ? Math.max(88, Math.min(560, Math.round(viewportHeight * .5), viewportHeight - 220))
+    : height ? Math.max(88, Math.round(height * 0.38)) : 300;
 
   // Auto-grow. The island is one continuous shape, so the box follows the
   // text instead of scrolling inside a fixed frame — up to the cap, after
@@ -321,7 +342,7 @@ export function FrontDoor(props: FrontDoorProps) {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
-  }, [text, inputCap]);
+  }, [text, inputCap, width]);
 
   // Type-to-start handoff. A LAYOUT effect, not a passive one: it must focus
   // and drain the seed buffer before the browser can dispatch the next
@@ -344,9 +365,9 @@ export function FrontDoor(props: FrontDoorProps) {
   // ⏎ from the keyboard never lost focus, but the send button steals it — and
   // clicking send is exactly the gesture after which the box must be ready.
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !autoFocusOnShow) return;
     taRef.current?.focus();
-  }, [visible, pending]);
+  }, [visible, pending, autoFocusOnShow]);
 
   const dictation = useDictation({
     enabled: dictationEnabled,
@@ -428,6 +449,7 @@ export function FrontDoor(props: FrontDoorProps) {
         return;
       }
       if (to === "chat") {
+        if (chatPending) { refuse("Opening the conversation. Your message is saved."); return; }
         // A chat's gate is NARROWER than the plan's and wider than the
         // Drafter's non-gate: it spawns `claude`, so a missing binary or a
         // stolen daemon port really would swallow the first message — but it
@@ -451,6 +473,7 @@ export function FrontDoor(props: FrontDoorProps) {
       refuse,
       onDrafter,
       onChat,
+      chatPending,
       readiness,
       attemptLaunch,
       combine.length,
@@ -549,7 +572,7 @@ export function FrontDoor(props: FrontDoorProps) {
     .join(" ");
 
   const rootClass = [
-    "rl-frontdoor font-sans",
+    floating ? "rl-frontdoor rl-floating-composer font-sans" : "rl-frontdoor font-sans",
     entered ? "is-in" : "",
     compact ? "is-compact" : "",
     tight ? "is-tight" : "",
@@ -564,11 +587,12 @@ export function FrontDoor(props: FrontDoorProps) {
       ref={rootRef}
       className={rootClass}
       data-tour="landing"
+      data-chat-composer={floating ? true : undefined}
       // Published so `.rl-fd-input`'s max-height is the SAME number the
       // auto-grow effect clamps to, rather than a copy that drifts.
       style={{ "--rl-fd-input-max": `${inputCap}px` } as React.CSSProperties}
     >
-      <div className="rl-fd-paper" aria-hidden />
+      {!floating && <><div className="rl-fd-paper" aria-hidden />
 
       {/* The stance, not another question — the composer's placeholder is
           already asking one. "Redline" is the verb, which is the whole point
@@ -583,6 +607,7 @@ export function FrontDoor(props: FrontDoorProps) {
         {hero?.sub || "Describe it. Redline the plan. Then build."}
       </p>
 
+      </>}
       <div className={islandClass}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
@@ -669,8 +694,9 @@ export function FrontDoor(props: FrontDoorProps) {
             placeholder={
               combine.length > 0
                 ? "Anything to add? (optional)"
-                : "What do you want to build?"
+                : floating ? "What are we working on?" : "What do you want to build?"
             }
+            aria-label="Message Redline"
             value={text}
             rows={1}
             spellCheck
@@ -685,14 +711,19 @@ export function FrontDoor(props: FrontDoorProps) {
             </div>
           )}
           <div className="rl-fd-tools">
-            <button
-              type="button"
-              onClick={attach}
-              title="Attach files as context"
-              className="rl-fd-tool"
-            >
-              <Plus size={14} />
-            </button>
+            <BackendMenu
+              choice={backend}
+              onChange={onBackendChange}
+              modelCatalogs={modelCatalogs}
+              modelError={modelError}
+              modelStatus={modelStatus}
+              onRefresh={onRefreshModels}
+              providerInfo={providerInfo}
+              onLocate={() => { void onFix({ id: backend.backend === "codex" ? "codex-missing" : backend.backend === "claude-code" ? "claude-missing" : "provider-missing", state: "blocked", label: `Locate ${backendLabel(backend.backend)}`, detail: "Choose the executable used for planning and restore.", fix: { label: "Change CLI…", kind: backend.backend === "codex" ? "locate-codex" : backend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: backend.backend } }); }}
+              onOpen={onNeedModels}
+              compact={tight}
+              allowedBackends={liveDestination === "chat" ? ["claude-code", "codex"] : undefined}
+            />
             <ProjectPicker
               options={projectOptions}
               value={choice ? choice.path : resolvedProject}
@@ -717,17 +748,22 @@ export function FrontDoor(props: FrontDoorProps) {
                 chatEnabled={chatEnabled}
               />
             )}
-            <BackendMenu
-              choice={backend}
-              onChange={onBackendChange}
-              modelCatalogs={modelCatalogs}
-              modelError={modelError}
-              providerInfo={providerInfo}
-              onLocate={() => { void onFix({ id: backend.backend === "codex" ? "codex-missing" : backend.backend === "claude-code" ? "claude-missing" : "provider-missing", state: "blocked", label: `Locate ${backendLabel(backend.backend)}`, detail: "Choose the executable used for planning and restore.", fix: { label: "Change CLI…", kind: backend.backend === "codex" ? "locate-codex" : backend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: backend.backend } }); }}
-              onOpen={onNeedModels}
-              compact={tight}
-            />
-            <div style={{ flex: 1 }} />
+
+
+            {floating && !accessories && chats.length > 0 && onOpenChat && <ComposerMenu
+              label="Conversation history" options={chats.map(chat => ({ value: chat.id, label: chat.title }))}
+              onChange={onOpenChat}>History</ComposerMenu>}
+            <div className="rl-composer-accessories">{accessories}</div>
+            <div className="rl-composer-send-tools" style={{ display: "flex", alignItems: "center", gap: 5, marginLeft: "auto" }}>
+            <button
+              type="button"
+              onClick={attach}
+              title="Attach files as context"
+              className="rl-fd-tool"
+            >
+              <Plus size={14} />
+            </button>
+
             {dictation.error && (
               <span className="rl-fd-err" title={dictation.error}>
                 mic error
@@ -750,10 +786,10 @@ export function FrontDoor(props: FrontDoorProps) {
             </button>
             <button
               type="button"
-              onClick={() => send(liveDestination)}
-              disabled={!canSubmit}
+              onClick={() => { taRef.current?.focus(); send(liveDestination); }}
+              disabled={!canSubmit || (liveDestination === "chat" && chatPending)}
               title={
-                combine.length > 0
+                liveDestination === "chat" && chatPending ? "Opening the conversation…" : combine.length > 0
                   ? `Combine ${combine.length} plans into one new plan (⏎)`
                   : liveDestination === "drafter"
                     ? "Open this in the drafter (⏎)"
@@ -763,8 +799,9 @@ export function FrontDoor(props: FrontDoorProps) {
               }
               className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
             >
-              <CornerDownLeft size={15} />
+              {floating ? <ArrowUp size={17}/> : <CornerDownLeft size={15} />}
             </button>
+            </div>
           </div>
         </div>
 
@@ -854,7 +891,7 @@ export function FrontDoor(props: FrontDoorProps) {
           not a max-height on the row: a fixed max-height is a lie the moment
           the chips wrap to a second line, and the overflow lands on top of
           whatever sits below. This version collapses any height correctly. */}
-      <div
+      {!floating && <div
         className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
         aria-hidden={suggestionsHidden}
       >
@@ -876,10 +913,11 @@ export function FrontDoor(props: FrontDoorProps) {
         </div>
       </div>
 
+      }
       {/* "Your harnesses" — the other doors this build can open. Same orbit
           discipline as the suggestions: a way in, not furniture — the row
           retires the moment there is a sentence to finish. */}
-      {harnesses.length > 0 && onEnterHarness && (
+      {!floating && harnesses.length > 0 && onEnterHarness && (
         <div
           className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
           aria-hidden={suggestionsHidden}
@@ -912,7 +950,7 @@ export function FrontDoor(props: FrontDoorProps) {
       )}
 
       {/* Recent chats — the way back in. */}
-      {chats.length > 0 && onOpenChat && (
+      {!floating && chats.length > 0 && onOpenChat && (
         <div
           className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
           aria-hidden={suggestionsHidden}
@@ -946,9 +984,9 @@ export function FrontDoor(props: FrontDoorProps) {
 
       <ReadinessStrip items={readiness} onFix={handleFix} />
 
-      <button type="button" className="rl-fd-how" onClick={onHowItWorks}>
+      {!floating && <button type="button" className="rl-fd-how" onClick={onHowItWorks}>
         How Redline works
-      </button>
+      </button>}
     </div>
   );
 }
@@ -979,59 +1017,14 @@ function PlanMenu({
   onDestinationChange: (next: LaunchDestination) => void;
   chatEnabled: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  useMenuOverlay(open);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
-  const rows = DESTINATIONS.filter((d) => d.id !== "chat" || chatEnabled);
-  const current = rows.find((d) => d.id === destination) ?? rows[0];
+  const rows = DESTINATIONS.filter(d => d.id !== "chat" || chatEnabled);
+  const current = rows.find(d => d.id === destination) ?? rows[0];
   const alternate = fallbackDestination(destination);
-  return (
-    <div ref={rootRef} data-no-drag="true" style={{ position: "relative" }}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        title="Where ⏎ sends this"
-        className="rl-fd-tool is-wide"
-      >
-        {current.chip} <span className="rl-fd-caret">▾</span>
-      </button>
-      {open && (
-        <div className="rl-fd-menu">
-          {rows.map((d) => (
-            <button
-              key={d.id}
-              type="button"
-              className={`rl-fd-menu-row${d.id === destination ? " is-on" : ""}`}
-              onClick={() => {
-                setOpen(false);
-                onDestinationChange(d.id);
-              }}
-            >
-              <span className="rl-fd-menu-name">
-                <Check
-                  size={12}
-                  className="rl-fd-menu-tick"
-                  style={{ opacity: d.id === destination ? 1 : 0 }}
-                />
-                {d.label}
-              </span>
-              <span className="rl-fd-kbd">
-                {d.id === destination ? "⏎" : d.id === alternate ? "⌘⏎" : ""}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  return <ComposerMenu label="Destination" value={destination} onChange={next => onDestinationChange(next as LaunchDestination)}
+    icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : <Sparkles size={12}/>}
+    options={rows.map(d => ({ value: d.id, label: d.label, detail: d.id === destination ? "Enter to send" : d.id === alternate ? "⌘ Enter shortcut" : undefined }))}>
+    {current.chip}
+  </ComposerMenu>;
 }
 
 /** `Claude ▾` / `Codex · GPT-5.6-Sol · xhigh ▾` — which harness ⏎ launches on.
@@ -1065,31 +1058,72 @@ export function BackendMenu({
   onChange,
   modelCatalogs,
   modelError,
+  modelStatus,
+  onRefresh,
   providerInfo,
   onLocate,
   onOpen,
   compact,
+  allowedBackends,
 }: {
   choice: BackendChoice;
   onChange: (next: BackendChoice) => void;
   modelCatalogs: ModelCatalogs;
   modelError?: string;
+  modelStatus?: ModelCatalogStatus;
+  onRefresh?: () => void;
   providerInfo?: { path: string | null; version?: string | null; source: string };
   onLocate: () => void;
   onOpen: () => void;
   compact: boolean;
+  allowedBackends?: readonly BackendChoice["backend"][];
 }) {
   const btnRef = useRef<HTMLButtonElement | null>(null);
+  const modelsRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const effortRef = useRef<HTMLDivElement>(null);
+  const [effortModel, setEffortModel] = useState<string | null>(null);
+  const [effortPosition, setEffortPosition] = useState({ left: 334, top: 0 });
+  const hideEffortTimer = useRef<number | null>(null);
+  const focusEffort = useRef(false);
+  const keepEffort = () => { if (hideEffortTimer.current !== null) window.clearTimeout(hideEffortTimer.current); };
+  useEffect(() => () => keepEffort(), []);
   // "above": the chip sits on the composer's bottom toolbar. `placeOver`
   // still flips below on its own if the door is squeezed against the top.
   // Stays open across picks, like `ChatRoom`'s ModelChip and unlike
   // `PlanMenu`: this menu has THREE axes, and choosing a harness usually means
   // choosing its model next. Outside-click and Escape dismiss it (`useDismiss`,
   // inside the hook).
-  const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above");
+  const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above", 328, true);
 
   const models = modelsFor(choice.backend, modelCatalogs);
-  const efforts = effortsFor(choice.backend, choice.model, modelCatalogs);
+  const efforts = effortsFor(choice.backend, effortModel, modelCatalogs);
+  const showEffort = open && effortModel !== null && efforts.length > 0;
+  useNativeOverlayRegion(effortRef, showEffort);
+  useLayoutEffect(() => {
+    if (!showEffort) return;
+    const position = () => {
+      const row = Array.from(modelsRef.current?.querySelectorAll<HTMLElement>("[data-effort-model]") ?? []).find(element => element.dataset.effortModel === effortModel);
+      const menu = menuRef.current?.getBoundingClientRect();
+      if (!row || !menu) return;
+      const rect = row.getBoundingClientRect();
+      const width = 184, gap = 6, height = effortRef.current?.offsetHeight || 116;
+      let left = menu.right + gap, top = rect.top - 8;
+      if (left + width > window.innerWidth - 8) left = menu.left - width - gap;
+      if (left < 8) { left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)); top = rect.bottom + gap; }
+      top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+      setEffortPosition(previous => previous.left === left - menu.left && previous.top === top - menu.top
+        ? previous : { left: left - menu.left, top: top - menu.top });
+    };
+    position();
+    if (focusEffort.current) {
+      focusEffort.current = false;
+      (effortRef.current?.querySelector<HTMLElement>('[aria-checked="true"]') ?? effortRef.current?.querySelector<HTMLElement>("button"))?.focus();
+    }
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => { window.removeEventListener("resize", position); window.removeEventListener("scroll", position, true); };
+  }, [showEffort, effortModel, panelProps.style]);
   const set = (next: BackendChoice) => onChange(normalizeChoice(next, modelCatalogs));
   const full = choiceLabel(choice, modelCatalogs);
   // The chip narrows before the composer does: in a squeezed pane the harness
@@ -1101,16 +1135,19 @@ export function BackendMenu({
     on: boolean,
     text: string,
     onClick: () => void,
-    extra?: { title?: string; disabled?: boolean },
+    extra?: { title?: string; disabled?: boolean; model?: boolean },
   ) => (
     <button
       key={key}
       type="button"
-      role="menuitem"
+      role="menuitemradio"
+      aria-checked={on}
       disabled={extra?.disabled}
       title={extra?.title}
-      className={`rl-fd-menu-row${on ? " is-on" : ""}`}
+      className="rl-composer-option"
       onClick={onClick}
+      data-effort-model={extra?.model ? key : undefined}
+      onPointerEnter={() => { keepEffort(); setEffortModel(extra?.model ? key : null); }}
     >
       <span className="rl-fd-menu-name">
         <Check
@@ -1120,6 +1157,7 @@ export function BackendMenu({
         />
         {text}
       </span>
+      {extra?.model && <ChevronRight size={13} aria-hidden="true"/>}
     </button>
   );
 
@@ -1130,22 +1168,26 @@ export function BackendMenu({
           type="button"
           ref={btnRef}
           onClick={() => {
-            if (!open) onOpen();
+            if (!open) { setEffortModel(null); onOpen(); }
             toggle();
           }}
           title={`⏎ launches on ${full}`}
           aria-haspopup="menu"
           aria-expanded={open}
-          className="rl-fd-tool is-wide"
+          className="rl-composer-chip"
         >
-          {label} <span className="rl-fd-caret">▾</span>
+          <Sparkles size={12}/><span>{label}</span> <span className="rl-fd-caret">▾</span>
         </button>
       </div>
       {open && (
         <Panel
           label="Harness"
           {...panelProps}
-          style={{ ...panelProps.style, ...MENU_GLASS }}
+          panelRef={element => { menuRef.current = element; panelProps.panelRef(element); }}
+          className="rl-composer-menu rl-model-menu"
+          style={{ ...panelProps.style, overflow: "visible" }}
+          onPointerEnter={keepEffort}
+          onPointerLeave={() => { keepEffort(); hideEffortTimer.current = window.setTimeout(() => setEffortModel(null), 180); }}
         >
           {/* The scroller, not the Panel, takes the overflow — `maxHeight` is
               only a real bound in a flex column with a `minHeight: 0` child. */}
@@ -1154,11 +1196,11 @@ export function BackendMenu({
             style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 5 }}
           >
             <div className="rl-fd-menu-label">Harness</div>
-            {BACKENDS.map((b) =>
+            {BACKENDS.filter(b => !allowedBackends || allowedBackends.includes(b.id)).map((b) =>
               row(b.id, b.id === choice.backend, b.preview ? `${b.label} · Preview` : b.label, () =>
                 // Switching harness drops the model and effort: a Claude alias
                 // is not a Codex slug, and `normalizeChoice` says so.
-                b.id !== choice.backend && set({ backend: b.id, model: null, effort: null }),
+                { if (b.id !== choice.backend) { setEffortModel(null); set({ backend: b.id, model: null, effort: null }); } },
               ),
             )}
 
@@ -1167,59 +1209,81 @@ export function BackendMenu({
               {providerInfo.version ? `${backendLabel(choice.backend)} ${providerInfo.version} · ` : ""}{providerInfo.path ?? "CLI not located"}
             </div>}
             {row("locate-provider", false, "Change CLI…", onLocate)}
-            <label className="rl-fd-model-field">
-              <span className="rl-fd-menu-label">Model</span>
-              <select aria-label="Model" value={choice.model ?? ""} onChange={(e) =>
-                set({ ...choice, model: e.target.value || null, effort: e.target.value ? choice.effort : null })
-              }>
-                <option value="">Default</option>
-                {models.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                {choice.model && !models.some(m => m.value === choice.model) &&
-                  <option value={choice.model}>{choice.model}</option>}
-              </select>
-            </label>
-            {models.length === 0 && (
-              // Not an error row: the catalog is fetched on open, and a codex
-              // that can't answer still launches fine on its own default model.
-              <div className="rl-fd-menu-note">{modelError ? "Model list unavailable. Reopen this menu to retry." : `Reading the ${backendLabel(choice.backend)} model list…`}</div>
-            )}
+            <div ref={modelsRef} role="group" aria-label="Model" onKeyDown={event => {
+              if (event.key !== "ArrowRight") return;
+              const model = (event.target as HTMLElement).closest<HTMLElement>("[data-effort-model]")?.dataset.effortModel;
+              if (!model) return;
+              event.preventDefault(); event.stopPropagation();
+              if (showEffort && effortModel === model) (effortRef.current?.querySelector<HTMLElement>('[aria-checked="true"]') ?? effortRef.current?.querySelector<HTMLElement>("button"))?.focus();
+              else { focusEffort.current = true; setEffortModel(model); }
+            }}>
+              <div className="rl-composer-menu-heading">Model</div>
+              {row("default-model", !choice.model, "Harness default", () => { setEffortModel(null); set({ ...choice, model: null, effort: null }); })}
+              {models.map(model => row(model.value, choice.model === model.value, model.label,
+                () => { set({ ...choice, model: model.value }); setEffortModel(model.value); },
+                { title: model.hint, model: effortsFor(choice.backend, model.value, modelCatalogs).length > 0 }))}
+              {choice.model && !models.some(model => model.value === choice.model) && row(choice.model, true, choice.model, () => {})}
+              {choice.model && modelStatus?.checkedAt && models.length > 0 && !models.some(model => model.value === choice.model) && <div className="rl-fd-menu-note">Your selected model is no longer listed. Your selection is kept.</div>}
+            </div>
+            {modelError && <div role="status" className="rl-fd-menu-note">{modelError}</div>}
+            {!modelError && models.length === 0 && <div className="rl-fd-menu-note">Reading the {backendLabel(choice.backend)} model list…</div>}
 
-            <div className="rl-fd-menu-sep" aria-hidden />
-            {BACKENDS.find(b => b.id === choice.backend)?.effort !== "none" && <>
-              <label className="rl-fd-model-field">
-                <span className="rl-fd-menu-label">Effort</span>
-                <select aria-label="Effort" value={choice.effort ?? ""}
-                  disabled={efforts.length === 0}
-                  onChange={(e) => set({ ...choice, effort: e.target.value || null })}>
-                  <option value="">Default{modelCatalogs[choice.backend]?.find(m => m.slug === choice.model)?.defaultEffort
-                    ? ` (${modelCatalogs[choice.backend]?.find(m => m.slug === choice.model)?.defaultEffort})` : ""}</option>
-                  {efforts.map(e => <option key={e} value={e}>{e}</option>)}
-                </select>
-              </label>
-              {efforts.length === 0 && <div className="rl-fd-menu-note">
-                {!choice.model ? "Choose a model to set its effort." : models.length === 0
-                  ? "Effort options load with the model list." : "This model has no configurable effort."}
-              </div>}
-            </>}
           </div>
+          {onRefresh && <div className="rl-model-catalog-status">
+            <span title={modelStatus?.checkedAt ? `Models reported by ${backendLabel(choice.backend)} on ${new Date(modelStatus.checkedAt).toLocaleString()}` : undefined}>
+              {modelStatus?.refreshing ? "Checking models…" : modelStatus?.checkedAt ? `Checked ${new Date(modelStatus.checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "Not checked yet"}
+            </span>
+            <button type="button" role="menuitem" disabled={modelStatus?.refreshing} onClick={onRefresh}>Refresh models</button>
+          </div>}
+          {showEffort && <div ref={effortRef} className="rl-effort-strip" style={effortPosition} onKeyDown={event => {
+            if (event.key !== "ArrowLeft" || (event.target as HTMLElement).closest(".rl-effort-notches")) return;
+            event.preventDefault(); event.stopPropagation();
+            modelsRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();
+          }}>
+            <EffortNotches key={`${choice.backend}:${effortModel}`} efforts={efforts}
+              selected={choice.model === effortModel ? choice.effort : null} defaultEffort={modelCatalogs[choice.backend]?.find(model => model.slug === effortModel)?.defaultEffort ?? null}
+              onSelect={effort => set({ ...choice, model: effortModel, effort })}/>
+          </div>}
         </Panel>
       )}
     </>
   );
 }
 
-/** The door's menus are glass slabs, not the app's solid dropdowns. `Panel`
- *  owns placement and the flex column; this is the appearance it spreads last,
- *  lifted verbatim from `.rl-fd-menu` so the two can't look different. */
-const MENU_GLASS: React.CSSProperties = {
-  padding: 0,
-  borderRadius: 12,
-  border: "1px solid color-mix(in srgb, var(--color-ink) 14%, transparent)",
-  background: "color-mix(in srgb, var(--color-bg-elevated) 90%, transparent)",
-  WebkitBackdropFilter: "blur(24px) saturate(160%)",
-  backdropFilter: "blur(24px) saturate(160%)",
-  boxShadow: "0 16px 40px -16px rgba(0, 0, 0, 0.7)",
-};
+function EffortNotches({ efforts, selected, defaultEffort, onSelect }: {
+  efforts: string[]; selected: string | null; defaultEffort: string | null; onSelect: (effort: string | null) => void;
+}) {
+  const [preview, setPreview] = useState<number | null>(null);
+  const selectedIndex = efforts.indexOf(selected ?? defaultEffort ?? "");
+  const active = preview ?? selectedIndex;
+  const level = preview === null ? selected : efforts[preview];
+  const label = (value: string) => value === "xhigh" ? "Extra high" : value.charAt(0).toUpperCase() + value.slice(1);
+  return <div role="group" aria-label="Effort" onBlur={event => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPreview(null);
+  }}>
+    <div className="rl-effort-readout"><span>Effort</span><strong className="rl-effort-value" aria-live="polite">{level ? label(level) : defaultEffort ? `Auto · ${label(defaultEffort)}` : "Auto"}</strong></div>
+    <div className="rl-effort-notches" onPointerLeave={() => setPreview(null)} onKeyDown={event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault(); event.stopPropagation(); (event.target as HTMLButtonElement).click(); return;
+      }
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : Math.max(0, Math.min(buttons.length - 1, current + (["ArrowRight", "ArrowUp"].includes(event.key) ? 1 : -1)));
+      buttons[next]?.focus();
+    }}>
+      {efforts.map((effort, index) => <button key={effort} type="button" role="menuitemradio" aria-label={label(effort)}
+        aria-checked={selected === effort} data-lit={index <= active} title={label(effort)}
+        onPointerEnter={() => setPreview(index)} onFocus={() => setPreview(index)} onClick={() => { onSelect(effort); setPreview(null); }}>
+        <i aria-hidden="true" style={{ height: `${12 + 18 * (index + 1) / efforts.length}px` }}/><span className="sr-only">{effort}</span>
+      </button>)}
+    </div>
+    <button type="button" className="rl-effort-default" role="menuitemradio" aria-checked={selected === null}
+      onFocus={() => setPreview(null)} onClick={() => { onSelect(null); setPreview(null); }}>Default</button>
+  </div>;
+}
 
 /** The first-run hole this closes: `projectOptions` is derived entirely from
  *  existing sessions and open folders, so a genuine first run has none and

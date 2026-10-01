@@ -9,6 +9,7 @@ import type { Applied, NodePatch, RunOp } from "../../lib/runner/ops";
 import type { NodeStream } from "../../lib/runner/stream";
 import { RunCanvas } from "./RunCanvas";
 import type { DiffFile } from "../../types";
+import { MonochatPolicyControls } from "../MonochatPolicyControls";
 
 export interface RunGraphPaneProps {
   runId: string; active: boolean;
@@ -60,6 +61,7 @@ export function RunGraphPane({ runId, active, onOpenPlanBlock, onReviewSession }
       {onReviewSession && <button disabled={graph.nodes.some((n) => isLiveNode(n.status))} onClick={() => void review()}>Review changes</button>}
     </div>
     <p className="rl-run-subtitle">{graph.status === "draft" ? "Edit the tasks, dependencies and checks before starting. Scope hints guide scheduling; claimed files determine ownership." : graph.projectPath}</p>
+    <MonochatPolicyControls />
     {(error || localError) && <div className="rl-run-error" role="alert">{error ?? localError}</div>}
     <div className="rl-run-toolbar">
       {(["task", "check", "review", "gate"] as NodeKind[]).map((kind) => <button key={kind} disabled={!editable || busy} onClick={() => {
@@ -111,7 +113,7 @@ function NodeInspector({ graph, node, stream, busy, apply, intervene, onError }:
   const patch = <K extends keyof RunNode>(key: K, value: RunNode[K]) => { setDirty(true); setDraft((old) => ({ ...old, [key]: value })); };
   const action = (name: string) => void intervene(name, node.id).catch(ignoreHandledError);
   const save = () => {
-    const set: NodePatch = { title: draft.title, brief: draft.brief, kind: draft.kind, seat: draft.seat || null, model: draft.model || null,
+    const set: NodePatch = { title: draft.title, brief: draft.brief, kind: draft.kind, backend: draft.backend || null, seat: draft.seat || null, model: draft.model || null,
       effort: draft.effort || null, scopeHint: scope.split(/[\n,]/).map((s) => s.trim()).filter(Boolean), enforceScope: draft.enforceScope,
       verifyCmd: draft.verifyCmd || null, checkGlobal: draft.checkGlobal, maxAttempts: draft.maxAttempts, planBlockId: draft.planBlockId || null };
     void apply([{ op: "update_node", id: node.id, set }]).then((result) => { if (result) setDirty(false); }).catch(ignoreHandledError);
@@ -131,6 +133,7 @@ function NodeInspector({ graph, node, stream, busy, apply, intervene, onError }:
       <label>Brief<textarea rows={5} value={draft.brief} onChange={(e) => patch("brief", e.target.value)} /></label>
       <label>Plan block<input value={draft.planBlockId ?? ""} placeholder="blk-…" onChange={(e) => patch("planBlockId", e.target.value)} /></label>
       {draft.kind === "task" || draft.kind === "review" ? <>
+        <label>Harness<select value={draft.backend === "codex" ? "codex" : "claude"} onChange={event => { patch("backend", event.target.value); patch("model", null); patch("effort", null); }}><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label>
         <label>Agent seat<input value={draft.seat ?? ""} placeholder="orchestrator" onChange={(e) => patch("seat", e.target.value)} /></label>
         <label>Model<input value={draft.model ?? ""} placeholder="Seat default" onChange={(e) => patch("model", e.target.value)} /></label>
         <label>Effort<select value={draft.effort ?? ""} onChange={(e) => patch("effort", e.target.value)}><option value="">Seat default</option>{["low", "medium", "high", "xhigh", "max", "ultra"].map((effort) => <option key={effort}>{effort}</option>)}</select></label>

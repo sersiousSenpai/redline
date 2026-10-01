@@ -179,8 +179,8 @@ pub fn validate(doc: &RunGraph) -> Result<(), String> {
         {
             return Err("scope hints must be repository relative".into());
         }
-        if n.kind == "task" && n.backend.as_deref().is_some_and(|b| b != "claude") {
-            return Err("only the Claude task backend is available".into());
+        if matches!(n.kind.as_str(), "task" | "review") && n.backend.as_deref().is_some_and(|b| !matches!(b, "claude" | "claude-code" | "codex")) {
+            return Err("choose Claude Code or Codex for this node".into());
         }
         if n.position
             .as_ref()

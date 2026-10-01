@@ -491,11 +491,15 @@ pub fn model_catalog(backend: &str) -> Result<Vec<CodexModel>, String> {
     if !bin.found {
         return Err("Provider CLI was not found".into());
     }
-    let caps = capabilities(backend, &bin.path)?;
+    model_catalog_for_bin(backend, &bin.path)
+}
+
+pub fn model_catalog_for_bin(backend: &str, bin: &str) -> Result<Vec<CodexModel>, String> {
+    let caps = capabilities(backend, bin)?;
     if !caps.usable {
         return Err("Provider CLI lacks native planning capabilities".into());
     }
-    let output = run_bounded(&bin.path, &["models"], PROBE_TIMEOUT)?;
+    let output = run_bounded(bin, &["models"], PROBE_TIMEOUT)?;
     if !output.success {
         return Err("Provider model discovery failed; check the CLI login and retry".into());
     }

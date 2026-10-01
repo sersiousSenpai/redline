@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GitBranch } from "lucide-react";
 
 import type { ReviewBranches } from "../types";
@@ -50,9 +50,15 @@ export default function ReviewPushDialog({
   const [form, setForm] = useState<PushFormState>(DEFAULT_PUSH_FORM);
   const [stageReviewedOnly, setStageReviewedOnly] = useState(true);
   const [confirmingProtected, setConfirmingProtected] = useState(false);
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const draftRevision = useRef(0);
 
   const set = useCallback(
     (patch: Partial<PushFormState>) => {
+      if (patch.message !== undefined) {
+        draftRevision.current += 1;
+        setDraftNotice(null);
+      }
       setForm((f) => ({ ...f, ...patch }));
       setConfirmingProtected(false);
     },
@@ -61,13 +67,16 @@ export default function ReviewPushDialog({
 
   // Fresh open → fresh form, seeded from the live status once it exists.
   useEffect(() => {
+    draftRevision.current += 1;
+    setDraftNotice(null);
     if (!open) return;
     setForm(DEFAULT_PUSH_FORM);
     setStageReviewedOnly(true);
     setConfirmingProtected(false);
     push.clearResult();
+    return () => { draftRevision.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, reviewId]);
   useEffect(() => {
     if (!open || !status) return;
     setForm((f) => ({
@@ -75,7 +84,7 @@ export default function ReviewPushDialog({
       remote: f.remote || status.defaultRemote || status.remotes[0] || "",
       prBase: f.prBase || status.defaultBranch || "",
     }));
-  }, [open, status]);
+  }, [open, status, reviewId]);
 
   const paths = stageReviewedOnly && reviewedPaths.length > 0 ? reviewedPaths : null;
   const plan = useMemo(() => planPush(status, form, paths), [status, form, paths]);
@@ -94,8 +103,11 @@ export default function ReviewPushDialog({
   }, [status, plan, pushing, confirmingProtected, repo, reviewId, form, paths, push, onPushed]);
 
   const doDraft = useCallback(async () => {
+    const revision = ++draftRevision.current;
+    setDraftNotice(null);
     const d = await push.draft();
-    if (!d) return;
+    if (!d || revision !== draftRevision.current) return;
+    setDraftNotice(d.notice ?? null);
     setForm((f) => ({
       ...f,
       message: d.body.trim() ? `${d.subject}\n\n${d.body}` : d.subject,
@@ -267,7 +279,7 @@ export default function ReviewPushDialog({
                     className="rl-review-btn"
                     style={{ fontSize: "11px", marginLeft: "auto" }}
                     disabled={drafting}
-                    title="Draft the message, branch name and PR text with AI — always editable"
+                    title="Quick AI draft — a short commit subject with branch and PR defaults, always editable"
                     onClick={() => void doDraft()}
                   >
                     ✦ {drafting ? "Drafting…" : "Draft"}
@@ -281,6 +293,11 @@ export default function ReviewPushDialog({
                   className="rl-push-textarea"
                   spellCheck={false}
                 />
+                {draftNotice && (
+                  <div role="status" style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}>
+                    {draftNotice}
+                  </div>
+                )}
               </>
             )}
 

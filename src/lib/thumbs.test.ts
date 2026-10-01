@@ -6,10 +6,21 @@ import {
   placeholderFor,
   planCaptures,
   thumbKey,
+  thumbZoom,
+  THUMB_VIEWPORT_WIDTH,
   THUMB_FAIL_COOLDOWN_MS,
   THUMB_STALE_MS,
   type ThumbEntry,
 } from "./thumbs";
+
+describe("desktop thumbnail layout", () => {
+  it("fits the same desktop viewport into different cards without changing snapshot density", () => {
+    for (const width of [240, 320, 480]) {
+      expect(width / thumbZoom(width)).toBe(THUMB_VIEWPORT_WIDTH);
+    }
+    expect(thumbZoom(2000)).toBe(1);
+  });
+});
 
 describe("calibrateScale", () => {
   it("stays at 1 when WebKit already backs the image at display scale", () => {

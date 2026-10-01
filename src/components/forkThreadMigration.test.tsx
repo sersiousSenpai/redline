@@ -36,6 +36,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+import { MonochatContext } from "./MonochatContext";
 import { CommentThread } from "./CommentThread";
 import { DrafterSidecar } from "./DrafterSidecar";
 import { ReviewThread } from "./ReviewThread";
@@ -134,7 +135,7 @@ const flush = () =>
 
 async function mount(el: ReactElement, open?: (h: HTMLElement) => void) {
   await act(async () => {
-    root.render(createElement(StrictMode, null, el));
+    root.render(createElement(StrictMode, null, createElement(MonochatContext.Provider, { value: { harness: { backend: "codex", model: null, effort: null }, conversationId: "shared-root" } }, el)));
   });
   await flush();
   if (open) {
@@ -176,7 +177,19 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-describe.each(CONSUMERS)("$name on the shared turn lifecycle", ({ element, open }) => {
+describe.each(CONSUMERS)("$name on the shared turn lifecycle", ({ name, element, open }) => {
+  it("keeps the reply composer on its source surface with shared routing enabled", async () => {
+    await mount(element(), open);
+    if (name === "CommentThread") {
+      const discuss = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Discuss with Claude"));
+      expect(discuss).toBeDefined();
+      await act(async () => discuss!.click());
+      expect(invokeMock.mock.calls.some(call => call[0] === "fork_thread_send" && call[1].sessionId === SESSION && call[1].commentId === ITEM && call[1].conversationId === "shared-root")).toBe(true);
+    }
+    expect(host.querySelector("textarea")).not.toBeNull();
+    expect(host.textContent).not.toContain("Monochat");
+  });
+
   it("appends a delta exactly once under StrictMode's double mount", async () => {
     // A live turn so the thread body is on screen for every consumer.
     statusReply = { ...idle, streaming: true, startedAt: 500 };

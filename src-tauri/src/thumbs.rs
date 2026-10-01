@@ -154,6 +154,10 @@ pub async fn browser_take_thumbnail(
     if bytes.is_empty() {
         return Err("the page produced an empty snapshot".into());
     }
+    if label == "browser-thumbcap" && looks_blank(&bytes, width) {
+        // A failed refresh must preserve the last useful dashboard preview.
+        return Err("the page produced a blank snapshot".into());
+    }
     std::fs::write(&tmp_path, &bytes).map_err(|e| format!("{}: {e}", tmp_path.display()))?;
     std::fs::rename(&tmp_path, &final_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp_path);

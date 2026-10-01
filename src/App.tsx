@@ -105,8 +105,7 @@ import {
   CONVERSATION_PIN_KEY,
   activeConversation,
   conversationContexts,
-  conversationPose,
-  dockScope, withDockOpen, toggleDockIn, onScopeChange, type DockScope, type DockOpenBy,
+  dockScope, withDockOpen, onScopeChange, type DockScope, type DockOpenBy,
   kindPill,
   migrateChatSurfaceOnce,
   pillKind,
@@ -321,6 +320,9 @@ import { ChromeSlot } from "./components/HullRail";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
+import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
+import { MonochatIsland } from "./components/MonochatIsland";
+import { MonochatContext } from "./components/MonochatContext";
 // The dock's body is fetched with its mount, not with the shell — see
 // `terminalMounted` below. `import type` is erased, so the handle's type
 // costs nothing.
@@ -422,6 +424,7 @@ import {
   type HealthQuery,
   type IntegrationHealth,
 } from "./lib/integrationHealth";
+import { integrationNeedsRepair, repairIntegration } from "./lib/integrationSetup";
 import {
   clearDrafterShadow,
   drafterModeKey,
@@ -489,9 +492,7 @@ import type { RunGraph } from "./lib/runner/schema";
 import { useModelCatalogs } from "./hooks/useModelCatalogs";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
-  backendLabel,
   defaultChoice as defaultBackendChoice,
-  normalizeChoice as normalizeBackendChoice,
   parseChoice as parseBackendChoice,
   type Backend,
   type BackendChoice,
@@ -560,9 +561,9 @@ const JoinDialog = lazy(() =>
 /** The unskippable first-run setup modal. Lazy is safe *because* the modal is
  *  now gated on `integrationReady` — it cannot render before the post-reveal
  *  probe answers, by which time this chunk is long since fetched. */
-const HookSetupModal = lazy(() =>
-  import("./components/HookSetupModal").then((m) => ({
-    default: m.HookSetupModal,
+const IntegrationSetupDialog = lazy(() =>
+  import("./components/IntegrationSetupDialog").then((m) => ({
+    default: m.IntegrationSetupDialog,
   })),
 );
 const HookConflictModal = lazy(() =>
@@ -588,7 +589,6 @@ import type {
   CommentType,
   CodexHookStatus,
   Companion,
-  HookStatus,
   InterceptionMode,
   ModeEvent,
   NewCommentRequest,
@@ -598,7 +598,6 @@ import type {
   ReviewSession,
   Section,
   SessionSummary,
-  SkillStatus,
   CombineBrief,
   CombinePreview,
   CombineSource,
@@ -679,6 +678,18 @@ const surfaceFallback =
   );
 
 function App() {
+  const [frontDoorOpen, setFrontDoorOpen] = useState(() => takeDockSeed(localStorage));
+  const [monochatVisible, setMonochatVisible] = useState(false);
+  const [monochatBusy, setMonochatBusy] = useState(false);
+  const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
+  const reportMonochatActivity = useCallback((key: string, active: boolean) => setMonochatForks(previous => {
+    if (previous.has(key) === active) return previous;
+    const next = new Set(previous); if (active) next.add(key); else next.delete(key); return next;
+  }), []);
+  useEffect(() => {
+    const subscriptions = ["fork-delta", "fork-done", "fork-error", "fork-cancelled"].map(event => listen<{sessionId: string; commentId: string}>(event, message => reportMonochatActivity(`${message.payload.sessionId}:${message.payload.commentId}`, event === "fork-delta")));
+    return () => { subscriptions.forEach(subscription => { void subscription.then(stop => stop()); }); };
+  }, [reportMonochatActivity]);
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   // Count of open header dropdowns (theme, mode, alerts, download). Folded into
@@ -747,16 +758,26 @@ function App() {
   // deliberately declined to do for you and must carry the way to do it, so the
   // state accepts the richer spec too.
   const [toast, setToast] = useState<string | ToastSpec | null>(null);
-  const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
-  const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
   const [codexHookStatus, setCodexHookStatus] =
     useState<CodexHookStatus | null>(null);
-  const [codexSkillStatus, setCodexSkillStatus] =
-    useState<SkillStatus | null>(null);
   // First-run setup modal: "setup" until an in-app install fully succeeds,
   // then "done" shows the one-time what-now explainer until dismissed.
   const [setupPhase, setSetupPhase] = useState<"setup" | "done">("setup");
   const [installError, setInstallError] = useState<string | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+  const installBusyRef = useRef(false);
+  const [installProgress, setInstallProgress] = useState<string | null>(null);
+  const [setupBackend, setSetupBackend] = useState<Backend | null>(null);
+  const [setupProject, setSetupProject] = useState<string | null>(null);
+  const [setupReviewInTerminal, setSetupReviewInTerminal] = useState(false);
+  const [dismissedSetup, setDismissedSetup] = useState<string | null>(null);
+  const setupContinuation = useRef<((ready: boolean) => void) | null>(null);
+  const requestSetup = useCallback((backend: Backend, projectPath: string | null = null): Promise<boolean> => {
+    if (setupContinuation.current || installBusyRef.current) return Promise.resolve(false);
+    setSetupPhase("setup"); setInstallError(null); setSetupBackend(backend);
+    setSetupProject(projectPath); setSetupReviewInTerminal(false);
+    return new Promise(resolve => { setupContinuation.current = resolve; });
+  }, []);
   const [mode, setMode] = useState<InterceptionMode>("active");
   const [decisionWindow, setDecisionWindow] =
     useState<PlanDecisionWindowEvent | null>(null);
@@ -1183,9 +1204,8 @@ function App() {
   // surfaces closed a conversation the user had deliberately left up. There is
   // one bit now, and `conversationContext.ts` decides WHICH conversation the
   // column is holding — the same shape `mainSurface` gave the center plate.
-  const [dockOpenBy, setDockOpenBy] = useState<DockOpenBy>(() => takeDockSeed(localStorage) ? { home: true } : {});
+  const [dockOpenBy, setDockOpenBy] = useState<DockOpenBy>({});
   const dockScopeRef = useRef<DockScope | null>(null);
-  const hasDockConversationRef = useRef(false);
   // The conversation the user asked to see as a ROOM rather than as the column
   // beside a surface — the kind, not a boolean, so the pose can be decided
   // before the context list exists (the mask is computed high up, and a read
@@ -1282,7 +1302,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── The front door ──────────────────────────────────────────────────────
+  // ── The floating launch composer (existing preference keys are retained) ──────────────────────────────────────────────────────
   // All three of these are PERSISTED, not plain useState. A half-typed prompt
   // has to survive a surface switch, a pane toggle and a reload — a front door
   // that eats your sentence is exactly the small betrayal this whole surface
@@ -1330,7 +1350,7 @@ function App() {
   // works by shaping long briefs first shouldn't re-pick it every session.
   const [frontDoorDest, setFrontDoorDest] = usePersistedState<LaunchDestination>(
     "redline.frontDoor.destination",
-    "plan",
+    "chat",
   );
   // WHICH harness ⏎ launches on. Sticky for the same reason the destination
   // is, and read by every door — the Drafter and the browser's "Send to
@@ -1341,24 +1361,14 @@ function App() {
       "redline.frontDoor.backend",
       defaultBackendChoice(),
     );
-  const { catalogs: modelCatalogs, errors: modelErrors, request: requestModels } = useModelCatalogs();
+  const { catalogs: modelCatalogs, errors: modelErrors, status: modelStatus, request: requestModels } = useModelCatalogs();
   const frontDoorBackend = useMemo(
-    () => normalizeBackendChoice(parseBackendChoice(frontDoorBackendRaw), modelCatalogs),
-    [frontDoorBackendRaw, modelCatalogs],
+    // Discovery can omit a pinned model. Never silently switch the user's pick.
+    () => parseBackendChoice(frontDoorBackendRaw),
+    [frontDoorBackendRaw],
   );
   // ── The chat room ───────────────────────────────────────────────────────
-  // Which conversation the room shows. PERSISTED for the same reason the
-  // door's sentence is: a chat is a place you come back to, and landing on a
-  // blank room after a restart would make it feel like a scratchpad instead.
-  const [chatId, setChatId] = usePersistedState<string | null>(
-    "redline.chat.id",
-    null,
-  );
-  // The chat list, for the door's recent-chat pills and the surface's title.
-  // App owns it (not the room) because the pills render on the FRONT DOOR,
-  // which is precisely where the room is not mounted.
-  const [chats, setChats] = useState<Companion[]>([]);
-  const [chatsLoaded, setChatsLoaded] = useState(false);
+  const { chatId, setChatId, chats, refreshChats } = useFrontDoorConversation();
   // The open conversation's name — the dock's tab label and the active-surface
   // cell's label, from one lookup.
   const currentChatIdRef = useRef(chatId);
@@ -1371,38 +1381,15 @@ function App() {
   const [chatSeed, setChatSeed] = useState<{
     companionId: string;
     text: string;
+    id?: string;
+    autoSend?: boolean;
+    target?: import("./lib/activeSurface").SurfaceInfo;
   } | null>(null);
   // The mint is in flight. Holds a placeholder so the PREVIOUS conversation
   // can't flash up in the half-second before the new one exists — the same
   // guard `drafterOpening` is for the Drafter.
   const [chatOpening, setChatOpening] = useState(false);
-  const refreshChats = useCallback(() => {
-    void invoke<Companion[]>("companion_list")
-      .then(setChats)
-      .catch(() => {
-        /* the list is an affordance, not a dependency */
-      })
-      .finally(() => setChatsLoaded(true));
-  }, []);
-  useEffect(() => {
-    refreshChats();
-  }, [refreshChats]);
-  // The room retitles itself a beat after the first reply, and renames/deletes
-  // happen inside it — either way the door's pills have to follow.
-  useEffect(() => {
-    const un = listen("companion-retitled", () => refreshChats());
-    return () => {
-      void un.then((f) => f());
-    };
-  }, [refreshChats]);
-
-  // The dock opened on the Companion with no conversation chosen. `chatId` is
-  // persisted and can be cleared independently (the last chat deleted, storage
-  // wiped), so land on the most recent conversation — coming back to a chat is
-  // the whole reason that id is persisted. Waits for the list to load, so an
-  // in-flight fetch is never mistaken for an empty one; with a genuinely empty
-  // list the dock offers to start the first one rather than minting one nobody
-  // asked for.
+  const chatCreation = useRef<Promise<Companion> | null>(null);
   // Belt and braces for the surface that moved into the dock: nothing in this
   // build selects `"chat"` any more and the boot migration rewrites the
   // persisted value, but a workspace manifest can still NAME a surface (its
@@ -1410,7 +1397,7 @@ function App() {
   useEffect(() => {
     if (mainSurface !== "chat") return;
     selectSurfaceRef.current("document");
-    setDockOpenBy(state => withDockOpen(state, "home", true));
+    setFrontDoorOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainSurface]);
 
@@ -1441,6 +1428,12 @@ function App() {
       : preflight?.providers?.[frontDoorBackend.backend]?.identity ?? "unresolved";
   useEffect(() => {
     if (preflight) requestModels(frontDoorBackend.backend, selectedModelIdentity);
+  }, [frontDoorBackend.backend, selectedModelIdentity, !!preflight, requestModels]);
+  useEffect(() => {
+    const refresh = () => { if (preflight && document.visibilityState === "visible") requestModels(frontDoorBackend.backend, selectedModelIdentity); };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
   }, [frontDoorBackend.backend, selectedModelIdentity, !!preflight, requestModels]);
 
   // Both read at LAUNCH time, from inside `launchPlan` — the same discipline
@@ -1901,21 +1894,17 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // ⌘J — toggle the discussion for the current surface. The voice panel IS
-  // the app's discussion surface now (voice-first, typed composer inside);
-  // the Companion's separate drawer UI is gone — its scope folded into the
-  // voice agent (voice.rs embeds the cross-surface map + write routes).
+  // ⌘J opens the front door; surface discussion controls stay local.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!isDockKey(e)) return;
       e.preventDefault();
-      // Surface-agnostic: one dock, one toggle. On a surface with no
-      // conversation of its own it is simply inert — `voiceDocked` below needs
-      // a context, not just the bit.
-      setDockOpenBy(state => toggleDockIn(state, dockScopeRef.current, hasDockConversationRef.current));
+      setFrontDoorOpen(value => !value);
     };
+    const toggleFromBrowser = () => setFrontDoorOpen(value => !value);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("redline:toggle-monochat", toggleFromBrowser);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleFromBrowser); };
   }, []);
   const codeReview = useReview();
   // The Localhost dashboard. Gated on the surface being selected: the scan
@@ -2199,12 +2188,6 @@ function App() {
     setDockOpenBy(state => onScopeChange(state, previous, currentDockScope));
   }, [currentDockScope]);
   useEffect(() => {
-    if (!dockOpen || chatId || chatOpening || !chatsLoaded) return;
-    const recent = chats[0];
-    if (recent) setChatId(recent.companionId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dockOpen, chatId, chatOpening, chatsLoaded, chats]);
-  useEffect(() => {
     if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
     let alive = true;
     void invoke<Section[]>("parse_markdown_sections", {
@@ -2221,14 +2204,8 @@ function App() {
   // that is precisely what lets the door open INTO a conversation instead of
   // navigating away to one.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
-  const conversationExpanded =
-    conversationPose({
-      open: dockOpen,
-      plateAtRest,
-    }) === "expanded";
-  useLayoutEffect(() => {
-    if (conversationExpanded) setPanelBreaks({ sidebar: false, pane: false });
-  }, [conversationExpanded]);
+  // The front door owns its full-screen layer; surface docks remain columns.
+  const conversationExpanded = false;
 
 
   // ---- Immersive surfaces ---------------------------------------------------
@@ -4609,7 +4586,6 @@ function App() {
     ],
   );
   const dockContext = activeConversation(dockContexts, conversationPin);
-  hasDockConversationRef.current = dockContext !== null;
   // Two poses, one thread. The plate is "at rest" only on the Front Door —
   // nothing of its own to cover — which is exactly what makes the door a way
   // IN to a conversation rather than a place you navigate away from.
@@ -5682,6 +5658,7 @@ function App() {
   // their own island, hold the ⏎ to carry through). This catches the door that
   // forgets — which is exactly how the Drafter shipped with zero preflight.
   const launchPlan = async (req: {
+    choice?: BackendChoice;
     origin: LaunchOrigin;
     prompt: string;
     projectPath: string | null;
@@ -5725,7 +5702,7 @@ function App() {
     const choice =
       kind === "extension"
         ? { backend: "claude-code" as const, model: null, effort: null }
-        : backendChoiceRef.current;
+        : req.choice ?? backendChoiceRef.current;
 
     // ── The launch boundary ─────────────────────────────────────────────────
     //
@@ -5746,7 +5723,7 @@ function App() {
     // the last derived readiness — a launch is not refused because a probe
     // errored, only because it answered with a blocker.
     const health = await integrationHealth
-      .ensure({ backend: choice.backend, extension: kind === "extension" })
+      .ensure({ backend: choice.backend, extension: kind === "extension", projectPath: req.projectPath })
       .catch((err) => {
         console.error("integration health failed at launch", err);
         return null;
@@ -5770,6 +5747,10 @@ function App() {
           )
         : readinessRef.current,
     );
+    if (gate.kind === "blocked" && gate.item.fix?.kind === "install-integration") {
+      if (await requestSetup(choice.backend, req.projectPath)) return launchPlan({ ...req, choice });
+      return { ok: false, reason: gate.item.label, blocked: gate.item };
+    }
     if (gate.kind === "blocked")
       return { ok: false, reason: gate.item.label, blocked: gate.item };
 
@@ -5877,19 +5858,6 @@ function App() {
     }
     setToast("Starting the dev server in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
-  };
-
-  // A card's screenshot just landed: remember it against that server's row so
-  // it survives a restart, and so a card whose server is DOWN still shows what
-  // it was serving. Best-effort — a lost thumbnail just means a recapture.
-  const persistDevServerThumb = (
-    projectPath: string,
-    port: number,
-    path: string,
-  ) => {
-    void invoke("dev_server_set_thumb", { projectPath, port, path }).catch(
-      () => {},
-    );
   };
 
   // "Open" on a Localhost card: bring the browser surface forward with a tab on
@@ -6458,32 +6426,32 @@ function App() {
   // path must not take the screen over with a post-install explainer the user
   // has already read once — it reports through the ordinary toast instead.
   const installIntegration = async (showExplainer = true, backend: Backend = frontDoorBackend.backend) => {
+    if (installBusyRef.current) return false;
+    installBusyRef.current = true; setInstallBusy(true); setInstallError(null);
     try {
-      if (backend === "cursor" || backend === "antigravity") {
-        await invoke("install_provider_integration", { backend });
-      } else if (backend === "codex") {
-        setCodexHookStatus(await invoke<CodexHookStatus>("install_codex_hook"));
-        await invoke("install_codex_profile");
-        setCodexSkillStatus(await invoke<SkillStatus>("install_codex_skill"));
-      } else {
-        setHookStatus(await invoke<HookStatus>("install_hook"));
-        setSkillStatus(await invoke<SkillStatus>("install_skill"));
+      if (backend === "codex" && !preflight?.codex?.usable) {
+        setInstallProgress("Installing the official Codex CLI…");
+        await invoke("install_codex_cli");
       }
-      integrationHealth.invalidate();
-      const health = await integrationHealth.refresh({ backend, extension: false });
-      applyHealthRef.current(health);
-      setInstallError(null);
-      if (showExplainer && backend === "claude-code") setSetupPhase("done");
-      else {
-        setToast(backend === "codex"
-          ? "Codex integration installed. Open /hooks in Codex and trust Redline’s Stop and UserPromptSubmit hooks if marked new or modified."
-          : `${backendLabel(backend)} integration installed`);
-        setTimeout(() => setToast(null), backend === "codex" ? 10000 : 4000);
-      }
+      const result = await repairIntegration(backend,
+        step => invoke(step.command, step.args),
+        async () => {
+          integrationHealth.invalidate();
+          const health = await integrationHealth.refresh({ backend, extension: false, projectPath: setupProject });
+          applyHealthRef.current(health);
+          return health.preflight;
+        }, setInstallProgress);
+      if (!result.verified) { setInstallError(result.errors.join("\n")); return false; }
+      const continuation = setupContinuation.current;
+      setupContinuation.current = null;
+      if (continuation) { setSetupBackend(null); continuation(true); }
+      else if (showExplainer) setSetupPhase("done");
       return true;
     } catch (error) {
-      setInstallError(String(error)); setToast(`Integration install failed: ${error}`);
+      setInstallError(String(error));
       return false;
+    } finally {
+      installBusyRef.current = false; setInstallBusy(false); setInstallProgress(null);
     }
   };
 
@@ -6496,14 +6464,18 @@ function App() {
   // variables happen to be null. Withholding is the whole point: integration
   // health now resolves AFTER the reveal, so without this the modal would
   // flash on every launch in the beat before the answer arrives.
-  const setupModalActive =
-    frontDoorBackend.backend === "claude-code" &&
-    integrationReady &&
-    !!hookStatus &&
-    !!skillStatus &&
-    (!hookStatus.installed ||
-      !skillStatus.installed ||
-      setupPhase === "done");
+  const selectedSetupBackend = setupBackend ?? frontDoorBackend.backend;
+  const setupFingerprint = JSON.stringify([selectedSetupBackend, preflight?.codex?.identity,
+    preflight?.codex?.authState, preflight?.codex?.usable,
+    preflight?.hook, preflight?.skill, preflight?.codexHook, preflight?.codexSkill, preflight?.codex?.profile,
+    preflight?.providers?.[selectedSetupBackend]?.hook, preflight?.providers?.[selectedSetupBackend]?.skill]);
+  const setupModalActive = !setupReviewInTerminal && (!!setupBackend || integrationReady &&
+    (setupPhase === "done" || (dismissedSetup !== setupFingerprint && integrationNeedsRepair(selectedSetupBackend, preflight))));
+  const dismissSetup = () => {
+    if (installBusyRef.current) return;
+    setDismissedSetup(setupFingerprint); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
+    const continuation = setupContinuation.current; setupContinuation.current = null; continuation?.(false);
+  };
   // First-run auto-start waits for the doors to finish — the tour's spotlight
   // is measured against plate geometry, and a coachmark pinned to a plate
   // that is still travelling points at nothing. This is the one legitimate
@@ -6512,6 +6484,7 @@ function App() {
   const tourActive =
     tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
   const browserOverlayActive =
+    frontDoorOpen ||
     !!sendConfirm ||
     showReadme ||
     showFeedback ||
@@ -6643,10 +6616,7 @@ function App() {
   const hookConflicts = useHookConflicts(healthQuery.backend, frontDoorResolvedProject, shellReady);
   const applyHealth = useCallback((health: IntegrationHealth) => {
     setPreflight(health.preflight);
-    setHookStatus(health.hook);
-    setSkillStatus(health.skill);
     setCodexHookStatus(health.codexHook);
-    setCodexSkillStatus(health.codexSkill);
     markOnce("rl:integration-ready");
   }, []);
 
@@ -6663,24 +6633,8 @@ function App() {
         .then((health) => {
           if (cancelled) return;
           applyHealth(health);
-          // Silent repair: `outdated` means present-but-stale (content drift
-          // after an app update, or a retired orphan dir). The user already
-          // consented to the install once via the setup modal, so refresh
-          // rather than re-raising it. First-run (not installed, not
-          // outdated) still gets the unskippable modal — which is why this
-          // runs after the reveal without gating anything: a modal that
-          // appears a beat later is fine, a shell that waits for a file diff
-          // is not.
-          if (health.skill.outdated) {
-            void invoke<SkillStatus>("install_skill").then(
-              (fresh) => {
-                if (cancelled) return;
-                setSkillStatus(fresh);
-                integrationHealth.invalidate();
-              },
-              (err) => console.error("install_skill failed", err),
-            );
-          }
+          // Drift is repaired through the same verified setup operation for
+          // every provider; no parallel background writer races the dialog.
         })
         .catch((err) => console.error("integration health failed", err));
     };
@@ -6732,6 +6686,7 @@ function App() {
     ({ preflight: pf, daemonOk, projectPath, backend, now }) => {
       const isExtension = projectKind(workspace, projectPath) === "extension";
       return {
+        requireIntegration: true,
         // The live `mode` beats the probe's snapshot: `mode-changed` lands
         // long before the re-probe it triggers resolves.
         preflight: pf ? { ...pf, mode } : null,
@@ -6982,6 +6937,7 @@ function App() {
     );
     setQuietOpen(true);
     void openDrafterWithMarkdown(prompt);
+    setFrontDoorOpen(false);
     setFrontDoorText("");
     setFrontDoorAttachments([]);
   };
@@ -6995,8 +6951,15 @@ function App() {
   // placeholder for the round-trip rather than letting the previous
   // conversation flash up in the half-second before the new one exists.
   const chatFromFrontDoor = async () => {
+    if (chatOpening || (chatSeed && chatSeed.autoSend !== false)) return;
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
     if (!prompt) return;
+    if (chatId) {
+      setChatSeed({ companionId: chatId, text: prompt, id: crypto.randomUUID(), target: activeSurface });
+      setFrontDoorOpen(true);
+      setFrontDoorText(""); setFrontDoorAttachments([]);
+      return;
+    }
     // Measured HERE, synchronously, while the island is still on screen — one
     // render later it is gone. This is the box the room springs out of.
     const island = document.querySelector(".rl-fd-island");
@@ -7014,7 +6977,7 @@ function App() {
     // column, it is going somewhere: the measured island rect above is the box
     // it grows out of, and `selectSurface` is deliberately not called, because
     // nothing is being navigated away from.
-    setDockOpenBy(state => withDockOpen(state, "home", true));
+    setFrontDoorOpen(true);
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
       // `companion_create`. It is a placeholder, not a name: the backend
@@ -7026,7 +6989,7 @@ function App() {
       setChatId(chat.companionId);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
-      setChatSeed({ companionId: chat.companionId, text: prompt });
+      setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface });
       localStorage.setItem(`rl.chatProject.${chat.companionId}`, JSON.stringify(frontDoorProject));
       refreshChats();
       setFrontDoorText("");
@@ -7035,7 +6998,7 @@ function App() {
       // The sentence is still in the composer — nothing was taken away.
       setToast(`Couldn't start the chat — ${e}`);
       setTimeout(() => setToast(null), 6000);
-      setDockOpenBy(state => withDockOpen(state, "home", false));
+      setFrontDoorOpen(false);
     } finally {
       setChatOpening(false);
     }
@@ -7045,18 +7008,20 @@ function App() {
   // `Chats ▾`). The dock comes forward wherever the user happens to be — a
   // conversation is not a place you navigate to any more.
   const openChat = (id: string) => {
+    setFrontDoorDest("chat");
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
-    if (!plateAtRest) openFrontDoor();
-    setDockOpenBy(state => withDockOpen(state, "home", true));
+    setFrontDoorOpen(true);
     setPanelBreaks({ sidebar: false, pane: false });
   };
   // The first conversation, from the dock's empty state. No seed and no
   // spring: the sentence-shaped way in is the Front Door's.
   const startChat = useCallback(() => {
     setChatOpening(true);
-    void invoke<Companion>("companion_create", { title: null })
+    const pending = chatCreation.current ?? invoke<Companion>("companion_create", { title: null });
+    chatCreation.current = pending;
+    void pending
       .then((chat) => {
         setChatId(chat.companionId);
         refreshChats();
@@ -7065,7 +7030,7 @@ function App() {
         setToast(`Couldn't start the chat — ${e}`);
         setTimeout(() => setToast(null), 6000);
       })
-      .finally(() => setChatOpening(false));
+      .finally(() => { if (chatCreation.current === pending) chatCreation.current = null; setChatOpening(false); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshChats]);
 
@@ -7116,7 +7081,7 @@ function App() {
           reprobe();
           return true;
         case "install-integration": {
-          const ok = await installIntegration(false, item.fix.backend);
+          const ok = await requestSetup(item.fix.backend ?? frontDoorBackend.backend);
           reprobe();
           return ok;
         }
@@ -7211,11 +7176,10 @@ function App() {
   // to deselect, the door is unreachable for anyone who has ever reviewed
   // anything — it would only ever show on a virgin install. This is that way.
   const openFrontDoor = useCallback(() => {
-    setActiveId(null);
-    setViewedVersionNumber(null);
-    selectSessions();
-    selectSurfaceRef.current("document");
-  }, [selectSessions]);
+    setFrontDoorDest("plan");
+    setFrontDoorOpen(true);
+    setFrontDoorFocus(n => n + 1);
+  }, []);
   // Fresh view of it for the mount-once ⌘⇧N listener.
   openFrontDoorRef.current = openFrontDoor;
 
@@ -7223,6 +7187,7 @@ function App() {
   // door is up, so the cross-surface mount race the seed buffer was built for
   // doesn't arise here — the nonce just tells it to take focus and drain.
   const startDraftFromLanding = useCallback(() => {
+    setFrontDoorOpen(true);
     setFrontDoorFocus((n) => n + 1);
   }, []);
   // Handed to the front-door composer AND to PromptDrafter; consuming resets
@@ -7317,7 +7282,7 @@ function App() {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
             if (d) navigateTo({ surface: d.id, tab: t.tab });
           },
-          toggleDock: () => setDockOpenBy(state => toggleDockIn(state, dockScopeRef.current, hasDockConversationRef.current)),
+          toggleDock: () => setFrontDoorOpen(value => !value),
           openConversation: (kind) => {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
@@ -7403,7 +7368,7 @@ function App() {
           />
         ) : (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <div ref={setChatRegularSlot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
+            <button type="button" onClick={() => setFrontDoorOpen(true)}>Open conversation</button>
           </div>
         )
       ) : (
@@ -7445,8 +7410,99 @@ function App() {
     </Suspense>
   ) : null;
 
+  const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
+
+  const renderMonochatComposer = (accessories?: React.ReactNode) => (
+              <FrontDoor
+                visible={shellReady && monochatVisible}
+                floating
+                autoFocusOnShow={frontDoorOpen}
+                chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
+                accessories={accessories}
+                text={frontDoorText}
+                onTextChange={setFrontDoorText}
+                choice={frontDoorProject}
+                onChoiceChange={setFrontDoorProject}
+                projectOptions={projectOptions}
+                resolvedProject={frontDoorResolvedProject}
+                attachments={frontDoorAttachments}
+                onAttachmentsChange={setFrontDoorAttachments}
+                combine={frontDoorCombine}
+                onCombineChange={setFrontDoorCombine}
+                combinePreview={combinePreview}
+                readiness={readiness}
+                onFix={applyReadinessFix}
+                // Only ITS launch: one pending state serves every door, so the
+                // front door must not render a card for the Drafter's launch.
+                pending={
+                  pendingLaunch?.origin === "front-door" ? pendingLaunch : null
+                }
+                onLaunch={launchFromFrontDoor}
+                // A refusal from App's own backstop gate, so the fix lands in
+                // the island rather than only in a corner toast.
+                refusal={frontDoorRefusal}
+                onDrafter={drafterFromFrontDoor}
+                onChat={() => void chatFromFrontDoor()}
+                chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
+                destination={frontDoorDest}
+                onDestinationChange={setFrontDoorDest}
+                backend={frontDoorBackend}
+                onBackendChange={setFrontDoorBackend}
+                modelCatalogs={modelCatalogs}
+                modelError={modelErrors[frontDoorBackend.backend]}
+                modelStatus={modelStatus[frontDoorBackend.backend]}
+                onRefreshModels={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)}
+                providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]}
+                onNeedModels={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)}
+                // Dismissing the flight pill retires the INDICATOR, nothing
+                // else: the plan keeps running in its tile and the composer —
+                // already blank, already usable — stays blank. No pay-back.
+                onCancelPending={() => setPendingLaunch(null)}
+                // The pill's other half: go watch it. Reveal the dock, focus
+                // the tile the plan is running in, and glow it once so the
+                // eye lands on the right one of fourteen.
+                onRevealPending={() => {
+                  const p = pendingLaunchRef.current;
+                  if (!p) return;
+                  setFrontDoorOpen(false);
+                  revealTerm();
+                  terminalsRef.current?.selectTab(p.terminalId);
+                  terminalsRef.current?.hailTerminal(p.terminalId);
+                }}
+                onHowItWorks={() => setHowItWorksOpen(true)}
+                onCreateProject={createFrontDoorProject}
+                focusNonce={frontDoorFocus}
+                consumeSeed={consumeLandingSeed}
+                // "Your harnesses" — the door is where a harness is entered
+                // (a contextual entry, never a header button). Hidden while
+                // inside one: a harness is a place, not a switcher — exit
+                // first. Inside one, the door wears the harness's hero.
+                harnesses={
+                  activeHarness
+                    ? []
+                    : harnessList.map((h) => ({ id: h.id, name: h.name }))
+                }
+                onEnterHarness={(id) => {
+                  const manifest = harnessList.find((h) => h.id === id);
+                  if (manifest) enterHarness(manifest);
+                }}
+                hero={activeHarness?.manifest.hero ?? null}
+                // Recent chats — the contextual way back into a conversation.
+                // Bounded: this is a way in, not an index; the room's own
+                // `Chats ▾` holds the full list.
+                chats={chats
+                  .slice(0, 4)
+                  .map((c) => ({ id: c.companionId, title: c.title }))}
+                onOpenChat={openChat}
+                // One native capture at a time, no session id — the voice
+                // panel owns the mic whenever it is open.
+                dictationEnabled={!dockOwnsMic && monochatVisible}
+              />
+  );
+
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
+    <MonochatContext.Provider value={monochatRouting}>
     <div className="h-full min-h-0 min-w-0 flex flex-col overflow-hidden">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
@@ -8255,14 +8311,12 @@ function App() {
               <ServersPane
                 scan={devServers.scan}
                 error={devServers.error}
-                active={serversOpen}
                 onRefresh={devServers.refresh}
                 onStop={devServers.stopServer}
                 onPlanStop={devServers.planStop}
                 projectOptions={projectOptions}
                 onRun={runDevServer}
                 onOpenUrl={openUrlInBrowser}
-                onThumbCaptured={persistDevServerThumb}
               />
             );
             const memoryBody = (
@@ -8472,102 +8526,10 @@ function App() {
                 </Suspense>
               )
             ) : (
-              // The front door: the resting state of the document plate any
-              // time no plan is selected. One headline, one prompt box, and ⏎
-              // launches a real plan-mode session in a real project. Typing
-              // anywhere lands in the composer (the landing listener above).
-              // Arrival needs no wiring here — `focusIntercepted` already
-              // selects the incoming session, so the Planning card is
-              // replaced by the review pane for free.
-              // The document slot holds ONE of two separate surfaces: the
-              // Front Door's composer, or the Drafter. They know nothing about
-              // each other — App decides which is in the slot, and owns the
-              // transition between them.
-              //
-              // `SpringSwap` mounts both for the length of the spring: the
-              // door fades back while the Drafter springs out of the box the
-              // island occupied. Without that overlap the door would vanish in
-              // a single frame, which is the whole-screen cut that read as
-              // janky navigation in every earlier attempt.
+              // The document plate has no composer. All launch paths open the
+              // persistent floating island without replacing the current work.
               frontDoorShowing ? (
-              <FrontDoor
-                visible={shellReady}
-                text={frontDoorText}
-                onTextChange={setFrontDoorText}
-                choice={frontDoorProject}
-                onChoiceChange={setFrontDoorProject}
-                projectOptions={projectOptions}
-                resolvedProject={frontDoorResolvedProject}
-                attachments={frontDoorAttachments}
-                onAttachmentsChange={setFrontDoorAttachments}
-                combine={frontDoorCombine}
-                onCombineChange={setFrontDoorCombine}
-                combinePreview={combinePreview}
-                readiness={readiness}
-                onFix={applyReadinessFix}
-                // Only ITS launch: one pending state serves every door, so the
-                // front door must not render a card for the Drafter's launch.
-                pending={
-                  pendingLaunch?.origin === "front-door" ? pendingLaunch : null
-                }
-                onLaunch={launchFromFrontDoor}
-                // A refusal from App's own backstop gate, so the fix lands in
-                // the island rather than only in a corner toast.
-                refusal={frontDoorRefusal}
-                onDrafter={drafterFromFrontDoor}
-                onChat={() => void chatFromFrontDoor()}
-                chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                destination={frontDoorDest}
-                onDestinationChange={setFrontDoorDest}
-                backend={frontDoorBackend}
-                onBackendChange={setFrontDoorBackend}
-                modelCatalogs={modelCatalogs}
-                modelError={modelErrors[frontDoorBackend.backend]}
-                providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]}
-                onNeedModels={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)}
-                // Dismissing the flight pill retires the INDICATOR, nothing
-                // else: the plan keeps running in its tile and the composer —
-                // already blank, already usable — stays blank. No pay-back.
-                onCancelPending={() => setPendingLaunch(null)}
-                // The pill's other half: go watch it. Reveal the dock, focus
-                // the tile the plan is running in, and glow it once so the
-                // eye lands on the right one of fourteen.
-                onRevealPending={() => {
-                  const p = pendingLaunchRef.current;
-                  if (!p) return;
-                  revealTerm();
-                  terminalsRef.current?.selectTab(p.terminalId);
-                  terminalsRef.current?.hailTerminal(p.terminalId);
-                }}
-                onHowItWorks={() => setHowItWorksOpen(true)}
-                onCreateProject={createFrontDoorProject}
-                focusNonce={frontDoorFocus}
-                consumeSeed={consumeLandingSeed}
-                // "Your harnesses" — the door is where a harness is entered
-                // (a contextual entry, never a header button). Hidden while
-                // inside one: a harness is a place, not a switcher — exit
-                // first. Inside one, the door wears the harness's hero.
-                harnesses={
-                  activeHarness
-                    ? []
-                    : harnessList.map((h) => ({ id: h.id, name: h.name }))
-                }
-                onEnterHarness={(id) => {
-                  const manifest = harnessList.find((h) => h.id === id);
-                  if (manifest) enterHarness(manifest);
-                }}
-                hero={activeHarness?.manifest.hero ?? null}
-                // Recent chats — the contextual way back into a conversation.
-                // Bounded: this is a way in, not an index; the room's own
-                // `Chats ▾` holds the full list.
-                chats={chats
-                  .slice(0, 4)
-                  .map((c) => ({ id: c.companionId, title: c.title }))}
-                onOpenChat={openChat}
-                // One native capture at a time, no session id — the voice
-                // panel owns the mic whenever it is open.
-                dictationEnabled={!dockOwnsMic}
-              />
+              <div className="rl-monochat-rest" aria-hidden="true"/>
               ) : null
             )}
           </article>
@@ -9746,7 +9708,7 @@ function App() {
             else if (source.conversationKind === "drafter") { setDrafterDraftId(source.conversationId); setDrafterShelfOpen(false); selectSurface("drafter"); }
             else { selectSurface("browser"); window.dispatchEvent(new CustomEvent("redline-open-conversation", { detail: source })); }
           } : undefined}
-          modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate planning CLI", detail: "Choose the executable used for planning.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : frontDoorBackend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} />}
+          modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate planning CLI", detail: "Choose the executable used for planning.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : frontDoorBackend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} />}
         />
       )}
       {/* Persistent and unobtrusive: it announces a ready release once per
@@ -9930,8 +9892,27 @@ function App() {
           <FeedbackModal onClose={() => setShowFeedback(false)} />
         </Suspense>
       )}
-      {chatId && (dockOpenBy.home || chatSeed) && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
+      <MonochatIsland
+        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
+        landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
+        surfaceKey={`${mainSurface}:${activeId ?? ""}:${drafterDraftId ?? ""}`}
+        onVisibilityChange={setMonochatVisible}
+        open={frontDoorOpen}
+        onOpenChange={setFrontDoorOpen}
+        context={activeSurface.label ?? activeSurface.kind}
+        busy={monochatBusy || monochatForks.size > 0}
+      >
+        <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
+        {!chatId && renderMonochatComposer()}
+      </MonochatIsland>
+      {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
+              composer={{ text: frontDoorText, onTextChange: setFrontDoorText, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: renderMonochatComposer }}
+              harness={frontDoorBackend}
+              target={activeSurface}
+              modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
+              onActivityChange={setMonochatBusy}
+              onSent={() => setFrontDoorOpen(true)}
               // Keyed by the thread: the composer draft is stored
               // per chat and `usePersistedState` reads its key
               // once, so switching conversations is a REMOUNT by
@@ -9946,28 +9927,31 @@ function App() {
               onQueuePlan={queuedChatPlans.arm}
               queuedInstruction={queuedChatPlans.queued[chatId]?.instruction ?? null}
               onCancelQueuedPlan={() => { queuedChatPlans.cancel(chatId); }}
-              onShowTerminal={id => { void showRawTerminal(id); }}
+              onShowTerminal={id => { setFrontDoorOpen(false); void showRawTerminal(id); }}
               onOpenPlan={id => { selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
               onFix={applyReadinessFix}
                             onSelectChat={openChat}
-              onEmpty={() => setChatId(null)}
+              onEmpty={() => { setChatId(null); setChatSeed(null); refreshChats(); }}
               // The agent's read-only file tools are scoped to
               // whatever folder the user is browsing; HOME when
               // there is none.
               cwd={
-                sidebarTab.kind === "folder" ? sidebarTab.id : null
+                activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null)
               }
-              dictationEnabled={!dockOwnsMic && !!chatRegularSlot}
+              dictationEnabled={!dockOwnsMic && monochatVisible}
               // Only in the room: shrink it to the column beside the door,
               // keeping the conversation up. The other way out is simply
               // going somewhere — `selectSurface` collapses the room and the
               // conversation comes with you.
-              onClose={closeDock}
+              onClose={() => setFrontDoorOpen(false)}
               seed={
                 chatSeed?.companionId === chatId
                   ? chatSeed.text
                   : null
               }
+              seedId={chatSeed?.id}
+              seedAutoSend={chatSeed?.autoSend}
+              seedTarget={chatSeed?.target}
               onSeedConsumed={() => setChatSeed(null)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
@@ -10035,26 +10019,33 @@ function App() {
           <HookConflictModal health={hookConflicts}/>
         </Suspense>
       )}
-      {setupModalActive && !hookConflicts.dialogOpen && hookStatus && skillStatus && (
+      {setupModalActive && !hookConflicts.dialogOpen && (
           <Suspense fallback={null}>
-          <HookSetupModal
-            hookConflictHealth={hookConflicts}
-            onReviewHookConflicts={hookConflicts.hasIssue ? hookConflicts.openDialog : undefined}
-            phase={
-              !hookStatus.installed ||
-              !skillStatus.installed
-                ? "setup"
-                : "done"
-            }
-            hookStatus={hookStatus}
-            skillStatus={skillStatus}
-            onInstall={() => { void installIntegration(true, "claude-code"); }}
-            onDismiss={() => setSetupPhase("setup")}
-            onShowHowItWorks={() => setHowItWorksOpen(true)}
+          <IntegrationSetupDialog
+            backend={selectedSetupBackend}
+            health={preflight}
+            busy={installBusy}
+            progress={installProgress}
+            done={setupPhase === "done"}
+            pending={!!setupContinuation.current}
+            onInstall={() => { void installIntegration(true, selectedSetupBackend); }}
+            onDismiss={dismissSetup}
+            onLocate={() => { void applyReadinessFix({ id: "codex-missing", state: "blocked", label: "Locate Codex", detail: "Choose the Codex executable", fix: { label: "Locate CLI", kind: "locate-codex" } }); }}
+            onReviewHooks={() => { void (async () => {
+              const binary = preflight?.codex?.path;
+              if (!binary) return;
+              const dock = await ensureTerminalReady();
+              const id = dock?.openSessionTerminal(setupProject);
+              if (!id) { setInstallError("Could not open the setup terminal. Retry, or open /hooks in your Codex terminal."); return; }
+              setSetupReviewInTerminal(true); setSetupBackend("codex"); setTermFullscreen(false); revealTerm();
+              const quoted = "'" + binary.replace(/'/g, "'\\''") + "'";
+              typeIntoTerminal(id, `${quoted}\r`, "Could not start Codex for hook review", null, true);
+            })(); }}
             error={installError}
           />
           </Suspense>
         )}
+      {setupReviewInTerminal && <div className="rl-setup-return" role="status"><span>Sign in if Codex asks, then open <code>/hooks</code> to review Redline’s hooks. Your work stays here.</span><button type="button" onClick={() => { setSetupReviewInTerminal(false); void installIntegration(true, "codex"); }}>Verify and continue</button><button type="button" onClick={() => { setSetupReviewInTerminal(false); dismissSetup(); }}>Later</button></div>}
       {howItWorksOpen && (
         <Suspense fallback={null}>
           <HowItWorksCard onClose={() => setHowItWorksOpen(false)} />
@@ -10071,15 +10062,7 @@ function App() {
           launch — but only after the hook/skill setup modal is out of the way,
           so the two never overlap. */}
       {(() => {
-        const setupActive =
-          integrationReady &&
-          !!hookStatus &&
-          !!skillStatus &&
-          (!hookStatus.installed ||
-            !skillStatus.installed ||
-            (codexHookStatus?.available &&
-              (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
-            setupPhase === "done");
+        const setupActive = setupModalActive;
         const show =
           tourOpen || (!onboardingDone && !setupActive && !bootAnimating);
         if (!show) return null;
@@ -10115,6 +10098,7 @@ function App() {
       )}
       </ErrorBoundary>
     </div>
+    </MonochatContext.Provider>
     </MenuOverlayProvider>
   );
 }

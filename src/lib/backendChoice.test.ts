@@ -46,6 +46,15 @@ describe("defaults", () => {
 });
 
 describe("the option lists", () => {
+  it("uses Claude's advertised capabilities rather than applying a global effort list", () => {
+    const catalogs = { "claude-code": [
+      { ...CATALOG[0], slug: "opus", efforts: ["low", "future-level"] },
+      { ...CATALOG[0], slug: "haiku", efforts: [] },
+    ] };
+    expect(effortsFor("claude-code", "opus", catalogs)).toEqual(["low", "future-level"]);
+    expect(effortsFor("claude-code", "haiku", catalogs)).toEqual([]);
+    expect(effortsFor("claude-code", "opus", {})).toEqual([]);
+  });
   it("uses stable planning aliases until the binary catalog answers, with shared efforts", () => {
     expect(modelsFor("claude-code", []).map((m) => m.value)).toEqual(
       ["opus", "sonnet", "haiku"],

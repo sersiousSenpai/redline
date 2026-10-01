@@ -16,14 +16,18 @@ mod browser_actions;
 mod browser_events;
 #[cfg(target_os = "macos")]
 mod browser_popup;
+mod browser_overlay;
 mod browser_workspace;
 mod bundle;
 mod classmem;
 mod claude_models;
+mod model_catalog;
 mod claude_proc;
 mod code;
 mod codehealth;
 mod codex_app_server;
+mod codex_conversation;
+mod monochat;
 mod codex_hook;
 mod codex_profile;
 mod confine;
@@ -2708,7 +2712,7 @@ fn backfill_from_transcript(
 }
 
 /// Classify a captured prompt as belonging to a Redline-managed project or an
-/// external `claude` session. Fact-based: a session running in a directory
+/// external harness session. Fact-based: a session running in a directory
 /// Redline already tracks as a project is ours; anything else is external.
 fn classify_prompt_origin(db: &db::Database, cwd: Option<&str>) -> ledger::Origin {
     if let Some(cwd) = cwd {
@@ -8575,6 +8579,11 @@ fn set_codex_bin_override(
 /// asks once per app session and caches. Live rather than hardcoded: the
 /// catalog ships with the ChatGPT app and changes under us.
 #[tauri::command(async)]
+async fn model_catalog_snapshot(backend: String, force: Option<bool>) -> Result<model_catalog::Snapshot, String> {
+    model_catalog::snapshot(backend, force.unwrap_or(false)).await
+}
+
+#[tauri::command(async)]
 async fn codex_model_catalog() -> Result<Vec<codex_app_server::CodexModel>, String> {
     codex_app_server::model_catalog().await
 }
@@ -10025,6 +10034,7 @@ fn selection_teardown_js() -> &'static str {
 fn browser_user_scripts(css: &str, selection_actions: bool) -> Vec<(String, bool)> {
     let mut out = vec![
         (include_str!("browser_signals.js").to_string(), true),
+        (include_str!("browser_frontdoor_shortcut.js").to_string(), false),
         (fullscreen_shim_js().to_string(), false),
         (newtab_shim_js().to_string(), false),
     ];
@@ -10426,7 +10436,8 @@ fn context_thread_tree(
     Ok(context::build_thread_tree(&store.database(), &kind, &id))
 }
 
-/// Read/write the "capture external claude sessions" toggle (default on).
+/// Read/write the capture toggle for external harness sessions (default on).
+/// The shared ingest observer applies it to every provider's prompt adapter.
 #[tauri::command]
 fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
     store
@@ -12112,6 +12123,8 @@ pub fn run() {
             hook_conflicts::unwatch_hook_conflicts,
             browser_events::browser_inspect,
             browser_events::browser_set_appearance,
+            browser_overlay::browser_overlay_attach,
+            browser_overlay::browser_overlay_regions,
             browser_actions::browser_action,
             browser_workspace::browser_protect_tabs,
             browser_workspace::browser_workspace_read,
@@ -12193,7 +12206,9 @@ pub fn run() {
             set_agent_seat,
             set_claude_bin_override,
             set_codex_bin_override,
+            codex_app_server::install_codex_cli,
             codex_model_catalog,
+            model_catalog_snapshot,
             claude_model_catalog,
             provider_model_catalog,
             install_provider_integration,
@@ -12462,6 +12477,9 @@ pub fn run() {
             companion::companion_create,
             companion::companion_list,
             companion::companion_get_thread,
+            companion::monochat_traces,
+            monochat::monochat_policy_get,
+            monochat::monochat_policy_set,
             companion::plan_origin_chat,
             companion::companion_graduations,
             companion::companion_rename,
@@ -13328,6 +13346,7 @@ mod tests {
         for set in [&on, &off] {
             assert!(set.iter().any(|(src, _)| src.contains("__redline_fs_installed")));
             assert!(set.iter().any(|(src, _)| src.contains("__redline_newtab_installed")));
+            assert!(set.iter().any(|(src, main_only)| src.contains("__redline_frontdoor_shortcut_installed") && !main_only));
         }
     }
 

@@ -10,6 +10,8 @@ import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import { WorkingIndicator } from "./WorkingIndicator";
+import { useMonochat } from "./MonochatContext";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 
 interface DrafterSidecarProps {
   draftId: string;
@@ -195,8 +197,9 @@ function DraftCommentCard({
  *  mid-turn remount restored from `fork_thread_status.partial` — which matters
  *  more here than anywhere, because collapsing and re-opening a card IS a
  *  remount — and the 10s self-heal for a lost terminal event. */
-function DraftThread({ draftId, commentId }: { draftId: string; commentId: string }) {
-  const [draft, setDraft] = useState("");
+export function DraftThread({ draftId, commentId }: { draftId: string; commentId: string }) {
+  const monochat = useMonochat();
+  const [draft, setDraft] = useSharedDraft(`rl.draftThread.${draftId}.${commentId}`);
 
   const turn = useAgentTurn<ThreadMessage>({
     surface: "fork",
@@ -219,8 +222,9 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
     // `Turns::begin` rejects-when-busy: no queue to type ahead into.
     queueing: false,
     sendFailPrefix: "Couldn't reach the discussion agent",
+    onSendFailed: text => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
     // …but `draft_thread_send` names the scope `draftId`, not `sessionId`.
-    buildSendArgs: (text) => ({ draftId, commentId, text }),
+    buildSendArgs: (text) => ({ draftId, commentId, text, harness: monochat?.harness, conversationId: monochat?.conversationId }),
     makeMessage: ({ id, role, body, status }) => ({
       id,
       sessionId: draftId,
@@ -233,6 +237,7 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
   });
   const { messages, liveText, status } = turn;
   const streaming = status === "streaming";
+  useEffect(() => { if (turn.loaded) monochat?.reportActivity?.(`${draftId}:${commentId}`, streaming); }, [turn.loaded, draftId, commentId, streaming, monochat?.reportActivity]);
 
   const send = (text: string) => {
     const trimmed = text.trim();

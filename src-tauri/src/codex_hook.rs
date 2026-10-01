@@ -24,6 +24,8 @@ pub struct CodexHookStatus {
     pub hooks_path: String,
     pub stop_found: bool,
     pub prompt_capture_found: bool,
+    pub trust: String,
+    pub trust_detail: Option<String>,
 }
 
 pub fn hooks_path() -> PathBuf {
@@ -78,6 +80,23 @@ fn get_status_at(path: &Path) -> CodexHookStatus {
         hooks_path: path.to_string_lossy().into_owned(),
         stop_found,
         prompt_capture_found,
+        trust: "unknown".into(),
+        trust_detail: None,
+    }
+}
+
+pub async fn probe_trust(status: &mut CodexHookStatus, bin: &str, project: Option<&str>) {
+    if !status.installed { return; }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let cwd = project.filter(|path| Path::new(path).is_dir()).unwrap_or(&home);
+    match crate::codex_app_server::inspect_request(bin, "hooks/list", json!({"cwds":[cwd]})).await {
+        Ok(value) => {
+            let hooks: Vec<&Value> = value["data"].as_array().into_iter().flatten().flat_map(|entry| entry["hooks"].as_array().into_iter().flatten()).filter(|hook| hook["sourcePath"].as_str() == Some(status.hooks_path.as_str()) && hook["command"].as_str().is_some_and(|command| command == stop_command() || command == capture_command())).collect();
+            let enabled = [stop_command(), capture_command()].iter().all(|command| hooks.iter().any(|hook| hook["command"].as_str() == Some(command) && hook["enabled"] == true && matches!(hook["trustStatus"].as_str(), Some("trusted" | "managed"))));
+            status.trust = if enabled { "trusted" } else { "needs-review" }.into();
+            if !enabled { status.trust_detail = Some("Review and enable Redline's Stop and UserPromptSubmit hooks in Codex /hooks.".into()); }
+        }
+        Err(error) => { status.trust = "unknown".into(); status.trust_detail = Some(error); }
     }
 }
 

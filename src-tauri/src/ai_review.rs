@@ -170,8 +170,8 @@ fn ai_review_args() -> Vec<String> {
 }
 
 /// Render the parsed diff with per-side line numbers — the same coordinates
-/// `relocate_quoted` will match `quoted` against. `pub(crate)`: the commit
-/// drafter (`ai_commit.rs`) shows its model the same rendering.
+/// `relocate_quoted` will match `quoted` against. Commit drafts use a smaller
+/// sampled rendering in `ai_commit.rs` to keep their interactive latency low.
 pub(crate) fn render_diff(diff: &[crate::review::DiffFile]) -> String {
     let mut out = String::new();
     for f in diff {

@@ -31,6 +31,9 @@ use serde::Serialize;
 use crate::db::Database;
 use crate::state::SessionStore;
 
+#[path = "devlaunch.rs"]
+mod launch;
+
 /// Redline's own daemon port — never a card.
 const DAEMON_PORT: u16 = 7676;
 /// How many non-project listeners we bother reporting.
@@ -512,6 +515,8 @@ pub struct ProjectProbe {
     pub deps: HashSet<String>,
     /// Script names only — the bodies never reach a shell, we re-derive them.
     pub scripts: HashSet<String>,
+    pub script_bodies: HashMap<String, String>,
+    pub declared_manager: Option<String>,
     pub has_cargo_toml: bool,
     pub cargo_name: Option<String>,
     pub has_pyproject: bool,
@@ -545,7 +550,16 @@ pub fn probe_project(root: &Path) -> ProjectProbe {
             }
             if let Some(map) = v.get("scripts").and_then(|s| s.as_object()) {
                 probe.scripts.extend(map.keys().cloned());
+                probe.script_bodies.extend(
+                    map.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|body| (k.clone(), body.to_string()))),
+                );
             }
+            probe.declared_manager = v
+                .get("packageManager")
+                .and_then(|v| v.as_str())
+                .and_then(launch::supported_manager)
+                .map(str::to_string);
         }
     }
     if let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) {
@@ -557,12 +571,14 @@ pub fn probe_project(root: &Path) -> ProjectProbe {
     probe.lockfile = [
         "pnpm-lock.yaml",
         "yarn.lock",
+        "bun.lock",
         "bun.lockb",
         "package-lock.json",
     ]
     .into_iter()
     .find(|f| root.join(f).exists())
     .map(|f| f.to_string());
+    launch::inherit_manager(root, &mut probe);
     probe
 }
 
@@ -783,7 +799,7 @@ fn package_manager(lockfile: Option<&str>) -> &'static str {
     match lockfile {
         Some("pnpm-lock.yaml") => "pnpm",
         Some("yarn.lock") => "yarn",
-        Some("bun.lockb") => "bun",
+        Some("bun.lockb" | "bun.lock") => "bun",
         _ => "npm",
     }
 }
@@ -806,12 +822,8 @@ pub fn derive_run_command(probe: Option<&ProjectProbe>, comm: &str, raw_args: &s
         if detect_runner(comm, raw_args).is_some_and(|(_, f)| f != family) {
             return raw_args.trim().to_string();
         }
-        let pm = package_manager(p.lockfile.as_deref());
-        if p.scripts.contains("dev") {
-            return format!("{pm} run dev");
-        }
-        if p.scripts.contains("start") {
-            return format!("{pm} run start");
+        if let Some(script) = launch::ranked_scripts(p, raw_args).first() {
+            return launch::script_command(p, script);
         }
         if p.has_cargo_toml {
             return "cargo run".to_string();
@@ -880,6 +892,59 @@ pub struct DevServerScan {
     pub running: Vec<RunningServer>,
     pub recent: Vec<RecentServer>,
     pub others: Vec<OtherListener>,
+    pub redline: Vec<RedlineService>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RedlineService {
+    pub port: u16,
+    pub role: String,
+}
+
+fn frontend_port(app: &tauri::AppHandle) -> Option<u16> {
+    // Use the effective Tauri config, including dev-time overrides. Packaged
+    // Redline has no frontend server; port 1420 then belongs to anyone.
+    tauri::is_dev()
+        .then(|| {
+            app.config()
+                .build
+                .dev_url
+                .as_ref()
+                .and_then(|url| url.port_or_known_default())
+        })
+        .flatten()
+}
+
+fn service_role(
+    listener: &RawListener,
+    own_pid: u32,
+    frontend: Option<u16>,
+) -> Option<&'static str> {
+    if listener.pid == own_pid || listener.port == DAEMON_PORT {
+        Some("App service")
+    } else if Some(listener.port) == frontend {
+        Some("App frontend")
+    } else {
+        None
+    }
+}
+
+fn protect_services(
+    plan: &StopPlan,
+    listeners: &[RawListener],
+    own_pid: u32,
+    frontend: Option<u16>,
+) -> Result<(), String> {
+    if listeners
+        .iter()
+        .any(|l| service_role(l, own_pid, frontend).is_some() && plan.pids.contains(&l.pid))
+    {
+        return Err(
+            "This process keeps Redline running and can't be stopped from Localhost.".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Split remembered rows into the ones worth showing as "recent": drop the ones
@@ -926,13 +991,16 @@ fn run_capture(program: &str, args: &[String]) -> Result<String, String> {
 
 /// One sweep of the machine. See the module header for the spawn budget.
 #[tauri::command(async)]
-pub fn dev_servers_scan(store: tauri::State<'_, SessionStore>) -> Result<DevServerScan, String> {
+pub fn dev_servers_scan(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<DevServerScan, String> {
     let db = store.database();
-    scan_with(&db, std::process::id())
+    scan_with(&db, std::process::id(), frontend_port(&app))
 }
 
 /// The scan body, with the process-id injected so tests can drive it.
-fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
+fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevServerScan, String> {
     // 1 — who is listening.
     let listeners_out = run_capture(
         "lsof",
@@ -943,7 +1011,28 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
             "-Fpcn".into(),
         ],
     )?;
-    let listeners = parse_lsof_listeners(&listeners_out, own_pid);
+    let all_listeners = parse_listener_fields(&listeners_out, None);
+    let mut redline: Vec<RedlineService> = all_listeners
+        .iter()
+        .filter_map(|l| {
+            service_role(l, own_pid, frontend).map(|role| RedlineService {
+                port: l.port,
+                role: role.into(),
+            })
+        })
+        .collect();
+    redline.sort_by_key(|s| s.port);
+    redline.dedup_by_key(|s| s.port);
+    // A protected process may own other ports too; none of them are cards.
+    let protected_pids: HashSet<u32> = all_listeners
+        .iter()
+        .filter(|l| service_role(l, own_pid, frontend).is_some())
+        .map(|l| l.pid)
+        .collect();
+    let listeners: Vec<_> = all_listeners
+        .into_iter()
+        .filter(|l| !protected_pids.contains(&l.pid))
+        .collect();
 
     // Group ports per pid up front: one process is ONE card, so a Vite dev
     // server's HMR socket can't mint a second one.
@@ -1012,7 +1101,7 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
         let root = cwds
             .get(pid)
             .and_then(|cwd| resolve_project(cwd, &known, home.as_deref(), dir_has_root_marker));
-        let Some(root) = root else {
+        let Some(mut root) = root else {
             // Not a project — a compact row, and crucially no filesystem probe.
             if others.len() < MAX_OTHERS {
                 others.push(OtherListener {
@@ -1023,6 +1112,18 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
             }
             continue;
         };
+        // Keep a workspace app's launch directory. A command from apps/web's
+        // manifest cannot be restarted in the registry's monorepo root.
+        if let Some(cwd) = cwds.get(pid) {
+            if let Some(package) = Path::new(cwd)
+                .ancestors()
+                .take(MAX_WALK_UP + 1)
+                .take_while(|dir| dir.starts_with(&root))
+                .find(|dir| dir.join("package.json").is_file() || dir.join("manage.py").is_file())
+            {
+                root = package.to_path_buf();
+            }
+        }
         let args = args_by_pid.get(pid).cloned().unwrap_or_default();
         // The repo is this process's cwd — but a neighbor is not a dev server.
         // Same compact row as the no-project branch, and the same point: no
@@ -1079,7 +1180,12 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
     others.sort_by(|a, b| a.port.cmp(&b.port));
 
     let _ = db.prune_dev_servers(KEEP_ROWS);
-    let rows = db.list_dev_servers(MAX_RECENT * 2).unwrap_or_default();
+    let rows = db
+        .list_dev_servers(MAX_RECENT * 2)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.port != DAEMON_PORT && Some(r.port) != frontend)
+        .collect::<Vec<_>>();
     // Carry each running card's stored thumbnail across (the row is the durable
     // home of a capture; the scan itself has no image state).
     let thumbs: HashMap<(String, u16), Option<String>> = rows
@@ -1109,6 +1215,7 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
         running,
         recent,
         others,
+        redline,
     })
 }
 
@@ -1128,8 +1235,8 @@ pub fn dev_server_set_thumb(
         .map_err(|e| e.to_string())
 }
 
-/// The manifest facts needed by the project launch dialog. No script bodies
-/// are exposed: a quick pick invokes a script by name through its package manager.
+/// The manifest facts and ranked commands needed by the project launch dialog.
+/// Bodies explain suggestions; execution invokes the script by its quoted name.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeView {
@@ -1139,12 +1246,14 @@ pub struct ProbeView {
     pub scripts: Vec<String>,
     pub exists: bool,
     pub package_manager: String,
+    pub suggestions: Vec<launch::LaunchOption>,
 }
 
 #[tauri::command(async)]
 pub fn dev_server_probe(project_path: String) -> ProbeView {
     let root = Path::new(&project_path);
     let probe = probe_project(root);
+    let suggestions = launch::suggestions(root, &probe);
     let mut scripts: Vec<String> = probe.scripts.iter().cloned().collect();
     scripts.sort();
     ProbeView {
@@ -1154,10 +1263,14 @@ pub fn dev_server_probe(project_path: String) -> ProbeView {
             .or_else(|| probe.cargo_name.clone())
             .unwrap_or_else(|| probe.dir_name.clone()),
         stack: detect_stack(Some(&probe), "", ""),
-        run_command: derive_run_command(Some(&probe), "", ""),
+        run_command: suggestions
+            .first()
+            .map(|s| s.command.clone())
+            .unwrap_or_default(),
         scripts,
         exists: root.is_dir(),
-        package_manager: package_manager(probe.lockfile.as_deref()).into(),
+        package_manager: launch::manager(&probe).into(),
+        suggestions,
     }
 }
 
@@ -1197,7 +1310,12 @@ struct StopSnapshot {
     identities: HashMap<u32, ProcIdentity>,
 }
 
-fn prepare_stop(pid: u32, port: u16, project_path: Option<&str>) -> Result<StopSnapshot, String> {
+fn prepare_stop(
+    pid: u32,
+    port: u16,
+    project_path: Option<&str>,
+    frontend: Option<u16>,
+) -> Result<StopSnapshot, String> {
     let (procs, identities) = process_snapshot()?;
     if !procs.contains_key(&std::process::id()) {
         return Err("could not inspect Redline’s process ancestry".into());
@@ -1243,16 +1361,18 @@ fn prepare_stop(pid: u32, port: u16, project_path: Option<&str>) -> Result<StopS
         project.as_deref(),
         &cwds,
     )?;
+    protect_services(&plan, &listeners, std::process::id(), frontend)?;
     Ok(StopSnapshot { plan, identities })
 }
 
 #[tauri::command(async)]
 pub fn dev_server_stop_plan(
+    app: tauri::AppHandle,
     pid: u32,
     port: u16,
     project_path: Option<String>,
 ) -> Result<StopPlan, String> {
-    Ok(prepare_stop(pid, port, project_path.as_deref())?.plan)
+    Ok(prepare_stop(pid, port, project_path.as_deref(), frontend_port(&app))?.plan)
 }
 
 /// Signal only snapshot members whose start identity still matches. Re-check
@@ -1291,14 +1411,14 @@ fn execute_stop(
     pid: u32,
     port: u16,
     project_path: Option<&str>,
+    frontend: Option<u16>,
 ) -> Result<(StopPlan, usize), String> {
-    let snapshot = prepare_stop(pid, port, project_path)?;
+    let snapshot = prepare_stop(pid, port, project_path, frontend)?;
     // A dry run is advisory only. Check the card's claim again immediately
     // before the first signal, after the slower ancestry/cwd enrichment.
-    if !stop_listeners()?
-        .iter()
-        .any(|l| l.pid == pid && l.port == port)
-    {
+    let listeners = stop_listeners()?;
+    protect_services(&snapshot.plan, &listeners, std::process::id(), frontend)?;
+    if !listeners.iter().any(|l| l.pid == pid && l.port == port) {
         return Err(format!("that server is no longer on :{port}"));
     }
     let (_, current) = process_snapshot()?;
@@ -1354,12 +1474,13 @@ fn execute_stop(
 
 #[tauri::command(async)]
 pub fn dev_server_stop(
+    app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,
     pid: u32,
     port: u16,
     project_path: Option<String>,
 ) -> Result<(), String> {
-    let (plan, count) = execute_stop(pid, port, project_path.as_deref())?;
+    let (plan, count) = execute_stop(pid, port, project_path.as_deref(), frontend_port(&app))?;
     let detail = format!(
         "root {} ({}), {count} processes signalled, port :{port}",
         plan.root, plan.root_label
@@ -1377,6 +1498,44 @@ pub fn dev_server_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redline_services_are_protected_even_as_collateral_processes() {
+        let frontend = RawListener {
+            pid: 20,
+            port: 1420,
+            comm: "node".into(),
+        };
+        assert_eq!(
+            service_role(&frontend, 99, Some(1420)),
+            Some("App frontend")
+        );
+        assert_eq!(service_role(&frontend, 99, None), None);
+        let daemon = RawListener {
+            pid: 99,
+            port: 7676,
+            comm: "redline".into(),
+        };
+        let plan = StopPlan {
+            root: 10,
+            root_label: "npm".into(),
+            pids: vec![10, 20, 21],
+            collateral_ports: vec![1420],
+        };
+        assert!(protect_services(&plan, &[frontend.clone(), daemon], 99, Some(1420)).is_err());
+        assert!(protect_services(&plan, &[frontend], 99, None).is_ok());
+        assert!(protect_services(
+            &plan,
+            &[RawListener {
+                pid: 21,
+                port: 7676,
+                comm: "redline".into()
+            }],
+            99,
+            None
+        )
+        .is_err());
+    }
 
     fn proc_tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, ProcRow> {
         rows.iter()
@@ -1708,7 +1867,7 @@ else:
             let values: Vec<&str> = line.split_whitespace().collect();
             let pid: u32 = values[0].parse().unwrap();
             let port: u16 = values[1].parse().unwrap();
-            let snapshot = prepare_stop(pid, port, None).unwrap();
+            let snapshot = prepare_stop(pid, port, None, None).unwrap();
             fixture.identities = snapshot
                 .plan
                 .pids
@@ -1728,7 +1887,7 @@ else:
                 "dry run sent no signal"
             );
             let start = std::time::Instant::now();
-            let (plan, count) = execute_stop(pid, port, None).unwrap();
+            let (plan, count) = execute_stop(pid, port, None, None).unwrap();
             assert_eq!(plan.root, fixture.child.id());
             assert!(count >= 1);
             if mode == "ignore" {
@@ -2302,14 +2461,14 @@ else:
             return; // no lsof on this box — nothing to assert
         }
         let db = Database::open_in_memory().unwrap();
-        let scan = scan_with(&db, std::process::id()).expect("a live scan must not error");
+        let scan = scan_with(&db, std::process::id(), None).expect("a live scan must not error");
 
         // A wrong lsof flag means empty stdout with a non-zero status, which
         // run_capture still surfaces as Ok("") — an invisibly empty dashboard.
         // Hold a loopback socket and sweep WITHOUT excluding this process: a
         // correct invocation must see at least the listener we planted.
         let planted = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let seeded = scan_with(&Database::open_in_memory().unwrap(), u32::MAX)
+        let seeded = scan_with(&Database::open_in_memory().unwrap(), u32::MAX, None)
             .expect("a live scan must not error");
         assert!(
             !seeded.running.is_empty() || !seeded.others.is_empty(),

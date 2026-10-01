@@ -41,7 +41,7 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
             let selectors = payload.get("selectors")?.as_array()?;
             if selectors.len() > 8 || selectors.iter().any(|selector| selector.as_str().is_none_or(|s| s.len() > 4096)) { return None; }
         }
-        "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen"].contains(&value.get("value")?.as_str()?) { return None; } }
+        "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door"].contains(&value.get("value")?.as_str()?) { return None; } }
         "focus" | "interaction" => {}
         _ => return None,
     }
@@ -62,6 +62,13 @@ fn signal_for_pane(raw: &str) -> Option<Value> {
             .is_some_and(|value| value["kind"] == "inspect"));
     tracing::warn!(bytes = raw.len(), inspector, "rejected browser page signal");
     inspector.then(|| serde_json::json!({ "kind": "inspect-error", "value": "Element picking isn't available on this page" }))
+}
+
+fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
+    let value = signal_for_pane(raw)?;
+    // Subframes may summon the front door. All other browser actions and
+    // page-state updates remain restricted to the main frame.
+    (main_frame || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
 }
 #[cfg(target_os = "macos")]
 mod native {
@@ -84,7 +91,6 @@ mod native {
         unsafe impl WKScriptMessageHandler for BrowserSignals {
             #[unsafe(method(userContentController:didReceiveScriptMessage:))]
             unsafe fn receive(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
-                if !message.frameInfo().isMainFrame() { return; }
                 let mut throttle = self.ivars().throttle.borrow_mut();
                 if throttle.0.elapsed().as_secs() >= 1 { *throttle = (Instant::now(), 0); }
                 if throttle.1 >= 60 { return; }
@@ -92,7 +98,7 @@ mod native {
                 drop(throttle);
                 let body = message.body();
                 let Some(raw) = body.downcast_ref::<NSString>() else { return; };
-                let Some(mut value) = signal_for_pane(&raw.to_string()) else { return; };
+                let Some(mut value) = signal_for_frame(&raw.to_string(), message.frameInfo().isMainFrame()) else { return; };
                 if value["kind"] == "interaction" || value["kind"] == "shortcut" { note_input(&self.ivars().label); }
                 value["label"] = Value::String(self.ivars().label.clone());
                 let _ = self.ivars().app.emit_to("main", "browser-page-event", value);
@@ -163,7 +169,21 @@ mod tests {
         assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-focus"}"#).is_none());
         assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-video-screen"}"#).is_some());
         assert!(parse_signal(r#"{"kind":"focus","command":"read_file"}"#).unwrap().get("command").is_none());
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-monochat"}"#).is_some());
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"open-front-door"}"#).is_some());
         assert!(!browser_label("main")); assert!(!browser_label("browser-"));
+    }
+
+    #[test]
+    fn subframes_can_only_summon_the_front_door() {
+        assert!(signal_for_frame(r#"{"kind":"shortcut","value":"open-front-door"}"#, false).is_some());
+        for raw in [
+            r#"{"kind":"shortcut","value":"close-tab"}"#,
+            r#"{"kind":"shortcut","value":"toggle-monochat"}"#,
+            r#"{"kind":"tabs","value":"https://example.org"}"#,
+            r#"{"kind":"inspect","value":{"command":"read_file"}}"#,
+        ] { assert!(signal_for_frame(raw, false).is_none()); }
+        assert!(signal_for_frame(r#"{"kind":"shortcut","value":"close-tab"}"#, true).is_some());
     }
 
     #[test]

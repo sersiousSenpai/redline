@@ -1,0 +1,77 @@
+.rl-frontdoor-dock { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); width: 160px; height: 40px; z-index: 55; pointer-events: none; }
+.rl-monochat-notch { position: relative; display: grid; place-items: center; width: 160px; height: 40px; padding: 0; border: 0; border-radius: 22px; background: transparent; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
+.rl-monochat-notch[data-hidden="true"] { visibility: hidden; pointer-events: none; }
+.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 4px; display: flex; align-items: center; justify-content: center; gap: 9px; width: 144px; height: 32px; border: 1px solid var(--color-rule); border-radius: 18px; color: var(--color-ink); font-size: 11px; background: var(--color-bg-elevated); box-shadow: 0 2px 12px #0002; transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
+.rl-monochat-signal { display: flex; gap: 3px; align-items: center; height: 13px; }
+.rl-monochat-signal i { width: 2px; height: 7px; border-radius: 2px; background: var(--color-info); }
+.rl-monochat-signal i:nth-child(2) { height: 12px; background: var(--color-success); }
+.rl-monochat-signal i:nth-child(3) { height: 9px; background: var(--color-selection); }
+.rl-monochat-notch:hover .rl-portal-membrane, .rl-monochat-notch:focus-visible .rl-portal-membrane { border-color: var(--color-info); }
+.rl-monochat-notch:focus-visible { outline: 1px solid var(--color-info); outline-offset: -3px; }
+.rl-monochat-notch[data-busy="true"] .rl-monochat-signal { animation: rl-portal-work 1.8s ease-in-out infinite; }
+.rl-frontdoor-focus { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center; pointer-events: none; visibility: hidden; }
+.rl-frontdoor-focus[data-visible="true"] { visibility: visible; }
+.rl-frontdoor-focus::before { content: ""; position: absolute; inset: 0; background: var(--color-paper); opacity: 0; pointer-events: none; transition: opacity 220ms ease-out; }
+.rl-frontdoor-focus[data-open="true"] { pointer-events: auto; }
+.rl-frontdoor-focus[data-open="true"]::before { opacity: 1; }
+.rl-monochat { position: relative; width: min(800px, calc(100vw - 48px)); height: min(760px, calc(100dvh - 100px)); color: var(--color-ink); pointer-events: auto; }
+.rl-frontdoor-focus[data-visible="false"] .rl-monochat { pointer-events: none; }
+/* Entry and focused chat share geometry so a click cannot move the caret. */
+.rl-monochat-content, .rl-monochat-conversation { height: 100%; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.rl-monochat-content { outline: none; }
+.rl-frontdoor-return { position: fixed; left: 50%; bottom: var(--portal-return-bottom, 12px); transform: translateX(-50%); width: 144px; height: 32px; border-radius: 18px; display: grid; place-items: center; background: var(--color-bg-elevated); border: 1px solid var(--color-rule); color: var(--color-ink-muted); cursor: pointer; z-index: 2; }
+.rl-frontdoor-return:hover, .rl-frontdoor-return:focus-visible { color: var(--color-ink); border-color: var(--color-info); }
+.rl-monochat [data-chat-toolbar] { display: none; }
+.rl-monochat[data-pose="entry"] [data-chat-messages] { display: none; }
+.rl-monochat[data-pose="entry"] [data-chat-room] { justify-content: center; }
+.rl-monochat [data-chat-composer] { flex-shrink: 0; }
+@keyframes rl-portal-work { 50% { opacity: .35; } }
+@media (max-width: 640px) { .rl-monochat { width: calc(100vw - 24px); height: calc(100dvh - 88px); } }
+@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus::before, .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
+.rl-frontdoor-focus[data-reduced="true"]::before, .rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
+.rl-monochat-observability { font-size: 10px; }
+.rl-monochat-trace-toggle { display: flex; gap: 5px; align-items: center; border: 0; background: none; color: var(--color-ink-muted); cursor: pointer; }
+.rl-monochat-traces { position: absolute; inset: 45px 12px 12px; z-index: 3; padding: 15px; border: 1px solid var(--color-rule); border-radius: 14px; background: var(--color-bg-elevated); box-shadow: 0 12px 40px #0004; overflow: auto; }
+.rl-monochat-trace-summary { display: flex; flex-direction: column; gap: 4px; padding-bottom: 12px; }
+.rl-monochat-trace-row { display: grid; gap: 4px; padding: 11px 0; border-top: 1px solid var(--color-rule); overflow-wrap: anywhere; }
+.rl-monochat-trace-row small { color: var(--color-ink-muted); }
+.rl-monochat-policy { font-size: 11px; margin: 8px 0; color: var(--color-ink-muted); }
+.rl-monochat-policy summary { cursor: pointer; color: var(--color-ink); }
+.rl-monochat-policy p { line-height: 1.5; margin: 8px 0; }
+.rl-monochat-policy fieldset { border: 0; padding: 0; display: grid; gap: 9px; }
+.rl-monochat-policy label { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.rl-monochat-policy input { width: 120px; padding: 5px 7px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink); }
+.rl-monochat-policy button { justify-self: start; border: 1px solid var(--color-rule); border-radius: 6px; padding: 5px 9px; color: var(--color-ink); }
+.rl-setup-return { position: fixed; z-index: 75; left: 50%; top: 48px; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; width: min(780px, 90vw); padding: 14px 18px; background: var(--color-bg-elevated); color: var(--color-ink); border: 1px solid var(--color-info); border-radius: 14px; box-shadow: 0 12px 40px #0005; font-size: 12px; }
+.rl-setup-return button { flex-shrink: 0; }
+.rl-monochat .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; max-height: 100%; overflow-y: auto; overscroll-behavior: contain; flex-shrink: 0; margin: 0; padding: 0 16px 14px; opacity: 1; animation: none; justify-content: flex-start; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 8px 2px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; transform: none; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-input { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
+.rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink) 68%, transparent); }
+.rl-monochat .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
+.rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
+.rl-monochat .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
+.rl-monochat .rl-fd-go { width: 34px; height: 34px; border-radius: 50%; }
+.rl-monochat .rl-composer-accessories { display: contents; }
+.rl-monochat .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
+.rl-monochat .rl-monochat-trace-toggle svg { width: 14px; height: 14px; }
+.rl-monochat .rl-fd-strip { margin-top: 10px; }
+.rl-monochat [data-chat-room] { background: transparent !important; }
+.rl-monochat .rl-floating-composer > * { position: static; }
+.rl-monochat .rl-floating-composer .rl-fd-island { position: static; }
+
+.rl-monochat .rl-floating-composer.rl-frontdoor { padding: 0 8px 8px; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px 20px 12px; border: 1px solid var(--color-rule); border-radius: 24px; background: var(--color-bg-elevated); }
+.rl-monochat .rl-fd-strip { display: none; }
+.rl-monochat-rest { flex: 1; min-height: 0; }
+
+.rl-monochat-conversation { justify-content: center; }
+.rl-frontdoor-chat-slot[hidden] { display: none; }
+.rl-monochat [data-chat-empty="true"] { justify-content: center; }
+.rl-monochat [data-chat-empty="true"] [data-chat-messages] { display: none; }
+
+/* The entrance occupies the footer's center without adding a row or height.
+   On narrow windows the existing groups scroll within their own half. */
+.rl-footer-status, .rl-footer-actions { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.rl-footer-status::-webkit-scrollbar, .rl-footer-actions::-webkit-scrollbar { display: none; }
+.rl-footer-status > *, .rl-footer-actions > * { flex-shrink: 0; }

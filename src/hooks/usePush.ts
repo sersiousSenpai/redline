@@ -120,6 +120,7 @@ export function usePush(repo: string | null, reviewId: string | null) {
     const id = reviewIdRef.current;
     if (!id) return null;
     setDrafting(true);
+    setError(null);
     try {
       return await invoke<CommitDraft>("ai_commit_draft", { reviewId: id });
     } catch (err) {

@@ -20,6 +20,9 @@ import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { toolbarPose, type ToolbarPose } from "../lib/toolbarPose";
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/seatAssign";
 import { usePersistedState } from "../theme/usePersistedState";
+import { BrowserDialog } from "./BrowserSurfaces";
+import { ComposerMenu } from "./ComposerMenu";
+import { MonochatTrace } from "./MonochatTrace";
 import { useMenuOverlay } from "./menuOverlay";
 import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
@@ -56,6 +59,12 @@ export interface ChatPlanReceipt { status: "starting" | "planning" | "error" | "
 export interface ChatPlanRequest { companionId: string; messages: ContinuationMessage[]; instruction: string; project: ProjectChoice; title: string }
 
 export interface ChatRoomProps {
+  composer?: { text: string; onTextChange: React.Dispatch<React.SetStateAction<string>>; attachments?: string[]; onAttachmentsConsumed?: () => void; project?: ProjectChoice; render: (actions: ReactNode) => ReactNode };
+  harness?: import("../lib/backendChoice").BackendChoice;
+  target?: import("../lib/activeSurface").SurfaceInfo;
+  modelControls?: React.ReactNode;
+  onActivityChange?: (busy: boolean) => void;
+  onSent?: () => void;
   /** The chat on screen. The parent remounts on change. */
   companionId: string;
   /** Switch to another chat, or to a freshly created one. */
@@ -71,6 +80,9 @@ export interface ChatRoomProps {
    *  thread. Sending from here means the optimistic bubble and the persisted
    *  row are the same lifecycle. */
   seed?: string | null;
+  seedId?: string;
+  seedAutoSend?: boolean;
+  seedTarget?: import("../lib/activeSurface").SurfaceInfo;
   /** The seed was sent — clear it, so a remount can't send it twice. */
   onSeedConsumed?: () => void;
   /** Working directory for the spawn (the agent's read-only file tools). */
@@ -91,6 +103,12 @@ export interface ChatRoomProps {
 }
 
 export function ChatRoom({
+  composer,
+  harness,
+  target,
+  modelControls,
+  onActivityChange,
+  onSent,
   companionId,
   onSelectChat,
   onEmpty,
@@ -101,19 +119,32 @@ export function ChatRoom({
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
   onClose,
   seed,
+  seedId,
+  seedAutoSend = true,
+  seedTarget,
   onSeedConsumed,
 }: ChatRoomProps) {
-  const [draft, setDraft] = usePersistedState<string>(
+  const [savedDraft, setSavedDraft] = usePersistedState<string>(
     `rl.chatDraft.${companionId}`,
     "",
   );
+  const draft = composer?.text ?? savedDraft;
+  const setDraft = composer?.onTextChange ?? setSavedDraft;
+  // Carry a draft from the former separate chat input into the one composer.
+  // Clear the old key only after handing its text to the persistent owner.
+  useEffect(() => {
+    if (!composer || !savedDraft.trim()) return;
+    composer.onTextChange(previous => previous.includes(savedDraft) ? previous : previous.trim() ? `${previous}\n\n${savedDraft}` : savedDraft);
+    setSavedDraft("");
+  }, [!!composer, savedDraft, setSavedDraft, setDraft]);
   // Paths, not bytes — the established convention. `composePrompt` folds them
   // into a `Context:` list the agent's Read/Grep can act on.
   const [attachments, setAttachments] = useState<string[]>([]);
   const [chats, setChats] = useState<Companion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [mode, setMode] = useState<"chat" | "plan">("chat");
-  const [project, setProject] = usePersistedState<ProjectChoice>(`rl.chatProject.${companionId}`, null);
+  const [savedProject, setProject] = usePersistedState<ProjectChoice>(`rl.chatProject.${companionId}`, null);
+  const project = composer ? composer.project ?? null : savedProject;
   const [armedPlan, setArmedPlan] = useState<string | null>(null);
   const [graduations, setGraduations] = useState<{ sessionId: string; title: string }[]>([]);
   useEffect(() => { void invoke<typeof graduations>("companion_graduations", { companionId }).then(value => setGraduations(value ?? [])).catch(() => {}); }, [companionId, receipt?.status]);
@@ -153,10 +184,13 @@ export function ChatRoom({
     historyCmd: "companion_get_thread",
     historyArgs: { companionId },
     sendFailPrefix: "Couldn't reach the chat agent",
-    buildSendArgs: (text) => ({
+    onSendFailed: (text) => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
+    buildSendArgs: (text, extra) => ({
       companionId,
       text,
       cwd,
+      harness,
+      target: (extra as { target?: typeof target } | undefined)?.target ?? target,
     }),
     makeMessage: ({ id, role, body, status }) => ({
       id,
@@ -223,6 +257,7 @@ export function ChatRoom({
     (text: string, opts?: { localBody?: string }) => {
       const composed = composePrompt(text, attachments);
       if (!composed) return;
+      onSent?.();
       stick();
       setNotice(null);
       sendTurn(composed, {
@@ -237,16 +272,18 @@ export function ChatRoom({
   // genuinely empty: `loaded` rules out sending before the history answers,
   // and the emptiness check rules out a second send if this room ever remounts
   // with a stale seed still in the parent's hand.
-  const seeded = useRef(false);
+  const seeded = useRef<string | null>(null);
   useEffect(() => {
-    if (seeded.current || !seed?.trim() || !loaded || messages.length > 0) return;
-    seeded.current = true;
-    stick();
-    sendTurn(seed);
+    const identity = seedId ?? seed;
+    if (!identity || seeded.current === identity || !seed?.trim() || !loaded) return;
+    seeded.current = identity;
+    if (seedAutoSend) { stick(); onSent?.(); sendTurn(seed, { extra: { target: seedTarget } }); }
+    else setDraft(previous => previous.trim() ? `${previous}\n\n${seed}` : seed);
     onSeedConsumed?.();
-  }, [seed, loaded, messages.length, sendTurn, onSeedConsumed]);
+  }, [seed, seedId, seedAutoSend, seedTarget, loaded, sendTurn, onSeedConsumed, onSent, setDraft]);
 
   const streaming = status === "streaming";
+  useEffect(() => { onActivityChange?.(streaming); }, [streaming, onActivityChange]);
   const canPlan = !!onPlan && messages.some(message => message.role === "assistant" && message.status === "complete");
   const armedInstruction = queuedInstruction ?? armedPlan;
   const planningProject = resolveLaunchProject([...messages.map(message => message.body), draft].join("\n"), project, { projectOptions, openFolder: null, lastLaunchProject });
@@ -289,7 +326,7 @@ export function ChatRoom({
     onError: (m) => setNotice(`🔇 Voice synthesis failed — ${m}`),
   });
   const dictation = useDictation({
-    enabled: dictationEnabled,
+    enabled: dictationEnabled && !composer,
     onFinal: (spoken) =>
       setDraft((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
   });
@@ -321,43 +358,28 @@ export function ChatRoom({
       .catch((e) => setNotice(String(e)));
   }, [onSelectChat, refreshChats]);
 
-  const rename = useCallback(
-    (id: string, current: string) => {
-      const next = window.prompt("Name this chat", current);
-      if (next == null || !next.trim()) return;
-      void invoke("companion_rename", {
-        companionId: id,
-        title: next.trim(),
-        byUser: true,
-      })
-        .then(refreshChats)
-        .catch((e) => setNotice(String(e)));
-    },
-    [refreshChats],
-  );
-
-  const remove = useCallback(
-    (id: string) => {
-      if (
-        !window.confirm(
-          "Delete this chat? The conversation goes; everything it captured stays in the lake.",
-        )
-      )
-        return;
-      void invoke("companion_delete", { companionId: id })
-        .then(() =>
-          invoke<Companion[]>("companion_list").then((rows) => {
-            setChats(rows);
-            if (id !== companionId) return;
-            const next = rows[0];
-            if (next) onSelectChat(next.companionId);
-            else onEmpty();
-          }),
-        )
-        .catch((e) => setNotice(String(e)));
-    },
-    [companionId, onEmpty, onSelectChat],
-  );
+  const [chatAction, setChatAction] = useState<{ kind: "rename" | "delete"; id: string; title: string } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const rename = useCallback((id: string, title: string) => { setActionError(null); setChatAction({ kind: "rename", id, title }); }, []);
+  const remove = useCallback((id: string) => { setActionError(null); setChatAction({ kind: "delete", id, title: "" }); }, []);
+  const commitChatAction = async () => {
+    if (!chatAction || actionBusy) return;
+    setActionBusy(true); setActionError(null);
+    try {
+      if (chatAction.kind === "rename") {
+        await invoke("companion_rename", { companionId: chatAction.id, title: chatAction.title.trim(), byUser: true });
+        refreshChats();
+      } else {
+        await invoke("companion_delete", { companionId: chatAction.id });
+        const rows = await invoke<Companion[]>("companion_list");
+        setChats(rows);
+        if (chatAction.id === companionId) onEmpty();
+      }
+      setChatAction(null);
+    } catch (error) { setActionError(String(error)); }
+    finally { setActionBusy(false); }
+  };
 
   const setModel = useCallback(
     (model: string | null, effort: string | null) => {
@@ -385,13 +407,52 @@ export function ChatRoom({
     return () => ro.disconnect();
   }, []);
   const compact = pose === "compact";
+  const [activityOpen, setActivityOpen] = useState(false);
+  useEffect(() => setActivityOpen(false), [companionId]);
+
+  const conversationActions = <>
+    {composer && <button type="button" className="rl-composer-chip" onClick={onEmpty} title="Return to a fresh composer; this conversation stays in History">
+      <Plus size={12}/><span>New chat</span>
+    </button>}
+    {composer && chats.length > 0 && <ComposerMenu label="Conversation history" value={companionId}
+      options={chats.map(chat => ({ value: chat.companionId, label: chat.title }))} onChange={onSelectChat}>History</ComposerMenu>}
+    {composer && <MonochatTrace conversationId={companionId} busy={streaming} open={activityOpen} onOpenChange={setActivityOpen}/>}
+    <ComposerMenu label="Conversation actions" options={[
+      { value: "plan-conversation", label: "Plan from this conversation", detail: "Carry its context and decisions into a plan", disabled: !canPlan, group: "Continue this work" },
+      { value: "drafter", label: "Draft first…", disabled: !canPlan || streaming },
+      { value: "auto", label: "Auto session…", disabled: !canPlan || streaming },
+      { value: "plan", label: "Edit the brief…", disabled: !canPlan || streaming },
+      { value: "voice", label: readAloud.speaking ? "Stop reading aloud" : speakReplies ? "Disable reading aloud" : "Read replies aloud", group: "Conversation" },
+      ...(composer ? [{ value: "activity", label: "Activity & usage", detail: "Token usage and activity for this conversation" }] : [{ value: "new", label: "New conversation" }]),
+      { value: "rename", label: "Rename…" },
+      { value: "delete", label: "Delete…" },
+      ...(composer ? [] : chats.filter(chat => chat.companionId !== companionId).slice(0, 8).map(chat => ({ value: `chat:${chat.companionId}`, label: chat.title, group: "Recent conversations" }))),
+    ]} onChange={value => {
+      if (value.startsWith("chat:")) onSelectChat(value.slice(5));
+      else if (value === "plan-conversation") { plan(composePrompt(draft, composer?.attachments ?? attachments)); composer?.onAttachmentsConsumed?.(); }
+      else if (value === "new") { if (composer) onEmpty(); else newChat(); }
+      else if (value === "activity") setActivityOpen(true);
+      else if (value === "rename") rename(companionId, me?.title ?? "Chat");
+      else if (value === "delete") remove(companionId);
+      else if (value === "voice") { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(previous => !previous); }
+      else continueAs(value as ContinueDestination);
+    }}>More</ComposerMenu>
+  </>;
 
   return (
     <ConversationSourceContext.Provider value={{ conversationKind: "companion", conversationId: companionId, messages }}>
-    <div data-chat-room className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
+    {chatAction && <BrowserDialog title={chatAction.kind === "rename" ? "Name this conversation" : "Delete this conversation?"}
+      closeLabel="Cancel" onClose={() => { if (!actionBusy) setChatAction(null); }}
+      footer={<button className="rb-button rb-button-primary" type="button" disabled={actionBusy || (chatAction.kind === "rename" && !chatAction.title.trim())} onClick={() => void commitChatAction()}>{actionBusy ? "Saving…" : chatAction.kind === "rename" ? "Save name" : "Delete conversation"}</button>}>
+      {chatAction.kind === "rename" ? <input aria-label="Conversation name" className="rb-input" value={chatAction.title} onChange={event => setChatAction({ ...chatAction, title: event.target.value })} onKeyDown={event => { if (event.key === "Enter" && chatAction.title.trim()) void commitChatAction(); }}/>
+        : <p>The conversation will be deleted. Its captured memory stays in the lake.</p>}
+      {actionError && <p role="alert">{actionError}</p>}
+    </BrowserDialog>}
+    <div data-chat-room data-chat-empty={!!composer && loaded && messages.length === 0 && status === "idle" && !receipt} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
       {/* Header: which chat, on what model, and the two ways out of it. */}
       <div
         ref={headerRef}
+        data-chat-toolbar
         className="flex min-w-0 shrink-0 items-center gap-2 px-3 py-2"
         style={{ borderBottom: "1px solid var(--color-rule)", flexWrap: "nowrap" }}
       >
@@ -455,7 +516,7 @@ export function ChatRoom({
           }}
         >
           {!loaded ? null : messages.length === 0 && status === "idle" ? (
-            <ChatEmptyState onAsk={(q) => send(q)} />
+            composer ? null : <ChatEmptyState onAsk={(q) => send(q)} />
           ) : (
             messages.map((m) => (
               <ChatBubble
@@ -487,7 +548,7 @@ export function ChatRoom({
                   plain and the settled row below renders rich. */}
               <StreamingBubble
                 text={liveText}
-                agent="Claude"
+                agent="Redline"
                 inspect={{ surface: "companion", key: companionId }}
                 meter={meter}
                 activity={activity}
@@ -499,8 +560,8 @@ export function ChatRoom({
 
       {streaming && <ChatTurnProgress startedAt={startedAt} activity={activity} meter={meter} status={retrieving} textLength={liveText.length} onStop={cancel} />}
 
-      {/* Composer */}
-      <div
+      {/* The floating launch composer owns input when supplied. */}
+      {composer ? composer.render(conversationActions) : <div
         data-chat-composer
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
@@ -551,7 +612,8 @@ export function ChatRoom({
                 const action = chatSubmitAction({ key: e.key, shiftKey: e.shiftKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing }, mode);
                 if (action && action !== "newline") { e.preventDefault(); submit(action); }
               }}
-              placeholder={mode === "plan" ? "Any final instruction for the plan?" : streaming ? "Type ahead — this queues behind the reply…" : "Think out loud…"}
+              aria-label="Message Redline"
+              placeholder={mode === "plan" ? "Any final instruction for the plan?" : streaming ? "Type ahead — this queues behind the reply…" : "What are we working on?"}
               rows={2}
               style={{
                 flex: 1,
@@ -588,12 +650,12 @@ export function ChatRoom({
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
-            <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={() => { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(value => !value); }} />
-            <ModelChip model={me?.model ?? null} effort={me?.effort ?? null} onChange={setModel} />
+            {!modelControls && <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={() => { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(value => !value); }} />}
+            {modelControls ?? <ModelChip model={me?.model ?? null} effort={me?.effort ?? null} onChange={setModel} />}
+            {modelControls && <MonochatTrace conversationId={companionId} busy={streaming}/>}
             {mode === "plan" && <ProjectPicker value={planningProject} onChange={path => setProject({ path })} options={projectOptions} />}
-            <select aria-label="Continue conversation" value="" onChange={event => { if (event.target.value) continueAs(event.target.value as ContinueDestination); }} disabled={!canPlan || streaming}>
-              <option value="">More…</option><option value="drafter">Draft first…</option><option value="auto">Auto session…</option><option value="plan">Edit the brief…</option>
-            </select>
+            {conversationActions}
+
             <div role="group" aria-label="Composer mode" style={{ display: "flex", marginLeft: "auto", gap: 6 }}>
               <button type="button" aria-pressed={mode === "chat"} onClick={() => setMode("chat")}>Chat</button>
               <button type="button" disabled={!canPlan} aria-pressed={mode === "plan"} onClick={() => setMode("plan")}>Plan</button>
@@ -623,7 +685,7 @@ export function ChatRoom({
             </button>
           </div>
         </div>
-      </div>
+      </div>}
     </div>
     </ConversationSourceContext.Provider>
   );
@@ -642,7 +704,7 @@ function RoleTag({ role }: { role: string }) {
         color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
       }}
     >
-      {isUser ? "You" : "Chat"}
+      {isUser ? "You" : "Redline"}
     </span>
   );
 }

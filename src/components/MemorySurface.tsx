@@ -2646,10 +2646,19 @@ function HealthTab({
               type="checkbox"
               checked={captureExternal ?? true}
               onChange={(e) => void toggleCapture(e.target.checked)}
+              aria-describedby="external-harness-capture-description"
               style={{ accentColor: "var(--color-info)" }}
             />
-            Capture external claude sessions
+            Capture external harness sessions
           </label>
+          <div
+            id="external-harness-capture-description"
+            className="font-sans"
+            style={{ fontSize: 12, lineHeight: 1.45, color: "var(--color-ink-muted)" }}
+          >
+            Save prompts from Claude Code, Codex, and other connected harnesses
+            outside your tracked projects. Requires prompt capture in each integration.
+          </div>
         </div>
 
         <div style={card}>

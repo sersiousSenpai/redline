@@ -66,6 +66,45 @@ async function mount(props: Partial<ComponentProps<typeof BrowserPane>> = {}) {
   await act(async () => root.render(<BrowserPane onClose={() => {}} dockSlot={dock} dockPill="page" {...props}/>));
   await settle();
 }
+
+it.each(["button", "shortcut"])("opens a new tab with Google from its first render via %s", async (via) => {
+  await mount();
+  if (via === "button") {
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
+  } else {
+    await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "new-tab" });
+  }
+  const tab = host.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
+  const label = `browser-${tab.dataset.tabId}`;
+  const title = () => tab.querySelector(".rb-tab-title")!.textContent;
+  expect(title()).toBe("Google");
+  for (const state of [
+    { url: "about:blank", title: "" },
+    { url: "https://www.google.com/", title: "" },
+    { url: "https://www.google.com/", title: "Google" },
+    { url: "https://www.google.com/", title: "" },
+  ]) {
+    await event("browser-page-event", { label, kind: "state", ...state });
+    expect(title()).toBe("Google");
+  }
+});
+
+it("ignores an older URL poll after a page event provides a newer URL and title", async () => {
+  const intervals = vi.spyOn(window, "setInterval");
+  await mount();
+  const tick = intervals.mock.calls.find(([, delay]) => delay === 5000)![0] as () => Promise<void>;
+  let finish!: (url: string) => void;
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) => command === "browser_url"
+    ? new Promise<string>((resolve) => { finish = resolve; }) : original(command, args));
+  let pending!: Promise<void>;
+  act(() => { pending = tick(); });
+  await event("browser-page-event", { label: "browser-t-two", kind: "state", url: "https://two.test/latest", title: "Latest page" });
+  await act(async () => { finish("https://two.test/"); await pending; });
+  expect(host.querySelector('[data-tab-id="t-two"] .rb-tab-title')?.textContent).toBe("Latest page");
+  expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe("https://two.test/latest");
+});
+
 it("keeps a closed dock closed across remounts", async () => {
   const onOpenDockPill = vi.fn();
   await mount({ dockPill: null, onOpenDockPill });

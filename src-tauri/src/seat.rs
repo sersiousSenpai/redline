@@ -187,9 +187,9 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
     ),
     (
         "ai_commit",
-        "Drafts a commit message, branch name and PR description from the \
-         review diff.",
-        "When you open the push dialog on a review.",
+        "Drafts a short commit subject at low effort from a sampled review \
+         diff, then derives branch and PR defaults. Limited to 15 seconds.",
+        "When you click Draft in a review's push dialog.",
     ),
     (
         "browse_locator",

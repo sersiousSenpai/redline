@@ -45,7 +45,7 @@ describe("formatLastRun", () => {
 import { afterEach, beforeEach, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { StopButton } from "./ServersPane";
+import { ServersPane, StopButton } from "./ServersPane";
 import { RunProjectDialog } from "./RunProjectDialog";
 import type { ProbeView, StopPlan } from "../lib/devServerTypes";
 import { scriptCommand } from "../lib/devServerTypes";
@@ -119,6 +119,52 @@ describe("StopButton", () => {
   });
 });
 
+describe("Redline service row", () => {
+  it("shows infrastructure outside the cards without stop or thumbnail controls", async () => {
+    mocks.invoke.mockResolvedValue([]);
+    let c!: HTMLElement;
+    await act(async () => {
+      c = mountComponent(createElement(ServersPane, {
+        scan: { running: [], recent: [], others: [], redline: [
+          { port: 1420, role: "App frontend" }, { port: 7676, role: "App service" },
+        ] },
+        error: null, projectOptions: [], onRun: vi.fn(), onRefresh: vi.fn(),
+        onStop: vi.fn(), onPlanStop: async () => null, onOpenUrl: vi.fn(),
+      }));
+    });
+    const row = c.querySelector('[aria-label="Redline services"]')!;
+    expect(row.textContent).toContain("App frontend :1420");
+    expect(row.textContent).toContain("App service :7676");
+    expect(row.querySelectorAll("button, img").length).toBe(0);
+    expect(c.querySelector(".rl-server-grid")).toBeNull();
+  });
+});
+
+it("uses repo artwork for live and recent servers without capturing pages, and falls back after a broken logo", async () => {
+  const logo = "data:image/png;base64,project-logo";
+  mocks.invoke.mockImplementation(async (command, args) => command === "repo_icon"
+    ? { root: args.cwd, name: "my-repo", dataUrl: logo } : []);
+  const server = { pid: 42, port: 3100, extraPorts: [], url: "http://localhost:3100", comm: "node", args: "vite",
+    projectPath: "/projects/artwork", projectName: "web", stack: "Vite — web", runCommand: "npm run dev", thumbPath: "/old-screenshot.png" };
+  let c!: HTMLElement;
+  await act(async () => {
+    c = mountComponent(createElement(ServersPane, {
+      scan: { running: [server], recent: [{ ...server, id: 1, port: 3101, lastSeenAt: Date.now(), portBusy: false }], others: [] },
+      error: null, projectOptions: [], onRun: vi.fn(), onRefresh: vi.fn(), onStop: vi.fn(),
+      onPlanStop: async () => null, onOpenUrl: vi.fn(),
+    }));
+  });
+  expect(mocks.invoke.mock.calls).toEqual([["repo_icon", { cwd: "/projects/artwork" }]]);
+  expect(c.querySelectorAll('img[alt="my-repo logo"]')).toHaveLength(2);
+  const first = c.querySelector<HTMLImageElement>("img")!;
+  expect(first.getAttribute("src")).toBe(logo);
+  act(() => first.dispatchEvent(new Event("error")));
+  const artwork = c.querySelector(".rl-project-art")!;
+  expect(artwork.getAttribute("data-has-logo")).toBe("false");
+  expect(artwork.querySelector("img")).toBeNull();
+  expect(artwork.textContent).toBe("my-repo");
+});
+
 const probe: ProbeView = { projectName: "web", stack: "Node — web", runCommand: "pnpm run dev", scripts: ["dev", "test"], exists: true, packageManager: "pnpm" };
 function mountRunDialog() {
   const onRun = vi.fn();
@@ -141,6 +187,26 @@ function editCommand(c: HTMLElement, command: string) {
 }
 
 describe("RunProjectDialog", () => {
+  it("launches a discovered web package in its own directory and can switch back to root scripts", async () => {
+    mocks.invoke.mockResolvedValue({ ...probe, runCommand: "bun run serve", suggestions: [
+      { command: "bun run serve", projectPath: "/projects/web/apps/site", detail: "vite --host" },
+      { command: "pnpm run start:dev", projectPath: "/projects/web", detail: "next dev" },
+    ] });
+    const { c, onRun } = mountRunDialog();
+    await chooseProject();
+    expect(c.textContent).toContain("Runs in /projects/web/apps/site");
+    expect(c.textContent).toContain("vite --host");
+    await clickText("Run ▶");
+    expect(onRun).toHaveBeenLastCalledWith("/projects/web/apps/site", "bun run serve");
+    await clickText("pnpm run start:dev");
+    await clickText("Run ▶");
+    expect(onRun).toHaveBeenLastCalledWith("/projects/web", "pnpm run start:dev");
+    await clickText("bun run serve");
+    await clickText("test");
+    await clickText("Run ▶");
+    expect(onRun).toHaveBeenLastCalledWith("/projects/web", "pnpm run test");
+  });
+
   it("prefills a known project's command and runs a script quick pick in its directory", async () => {
     mocks.invoke.mockResolvedValue(probe);
     const { c, onRun } = mountRunDialog();

@@ -31,6 +31,8 @@ import {
   calibrateScale,
   INITIAL_THUMB_SCALE,
   planCaptures,
+  thumbZoom,
+  THUMB_READY_SCRIPT,
   type ThumbEntry,
   type ThumbTarget,
 } from "../lib/thumbs";
@@ -41,12 +43,8 @@ import {
 const THUMB_LABEL = "browser-thumbcap";
 
 /** How long to wait for a page to report itself loaded before giving up. */
-const READY_TIMEOUT_MS = 8000;
+const READY_TIMEOUT_MS = 15000;
 const READY_POLL_MS = 150;
-/** Time after `readyState === "complete"` for the paints that follow it —
- *  webfonts swapping, a hero image decoding, a framework hydrating. Without it
- *  most captures are of a correct but empty-looking page. */
-const SETTLE_MS = 700;
 /** A card must be at least this visible to be worth parking a webview over. */
 const MIN_RECT = 24;
 
@@ -113,6 +111,7 @@ export function useThumbCapture(
   // capture) and when each key last failed.
   const entriesRef = useRef<Map<string, ThumbEntry>>(new Map());
   const failuresRef = useRef<Map<string, number>>(new Map());
+  const seededRef = useRef(false);
   // Cards' DOM elements, for the rect the webview glues to.
   const rectsRef = useRef<Map<string, HTMLElement>>(new Map());
   // Serialization + cancellation. `runningRef` admits one runner; `tokenRef` is
@@ -151,12 +150,12 @@ export function useThumbCapture(
     if (!el || !el.isConnected) return null;
     const r = el.getBoundingClientRect();
     if (r.width < MIN_RECT || r.height < MIN_RECT) return null;
-    if (
-      r.bottom <= 0 ||
-      r.right <= 0 ||
-      r.top >= window.innerHeight ||
-      r.left >= window.innerWidth
-    ) {
+    const pane = el.closest(".rl-servers-pane")?.getBoundingClientRect();
+    // Native views do not inherit DOM clipping. Defer a partially scrolled
+    // card instead of painting over the pane header or neighbouring surfaces.
+    if (r.top < Math.max(0, pane?.top ?? 0) || r.left < Math.max(0, pane?.left ?? 0) ||
+        r.bottom > Math.min(window.innerHeight, pane?.bottom ?? window.innerHeight) ||
+        r.right > Math.min(window.innerWidth, pane?.right ?? window.innerWidth)) {
       return null;
     }
     return {
@@ -171,13 +170,14 @@ export function useThumbCapture(
    *  something actually changed (redundant setPosition/setSize force WKWebView
    *  relayout — the same discipline BrowserPane's syncBounds follows). */
   const applyRect = useCallback(
-    (wv: Webview, next: { x: number; y: number; w: number; h: number }) => {
+    async (wv: Webview, next: { x: number; y: number; w: number; h: number }) => {
       const prev = lastRectRef.current;
       if (!prev || prev.x !== next.x || prev.y !== next.y) {
-        void wv.setPosition(new LogicalPosition(next.x, next.y));
+        await wv.setPosition(new LogicalPosition(next.x, next.y));
       }
       if (!prev || prev.w !== next.w || prev.h !== next.h) {
-        void wv.setSize(new LogicalSize(next.w, next.h));
+        await wv.setSize(new LogicalSize(next.w, next.h));
+        await wv.setZoom(thumbZoom(next.w));
       }
       lastRectRef.current = next;
     },
@@ -189,8 +189,7 @@ export function useThumbCapture(
     async (rect: { x: number; y: number; w: number; h: number }) => {
       const existing = await Webview.getByLabel(THUMB_LABEL).catch(() => null);
       if (existing) {
-        wvRef.current = existing;
-        return existing;
+        await invoke("browser_close", { label: THUMB_LABEL });
       }
       const win = Window.getCurrent();
       const opts = {
@@ -202,6 +201,7 @@ export function useThumbCapture(
         // Present as a real browser tab: a dev server that content-negotiates
         // on the UA must serve the same page it serves when you click Open.
         userAgent: SAFARI_UA,
+        focus: false,
       };
       const create = () =>
         new Promise<Webview>((resolve, reject) => {
@@ -246,7 +246,8 @@ export function useThumbCapture(
       url: string,
       token: number,
     ): Promise<"ok" | "failed" | "deferred" | "cancelled"> => {
-      const cancelled = () => token !== tokenRef.current || !activeRef.current;
+      const cancelled = () => token !== tokenRef.current || !activeRef.current || document.hidden ||
+        !targetsRef.current.some((target) => target.key === key && target.url === url && target.live);
       const rect = rectFor(key);
       if (!rect) return "deferred";
 
@@ -259,14 +260,16 @@ export function useThumbCapture(
       if (cancelled()) return "cancelled";
 
       parkedKeyRef.current = key;
-      applyRect(wv, rect);
       try {
+        await applyRect(wv, rect);
+        if (cancelled()) return "cancelled";
         await invoke("browser_navigate", { label: THUMB_LABEL, url });
       } catch {
         return "failed";
       }
-      await wv.show().catch(() => {});
       if (cancelled()) return "cancelled";
+      await wv.show().catch(() => {});
+      if (cancelled()) { hideWebview(); return "cancelled"; }
 
       // Wait for the page to report itself loaded AND to actually be the page
       // we asked for.
@@ -280,11 +283,9 @@ export function useThumbCapture(
         try {
           const state = await invoke<string>("browser_eval_result", {
             label: THUMB_LABEL,
-            script:
-              "(function(){try{return document.readyState + '|' + location.href}catch(e){return 'err|'}})()",
+            script: THUMB_READY_SCRIPT,
           });
-          const [readyState, href = ""] = state.split("|");
-          if (readyState === "complete" && sameOrigin(href, url)) {
+          if (sameOrigin(state, url)) {
             ready = true;
             break;
           }
@@ -301,22 +302,6 @@ export function useThumbCapture(
       if (!ready) return "failed";
       if (cancelled()) return "cancelled";
 
-      // Disarm the page. A native webview sits above every DOM element, so no
-      // React overlay can shield it — in-page CSS is the only way to stop a
-      // stray click landing on somebody's dev site. It doesn't affect painting,
-      // so the snapshot is unchanged.
-      try {
-        await invoke("browser_eval", {
-          label: THUMB_LABEL,
-          script:
-            "(function(){try{document.documentElement.style.pointerEvents='none'}catch(e){}})()",
-        });
-      } catch {
-        /* best effort — a page that refuses this is still snapshotable */
-      }
-
-      await sleep(SETTLE_MS);
-      if (cancelled()) return "cancelled";
       const stillThere = rectFor(key);
       if (!stillThere) return "deferred";
 
@@ -335,12 +320,11 @@ export function useThumbCapture(
           window.devicePixelRatio || 1,
         );
         const path = shot.path;
-        entriesRef.current.set(key, { key, path, modifiedMs: Date.now() });
         const dataUrl = await readThumb(path);
         if (cancelled()) return "cancelled";
-        if (dataUrl) {
-          setThumbs((prev) => new Map(prev).set(key, dataUrl));
-        }
+        if (!dataUrl) return "failed";
+        entriesRef.current.set(key, { key, path, modifiedMs: Date.now() });
+        setThumbs((prev) => new Map(prev).set(key, dataUrl));
         onCapturedRef.current(key, path);
         return "ok";
       } catch (e) {
@@ -348,13 +332,13 @@ export function useThumbCapture(
         return "failed";
       }
     },
-    [applyRect, ensureWebview, rectFor],
+    [applyRect, ensureWebview, hideWebview, rectFor],
   );
 
   /** Drain the queue, one card at a time. */
   const runQueue = useCallback(async () => {
     if (runningRef.current) return;
-    if (!activeRef.current || unsupportedRef.current) return;
+    if (!activeRef.current || unsupportedRef.current || !seededRef.current || document.hidden) return;
     runningRef.current = true;
     const token = ++tokenRef.current;
     try {
@@ -375,6 +359,12 @@ export function useThumbCapture(
         if (!target) break;
         setCapturingKey(key);
         const result = await captureOne(key, target.url, token);
+        hideWebview();
+        // Release scripts, sockets and media after every capture. A fresh view
+        // also prevents a same-origin refresh from snapshotting the old page.
+        await invoke("browser_close", { label: THUMB_LABEL }).catch(() => {});
+        wvRef.current = null;
+        lastRectRef.current = null;
         setCapturingKey(null);
         if (result === "cancelled") break;
         if (result === "failed") failuresRef.current.set(key, Date.now());
@@ -388,6 +378,10 @@ export function useThumbCapture(
       setCapturingKey(null);
       hideWebview();
       runningRef.current = false;
+      // A surface can close and reopen before an in-flight await unwinds.
+      if (token !== tokenRef.current && activeRef.current && !document.hidden) {
+        window.setTimeout(() => void runQueueRef.current(), 0);
+      }
     }
   }, [captureOne, hideWebview, rectFor]);
 
@@ -411,6 +405,8 @@ export function useThumbCapture(
         list = await invoke<ThumbEntry[]>("thumbs_list");
       } catch (e) {
         if (String(e).includes("only supported on macOS")) setUnsupported(true);
+        seededRef.current = true;
+        if (alive) void runQueueRef.current();
         return;
       }
       if (!alive) return;
@@ -424,9 +420,12 @@ export function useThumbCapture(
         const dataUrl = await readThumb(e.path);
         if (!alive) return;
         if (dataUrl) loaded.set(e.key, dataUrl);
+        else entriesRef.current.delete(e.key);
       }
       if (!alive) return;
       setThumbs(loaded);
+      seededRef.current = true;
+      void runQueueRef.current();
     })();
     return () => {
       alive = false;
@@ -458,7 +457,7 @@ export function useThumbCapture(
     void runQueueRef.current();
   }, [active, targets, hideWebview]);
 
-  // --- keep the parked webview glued while the grid moves --------------------
+  // --- cancel native capture when the grid moves ----------------------------
   useEffect(() => {
     if (!active) return;
     const resync = () => {
@@ -472,10 +471,17 @@ export function useThumbCapture(
         if (!rect) {
           // Scrolled out from under the capture — stop covering whatever is
           // there now; the runner will notice and defer.
-          void wv.hide().catch(() => {});
+          tokenRef.current++;
+          hideWebview();
           return;
         }
-        applyRect(wv, rect);
+        // Geometry changes invalidate readiness/layout. Restart after scrolling
+        // settles instead of racing native resizes with a pending snapshot.
+        const previous = lastRectRef.current;
+        if (!previous || Object.keys(rect).some((k) => rect[k as keyof typeof rect] !== previous[k as keyof typeof previous])) {
+          tokenRef.current++;
+          hideWebview();
+        }
       });
     };
     // `true` so the grid's own scroll container is caught, not just the window.
@@ -487,7 +493,7 @@ export function useThumbCapture(
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = 0;
     };
-  }, [active, applyRect, rectFor]);
+  }, [active, hideWebview, rectFor]);
 
   // Nothing scrolls forever: after the grid settles, retry whatever deferred.
   useEffect(() => {
@@ -498,11 +504,19 @@ export function useThumbCapture(
       timer = window.setTimeout(() => void runQueueRef.current(), 400);
     };
     window.addEventListener("scroll", onSettle, true);
+    window.addEventListener("resize", onSettle);
+    const onVisibility = () => {
+      if (document.hidden) { tokenRef.current++; hideWebview(); }
+      else onSettle();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("scroll", onSettle, true);
+      window.removeEventListener("resize", onSettle);
+      document.removeEventListener("visibilitychange", onVisibility);
       window.clearTimeout(timer);
     };
-  }, [active]);
+  }, [active, hideWebview]);
 
   // --- unmount: cancel and destroy ------------------------------------------
   useEffect(

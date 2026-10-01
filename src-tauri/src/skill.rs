@@ -177,10 +177,7 @@ fn skills_root() -> PathBuf {
 }
 
 fn codex_skills_root() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex").join("skills")
+    crate::codex_profile::codex_home().join("skills")
 }
 
 /// Per-skill install state at a path: `Ok(true)` installed-and-current,

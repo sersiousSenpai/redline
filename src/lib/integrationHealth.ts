@@ -58,6 +58,8 @@ export interface HealthQuery {
   /** ⏎'s target is an extension pack, the only case needing `cargo` +
    *  `wasm32-unknown-unknown`. */
   extension: boolean;
+  /** Hooks can be disabled by project configuration even when global setup is healthy. */
+  projectPath?: string | null;
 }
 
 /** Everything the setup surfaces and the readiness derivation read. The codex
@@ -93,7 +95,7 @@ export interface HealthService {
   peek(query: HealthQuery, now?: number): IntegrationHealth | null;
 }
 
-const keyOf = (q: HealthQuery) => `${q.backend ?? "both"}|${q.extension}`;
+const keyOf = (q: HealthQuery) => JSON.stringify([q.backend ?? "both", q.extension, q.projectPath ?? null]);
 
 export function makeHealthService(
   probe: HealthProbe,
@@ -168,6 +170,7 @@ const invokeProbe: HealthProbe = async (query) => {
   const preflight = await invoke<PreflightPayload>("preflight_status", {
     backend: query.backend,
     extension: query.extension,
+    ...(query.projectPath ? { projectPath: query.projectPath } : {}),
   });
   return {
     preflight,

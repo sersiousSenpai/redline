@@ -76,6 +76,16 @@ const flush = async () => {
 };
 
 describe("mount ordering", () => {
+  it("returns a rejected send to its composer and settles with an error", async () => {
+    const { io, invokeImpl } = fakeIo();
+    invokeImpl.set("get_browse_thread", () => []); invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_send", () => { throw new Error("token threshold reached"); });
+    const restore = vi.fn();
+    const ctl = new AgentTurnController(() => makeCfg({ onSendFailed: restore }), io);
+    await ctl.attach(); ctl.send("Keep my question"); await flush();
+    expect(restore).toHaveBeenCalledWith("Keep my question", expect.any(Error));
+    expect(ctl.getState().phase).toBe("error"); ctl.detach();
+  });
   it("holds the history + status probes until every listener is registered", async () => {
     const { io, releases, invokeImpl, invoke, listen } = fakeIo({ holdListens: true });
     invokeImpl.set("get_browse_thread", () => rows({ id: "a1" }));

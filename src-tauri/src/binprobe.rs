@@ -137,13 +137,40 @@ pub fn login_shell_which(name: &str) -> Option<String> {
     answer
 }
 
+/// Run a diagnostic with a real deadline, bounded capture, and concurrent
+/// pipe drains. On timeout the probe's own process group is reaped on Unix.
+pub fn bounded_output(command: &mut std::process::Command, seconds: u64) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    #[cfg(unix)] { use std::os::unix::process::CommandExt; command.process_group(0); }
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let capture = |pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pipe = pipe; let mut bytes = Vec::new(); let mut block = [0u8; 8192];
+            while let Ok(count) = pipe.read(&mut block) { if count == 0 { break; } let remaining = 1024usize.saturating_mul(1024).saturating_sub(bytes.len()); bytes.extend_from_slice(&block[..count.min(remaining)]); }
+            let _ = tx.send(bytes);
+        }); rx
+    };
+    let stdout = capture(Box::new(child.stdout.take().unwrap()));
+    let stderr = capture(Box::new(child.stderr.take().unwrap()));
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? { break status; }
+        if started.elapsed() >= std::time::Duration::from_secs(seconds) {
+            #[cfg(unix)] unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.kill(); let _ = child.wait();
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "Harness diagnostic exceeded its deadline"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| rx.recv_timeout(std::time::Duration::from_millis(250)).unwrap_or_default();
+    Ok(std::process::Output { status, stdout: collect(stdout), stderr: collect(stderr) })
+}
+
 fn run_login_shell_which(name: &str) -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    std::process::Command::new(&shell)
-        .args(["-ilc", &format!("command -v {name}")])
-        // An interactive rc that reads stdin must hit EOF, not hang.
-        .stdin(Stdio::null())
-        .output()
+    bounded_output(std::process::Command::new(&shell)
+        .args(["-ilc", &format!("command -v {name}")]), 4)
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| {

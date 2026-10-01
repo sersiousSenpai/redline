@@ -339,6 +339,15 @@ impl<Q> Turns<Q> {
         self.inner.lock().unwrap().procs.contains_key(key)
     }
 
+    /// Commit small synchronous provider metadata before releasing a slot.
+    /// A cancelled reader must never overwrite its successor's resume state.
+    pub fn with_owned(&self, key: &str, token: u64, commit: impl FnOnce()) -> bool {
+        let inner = self.inner.lock().unwrap();
+        if !inner.procs.get(key).is_some_and(|proc| proc.token == token) { return false; }
+        commit();
+        true
+    }
+
     /// Snapshot a key's turn for a remounting panel.
     pub fn status(&self, key: &str) -> TurnStatus {
         let inner = self.inner.lock().unwrap();
@@ -674,6 +683,15 @@ mod tests {
             text: format!("text of {id}"),
             queued_at: 0,
         }
+    }
+
+    #[test]
+    fn provider_metadata_commit_requires_the_current_reservation() {
+        let t=turns();let old=t.begin("k").unwrap();let token=old.token();
+        assert!(t.with_owned("k",token,|| {}));
+        t.take("k");let next=t.begin("k").unwrap();
+        assert!(!t.with_owned("k",token,|| panic!("cancelled reader overwrote successor metadata")));
+        assert!(t.with_owned("k",next.token(),|| {}));
     }
 
     #[test]

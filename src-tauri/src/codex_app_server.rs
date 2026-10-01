@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 /// Explicit env/settings choices win. Otherwise select the newest capable
@@ -51,7 +51,7 @@ pub fn resolve_codex_bin() -> String {
 
 /// Discovery order only breaks version ties; location is not freshness.
 fn codex_install_locations() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from(CHATGPT_APP_CODEX)];
+    let mut paths = vec![PathBuf::from(CHATGPT_APP_CODEX), crate::codex_profile::codex_home().join("redline-runtime/node_modules/.bin/codex")];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         // A per-user copy of the same bundle (~/Applications).
         paths.push(home.join("Applications/ChatGPT.app/Contents/Resources/codex"));
@@ -60,6 +60,34 @@ fn codex_install_locations() -> Vec<PathBuf> {
     paths.push(PathBuf::from("/opt/homebrew/bin/codex"));
     paths.push(PathBuf::from("/usr/local/bin/codex"));
     paths
+}
+
+/// User-invoked installation into a private prefix. Existing bundle/global
+/// installs remain available for rollback; activation happens after validation.
+#[tauri::command]
+pub async fn install_codex_cli(settings: tauri::State<'_, crate::Settings>) -> Result<String, String> {
+    let path = tokio::task::spawn_blocking(|| {
+        static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = INSTALL.try_lock().map_err(|_| "Codex installation is already running".to_string())?;
+        let npm = crate::binprobe::login_shell_which("npm").ok_or("Install Node.js/npm, or use Locate CLI to choose an existing Codex installation.")?;
+        // Stage each candidate separately: a failed update must not replace
+        // the binary used by an existing conversation or selected override.
+        let prefix = crate::codex_profile::codex_home().join("redline-runtime").join("versions").join(uuid::Uuid::new_v4().to_string());
+        let mut command = std::process::Command::new(&npm);
+        command.args(["install", "--no-audit", "--no-fund", "--prefix"]).arg(&prefix).arg("@openai/codex@latest");
+        // npm's shebang and package installer need Node beside the npm binary.
+        if let Some(parent) = Path::new(&npm).parent() {
+            command.env("PATH", format!("{}:{}", parent.display(), std::env::var("PATH").unwrap_or_default()));
+        }
+        let output = crate::binprobe::bounded_output(&mut command, 120).map_err(|error| format!("Codex installation did not complete: {error}"))?;
+        if !output.status.success() { return Err(format!("Codex installation failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(1500).collect::<String>())); }
+        let binary = prefix.join("node_modules/.bin/codex").to_string_lossy().into_owned();
+        forget_codex_capability(&binary);
+        if !codex_capability(&binary).0 || !supports_plan_handoff(codex_version(&binary).as_ref()) { return Err("The installed Codex does not support Redline's required interfaces. The previous CLI is still selected.".into()); }
+        Ok(binary)
+    }).await.map_err(|error| error.to_string())??;
+    crate::seat::set_codex_bin_override(&settings.db, &path)?;
+    Ok(path)
 }
 
 /// Existing known and PATH installs, deduplicated by their actual target.
@@ -183,10 +211,7 @@ static VERSIONS: OnceLock<crate::binprobe::Cache<Option<CodexVersion>>> = OnceLo
 
 pub fn codex_version(bin: &str) -> Option<CodexVersion> {
     crate::binprobe::cached(&VERSIONS, bin, || {
-        std::process::Command::new(bin)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
+        crate::binprobe::bounded_output(std::process::Command::new(bin).arg("--version"), 4)
             .ok()
             .filter(|out| out.status.success())
             .and_then(|out| parse_codex_version(&String::from_utf8_lossy(&out.stdout)))
@@ -303,10 +328,7 @@ pub fn forget_codex_capability(bin: &str) {
 /// binary that isn't codex at all still costs one child.
 fn codex_capability_uncached(bin: &str) -> (bool, bool) {
     let banner = |args: &[&str]| {
-        std::process::Command::new(bin)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
+        crate::binprobe::bounded_output(std::process::Command::new(bin).args(args), 4)
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -396,10 +418,7 @@ static MODEL_CATALOG: OnceLock<crate::binprobe::Cache<Result<Vec<CodexModel>, St
 /// process or accidentally asking a newly changed override mid-probe.
 pub fn model_catalog_for_bin(bin: &str) -> Result<Vec<CodexModel>, String> {
     crate::binprobe::cached(&MODEL_CATALOG, bin, || {
-        let out = std::process::Command::new(bin)
-            .args(["debug", "models"])
-            .stdin(Stdio::null())
-            .output()
+        let out = crate::binprobe::bounded_output(std::process::Command::new(bin).args(["debug", "models"]), 8)
             .map_err(|e| format!("failed to run {bin} debug models: {e}"))?;
         if !out.status.success() {
             return Err(format!(
@@ -421,6 +440,29 @@ async fn send(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()
     let mut bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
     stdin.write_all(&bytes).await.map_err(|e| e.to_string())
+}
+
+/// Bounded metadata-only request: never creates a thread or spends model tokens.
+pub async fn inspect_request(bin: &str, method: &str, params: Value) -> Result<Value, String> {
+    let mut child = Command::new(bin).arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn().map_err(|error| error.to_string())?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        let mut stdin = child.stdin.take().ok_or("Codex diagnostic input unavailable")?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or("Codex diagnostic output unavailable")?.take(2 * 1024 * 1024)).lines();
+        send(&mut stdin, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"redline","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}}})).await?;
+        while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
+            if event["id"] == 1 {
+                if event.get("error").is_some() { return Err("Codex rejected the diagnostic handshake".into()); }
+                send(&mut stdin, json!({"method":"initialized","params":{}})).await?;
+                send(&mut stdin, json!({"id":2,"method":method,"params":params})).await?;
+            } else if event["id"] == 2 {
+                return event.get("result").cloned().ok_or_else(|| event.pointer("/error/message").and_then(Value::as_str).unwrap_or("Codex diagnostic is unavailable").into());
+            }
+        }
+        Err("Codex closed the diagnostic connection".into())
+    }).await.map_err(|_| "Codex diagnostic timed out".to_string()).and_then(|result| result);
+    let _ = child.kill().await; let _ = child.wait().await;
+    result
 }
 
 /// Change the live CLI thread's next turn before releasing its Stop hook.
@@ -552,6 +594,7 @@ fn response_result(value: &Value, id: u64) -> Option<Result<Value, String>> {
     })
 }
 
+#[cfg(test)]
 fn agent_text(value: &Value) -> Option<&str> {
     value.pointer("/params/delta").and_then(Value::as_str)
         .or_else(|| value.pointer("/params/item/text").and_then(Value::as_str))
@@ -560,77 +603,38 @@ fn agent_text(value: &Value) -> Option<&str> {
 
 /// One Codex turn, driven to completion.
 ///
-/// Returns the reply AND the turn's meter. The meter is mostly provenance:
-/// Codex reports no usage on any shape captured so far, so its numbers are
-/// usually zero and its model is the configured one — see
-/// `meter::from_codex_turn` for why that is still worth carrying.
+/// Returns the reply and observed native usage. Unreported cost stays unknown.
 pub async fn run_one_shot(
     cwd: &Path,
     prompt: &str,
     model: Option<&str>,
 ) -> Result<(String, crate::meter::TurnMeter), String> {
-    let bin = resolve_codex_bin();
-    let mut child = Command::new(&bin)
-        .arg("app-server")
-        .current_dir(cwd)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn().map_err(|e| format!("failed to spawn codex app-server ({bin}): {e}"))?;
-    let mut stdin = child.stdin.take().ok_or("codex stdin unavailable")?;
-    let stdout = child.stdout.take().ok_or("codex stdout unavailable")?;
-    let mut lines = BufReader::new(stdout).lines();
+    run_with_schema(cwd, prompt, model, None, None).await
+}
 
-    send(&mut stdin, json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"redline","version":env!("CARGO_PKG_VERSION")}}})).await?;
-    let init = loop {
-        let line = lines.next_line().await.map_err(|e| e.to_string())?.ok_or("codex app-server exited during initialize")?;
-        let value: Value = serde_json::from_str(&line).map_err(|e| format!("invalid app-server JSON: {e}"))?;
-        if let Some(result) = response_result(&value, 1) { break result?; }
-    };
-    let _ = init;
-    send(&mut stdin, json!({"jsonrpc":"2.0","method":"initialized","params":{}})).await?;
-    let mut thread_params = json!({"cwd": cwd, "approvalPolicy":"never", "sandbox":"read-only"});
-    if let Some(model) = model.filter(|m| !m.trim().is_empty()) { thread_params["model"] = json!(model); }
-    send(&mut stdin, json!({"jsonrpc":"2.0","id":2,"method":"thread/start","params":thread_params})).await?;
-    let thread_id = loop {
-        let line = lines.next_line().await.map_err(|e| e.to_string())?.ok_or("codex app-server exited before thread start")?;
-        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        if let Some(result) = response_result(&value, 2) {
-            let result = result?;
-            break result.pointer("/thread/id").or_else(|| result.get("threadId"))
-                .and_then(Value::as_str).ok_or("thread/start returned no thread id")?.to_string();
+pub async fn run_with_schema(cwd: &Path, prompt: &str, model: Option<&str>, effort: Option<&str>, schema: Option<&Value>) -> Result<(String, crate::meter::TurnMeter), String> {
+    let bin = tokio::task::spawn_blocking(resolve_codex_bin).await.map_err(|error| error.to_string())?;
+    let mut child = Command::new(&bin).arg("app-server").current_dir(cwd)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .kill_on_drop(true).spawn().map_err(|error| format!("Could not start Codex: {error}"))?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        let mut stdin = child.stdin.take().ok_or("Codex input unavailable")?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or("Codex output unavailable")?).lines();
+        let mut turn = crate::codex_conversation::NativeTurn::new(cwd.to_string_lossy().into_owned(), prompt.into(), None, model.map(str::to_owned), effort.map(str::to_owned), Value::Null).schema(schema.cloned());
+        let mut meter = crate::meter::TurnMeter::new();
+        send(&mut stdin, crate::codex_conversation::NativeTurn::initialize()).await?;
+        while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+            let Ok(event) = serde_json::from_str::<Value>(&line) else { continue; };
+            let step = turn.observe(&event);
+            for write in step.writes { send(&mut stdin, write).await?; }
+            if let Some(value) = step.meter { meter = value; }
+            if let Some(error) = step.error { return Err(error); }
+            if let Some(text) = step.final_text { return if text.trim().is_empty() { Err("Codex produced an empty response".into()) } else { Ok((text, meter)) }; }
         }
-    };
-    send(&mut stdin, json!({"jsonrpc":"2.0","id":3,"method":"turn/start","params":{"threadId":thread_id,"input":[{"type":"text","text":prompt}]}})).await?;
-    let mut text = String::new();
-    // Provenance even if the turn never reports usage: the badge should read
-    // the model whatever the protocol says (or doesn't).
-    let mut meter = crate::meter::from_codex_turn(&Value::Null, model);
-    let _ = &meter;
-    loop {
-        let line = lines.next_line().await.map_err(|e| e.to_string())?.ok_or("codex app-server exited before turn completion")?;
-        let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-        let method = value.get("method").and_then(Value::as_str).unwrap_or("");
-        if method.contains("agentMessage") && method.ends_with("delta") {
-            if let Some(delta) = agent_text(&value) { text.push_str(delta); }
-        } else if method == "item/completed" && text.is_empty() {
-            if let Some(final_text) = agent_text(&value) { text.push_str(final_text); }
-        } else if method == "turn/completed" {
-            // Whatever this carries, the ONE accounting rule reads it.
-            meter = crate::meter::from_codex_turn(&value, model);
-            break;
-        } else if value.get("id").is_some() && value.get("method").is_some() {
-            // A tool-less, read-only turn should never request approval. Deny
-            // defensively so an unexpected server request cannot hang Redline.
-            let id = value["id"].clone();
-            send(&mut stdin, json!({"jsonrpc":"2.0","id":id,"result":{"decision":"decline"}})).await?;
-        }
-    }
-    let _ = child.kill().await;
-    if text.trim().is_empty() {
-        Err("codex ended without producing a response".into())
-    } else {
-        Ok((text, meter))
-    }
+        Err("Codex ended before completing the response".into())
+    }).await.map_err(|_| "Codex exceeded the response deadline".to_string()).and_then(|result| result);
+    let _ = child.kill().await; let _ = child.wait().await;
+    result
 }
 
 #[cfg(test)]

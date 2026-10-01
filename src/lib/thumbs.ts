@@ -26,6 +26,40 @@ export const THUMB_FAIL_COOLDOWN_MS = 5 * 60 * 1000;
  *  the first capture reports its true dimensions, `calibrateScale` takes over. */
 export const INITIAL_THUMB_SCALE = 1;
 
+/** Fit a desktop viewport inside the native card view, including media queries.
+ *  Snapshot resolution is separate: shrinking layout must not blur the PNG. */
+export const THUMB_VIEWPORT_WIDTH = 1280;
+export function thumbZoom(cssWidth: number): number {
+  return Math.min(1, Math.max(0.1, cssWidth / THUMB_VIEWPORT_WIDTH));
+}
+
+/** Readiness includes hydration, visible images and fonts, with a bounded wait
+ *  for pages with ongoing updates. This is evaluated only in the capture view. */
+export const THUMB_READY_SCRIPT = `(() => {
+  if (!document.body || location.href === 'about:blank') return '';
+  if (!window.__redlineThumbReady) {
+    const state = { started: performance.now(), changed: performance.now() };
+    window.__redlineThumbReady = state;
+    const style = document.createElement('style');
+    style.textContent = '* { pointer-events: none !important; caret-color: transparent !important; }';
+    document.head.appendChild(style);
+    new MutationObserver(() => { state.changed = performance.now(); })
+      .observe(document.body, { subtree: true, childList: true, characterData: true });
+    document.querySelectorAll('video, audio').forEach(media => { media.muted = true; media.pause(); });
+  }
+  const state = window.__redlineThumbReady;
+  const elapsed = performance.now() - state.started;
+  const imagesReady = [...document.images].filter(image => {
+    const r = image.getBoundingClientRect();
+    return r.bottom > 0 && r.top < innerHeight && r.right > 0 && r.left < innerWidth;
+  }).every(image => image.complete);
+  const content = document.body.innerText.trim() || document.querySelector('img, svg, canvas, video');
+  const settled = performance.now() - state.changed > 350 || elapsed > 4500;
+  return document.readyState !== 'loading' && content && imagesReady &&
+    (!document.fonts || document.fonts.status === 'loaded') && elapsed > 900 && settled
+    ? location.href : '';
+})()`;
+
 /** Learn the right multiplier from a capture that actually happened.
  *
  *  We asked for `requestedWidth` points and got `pixelWidth` real pixels, so

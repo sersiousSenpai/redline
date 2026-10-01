@@ -6,8 +6,8 @@
 // ShortcutHelp cheat sheets, the onboarding tour's shortcuts step — so a
 // binding can't drift between the surfaces that describe it.
 //
-// Honest scope: only the wired globals (⌘K palette, ⌘⇧N front door, ⌘⇧0
-// snap-back, ⌘J the conversation dock) are *dispatched* through the matchers
+// Honest scope: only the wired globals (⌘K palette, ⌘⇧N new plan, ⇧⏎ front
+// door, ⌘⇧0 snap-back, ⌘J front-door toggle) use the matchers
 // below; every other entry documents an existing listener that still owns its
 // own keydown handling (`wired: false`).
 // Rewiring those long-proven listeners through a generic dispatcher would be
@@ -38,6 +38,7 @@ export interface KeyBinding {
 
 export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "palette", keys: ["⌘", "K"], label: "Command palette", group: "Global", wired: true },
+  { id: "front-door", keys: ["⇧", "⏎"], label: "Open the front door", group: "Global", wired: true },
   // The front door — the app's resting state, and the only path that clears
   // the session selection. It had no chord at all, which was survivable while
   // the sessions sidebar was always there carrying its row; it isn't, now that
@@ -45,10 +46,8 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   // Tauri/macOS read it as "new window".
   { id: "new-plan", keys: ["⌘", "⇧", "N"], label: "Plan a build", group: "Global", wired: true },
   { id: "snap-back", keys: ["⌘", "⇧", "0"], label: "Snap the layout back", group: "Layout", wired: true },
-  // The conversation dock — one AI column beside whichever surface is up. A
-  // Global, not a Layout toggle: it opens a conversation, and which one
-  // depends on where you are (see conversationContext.ts).
-  { id: "dock", keys: ["⌘", "J"], label: "Show / hide the conversation", group: "Global", wired: true },
+  // The existing alternate toggle for the front door.
+  { id: "dock", keys: ["⌘", "J"], label: "Show / hide the front door", group: "Global", wired: true },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
   { id: "pane-terminal", keys: ["⇧", "↓"], label: "Show / hide the terminal", group: "Layout", wired: false },
@@ -105,11 +104,16 @@ export function isNewPlanKey(e: KeyComboInfo): boolean {
   return e.shiftKey && e.code === "KeyN";
 }
 
-/** ⌘J — the conversation dock. Shift and Alt excluded so ⌘⇧J stays free. */
+/** ⌘J — toggle the front door. Shift and Alt excluded so ⌘⇧J stays free. */
 export function isDockKey(e: KeyComboInfo): boolean {
   if (!(e.metaKey || e.ctrlKey)) return false;
   if (e.shiftKey || e.altKey) return false;
   return e.key === "j" || e.key === "J";
+}
+
+/** Shift+Enter summons the front door without colliding with modified sends. */
+export function isFrontDoorKey(e: KeyComboInfo): boolean {
+  return e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
 }
 
 // ---- Renderings -------------------------------------------------------------

@@ -2928,6 +2928,7 @@ dependencies = [
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
+ "objc2-quartz-core",
 ]
 
 [[package]]
@@ -3141,6 +3142,7 @@ dependencies = [
  "bitflags 2.11.1",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
 ]
 
@@ -3900,8 +3902,10 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-avf-audio",
+ "objc2-core-graphics",
  "objc2-foundation",
  "objc2-natural-language",
+ "objc2-quartz-core",
  "objc2-speech",
  "objc2-web-kit",
  "polis-core",
