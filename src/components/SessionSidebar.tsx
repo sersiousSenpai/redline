@@ -45,6 +45,9 @@ interface SessionSidebarProps {
    *  live discussion suppresses that (see App's `plan-received` handler), this
    *  pulsing dot is what keeps the arrival discoverable. Cleared on select. */
   unseenIds?: ReadonlySet<string>;
+  /** A plan that just arrived while another was being read: its row glows
+   *  once. Nonce'd so a second arrival glows again. */
+  arrivalGlow?: { sessionId: string; nonce: number } | null;
   /** Open the RunReport container for an orchestrated run (chip click). */
   onOpenRunReport?: (sessionId: string) => void;
   /** Hand N selected plans to the Front Door as combine pills. Does what
@@ -108,6 +111,7 @@ function SessionSidebarBase({
   onSelectRevision,
   viewedVersionNumber,
   unseenIds,
+  arrivalGlow,
   onOpenRunReport,
   onCombine,
   onNewPlan,
@@ -271,6 +275,7 @@ function SessionSidebarBase({
               expanded={expanded.has(s.sessionId)}
               pending={pendingCounts[s.sessionId] ?? 0}
               unseen={unseenIds?.has(s.sessionId) ?? false}
+              glowNonce={arrivalGlow?.sessionId === s.sessionId ? arrivalGlow.nonce : undefined}
               viewedVersionNumber={
                 s.sessionId === activeId ? viewedVersionNumber : null
               }
@@ -436,6 +441,7 @@ function SessionRow({
   expanded,
   pending,
   unseen = false,
+  glowNonce,
   viewedVersionNumber,
   combining = false,
   pickedAt = -1,
@@ -458,6 +464,8 @@ function SessionRow({
   pickedAt?: number;
   /** A plan arrived for this session but the reviewer was never taken to it. */
   unseen?: boolean;
+  /** Set (and changed) to glow the row once. */
+  glowNonce?: number;
   /** Which revision the active pane is viewing — only relevant on the active
    *  session row, used to highlight the corresponding RevisionRow. */
   viewedVersionNumber: number | null;
@@ -483,6 +491,10 @@ function SessionRow({
 
   return (
     <li className="relative group">
+      {/* One-shot arrival glow — an overlay, like the tile hail, so it paints
+          above the row's own background. Keyed on the nonce: a new arrival is
+          a new element, so the animation genuinely restarts. */}
+      {glowNonce !== undefined && <span key={glowNonce} className="rl-row-arrival" aria-hidden />}
       {/* Disclosure chevron — toggles the revision tree without selecting. */}
       {expandable && (
         <button

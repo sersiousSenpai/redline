@@ -22,7 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { ApproveToast } from "./components/ApproveToast";
+import { makeToast, RedlineToast, type ActiveToast, type ToastSpec } from "./components/RedlineToast";
 import { CommentComposer } from "./components/CommentComposer";
 import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
@@ -51,6 +51,7 @@ import {
   type LandingPhase,
 } from "./lib/landing";
 import { type LaunchDestination } from "./lib/frontDoor";
+import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
 import {
   attemptLaunch,
   attemptRun,
@@ -658,12 +659,6 @@ function isDetachError(err: unknown): boolean {
 /** An actionable toast. Plain strings stay the common case; this is for the
  *  toasts that report a switch the app chose NOT to make for you, which have to
  *  offer the switch itself. */
-interface ToastSpec {
-  message: string;
-  tone?: "success" | "info";
-  action?: { label: string; onAction: () => void };
-}
-
 /** The standard per-surface crash-containment fallback (T2.1).
  *
  *  14 of the 21 recorded runtime failures were WKWebView render errors and 12
@@ -764,7 +759,17 @@ function App() {
   // Most toasts are a bare confirmation string. A few report something the app
   // deliberately declined to do for you and must carry the way to do it, so the
   // state accepts the richer spec too.
-  const [toast, setToast] = useState<string | ToastSpec | null>(null);
+  // ONE toast slot. Each toast carries an id and owns its own timer
+  // (`RedlineToast`), so a call site only ever says what to show — and a
+  // stale dismissal can never clear a newer toast.
+  const [toast, setToastState] = useState<ActiveToast | null>(null);
+  const toastSeq = useRef(0);
+  const setToast = useCallback((t: string | ToastSpec | null, durationMs?: number | null) => {
+    setToastState(t === null ? null : makeToast(t, ++toastSeq.current, durationMs));
+  }, []);
+  const dismissToast = useCallback((id: number) => {
+    setToastState((cur) => (cur?.id === id ? null : cur));
+  }, []);
   const [codexHookStatus, setCodexHookStatus] =
     useState<CodexHookStatus | null>(null);
   // First-run setup modal: "setup" until an in-app install fully succeeds,
@@ -1248,6 +1253,9 @@ function App() {
   const planVoiceOpenRef = useRef(false);
   // Sessions whose intercepted plan we did NOT switch to (a live discussion was
   // in the way). Drives the sidebar's pulsing dot until the row is selected.
+  // A one-shot glow on the sidebar row of a plan that arrived while you were
+  // reading another one. Nonce'd so a second arrival glows again.
+  const [arrivalGlow, setArrivalGlow] = useState<{ sessionId: string; nonce: number } | null>(null);
   const [unseenPlanIds, setUnseenPlanIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1715,9 +1723,8 @@ function App() {
             setToast(
               `Couldn't attach ${failed.length} file${failed.length === 1 ? "" : "s"}: ${
                 (failed[0] as PromiseRejectedResult).reason
-              }`,
+              }`, 8000,
             );
-            setTimeout(() => setToast(null), 8000);
           }
           refreshDrafterSources(id);
         },
@@ -1744,8 +1751,7 @@ function App() {
       void newDraft(t?.folderId ?? null, undefined, null, templateId)
         .then(setDrafterDraftId)
         .catch((e) => {
-          setToast(`Couldn't start from that template: ${e}`);
-          setTimeout(() => setToast(null), 6000);
+          setToast(`Couldn't start from that template: ${e}`, 6000);
         });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1757,8 +1763,7 @@ function App() {
       const id = drafterDraftIdRef.current;
       setDrafterSources((list) => list.filter((s) => s.id !== sourceId));
       void deleteSource(sourceId).catch((err) => {
-        setToast(`Couldn't remove that attachment: ${err}`);
-        setTimeout(() => setToast(null), 6000);
+        setToast(`Couldn't remove that attachment: ${err}`, 6000);
         refreshDrafterSources(id);
       });
     },
@@ -1802,9 +1807,8 @@ function App() {
         setToast(
           line
             ? `${name} — ${line}`
-            : `${name} finished. Review its tracked changes in the document.`,
+            : `${name} finished. Review its tracked changes in the document.`, 12_000,
         );
-        setTimeout(() => setToast(null), 12_000);
       },
     );
     const err = listen<{ draftId: string; error: string }>(
@@ -1814,8 +1818,7 @@ function App() {
         if (e.payload.draftId !== drafterDraftId) return;
         const name = shelfRunLive.current;
         shelfRunLive.current = null;
-        setToast(`${name} failed: ${e.payload.error}`);
-        setTimeout(() => setToast(null), 12_000);
+        setToast(`${name} failed: ${e.payload.error}`, 12_000);
       },
     );
     return () => {
@@ -2189,6 +2192,8 @@ function App() {
   // once is what lets the conversation dock tell a plan (which has a
   // discussion) from a file (which has none).
   const plateMode = documentPlateMode(sidebarTab, activeId, activeFile);
+  const plateModeRef = useRef(plateMode);
+  plateModeRef.current = plateMode;
   useLayoutEffect(() => {
     setPanelBreaks(state => state.pane ? { ...state, pane: false } : state);
   }, [plateMode]);
@@ -2372,10 +2377,8 @@ function App() {
       tone: "info",
       message:
         "Panels hidden for this surface — ⇧← or ⇧→ brings one back, ⌘⇧0 snaps everything back.",
-    });
-    const t = window.setTimeout(() => setToast(null), 8000);
-    return () => window.clearTimeout(t);
-  }, [panelsAreMasked, setImmersiveHintSeen]);
+    }, 8000);
+  }, [panelsAreMasked, setImmersiveHintSeen, setToast]);
   // A3 snap-back: one gesture returns the shell to its canonical resting
   // arrangement — the shape a fresh install's doors open onto — and a second
   // gesture from rest CLOSES the panes (full-bleed document). The cycle is
@@ -3791,13 +3794,10 @@ function App() {
                 }).label
               } when ready`,
             );
-            setTimeout(() => setToast(null), 4000);
           }
         }
-        // Bring the intercepted plan to the foreground no matter the current
-        // view — browsing project files, sitting on another session, or no
-        // session at all. The whole point of an intercept is to review the new
-        // plan, so flip the sidebar back to Sessions and select it.
+        // Where a new plan lands is one rule (`arrivalFocus`): it takes focus
+        // unless you are already reading ANOTHER plan.
         const focusIntercepted = () => {
           selectSessions();
           // The intercept or its explicit Review action opens the discussion
@@ -3809,6 +3809,7 @@ function App() {
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
         };
+        const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
           const chatId = arrivingLaunch.chatId;
           const title = list.find(item => item.sessionId === payload.sessionId)?.planTitle ?? "Plan";
@@ -3820,51 +3821,56 @@ function App() {
             selectSurfaceRef.current("document");
             focusIntercepted();
           } else {
-            setToast({ message: "Your chat is now a plan", action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
+            setToast({ message: "Your chat became a plan", tone: "info", action: { label: "Open", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
           }
           return;
         }
-        if (paneMaskedRef.current) {
-          setToast({ message: "New plan intercepted", action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
-          return;
-        }
-        // …with one exception. A plan for ANOTHER session, arriving while the
-        // reviewer is mid-conversation in the discussion panel, must not yank
-        // them away from it: the panel is keyed on the session, so the switch
-        // remounts it and the thread they were reading disappears
-        // mid-sentence. A revision for the session you're already on is not
-        // that case — it's the answer you were waiting for, so it still lands.
-        const stealsFocus =
-          payload.sessionId !== activeId &&
-          discussionLiveRef.current &&
-          planVoiceOpenRef.current;
-        if (!stealsFocus) {
+        const focus = arrivalFocus({
+          activeId,
+          sessionId: payload.sessionId,
+          mainSurface: mainSurfaceRef.current,
+          plateMode: plateModeRef.current,
+        });
+        if (focus === "focus" && !paneMaskedRef.current) {
+          // On the document surface: on screen now. From the Front Door the
+          // plate turns into the plan, which is the point of launching one.
           focusIntercepted();
           return;
         }
-        // Suppressed — so the arrival has to announce itself instead. The
-        // window flash + beep above already fired; add a pulsing dot on the
-        // session's sidebar row and an actionable toast that performs the
-        // switch we just declined to make.
+        if (focus === "focus") {
+          // A masked surface (browser, memory, runs): the plan becomes what
+          // you come back to, but the surface you chose is not yanked away.
+          selectSessions();
+          setActiveId(payload.sessionId);
+          setViewedVersionNumber(null);
+          void loadSession(payload.sessionId);
+          setToast({
+            message: arrivalMessage(title),
+            tone: "info",
+            action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } },
+          });
+          return;
+        }
+        // flash — you are reading another plan. Nothing moves: the row pulses
+        // (and glows once), and the notice offers the switch we declined.
         setUnseenPlanIds((prev) => {
           if (prev.has(payload.sessionId)) return prev;
           const next = new Set(prev);
           next.add(payload.sessionId);
           return next;
         });
+        setArrivalGlow({ sessionId: payload.sessionId, nonce: Date.now() });
         setToast({
-          message: "New plan intercepted",
+          message: arrivalMessage(title),
           tone: "info",
           action: {
-            label: "Review",
+            label: "Open",
             onAction: () => {
-              setToast(null);
               selectSurfaceRef.current("document");
               focusIntercepted();
             },
           },
         });
-        setTimeout(() => setToast(null), 8000);
       });
       if (
         payload.sessionId === activeId &&
@@ -3939,8 +3945,7 @@ function App() {
             `A plan from session ${e.payload.sessionId.slice(0, 8)}… was passed ` +
             `through WITHOUT capture: ${e.payload.reason}`,
           tone: "info",
-        });
-        setTimeout(() => setToast(null), 15000);
+        }, 15000);
       },
     );
     const modeUnlisten = listen<ModeEvent>("mode-changed", (e) => {
@@ -5201,8 +5206,7 @@ function App() {
     setBusy(true);
     try {
       await invoke("approve_plan", { sessionId: session.sessionId });
-      setToast("Plan approved");
-      setTimeout(() => setToast(null), 3500);
+      setToast("Plan approved", 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
       if (isDetachError(err)) {
@@ -5266,8 +5270,7 @@ function App() {
       setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
       void refreshSummaries();
     } catch (err) {
-      setToast(`Reset failed: ${err}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Reset failed: ${err}`, 6000);
     }
   };
 
@@ -5286,12 +5289,10 @@ function App() {
       setRunReportFor((cur) => (cur === sessionId ? null : cur));
       void refreshSummaries();
       setToast(
-        "Approval rescinded — the session is back in review. Restore reattaches it.",
+        "Approval rescinded — the session is back in review. Restore reattaches it.", 7000,
       );
-      setTimeout(() => setToast(null), 7000);
     } catch (err) {
-      setToast(`Un-approve failed: ${err}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Un-approve failed: ${err}`, 6000);
     }
   };
 
@@ -5329,12 +5330,11 @@ function App() {
       } else {
         setToast(
           "Run stood down — the orchestrator (if it is running) keeps going until its terminal is closed.",
+          10000,
         );
       }
-      setTimeout(() => setToast(null), 10000);
     } catch (err) {
-      setToast(`Stand down failed: ${err}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Stand down failed: ${err}`, 6000);
     }
   };
 
@@ -5623,7 +5623,6 @@ function App() {
     }
     if (note) {
       setToast(note);
-      setTimeout(() => setToast(null), 4000);
     }
   };
 
@@ -5855,7 +5854,6 @@ function App() {
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
       setLastLaunchProject(req.projectPath!);
       setToast("Running in the terminal below ↓");
-      setTimeout(() => setToast(null), 4000);
       return { ok: true, terminalId, launchId };
     }
 
@@ -5868,7 +5866,6 @@ function App() {
     if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
     setToast("Launching plan in the terminal below ↓");
-    setTimeout(() => setToast(null), 4000);
     return { ok: true, terminalId, launchId };
   };
 
@@ -5888,7 +5885,6 @@ function App() {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
     setToast("Starting the dev server in the terminal below ↓");
-    setTimeout(() => setToast(null), 4000);
   };
 
   // "Open" on a Localhost card: bring the browser surface forward with a tab on
@@ -6125,7 +6121,6 @@ function App() {
     await openDrafterWithMarkdown(markdown);
     if (!markdown.trim()) return;
     setToast("Mission brief opened in the drafter ✍️");
-    setTimeout(() => setToast(null), 4000);
   };
 
   // The synthesize handoff listens at APP level, not in MissionChat: the
@@ -6158,7 +6153,6 @@ function App() {
     await openDrafterWithMarkdown(markdown);
     if (!markdown.trim()) return;
     setToast("Reply opened in the drafter ✍️");
-    setTimeout(() => setToast(null), 4000);
   };
 
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
@@ -6204,8 +6198,7 @@ function App() {
       ),
     );
     const note = restoreCopiedNote(restoreDecision, target);
-    setToast(note.message);
-    setTimeout(() => setToast(null), note.ms);
+    setToast(note.message, note.ms);
   };
 
   // Local date/time stamp embedded in export file names.
@@ -6221,8 +6214,7 @@ function App() {
   const toastSaved = (saved: string | null) => {
     if (!saved) return; // user cancelled the dialog
     const name = saved.split(/[\\/]/).pop() ?? saved;
-    setToast(`Saved ${name}`);
-    setTimeout(() => setToast(null), 3500);
+    setToast(`Saved ${name}`, 3500);
   };
 
   // Save one plan revision as a clean .md file (sidecars stripped) through a
@@ -6326,8 +6318,7 @@ function App() {
     if (!dw) return;
     try {
       await invoke("approve_plan", { sessionId: dw.sessionId });
-      setToast("Plan approved");
-      setTimeout(() => setToast(null), 3500);
+      setToast("Plan approved", 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
     }
@@ -6365,8 +6356,7 @@ function App() {
   // M4 lock feedback: a keystroke landed in a block owned by a pending agent
   // suggestion and was filtered.
   const lockedEditToast = () => {
-    setToast("Resolve the agent suggestion on this block first");
-    setTimeout(() => setToast(null), 3000);
+    setToast("Resolve the agent suggestion on this block first", 3000);
   };
 
   const reopenResolution = async (commentId: string, note?: string) => {
@@ -6847,8 +6837,7 @@ function App() {
     try {
       preview = await invoke<CombinePreview>("combine_preview", { sessionIds });
     } catch (err) {
-      setToast(`Couldn't read those plans — ${String(err)}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Couldn't read those plans — ${String(err)}`, 6000);
       return;
     }
     // The same door "＋ Plan a build" opens — surface, tab and viewed version
@@ -6906,8 +6895,7 @@ function App() {
       },
     });
     if (!r.ok) {
-      setToast(`Couldn't launch the combination — ${r.reason}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Couldn't launch the combination — ${r.reason}`, 6000);
       setFrontDoorRefusal((prev) => ({
         item: r.blocked ?? null,
         reason: r.blocked ? null : r.reason,
@@ -6950,8 +6938,7 @@ function App() {
       },
     });
     if (!r.ok) {
-      setToast(`Couldn't ${mode === "run" ? "start the run" : "launch the plan"} — ${r.reason}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Couldn't ${mode === "run" ? "start the run" : "launch the plan"} — ${r.reason}`, 6000);
       // And say it INSIDE the island. A toast in the corner is easy to miss
       // when your eyes are on the sentence you just pressed ⏎ on — which is
       // the whole "the text just sits there" report — and it carries no fix
@@ -7053,8 +7040,7 @@ function App() {
       setFrontDoorAttachments([]);
     } catch (e) {
       // The sentence is still in the composer — nothing was taken away.
-      setToast(`Couldn't start the chat — ${e}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Couldn't start the chat — ${e}`, 6000);
       setFrontDoorOpen(false);
     } finally {
       setChatOpening(false);
@@ -7084,8 +7070,7 @@ function App() {
         refreshChats();
       })
       .catch((e) => {
-        setToast(`Couldn't start the chat — ${e}`);
-        setTimeout(() => setToast(null), 6000);
+        setToast(`Couldn't start the chat — ${e}`, 6000);
       })
       .finally(() => { if (chatCreation.current === pending) chatCreation.current = null; setChatOpening(false); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -7112,8 +7097,7 @@ function App() {
       restore: { kind: "none" },
     });
     if (!r.ok) {
-      setToast(`Couldn't launch the plan — ${r.reason}`);
-      setTimeout(() => setToast(null), 6000);
+      setToast(`Couldn't launch the plan — ${r.reason}`, 6000);
     }
   };
 
@@ -7168,8 +7152,7 @@ function App() {
       }
     } catch (err) {
       console.error("readiness fix failed", item.id, err);
-      setToast(String(err));
-      setTimeout(() => setToast(null), 6000);
+      setToast(String(err), 6000);
       return false;
     }
   };
@@ -7197,11 +7180,9 @@ function App() {
       if (kind === "harness") refreshHarnesses();
       setFrontDoorProject({ path });
       setToast(`Created ${path}`);
-      setTimeout(() => setToast(null), 4000);
       return path;
     } catch (err) {
-      setToast(String(err));
-      setTimeout(() => setToast(null), 8000);
+      setToast(String(err), 8000);
       return null;
     }
   };
@@ -7810,6 +7791,7 @@ function App() {
               }}
               viewedVersionNumber={viewedVersionNumber}
               unseenIds={unseenPlanIds}
+              arrivalGlow={arrivalGlow}
               onOpenRunReport={(sessionId) => {
                 // The run chip is the Runs monitor's one entry point: a live
                 // run opens the live monitor (selecting the session so the
@@ -8173,9 +8155,8 @@ function App() {
                         shelfRunLive.current = name;
                         setAgentShelfOpen(false);
                         setToast(
-                          `${name} is working — its edits will land as tracked changes.`,
+                          `${name} is working — its edits will land as tracked changes.`, 8000,
                         );
-                        setTimeout(() => setToast(null), 8000);
                       }}
                       onClose={() => setAgentShelfOpen(false)}
                     />
@@ -8208,8 +8189,7 @@ function App() {
                     )
                       .then(() => clearDrafterShadow(r.forId))
                       .catch((err) => {
-                        setToast(`Couldn't save the recovered copy: ${err}`);
-                        setTimeout(() => setToast(null), 8000);
+                        setToast(`Couldn't save the recovered copy: ${err}`, 8000);
                       });
                   },
                 }}
@@ -9788,16 +9768,7 @@ function App() {
           onToast={setToast}
         />
       </Suspense>
-      {toast &&
-        (typeof toast === "string" ? (
-          <ApproveToast message={toast} />
-        ) : (
-          <ApproveToast
-            message={toast.message}
-            tone={toast.tone}
-            action={toast.action}
-          />
-        ))}
+      {toast && <RedlineToast key={toast.id} toast={toast} onDismiss={dismissToast} />}
       {/* A5: a failed Orchestrate handoff is persistent and actionable —
           never a 10-second toast. The run state was already rolled back to
           NULL when this appears; the plan stays approved. */}
@@ -9844,7 +9815,6 @@ function App() {
                   `${handoffFailure.launchCmd}\n${handoffFailure.prompt}`,
                 );
                 setToast("Launch command + prompt copied");
-                setTimeout(() => setToast(null), 4000);
               }}
               className="rounded px-2 py-1"
               style={{

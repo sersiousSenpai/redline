@@ -11,7 +11,10 @@ describe("panel mask wiring", () => {
   it("a plan arrival opens the preference only when selecting the intercepted plan", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
     const focus = arrival.slice(arrival.indexOf('const focusIntercepted ='), arrival.indexOf('if (graduated &&'));
-    const maskedArrival = arrival.slice(arrival.indexOf('if (paneMaskedRef.current)'), arrival.indexOf('const stealsFocus ='));
+    // The masked-surface branch of `arrivalFocus`'s "focus": selects, never
+    // yanks the surface or opens the pane — its Review action does that.
+    const maskedArrival = arrival.slice(arrival.indexOf('if (focus === "focus") {'), arrival.indexOf('// flash'));
+    expect(maskedArrival.length).toBeGreaterThan(0);
     expect(arrival).not.toContain("revealPane()");
     expect(arrival).toContain("paneMaskedRef.current");
     expect(arrival).toContain('selectSurfaceRef.current("document")');
