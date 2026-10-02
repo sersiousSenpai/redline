@@ -204,6 +204,68 @@ mod tests {
         );
     }
 
+    /// Every command a memory surface (pill, Memory inspector, Health, Catalog,
+    /// Cosmos, Ask) calls takes the ONE shared `Mutex<Connection>` — the same
+    /// lock a `VACUUM INTO` backup, the canary and embedding ticks hold for
+    /// seconds. A sync command waits for it on the macOS main thread, and the
+    /// app beach-balls (the 2026-09-29 diag: main thread inside
+    /// `get_work_graph` → SQLite `pagerStress`). Pinned by name, so a refactor
+    /// that drops one `(async)` fails here.
+    #[test]
+    fn memory_surface_commands_stay_async() {
+        let lib = include_str!("lib.rs");
+        for func in [
+            "memory_catalog_health",
+            "ledger_verify",
+            "ledger_get_capture_external",
+            "ledger_set_capture_external",
+            "memory_embed_settings",
+            "classmem_tree",
+            "classmem_node",
+            "classmem_proposals",
+            "classmem_latest_run",
+            "classmem_runs",
+            "classmem_run",
+            "classmem_revert_run",
+            "ledger_list_events",
+            "ledger_prompt_body",
+            "mirror_status",
+            "memory_forget",
+            "memory_note_write",
+        ] {
+            assert_async_private_command(lib, "lib.rs", func);
+        }
+        let work = include_str!("work.rs");
+        assert_async_command(work, "work.rs", "get_work_graph");
+        assert_async_command(work, "work.rs", "work_ready_count");
+        let memchat = include_str!("memchat.rs");
+        assert_async_command(memchat, "memchat.rs", "memchat_thread");
+        assert_async_command(memchat, "memchat.rs", "memchat_clear");
+    }
+
+    /// `memory_catalog_health` must not route through `MemoryApi::health()`,
+    /// which re-hashes the whole ledger chain under the shared lock before it
+    /// builds the catalog half the Health tab actually reads. And backups must
+    /// vacuum off the shared lock.
+    #[test]
+    fn memory_health_and_backups_skip_the_shared_lock() {
+        let lib = include_str!("lib.rs");
+        let start = lib
+            .find("fn memory_catalog_health")
+            .expect("lib.rs: memory_catalog_health must exist");
+        let body = &lib[start..start + lib[start..].find("\n}\n").unwrap()];
+        assert!(
+            !body.contains(".health()"),
+            "memory_catalog_health must not call MemoryApi::health() — it walks the full chain"
+        );
+        let snap = lib.find("fn snapshot_database").expect("snapshot_database");
+        let snap_body = &lib[snap..snap + lib[snap..].find("\n}\n").unwrap()];
+        assert!(
+            snap_body.contains("snapshot_off_lock") && !snap_body.contains(".snapshot_to("),
+            "snapshot_database must VACUUM on its own connection (snapshot_off_lock)"
+        );
+    }
+
     /// Not a perf budget but the same mechanism: a source-shape invariant that
     /// a refactor could silently undo, with real stakes.
     ///

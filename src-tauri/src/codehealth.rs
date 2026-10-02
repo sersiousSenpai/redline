@@ -317,6 +317,12 @@ const HEAVY_MARKERS: &[&str] = &[
     "base64",
     "fs::read",
     "std::process::Command",
+    // The shared DB lock. Every SQLite read waits on ONE `Mutex<Connection>`
+    // that a backup, the canary, or an embedding tick can hold for seconds; a
+    // sync command waiting on it waits on the main thread (the 2026-09-29
+    // memory beach ball was exactly this, in `get_work_graph`).
+    ".database()",
+    "polis_handle()",
 ];
 
 /// A **sync** `#[tauri::command]` whose body does real work runs on the WebView
@@ -345,7 +351,12 @@ pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
             continue;
         }
         let mut body = String::new();
-        for line in bytes.iter().skip(i + 1) {
+        for (k, line) in bytes.iter().skip(i + 1).enumerate() {
+            // The next command's attribute ends this body even when this one
+            // never reached a column-0 `}` (a one-line `fn f() { … }`).
+            if k > 0 && line.trim_start().starts_with("#[tauri::command") {
+                break;
+            }
             body.push_str(line);
             body.push('\n');
             if *line == "}" {
@@ -1120,11 +1131,17 @@ mod tests {
                    \x20   let _ = std::fs::read_to_string(&path);\n\
                    }\n\
                    #[tauri::command]\n\
-                   fn light(n: u32) -> u32 { n + 1 }\n";
+                   fn light(n: u32) -> u32 { n + 1 }\n\
+                   #[tauri::command]\n\
+                   fn locks(store: State<'_, SessionStore>) -> i64 {\n\
+                   \x20   store.database().max_ledger_seq().unwrap()\n\
+                   }\n";
         let found = probe_command_hygiene("x.rs", src);
-        assert_eq!(found.len(), 1, "only the sync+heavy one: {found:?}");
+        assert_eq!(found.len(), 2, "the sync+heavy one and the sync DB-lock one: {found:?}");
         assert!(found[0].detail.contains("heavy"));
         assert!(found[0].detail.contains("read_to_string"));
+        assert!(found[1].detail.contains("`locks`"));
+        assert!(found[1].detail.contains(".database()"));
     }
 
     #[test]

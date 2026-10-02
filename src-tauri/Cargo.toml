@@ -284,3 +284,11 @@ codegen-units = 1
 # the binary anyway (OSO/dSYM), so local debugging loses nothing; release-CI
 # dSYM extraction runs before bundling.
 strip = "symbols"
+
+# Dependencies (bundled SQLite, sha2, the embedding math) build optimised even
+# in `tauri dev`: a diagnostic report of a memory-surface freeze was taken from
+# an unoptimised debug binary whose SQLite pager ran ~10x slower under the DB
+# lock. The crate's own code stays at opt 0 so incremental rebuilds stay fast;
+# the cost is a slower first dev build.
+[profile.dev.package."*"]
+opt-level = 2

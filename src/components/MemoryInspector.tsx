@@ -31,6 +31,9 @@ import {
 } from "../lib/portability";
 import type { SkillStatus } from "../types";
 
+/** Inspector rows mounted per page (newest first). */
+const INSPECTOR_ROW_PAGE = 200;
+
 // The pill's quick inspector — an ephemeral, read-mostly modal for the fast
 // glance (the full Memory surface, `MemorySurface.tsx`, is the main-pane home).
 // Three tabs: the Lake (the hash-chained record, with Verify + a manual
@@ -182,6 +185,9 @@ function LakeTab() {
   // transcript backfill; prompts with no recorded model are simply absent).
   const [models, setModels] = useState<Map<number, string>>(() => new Map());
   const [modelFilter, setModelFilter] = useState("");
+  // Mount the newest rows only; "Show more" extends in pages. A thousand
+  // fully-styled row buttons was a long first paint for an ambient surface.
+  const [rowCap, setRowCap] = useState(INSPECTOR_ROW_PAGE);
 
   const load = useCallback(async () => {
     try {
@@ -345,7 +351,7 @@ function LakeTab() {
                 : "No events yet. Prompts, plan revisions, and decisions appear here as you work."}
             </div>
           ) : (
-            shownEvents.map((ev) => {
+            shownEvents.slice(0, rowCap).map((ev) => {
               const compacted = ev.promptId != null && compactedPromptIds.has(ev.promptId);
               const model = ev.promptId != null ? models.get(ev.promptId) : undefined;
               return (
@@ -439,6 +445,24 @@ function LakeTab() {
                 </button>
               );
             })
+          )}
+          {shownEvents.length > rowCap && (
+            <button
+              type="button"
+              onClick={() => setRowCap((c) => c + INSPECTOR_ROW_PAGE)}
+              style={{
+                display: "block",
+                width: "100%",
+                padding: "8px 12px",
+                border: "none",
+                background: "transparent",
+                color: "var(--color-ink-muted)",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              Show more ({shownEvents.length - rowCap} older)
+            </button>
           )}
         </div>
 

@@ -1762,7 +1762,7 @@ async fn prepare_inner(app: AppHandle, release_id: String) -> Result<Release, St
     {
         let database = db(&app)?;
         let dest = snapshot_path.clone();
-        tokio::task::spawn_blocking(move || database.snapshot_to(&dest))
+        tokio::task::spawn_blocking(move || database.snapshot_off_lock(&dest))
             .await
             .map_err(|e| format!("the probe snapshot did not run: {e}"))?
             .map_err(|e| format!("could not snapshot the database for the probe: {e}"))?;

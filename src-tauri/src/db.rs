@@ -442,6 +442,28 @@ pub use polis_store::{
 };
 use polis_store::{AttachOptions, PolisStore};
 
+/// The ready frontier's shape, shared by `list_ready_work_items` (the page)
+/// and `count_ready_work_items` (the pill's count) so the two can't drift.
+/// Binds `?1` = project filter (NULL = all) and `?2` = now (ms).
+const READY_WORK_CTE: &str = "WITH RECURSIVE deferred_down(id) AS (
+                 SELECT id FROM work_items
+                  WHERE defer_until IS NOT NULL AND defer_until > ?2
+                 UNION
+                 SELECT e.to_id FROM work_edges e
+                  JOIN deferred_down d ON e.from_id = d.id
+                  WHERE e.type = 'parent-child'
+             )";
+const READY_WORK_WHERE: &str = "w.status = 'open'
+               AND (?1 IS NULL OR w.project_path = ?1)
+               AND w.id NOT IN (SELECT id FROM deferred_down)
+               AND NOT EXISTS (
+                   SELECT 1 FROM work_edges e
+                    JOIN work_items b ON b.id = e.from_id
+                   WHERE e.to_id = w.id AND e.type = 'blocks'
+                     AND b.status != 'closed'
+               )";
+
+
 pub struct Database {
     /// Shared with the attached `PolisStore` — ONE connection, one lock, so
     /// the memory tables and the app's own live in one transaction domain.
@@ -4533,6 +4555,50 @@ impl Database {
         rows.collect()
     }
 
+    /// The database's file on disk, or `None` for an in-memory database.
+    /// Holds the shared lock only for the length of a pointer read.
+    pub fn file_path(&self) -> Option<std::path::PathBuf> {
+        let conn = self.lock_conn();
+        conn.path()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
+    /// `VACUUM INTO dest` WITHOUT the shared connection's lock: the copy runs
+    /// on a short-lived read-only connection of its own, opened on the same
+    /// file. WAL lets that reader see a consistent snapshot while the app's
+    /// connection keeps reading and writing — the old path held the ONE
+    /// `Mutex<Connection>` for the seconds a full-database vacuum takes, and
+    /// every sync command queued behind it on the main thread (the 2026-09-29
+    /// memory beach ball). Falls back to the shared connection only when there
+    /// is no file (in-memory) or the side connection fails.
+    pub fn snapshot_off_lock(&self, dest: &Path) -> rusqlite::Result<()> {
+        if let Some(src) = self.file_path() {
+            match Self::snapshot_file(&src, dest) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "off-lock snapshot failed; retrying on the shared connection");
+                    let _ = std::fs::remove_file(dest);
+                }
+            }
+        }
+        self.snapshot_to(dest)
+    }
+
+    /// The side-connection half of `snapshot_off_lock`.
+    pub(crate) fn snapshot_file(src: &Path, dest: &Path) -> rusqlite::Result<()> {
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let conn = Connection::open_with_flags(
+            src,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+        Ok(())
+    }
+
     // `snapshot_to` (VACUUM INTO) is `PolisStore`'s since Polis E1
     // (`polis_store::PolisStore::snapshot_to`, reached through `Deref`); the
     // Redline copy that lived here was byte-equivalent minus its
@@ -7624,24 +7690,9 @@ impl Database {
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
-            "WITH RECURSIVE deferred_down(id) AS (
-                 SELECT id FROM work_items
-                  WHERE defer_until IS NOT NULL AND defer_until > ?2
-                 UNION
-                 SELECT e.to_id FROM work_edges e
-                  JOIN deferred_down d ON e.from_id = d.id
-                  WHERE e.type = 'parent-child'
-             )
+            "{READY_WORK_CTE}
              SELECT {} FROM work_items w
-             WHERE w.status = 'open'
-               AND (?1 IS NULL OR w.project_path = ?1)
-               AND w.id NOT IN (SELECT id FROM deferred_down)
-               AND NOT EXISTS (
-                   SELECT 1 FROM work_edges e
-                    JOIN work_items b ON b.id = e.from_id
-                   WHERE e.to_id = w.id AND e.type = 'blocks'
-                     AND b.status != 'closed'
-               )
+             WHERE {READY_WORK_WHERE}
              ORDER BY w.pinned DESC, w.priority ASC, w.created_at ASC
              LIMIT ?3",
             Self::WORK_ITEM_COLS
@@ -7650,6 +7701,20 @@ impl Database {
             Self::row_to_work_item(r)
         })?;
         rows.collect()
+    }
+
+    /// The size of the ready frontier `list_ready_work_items` pages — the SAME
+    /// CTE and predicate (shared consts, so the two can't drift), as one
+    /// `COUNT(*)`. The memory pill's "· N ready" segment reads this instead of
+    /// pulling the whole work graph (~1.5 MB of JSON) every 60s just to take
+    /// `readyIds.length`.
+    pub fn count_ready_work_items(&self, project: Option<&str>, now: i64) -> rusqlite::Result<i64> {
+        let conn = self.lock_conn();
+        conn.query_row(
+            &format!("{READY_WORK_CTE} SELECT COUNT(*) FROM work_items w WHERE {READY_WORK_WHERE}"),
+            params![project, now],
+            |r| r.get(0),
+        )
     }
 
     /// Atomic claim: flip `open` → `claimed` in ONE guarded UPDATE
@@ -8918,6 +8983,9 @@ mod work_graph_tests {
         }
     }
 
+    /// Every ready-CTE test below goes through here, so each one also pins
+    /// `count_ready_work_items` (the memory pill's count) to the page's length
+    /// — across blocked, deferred, cyclic and lease-expired shapes.
     fn ready_ids(db: &Database, now: i64) -> Vec<String> {
         let mut ids: Vec<String> = db
             .list_ready_work_items(None, now, 50)
@@ -8925,6 +8993,11 @@ mod work_graph_tests {
             .into_iter()
             .map(|i| i.id)
             .collect();
+        assert_eq!(
+            db.count_ready_work_items(None, now).unwrap(),
+            ids.len() as i64,
+            "work_ready_count must equal list_ready_work_items().len()"
+        );
         ids.sort();
         ids
     }
@@ -12595,6 +12668,49 @@ mod tests {
             let v = snap.verify_ledger_chain().unwrap();
             assert!(v.ok);
             assert_eq!(v.checked, 2);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The beach-ball fix: a backup must complete while ANOTHER thread holds
+    /// the shared connection's lock — a sync command waiting on that lock is a
+    /// frozen main thread. Runs the vacuum with the lock held for its whole
+    /// length, then proves the copy carries the chain (read-only reopen, as
+    /// the keeper's deep walk does).
+    #[test]
+    fn snapshot_off_lock_runs_while_the_shared_lock_is_held() {
+        let dir = std::env::temp_dir().join(format!("redline-offlock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("live.db");
+        {
+            let db = Database::open(&src).unwrap();
+            append(&db, "prompt", "h1");
+            append(&db, "approval", "h2");
+            assert_eq!(
+                db.file_path().map(|p| p.canonicalize().unwrap()),
+                Some(src.canonicalize().unwrap())
+            );
+            let dest = dir.join("backups").join("snap.db");
+            let held = db.lock_conn();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (s2, d2) = (src.clone(), dest.clone());
+            std::thread::spawn(move || tx.send(Database::snapshot_file(&s2, &d2)).unwrap());
+            let r = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the off-lock vacuum must not wait on the shared connection");
+            drop(held);
+            r.unwrap();
+            let copy = polis_store::PolisStore::open_read_only(&dest).unwrap();
+            let v = copy.verify_ledger_chain().unwrap();
+            assert!(v.ok);
+            assert_eq!(v.checked, 2);
+            // The public entry point agrees (and an in-memory db falls back).
+            let dest2 = dir.join("snap2.db");
+            db.snapshot_off_lock(&dest2).unwrap();
+            assert!(dest2.exists());
+            let mem = Database::open_in_memory().unwrap();
+            assert!(mem.file_path().is_none());
+            mem.snapshot_off_lock(&dir.join("mem.db")).unwrap();
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

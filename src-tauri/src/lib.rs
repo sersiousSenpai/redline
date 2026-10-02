@@ -2582,7 +2582,14 @@ const LEDGER_BACKUP_KEEP: usize = 7;
 /// unrecoverable; the mirror/export are secondary content copies, this protects
 /// the chain itself. Best-effort and self-contained — logs and returns on any
 /// error rather than propagating.
-fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize) {
+///
+/// Returns the snapshot's path on success, so the keeper's deep chain walk can
+/// run against the copy instead of the live database's shared connection.
+fn snapshot_database(
+    db: &db::Database,
+    data_dir: &std::path::Path,
+    keep: usize,
+) -> Option<std::path::PathBuf> {
     // One vacuum at a time. Three triggers (once per boot, every 6h, on quit)
     // and, since the startup one moved behind the reveal, real opportunity for
     // two to overlap — a quit during the launch snapshot, or a 6h tick landing
@@ -2593,16 +2600,16 @@ fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize)
     let dir = data_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(error = %e, "could not create backups dir");
-        return;
+        return None;
     }
     // now_millis() is 13 digits until ~year 2286, so filenames sort
     // chronologically by plain lexical order.
     let dest = dir.join(format!("redline-{}.db", ledger::now_millis()));
     // VACUUM INTO refuses an existing destination (a same-millisecond retry).
     let _ = std::fs::remove_file(&dest);
-    if let Err(e) = db.snapshot_to(&dest) {
+    if let Err(e) = db.snapshot_off_lock(&dest) {
         tracing::warn!(error = %e, "ledger DB snapshot failed");
-        return;
+        return None;
     }
     tracing::info!(path = %dest.display(), "ledger DB snapshot written");
 
@@ -2624,6 +2631,7 @@ fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize)
             }
         }
     }
+    Some(dest)
 }
 
 // The capture route and its payload reader live in `polis_server::ingest`
@@ -10339,7 +10347,7 @@ fn get_source_feedback(
 // ---------------------------------------------------------------------------
 
 /// Most-recent-first ledger events for the Ledger pane.
-#[tauri::command]
+#[tauri::command(async)]
 fn ledger_list_events(
     store: tauri::State<'_, SessionStore>,
     limit: Option<i64>,
@@ -10352,7 +10360,7 @@ fn ledger_list_events(
 
 /// Re-walk the hash chain and report whether it verifies (and the first bad seq
 /// if not).
-#[tauri::command]
+#[tauri::command(async)]
 fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainVerdict, String> {
     store
         .database()
@@ -10361,7 +10369,7 @@ fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainV
 }
 
 /// Fetch a stored prompt body by id (the Ledger pane's body viewer).
-#[tauri::command]
+#[tauri::command(async)]
 fn ledger_prompt_body(
     store: tauri::State<'_, SessionStore>,
     id: i64,
@@ -10438,7 +10446,7 @@ fn context_thread_tree(
 
 /// Read/write the capture toggle for external harness sessions (default on).
 /// The shared ingest observer applies it to every provider's prompt adapter.
-#[tauri::command]
+#[tauri::command(async)]
 fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
     store
         .database()
@@ -10447,7 +10455,7 @@ fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
         .unwrap_or(true)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ledger_set_capture_external(
     store: tauri::State<'_, SessionStore>,
     enabled: bool,
@@ -11329,7 +11337,7 @@ async fn export_context_bundle(
 }
 
 /// Current mirror status for the settings surface.
-#[tauri::command]
+#[tauri::command(async)]
 fn mirror_status(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
     Ok(mirror::status(&store.database()))
 }
@@ -11570,7 +11578,7 @@ fn memory_set_embed_provider(
 
 /// What the settings row shows: the configured provider and whether a key is
 /// present. The key itself is NEVER returned — only whether one is set.
-#[tauri::command]
+#[tauri::command(async)]
 fn memory_embed_settings(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<serde_json::Value, String> {
@@ -11643,7 +11651,7 @@ fn memory_reindex(
 /// Explicit forget: release a prompt's words now (a manual compaction). The
 /// ledger keeps the fact that it happened + the original body hash. Returns the
 /// new ledger seq, or `null` if the prompt was already compacted/absent.
-#[tauri::command]
+#[tauri::command(async)]
 fn memory_forget(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -11675,7 +11683,7 @@ fn memory_forget(
 /// `none`). Exactly one of `text`/`starred` per call: each act appends one
 /// `note` ledger event; the readable `user_notes` row updates in place.
 /// Rejections (phantom target, no act) surface as command errors.
-#[tauri::command]
+#[tauri::command(async)]
 fn memory_note_write(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -11732,7 +11740,7 @@ fn memory_notes_list(
 }
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_tree(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Vec<polis_core::api::TreeNodeView>, String> {
@@ -11746,7 +11754,7 @@ fn classmem_tree(
 
 /// One node with its children, (label-resolved, supersession-aware) links,
 /// and observations — the same shape the bridge route serves.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_node(
     store: tauri::State<'_, SessionStore>,
     id: String,
@@ -11780,7 +11788,7 @@ struct ProposalView {
 /// The gardener's work queue (promote/split/merge/collapse/supersede — due
 /// and deferred), enriched with the digest preview + citations the surface
 /// shows as "waiting for a run".
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<ProposalView>, String> {
     let db = store.database();
     let rows = db.list_class_proposals().map_err(|e| e.to_string())?;
@@ -11816,7 +11824,7 @@ fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<Propo
 }
 
 /// The latest classifier run (status/summary/session) for the pane header.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_latest_run(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Option<classmem::ClassRun>, String> {
@@ -11827,7 +11835,7 @@ fn classmem_latest_run(
 /// organize / compaction / observations / revert, with what each did and
 /// cost — the memory surface's run timeline. Same shape as
 /// `GET /v1/memory/runs`.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_runs(limit: Option<i64>) -> Result<Vec<polis_core::types::ClassRun>, String> {
     use polis_core::MemoryApi;
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
@@ -11836,7 +11844,7 @@ fn classmem_runs(limit: Option<i64>) -> Result<Vec<polis_core::types::ClassRun>,
 
 /// One run with its journaled ops (op, subjects, outcome, reason — no image
 /// blobs). Same shape as `GET /v1/memory/runs/:id`.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_run(id: i64) -> Result<Option<polis_core::types::RunView>, String> {
     use polis_core::MemoryApi;
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
@@ -11849,7 +11857,7 @@ fn classmem_run(id: i64) -> Result<Option<polis_core::types::RunView>, String> {
 /// surface shows inline; nothing is deleted, and the revert is itself a run.
 /// Emits what every memory write emits, so the surface, the ledger pane and
 /// the status pill refresh.
-#[tauri::command]
+#[tauri::command(async)]
 fn classmem_revert_run(
     app: AppHandle,
     id: i64,
@@ -11875,11 +11883,15 @@ fn classmem_revert_run(
 /// orphan/duplicate rates, provenance violations, the queue depth. The
 /// Health tab reads it lazily; it is NOT folded into `memory_status`, which
 /// the pill polls on every `memory-changed`.
-#[tauri::command]
+///
+/// Calls `catalog_health` directly, NOT `MemoryApi::health()`: the full report
+/// re-hashes the entire ledger chain first, only to throw that verdict away —
+/// and holds the shared DB lock for the length of the walk. The chain verdict
+/// is `memory_status`'s (incremental) and the Verify button's (full) job.
+#[tauri::command(async)]
 fn memory_catalog_health() -> Result<Option<polis_core::types::CatalogHealth>, String> {
-    use polis_core::MemoryApi;
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
-    Ok(api.health().map_err(|e| e.to_string())?.catalog)
+    Ok(Some(polis_memory::health::catalog_health(&api.view())))
 }
 
 // The human curation commands — accept / reject / pin / rename on nodes,
@@ -12231,6 +12243,7 @@ pub fn run() {
             revert_seat_assignment,
             seat::get_seat_roster,
             work::get_work_graph,
+            work::work_ready_count,
             userconfig::get_workspace,
             userconfig::save_workspace,
             userconfig::list_harnesses,
@@ -13272,7 +13285,7 @@ pub fn run() {
                     tracing::info!("skipping the quit snapshot: the restart already took one");
                 } else if let Some(store) = app_handle.try_state::<SessionStore>() {
                     if let Ok(dir) = app_handle.path().app_data_dir() {
-                        snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
+                        let _ = snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
                     }
                 }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {

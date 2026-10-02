@@ -771,7 +771,7 @@ pub async fn restart_to_apply(
     {
         let db = store.database();
         let dest = pre_snapshot.clone();
-        let result = tokio::task::spawn_blocking(move || db.snapshot_to(&dest))
+        let result = tokio::task::spawn_blocking(move || db.snapshot_off_lock(&dest))
             .await
             .map_err(|e| refuse(format!("the recovery snapshot did not run: {e}")))?;
         if let Err(e) = result {

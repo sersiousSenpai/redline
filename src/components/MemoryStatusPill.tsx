@@ -112,8 +112,9 @@ export function MemoryStatusPill({
       /* best-effort: the pill is ambient, never an error surface */
     }
     try {
-      const graph = await invoke<{ readyIds: string[] }>("get_work_graph");
-      setReadyWork(graph.readyIds.length);
+      // One COUNT(*), not the whole work graph — this runs every 60s and on
+      // every memory event.
+      setReadyWork(await invoke<number>("work_ready_count"));
     } catch {
       /* same best-effort rule: no ready count is a hidden segment, not an error */
     }

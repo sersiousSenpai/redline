@@ -224,7 +224,7 @@ pub fn run_deferred_external(app: AppHandle) {
 /// The startup snapshot, and only the startup one — the six-hour cadence and
 /// the quit snapshot keep their own call sites.
 fn snapshot_once_per_boot(db: &std::sync::Arc<crate::db::Database>, dir: PathBuf) {
-    crate::snapshot_database(db, &dir, crate::LEDGER_BACKUP_KEEP);
+    let _ = crate::snapshot_database(db, &dir, crate::LEDGER_BACKUP_KEEP);
 }
 
 /// Serializes every `VACUUM INTO`.

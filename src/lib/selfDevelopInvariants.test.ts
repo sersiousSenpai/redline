@@ -148,7 +148,7 @@ describe("nothing expensive happens after the process exits", () => {
     // while Redline is still usable. Moving either below the handoff would not
     // break a test — it would just make every restart slow.
     const restart = activationRs.slice(activationRs.indexOf("pub async fn restart_to_apply"));
-    const snapshot = restart.indexOf("snapshot_to");
+    const snapshot = restart.indexOf("snapshot_off_lock");
     const staging = restart.indexOf("stage(&candidate");
     const handoff = restart.indexOf("helper_ready");
     const exit = restart.indexOf("app.exit(0)");

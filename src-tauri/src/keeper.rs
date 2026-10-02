@@ -189,14 +189,27 @@ fn backup_act(ctx: &WatchCtx, _now: i64) {
     let db = ctx.db.clone();
     let dir = ctx.data_dir.clone();
     tokio::task::spawn_blocking(move || {
-        crate::snapshot_database(&db, &dir, crate::LEDGER_BACKUP_KEEP);
+        let snapshot = crate::snapshot_database(&db, &dir, crate::LEDGER_BACKUP_KEEP);
         // The DEEP chain check, and the reason the memory pill can afford a
         // cheap one. `verify_ledger_chain_incremental` re-walks only what grew
         // since its stored anchor, so it cannot see a retroactive edit to a
         // row it already verified; this full re-hash can, and runs on the same
         // 6h cadence as the backup it validates. Already off the main thread —
         // it rides the backup's `spawn_blocking`.
-        match db.verify_ledger_chain() {
+        //
+        // It walks the SNAPSHOT just written — a consistent copy of the live
+        // chain at that instant — on that file's own read-only connection, so
+        // the shared `Mutex<Connection>` is never held for the walk. It also
+        // proves the backup itself carries a sound chain. The live database is
+        // walked only if the copy can't be opened.
+        let verdict = match snapshot
+            .as_deref()
+            .map(polis_store::PolisStore::open_read_only)
+        {
+            Some(Ok(copy)) => copy.verify_ledger_chain(),
+            _ => db.verify_ledger_chain(),
+        };
+        match verdict {
             Ok(v) if v.ok => {
                 tracing::info!(checked = v.checked, "ledger chain verified (deep walk)")
             }
