@@ -32,7 +32,9 @@ interface CommentComposerProps {
    *  Undefined defaults the field to the selected text (a normal edit). */
   presetRevised?: string;
   onCancel: () => void;
-  onSubmit: (request: NewCommentRequest) => Promise<void>;
+  /** `discuss`: the comment was SENT — save it and start its discussion in
+   *  the same press. False for "Save only" and for every edit. */
+  onSubmit: (request: NewCommentRequest, opts: { discuss: boolean }) => Promise<void>;
 }
 
 const TYPE_LABELS: Record<CommentType, string> = {
@@ -106,7 +108,11 @@ export function CommentComposer({
   const canSubmit =
     type === "edit" ? revised !== selectedText : body.trim().length > 0;
 
-  const submit = async () => {
+  // Questions and feedback are SENT: saved and discussed in one press. An edit
+  // is its own whole message, so it only ever saves.
+  const sends = type !== "edit";
+
+  const submit = async (discuss: boolean = sends) => {
     if (!canSubmit || saving) return;
     setSaving(true);
     try {
@@ -143,7 +149,7 @@ export function CommentComposer({
                 attachments,
               }
             : { type, anchorId, body: body.trim(), selection, attachments };
-      await onSubmit(req);
+      await onSubmit(req, { discuss: sends && discuss });
     } finally {
       setSaving(false);
     }
@@ -152,7 +158,9 @@ export function CommentComposer({
   const onKeyDown = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      void submit();
+      // ⌥⌘⏎ saves without starting a discussion — for feedback you only mean
+      // to batch into the next Revise.
+      void submit(!e.altKey);
     } else if (e.key === "Escape") {
       e.preventDefault();
       onCancel();
@@ -344,10 +352,25 @@ export function CommentComposer({
         className="flex items-center justify-between mt-2"
         style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
       >
-        <span>⌘+Enter to save · Esc to cancel · drop or ⌘V a file</span>
+        <span>
+          {sends ? "⌘+Enter to send · ⌥⌘+Enter to save only" : "⌘+Enter to save"} · Esc to cancel · drop or ⌘V a file
+        </span>
+        <span className="flex items-center gap-2">
+        {sends && (
+          <button
+            type="button"
+            onClick={() => void submit(false)}
+            disabled={!canSubmit || saving}
+            className="disabled:opacity-40"
+            title="Save it for the next Revise without starting a discussion (⌥⌘⏎)"
+            style={{ color: "var(--color-ink-muted)", fontSize: "11px", textDecoration: "underline", textUnderlineOffset: 3 }}
+          >
+            Save only
+          </button>
+        )}
         <button
           type="button"
-          onClick={submit}
+          onClick={() => void submit()}
           disabled={!canSubmit || saving}
           className="rounded px-3 py-1 font-medium disabled:opacity-40"
           style={{
@@ -356,8 +379,9 @@ export function CommentComposer({
             fontSize: "12px",
           }}
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? (sends ? "Sending…" : "Saving…") : sends ? "Send" : "Save"}
         </button>
+        </span>
       </div>
     </div>
   );

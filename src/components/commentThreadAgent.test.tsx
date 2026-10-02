@@ -235,3 +235,41 @@ describe("per-comment discussion model", () => {
     expect(invokeMock).toHaveBeenCalledWith("fork_thread_set_model", { sessionId: SESSION, commentId: ITEM, model: "gpt-fixture", effort: "ultra" });
   });
 });
+
+describe("one-press Send starts the discussion", () => {
+  const sends = () => invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_send");
+  const render = (props: Record<string, unknown>, c: Comment = comment) =>
+    act(async () => {
+      root.render(createElement(CommentThread, { sessionId: SESSION, comment: c, backend: null, ...props }));
+    });
+
+  it("sends the comment as the first message exactly once, and survives a remount", async () => {
+    const c = { ...comment, id: "c-send-1" };
+    const consumed = vi.fn();
+    await render({ autoDiscuss: true, onAutoDiscussConsumed: consumed }, c);
+    await flush();
+    expect(sends()).toHaveLength(1);
+    expect(sends()[0][1]).toMatchObject({ commentId: "c-send-1", text: comment.body });
+    expect(consumed).toHaveBeenCalled();
+    // A remount before the parent cleared the flag must not send it again.
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await render({ autoDiscuss: true, onAutoDiscussConsumed: consumed }, c);
+    await flush();
+    expect(sends()).toHaveLength(1);
+  });
+
+  it("leaves a thread that already has its seed alone", async () => {
+    history = [seed, reply];
+    await render({ autoDiscuss: true, onAutoDiscussConsumed: () => {} }, { ...comment, id: "c-send-2" });
+    await flush();
+    expect(sends()).toHaveLength(0);
+  });
+
+  it("does nothing without the flag — Save only stays a plain save", async () => {
+    await render({}, { ...comment, id: "c-send-3" });
+    await flush();
+    expect(sends()).toHaveLength(0);
+    expect(text()).toContain("Discuss with Claude");
+  });
+});

@@ -27,6 +27,11 @@ interface CommentCardProps {
   /** Called after `autoOpen` has been honored, so the parent can clear it and
    *  stop fighting a later manual collapse. */
   onAutoOpenConsumed?: () => void;
+  /** True once, right after the composer's Send: open the card and start the
+   *  discussion with the comment as its first message. */
+  autoDiscuss?: boolean;
+  /** Called once the discussion has been started, so the parent clears it. */
+  onAutoDiscussConsumed?: () => void;
   /** Click anywhere on the card to mirror focus over to the editor's
    *  matching highlight or block. Behaves as a toggle in the parent. Always
    *  active — PlanEditor's focus effect falls back to scrolling the comment's
@@ -103,6 +108,8 @@ export const CommentCard = memo(function CommentCard({
   focused = false,
   autoOpen = false,
   onAutoOpenConsumed,
+  autoDiscuss = false,
+  onAutoDiscussConsumed,
   onSelect,
   onDelete,
   onUpdate,
@@ -154,8 +161,8 @@ export const CommentCard = memo(function CommentCard({
   // A just-captured voice comment: make sure the card is open so its discussion
   // sidecar (which only mounts when expanded) can auto-expand below.
   useEffect(() => {
-    if (autoOpen) setCollapsed(false);
-  }, [autoOpen]);
+    if (autoOpen || autoDiscuss) setCollapsed(false);
+  }, [autoOpen, autoDiscuss]);
 
   // Inline edit of a still-draft, user-authored comment — fix a typo or
   // sharpen the wording before it rides a Submit. Agent suggestions keep
@@ -1047,6 +1054,8 @@ export const CommentCard = memo(function CommentCard({
           backend={backend}
           autoOpen={autoOpen}
           onAutoOpenConsumed={onAutoOpenConsumed}
+          autoDiscuss={autoDiscuss}
+          onAutoDiscussConsumed={onAutoDiscussConsumed}
         />
       )}
     </div>

@@ -36,7 +36,17 @@ interface CommentThreadProps {
   autoOpen?: boolean;
   /** Called after `autoOpen` is honored, so the parent clears it. */
   onAutoOpenConsumed?: () => void;
+  /** True once, right after the composer's Send: the comment was saved to be
+   *  DISCUSSED, so start the discussion with it — no second click. */
+  autoDiscuss?: boolean;
+  /** Called once the seed is sent (or found already sent). */
+  onAutoDiscussConsumed?: () => void;
 }
+
+/** Comments whose Send-started discussion has already fired, app-wide. The
+ *  parent's flag clears the moment the seed goes out, but a remount racing
+ *  that clear must still never send it twice. */
+const autoDiscussed = new Set<string>();
 
 type ThreadStatus = "idle" | "streaming" | "error";
 
@@ -66,6 +76,8 @@ export const CommentThread = memo(function CommentThread({
   backend = null,
   autoOpen = false,
   onAutoOpenConsumed,
+  autoDiscuss = false,
+  onAutoDiscussConsumed,
 }: CommentThreadProps) {
   const monochat = useMonochat();
   const commentId = comment.id;
@@ -163,6 +175,21 @@ export const CommentThread = memo(function CommentThread({
     setExpanded(true);
     onAutoOpenConsumed?.();
   }, [autoOpen, onAutoOpenConsumed]);
+
+  // One-press Send: once the (empty) thread has loaded, its first message is
+  // the comment itself — exactly what "💬 Discuss" would have sent. Waiting
+  // for `loaded` is what makes it exactly-once: a thread that already has a
+  // seed (a remount after the send) is not empty and is left alone.
+  useEffect(() => {
+    if (!autoDiscuss || !loaded) return;
+    const key = `${sessionId}:${commentId}`;
+    if (!autoDiscussed.has(key) && messages.length === 0 && status === "idle") {
+      autoDiscussed.add(key);
+      send(discussSeed(comment));
+    }
+    onAutoDiscussConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoDiscuss, loaded]);
 
   // Auto-expand as the reply streams in — unless the reviewer just folded
   // this thread away on purpose. (Previously done inside the delta listener;

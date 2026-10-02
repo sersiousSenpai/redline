@@ -3288,6 +3288,10 @@ function App() {
   });
   // Stable so it doesn't defeat the memo on CommentCard / CommentThread.
   const clearAutoOpen = useCallback(() => setAutoOpenCommentId(null), []);
+  // A comment the composer just SENT (saved + discuss): its thread sends the
+  // comment as its first message once, then clears this.
+  const [autoDiscussCommentId, setAutoDiscussCommentId] = useState<string | null>(null);
+  const clearAutoDiscuss = useCallback(() => setAutoDiscussCommentId(null), []);
 
   // Appearance prefs live in the DB (`app_settings`) so a fork or second
   // machine carries them; localStorage is only the pre-paint cache. This mount
@@ -5097,10 +5101,10 @@ function App() {
     clearSelection();
   };
 
-  const submitComment = async (req: NewCommentRequest) => {
+  const submitComment = async (req: NewCommentRequest, opts: { discuss: boolean } = { discuss: false }) => {
     if (!session) return;
     try {
-      await invoke<Comment>("add_comment", {
+      const saved = await invoke<Comment>("add_comment", {
         sessionId: session.sessionId,
         // Resolve the stable blockId from the comment's anchor so the in-doc
         // highlight decoration (keyed by blockId) paints — without it the
@@ -5111,6 +5115,11 @@ function App() {
         },
       });
       setComposing(null);
+      // Send = save + discuss: the new card starts its own discussion once.
+      if (opts.discuss && saved?.id) {
+        setAutoDiscussCommentId(saved.id);
+        setFocusedCommentId(saved.id);
+      }
     } catch (err) {
       console.error("failed to add comment", err);
     }
@@ -9547,6 +9556,8 @@ function App() {
                 focused={focusedCommentId === c.id}
                 autoOpen={autoOpenCommentId === c.id}
                 onAutoOpenConsumed={clearAutoOpen}
+                autoDiscuss={autoDiscussCommentId === c.id}
+                onAutoDiscussConsumed={clearAutoDiscuss}
                 onSelect={commentCallbacks.onSelect}
                 onDelete={commentCallbacks.onDelete}
                 onUpdate={commentCallbacks.onUpdate}
