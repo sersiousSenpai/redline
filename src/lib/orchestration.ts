@@ -19,6 +19,8 @@ import type {
 
 /** FE mirror of `runwatch::is_live_run_state` — which run_state values mean
  *  a run is still in flight (watcher alive, Live tab shows it). */
+// `building` (one agent building an approved plan) is deliberately NOT live:
+// there is no run graph to watch, and the plan stays reopenable.
 export function isLiveRunState(state: string | null | undefined): boolean {
   return (
     state === "orchestrating" || state === "running" || state === "in_code_review"

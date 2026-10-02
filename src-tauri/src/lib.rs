@@ -7907,6 +7907,12 @@ async fn approve_plan(
     let _ = tx.send(allow_response("Reviewer approved via Redline."));
     store.set_attach_state(&session_id, AttachState::Idle);
     tracing::info!(session_id = %session_id, "approve_plan fired");
+    // "Approve & build": the same agent is building now. Recording it is what
+    // keeps an approved-and-building plan from reading as "approved · not
+    // built" — and from being picked up by the overnight queue, whose ready
+    // set is exactly `approved AND run_state IS NULL`.
+    record_plan_build(&store.database(), &session_id, session.backend.as_deref().unwrap_or("claude-code"), "approve");
+    advance_run_state(&app, &store, &session_id, "building");
     let _ = app.emit(
         "session-status-changed",
         SessionEvent {
@@ -8016,6 +8022,129 @@ fn orchestrate_plan(
     );
     refresh_tray(&app, &store);
     Ok(())
+}
+
+/// The deny reason `approve_plan_later` sends into the held ExitPlanMode (or
+/// Codex Stop). Same calm ✅ register as `ORCHESTRATE_STAND_DOWN`: the plan is
+/// approved, nothing builds yet, and the agent stays idle in plan mode until
+/// the user starts the build from Redline — which resumes THIS session with a
+/// trigger that voids this stand-down.
+const BUILD_LATER_STAND_DOWN: &str = "✅ Plan approved in Redline — the build will start \
+     later, from Redline. Do NOT implement this plan yet, do not revise it, and do not \
+     call ExitPlanMode again. Acknowledge briefly and end your turn; the user will start \
+     the build from Redline.";
+
+/// The state-machine core of `approve_plan_later`: approve, deny with the
+/// build-later stand-down, leave `run_state` NULL (that NULL is what "approved
+/// · not built" IS). Mirrors `orchestrate_plan_inner`; for Codex it never
+/// queues the implementation, because nothing should build yet.
+fn approve_plan_later_inner(
+    store: &SessionStore,
+    pending: &PendingResponses,
+    expected_modes: &ExpectedModes,
+    session_id: &str,
+) -> Result<(), String> {
+    let Some(tx) = pending.take(session_id) else {
+        return Err("no plan is currently waiting for review on this session".to_string());
+    };
+    let _ = expected_modes.take(session_id);
+    // `set_status(Approved)` records the Approval in the ledger, exactly as a
+    // plain Approve does.
+    store.set_status(session_id, SessionStatus::Approved);
+    let _ = tx.send(deny_response(BUILD_LATER_STAND_DOWN));
+    store.set_attach_state(session_id, AttachState::Idle);
+    Ok(())
+}
+
+/// "Approve, build later": the plan is approved and waits in Redline, with
+/// Build (same agent or a hand-off) and Reopen on its footer.
+#[tauri::command]
+fn approve_plan_later(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+    expected_modes: tauri::State<'_, ExpectedModes>,
+    session_id: String,
+) -> Result<(), String> {
+    if let Err(e) = approve_plan_later_inner(&store, &pending, &expected_modes, &session_id) {
+        mark_session_detached(&app, &store, &session_id);
+        return Err(e);
+    }
+    tracing::info!(session_id = %session_id, "approve_plan_later fired");
+    let _ = store.database().append_journal("approve_later", Some("session"), Some(&session_id), None, None);
+    let _ = app.emit(
+        "session-status-changed",
+        SessionEvent {
+            session_id: session_id.clone(),
+        },
+    );
+    refresh_tray(&app, &store);
+    capture_approval_shot(&app, &store, &session_id);
+    Ok(())
+}
+
+/// The journal row every build start writes. `build_launched` lives in the
+/// context journal rather than as a new ledger kind: the event vocabulary is
+/// owned by the pinned polis crate, and the approval itself is already a
+/// ledger decision.
+fn record_plan_build(db: &Database, session_id: &str, harness: &str, mode: &str) {
+    let _ = db.append_journal(
+        "build_launched",
+        Some("session"),
+        Some(session_id),
+        Some(harness),
+        Some(mode),
+    );
+}
+
+/// `mode`: "same" (resume the planning agent) or "handoff" (a fresh session
+/// on another harness, pointed at the approved plan file). Only an approved
+/// plan builds.
+fn mark_plan_build_inner(store: &SessionStore, session_id: &str, harness: &str, mode: &str) -> Result<(), String> {
+    if !matches!(mode, "same" | "handoff") {
+        return Err(format!("unknown build mode {mode}"));
+    }
+    let session = store.get(session_id).ok_or("plan session not found")?;
+    if session.status != SessionStatus::Approved {
+        return Err("only an approved plan can be built".to_string());
+    }
+    record_plan_build(&store.database(), session_id, harness, mode);
+    Ok(())
+}
+
+/// Both build paths from an approved-but-unbuilt plan go through here: one
+/// journal row, and `run_state = "building"` — the chip, and the overnight
+/// queue's exclusion.
+#[tauri::command(async)]
+fn mark_plan_build(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    harness: String,
+    mode: String,
+) -> Result<(), String> {
+    mark_plan_build_inner(&store, &session_id, &harness, &mode)?;
+    advance_run_state(&app, &store, &session_id, "building");
+    Ok(())
+}
+
+/// Write an approved plan where a DIFFERENT agent can read it:
+/// `<app data>/handoff/<sessionId>-v<N>.md`. The hand-off prompt is a short
+/// pointer to this file — the plan itself is never typed into a PTY.
+/// Returns the absolute path.
+#[tauri::command(async)]
+fn write_plan_handoff(app: AppHandle, store: tauri::State<'_, SessionStore>, session_id: String) -> Result<String, String> {
+    let session = store.get(&session_id).ok_or("plan session not found")?;
+    if session.status != SessionStatus::Approved {
+        return Err("only an approved plan can be handed off".to_string());
+    }
+    let rev = session.revisions.last().ok_or("session has no plan")?;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("handoff");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe: String = session_id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    let path = dir.join(format!("{safe}-v{}.md", rev.version_number));
+    std::fs::write(&path, &rev.raw_plan_markdown).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// Record an Orchestrate launch at click time, before the orchestrator's
@@ -9145,6 +9274,25 @@ fn prepare_restore(
         relocated,
         primed,
     }
+}
+
+/// Where a conversation can be RESUMED from, with no side effects: the
+/// startup-cwd half of `prepare_restore`, without its plan-file prime. A build
+/// resumes the planning session to IMPLEMENT the plan, and priming would
+/// overwrite the very plan file the agent is about to read with the restore
+/// marker. Claude only; everything else resumes from the project path.
+#[tauri::command(async)]
+fn resume_startup_cwd(session_id: String, project_path: Option<String>, backend: Option<String>) -> Option<String> {
+    let claude = backend
+        .as_deref()
+        .map(|b| b.trim().to_ascii_lowercase())
+        .is_none_or(|b| b.is_empty() || b == "claude-code" || b == "claude");
+    if !claude {
+        return project_path;
+    }
+    find_transcript(&session_id)
+        .and_then(|t| startup_cwd_from_transcript(&t))
+        .or(project_path)
 }
 
 /// Reveal the main window. The window starts hidden and is shown once the
@@ -10529,7 +10677,7 @@ fn record_plan_launch(
         .filter(|o| {
             matches!(
                 o.as_str(),
-                "front-door" | "drafter" | "browser" | "chat" | "combine" | "front-door-run"
+                "front-door" | "drafter" | "browser" | "chat" | "combine" | "front-door-run" | "plan-handoff"
             )
         })
         .unwrap_or_else(|| "drafter".to_string());
@@ -12171,6 +12319,10 @@ pub fn run() {
             submit_review,
             approve_plan,
             orchestrate_plan,
+            approve_plan_later,
+            mark_plan_build,
+            write_plan_handoff,
+            resume_startup_cwd,
             record_orchestration_launch,
             workflow_availability,
             apply_orchestrate_allows,
@@ -14124,7 +14276,7 @@ mod tests {
             .expect("record_plan_launch exists")
             .1;
         let filter = f.split_once("unwrap_or_else").expect("origin filter").0;
-        for origin in ["front-door", "drafter", "browser", "chat", "combine", "front-door-run"] {
+        for origin in ["front-door", "drafter", "browser", "chat", "combine", "front-door-run", "plan-handoff"] {
             assert!(
                 filter.contains(&format!("\"{origin}\"")),
                 "{origin} must be an accepted launch origin"
@@ -14441,6 +14593,57 @@ mod tests {
         assert!(expected_modes.take("s1").is_none());
         // The pending slot is consumed — no double-fire window.
         assert!(pending.take("s1").is_none());
+    }
+
+    #[test]
+    fn approve_plan_later_inner_approves_stands_down_and_leaves_run_state_null() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let expected_modes = ExpectedModes::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let (rx, _token) = pending.register("s1", None).expect("register");
+        expected_modes.set("s1", SubmissionMode::Ask);
+
+        approve_plan_later_inner(&store, &pending, &expected_modes, "s1")
+            .expect("approve-later with a held sender must succeed");
+
+        let resp = rx.blocking_recv().expect("oneshot must have been sent");
+        assert_eq!(resp.hook_specific_output.permission_decision, "deny");
+        assert_eq!(resp.hook_specific_output.permission_decision_reason, BUILD_LATER_STAND_DOWN);
+        let session = store.get("s1").expect("session exists");
+        assert_eq!(session.status, SessionStatus::Approved);
+        assert_eq!(session.attach_state, AttachState::Idle);
+        // NULL run_state IS "approved · not built" — and the queue sees it.
+        assert_eq!(store.database().get_run_state("s1"), None);
+        assert!(expected_modes.take("s1").is_none());
+        assert!(pending.take("s1").is_none());
+        // The approval is a ledger decision, exactly like a plain Approve.
+        assert!(store.database().latest_decision_seq("s1", "approval").unwrap().is_some());
+    }
+
+    #[test]
+    fn approve_plan_later_errs_without_held_sender_and_stand_down_is_calm() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        assert!(approve_plan_later_inner(&store, &PendingResponses::new(), &ExpectedModes::new(), "s1").is_err());
+        assert_eq!(store.get("s1").unwrap().status, SessionStatus::InReview);
+        assert!(BUILD_LATER_STAND_DOWN.starts_with("✅"));
+        for needle in ["Do NOT implement", "do not call ExitPlanMode", "from Redline"] {
+            assert!(BUILD_LATER_STAND_DOWN.contains(needle), "{needle}");
+        }
+    }
+
+    #[test]
+    fn mark_plan_build_requires_an_approved_plan_and_a_known_mode() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        assert!(mark_plan_build_inner(&store, "s1", "codex", "same").is_err(), "in review");
+        store.set_status("s1", SessionStatus::Approved);
+        assert!(mark_plan_build_inner(&store, "s1", "codex", "bogus").is_err());
+        mark_plan_build_inner(&store, "s1", "codex", "handoff").expect("approved plan builds");
     }
 
     #[test]

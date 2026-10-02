@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { BackendChoice } from "./backendChoice";
-import { CODEX_PLAN_PROFILE, codexPlanLauncher, shq } from "./resumeCommand";
+import { CODEX_BYPASS_FLAG, CODEX_PLAN_PROFILE, codexPlanLauncher, shq } from "./resumeCommand";
 
 /** Build the command that launches a *fresh* plan session seeded with a
  *  drafted prompt — on either backend. THE only place a plan launch is built:
@@ -92,7 +92,7 @@ export function buildRunLaunchCommand(
     const effort = choice.effort
       ? `-c ${shq(`model_reasoning_effort=${tomlString(choice.effort)}`)} `
       : "";
-    launch = `${bin} ${model}${effort}--dangerously-bypass-approvals-and-sandbox ${shq(prompt)}`;
+    launch = `${bin} ${model}${effort}${CODEX_BYPASS_FLAG} ${shq(prompt)}`;
   } else {
     const grants = addDirs.map((d) => `--add-dir ${shq(d)} `).join("");
     const model = choice.model ? `--model ${shq(choice.model)} ` : "";

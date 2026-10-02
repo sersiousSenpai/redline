@@ -19,7 +19,9 @@ const tabs = read("components/TerminalTabs.tsx");
 /** `restorePlanSession`'s body, from its declaration to the next top-level
  *  `const` at the same indentation. */
 const restoreBody = (() => {
-  const start = app.indexOf("const restorePlanSession = async () => {");
+  // The body lives in `restorePlanSessionWith` (Reopen passes `rescinded`);
+  // `restorePlanSession` is its no-option alias.
+  const start = app.indexOf("const restorePlanSession = () => restorePlanSessionWith({});");
   expect(start).toBeGreaterThan(-1);
   const end = app.indexOf("\n  // Candidate project directories", start);
   expect(end).toBeGreaterThan(start);

@@ -1,8 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { useEffect, useRef, useState } from "react";
 import type { Comment } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
 import { Button } from "./ui/Button";
+import { MenuSurface } from "./ui/MenuSurface";
+
+/** Where an approved plan can be built from — the same agent, or a hand-off. */
+export interface BuildTarget {
+  id: string;
+  label: string;
+  detail?: string;
+}
+
+/** The open plan, once approved. `runState` NULL is "approved · not built". */
+export interface FooterApproval {
+  version: number;
+  runState: string | null;
+  /** A live orchestrated run can't be reopened under itself. */
+  runLive: boolean;
+}
 
 interface FooterProps {
   comments: Comment[];
@@ -10,14 +27,20 @@ interface FooterProps {
   sessionReady: boolean;
   canSubmit: boolean;
   canApprove: boolean;
-  /** Same gating as canApprove — Orchestrate prepares a graph for review. */
-  canOrchestrate: boolean;
   waiting: boolean;
   /** The in-flight submit was an Ask batch — the author is answering. */
   waitingAsk: boolean;
   onSubmit: () => void;
+  /** "Approve & build": the same agent builds now. */
   onApprove: () => void;
-  onOrchestrate: () => void;
+  /** "Approve, build later": approved, the agent stands down, nothing builds. */
+  onApproveLater: () => void;
+  /** Present once the open plan is approved. */
+  approval?: FooterApproval | null;
+  buildTargets?: BuildTarget[];
+  onBuild?: (targetId: string) => void;
+  /** Rescind the approval and bring the plan back held, in review. */
+  onReopen?: () => void;
   /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
   termCollapsed: boolean;
   termTabCount: number;
@@ -32,12 +55,15 @@ export function Footer({
   sessionReady,
   canSubmit,
   canApprove,
-  canOrchestrate,
   waiting,
   waitingAsk,
   onSubmit,
   onApprove,
-  onOrchestrate,
+  onApproveLater,
+  approval = null,
+  buildTargets = [],
+  onBuild,
+  onReopen,
   termCollapsed,
   termTabCount,
   termHasUnseen,
@@ -126,6 +152,15 @@ export function Footer({
           >
             {waitingCopy}
           </button>
+        ) : approval ? (
+          <span style={{ color: "var(--color-success)" }}>
+            Approved · v{approval.version}
+            <span style={{ color: "var(--color-ink-muted)" }}>
+              {approval.runState === null
+                ? " · not built"
+                : ` · ${approval.runState.replace(/_/g, " ")}`}
+            </span>
+          </span>
         ) : idle ? (
           <span>
             Waiting for a plan — start a planning session from the front door
@@ -211,36 +246,26 @@ export function Footer({
             )}
           </span>
         </Button>
-        {/* Decomposition produces an editable graph; execution starts only
-            after the reviewer starts or approves that graph for the queue. */}
-        <Button
-          size="sm"
-          onClick={onOrchestrate}
-          disabled={!canOrchestrate || waiting}
-          className="font-medium"
-          title="Approve the plan and prepare an editable run graph. Review its agents, scope, and checks before starting execution."
-        >
-          <span className="flex flex-col items-center leading-tight">
-            <span>Orchestrate</span>
-            <span
-              style={{
-                fontSize: "10px",
-                fontWeight: 400,
-                color: "var(--color-ink-muted)",
-              }}
-            >
-              approve + review run graph
-            </span>
-          </span>
-        </Button>
-        <Button
-          size="sm"
-          variant="success"
-          onClick={onApprove}
-          disabled={!canApprove || waiting}
-          className="font-medium"
-          label="Approve plan"
-        />
+        {approval ? (
+          <ApprovedActions
+            approval={approval}
+            buildTargets={buildTargets}
+            onBuild={onBuild}
+            onReopen={onReopen}
+          />
+        ) : (
+          // Approving never routes through a run graph: Approve & build hands
+          // the plan to the agent that wrote it; build later parks it here.
+          <SplitButton
+            label="Approve & build"
+            sublabel={`with ${author}`}
+            disabled={!canApprove || waiting}
+            onPrimary={onApprove}
+            menuLabel="More approve options"
+            items={[{ id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" }]}
+            onItem={() => onApproveLater()}
+          />
+        )}
       </span>
     </footer>
   );
@@ -287,4 +312,128 @@ function countByType(comments: Comment[]): Record<Comment["type"], number> {
     out[c.type] += 1;
   }
   return out;
+}
+
+/** An approved plan's actions: Build ▾ while it isn't built, and Reopen
+ *  unless a live run sits on it. Reopening something already building asks
+ *  once, inline — the agent may already have changed files. */
+function ApprovedActions({
+  approval,
+  buildTargets,
+  onBuild,
+  onReopen,
+}: {
+  approval: FooterApproval;
+  buildTargets: BuildTarget[];
+  onBuild?: (targetId: string) => void;
+  onReopen?: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const built = approval.runState !== null;
+  return (
+    <>
+      {!approval.runLive && onReopen && (confirming ? (
+        <span className="flex items-center gap-2" role="group" aria-label="Confirm reopen">
+          <span style={{ fontSize: "11px" }}>The agent may already have made changes.</span>
+          <Button size="sm" onClick={() => { setConfirming(false); onReopen(); }}>Reopen anyway</Button>
+          <Button size="sm" onClick={() => setConfirming(false)}>Cancel</Button>
+        </span>
+      ) : (
+        <Button
+          size="sm"
+          onClick={() => (built ? setConfirming(true) : onReopen())}
+          title="Rescind the approval and bring the plan back into review, with its comments"
+        >
+          Reopen
+        </Button>
+      ))}
+      {!built && buildTargets.length > 0 && onBuild && (
+        <SplitButton
+          label="Build"
+          sublabel={buildTargets[0].label}
+          onPrimary={() => onBuild(buildTargets[0].id)}
+          menuLabel="Build with"
+          items={buildTargets}
+          onItem={onBuild}
+        />
+      )}
+    </>
+  );
+}
+
+/** A primary action with a ▾ beside it that opens a small menu upward — the
+ *  footer sits on the bottom edge, so the menu grows into the page. */
+function SplitButton({
+  label,
+  sublabel,
+  disabled = false,
+  onPrimary,
+  menuLabel,
+  items,
+  onItem,
+}: {
+  label: string;
+  sublabel?: string;
+  disabled?: boolean;
+  onPrimary: () => void;
+  menuLabel: string;
+  items: BuildTarget[];
+  onItem: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  return (
+    <span ref={wrap} className="relative inline-flex items-stretch">
+      <Button size="sm" variant="success" onClick={onPrimary} disabled={disabled} className="font-medium" style={{ borderTopRightRadius: 0, borderBottomRightRadius: 0 }}>
+        <span className="flex flex-col items-center leading-tight">
+          <span>{label}</span>
+          {sublabel && <span style={{ fontSize: "10px", fontWeight: 400, opacity: 0.85 }}>{sublabel}</span>}
+        </span>
+      </Button>
+      <Button
+        size="sm"
+        variant="success"
+        ariaLabel={menuLabel}
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{ borderTopLeftRadius: 0, borderBottomLeftRadius: 0, borderLeft: "1px solid color-mix(in srgb, var(--color-on-accent) 35%, transparent)", paddingLeft: 6, paddingRight: 6 }}
+      >
+        ▾
+      </Button>
+      {open && (
+        <MenuSurface
+          ariaLabel={menuLabel}
+          className="absolute right-0 z-50 py-1"
+          style={{ bottom: "calc(100% + 6px)", minWidth: 220 }}
+        >
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitem"
+              className="block w-full text-left px-3 py-1.5 hover:bg-[color-mix(in_srgb,var(--color-ink)_7%,transparent)]"
+              style={{ color: "var(--color-ink)", fontSize: "12px" }}
+              onClick={() => { setOpen(false); onItem(item.id); }}
+            >
+              {item.label}
+              {item.detail && <span className="block" style={{ color: "var(--color-ink-muted)", fontSize: "10.5px" }}>{item.detail}</span>}
+            </button>
+          ))}
+        </MenuSurface>
+      )}
+    </span>
+  );
 }

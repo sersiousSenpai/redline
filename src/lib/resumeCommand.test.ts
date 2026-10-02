@@ -2,7 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 import {
+  buildResumeBuildCommand,
   buildResumeCommand,
+  handoffPrompt,
   CODEX_PLAN_PROFILE,
   RESTORE_ENV,
   RESTORE_SEAT,
@@ -297,5 +299,34 @@ describe("buildResumeCommand — the codex arm", () => {
         backend: "claude-code",
       }),
     ).toBe(buildResumeCommand("abc-123", NOW, "/p"));
+  });
+});
+
+describe("buildResumeBuildCommand — building an approved plan with the same agent", () => {
+  const NOW = new Date(2026, 9, 2, 9, 5);
+  it("resumes Claude in auto mode from the startup cwd, voiding the stand-down", () => {
+    const cmd = buildResumeBuildCommand("abc-123", NOW, "/w/app", 3, { backend: "claude-code", claudeBin: "/bin/claude" });
+    expect(cmd.startsWith("cd '/w/app' && '/bin/claude' --resume 'abc-123' --permission-mode auto '")).toBe(true);
+    expect(cmd).toContain("approved plan v3 is now cleared to implement");
+    expect(cmd).toContain("stand-down in your context (do not implement) is void");
+    expect(cmd).not.toContain("--permission-mode plan");
+  });
+
+  it("resumes Codex on the plain binary with no approvals and no sandbox", () => {
+    const cmd = buildResumeBuildCommand("t-9", NOW, null, 2, { backend: "codex", codexBin: "/x/codex", model: "gpt-5.5", effort: "high" });
+    expect(cmd).toMatch(/^'\/x\/codex' resume 't-9' -m 'gpt-5\.5' -c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox '/);
+    expect(cmd).not.toContain("redline-plan");
+    expect(cmd).not.toContain("read-only");
+  });
+
+  it("refuses the harnesses whose non-plan flags are unverified", () => {
+    expect(() => buildResumeBuildCommand("s", NOW, null, 1, { backend: "cursor" })).toThrow();
+    expect(() => buildResumeBuildCommand("s", NOW, null, 1, { backend: "antigravity" })).toThrow();
+  });
+
+  it("hands a different agent a pointer, never the plan", () => {
+    expect(handoffPrompt("/data/handoff/s-v2.md")).toBe(
+      "Implement the approved plan in /data/handoff/s-v2.md. It was reviewed and approved in Redline; follow it.",
+    );
   });
 });

@@ -342,7 +342,7 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
-import { buildResumeCommand } from "./lib/resumeCommand";
+import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isDockKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -500,6 +500,7 @@ import type { RunGraph } from "./lib/runner/schema";
 import { useModelCatalogs } from "./hooks/useModelCatalogs";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
+  agentLabelFor,
   defaultChoice as defaultBackendChoice,
   parseChoice as parseBackendChoice,
   type Backend,
@@ -5026,9 +5027,8 @@ function App() {
   // restored (which clears `detached` on the next plan-received POST).
   const canSubmit = pendingComments.length > 0 && !detached;
   const canApprove = !!session && session.status !== "approved" && !detached;
-  // Orchestrate shares Approve's gating exactly: after either fires,
-  // status=approved disables both — no double-fire window.
-  const canOrchestrate = canApprove;
+  const activeRunState =
+    summaries.find((s) => s.sessionId === session?.sessionId)?.runState ?? null;
 
   // Bidirectional focus: when the editor (or anything else) sets a focused
   // comment id, scroll the matching sidebar card into view. The editor side
@@ -5227,6 +5227,117 @@ function App() {
     }
   };
 
+  // "Approve, build later": approved, the agent stands down in plan mode, and
+  // the plan waits here as "approved · not built" with Build and Reopen.
+  const approvePlanLater = async () => {
+    if (!session || busy) return;
+    setBusy(true);
+    try {
+      await invoke("approve_plan_later", { sessionId: session.sessionId });
+      setToast("Plan approved — build it from here when you're ready");
+      void refreshSummaries();
+    } catch (err) {
+      console.error("approve_plan_later failed", err);
+      if (isDetachError(err)) {
+        setDetachDismissed(false);
+        void refreshSummaries();
+      } else setToast(`Approve failed: ${err}`, null);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Building an approved plan: the agent that wrote it ("same", resuming its
+  // session in a building mode) or a hand-off to the other harness, which
+  // reads the approved plan from a file. Cursor/Antigravity are not offered
+  // (their non-plan flags are unverified). Multi-agent builds are Track O.
+  const planHarness: Backend = restoreDecision.harness;
+  const buildTargets = useMemo(() => {
+    if (session?.status !== "approved") return [];
+    const targets: { id: string; label: string; detail?: string }[] = [];
+    if (runSupported(planHarness))
+      targets.push({ id: "same", label: `with ${agentLabelFor(planHarness)}`, detail: "resumes the session that wrote the plan" });
+    for (const b of ["claude-code", "codex"] as const) {
+      if (b !== planHarness) targets.push({ id: b, label: `with ${agentLabelFor(b)}`, detail: "a fresh session reads the approved plan" });
+    }
+    return targets;
+  }, [session?.status, planHarness]);
+
+  const buildApproved = async (targetId: string) => {
+    if (!session || busy) return;
+    const sessionId = session.sessionId;
+    const projectPath = session.projectPath || null;
+    const version = session.revisions[session.revisions.length - 1]?.versionNumber ?? 1;
+    setBusy(true);
+    try {
+      if (targetId === "same") {
+        const health = await integrationHealth
+          .ensure({ backend: planHarness, extension: false, projectPath })
+          .catch(() => null);
+        // Where `--resume` can find the conversation — WITHOUT the restore's
+        // plan-file prime, which would overwrite the plan the agent is about
+        // to implement.
+        const cwd = await invoke<string | null>("resume_startup_cwd", {
+          sessionId,
+          projectPath,
+          backend: planHarness,
+        }).catch(() => projectPath);
+        const cmd = `${buildResumeBuildCommand(sessionId, new Date(), cwd, version, {
+          backend: planHarness,
+          claudeBin: health?.preflight.claude.path ?? preflightRef.current?.claude.path ?? null,
+          codexBin: health?.preflight.codex?.path ?? preflightRef.current?.codex?.path ?? null,
+          model: session.model,
+          effort: session.effort,
+        })}\r`;
+        suppressTerminalRevealFocus();
+        setTermFullscreen(false);
+        revealTerm();
+        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
+        if (!id) {
+          setToast("Couldn't open a terminal to build in", 6000);
+          return;
+        }
+        const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
+        if (!delivery.ok) {
+          setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000);
+          return;
+        }
+        await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
+        setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
+      } else {
+        const path = await invoke<string>("write_plan_handoff", { sessionId });
+        const r = await launchPlan({
+          mode: "run",
+          origin: "plan-handoff",
+          choice: { backend: targetId as Backend, model: null, effort: null },
+          prompt: handoffPrompt(path),
+          projectPath,
+          draftId: null,
+          addDirs: [path.slice(0, path.lastIndexOf("/"))],
+          restore: { kind: "none" },
+        });
+        if (!r.ok) {
+          setToast(`Couldn't hand off the build — ${r.reason}`, 6000);
+          return;
+        }
+        await invoke("mark_plan_build", { sessionId, harness: targetId, mode: "handoff" });
+      }
+      void refreshSummaries();
+    } catch (err) {
+      setToast(`Couldn't start the build: ${err}`, 6000);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Reopen for review: rescind the approval, then restore the session so the
+  // plan comes back held, in review, with its comments — the stand-down it
+  // was given is declared void in the restore trigger.
+  const reopenApproved = async () => {
+    if (!session) return;
+    if (await unapproveSession(session.sessionId)) await restorePlanSessionWith({ rescinded: true });
+  };
+
   // A native graph is reviewed in Runs before any task gets write access.
   const [nativeRunId, setNativeRunId] = useState<string | null>(null);
   const [runPlanAnchor, setRunPlanAnchor] = useState<{ sessionId: string; blockId: string } | null>(null);
@@ -5242,17 +5353,6 @@ function App() {
     setNativeRunId(run.runId);
     selectSurface("runs");
     void refreshSummaries();
-  };
-  const openOrchestrateModal = async () => {
-    if (!session || busy) return;
-    setBusy(true);
-    try {
-      const graph = await invoke<RunGraph>("runner_decompose", { planSessionId: session.sessionId });
-      await invoke("orchestrate_plan", { sessionId: session.sessionId });
-      showNativeRun(graph);
-    } catch (err) {
-      setToast(`Could not prepare the run: ${err}`);
-    } finally { setBusy(false); }
   };
   const relaunchOrchestrator = async (sessionId: string) => {
     if (busy) return;
@@ -5286,7 +5386,7 @@ function App() {
   // B3: rescind the approval — back to review, detached, ledger supersession
   // backend-side. The rescinded set feeds the restore prompt's "your
   // stand-down is void" sentence.
-  const unapproveSession = async (sessionId: string) => {
+  const unapproveSession = async (sessionId: string): Promise<boolean> => {
     try {
       await invoke("unapprove_plan", { sessionId });
       setRescindedIds((prev) => {
@@ -5300,8 +5400,10 @@ function App() {
       setToast(
         "Approval rescinded — the session is back in review. Restore reattaches it.", 7000,
       );
+      return true;
     } catch (err) {
       setToast(`Un-approve failed: ${err}`, 6000);
+      return false;
     }
   };
 
@@ -5484,7 +5586,10 @@ function App() {
   // raw replay this rework exists to stop presenting as conversation. The
   // banner they are already reading becomes the progress surface, and
   // "Show raw terminal" is there for when they want the machinery.
-  const restorePlanSession = async () => {
+  // `rescinded` is passed by Reopen, which rescinds and restores in one
+  // gesture — before `rescindedIds` has re-rendered into this closure.
+  const restorePlanSession = () => restorePlanSessionWith({});
+  const restorePlanSessionWith = async (opts: { rescinded?: boolean }) => {
     if (!session) return;
     // One at a time. See `RestoreAttempt`. A failed attempt is not in flight —
     // its Retry comes back through here.
@@ -5518,7 +5623,7 @@ function App() {
       sessionId,
       new Date(),
       target.cwd,
-      rescindedIds.has(sessionId),
+      rescindedIds.has(sessionId) || !!opts.rescinded,
       target.primed,
       // A Codex thread id handed to `claude --resume` does not error — it
       // silently starts a FRESH session, which then writes the sentinel under
@@ -5694,6 +5799,8 @@ function App() {
      *  months later, "why did we build this" walks back from the plan to the
      *  talk that produced it. */
     chatId?: string | null;
+    /** Extra read grants (`--add-dir`) — the approved plan's hand-off dir. */
+    addDirs?: string[];
     /** What the prompt LAKE should hold, when that is not what gets typed.
      *  Only Combine passes it — see the invoke below. */
     recordBody?: string | null;
@@ -5789,10 +5896,13 @@ function App() {
     // via --add-dir: the contract it builds against lives outside its cwd.
     // Read from the payload just awaited, so an extension launch can no longer
     // grant nothing because the door's cached probe never asked.
-    const addDirs = extensionAddDirs(
-      kind,
-      health?.preflight.extension ?? preflightRef.current?.extension ?? null,
-    );
+    const addDirs = [
+      ...extensionAddDirs(
+        kind,
+        health?.preflight.extension ?? preflightRef.current?.extension ?? null,
+      ),
+      ...(req.addDirs ?? []),
+    ];
     const launchId = crypto.randomUUID();
     const bins = {
       "claude-code": health.preflight.claude.path,
@@ -9699,12 +9809,23 @@ function App() {
         sessionReady={sessionReady}
         canSubmit={canSubmit}
         canApprove={canApprove}
-        canOrchestrate={canOrchestrate}
         waiting={waiting}
         waitingAsk={waitingAsk}
         onSubmit={submitReview}
         onApprove={approvePlan}
-        onOrchestrate={() => void openOrchestrateModal()}
+        onApproveLater={() => void approvePlanLater()}
+        approval={
+          session?.status === "approved"
+            ? {
+                version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
+                runState: activeRunState,
+                runLive: isLiveRunState(activeRunState),
+              }
+            : null
+        }
+        buildTargets={buildTargets}
+        onBuild={(id) => void buildApproved(id)}
+        onReopen={() => void reopenApproved()}
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}

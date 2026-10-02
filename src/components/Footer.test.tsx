@@ -12,8 +12,8 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); })
 async function mount(backend?: string, waiting = false, waitingAsk = false) {
   await act(async () => root.render(createElement(Footer, {
     comments: [], sessionReady: true, canSubmit: true, canApprove: true,
-    canOrchestrate: true, waiting, waitingAsk, backend,
-    onSubmit: () => {}, onApprove: () => {}, onOrchestrate: () => {},
+    waiting, waitingAsk, backend,
+    onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
     termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
   })));
 }
@@ -27,11 +27,70 @@ describe("plan footer provider and execution labels", () => {
       expect(host.textContent).toContain(`${author} is working — revising in the terminal`);
     },
   );
-  it("explains that orchestration prepares a graph for review before execution", async () => {
-    await mount("cursor");
-    const button = Array.from(host.querySelectorAll("button")).find((element) => element.textContent?.includes("Orchestrate"));
-    expect(button?.textContent).toContain("approve + review run graph");
-    expect(button?.title).toContain("before starting execution");
-    expect(button?.title).not.toContain("terminal");
+  it("approves through the plan's own agent, never a run graph", async () => {
+    await mount("codex");
+    expect(host.textContent).toContain("Approve & build");
+    expect(host.textContent).toContain("with Codex");
+    expect(host.textContent).not.toContain("Orchestrate");
+  });
+});
+
+describe("approve, build later, build and reopen", () => {
+  const button = (text: string) =>
+    [...host.querySelectorAll("button")].find((b) => b.textContent?.trim().startsWith(text));
+  async function mountWith(over: Record<string, unknown>) {
+    await act(async () => root.render(createElement(Footer, {
+      comments: [], sessionReady: true, canSubmit: false, canApprove: true, waiting: false, waitingAsk: false,
+      backend: "claude-code", onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
+      termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
+      ...over,
+    })));
+  }
+
+  it("offers build later from the approve split button", async () => {
+    const calls: string[] = [];
+    await mountWith({ onApprove: () => calls.push("now"), onApproveLater: () => calls.push("later") });
+    await act(async () => button("Approve & build")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
+    const later = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes("Approve, build later"))!;
+    await act(async () => later.click());
+    expect(calls).toEqual(["now", "later"]);
+  });
+
+  it("an approved, unbuilt plan shows Build ▾ and Reopen", async () => {
+    const built: string[] = [];
+    let reopened = 0;
+    await mountWith({
+      approval: { version: 3, runState: null, runLive: false },
+      buildTargets: [{ id: "same", label: "with Claude" }, { id: "codex", label: "with Codex" }],
+      onBuild: (id: string) => built.push(id),
+      onReopen: () => reopened++,
+    });
+    expect(host.textContent).toContain("Approved · v3");
+    expect(host.textContent).toContain("not built");
+    expect(button("Approve & build")).toBeUndefined();
+    await act(async () => button("Build")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Build with"]')!.click());
+    const codex = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes("with Codex"))!;
+    await act(async () => codex.click());
+    expect(built).toEqual(["same", "codex"]);
+    await act(async () => button("Reopen")!.click());
+    expect(reopened).toBe(1);
+  });
+
+  it("reopening a plan that is already building asks once, inline", async () => {
+    let reopened = 0;
+    await mountWith({ approval: { version: 2, runState: "building", runLive: false }, onReopen: () => reopened++ });
+    expect(button("Build")).toBeUndefined();
+    await act(async () => button("Reopen")!.click());
+    expect(reopened).toBe(0);
+    expect(host.textContent).toContain("may already have made changes");
+    await act(async () => button("Reopen anyway")!.click());
+    expect(reopened).toBe(1);
+  });
+
+  it("hides Reopen under a live run", async () => {
+    await mountWith({ approval: { version: 1, runState: "running", runLive: true }, onReopen: () => {} });
+    expect(button("Reopen")).toBeUndefined();
   });
 });

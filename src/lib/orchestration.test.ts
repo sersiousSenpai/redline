@@ -86,6 +86,8 @@ describe("isLiveRunState", () => {
     expect(isLiveRunState("stalled")).toBe(false);
     // A stand-down is terminal — the watcher exits and rehydration skips it.
     expect(isLiveRunState("abandoned")).toBe(false);
+    // One agent building an approved plan: no graph to watch, still reopenable.
+    expect(isLiveRunState("building")).toBe(false);
     expect(isLiveRunState(null)).toBe(false);
   });
 });

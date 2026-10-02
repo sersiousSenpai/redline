@@ -80,17 +80,27 @@ describe("one launch pipeline", () => {
     expect(hits, `built in ${hits} places`).toBe(1);
   });
 
-  it("the run launch command is built in exactly one place, and only it skips the sandbox", () => {
+  it("the run launch command is built in exactly one place, and only runs skip the sandbox", () => {
     // "Just run it" and the approved-plan hand-off launch through the same
     // builder. The bypass flag is the user's explicit choice for a RUN; a
     // second site writing it is how a plan session could lose its sandbox.
     expect(countIn("src", "buildRunLaunchCommand(")).toBe(1);
-    expect(countIn("src", "--dangerously-bypass-approvals-and-sandbox")).toBe(1);
+    // The literal lives only in its exported constant (`countIn` skips the
+    // export line), so any other occurrence is a second, unguarded site.
+    expect(countIn("src", "--dangerously-bypass-approvals-and-sandbox")).toBe(0);
+    const resume = read("src/lib/resumeCommand.ts");
+    expect(resume).toContain('export const CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox";');
+    // Its only users: the run builder and the approved plan's build.
+    const fnBody = (src: string, name: string) => {
+      const from = src.slice(src.indexOf(`export function ${name}(`));
+      return from.slice(0, from.indexOf("\n}\n"));
+    };
     const builder = read("src/lib/planLaunchCommand.ts");
-    const runFn = builder.slice(builder.indexOf("export function buildRunLaunchCommand("));
-    expect(runFn.slice(0, runFn.indexOf("\n}\n"))).toContain("--dangerously-bypass-approvals-and-sandbox");
-    const planFn = builder.slice(builder.indexOf("export function buildPlanLaunchCommand("));
-    expect(planFn.slice(0, planFn.indexOf("\n}\n"))).not.toContain("--dangerously-bypass");
+    expect(fnBody(builder, "buildRunLaunchCommand")).toContain("CODEX_BYPASS_FLAG");
+    expect(fnBody(resume, "buildResumeBuildCommand")).toContain("CODEX_BYPASS_FLAG");
+    expect(fnBody(builder, "buildPlanLaunchCommand")).not.toContain("BYPASS");
+    expect(fnBody(resume, "buildResumeCommand")).not.toContain("BYPASS");
+    expect(countIn("src", "CODEX_BYPASS_FLAG")).toBe(2);
   });
 
   it("a run never claims a plan: it skips the intercept registry and the pending card", () => {

@@ -15666,6 +15666,10 @@ body.
         // Approved but parked overnight — must NOT re-queue.
         db.upsert_session(&mk("parked", SessionStatus::Approved, 60)).unwrap();
         db.set_run_state("parked", "awaiting_review").unwrap();
+        // Approved and being built by a single agent ("Approve & build", or
+        // Build from "approved · not built") — must NOT queue a second build.
+        db.upsert_session(&mk("building", SessionStatus::Approved, 70)).unwrap();
+        db.set_run_state("building", "building").unwrap();
         // Not approved at all.
         db.upsert_session(&mk("reviewing", SessionStatus::InReview, 10)).unwrap();
         db.upsert_session(&mk("dead", SessionStatus::Aborted, 20)).unwrap();

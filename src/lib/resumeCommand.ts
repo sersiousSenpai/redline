@@ -249,3 +249,59 @@ function nativeResume(
     (harness.model ? `--model ${shq(harness.model)} ` : "") +
     (!cursor && harness.effort ? `--effort ${shq(harness.effort)} ` : "") + (!cursor ? "--prompt-interactive " : "") + shq(prompt);
 }
+
+/** Codex's no-approvals, no-sandbox flag. Written ONCE, here: only a direct
+ *  run (`buildRunLaunchCommand`) and an approved plan's build
+ *  (`buildResumeBuildCommand`) may use it — never a plan or a restore. */
+export const CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox";
+
+/** The trigger typed into the resumed planning session when its approved plan
+ *  is built. It voids the build-later stand-down the same way a rescinded
+ *  restore voids its stand-down, and names the version that was approved. */
+export function buildTrigger(version: number, stamp: string): string {
+  return (
+    `Redline build · ${stamp} — the approved plan v${version} is now cleared to implement. ` +
+    "The earlier Redline stand-down in your context (do not implement) is void. " +
+    "Implement the plan now, exactly as approved."
+  );
+}
+
+/** Build an approved plan with the SAME agent that wrote it: the run-mode
+ *  sibling of `buildResumeCommand`. Resumes the planning conversation (from
+ *  its startup cwd — see `resolveResumeCwd`) in a building mode:
+ *
+ *  - Claude: `claude --resume <id> --permission-mode auto '<trigger>'`.
+ *  - Codex: `codex resume <id> … --dangerously-bypass-approvals-and-sandbox`,
+ *    on the plain binary — not the plan launcher, whose profile is the
+ *    read-only plan contract.
+ *
+ *  Throws for Cursor/Antigravity, whose non-plan flags are unverified. */
+export function buildResumeBuildCommand(
+  sessionId: string,
+  now: Date,
+  cwd: string | null | undefined,
+  version: number,
+  harness: { backend?: string | null; claudeBin?: string | null; codexBin?: string | null; model?: string | null; effort?: string | null },
+): string {
+  const trigger = buildTrigger(version, restoreStamp(now));
+  const backend = harness.backend ?? "claude-code";
+  let cmd: string;
+  if (backend === "codex") {
+    const bin = harness.codexBin?.trim() ? shq(harness.codexBin.trim()) : "codex";
+    const model = harness.model ? `-m ${shq(harness.model)} ` : "";
+    const effort = harness.effort ? `-c ${shq(`model_reasoning_effort=${JSON.stringify(harness.effort)}`)} ` : "";
+    cmd = `${bin} resume ${shq(sessionId)} ${model}${effort}${CODEX_BYPASS_FLAG} ${shq(trigger)}`;
+  } else if (backend === "claude-code") {
+    const bin = harness.claudeBin?.trim() ? shq(harness.claudeBin.trim()) : "claude";
+    cmd = `${bin} --resume ${shq(sessionId)} --permission-mode auto ${shq(trigger)}`;
+  } else {
+    throw new Error(`building with the same agent is not supported for ${backend}`);
+  }
+  return cwd ? `cd ${shq(cwd)} && ${cmd}` : cmd;
+}
+
+/** The hand-off prompt for a DIFFERENT agent: a short pointer, never the plan
+ *  itself typed into a PTY. */
+export function handoffPrompt(path: string): string {
+  return `Implement the approved plan in ${path}. It was reviewed and approved in Redline; follow it.`;
+}

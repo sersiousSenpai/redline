@@ -190,7 +190,10 @@ export type LaunchOrigin =
   | "combine"
   // "Just run it": a direct, non-plan session from the Front Door. Its own
   // origin so the lake never files an unreviewed run as a plan launch.
-  | "front-door-run";
+  | "front-door-run"
+  // An approved plan handed to a DIFFERENT agent to build (Build ▾ → with
+  // Codex / Claude Code): a pointer to the plan file, launched as a run.
+  | "plan-handoff";
 
 /** What a surface gets back if its launch dies before a plan arrives.
  *

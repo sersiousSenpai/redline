@@ -76,6 +76,10 @@ const RUN_STATE_COLORS: Record<string, string> = {
   stalled: "var(--color-warning, #b45309)",
   // A stand-down: deliberate and terminal — muted, not alarming.
   abandoned: "var(--color-ink-muted)",
+  // A single agent building an approved plan in its terminal. Not a "live
+  // run" (`isLiveRunState`): there is no run graph to watch, and the plan can
+  // still be reopened.
+  building: "var(--color-info)",
 };
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
@@ -712,7 +716,12 @@ function SessionRow({
               letterSpacing: "0.06em",
             }}
           >
-            {STATUS_LABELS[session.status]}
+            {/* Approved with nothing building is its own state — it waits on
+                you (Build or Reopen), so it says so rather than reading as
+                done. NULL run_state is exactly that state. */}
+            {session.status === "approved" && !session.runState
+              ? "approved · not built"
+              : STATUS_LABELS[session.status]}
           </span>
           {/* The harness is no longer holding this review — comments and
               discussions still save, but sending needs a restore first.
@@ -767,7 +776,24 @@ function SessionRow({
               finished run reopens its report. An abandoned/needs-follow-up
               run keeps its last state visible — only a Resolved mark walks
               it to `landed`. */}
-          {session.runState && !combining && (
+          {session.runState === "building" && !combining && (
+            <span
+              title="An agent is building this approved plan in its terminal"
+              style={{
+                color: RUN_STATE_COLORS.building,
+                border: `1px solid ${RUN_STATE_COLORS.building}`,
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              building
+            </span>
+          )}
+          {session.runState && session.runState !== "building" && !combining && (
             <button
               type="button"
               title={`Orchestrated run: ${session.runState.replace(/_/g, " ")} — click to ${
