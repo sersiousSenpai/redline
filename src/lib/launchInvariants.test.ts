@@ -80,6 +80,31 @@ describe("one launch pipeline", () => {
     expect(hits, `built in ${hits} places`).toBe(1);
   });
 
+  it("the run launch command is built in exactly one place, and only it skips the sandbox", () => {
+    // "Just run it" and the approved-plan hand-off launch through the same
+    // builder. The bypass flag is the user's explicit choice for a RUN; a
+    // second site writing it is how a plan session could lose its sandbox.
+    expect(countIn("src", "buildRunLaunchCommand(")).toBe(1);
+    expect(countIn("src", "--dangerously-bypass-approvals-and-sandbox")).toBe(1);
+    const builder = read("src/lib/planLaunchCommand.ts");
+    const runFn = builder.slice(builder.indexOf("export function buildRunLaunchCommand("));
+    expect(runFn.slice(0, runFn.indexOf("\n}\n"))).toContain("--dangerously-bypass-approvals-and-sandbox");
+    const planFn = builder.slice(builder.indexOf("export function buildPlanLaunchCommand("));
+    expect(planFn.slice(0, planFn.indexOf("\n}\n"))).not.toContain("--dangerously-bypass");
+  });
+
+  it("a run never claims a plan: it skips the intercept registry and the pending card", () => {
+    const launch = app.slice(app.indexOf("const launchPlan ="), app.indexOf('// "Run" on a Localhost'));
+    expect(launch).toContain("if (!run) launchedPlansRef.current.set(launchId, pending);");
+    const branch = launch.slice(launch.indexOf("    if (run) {\n      // Its own pill"));
+    const body = branch.slice(0, branch.indexOf("\n    }\n"));
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).not.toContain("setPendingLaunch(");
+    expect(body).toContain("return { ok: true");
+    // …and it returns before the plan card is ever set.
+    expect(launch.indexOf("    if (run) {\n      // Its own pill")).toBeLessThan(launch.indexOf("setPendingLaunch(pending)"));
+  });
+
   it("the ledger write is followed by a .catch — the missing one, as a guard", () => {
     const at = app.indexOf("record_plan_launch");
     expect(at).toBeGreaterThan(-1);

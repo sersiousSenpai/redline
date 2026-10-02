@@ -10,7 +10,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -29,6 +29,7 @@ import {
 import {
   attemptChat as gateChat,
   attemptLaunch as gateLaunch,
+  attemptRun as gateRun,
   MIN_COMBINE,
   type ProjectChoice,
 } from "../lib/launch";
@@ -44,6 +45,7 @@ import {
   type BackendChoice,
   type ModelCatalogs,
 } from "../lib/backendChoice";
+import { runSupported } from "../lib/planLaunchCommand";
 
 // The front door. The document plate's resting state and where Redline opens:
 // one line of type, one box, and ⏎ starts a real plan-mode session in a real
@@ -103,7 +105,7 @@ export interface FrontDoorProps {
   onFix: (item: ReadinessItem) => Promise<boolean>;
   /** The in-flight launch, or null. Ephemeral by design — a stale
    *  "Planning…" card must not survive a restart. */
-  pending: { prompt: string; startedAt: number } | null;
+  pending: { prompt: string; startedAt: number; kind?: "plan" | "run" } | null;
   /** Launch, optionally overriding the resolved project (used right after a
    *  folder is created, when the chip's state hasn't landed yet). */
   onLaunch: (projectOverride?: string) => void;
@@ -114,6 +116,9 @@ export interface FrontDoorProps {
    *  so the same blocker twice nudges twice. */
   refusal: { item: ReadinessItem | null; reason: string | null; nonce: number } | null;
   onDrafter: () => void;
+  /** "Just run it" — launch the sentence as a direct (non-plan) session.
+   *  Same project-override contract as `onLaunch`. */
+  onRun: (projectOverride?: string) => void;
   /** Open the composer's text as a new chat — the third destination. */
   onChat: () => void;
   /** The manifest keeps the chat surface. False removes the destination
@@ -201,6 +206,7 @@ export function FrontDoor(props: FrontDoorProps) {
     onLaunch,
     refusal,
     onDrafter,
+    onRun,
     onChat,
     chatEnabled,
     destination,
@@ -280,6 +286,9 @@ export function FrontDoor(props: FrontDoorProps) {
     name: string;
     launchAfter: boolean;
     kind: "app" | "extension" | "harness";
+    /** The ⏎ being held is a direct run, not a plan. A run edits files, so it
+     *  never gets the "skip — launch in $HOME" escape a plan does. */
+    run?: boolean;
   } | null>(null);
   const [creating, setCreating] = useState(false);
   // A refused ⏎ has to LOOK refused. Every refusal below is a real condition
@@ -448,6 +457,28 @@ export function FrontDoor(props: FrontDoorProps) {
         onDrafter();
         return;
       }
+      if (to === "run") {
+        // A run's gate is the harness alone (`runBlockingItems`): no plan
+        // comes back, so the hook, the interception mode and the daemon port
+        // cannot touch it. But it EDITS files, so with nowhere to build it is
+        // offered a folder — and, unlike a plan, never the $HOME escape.
+        const gate = gateRun(readiness);
+        if (gate.kind === "blocked") {
+          setBlocked(gate.item);
+          refuse();
+          return;
+        }
+        if (projectOptions.length === 0 && !choice) {
+          setOffer({ name: projectNameFromPrompt(text), launchAfter: true, kind: "app", run: true });
+          refuse();
+          return;
+        }
+        setBlocked(null);
+        setOffer(null);
+        setRefusedWhy(null);
+        onRun();
+        return;
+      }
       if (to === "chat") {
         if (chatPending) { refuse("Opening the conversation. Your message is saved."); return; }
         // A chat's gate is NARROWER than the plan's and wider than the
@@ -472,19 +503,28 @@ export function FrontDoor(props: FrontDoorProps) {
       canSubmit,
       refuse,
       onDrafter,
+      onRun,
       onChat,
       chatPending,
       readiness,
       attemptLaunch,
       combine.length,
+      projectOptions.length,
+      choice,
+      text,
     ],
   );
 
   // A sticky destination outlives the manifest that allowed it: someone who
   // left the door on `chat` and later disabled the surface would otherwise
   // press ⏎ into a route that bounces straight back.
+  //
+  // Same for a run left selected on a harness that doesn't offer one.
   const liveDestination: LaunchDestination =
-    destination === "chat" && !chatEnabled ? "plan" : destination;
+    (destination === "chat" && !chatEnabled) ||
+    (destination === "run" && !runSupported(backend.backend))
+      ? "plan"
+      : destination;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const action = submitAction(
@@ -534,7 +574,7 @@ export function FrontDoor(props: FrontDoorProps) {
     // Launch into the fresh folder directly: the chip's state change hasn't
     // reached App's `resolvedProject` yet, and this launch is that folder's
     // whole reason to exist.
-    if (launchAfter) onLaunch(path);
+    if (launchAfter) (offer.run ? onRun : onLaunch)(path);
   };
 
   // `new-project` is the one fix App can't answer on its own — it needs a
@@ -746,7 +786,22 @@ export function FrontDoor(props: FrontDoorProps) {
                 destination={liveDestination}
                 onDestinationChange={onDestinationChange}
                 chatEnabled={chatEnabled}
+                runEnabled={runSupported(backend.backend)}
               />
+            )}
+            {/* Honesty, in the chip row and never as a modal: a direct run
+                does not stop to ask, and on Codex it is not sandboxed. */}
+            {combine.length === 0 && liveDestination === "run" && (
+              <span
+                className={`rl-fd-runmode${backend.backend === "codex" ? " is-unsafe" : ""}`}
+                title={
+                  backend.backend === "codex"
+                    ? "Codex runs in yolo mode: it edits and executes without asking, outside any sandbox."
+                    : "Claude Code runs with --permission-mode auto: a classifier approves each action instead of you."
+                }
+              >
+                {backend.backend === "codex" ? "No approvals · no sandbox" : "Auto mode"}
+              </span>
             )}
 
 
@@ -795,7 +850,9 @@ export function FrontDoor(props: FrontDoorProps) {
                     ? "Open this in the drafter (⏎)"
                     : liveDestination === "chat"
                       ? "Talk this through (⏎)"
-                      : "Plan this (⏎)"
+                      : liveDestination === "run"
+                        ? "Run this now (⏎)"
+                        : "Plan this (⏎)"
               }
               className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
             >
@@ -819,7 +876,7 @@ export function FrontDoor(props: FrontDoorProps) {
           readiness={readiness}
           onFix={onFix}
           onShow={setBlocked}
-          onProceed={() => onLaunch()}
+          onProceed={() => (liveDestination === "run" ? onRun() : onLaunch())}
         />
 
         {offer && (
@@ -831,8 +888,9 @@ export function FrontDoor(props: FrontDoorProps) {
             onName={(name) => setOffer({ ...offer, name })}
             onCreate={createFromOffer}
             onCancel={() => setOffer(null)}
+            run={offer.run && offer.launchAfter}
             onSkip={
-              offer.launchAfter
+              offer.launchAfter && !offer.run
                 ? () => {
                     setOffer(null);
                     onLaunch();
@@ -863,11 +921,11 @@ export function FrontDoor(props: FrontDoorProps) {
             // the wrapper's, and the wrapper's is the prompt — the one thing
             // you might actually want to check. The visible label already
             // says where the click goes.
-            aria-label="Show the terminal this plan is running in"
+            aria-label={pending.kind === "run" ? "Show the terminal this task is running in" : "Show the terminal this plan is running in"}
           >
             <WorkingIndicator
               compact
-              label="Planning"
+              label={pending.kind === "run" ? "Running" : "Planning"}
               startedAt={pending.startedAt}
             />
             <span className="rl-fd-detail">in the terminal ↓</span>
@@ -876,7 +934,7 @@ export function FrontDoor(props: FrontDoorProps) {
             type="button"
             className="rl-fd-x"
             onClick={onCancelPending}
-            title="Dismiss — the plan keeps running"
+            title={pending.kind === "run" ? "Dismiss — the task keeps running" : "Dismiss — the plan keeps running"}
             aria-label="Dismiss the in-flight indicator"
           >
             <X size={11} />
@@ -998,6 +1056,9 @@ const DESTINATIONS: { id: LaunchDestination; label: string; chip: string }[] = [
   // column already renders "" for "neither", so a third row needs no change
   // there — only `fallbackDestination` had to stop being an involution.
   { id: "chat", label: "Talk it through first", chip: "Chat" },
+  // The fourth: no plan, no review — straight to an agent that builds it.
+  // Hidden on harnesses whose non-plan flags aren't verified (`runSupported`).
+  { id: "run", label: "Just run it", chip: "Run" },
 ];
 
 /** `Plan ▾` — a DESTINATION picker, not a model picker, and a STICKY one.
@@ -1012,16 +1073,18 @@ function PlanMenu({
   destination,
   onDestinationChange,
   chatEnabled,
+  runEnabled,
 }: {
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
   chatEnabled: boolean;
+  runEnabled: boolean;
 }) {
-  const rows = DESTINATIONS.filter(d => d.id !== "chat" || chatEnabled);
+  const rows = DESTINATIONS.filter(d => (d.id !== "chat" || chatEnabled) && (d.id !== "run" || runEnabled));
   const current = rows.find(d => d.id === destination) ?? rows[0];
   const alternate = fallbackDestination(destination);
   return <ComposerMenu label="Destination" value={destination} onChange={next => onDestinationChange(next as LaunchDestination)}
-    icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : <Sparkles size={12}/>}
+    icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : destination === "run" ? <Play size={12}/> : <Sparkles size={12}/>}
     options={rows.map(d => ({ value: d.id, label: d.label, detail: d.id === destination ? "Enter to send" : d.id === alternate ? "⌘ Enter shortcut" : undefined }))}>
     {current.chip}
   </ComposerMenu>;
@@ -1303,6 +1366,7 @@ function NewProjectOffer({
   onCreate,
   onCancel,
   onSkip,
+  run,
 }: {
   name: string;
   busy: boolean;
@@ -1312,6 +1376,8 @@ function NewProjectOffer({
   onCreate: () => void;
   onCancel: () => void;
   onSkip?: () => void;
+  /** The held ⏎ is a direct run — it launches after creating, with no skip. */
+  run?: boolean;
 }) {
   // The destination prefix comes from the same policy as the write
   // (`project.rs::default_parent`): `~/Projects/` only on machines that
@@ -1374,7 +1440,7 @@ function NewProjectOffer({
           disabled={busy || !name.trim()}
           className="rl-fd-fix is-primary"
         >
-          {busy ? "Creating…" : onSkip ? "Create & plan" : "Create"}
+          {busy ? "Creating…" : onSkip ? "Create & plan" : run ? "Create & run" : "Create"}
         </button>
         {onSkip && (
           <button type="button" className="rl-fd-quiet" onClick={onSkip}>

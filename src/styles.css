@@ -4004,6 +4004,24 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   color: var(--color-ink);
   font-size: 11.5px;
 }
+/* "Just run it" says what it skips — quiet on Claude (auto mode), amber on
+   Codex (no approvals, no sandbox). A chip, never a modal. */
+.rl-fd-runmode {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  color: var(--color-ink-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.rl-fd-runmode.is-unsafe {
+  border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  color: var(--color-ink);
+}
 .rl-fd-x {
   display: inline-flex;
   border: none;

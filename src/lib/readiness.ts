@@ -559,3 +559,18 @@ const CHAT_BLOCKERS: readonly ReadinessId[] = ["claude-missing", "daemon-unbound
 export function chatBlockingItems(items: ReadinessItem[]): ReadinessItem[] {
   return blockingItems(items).filter((i) => CHAT_BLOCKERS.includes(i.id));
 }
+
+/** The blockers that apply to a direct RUN ("Just run it").
+ *
+ *  A run is a plain session in a terminal tile: no plan comes back, so the
+ *  hook, the interception mode, the plan contract and the daemon port cannot
+ *  touch it. What can: the harness binary (and Codex's login) has to be there
+ *  to start at all. A run also edits files, so it must land in a resolved
+ *  project rather than $HOME — but `no-project` is only ever a warning, so
+ *  that rule is enforced where the project is resolved (the door's folder
+ *  offer, and `launchPlan`'s run branch), not here. */
+const RUN_BLOCKERS: readonly ReadinessId[] = ["claude-missing", "codex-missing", "codex-logged-out"];
+
+export function runBlockingItems(items: ReadinessItem[]): ReadinessItem[] {
+  return blockingItems(items).filter((i) => RUN_BLOCKERS.includes(i.id));
+}

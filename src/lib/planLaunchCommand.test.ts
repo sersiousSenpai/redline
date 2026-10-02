@@ -5,6 +5,8 @@ import {
   buildOrchestrateLaunchCommand,
   buildOrchestratePrompt,
   buildPlanLaunchCommand,
+  buildRunLaunchCommand,
+  runSupported,
   tomlString,
 } from "./planLaunchCommand";
 
@@ -300,3 +302,52 @@ describe("buildOrchestratePrompt", () => {
   });
 });
 
+
+describe("buildRunLaunchCommand", () => {
+  it("runs Claude in auto mode with no tool allow-list", () => {
+    expect(buildRunLaunchCommand("Bump the lockfile.", "/w/app")).toBe(
+      "cd '/w/app' && claude --permission-mode auto 'Bump the lockfile.'",
+    );
+  });
+
+  it("carries the launch id, grants, model and effort on the Claude arm", () => {
+    const cmd = buildRunLaunchCommand(
+      "go",
+      "/w/app",
+      ["/x/sdk"],
+      { backend: "claude-code", model: "opus", effort: "high" },
+      { "claude-code": "/opt/bin/claude" },
+      "L1",
+    );
+    expect(cmd).toBe(
+      "cd '/w/app' && REDLINE_PLAN_LAUNCH_ID='L1' '/opt/bin/claude' --add-dir '/x/sdk' --model 'opus' --effort 'high' --permission-mode auto 'go'",
+    );
+    expect(cmd).not.toContain("--allowedTools");
+    expect(cmd).not.toContain("plan");
+  });
+
+  it("runs Codex with no approvals and no sandbox, as an interactive TUI", () => {
+    expect(buildRunLaunchCommand("go", "/w/app", [], { backend: "codex", model: "gpt-5.5", effort: "high" }, { codex: BIN }, "L2")).toBe(
+      `cd '/w/app' && REDLINE_PLAN_LAUNCH_ID='L2' '${BIN}' -m 'gpt-5.5' -c 'model_reasoning_effort="high"' --dangerously-bypass-approvals-and-sandbox 'go'`,
+    );
+    const bare = buildRunLaunchCommand("go", null, [], CODEX);
+    expect(bare).toBe("codex --dangerously-bypass-approvals-and-sandbox 'go'");
+    expect(bare).not.toContain("read-only");
+    expect(bare).not.toContain("exec");
+  });
+
+  it("quotes a prompt with a single quote as one argument", () => {
+    expect(buildRunLaunchCommand("don't stop", null)).toBe(
+      "claude --permission-mode auto 'don'\\''t stop'",
+    );
+  });
+
+  it("is hidden for Cursor and Antigravity rather than guessed at", () => {
+    expect(runSupported("claude-code")).toBe(true);
+    expect(runSupported("codex")).toBe(true);
+    expect(runSupported("cursor")).toBe(false);
+    expect(runSupported("antigravity")).toBe(false);
+    expect(() => buildRunLaunchCommand("go", null, [], { backend: "cursor", model: null, effort: null })).toThrow();
+    expect(() => buildRunLaunchCommand("go", null, [], { backend: "antigravity", model: null, effort: null })).toThrow();
+  });
+});

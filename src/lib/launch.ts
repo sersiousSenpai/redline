@@ -19,7 +19,7 @@ import type { CombineSource } from "../types";
 import type { ProjectOption } from "../components/ProjectPicker";
 import { guessProjectForPlan } from "./guessProject";
 import type { ExtensionToolchain, ReadinessItem } from "./readiness";
-import { blockingItems, chatBlockingItems } from "./readiness";
+import { blockingItems, chatBlockingItems, runBlockingItems } from "./readiness";
 
 // ── Project resolution ──────────────────────────────────────────────────────
 
@@ -138,6 +138,13 @@ export function attemptChat(readiness: ReadinessItem[]): LaunchAttempt {
   return { kind: "go" };
 }
 
+/** `attemptLaunch` for a direct run — see `runBlockingItems`. */
+export function attemptRun(readiness: ReadinessItem[]): LaunchAttempt {
+  const blocking = runBlockingItems(readiness);
+  if (blocking.length > 0) return { kind: "blocked", item: blocking[0] };
+  return { kind: "go" };
+}
+
 /** After a fix resolves true: the next thing still blocking, or null when the
  *  path is clear and the held ⏎ should carry through. Taking `fixedId` rather
  *  than reading a stale list is what makes "fix it and it just goes" work. */
@@ -180,7 +187,10 @@ export type LaunchOrigin =
   // through the Front Door: `surface` feeds `resolve_parent` and the
   // Companion's account of what you did, and "synthesised three plans" must
   // not collapse into "typed a sentence".
-  | "combine";
+  | "combine"
+  // "Just run it": a direct, non-plan session from the Front Door. Its own
+  // origin so the lake never files an unreviewed run as a plan launch.
+  | "front-door-run";
 
 /** What a surface gets back if its launch dies before a plan arrives.
  *

@@ -6,6 +6,7 @@ import type { ProjectOption } from "../components/ProjectPicker";
 import {
   extensionAddDirs,
   attemptLaunch,
+  attemptRun,
   composePrompt,
   launchLiveness,
   launchReceipt,
@@ -509,5 +510,25 @@ describe("chat graduation matching", () => {
     expect(isGraduation(pending, {})).toBe(false);
     expect(isGraduation({ launchId: "first" }, { launchId: "first" })).toBe(false);
     expect(isGraduation(null, { launchId: "first" })).toBe(false);
+  });
+});
+
+describe("attemptRun", () => {
+  const item = (id: ReadinessItem["id"], state: ReadinessItem["state"] = "blocked") =>
+    ({ id, state, label: id, detail: "" }) as ReadinessItem;
+
+  it("is gated by the harness alone — no plan comes back for a hook to catch", () => {
+    for (const id of ["hook-unapproved", "mode-paused", "daemon-unbound", "codex-contract-missing"] as const) {
+      expect(attemptRun([item(id)])).toEqual({ kind: "go" });
+      expect(attemptLaunch([item(id)]).kind).toBe("blocked");
+    }
+  });
+
+  it("refuses when the harness cannot start", () => {
+    for (const id of ["claude-missing", "codex-missing", "codex-logged-out"] as const) {
+      const r = attemptRun([item("hook-unapproved"), item(id)]);
+      expect(r.kind).toBe("blocked");
+      if (r.kind === "blocked") expect(r.item.id).toBe(id);
+    }
   });
 });

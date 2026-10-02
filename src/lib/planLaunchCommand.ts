@@ -53,6 +53,58 @@ export function buildPlanLaunchCommand(
   return projectPath ? `cd ${shq(projectPath)} && ${bound}` : bound;
 }
 
+/** The harnesses "Just run it" is offered for. Cursor's and Antigravity's
+ *  non-plan flags are unverified, so the destination is hidden for them
+ *  rather than guessed at. */
+export function runSupported(backend: BackendChoice["backend"]): boolean {
+  return backend === "claude-code" || backend === "codex";
+}
+
+/** Build the command for a DIRECT run — the Front Door's "Just run it" and
+ *  the approved-plan hand-off. The sibling of `buildPlanLaunchCommand`, and
+ *  like it THE only construction site (`launchInvariants.test.ts`): no plan
+ *  comes back, so it shares only the prefix (`cd`, `REDLINE_PLAN_LAUNCH_ID`,
+ *  which binds the captured prompt to the spawned session) and the
+ *  model/effort/`--add-dir` helpers.
+ *
+ *  - Claude: `--permission-mode auto` — the classifier decides per action.
+ *    No `--allowedTools` list: an allow-list would pre-approve what auto mode
+ *    should still be judging.
+ *  - Codex: `--dangerously-bypass-approvals-and-sandbox` — the user's explicit
+ *    choice for a run (no approvals, no sandbox), and the composer says so
+ *    with a chip. Plain TUI on the resolved binary: none of the plan
+ *    launcher's profile/contract plumbing applies to a run.
+ *
+ *  Throws for Cursor/Antigravity; callers gate on `runSupported`. */
+export function buildRunLaunchCommand(
+  prompt: string,
+  projectPath: string | null | undefined,
+  addDirs: readonly string[] = [],
+  choice: BackendChoice = { backend: "claude-code", model: null, effort: null },
+  bins: Partial<Record<BackendChoice["backend"], string | null>> = {},
+  launchId?: string,
+): string {
+  if (!runSupported(choice.backend)) throw new Error(`a direct run is not supported for ${choice.backend}`);
+  let launch: string;
+  if (choice.backend === "codex") {
+    const bin = bins.codex?.trim() ? shq(bins.codex.trim()) : "codex";
+    const model = choice.model ? `-m ${shq(choice.model)} ` : "";
+    const effort = choice.effort
+      ? `-c ${shq(`model_reasoning_effort=${tomlString(choice.effort)}`)} `
+      : "";
+    launch = `${bin} ${model}${effort}--dangerously-bypass-approvals-and-sandbox ${shq(prompt)}`;
+  } else {
+    const grants = addDirs.map((d) => `--add-dir ${shq(d)} `).join("");
+    const model = choice.model ? `--model ${shq(choice.model)} ` : "";
+    const effort = choice.effort ? `--effort ${shq(choice.effort)} ` : "";
+    const resolved = bins["claude-code"]?.trim();
+    const bin = resolved ? shq(resolved) : "claude";
+    launch = `${bin} ${grants}${model}${effort}--permission-mode auto ${shq(prompt)}`;
+  }
+  const bound = (launchId ? `REDLINE_PLAN_LAUNCH_ID=${shq(launchId)} ` : "") + launch;
+  return projectPath ? `cd ${shq(projectPath)} && ${bound}` : bound;
+}
+
 /** Keep the contract compact: the canonical skill owns revision semantics. */
 export const NATIVE_PLAN_PREFIX =
   "Use the installed redline-plan-review skill. Remain in read-only research and planning mode. " +

@@ -30,6 +30,10 @@ import { installExternalLinkHandler } from "./lib/externalLinks";
 import { isClaudeWorking } from "./lib/claudeWorking";
 import { heldPlanByTerminal, heldTerminalIds } from "./lib/heldTerminals";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
+/** How long a direct run's flight pill stays up: through the launch, not the
+ *  run — after this the tile is the status. */
+const RUN_FLIGHT_MS = 12_000;
+
 const loadPlanEditor = () => import("./components/PlanEditor");
 const PlanEditor = lazy(() =>
   loadPlanEditor().then((m) => ({ default: m.PlanEditor })),
@@ -49,6 +53,7 @@ import {
 import { type LaunchDestination } from "./lib/frontDoor";
 import {
   attemptLaunch,
+  attemptRun,
   composePrompt,
   extensionAddDirs,
   launchLiveness,
@@ -486,6 +491,8 @@ import {
 } from "./lib/resizeSession";
 import {
   buildPlanLaunchCommand,
+  buildRunLaunchCommand,
+  runSupported,
 } from "./lib/planLaunchCommand";
 import type { CodeReviewSession } from "./types";
 import type { RunGraph } from "./lib/runner/schema";
@@ -1409,6 +1416,13 @@ function App() {
   const [pendingLaunch, setPendingLaunch] = useState<PendingLaunch | null>(null);
   const pendingLaunchRef = useRef(pendingLaunch);
   pendingLaunchRef.current = pendingLaunch;
+  // A direct run's flight pill. Its OWN slot, deliberately not `pendingLaunch`:
+  // that slot claims plan-decision windows and drives the `/hooks` nudge, and
+  // a run sends no plan to claim. It lives only through the launch itself —
+  // the tile is the status after that — so it retires on its own.
+  const [runFlight, setRunFlight] = useState<
+    { prompt: string; startedAt: number; terminalId: string; restore: LaunchRestore; kind: "run" } | null
+  >(null);
   const launchedPlansRef = useRef(new Map<string, PendingLaunch>());
   const [chatReceipts, setChatReceipts] = useState<Record<string, ChatPlanReceipt>>({});
   const [planSwap, setPlanSwap] = useState<{ launchId: string; from: SwapRect } | null>(null);
@@ -5659,6 +5673,10 @@ function App() {
   // forgets — which is exactly how the Drafter shipped with zero preflight.
   const launchPlan = async (req: {
     choice?: BackendChoice;
+    /** `run` is "Just run it": the same terminal, handoff and lineage, but a
+     *  direct session (`buildRunLaunchCommand`) — the harness-only gate, no
+     *  plan claim, no pending plan card. Default `plan`. */
+    mode?: "plan" | "run";
     origin: LaunchOrigin;
     prompt: string;
     projectPath: string | null;
@@ -5683,6 +5701,9 @@ function App() {
   > => {
     const trimmed = req.prompt.trim();
     if (!trimmed) return { ok: false, reason: "nothing to launch" };
+    const run = req.mode === "run";
+    // A run edits files: it never falls back to $HOME the way a plan may.
+    if (run && !req.projectPath) return { ok: false, reason: "Pick a project to run this in" };
 
     // What kind of launch is this? Answered from the workspace registry alone
     // — no probe needed — and it decides both the backend and what has to be
@@ -5703,6 +5724,8 @@ function App() {
       kind === "extension"
         ? { backend: "claude-code" as const, model: null, effort: null }
         : req.choice ?? backendChoiceRef.current;
+    if (run && !runSupported(choice.backend))
+      return { ok: false, reason: `"Just run it" isn't available for ${choice.backend} yet` };
 
     // ── The launch boundary ─────────────────────────────────────────────────
     //
@@ -5734,7 +5757,7 @@ function App() {
     // its plan would land in a different instance. Bounded — a bind that never
     // resolves must not strand the launch either.
     const daemon = await ensureDaemonReady();
-    const gate = attemptLaunch(
+    const gate = (run ? attemptRun : attemptLaunch)(
       health
         ? deriveReadiness(
             { ...readinessInputRef.current({
@@ -5763,22 +5786,20 @@ function App() {
       health?.preflight.extension ?? preflightRef.current?.extension ?? null,
     );
     const launchId = crypto.randomUUID();
-    const cmd = `${buildPlanLaunchCommand(
-      trimmed,
-      req.projectPath,
-      addDirs,
-      choice,
-      {
-        "claude-code": health.preflight.claude.path,
-        codex:
-          health?.preflight.codex?.path ??
-          preflightRef.current?.codex?.path ??
-          null,
-        cursor: health?.preflight.providers?.cursor?.path ?? null,
-        antigravity: health?.preflight.providers?.antigravity?.path ?? null,
-      },
-      launchId,
-    )}\r`;
+    const bins = {
+      "claude-code": health.preflight.claude.path,
+      codex:
+        health?.preflight.codex?.path ??
+        preflightRef.current?.codex?.path ??
+        null,
+      cursor: health?.preflight.providers?.cursor?.path ?? null,
+      antigravity: health?.preflight.providers?.antigravity?.path ?? null,
+    };
+    const cmd = `${
+      run
+        ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
+        : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
+    }\r`;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
@@ -5820,12 +5841,22 @@ function App() {
     if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
     const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
-    // Register before typing: an immediate intercept must be able to match the launch.
-    launchedPlansRef.current.set(launchId, pending);
+    // Register before typing: an immediate intercept must be able to match the
+    // launch. A run sends no plan, so it registers nothing for an intercept to
+    // match and claims no decision window.
+    if (!run) launchedPlansRef.current.set(launchId, pending);
     const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId, [{ stage: "launch", data: cmd }]);
     if (!delivery.ok) {
       launchedPlansRef.current.delete(launchId);
-      return { ok: false, reason: `Couldn't type the plan launch (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
+      return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
+    }
+    if (run) {
+      // Its own pill, never the pending plan card.
+      setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
+      setLastLaunchProject(req.projectPath!);
+      setToast("Running in the terminal below ↓");
+      setTimeout(() => setToast(null), 4000);
+      return { ok: true, terminalId, launchId };
     }
 
     // The displaced launch is NOT repaid. It is still running in its own
@@ -6539,27 +6570,52 @@ function App() {
   const launchConfirmedRef = useRef<{ startedAt: number; confirmed: boolean } | null>(
     null,
   );
+  // A direct run's pill obeys the same law, tracked beside it in this one
+  // effect so the pay-back keeps exactly one call site.
+  const runConfirmedRef = useRef<{ startedAt: number; confirmed: boolean } | null>(null);
   useEffect(() => {
-    const p = pendingLaunch;
-    if (!p) {
-      launchConfirmedRef.current = null;
-      return;
+    const died = (
+      f: { startedAt: number; terminalId: string } | null,
+      ref: { current: { startedAt: number; confirmed: boolean } | null },
+    ): boolean => {
+      if (!f) {
+        ref.current = null;
+        return false;
+      }
+      if (ref.current?.startedAt !== f.startedAt) {
+        ref.current = { startedAt: f.startedAt, confirmed: false };
+      }
+      const seen = ref.current;
+      const live = launchLiveness(f.terminalId, liveTermIds, seen.confirmed);
+      seen.confirmed = live.confirmed;
+      return !live.alive;
+    };
+    const dead: PendingLaunch[] = [];
+    if (died(pendingLaunch, launchConfirmedRef)) {
+      setPendingLaunch(null);
+      dead.push(pendingLaunch!);
     }
-    if (launchConfirmedRef.current?.startedAt !== p.startedAt) {
-      launchConfirmedRef.current = { startedAt: p.startedAt, confirmed: false };
+    if (died(runFlight, runConfirmedRef)) {
+      setRunFlight(null);
+      dead.push({ ...runFlight!, launchId: "", origin: "front-door-run", draftId: null });
     }
-    const seen = launchConfirmedRef.current;
-    const live = launchLiveness(p.terminalId, liveTermIds, seen.confirmed);
-    seen.confirmed = live.confirmed;
-    if (live.alive) return;
-    setPendingLaunch(null);
     // Give the sentence back, for the door that took one — the ONE place the
     // pay-back fires. This is the involuntary case: the launch did not survive
     // and nobody chose that, so the composer is refilled ready to re-send. The
     // Drafter's document never left the screen, so its restore is `none`.
-    repayPending(p, "Launch cancelled — that terminal was closed");
+    for (const p of dead) repayPending(p, "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveTermIds, pendingLaunch]);
+  }, [liveTermIds, pendingLaunch, runFlight]);
+
+  // The run's pill retires itself once the run is under way: no plan arrives
+  // to clear it, and a run's tile is its own status from then on. Keyed on
+  // `startedAt` so one run's timer can never retire the next run's pill.
+  useEffect(() => {
+    if (!runFlight) return;
+    const startedAt = runFlight.startedAt;
+    const t = setTimeout(() => setRunFlight((f) => (f?.startedAt === startedAt ? null : f)), RUN_FLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [runFlight]);
 
   // The `/hooks` nudge is the only time-based item, so the clock only ticks
   // while a launch is actually pending.
@@ -6867,10 +6923,10 @@ function App() {
     setCombinePreview(null);
   };
 
-  const launchFromFrontDoor = async (projectOverride?: string) => {
+  const launchFromFrontDoor = async (projectOverride?: string, mode: "plan" | "run" = "plan") => {
     // Plans pilled → this is a combination, and the composer's text is context
     // on top of them rather than the thing being launched.
-    if (frontDoorCombine.length > 0) {
+    if (mode === "plan" && frontDoorCombine.length > 0) {
       await launchCombine(projectOverride);
       return;
     }
@@ -6878,7 +6934,8 @@ function App() {
     if (!prompt) return;
     const project = projectOverride ?? frontDoorResolvedProject;
     const r = await launchPlan({
-      origin: "front-door",
+      mode,
+      origin: mode === "run" ? "front-door-run" : "front-door",
       prompt,
       projectPath: project,
       // The front door has no document, and inheriting the active Drafter's id
@@ -6893,7 +6950,7 @@ function App() {
       },
     });
     if (!r.ok) {
-      setToast(`Couldn't launch the plan — ${r.reason}`);
+      setToast(`Couldn't ${mode === "run" ? "start the run" : "launch the plan"} — ${r.reason}`);
       setTimeout(() => setToast(null), 6000);
       // And say it INSIDE the island. A toast in the corner is easy to miss
       // when your eyes are on the sentence you just pressed ⏎ on — which is
@@ -7412,6 +7469,14 @@ function App() {
 
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
 
+  // The door's one flight pill: its own plan launch or its own run, whichever
+  // started last.
+  const frontDoorPlan = pendingLaunch?.origin === "front-door" ? { ...pendingLaunch, kind: "plan" as const } : null;
+  const frontDoorFlight =
+    frontDoorPlan && runFlight
+      ? (runFlight.startedAt > frontDoorPlan.startedAt ? runFlight : frontDoorPlan)
+      : (runFlight ?? frontDoorPlan);
+
   const renderMonochatComposer = (accessories?: React.ReactNode) => (
               <FrontDoor
                 visible={shellReady && monochatVisible}
@@ -7434,10 +7499,9 @@ function App() {
                 onFix={applyReadinessFix}
                 // Only ITS launch: one pending state serves every door, so the
                 // front door must not render a card for the Drafter's launch.
-                pending={
-                  pendingLaunch?.origin === "front-door" ? pendingLaunch : null
-                }
-                onLaunch={launchFromFrontDoor}
+                pending={frontDoorFlight}
+                onLaunch={(project) => void launchFromFrontDoor(project)}
+                onRun={(project) => void launchFromFrontDoor(project, "run")}
                 // A refusal from App's own backstop gate, so the fix lands in
                 // the island rather than only in a corner toast.
                 refusal={frontDoorRefusal}
@@ -7457,12 +7521,12 @@ function App() {
                 // Dismissing the flight pill retires the INDICATOR, nothing
                 // else: the plan keeps running in its tile and the composer —
                 // already blank, already usable — stays blank. No pay-back.
-                onCancelPending={() => setPendingLaunch(null)}
+                onCancelPending={() => (frontDoorFlight?.kind === "run" ? setRunFlight(null) : setPendingLaunch(null))}
                 // The pill's other half: go watch it. Reveal the dock, focus
                 // the tile the plan is running in, and glow it once so the
                 // eye lands on the right one of fourteen.
                 onRevealPending={() => {
-                  const p = pendingLaunchRef.current;
+                  const p = frontDoorFlight;
                   if (!p) return;
                   setFrontDoorOpen(false);
                   revealTerm();

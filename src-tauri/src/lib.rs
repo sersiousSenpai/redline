@@ -10529,7 +10529,7 @@ fn record_plan_launch(
         .filter(|o| {
             matches!(
                 o.as_str(),
-                "front-door" | "drafter" | "browser" | "chat" | "combine"
+                "front-door" | "drafter" | "browser" | "chat" | "combine" | "front-door-run"
             )
         })
         .unwrap_or_else(|| "drafter".to_string());
@@ -14124,7 +14124,7 @@ mod tests {
             .expect("record_plan_launch exists")
             .1;
         let filter = f.split_once("unwrap_or_else").expect("origin filter").0;
-        for origin in ["front-door", "drafter", "browser", "chat", "combine"] {
+        for origin in ["front-door", "drafter", "browser", "chat", "combine", "front-door-run"] {
             assert!(
                 filter.contains(&format!("\"{origin}\"")),
                 "{origin} must be an accepted launch origin"
