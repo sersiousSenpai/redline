@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { researchStatus } from "../lib/planSearch";
 import { memo, useEffect, useRef, useState } from "react";
 import type { Comment, CommentStatus, UpdateCommentRequest } from "../types";
 import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
@@ -32,6 +33,8 @@ interface CommentCardProps {
   autoDiscuss?: boolean;
   /** Called once the discussion has been started, so the parent clears it. */
   onAutoDiscussConsumed?: () => void;
+  /** A research comment's "View result →": open its browser tab + chat. */
+  onViewResearch?: (comment: Comment) => void;
   /** Click anywhere on the card to mirror focus over to the editor's
    *  matching highlight or block. Behaves as a toggle in the parent. Always
    *  active — PlanEditor's focus effect falls back to scrolling the comment's
@@ -110,6 +113,7 @@ export const CommentCard = memo(function CommentCard({
   onAutoOpenConsumed,
   autoDiscuss = false,
   onAutoDiscussConsumed,
+  onViewResearch,
   onSelect,
   onDelete,
   onUpdate,
@@ -595,6 +599,29 @@ export const CommentCard = memo(function CommentCard({
         </div>
       )}
 
+      {/* Search from the plan: where the answer lives. Not feedback — it
+          never rides a Send until promoted ("Make this a change"). */}
+      {comment.research && (
+        <div
+          className="flex items-center gap-2 mt-1"
+          style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+          title={comment.research.answerHash ? `Answer ${comment.research.answerHash.slice(0, 12)} — stays with the plan for follow-ups` : "The tab's agent is still researching"}
+        >
+          <span>{researchStatus(comment.research)}</span>
+          {onViewResearch && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onViewResearch(comment);
+              }}
+              style={{ color: "var(--color-info)", textDecoration: "underline", textUnderlineOffset: 3, cursor: "pointer" }}
+            >
+              View result →
+            </button>
+          )}
+        </div>
+      )}
       {!collapsed && !editOpen && comment.body && comment.body.trim() !== "(edit)" && (
         <div className="rl-comment-body-scroll">
           <MarkdownView body={comment.body} />

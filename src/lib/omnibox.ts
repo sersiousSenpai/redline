@@ -7,7 +7,7 @@
 
 // Default search engine — matches the browser's HOME (Google). A query is sent
 // as ?q=<encoded>.
-const SEARCH_URL = "https://www.google.com/search?q=";
+export const SEARCH_URL = "https://www.google.com/search?q=";
 
 // http://, https://, ftp:// … — a scheme followed by an authority.
 const SCHEME_WITH_AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\//i;

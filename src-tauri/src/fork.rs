@@ -477,6 +477,52 @@ fn build_first_turn_prompt(
     p
 }
 
+/// What was already found for this part of the plan. A research comment
+/// (Search from the plan) on the SAME block — or the discussed comment itself
+/// — carries the tab agent's answer; it is handed to the discussion directly,
+/// bounded at `RESEARCH_EXCERPT_MAX` in total and cited by hash, so a
+/// follow-up starts from the result instead of searching memory for it.
+/// `None` when nothing linked has landed, which leaves the prompt unchanged.
+fn research_block<'a>(
+    comments: impl Iterator<Item = &'a crate::state::Comment>,
+    target: &crate::state::Comment,
+) -> Option<String> {
+    let near = |c: &crate::state::Comment| {
+        c.id == target.id
+            || match (&c.block_id, &target.block_id) {
+                (Some(a), Some(b)) => a == b,
+                _ => c.anchor_id == target.anchor_id,
+            }
+    };
+    let mut budget = crate::state::RESEARCH_EXCERPT_MAX;
+    let mut out = String::new();
+    for c in comments.filter(|c| near(c)) {
+        let Some(link) = &c.research else { continue };
+        let (Some(hash), Some(excerpt)) = (&link.answer_hash, &link.answer_excerpt) else { continue };
+        if budget == 0 {
+            break;
+        }
+        let clipped = crate::state::clip_utf8(excerpt, budget);
+        budget -= clipped.len();
+        let short: String = hash.chars().take(12).collect();
+        out.push_str(&format!(
+            "\n\nThe reviewer already researched this part of the plan (searched: \"{}\"). \
+             What was found [research {short}]:\n",
+            link.query.replace('\n', " ")
+        ));
+        for line in clipped.lines() {
+            out.push_str("> ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "Build on this result and cite it as [research {short}] when you use it; \
+             don't search memory for it again.\n"
+        ));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 // --- Spawn args -------------------------------------------------------------
 
 /// Base spawn args for a read-only **discussion fork** (the sidecar / code-review
@@ -971,7 +1017,11 @@ pub async fn fork_thread_send(
                 // Empty for a genuine first turn, so that prompt is unchanged;
                 // populated only when replacing a wrong-harness fork.
                 continuity_block(&carried).as_deref(),
+            ) + &research_block(
+                session.revisions.iter().flat_map(|r| r.comments.iter()),
+                comment,
             )
+            .unwrap_or_default()
         }
         // Follow-ups go verbatim, so a file dropped into one has to announce
         // itself — otherwise the fork never learns the path exists.
@@ -2356,6 +2406,67 @@ fn finish_error(
 
 #[cfg(test)]
 mod tests {
+
+    fn research_comment(id: &str, block: &str, excerpt: Option<&str>) -> crate::state::Comment {
+        let mut c: crate::state::Comment = serde_json::from_value::<crate::state::NewCommentRequest>(serde_json::json!({
+            "type": "question", "anchorId": "A.1", "blockId": block, "body": "q"
+        }))
+        .map(|r| crate::state::Comment {
+            id: id.to_string(),
+            kind: r.kind,
+            scope: None,
+            anchor_id: r.anchor_id,
+            block_id: r.block_id,
+            body: r.body,
+            edit: None,
+            structural: None,
+            created_at: 0,
+            status: crate::state::CommentStatus::Draft,
+            resolution: None,
+            selection: None,
+            reopen_note: None,
+            reopen_history: Vec::new(),
+            actionable: false,
+            author: None,
+            agent_state: None,
+            reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
+            research: None,
+        })
+        .unwrap();
+        c.research = Some(crate::state::ResearchLink {
+            query: "rate limits".into(),
+            browse_id: "b-1".into(),
+            url: None,
+            answer_hash: excerpt.map(|_| "abcdef0123456789".into()),
+            answer_excerpt: excerpt.map(str::to_string),
+        });
+        c
+    }
+
+    #[test]
+    fn research_block_cites_only_the_anchored_blocks_landed_answer_bounded() {
+        let here = research_comment("c-1", "blk-1", Some("Limit is 100/min."));
+        let elsewhere = research_comment("c-2", "blk-9", Some("unrelated"));
+        let pending = research_comment("c-3", "blk-1", None);
+        let mut target = research_comment("c-4", "blk-1", None);
+        target.research = None;
+        let all = [here.clone(), elsewhere, pending];
+        let block = research_block(all.iter(), &target).expect("a landed answer on the block");
+        assert!(block.contains("Limit is 100/min."));
+        assert!(block.contains("[research abcdef012345]"));
+        assert!(!block.contains("unrelated"));
+        // Nothing landed nearby → the prompt is untouched.
+        let other = research_comment("c-5", "blk-2", None);
+        assert!(research_block(all.iter(), &other).is_none());
+        // Bounded in total.
+        let huge = research_comment("c-6", "blk-1", Some(&"x".repeat(10_000)));
+        let block = research_block([huge.clone(), huge].iter(), &target).unwrap();
+        let quoted: usize = block.lines().filter(|l| l.starts_with("> ")).map(|l| l.len() - 2).sum();
+        assert!(quoted <= crate::state::RESEARCH_EXCERPT_MAX);
+    }
     use super::*;
 
     #[test]
@@ -3121,6 +3232,7 @@ mod tests {
                 external_created_at: None,
                 share_request_id: None,
                 attachments: Vec::new(),
+                research: None,
             },
         )
         .unwrap();

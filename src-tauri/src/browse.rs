@@ -304,6 +304,15 @@ impl BrowseState {
     }
 }
 
+/// Link this answer to any research comment waiting on the tab, and tell the
+/// plans that hold them.
+fn link_research(app: &AppHandle, browse_id: &str, answer: &str) {
+    let Some(store) = app.try_state::<crate::state::SessionStore>() else { return };
+    for session_id in store.link_research_answer(browse_id, answer) {
+        let _ = app.emit("comments-changed", crate::SessionEvent { session_id });
+    }
+}
+
 // --- Event payloads --------------------------------------------------------
 
 #[derive(Clone, Serialize)]
@@ -1050,6 +1059,10 @@ async fn read_browse(
             crate::meter::attach(&db, "browse", &msg.id, &settled);
             // Companion journal: this tab's agent completed a turn.
             let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
+            // A research comment (Search from the plan) waiting on this tab's
+            // first answer now links to it — before the event, so a plan
+            // reloading on `comments-changed` sees the hash.
+            link_research(&app, &browse_id, &text);
             let _ = app.emit(
                 "browse-done",
                 BrowseDone {

@@ -14595,6 +14595,69 @@ mod tests {
         assert!(pending.take("s1").is_none());
     }
 
+    /// A plan with one research comment (Search from the plan) and one plain
+    /// question on the same block.
+    fn research_fixture() -> (SessionStore, String, String) {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let req = |v: serde_json::Value| serde_json::from_value::<crate::state::NewCommentRequest>(v).unwrap();
+        let research = store
+            .add_comment("s1", req(serde_json::json!({
+                "type": "question", "anchorId": "A.1", "blockId": "blk-1", "body": "Search: rate limits",
+                "research": { "query": "rate limits", "browseId": "b-7" }
+            })))
+            .expect("research comment");
+        let plain = store
+            .add_comment("s1", req(serde_json::json!({
+                "type": "question", "anchorId": "A.1", "blockId": "blk-1", "body": "Why this order?"
+            })))
+            .expect("plain comment");
+        (store, research.id, plain.id)
+    }
+
+    #[test]
+    fn a_research_comment_never_rides_a_revise_unless_promoted() {
+        let (store, research_id, plain_id) = research_fixture();
+        let (_, comments, _) = store.drafts_and_reopens_for_payload("s1").unwrap();
+        let ids: Vec<&str> = comments.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec![plain_id.as_str()], "only the plain question rides");
+        let submitted = store.mark_submitted("s1");
+        assert_eq!(submitted, vec![plain_id.clone()]);
+        // Promoting it ("Make this a change") is what lets it ride.
+        store.unmark_submitted("s1", &submitted);
+        store
+            .attach_discussion("s1", &research_id, Some("Use 100/min."), true)
+            .expect("promote");
+        let (_, comments, _) = store.drafts_and_reopens_for_payload("s1").unwrap();
+        assert!(comments.iter().any(|c| c.id == research_id));
+    }
+
+    #[test]
+    fn the_first_tab_answer_links_bounded_and_a_later_turn_does_not_relink() {
+        let (store, research_id, _) = research_fixture();
+        let long = "é".repeat(5000); // 10 KB, multi-byte
+        assert_eq!(store.link_research_answer("b-7", &long), vec!["s1".to_string()]);
+        assert!(store.link_research_answer("b-other", "x").is_empty());
+        let get = || {
+            store.get("s1").unwrap().revisions.iter().flat_map(|r| r.comments.clone())
+                .find(|c| c.id == research_id).unwrap().research.unwrap()
+        };
+        let link = get();
+        assert_eq!(link.answer_hash.as_deref(), Some(ledger::body_hash(&long).as_str()));
+        let excerpt = link.answer_excerpt.unwrap();
+        assert!(excerpt.len() <= crate::state::RESEARCH_EXCERPT_MAX && excerpt.chars().all(|c| c == 'é'));
+        // A follow-up in the tab is not the result.
+        assert!(store.link_research_answer("b-7", "a later turn").is_empty());
+        assert_eq!(get().answer_hash.as_deref(), Some(ledger::body_hash(&long).as_str()));
+        // And it survives a reload from the DB.
+        let reloaded = SessionStore::new(store.database());
+        let persisted = reloaded.get("s1").unwrap().revisions.iter().flat_map(|r| r.comments.clone())
+            .find(|c| c.id == research_id).unwrap().research.unwrap();
+        assert_eq!(persisted.answer_hash, get().answer_hash);
+        assert_eq!(persisted.browse_id, "b-7");
+    }
+
     #[test]
     fn approve_plan_later_inner_approves_stands_down_and_leaves_run_state_null() {
         let store = make_store();
@@ -15458,6 +15521,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .unwrap();

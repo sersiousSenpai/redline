@@ -224,12 +224,21 @@ interface BrowserPaneProps {
    *  selected, so an event emitted at the moment of selection would fire before
    *  the listener subscribes and be lost. `nonce` makes a repeat request for the
    *  SAME url still count as a new one. */
-  openRequest?: { url: string; nonce: number } | null;
+  openRequest?: {
+    url: string;
+    nonce: number;
+    /** Seed (and, with `autoSend`, send) the opened tab's chat — Search from
+     *  the plan hands its research ask over this way. */
+    chat?: { text: string; autoSend?: boolean };
+    /** Prefer an existing tab by its thread (a research comment's "View
+     *  result"); falls back to opening `url` when that tab is gone. */
+    focusBrowseId?: string;
+  } | null;
   /** Called once the pane has acted on `openRequest`, so the owner clears it.
    *  Without this the request outlives its click: `lastOpenNonceRef` resets on
    *  every mount, so each browser-surface re-entry replayed the stale request
    *  and appended another tab. */
-  onOpenRequestConsumed?: () => void;
+  onOpenRequestConsumed?: (browseId: string | null) => void;
   /** Opaque token that changes whenever a SURROUNDING App pane toggles (comment
    *  pane, sidebar, doc-split orientation/visibility, the conversation dock).
    *  These reflow the slot without a drag — and a `ResizeObserver` on the slot
@@ -2071,8 +2080,26 @@ function BrowserPaneBase({
   useEffect(() => {
     if (!openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
     lastOpenNonceRef.current = openRequest.nonce;
-    openTabRef.current(openRequest.url, {});
-    onOpenRequestConsumedRef.current?.();
+    const existing = openRequest.focusBrowseId
+      ? tabsRef.current.find((t) => t.browseId === openRequest.focusBrowseId)
+      : undefined;
+    let browseId: string | null;
+    if (existing) {
+      selectTabRef.current(existing.id);
+      browseId = existing.browseId;
+    } else {
+      browseId = openTabRef.current(openRequest.url, {});
+    }
+    if (browseId && (openRequest.chat || openRequest.focusBrowseId)) {
+      if (openRequest.chat) {
+        seedPageChat({ text: openRequest.chat.text, nonce: openRequest.nonce, autoSend: openRequest.chat.autoSend });
+      }
+      // By thread, not "here": the active-tab ref hasn't caught up with a
+      // tab opened on this same tick.
+      setChatFor(browseId, { open: true, pill: "page" });
+    }
+    onOpenRequestConsumedRef.current?.(browseId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openRequest]);
 
   // The browse agent switches the user into an existing tab by emitting

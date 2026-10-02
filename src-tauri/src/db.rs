@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::state::{
     AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
     Comment, CommentAttachment,
-    CommentKind, CommentOffer,
+    CommentKind, CommentOffer, ResearchLink,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
     MissionFinding, MissionMessage, PushRecord, Resolution, ReviewAnnotation, ReviewQuestion,
     ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
@@ -45,6 +45,11 @@ fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
 /// Serialize a comment's (or thread turn's) attachment metadata. Same rule as
 /// `reopen_history_to_json`: no attachments stores NULL, so every pre-feature
 /// row and every comment without a file keeps a clean column.
+/// A research link as stored: NULL for every non-research comment.
+fn research_to_json(link: Option<&ResearchLink>) -> Option<String> {
+    link.and_then(|l| serde_json::to_string(l).ok())
+}
+
 fn attachments_to_json(attachments: &[CommentAttachment]) -> Option<String> {
     if attachments.is_empty() {
         return None;
@@ -1824,6 +1829,10 @@ impl Database {
         // `<app_data_dir>/attachments/<session_id>/`. NULL for every comment
         // without one.
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN attachments TEXT", []);
+        // A research comment's link (Search from the plan): JSON
+        // `{query, browseId, url?, answerHash?, answerExcerpt?}`. NULL for
+        // every other comment.
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN research TEXT", []);
         // The same, per sidecar-discussion turn: a reviewer can drop an image
         // into a follow-up inside a comment's Discuss thread.
         let _ = conn.execute(
@@ -4795,8 +4804,8 @@ impl Database {
                 sel_char_start, sel_char_end, sel_quoted_text,
                 sel_sub_block_id, reopen_note, reopen_history, actionable,
                 author, agent_state, reviewer,
-                external_created_at, share_request_id, attachments
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                external_created_at, share_request_id, attachments, research
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)",
             params![
                 comment.id,
                 session_id,
@@ -4827,6 +4836,7 @@ impl Database {
                 comment.external_created_at,
                 comment.share_request_id,
                 attachments_to_json(&comment.attachments),
+                research_to_json(comment.research.as_ref()),
             ],
         )?;
         Self::touch_session(&conn, session_id, comment.created_at);
@@ -4882,7 +4892,8 @@ impl Database {
                 reviewer = ?20,
                 external_created_at = ?21,
                 share_request_id = ?22,
-                attachments = ?23
+                attachments = ?23,
+                research = ?26
              WHERE session_id = ?24 AND id = ?25",
             params![
                 comment.scope.map(|s| s.as_str()),
@@ -4910,6 +4921,7 @@ impl Database {
                 attachments_to_json(&comment.attachments),
                 session_id,
                 comment.id,
+                research_to_json(comment.research.as_ref()),
             ],
         )?;
         Ok(())
@@ -7433,7 +7445,7 @@ impl Database {
                     sel_char_start, sel_char_end, sel_quoted_text,
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
                     author, agent_state, reviewer,
-                    external_created_at, share_request_id, attachments
+                    external_created_at, share_request_id, attachments, research
              FROM comments",
             "ORDER BY session_id, version_number, created_at",
         ))?;
@@ -7492,6 +7504,9 @@ impl Database {
             let external_created_at: Option<i64> = row.get(26)?;
             let share_request_id: Option<String> = row.get(27)?;
             let attachments = attachments_from_json(row.get(28)?);
+            let research = row
+                .get::<_, Option<String>>(29)?
+                .and_then(|j| serde_json::from_str::<ResearchLink>(&j).ok());
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -7517,6 +7532,7 @@ impl Database {
                     external_created_at,
                     share_request_id,
                     attachments,
+                    research,
                 },
             ))
         })?;
@@ -12990,6 +13006,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         // Normal mint starts the c-NNN sequence.
         let a = store.add_comment("s", req(None)).unwrap();
@@ -13034,6 +13051,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         // A submitted comment (stays on v1), a reopened one and a draft (carried).
         let settled = store.add_comment("s", comment("settled")).unwrap();
@@ -13100,6 +13118,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -13150,6 +13169,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -13222,6 +13242,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -13258,6 +13279,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -13279,6 +13301,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -13319,6 +13342,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add agent comment");
@@ -13343,6 +13367,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add user comment");
@@ -13387,6 +13412,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         let imported = store
             .add_comment("sess-r", mk(Some("John Doe")))
@@ -13437,6 +13463,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: vec![att.clone()],
+                    research: None,
                 },
             )
             .expect("add comment with an attachment");
@@ -13462,6 +13489,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add plain comment");
@@ -13528,6 +13556,7 @@ mod tests {
             external_created_at: prov.then_some(1_700_000_100_000),
             share_request_id: prov.then(|| "req-abc123".to_string()),
             attachments: Vec::new(),
+            research: None,
         };
         let imported = store
             .add_comment("sess-p", mk(true))
@@ -13831,6 +13860,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -13879,6 +13909,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -13974,6 +14005,7 @@ mod tests {
                         external_created_at: None,
                         share_request_id: None,
                         attachments: Vec::new(),
+                        research: None,
                     },
                 )
                 .expect("add comment");
@@ -14067,6 +14099,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -14134,6 +14167,7 @@ mod tests {
                 external_created_at: None,
                 share_request_id: None,
                 attachments: Vec::new(),
+                research: None,
             },
         )
         .expect("add comment");
@@ -14154,6 +14188,7 @@ mod tests {
                 external_created_at: None,
                 share_request_id: None,
                 attachments: Vec::new(),
+                research: None,
             },
         )
         .expect("add comment");
@@ -14311,6 +14346,7 @@ Restructured detail body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add q1");
@@ -14332,6 +14368,7 @@ Restructured detail body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add q2");
@@ -14450,6 +14487,7 @@ body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add comment");
@@ -14496,6 +14534,7 @@ body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add");
@@ -14567,6 +14606,7 @@ body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("add structural");
@@ -15000,6 +15040,7 @@ body.
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
 
         let a = store
@@ -15148,6 +15189,7 @@ body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .expect("fresh session c-001 persists");
@@ -15272,6 +15314,7 @@ body.
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .unwrap();
@@ -15747,6 +15790,7 @@ body.
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         let answered = |accepted_at: Option<i64>| {
             Some(Resolution {
@@ -15916,6 +15960,7 @@ body.
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         }
     }
 
@@ -16193,6 +16238,7 @@ body.
                 external_created_at: None,
                 share_request_id: None,
                 attachments: Vec::new(),
+                research: None,
             }
         };
         let insert = |c: &Comment| db.insert_comment("s-ghost", 1, c).unwrap();

@@ -273,6 +273,7 @@ pub fn suggest_edit_core(
                 share_request_id: None,
                 // Agents propose text, never files.
                 attachments: Vec::new(),
+                research: None,
             },
         )
         .map_err(AgentError::BadRequest)
@@ -350,6 +351,7 @@ pub fn add_feedback_core(
                 share_request_id: None,
                 // Agents propose text, never files.
                 attachments: Vec::new(),
+                research: None,
             },
         )
         .map_err(AgentError::BadRequest)
@@ -553,6 +555,7 @@ mod tests {
                     external_created_at: None,
                     share_request_id: None,
                     attachments: Vec::new(),
+                    research: None,
                 },
             )
             .unwrap();

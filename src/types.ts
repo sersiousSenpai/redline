@@ -122,6 +122,17 @@ export interface CommentAttachment {
   bytes: number;
 }
 
+/** A research comment's link (Search from the plan) — see `ResearchLink` in
+ *  state.rs. `answerHash`/`answerExcerpt` land when the tab agent's first
+ *  answer completes. */
+export interface ResearchLink {
+  query: string;
+  browseId: string;
+  url?: string;
+  answerHash?: string;
+  answerExcerpt?: string;
+}
+
 export interface Comment {
   id: string;
   type: CommentType;
@@ -172,6 +183,9 @@ export interface Comment {
    *  NOTE: this rides the Yjs collab mirror for free, but the mesh carries the
    *  JSON metadata only — never the files, which are local to their author. */
   attachments?: CommentAttachment[];
+  /** Search from the plan: a question that links to a browser tab's answer.
+   *  Never rides a Revise unless promoted ("Make this a change"). */
+  research?: ResearchLink;
 }
 
 export interface NewCommentRequest {
@@ -198,6 +212,9 @@ export interface NewCommentRequest {
   shareRequestId?: string;
   /** Files captured by the composer before Save (see `Comment.attachments`). */
   attachments?: CommentAttachment[];
+  /** Search from the plan: a question that links to a browser tab's answer.
+   *  Never rides a Revise unless promoted ("Make this a change"). */
+  research?: ResearchLink;
 }
 
 export interface UpdateCommentRequest {

@@ -52,6 +52,7 @@ import {
 } from "./lib/landing";
 import { type LaunchDestination } from "./lib/frontDoor";
 import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
+import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import {
   attemptLaunch,
   attemptRun,
@@ -158,7 +159,7 @@ const OnboardingTour = lazy(() =>
 );
 import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
-import { SelectionMenu } from "./components/SelectionMenu";
+import { PlanSearchBar, SelectionMenu } from "./components/SelectionMenu";
 // Off the boot path, but warmed by the boot effect: the sessions tab is the
 // sidebar's resting state, so its chunk is fetched under the parting doors
 // rather than on first paint of the aside.
@@ -4856,9 +4857,9 @@ function App() {
 
   const pendingComments = useMemo(
     () =>
-      threadComments.filter(
-        (c) => c.status === "draft" || c.status === "reopened",
-      ),
+      // An unpromoted research comment is a pointer to what was found, not
+      // feedback — it never rides a Send.
+      threadComments.filter(ridesSubmit),
     [threadComments],
   );
   const submittedComments = threadComments.filter(
@@ -5086,6 +5087,50 @@ function App() {
     });
     clearSelection();
   };
+
+  // Search from the plan. The bar keeps its own copy of the selection: the
+  // editor's selection collapses the moment the bar's input takes focus.
+  const [planSearch, setPlanSearch] = useState<{ sessionId: string; selection: NonNullable<typeof selection> } | null>(null);
+  const beginPlanSearch = () => {
+    if (!selection || !session) return;
+    setPlanSearch({ sessionId: session.sessionId, selection });
+    clearSelection();
+  };
+  // ⏎ in the bar: a new browser tab on a web search for the passage, its chat
+  // seeded and sent, and — once the pane reports the tab's thread — an
+  // anchored research comment that links back to it (`onBrowserOpenConsumed`).
+  const runPlanSearch = (instruction: string) => {
+    const s = planSearch;
+    setPlanSearch(null);
+    if (!s) return;
+    const { selection: sel } = s;
+    const query = researchQuery(sel.text, instruction);
+    const url = researchSearchUrl(sel.text, instruction);
+    const title = summaries.find((x) => x.sessionId === s.sessionId)?.planTitle ?? null;
+    pendingResearchRef.current = {
+      sessionId: s.sessionId,
+      request: {
+        type: "question",
+        anchorId: sel.anchorId,
+        blockId: blockIdByAnchor.get(sel.anchorId),
+        body: `Searched: ${query}`,
+        selection:
+          sel.charEnd > sel.charStart
+            ? { charStart: sel.charStart, charEnd: sel.charEnd, quotedText: sel.text, subBlockId: sel.subBlockId }
+            : undefined,
+        research: { query, browseId: "", url },
+      },
+    };
+    setBrowserOpenRequest({ url, nonce: Date.now(), chat: { text: researchSeed(sel.text, instruction, title), autoSend: true } });
+    selectSurface("browser");
+  };
+  // "View result →" on a research comment: wake its tab with the chat open,
+  // or reopen the search if that tab has since been closed.
+  const viewResearch = useCallback((c: Comment) => {
+    if (!c.research) return;
+    setBrowserOpenRequest({ url: c.research.url ?? researchSearchUrl(c.research.query, ""), nonce: Date.now(), focusBrowseId: c.research.browseId });
+    selectSurfaceRef.current("browser");
+  }, []);
 
   // Cross out the selection: strike it in place exactly like the Delete key
   // (Word-style `rl_del` track change), driven through the editor's
@@ -6014,7 +6059,26 @@ function App() {
   const [browserOpenRequest, setBrowserOpenRequest] = useState<{
     url: string;
     nonce: number;
+    chat?: { text: string; autoSend?: boolean };
+    focusBrowseId?: string;
   } | null>(null);
+  // Search from the plan, mid-flight: the anchored passage waiting for the
+  // browser to report which thread it opened, so the research comment can
+  // link to it. One at a time — it is consumed on the very next open.
+  const pendingResearchRef = useRef<{
+    sessionId: string;
+    request: NewCommentRequest;
+  } | null>(null);
+  const onBrowserOpenConsumed = (browseId: string | null) => {
+    setBrowserOpenRequest(null);
+    const pending = pendingResearchRef.current;
+    pendingResearchRef.current = null;
+    if (!pending || !browseId) return;
+    void invoke<Comment>("add_comment", {
+      sessionId: pending.sessionId,
+      request: { ...pending.request, research: { ...pending.request.research!, browseId } },
+    }).catch((err) => setToast(`Couldn't link the search to the plan: ${err}`, 6000));
+  };
   const openUrlInBrowser = (url: string) => {
     setBrowserOpenRequest({ url, nonce: Date.now() });
     selectSurface("browser");
@@ -9668,6 +9732,7 @@ function App() {
                 onAutoOpenConsumed={clearAutoOpen}
                 autoDiscuss={autoDiscussCommentId === c.id}
                 onAutoDiscussConsumed={clearAutoDiscuss}
+                onViewResearch={viewResearch}
                 onSelect={commentCallbacks.onSelect}
                 onDelete={commentCallbacks.onDelete}
                 onUpdate={commentCallbacks.onUpdate}
@@ -9859,11 +9924,20 @@ function App() {
           </div>
         )}
       >
-      {selection && !composing && !isViewingHistorical && (
+      {selection && !composing && !planSearch && !isViewingHistorical && (
         <SelectionMenu
           rect={selection.rect}
           onPick={beginCompose}
           onCrossOut={beginCrossOut}
+          onSearch={beginPlanSearch}
+        />
+      )}
+      {planSearch && (
+        <PlanSearchBar
+          rect={planSearch.selection.rect}
+          selectedText={planSearch.selection.text}
+          onSubmit={runPlanSearch}
+          onCancel={() => setPlanSearch(null)}
         />
       )}
       {sendConfirm && (
@@ -10151,7 +10225,7 @@ function App() {
                   openRequest={browserOpenRequest}
                   // Cleared once acted on — a request that lingers replays on
                   // every remount (the pane's nonce guard resets with it).
-                  onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
+                  onOpenRequestConsumed={onBrowserOpenConsumed}
                   // Re-sync the native webview whenever a surrounding pane toggles
                   // and reflows the slot without a drag (e.g. closing the comment
                   // pane, which otherwise leaves the webview stranded at its old

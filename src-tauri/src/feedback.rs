@@ -495,6 +495,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         }
     }
 
@@ -727,6 +728,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         };
         let prose = mk_comment(
             "c-001",

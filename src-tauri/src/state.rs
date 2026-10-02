@@ -480,6 +480,32 @@ pub struct CommentAttachment {
     pub bytes: u64,
 }
 
+/// A research comment's link to what was found: "Search" on a plan
+/// selection opens a browser tab whose agent researches it, and this records
+/// where that answer lives. The id lets the plan reopen the live thread; the
+/// hash (and its bounded excerpt) let a discussion cite exactly what was
+/// found, even after the tab's chat has moved on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchLink {
+    /// What was searched for — the selection, plus any instruction.
+    pub query: String,
+    /// The browser tab's thread (`browse_id`).
+    pub browse_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// sha256 of the tab agent's first completed answer. `None` until that
+    /// turn lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_hash: Option<String>,
+    /// That answer, capped at `RESEARCH_EXCERPT_MAX` bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_excerpt: Option<String>,
+}
+
+/// The most of a linked research answer a discussion is ever handed.
+pub const RESEARCH_EXCERPT_MAX: usize = 4 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
@@ -558,6 +584,22 @@ pub struct Comment {
     /// pre-attachment contract.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CommentAttachment>,
+    /// Set on a research comment (Search from the plan). Such a comment is a
+    /// question that does NOT ride a Revise until promoted ("Make this a
+    /// change" → `actionable`). `None` everywhere else, keeping the serialized
+    /// shape byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research: Option<ResearchLink>,
+}
+
+impl Comment {
+    /// Whether this comment goes out with the next Send/Revise: a draft or a
+    /// reopened comment — except an unpromoted research comment, which is a
+    /// pointer to what was found, not something for the planner to act on.
+    pub fn rides_submit(&self) -> bool {
+        matches!(self.status, CommentStatus::Draft | CommentStatus::Reopened)
+            && !(self.research.is_some() && !self.actionable)
+    }
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -1119,6 +1161,10 @@ pub struct NewCommentRequest {
     /// Files captured by the composer before Save (see `Comment::attachments`).
     #[serde(default)]
     pub attachments: Vec<CommentAttachment>,
+    /// A research comment's link (Search from the plan). Ignored unless the
+    /// comment is a question.
+    #[serde(default)]
+    pub research: Option<ResearchLink>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1765,6 +1811,8 @@ impl SessionStore {
             external_created_at: request.external_created_at,
             share_request_id: request.share_request_id,
             attachments: request.attachments,
+            // Only a question can be a research comment.
+            research: request.research.filter(|_| request.kind == CommentKind::Question),
         };
 
         let latest = session
@@ -2013,13 +2061,43 @@ impl SessionStore {
                 .revisions
                 .iter()
                 .flat_map(|r| r.comments.iter())
-                .filter(|c| matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened))
+                .filter(|c| c.rides_submit())
                 .cloned()
                 .collect();
             (latest, comments)
         };
         let sections = self.sections_for(session_id, &latest);
         Some(((*sections).clone(), comments, latest.raw_plan_markdown))
+    }
+
+    /// A browser tab's agent finished a turn. Every research comment waiting on
+    /// THAT tab's first answer records it — hash plus a bounded excerpt — and
+    /// is persisted. Returns the session ids that changed. Only the first
+    /// answer links: later turns are follow-ups in the tab, not the result.
+    pub fn link_research_answer(&self, browse_id: &str, answer: &str) -> Vec<String> {
+        let hash = crate::ledger::body_hash(answer);
+        let excerpt = clip_utf8(answer, RESEARCH_EXCERPT_MAX);
+        let mut map = self.inner.lock().unwrap();
+        let mut changed = Vec::new();
+        for (session_id, session) in map.iter_mut() {
+            for revision in session.revisions.iter_mut() {
+                for comment in revision.comments.iter_mut() {
+                    let Some(link) = comment.research.as_mut() else { continue };
+                    if link.browse_id != browse_id || link.answer_hash.is_some() {
+                        continue;
+                    }
+                    link.answer_hash = Some(hash.clone());
+                    link.answer_excerpt = Some(excerpt.clone());
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
+                        tracing::error!(error = %e, "failed to persist research link");
+                    }
+                    if !changed.contains(session_id) {
+                        changed.push(session_id.clone());
+                    }
+                }
+            }
+        }
+        changed
     }
 
     pub fn mark_submitted(&self, session_id: &str) -> Vec<String> {
@@ -2030,10 +2108,7 @@ impl SessionStore {
         let mut ids = Vec::new();
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
-                if matches!(
-                    comment.status,
-                    CommentStatus::Draft | CommentStatus::Reopened
-                ) {
+                if comment.rides_submit() {
                     comment.status = CommentStatus::Submitted;
                     ids.push(comment.id.clone());
                     if let Err(e) = self.db.update_comment(session_id, comment) {
@@ -2829,6 +2904,7 @@ mod tests {
             external_created_at: None,
             share_request_id: None,
             attachments: Vec::new(),
+            research: None,
         }
     }
 
@@ -3084,4 +3160,17 @@ mod tests {
         assert!(all.len() > v1_count, "the new version filed its own items");
         assert!(all.iter().any(|i| i.title.starts_with("Plan v2 approved:")));
     }
+}
+
+/// The longest prefix of `s` that fits in `max` bytes without splitting a
+/// character.
+pub fn clip_utf8(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }

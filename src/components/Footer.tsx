@@ -5,6 +5,7 @@ import type { Comment } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
 import { Button } from "./ui/Button";
 import { MenuSurface } from "./ui/MenuSurface";
+import { ridesSubmit } from "../lib/planSearch";
 
 /** Where an approved plan can be built from — the same agent, or a hand-off. */
 export interface BuildTarget {
@@ -71,9 +72,8 @@ export function Footer({
   backend,
 }: FooterProps) {
   const author = agentLabelFor(backend);
-  const pending = comments.filter(
-    (c) => c.status === "draft" || c.status === "reopened",
-  );
+  // What the next Send carries — an unpromoted research comment doesn't.
+  const pending = comments.filter(ridesSubmit);
   const counts = countByType(pending);
   const total = pending.length;
   // "All resolutions handled" surfaces once the reviewer has dispatched every
