@@ -22,7 +22,10 @@
 //!     `configuration`, auto-closing on `window.close()`), and
 //!   * re-implements wry's other two delegate methods verbatim (file-`<input>`
 //!     upload panel + camera/mic permission grant) so replacing wry's delegate
-//!     doesn't regress those on every site.
+//!     doesn't regress those on every site, and
+//!   * answers WebKit's private print/save requests (`window.print()`, the PDF
+//!     viewer's Print and Save buttons; selectors checked against
+//!     `WKUIDelegatePrivate.h`) through `browser_output`.
 //!
 //! The delegate class mirrors wry 0.55's `WryWebViewUIDelegate` (same objc2 /
 //! objc2-web-kit versions), so the unsafe memory/threading patterns are the
@@ -33,6 +36,8 @@ use std::cell::RefCell;
 use std::ptr::null_mut;
 use std::rc::Rc;
 
+use tauri::Manager;
+
 use block2::Block;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
@@ -42,7 +47,8 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSURL,
+    MainThreadMarker, NSArray, NSData, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, NSURL,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKMediaCaptureType, WKNavigationAction, WKOpenPanelParameters, WKPermissionDecision,
@@ -115,6 +121,8 @@ impl PopupWindowDelegate {
 // --- Our WKUIDelegate ---------------------------------------------------------
 struct BrowserUIDelegateIvars {
     windows: Rc<RefCell<Vec<PopupHost>>>,
+    app: tauri::AppHandle,
+    label: String,
 }
 
 /// Build + show a floating popup window hosting a WebKit-created child webview,
@@ -126,11 +134,12 @@ struct BrowserUIDelegateIvars {
 /// SAFETY: called only from the UI-delegate method, which WebKit invokes on the
 /// main thread; every AppKit/WebKit call below runs there.
 unsafe fn build_popup(
-    windows: &Rc<RefCell<Vec<PopupHost>>>,
+    delegate: &BrowserUIDelegate,
     webview: &WKWebView,
     configuration: &WKWebViewConfiguration,
     window_features: &WKWindowFeatures,
 ) -> Option<Retained<WKWebView>> {
+    let windows = &delegate.ivars().windows;
     let mtm = MainThreadMarker::new()?;
     let current_window = webview.window()?;
     let screen = current_window.screen()?;
@@ -185,7 +194,7 @@ unsafe fn build_popup(
 
     let windows_for_close = windows.clone();
     let window_id = Retained::as_ptr(&window) as usize;
-    let delegate = PopupWindowDelegate::new(
+    let delegate_for_window = PopupWindowDelegate::new(
         mtm,
         Box::new(move || {
             windows_for_close
@@ -193,14 +202,17 @@ unsafe fn build_popup(
                 .retain(|h| Retained::as_ptr(&h.ns_window) as usize != window_id);
         }),
     );
-    window.setDelegate(Some(&ProtocolObject::from_ref(&*delegate)));
+    window.setDelegate(Some(ProtocolObject::from_ref(&*delegate_for_window)));
+    // The popup is often a `blob:` PDF; its viewer's Print / Save buttons
+    // reach the same delegate as the tab that opened it.
+    popup.setUIDelegate(Some(ProtocolObject::from_ref(delegate)));
     window.setContentView(Some(&popup));
     window.makeKeyAndOrderFront(None);
 
     windows.borrow_mut().push(PopupHost {
         ns_window: window,
         webview: popup.clone(),
-        delegate,
+        delegate: delegate_for_window,
     });
 
     Some(popup)
@@ -230,7 +242,7 @@ define_class!(
             // The real work lives in `build_popup` (a plain fn) so it can use `?`
             // — a `method_id` body can't, since the macro re-types its return.
             build_popup(
-                &self.ivars().windows,
+                self,
                 webview,
                 configuration,
                 window_features,
@@ -287,14 +299,55 @@ define_class!(
             (*decision_handler).call((WKPermissionDecision::Grant,));
         }
     }
+
+    // Private WKUIDelegate methods (WKUIDelegatePrivate.h). WebKit probes for
+    // them with respondsToSelector:, so they only need to exist on the class.
+    impl BrowserUIDelegate {
+        // `window.print()` and the PDF viewer's Print button (macOS 12+).
+        // WebKit holds the page's print call until `completion` runs, so it is
+        // passed through to fire when the sheet closes.
+        #[unsafe(method(_webView:printFrame:pdfFirstPageSize:completionHandler:))]
+        fn print_frame_with_completion(
+            &self,
+            webview: &WKWebView,
+            _frame: *mut AnyObject,
+            _size: NSSize,
+            completion: &Block<dyn Fn()>,
+        ) {
+            unsafe { crate::browser_output::run_print(webview, Some(completion.copy())) };
+        }
+
+        // The pre-macOS 12 form of the same request.
+        #[unsafe(method(_webView:printFrame:))]
+        fn print_frame(&self, webview: &WKWebView, _frame: *mut AnyObject) {
+            unsafe { crate::browser_output::run_print(webview, None) };
+        }
+
+        // The PDF viewer's Save button hands over the document's bytes.
+        #[unsafe(method(_webView:saveDataToFile:suggestedFilename:mimeType:originatingURL:))]
+        fn save_data_to_file(
+            &self,
+            _webview: &WKWebView,
+            data: &NSData,
+            suggested: &NSString,
+            _mime: *mut NSString,
+            url: *mut NSURL,
+        ) {
+            let ivars = self.ivars();
+            let url = unsafe { url.as_ref() };
+            crate::browser_output::save_data_to_file(&ivars.app, &ivars.label, data, suggested, url);
+        }
+    }
 );
 
 impl BrowserUIDelegate {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, app: tauri::AppHandle, label: String) -> Retained<Self> {
         let delegate = mtm
             .alloc::<BrowserUIDelegate>()
             .set_ivars(BrowserUIDelegateIvars {
                 windows: Rc::new(RefCell::new(Vec::new())),
+                app,
+                label,
             });
         unsafe { msg_send![super(delegate), init] }
     }
@@ -305,7 +358,9 @@ impl BrowserUIDelegate {
 /// as an associated object, so it lives exactly as long as the webview. Safe to
 /// be a no-op if the webview handle is gone.
 pub fn install_new_window_delegate(wv: &tauri::Webview) -> Result<(), String> {
-    wv.with_webview(|pw| {
+    let app = wv.app_handle().clone();
+    let label = wv.label().to_owned();
+    wv.with_webview(move |pw| {
         // SAFETY: `with_webview` runs on the UI (main) thread; `inner()` is the
         // live WKWebView (wry's subclass), so treating it as `WKWebView` and
         // sending UI-delegate/associated-object messages is sound.
@@ -313,7 +368,7 @@ pub fn install_new_window_delegate(wv: &tauri::Webview) -> Result<(), String> {
             let ptr = pw.inner() as *mut WKWebView;
             let Some(webview) = ptr.as_ref() else { return };
             let Some(mtm) = MainThreadMarker::new() else { return };
-            let delegate = BrowserUIDelegate::new(mtm);
+            let delegate = BrowserUIDelegate::new(mtm, app, label);
             webview.setUIDelegate(Some(&ProtocolObject::from_ref(&*delegate)));
             // Retain the delegate for the webview's lifetime (UIDelegate is weak).
             objc_setAssociatedObject(

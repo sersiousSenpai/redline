@@ -14,6 +14,12 @@ export interface ToastSpec {
   tone?: "success" | "info" | "warning";
   /** One quiet action. Pressing it also dismisses the toast. */
   action?: { label: string; onAction: () => void };
+  /** A second, rarer action beside the first (a download's Show in Finder). */
+  secondaryAction?: { label: string; onAction: () => void };
+  /** "top" lifts the card to the window's top edge, which is always HTML.
+   *  For a notice raised while a native browser page (which paints over all
+   *  HTML) fills the lower window, as a download's does. */
+  placement?: "top";
   durationMs?: number | null;
 }
 
@@ -90,7 +96,7 @@ export function RedlineToast({
   const Icon = tone === "warning" ? AlertTriangle : tone === "info" ? Info : Check;
   return (
     <div
-      className={`rl-toast is-${tone}${leaving ? " is-leaving" : ""}`}
+      className={`rl-toast is-${tone}${toast.placement === "top" ? " is-top" : ""}${leaving ? " is-leaving" : ""}`}
       role="status"
       aria-live="polite"
       onMouseEnter={() => setHovered(true)}
@@ -98,18 +104,19 @@ export function RedlineToast({
     >
       <Icon size={14} className="rl-toast-icon" aria-hidden />
       <span className="rl-toast-msg">{toast.message}</span>
-      {toast.action && (
+      {[toast.action, toast.secondaryAction].map((action) => action && (
         <button
+          key={action.label}
           type="button"
           className="rl-toast-action"
           onClick={() => {
-            toast.action!.onAction();
+            action.onAction();
             leave.current();
           }}
         >
-          {toast.action.label}
+          {action.label}
         </button>
-      )}
+      ))}
       <button
         type="button"
         className="rl-toast-x"

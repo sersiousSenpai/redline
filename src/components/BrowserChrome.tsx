@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useLayoutEffect, useRef, type PointerEvent } from "react";
-import { ArrowLeft, ArrowRight, Columns2, Globe2, Grid3x3, MessageSquare, MoreHorizontal, Palette, Plus, RotateCw, Scan, Settings2, Star, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Columns2, Download, Globe2, Grid3x3, MessageSquare, MoreHorizontal, Palette, Plus, Printer, RotateCw, Scan, Settings2, Star, X } from "lucide-react";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import type { TilePage } from "./BrowserTileStage";
 
@@ -20,6 +20,7 @@ interface Props {
   menuOpen: boolean; onMenu: (open: boolean) => void;
   onBookmarks: () => void; onAppearance: () => void; onPreferences: () => void;
   onInspect: () => void; onCloseBrowser: () => void;
+  onPrint?: () => void; onSavePage?: () => void;
 }
 
 export function BrowserChrome(props: Props) {
@@ -116,6 +117,11 @@ export function BrowserChrome(props: Props) {
       <BrowserMenuItem icon={<Star size={16}/>} onClick={act(props.onBookmarks)}>Bookmarks…</BrowserMenuItem>
       <BrowserMenuItem icon={<Palette size={16}/>} onClick={act(props.onAppearance)}>Page appearance…</BrowserMenuItem>
       <BrowserMenuItem icon={<Scan size={16}/>} onClick={act(props.onInspect)}>Select an element to discuss</BrowserMenuItem>
+      {props.onPrint && props.onSavePage && <>
+        <div className="rb-menu-rule"/>
+        <BrowserMenuItem icon={<Printer size={16}/>} onClick={act(props.onPrint)}>Print…</BrowserMenuItem>
+        <BrowserMenuItem icon={<Download size={16}/>} onClick={act(props.onSavePage)}>Save page/PDF</BrowserMenuItem>
+      </>}
       <div className="rb-menu-rule"/>
       <BrowserMenuItem icon={<Settings2 size={16}/>} onClick={act(props.onPreferences)}>Browsing preferences…</BrowserMenuItem>
       <BrowserMenuItem icon={<ArrowLeft size={16}/>} onClick={act(props.onCloseBrowser)}>Return to Redline</BrowserMenuItem>

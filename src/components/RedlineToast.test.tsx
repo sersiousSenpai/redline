@@ -99,6 +99,20 @@ describe("RedlineToast", () => {
     expect(card()).toBeNull();
   });
 
+  it("renders a second action beside the first, and either one closes it", () => {
+    const open = vi.fn();
+    const reveal = vi.fn();
+    act(() => show({ message: "a.zip saved to Downloads", placement: "top", action: { label: "Open", onAction: open }, secondaryAction: { label: "Show in Finder", onAction: reveal } }));
+    expect(card()?.classList.contains("is-top")).toBe(true);
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>(".rl-toast-action")];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Open", "Show in Finder"]);
+    act(() => buttons[1].click());
+    expect(reveal).toHaveBeenCalledOnce();
+    expect(open).not.toHaveBeenCalled();
+    advance(TOAST_LEAVE_MS);
+    expect(card()).toBeNull();
+  });
+
   it("stays up when asked to, and an action buys more time", () => {
     expect(toastDuration({ message: "x" })).toBe(4000);
     expect(toastDuration({ message: "x", action: { label: "a", onAction() {} } })).toBe(8000);

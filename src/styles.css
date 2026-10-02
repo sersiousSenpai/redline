@@ -5283,6 +5283,7 @@ html[data-rl-resizing] [data-rl-pane] {
   animation: rl-toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 .rl-toast.is-leaving { animation: rl-toast-out 140ms ease-in both; }
+.rl-toast.is-top { top: 6px; bottom: auto; }
 .rl-toast-icon { flex: none; color: var(--color-ink-muted); }
 .rl-toast.is-success .rl-toast-icon { color: var(--color-success); }
 .rl-toast.is-warning .rl-toast-icon { color: var(--color-warning); }

@@ -17,6 +17,7 @@ mod browser_events;
 #[cfg(target_os = "macos")]
 mod browser_popup;
 mod browser_overlay;
+mod browser_output;
 mod browser_workspace;
 mod bundle;
 mod classmem;
@@ -3983,6 +3984,98 @@ fn preparation_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     lock
 }
 
+/// The one Safari user agent every browser tab presents. `src/lib/safariUA.ts`
+/// pins the same string for the thumbnail webviews; a test keeps them equal.
+const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15";
+
+/// The one way a browser tab's native webview is built, whether the pane asks
+/// (`browser_create_tab`) or a background wake does (`ensure_live`), so every
+/// tab has the same user agent and the Safari-style download handler. A
+/// webview made through the JS `Webview` API could never get `on_download`, and
+/// wry cancels downloads on a webview without one.
+fn browser_tab_builder(label: &str, url: tauri::Url) -> tauri::webview::WebviewBuilder<tauri::Wry> {
+    tauri::webview::WebviewBuilder::new(label, tauri::WebviewUrl::External(url))
+        .focused(false)
+        .accept_first_mouse(true)
+        .user_agent(SAFARI_UA)
+        .on_download(browser_output::on_download)
+}
+
+/// Where a new tab starts: the page itself for http(s) and about:blank, or
+/// about:blank plus a file to load for `file://` (WebKit only opens local files
+/// through `loadFileURL:allowingReadAccessToURL:`). Anything else is refused.
+fn browser_tab_start(url: &str) -> Result<(tauri::Url, Option<std::path::PathBuf>), &'static str> {
+    let parsed: tauri::Url = url.parse().map_err(|_| "The tab's address is invalid")?;
+    match parsed.scheme() {
+        "http" | "https" => Ok((parsed, None)),
+        _ if parsed.as_str() == "about:blank" => Ok((parsed, None)),
+        "file" => {
+            let path = parsed.to_file_path().map_err(|_| "The tab's file address is invalid")?;
+            Ok(("about:blank".parse().expect("static url"), Some(path)))
+        }
+        _ => Err("Unsupported tab address"),
+    }
+}
+
+/// Load a local file into a tab, with read access to the file's folder so a
+/// page's sibling assets resolve.
+fn load_file_url(wv: &tauri::Webview, path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let file = path.display().to_string();
+        let dir = path.parent().map(|d| d.display().to_string()).unwrap_or_else(|| "/".into());
+        wv.with_webview(move |pw| {
+            use objc2_foundation::{NSString, NSURL};
+            // SAFETY: `with_webview` runs on the main thread; `inner()` is the live WKWebView.
+            unsafe {
+                let Some(webview) = (pw.inner() as *mut objc2_web_kit::WKWebView).as_ref() else { return };
+                let file = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&file), false);
+                let dir = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&dir), true);
+                let _ = webview.loadFileURL_allowingReadAccessToURL(&file, &dir);
+            }
+        })
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let url = tauri::Url::from_file_path(path).map_err(|_| "invalid file path".to_string())?;
+        wv.navigate(url).map_err(|e| e.to_string())
+    }
+}
+
+/// Create a browser tab's native webview for the pane, which then adopts it by
+/// label (`Webview.getByLabel`) for show / hide / position as before. Shares
+/// the wake lock with `ensure_live`, so a pane create racing a background wake
+/// yields one webview, not a duplicate-label error.
+#[tauri::command(async)]
+async fn browser_create_tab(app: AppHandle, label: String, url: String) -> Result<(), String> {
+    if !label.starts_with("browser-") || label.len() > 160 {
+        return Err("Invalid browser tab label".into());
+    }
+    let (initial, file) = browser_tab_start(&url)?;
+    let lock = preparation_lock(&format!("wake:{label}"));
+    let _guard = lock.lock().await;
+    if app.get_webview(&label).is_some() {
+        return Ok(());
+    }
+    let window = app.get_window("main").ok_or("Browser window is unavailable")?;
+    let handle = app.clone();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        if handle.get_webview(&label).is_some() { let _ = send.send(Ok(())); return; }
+        let result = window
+            .add_child(browser_tab_builder(&label, initial), tauri::LogicalPosition::new(-10000.0, -10000.0), tauri::LogicalSize::new(1.0, 1.0))
+            .map_err(|e| e.to_string())
+            .and_then(|view| match &file { Some(path) => load_file_url(&view, path), None => Ok(()) });
+        let _ = send.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    tokio::time::timeout(std::time::Duration::from_secs(6), receive)
+        .await
+        .map_err(|_| "Browser creation is still pending".to_string())?
+        .map_err(|_| "Browser creation was interrupted".to_string())?
+}
+
 /// Materialize a saved or suspended tab without requiring a mounted browser
 /// pane or changing the active workspace. The pane can adopt it by stable label.
 #[cfg(target_os = "macos")]
@@ -3993,11 +4086,8 @@ async fn ensure_live(app_state: &AppState, label: &str) -> Result<(), axum::resp
     if app_state.app_handle.get_webview(label).is_some() { return Ok(()); }
     let tab = known_browser_tab(app_state, label)
         .ok_or_else(|| browser_error_response("The saved tab is unavailable"))?;
-    let url: tauri::Url = tab.url.parse().map_err(|_| browser_error_response("Saved tab URL is invalid"))?;
-    if !matches!(url.scheme(), "http" | "https") && url.as_str() != "about:blank" {
-        return Err(browser_error_response("Unsupported saved tab URL"));
-    }
-    let requested_blank = url.as_str() == "about:blank";
+    let (url, file) = browser_tab_start(&tab.url).map_err(browser_error_response)?;
+    let requested_blank = url.as_str() == "about:blank" && file.is_none();
     let window = app_state.app_handle.get_window("main")
         .ok_or_else(|| browser_error_response("Browser window is unavailable"))?;
     let handle = app_state.app_handle.clone();
@@ -4008,9 +4098,7 @@ async fn ensure_live(app_state: &AppState, label: &str) -> Result<(), axum::resp
         // was queued. Reuse it; do not hide or refocus an already visible tile.
         if handle.get_webview(&label_owned).is_some() { let _ = send.send(Ok(())); return; }
         let result = window.add_child(
-            tauri::webview::WebviewBuilder::new(&label_owned, tauri::WebviewUrl::External(url))
-                .focused(false).accept_first_mouse(true)
-                .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15"),
+            browser_tab_builder(&label_owned, url),
             tauri::LogicalPosition::new(-10000.0, -10000.0), tauri::LogicalSize::new(1024.0, 768.0),
         ).map_err(|e| e.to_string()).and_then(|view| {
             let setup = (|| {
@@ -4020,6 +4108,7 @@ async fn ensure_live(app_state: &AppState, label: &str) -> Result<(), axum::resp
                 browser_enable_gestures(handle.clone(), label_owned.clone())?;
                 browser_enable_autoresize(handle.clone(), label_owned.clone(), Some(false))?;
                 let _ = browser_popup::install_new_window_delegate(&view);
+                if let Some(path) = &file { load_file_url(&view, path)?; }
                 Ok(())
             })();
             if setup.is_err() { let _ = view.close(); }
@@ -6643,9 +6732,16 @@ async fn browser_can_suspend(app: AppHandle, label: String) -> Result<bool, Stri
             return Ok(false);
         }
     }
-    // A tab actively playing audio/video stays live.
+    // A tab showing a PDF or a non-http document (blob:, data:, file:) can't
+    // be rebuilt from a snapshot + URL, so it stays live like a pinned tab.
+    if let Some(wv) = app.get_webview(&label) {
+        if webview_current_url(&wv).is_some_and(|url| suspend_exempt_url(&url)) {
+            return Ok(false);
+        }
+    }
+    // A tab actively playing audio/video, mid-edit, or showing a PDF stays live.
     if app.get_webview(&label).is_some() {
-        let probe = "(function(){try{return (document.activeElement&&document.activeElement.matches('input,textarea,[contenteditable]'))||[].slice.call(document.querySelectorAll('video,audio')).some(function(m){return !m.paused && !m.ended && m.currentTime>0;})?\"1\":\"0\";}catch(e){return \"0\";}})()";
+        let probe = "(function(){try{return document.contentType==='application/pdf'||(document.activeElement&&document.activeElement.matches('input,textarea,[contenteditable]'))||[].slice.call(document.querySelectorAll('video,audio')).some(function(m){return !m.paused && !m.ended && m.currentTime>0;})?\"1\":\"0\";}catch(e){return \"0\";}})()";
         if let Ok(r) = daemon_eval(&app, &label, probe).await {
             if r == "1" {
                 return Ok(false);
@@ -6653,6 +6749,16 @@ async fn browser_can_suspend(app: AppHandle, label: String) -> Result<bool, Stri
         }
     }
     Ok(true)
+}
+
+/// Whether a tab's address alone rules out suspension: a document that only
+/// lives in this webview (blob:, data:, file:, …) or an http(s) `.pdf`.
+fn suspend_exempt_url(url: &str) -> bool {
+    match tauri::Url::parse(url) {
+        Ok(u) if matches!(u.scheme(), "http" | "https") => u.path().to_ascii_lowercase().ends_with(".pdf"),
+        Ok(u) => u.as_str() != "about:blank",
+        Err(_) => false,
+    }
 }
 
 /// Suspend a background tab: capture a fresh snapshot + scroll offset into the
@@ -9363,9 +9469,13 @@ fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), St
     let wv = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
-    let parsed = url
+    let parsed: tauri::Url = url
         .parse()
         .map_err(|_| format!("invalid url: {url}"))?;
+    if parsed.scheme() == "file" {
+        let path = parsed.to_file_path().map_err(|_| format!("invalid file url: {url}"))?;
+        return load_file_url(&wv, &path);
+    }
     wv.navigate(parsed).map_err(|e| e.to_string())
 }
 
@@ -9645,6 +9755,13 @@ fn newtab_shim_js() -> &'static str {
     return /\bwidth\s*=/.test(f) || /\bheight\s*=/.test(f) || /\bpopup\b/.test(f);
   }
   window.open = function(u, name, features){
+    // A blob:/data: document (a site's "Download PDF" button) can't become a
+    // Redline tab — another webview can't read this page's blob. Open it the
+    // way a target=_blank blob link already opens: a WebKit-created popup with
+    // a live opener, hosted by our UI delegate.
+    if (!isPopupFeatures(features) && /^(blob|data):/i.test(String(u || ''))){
+      try{ return _open(u, name || '_blank', 'popup,width=960,height=1100'); }catch(e){ return null; }
+    }
     if (isPopupFeatures(features)){
       // Real popup (OAuth/SSO): let WebKit's native path run so our WKUIDelegate
       // hosts it in a floating window with a live `window.opener`.
@@ -12568,6 +12685,9 @@ pub fn run() {
             devmap::dev_server_probe,
             devmap::dev_server_set_thumb,
             browser_navigate,
+            browser_create_tab,
+            browser_output::browser_print,
+            browser_output::browser_save_page,
             browser_eval,
             browser_close,
             browser_url,
@@ -13311,6 +13431,12 @@ pub fn run() {
                     .accelerator("CmdOrCtrl+W")
                     .build(app)?;
                 file_submenu.append(&close_tab)?;
+                // ⌘P prints the active browser tab (the pane decides whether
+                // a browser tab is in front; see `menu-print`).
+                let print = MenuItemBuilder::with_id("print_page", "Print…")
+                    .accelerator("CmdOrCtrl+P")
+                    .build(app)?;
+                file_submenu.append_items(&[&PredefinedMenuItem::separator(app)?, &print])?;
             }
             // The stock Edit submenu (index 2 on macOS) carries predefined
             // Undo/Redo whose Cmd+Z / Cmd+Shift+Z key-equivalents AppKit
@@ -13356,6 +13482,9 @@ pub fn run() {
                 // isn't open, App falls back to closing the window.
                 "close_tab" => {
                     let _ = app.emit("menu-close-tab", ());
+                }
+                "print_page" => {
+                    let _ = app.emit("menu-print", ());
                 }
                 _ => {}
             });
@@ -14097,6 +14226,35 @@ mod tests {
     use std::sync::Arc;
 
     // --- Browse-agent download helpers ------------------------------------
+
+    #[test]
+    fn pdf_and_non_http_tabs_are_exempt_from_suspension() {
+        assert!(suspend_exempt_url("https://example.com/papers/A.PDF"));
+        assert!(suspend_exempt_url("blob:https://example.com/2c9d"));
+        assert!(suspend_exempt_url("data:application/pdf;base64,JVBERi0="));
+        assert!(suspend_exempt_url("file:///Users/me/x.pdf"));
+        assert!(!suspend_exempt_url("https://arxiv.org/abs/2401.00001"));
+        assert!(!suspend_exempt_url("about:blank"));
+        assert!(!suspend_exempt_url("not a url"));
+    }
+
+    #[test]
+    fn tab_start_loads_files_natively_and_refuses_other_schemes() {
+        let (url, file) = browser_tab_start("https://example.com/a").unwrap();
+        assert_eq!((url.as_str(), file), ("https://example.com/a", None));
+        let (url, file) = browser_tab_start("file:///tmp/x%20y.pdf").unwrap();
+        assert_eq!(url.as_str(), "about:blank");
+        assert_eq!(file, Some(std::path::PathBuf::from("/tmp/x y.pdf")));
+        assert!(browser_tab_start("about:blank").unwrap().1.is_none());
+        assert!(browser_tab_start("blob:https://example.com/1").is_err());
+        assert!(browser_tab_start("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn the_frontend_user_agent_is_pinned_to_the_native_one() {
+        let ts = include_str!("../../src/lib/safariUA.ts");
+        assert!(ts.contains(&format!("\"{SAFARI_UA}\"")), "src/lib/safariUA.ts drifted from SAFARI_UA");
+    }
 
     #[test]
     fn sanitize_basename_strips_traversal_and_separators() {

@@ -25,6 +25,7 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {} }) }));
 vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { browseId: string; label: string; onToggleLinked?: () => void; seed?: { text: string } }) => <div data-conversation={props.browseId} data-label={props.label} data-seed={props.seed?.text}><button onClick={props.onToggleLinked}>Linked toggle</button></div> }));
 import { BrowserPane } from "./BrowserPane";
+import { Webview as MockWebview } from "@tauri-apps/api/webview";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, dock: HTMLDivElement, root: Root;
@@ -44,6 +45,8 @@ beforeEach(() => {
   mocks.setFullscreen.mockReset().mockImplementation(async (value: boolean) => { mocks.windowFullscreen = value; mocks.resized?.(); });
   mocks.invoke.mockReset(); mocks.load.mockReset(); mocks.save.mockReset(); mocks.revision.mockReset();
   mocks.invoke.mockImplementation(async (command, args) => {
+    // Tabs are built natively now; the mocked view stands in for the result.
+    if (command === "browser_create_tab") { const view = new (MockWebview as unknown as new (window: unknown, label: string) => { label: string })(null, args.label); await (mocks.createGates.get(view.label) ?? Promise.resolve()); return null; }
     if (command === "browser_close") { const view = mocks.views.get(args.label); if (view) { view.visible = false; view.log.push("close"); mocks.views.delete(args.label); } }
     return command === "get_browse_thread" ? [] : null;
   });

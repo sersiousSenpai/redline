@@ -84,13 +84,7 @@ pub fn write(db: &Database, id: &str, mut value: Value, expected_revision: Optio
     if id.is_empty() || id.len() > 160 || !value.is_object() { return Err("Invalid workspace".into()); }
     let tabs = value["tabs"].as_array().ok_or("Workspace tabs are missing")?;
     if tabs.len() > 100 { return Err("A workspace can contain at most 100 tabs".into()); }
-    let mut ids = std::collections::HashSet::new();
-    for tab in tabs {
-        let id = tab["id"].as_str().ok_or("Tab identity is missing")?;
-        let url = tab["url"].as_str().ok_or("Tab URL is missing")?;
-        let valid_url = url == "about:blank" || tauri::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
-        if id.is_empty() || !ids.insert(id) || id.len() > 160 || url.len() > 8192 || !valid_url { return Err("Invalid or duplicate tab in workspace".into()); }
-    }
+    value["tabs"] = Value::Array(normalize_tabs(tabs));
     if value.get("name").is_some_and(|name| !name.as_str().is_some_and(|name| name.len() <= 200)) { return Err("Invalid workspace name".into()); }
     if value.get("cells").is_some_and(|cells| !cells.as_array().is_some_and(|cells| cells.len() <= MAX_MOSAIC_TILES)) { return Err("A mosaic can contain at most 16 pages".into()); }
     value.as_object_mut().unwrap().remove("revision");
@@ -111,6 +105,30 @@ pub fn write(db: &Database, id: &str, mut value: Value, expected_revision: Optio
     tx.commit().map_err(|e| e.to_string())?;
     value["revision"] = revision.into();
     Ok(value)
+}
+/// One bad tab never costs the user the whole workspace: a tab without a
+/// usable identity (missing, overlong, duplicate) is dropped, and a tab whose
+/// address can't be reopened (a blob:, data: or javascript: URL, an overlong
+/// one) is kept at about:blank so its place, title and chat survive.
+fn normalize_tabs(tabs: &[Value]) -> Vec<Value> {
+    let mut ids = std::collections::HashSet::new();
+    tabs.iter()
+        .filter(|tab| tab["id"].as_str().is_some_and(|id| !id.is_empty() && id.len() <= 160 && ids.insert(id.to_owned())))
+        .map(|tab| {
+            let mut tab = tab.clone();
+            if !tab["url"].as_str().is_some_and(durable_url) { tab["url"] = "about:blank".into(); }
+            tab
+        })
+        .collect()
+}
+
+/// An address a saved tab can be reopened at.
+fn durable_url(url: &str) -> bool {
+    url.len() <= 8192 && (url == "about:blank" || tauri::Url::parse(url).is_ok_and(|url| match url.scheme() {
+        "http" | "https" => url.host_str().is_some(),
+        "file" => url.to_file_path().is_ok(),
+        _ => false,
+    }))
 }
 /// Summaries of the workspaces whose id starts with `prefix`, most recently used first.
 pub fn list(db: &Database, prefix: &str) -> Result<Vec<Value>, String> {
@@ -155,8 +173,30 @@ mod tests {
         assert!(write(&db, "regular", json!({"tabs":[]}), Some(0)).is_err());
         assert_eq!(read(&db, "regular").unwrap().unwrap()["tabs"], value["tabs"]);
         assert!(read(&db, "different").unwrap().is_none());
-        assert!(write(&db, "regular", json!({"tabs":[{"id":"","url":"https://example.org"}]}), Some(1)).is_err());
-        assert!(write(&db, "regular", json!({"tabs":[{"id":"a","url":"https://"}]}), Some(1)).is_err());
+    }
+    #[test] fn one_bad_tab_is_normalized_instead_of_rejecting_the_workspace() {
+        let db = Database::open_in_memory().unwrap();
+        let saved = write(&db, "regular", json!({"tabs":[
+            {"id":"a","url":"https://example.org/paper.pdf"},
+            {"id":"b","url":"blob:https://example.org/3f2a","title":"Report"},
+            {"id":"c","url":"data:application/pdf;base64,JVBERi0="},
+            {"id":"d","url":"https://"},
+            {"id":"e","url":"file:///Users/me/x.pdf"},
+            {"id":"","url":"https://example.org"},
+            {"id":"a","url":"https://example.org/duplicate"},
+            {"url":"https://example.org/no-id"}
+        ]}), Some(0)).unwrap();
+        let tabs = saved["tabs"].as_array().unwrap();
+        let urls: Vec<_> = tabs.iter().map(|t| (t["id"].as_str().unwrap(), t["url"].as_str().unwrap())).collect();
+        assert_eq!(urls, vec![
+            ("a", "https://example.org/paper.pdf"),
+            ("b", "about:blank"),
+            ("c", "about:blank"),
+            ("d", "about:blank"),
+            ("e", "file:///Users/me/x.pdf"),
+        ]);
+        assert_eq!(tabs[1]["title"], "Report");
+        assert_eq!(read(&db, "regular").unwrap().unwrap()["tabs"], saved["tabs"]);
     }
     #[test] fn mosaics_list_by_prefix_keep_their_definition_and_delete_alone() {
         let db = Database::open_in_memory().unwrap();

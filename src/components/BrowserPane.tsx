@@ -52,6 +52,7 @@ import {
   type RawLocator,
 } from "../lib/pageLocator";
 import { SAFARI_UA } from "../lib/safariUA";
+import { isDurableTabUrl } from "../lib/browserOutput";
 // `BrowserPane` is a static import in App, so it sits in the boot path. The
 // list panel only exists once a user picks the pill, so it has no business
 // costing boot bytes — and `scripts/size-budget.json` has limited headroom.
@@ -1016,7 +1017,7 @@ function BrowserPaneBase({
   }, [syncBounds]);
 
   const ensureTab = useCallback(
-    async (tab: Tab, win: Window): Promise<{ view: Webview; adopted: boolean }> => {
+    async (tab: Tab): Promise<{ view: Webview; adopted: boolean }> => {
       // Reuse an existing webview with this label if one is still alive (a
       // StrictMode remount or cancelled teardown left it around) — recreating
       // it would either flash or error on the duplicate label.
@@ -1031,18 +1032,13 @@ function BrowserPaneBase({
       };
       const existing = await Webview.getByLabel(tab.label).catch(() => null);
       if (existing) return adopt(existing);
-      const opts = {
-        url: tab.url,
-        x: -10000, y: -10000, width: 1, height: 1, focus: false,
-        acceptFirstMouse: true,
-        userAgent: SAFARI_UA,
-      };
+      // Built natively (`browser_create_tab`), never with the JS `new Webview`:
+      // only a Rust-built webview can carry the download handler, and it shares
+      // one builder (user agent included) with a background wake.
       const create = async (): Promise<Webview> => {
-        const w = new Webview(win, tab.label, opts);
-        await new Promise<void>((resolve, reject) => {
-          void w.once("tauri://created", () => resolve()).catch(reject);
-          void w.once("tauri://error", (e) => reject(e)).catch(reject);
-        });
+        await invoke("browser_create_tab", { label: tab.label, url: tab.url });
+        const w = await Webview.getByLabel(tab.label);
+        if (!w) throw new Error("The page's view did not open");
         return w;
       };
       // A just-suspended tab's webview may still be mid-teardown (close() is
@@ -1095,7 +1091,6 @@ function BrowserPaneBase({
   // in `liveIntentRef` is suspended (no webview) — left alone here. Creation is
   // async and guarded against StrictMode double-mount.
   useEffect(() => {
-    const win = Window.getCurrent();
     const now = Date.now();
     // The active page first, then the other visible tiles, then the rest.
     const rank = (tab: Tab) => tab.id === activeIdRef.current ? 0 : tileIdsRef.current.includes(tab.id) ? 1 : 2;
@@ -1112,7 +1107,7 @@ function BrowserPaneBase({
       if (creatingRef.current.size >= MAX_CONCURRENT_CREATES) break;
       creatingRef.current.add(tab.id);
       const epoch = nativeEpochRef.current;
-      ensureTab(tab, win)
+      ensureTab(tab)
         .then(({ view: wv, adopted }) => {
           creatingRef.current.delete(tab.id);
           if (nativeMountedRef.current) setLiveVersion((v) => v + 1);
@@ -1190,21 +1185,28 @@ function BrowserPaneBase({
   // (still discussable from the cache, woken on demand). Gated by
   // `browser_can_suspend` so we never drop the active tab, an in-flight agent
   // turn, or a tab playing media.
+  const heldLiveRef = useRef(new Set<string>());
   const enforceLiveBudget = useCallback(() => {
     const active = activeIdRef.current;
     // Every visible tile stays live unconditionally; recency tops up the rest.
     const budget = Math.min(MAX_MOSAIC_TILES, Math.max(MAX_LIVE_WEBVIEWS, tileIdsRef.current.length));
-    const keep = new Set([...tileIdsRef.current, active]);
+    // A tab that refused suspension (a PDF, a blob: page, media playing)
+    // stays live and takes a slot, like a pinned tab, until it would allow it.
+    const held = heldLiveRef.current;
+    for (const id of held) if (!wvMapRef.current.has(id)) held.delete(id);
+    const keep = new Set([...tileIdsRef.current, active, ...held]);
     for (const id of mruRef.current) {
       if (keep.size >= budget) break;
       keep.add(id);
     }
     for (const [id] of [...wvMapRef.current]) {
-      if (keep.has(id)) continue;
+      if (keep.has(id) && !held.has(id)) continue;
       void invoke<boolean>("browser_can_suspend", { label: `browser-${id}` })
         .then((ok) => {
-          // Bail if it can't be suspended, became active, or is already gone.
-          if (!ok || tileIdsRef.current.includes(id) || id === activeIdRef.current || !wvMapRef.current.has(id)) {
+          if (!ok) { held.add(id); return; }
+          held.delete(id);
+          // Bail if it is wanted again, became active, or is already gone.
+          if (keep.has(id) || tileIdsRef.current.includes(id) || id === activeIdRef.current || !wvMapRef.current.has(id)) {
             return;
           }
           geometry.hide(id, wvMapRef.current.get(id)!);
@@ -1286,6 +1288,12 @@ function BrowserPaneBase({
           label: `browser-${id}`,
         });
         if (!url || url === "about:blank") return;
+        // A blob:/data:/file: document is shown, never persisted: the tab keeps
+        // its last http(s) address as the one a restart reopens.
+        if (!isDurableTabUrl(url)) {
+          if (id === activeIdRef.current && !addrFocusedRef.current) setAddr(url);
+          return;
+        }
         // A page event or explicit navigation may have overtaken this poll.
         if (tabsRef.current.find((tab) => tab.id === id)?.url !== requestedUrl) return;
         const changed = tabsRef.current.find((t) => t.id === id)?.url !== url;
@@ -1999,6 +2007,20 @@ function BrowserPaneBase({
       void p.then((un) => un());
     };
   }, []);
+  // File ▸ Print… (⌘P) prints the page in front; the page menu offers it too,
+  // beside Save page/PDF, which saves through the tab's own cookies.
+  const pageOutputRef = useRef<(command: "browser_print" | "browser_save_page") => void>(() => {});
+  pageOutputRef.current = (command) => {
+    const id = activeIdRef.current;
+    if (!wvMapRef.current.has(id)) return;
+    void invoke(command, { label: `browser-${id}` }).catch((e) => setWorkspaceError(String(e)));
+  };
+  useEffect(() => {
+    const p = listen("menu-print", () => { if (surfaceActiveRef.current) pageOutputRef.current("browser_print"); });
+    return () => {
+      void p.then((un) => un());
+    };
+  }, []);
 
   const navigate = (raw: string, id: string = activeIdRef.current) => {
     // Omnibox: a URL-like entry navigates; anything else becomes a web search.
@@ -2229,6 +2251,7 @@ function BrowserPaneBase({
         menuOpen={overflowOpen} onMenu={setOverflowOpen} onBookmarks={() => setBookmarksOpen(true)}
         onAppearance={() => setAppearanceOpen(true)} onPreferences={() => setPreferencesOpen(true)}
         onInspect={() => void picker.start(tabs.find(tab => tab.id === activeId)?.url ?? "")}
+        onPrint={() => pageOutputRef.current("browser_print")} onSavePage={() => pageOutputRef.current("browser_save_page")}
         onCloseBrowser={onClose}/>}
 
       {videoFs.stage === "browser" && <BrowserFullscreenEdge title={tabs.find((tab) => tab.id === activeId)?.title ?? "Video"}

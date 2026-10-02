@@ -23,6 +23,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { makeToast, RedlineToast, type ActiveToast, type ToastSpec } from "./components/RedlineToast";
+import type { BrowserDownloadEvent } from "./lib/browserOutput";
 import { CommentComposer } from "./components/CommentComposer";
 import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
@@ -2137,6 +2138,18 @@ function App() {
       void p.then((un) => un());
     };
   }, [browserOpen]);
+
+  // A browser download or page save landed (or failed): Safari's notice, with
+  // Open / Show in Finder. Native, so it fires for background tabs too; the
+  // toast builder loads on the first download, never at boot.
+  useEffect(() => {
+    const p = listen<BrowserDownloadEvent>("browser-download", (e) => {
+      void import("./lib/browserOutput").then((m) => setToast(m.downloadToast(e.payload)));
+    });
+    return () => {
+      void p.then((un) => un());
+    };
+  }, [setToast]);
 
   // The first React commit — a themed shell now exists in the DOM. A layout
   // effect, so it lands on the commit itself rather than a frame later.
