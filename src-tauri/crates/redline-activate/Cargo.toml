@@ -1,0 +1,25 @@
+[package]
+name = "redline-activate"
+version = "0.1.0"
+description = "Redline's activation helper: the small out-of-process executable that survives Redline exiting, exchanges the installed bundle for a prepared one, verifies the new process starts, and restores the previous release if it does not."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+[[bin]]
+name = "redline-activate"
+path = "src/main.rs"
+
+# Three dependencies, on purpose. This executable supervises the installation
+# of the application; it must not link it, must not run agents, must not
+# compile anything, and must not execute commands a plan could choose. Its
+# whole job is to install an artifact that was already prepared and verified.
+[dependencies]
+redline-activation = { path = "../redline-activation" }
+serde_json = "1"
+libc = "0.2"
+
+[dev-dependencies]
+# The end-to-end tests read the helper's own JSON output back.
+serde_json = "1"

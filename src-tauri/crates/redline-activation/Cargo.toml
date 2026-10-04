@@ -1,0 +1,16 @@
+[package]
+name = "redline-activation"
+version = "0.1.0"
+description = "The activation protocol shared by Redline and its out-of-process activation helper: the transaction record, the durable journal, the atomic bundle exchange, and the startup handshake."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+# Deliberately tiny, and for the same reason as redline-extension-abi: the
+# helper that supervises an installation must not link the application it is
+# replacing. serde for the records, libc for `renamex_np` and `flock`.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
