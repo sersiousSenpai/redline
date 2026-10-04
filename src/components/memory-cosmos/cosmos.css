@@ -1,0 +1,37 @@
+.mc-shell { flex:1; min-height:0; display:flex; flex-direction:column; background:#070e15; color:#d9e7e4; font:12px system-ui,sans-serif; }
+.mc-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:9px 12px; border-bottom:1px solid #28384b; background:#101a2a; }
+.mc-shell button, .mc-controls button { border:1px solid #36485e; border-radius:7px; padding:5px 9px; color:#c3d4e7; background:#111d2d; cursor:pointer; font:inherit; }
+.mc-shell button:hover { background:#213449; color:#f2f7ff; }
+.mc-shell button[aria-pressed=true] { color:#b4f0ff; background:#1d3b50; border-color:#6097b0; }
+.mc-shell button:focus-visible,.mc-shell select:focus-visible,.mc-canvas:focus-visible { outline:2px solid #87d9ed; outline-offset:-2px; }
+.mc-count { margin-left:auto; font-size:11px; color:#9bb0c7; }
+.mc-body { display:flex; flex:1; min-height:0; position:relative; }
+.mc-scene-slot { flex:1; min-width:0; min-height:240px; position:relative; }
+.mc-stage,.mc-render { position:absolute; inset:0; overflow:hidden; }
+.mc-canvas { display:block; width:100%; height:100%; touch-action:none; }
+.mc-labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.mc-label { position:absolute; top:0; left:0; padding:3px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#b6cada; font:10px system-ui,sans-serif; text-shadow:0 1px 4px #000; background:#08111ad6; border-radius:4px; }
+.mc-label[data-selected=true] { color:#e0faff; border:1px solid #557f94; }
+.mc-visor { position:absolute; inset:0; pointer-events:none; background:radial-gradient(ellipse at 35% 46%,#71c6b207,transparent 48%),radial-gradient(ellipse at 70% 55%,#a49bcd05,transparent 48%); transform:translateX(var(--mc-visor-x,0px)); }
+.mc-still .mc-visor { display:none; }
+.mc-controls { position:absolute; top:14px; left:14px; display:flex; flex-wrap:wrap; gap:5px; max-width:calc(100% - 28px); padding:5px; background:#0b1422c9; border:1px solid #30405099; border-radius:10px; }
+.mc-hint { position:absolute; bottom:10px; left:16px; right:70px; pointer-events:none; margin:0; color:#8ca5bd; font-size:10px; line-height:1.6; text-shadow:0 1px 4px #000; }
+.mc-stats { position:absolute; bottom:12px; right:12px; color:#708da7; font:10px ui-monospace,monospace; }
+.mc-capture-error { position:absolute; top:62px; left:20px; right:20px; padding:8px; background:#231d25; color:#efd4b2; }
+.mc-inspector { width:214px; max-width:38%; flex-shrink:0; overflow-y:auto; padding:22px 16px; border-left:1px solid #263a3e; background:linear-gradient(160deg,#101e25,#0b141c); }
+.mc-inspector h3 { margin:0 0 8px; font-size:14px; line-height:1.4; color:#e7f3ff; overflow-wrap:anywhere; }
+.mc-inspector p { color:#9cb2c9; font-size:11px; line-height:1.6; }
+.mc-inspector button { margin:4px 0; text-align:left; }
+.mc-eyebrow { display:block; margin-bottom:12px; font-size:8px; line-height:1.6; letter-spacing:1.6px; text-transform:uppercase; color:#a9b9a9; }
+.mc-legend { display:grid; gap:13px; margin:24px 0; color:#adc2c7; font-size:10px; line-height:1.5; }
+.mc-legend span { display:flex; align-items:center; gap:9px; }
+.mc-legend i { display:block; width:7px; height:7px; flex-shrink:0; border-radius:50%; background:#b7e2d6; box-shadow:0 0 8px #9bcebd55; }
+.mc-legend .mc-legend-pin { background:#e4c58e; box-shadow:0 0 8px #e4c58e44; }
+.mc-legend .mc-legend-fiber { height:1px; width:10px; border-radius:0; background:#79aaa7; box-shadow:none; }
+.mc-status { padding:12px 16px; color:#bacce1; line-height:1.6; }
+.mc-status[role=alert] { color:#f2c7a5; background:#292025; }
+.mc-list { border-top:1px solid #28384b; padding:7px 12px; background:#0e1928; }
+.mc-list summary { cursor:pointer; color:#b9cde3; }
+.mc-list-content { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:8px; }
+.mc-list select { flex:1; min-width:130px; max-width:440px; padding:7px; border:1px solid #3f536e; border-radius:6px; background:#101e30; color:#dce8f5; }
+@media(max-width:700px) { .mc-inspector { width:165px; padding:10px 8px; } .mc-toolbar { gap:4px; padding:7px; } .mc-toolbar button { font-size:10px; padding:5px 6px; } }
