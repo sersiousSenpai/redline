@@ -764,3 +764,37 @@ again in `/hooks`; installation is not proof of trust. Production code never
 bypasses hook trust. The isolated probe trusts only its own fixture hook.
 Plannotator's command is an executable path; Redline's is the visible curl
 adapter. The different appearance is not a different Codex hook type.
+
+## Experiment (k) — dynamic workflows through `PreToolUse` hooks (2026-10-03, claude 2.1.289)
+
+The scaled-build program (Track O, `src-tauri/src/scaled.rs`) rests on five
+behaviors. Each was observed with an interactive `claude --model haiku` in a
+PTY, the `ultracode:` prompt typed as keystrokes, and the hooks installed for
+that session only through `--settings <file>` (logging HTTP and command hooks
+on a spare port; never 7676).
+
+1. **The Workflow call fires `PreToolUse`** (`tool_name: "Workflow"`) before any
+   agent starts. `tool_input` has a single key, `script`: the full generated
+   script text, `export const meta = {…}` block included. The payload carries
+   `session_id`, `transcript_path`, `cwd`, `permission_mode`, `prompt_id`,
+   `scratchpad_dir` and `tool_use_id`, with no `agent_id`.
+2. **A hook `allow` replaces the CLI's own "Run a dynamic workflow?" card.**
+   The workflow went straight to "Running in background". With no hook
+   decision, the card appears and waits for a keypress.
+3. **A hook `deny` with a reason sends the lead back to revise.** It wrote a new
+   script and called Workflow again about 8 s later, which fired the hook
+   again. Compliance with the note is the model's: asked for one agent, it
+   kept two, so the cap, not the note, is what enforces size.
+4. **Workflow subagents fire the SESSION's hooks for their own tool calls**,
+   with `agent_type: "workflow-subagent"` and a per-agent `agent_id` (17-hex
+   `a…`). The lead's calls carry neither.
+5. **Holding a subagent's hook pauses that agent.** One subagent's `Bash` call
+   was held for 20 s while its sibling's `Read` passed. The held agent resumed
+   when the hook answered `{}` (no opinion), and both agents' results
+   arrived. `{}` leaves the normal permission rules in charge, so the gate
+   never widens what an agent may do.
+
+Also observed: both matchers (`Workflow` and `*`) fire for the Workflow call,
+in parallel ("running PreToolUse hooks… 0/2"). The `*` gate route therefore
+ignores `tool_name: "Workflow"`, and the pre-flight route owns it. `--settings`
+hooks merge with the user's global hooks, which keep firing.

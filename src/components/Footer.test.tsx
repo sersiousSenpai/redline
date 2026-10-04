@@ -94,3 +94,28 @@ describe("approve, build later, build and reopen", () => {
     expect(button("Reopen")).toBeUndefined();
   });
 });
+
+describe("approve and build with a team (Track O)", () => {
+  it("offers Auto and Custom in the approve menu and routes the scale", async () => {
+    const picked: string[] = [];
+    await act(async () => root.render(createElement(Footer, {
+      comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
+      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {}, onBuildTeam: (scale: string) => picked.push(scale),
+      termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
+    })));
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    const auto = items.find((b) => b.textContent?.startsWith("Approve & build with a team · Auto"))!;
+    expect(auto.textContent).toContain("8 agents · 5M tokens · 4 h");
+    await act(async () => auto.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.startsWith("Approve & build with a team · Custom"))!.click());
+    expect(picked).toEqual(["auto", "custom"]);
+  });
+
+  it("offers no team without a handler", async () => {
+    await mount("claude-code");
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
+    expect([...document.querySelectorAll('[role="menuitem"]')].some((b) => b.textContent?.includes("with a team"))).toBe(false);
+  });
+});

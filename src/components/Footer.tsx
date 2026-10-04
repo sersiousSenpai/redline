@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
 import { useEffect, useRef, useState } from "react";
 import type { Comment } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
@@ -36,6 +37,8 @@ interface FooterProps {
   onApprove: () => void;
   /** "Approve, build later": approved, the agent stands down, nothing builds. */
   onApproveLater: () => void;
+  /** Approve and build with a team (Track O): Auto, or the Custom dialog. */
+  onBuildTeam?: (scale: Scale) => void;
   /** Present once the open plan is approved. */
   approval?: FooterApproval | null;
   buildTargets?: BuildTarget[];
@@ -61,6 +64,7 @@ export function Footer({
   onSubmit,
   onApprove,
   onApproveLater,
+  onBuildTeam,
   approval = null,
   buildTargets = [],
   onBuild,
@@ -262,8 +266,15 @@ export function Footer({
             disabled={!canApprove || waiting}
             onPrimary={onApprove}
             menuLabel="More approve options"
-            items={[{ id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" }]}
-            onItem={() => onApproveLater()}
+            items={[
+              { id: "later", label: "Approve, build later", detail: "the agent stands down; build from here when ready" },
+              ...(onBuildTeam ? TEAM_BUILD_ITEMS.map((item) => ({ ...item, label: `Approve & build ${item.label}` })) : []),
+            ]}
+            onItem={(id) => {
+              const scale = teamScaleOf(id);
+              if (scale) onBuildTeam?.(scale);
+              else onApproveLater();
+            }}
           />
         )}
       </span>

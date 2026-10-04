@@ -74,6 +74,7 @@ mod plan_provider;
 mod plan_submission;
 mod provider_hooks;
 mod runner;
+mod scaled;
 mod runner_graph;
 mod runtime_profile;
 mod seatassign;
@@ -3327,6 +3328,10 @@ async fn run_server(state: AppState) {
         .route("/v1/cursor/stop", post(handle_cursor_stop))
         .route("/v1/antigravity/stop", post(handle_antigravity_stop))
         .route("/v1/runs/claim", post(handle_runner_claim))
+        // Scaled builds (Track O): the per-run hooks and the lead's brief.
+        .route("/v1/scaled/:run/preflight", post(scaled::handle_preflight))
+        .route("/v1/scaled/:run/gate", post(scaled::handle_gate))
+        .route("/v1/scaled/:run/brief", get(scaled::handle_brief))
         // Agent-in-doc (M4): the per-user agent's surface — read the plan's
         // block structure, post a tracked suggestion against a block id.
         .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
@@ -8084,6 +8089,25 @@ fn orchestrate_plan_inner(
     expected_modes: &ExpectedModes,
     session_id: &str,
 ) -> Result<(), String> {
+    approve_with_stand_down(store, pending, expected_modes, session_id, ORCHESTRATE_STAND_DOWN)
+}
+
+/// The stand-down a scaled build (Track O) sends: same register and the same
+/// read-only guarantee as `ORCHESTRATE_STAND_DOWN`, worded for a team.
+const SCALED_STAND_DOWN: &str = "✅ Plan approved in Redline — a team of agents will \
+     build it in a separate session. Do NOT implement this plan, do not revise it, and \
+     do not call ExitPlanMode again. Acknowledge briefly and end your turn; this \
+     session's work is done.";
+
+/// Approve a held plan with a DENY carrying `stand_down`, so the session that
+/// wrote it stays read-only while something else builds it.
+fn approve_with_stand_down(
+    store: &SessionStore,
+    pending: &PendingResponses,
+    expected_modes: &ExpectedModes,
+    session_id: &str,
+    stand_down: &str,
+) -> Result<(), String> {
     let Some(tx) = pending.take(session_id) else {
         return Err("no plan is currently waiting for review on this session".to_string());
     };
@@ -8092,7 +8116,7 @@ fn orchestrate_plan_inner(
     // Ignore send failure like `approve_plan` does: a dead receiver means the
     // original session already went away — no collision is possible, and the
     // orchestration is still valid.
-    let _ = tx.send(deny_response(ORCHESTRATE_STAND_DOWN));
+    let _ = tx.send(deny_response(stand_down));
     store.set_attach_state(session_id, AttachState::Idle);
     Ok(())
 }
@@ -8130,6 +8154,75 @@ fn orchestrate_plan(
     );
     refresh_tray(&app, &store);
     Ok(())
+}
+
+/// What the frontend needs to launch a scaled build's lead: the run, its
+/// per-run `--settings` file, the session model and effort, and the tree.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScaledLaunch {
+    run_id: String,
+    settings_path: String,
+    lead_model: String,
+    effort: Option<String>,
+    project_path: String,
+}
+
+/// Build an approved plan with a team (Track O). A plan still held in review
+/// is approved with the Orchestrate stand-down (the session that wrote it
+/// stays read-only, so it cannot collide with the team); an already-approved
+/// plan that nothing is building goes straight to launch. Then the run is
+/// registered and its `--settings` file written; the frontend opens the
+/// terminal and types the `ultracode:` prompt through the verified handoff.
+#[tauri::command]
+fn scaled_build_start(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+    expected_modes: tauri::State<'_, ExpectedModes>,
+    session_id: String,
+    config: scaled::ScaleConfig,
+) -> Result<ScaledLaunch, String> {
+    let config = config.sanitize()?;
+    let session = store.get(&session_id).ok_or("plan session not found")?;
+    let project_path = session.project_path.trim().to_string();
+    if project_path.is_empty() {
+        // A write-capable team must never run in the home directory.
+        return Err("this plan has no project directory, so a team cannot be launched for it".into());
+    }
+    match session.status {
+        SessionStatus::InReview => {
+            if let Err(e) = approve_with_stand_down(&store, &pending, &expected_modes, &session_id, SCALED_STAND_DOWN) {
+                mark_session_detached(&app, &store, &session_id);
+                return Err(e);
+            }
+        }
+        SessionStatus::Approved => {
+            if runwatch::is_live_run_state(store.database().get_run_state(&session_id).as_deref()) {
+                return Err("a build is already running on this plan".into());
+            }
+        }
+        SessionStatus::Aborted => return Err("this plan was aborted".into()),
+    }
+    let (ctl, settings_path) = scaled::create_run(&app, &session_id, config.clone())?;
+    tracing::info!(session_id = %session_id, run_id = %ctl.run_id, "scaled build started");
+    let _ = store.database().append_journal(
+        "scaled_build_launch",
+        Some("session"),
+        Some(&session_id),
+        Some(&ctl.run_id),
+        Some(&config.scale),
+    );
+    advance_run_state(&app, &store, &session_id, "orchestrating");
+    let _ = app.emit("session-status-changed", SessionEvent { session_id: session_id.clone() });
+    refresh_tray(&app, &store);
+    Ok(ScaledLaunch {
+        run_id: ctl.run_id,
+        settings_path,
+        lead_model: config.lead_model,
+        effort: config.effort,
+        project_path,
+    })
 }
 
 /// The deny reason `approve_plan_later` sends into the held ExitPlanMode (or
@@ -12438,6 +12531,13 @@ pub fn run() {
             submit_review,
             approve_plan,
             orchestrate_plan,
+            scaled_build_start,
+            scaled::scaled_defaults,
+            scaled::scaled_preflight_decide,
+            scaled::scaled_pause_decide,
+            scaled::scaled_stop,
+            scaled::scaled_pending,
+            scaled::scaled_run_for,
             approve_plan_later,
             mark_plan_build,
             write_plan_handoff,
@@ -12989,6 +13089,7 @@ pub fn run() {
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
+            app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());
             app.manage(self_develop::SelfDevelopState::new());
 
@@ -14756,6 +14857,25 @@ mod tests {
         assert!(expected_modes.take("s1").is_none());
         // The pending slot is consumed — no double-fire window.
         assert!(pending.take("s1").is_none());
+    }
+
+    #[test]
+    fn a_team_build_stands_the_plan_session_down_read_only() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let expected_modes = ExpectedModes::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let (rx, _token) = pending.register("s1", None).expect("register");
+        approve_with_stand_down(&store, &pending, &expected_modes, "s1", SCALED_STAND_DOWN).expect("held");
+        let resp = rx.blocking_recv().expect("sent");
+        // A deny, so the plan-mode session that wrote it cannot collide with the team.
+        assert_eq!(resp.hook_specific_output.permission_decision, "deny");
+        assert!(resp.hook_specific_output.permission_decision_reason.contains("a team of agents will build it"));
+        assert!(resp.hook_specific_output.permission_decision_reason.contains("Do NOT implement this plan"));
+        assert_eq!(store.get("s1").unwrap().status, SessionStatus::Approved);
+        // Nothing held: the stand-down cannot fire twice.
+        assert!(approve_with_stand_down(&store, &pending, &expected_modes, "s1", SCALED_STAND_DOWN).is_err());
     }
 
     /// A plan with one research comment (Search from the plan) and one plain

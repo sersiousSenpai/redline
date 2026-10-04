@@ -174,10 +174,14 @@ import {
 } from "./components/TerminalView";
 import {
   deliverToTerminal,
+  orchestrateHandoff,
   PROMPT_TIMEOUT_MS,
   SHELL_PROMPT,
   type HandoffStep,
+  type OrchestrateDeps,
 } from "./lib/terminalHandoff";
+import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems";
+import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { PlanToc } from "./components/PlanToc";
 import { FileTree } from "./components/FileTree";
@@ -260,6 +264,9 @@ const OrchestrationSurface = lazy(() =>
 // size budget, so a chat room in the boot chunk would fail `size-budget.json`
 // outright. It loads when the door's third destination is taken.
 const loadChatRoom = () => import("./components/ChatRoom");
+// Scaled builds (Track O): the Custom dialog and the pre-flight/pause cards.
+const ScaledBuildDialog = lazy(() => import("./components/ScaledBuild").then((m) => ({ default: m.ScaledBuildDialog })));
+const ScaledBuildCards = lazy(() => import("./components/ScaledBuild").then((m) => ({ default: m.ScaledBuildCards })));
 const ChatRoom = lazy(() => loadChatRoom().then((m) => ({ default: m.ChatRoom })));
 // Every lazy surface body's chunk, keyed by the surface that mounts it. The
 // boot effect prefetches the LANDING surface's entry the moment
@@ -495,9 +502,11 @@ import {
 import {
   buildPlanLaunchCommand,
   buildRunLaunchCommand,
+  buildScaledLaunchCommand,
+  buildScaledPrompt,
   runSupported,
 } from "./lib/planLaunchCommand";
-import type { CodeReviewSession } from "./types";
+import type { CodeReviewSession, WorkflowAvailability } from "./types";
 import type { RunGraph } from "./lib/runner/schema";
 import { useModelCatalogs } from "./hooks/useModelCatalogs";
 import { guessProjectForPlan } from "./lib/guessProject";
@@ -1958,6 +1967,8 @@ function App() {
     launchCmd: string;
     prompt: string;
     projectPath: string | null;
+    /** A team build's failed launch: Retry relaunches the team, not a graph. */
+    retryScaled?: ScaleConfig;
   } | null>(null);
   // Sessions whose approval was rescinded (unapprove_plan) this app session —
   // their restore prompt carries the "your stand-down is void" sentence so a
@@ -5318,10 +5329,16 @@ function App() {
     for (const b of ["claude-code", "codex"] as const) {
       if (b !== planHarness) targets.push({ id: b, label: `with ${agentLabelFor(b)}`, detail: "a fresh session reads the approved plan" });
     }
+    targets.push(...TEAM_BUILD_ITEMS);
     return targets;
   }, [session?.status, planHarness]);
 
   const buildApproved = async (targetId: string) => {
+    const scale = teamScaleOf(targetId);
+    if (scale) {
+      void startTeamBuild(scale);
+      return;
+    }
     if (!session || busy) return;
     const sessionId = session.sessionId;
     const projectPath = session.projectPath || null;
@@ -5387,6 +5404,90 @@ function App() {
       setBusy(false);
     }
   };
+
+  // SCALED BUILDS (Track O): build with a team. Auto launches at the
+  // defaults; Custom opens the dialog first. Either way the lead is a typed
+  // `ultracode:` launch through the verified handoff, with the run's own
+  // pre-flight and budget hooks in its `--settings`.
+  const [scaleDialogFor, setScaleDialogFor] = useState<{ sessionId: string; defaults: ScaleConfig } | null>(null);
+  const startTeamBuild = async (scale: Scale) => {
+    if (!session || busy) return;
+    const defaults = await invoke<ScaleConfig>("scaled_defaults").catch(() => null);
+    if (!defaults) {
+      setToast("Couldn't read the team build defaults", 6000);
+      return;
+    }
+    if (scale === "custom") setScaleDialogFor({ sessionId: session.sessionId, defaults });
+    else void launchScaledBuild(session.sessionId, defaults);
+  };
+  const launchScaledBuild = async (sessionId: string, config: ScaleConfig) => {
+    if (busy) return;
+    const projectPath = (session?.sessionId === sessionId ? session.projectPath : summaries.find((s) => s.sessionId === sessionId)?.projectPath) || null;
+    // Refuse before approving anything: without workflows the team can't run.
+    const availability = await invoke<WorkflowAvailability>("workflow_availability", { projectPath }).catch(() => null);
+    if (availability?.disabledInSettings || availability?.disabledInEnv) {
+      setToast(`Dynamic workflows are turned off${availability.settingsSource ? ` in ${availability.settingsSource}` : ""}; a team build needs them.`, 8000);
+      return;
+    }
+    setBusy(true);
+    let launch: ScaledLaunch;
+    try {
+      launch = await invoke<ScaledLaunch>("scaled_build_start", { sessionId, config });
+    } catch (err) {
+      if (isDetachError(err)) {
+        setDetachDismissed(false);
+        void refreshSummaries();
+      } else setToast(`Couldn't start the team build: ${err}`, 8000);
+      return;
+    } finally {
+      setBusy(false);
+    }
+    void refreshSummaries();
+    const launchCmd = buildScaledLaunchCommand(launch.projectPath, launch.settingsPath, launch.leadModel, launch.effort);
+    const prompt = buildScaledPrompt(sessionId, launch.runId);
+    suppressTerminalRevealFocus();
+    setTermFullscreen(false);
+    revealTerm();
+    const id = (await ensureTerminalReady())?.openSessionTerminal(launch.projectPath) ?? null;
+    // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
+    // claim links the lead under the plan and starts the Runs watcher.
+    const rearm = () =>
+      invoke("record_orchestration_launch", { prompt, planSessionId: sessionId, terminalId: id }).then(() => undefined);
+    await rearm().catch((err) => console.error("record_orchestration_launch failed", err));
+    const fail = async (stage: string, reason: string) => {
+      await invoke("scaled_stop", { runId: launch.runId }).catch(() => {});
+      await invoke("reset_run", { sessionId }).catch(() => {});
+      setHandoffFailure({ sessionId, stage, reason, launchCmd, prompt, projectPath: launch.projectPath, retryScaled: config });
+      void refreshSummaries();
+    };
+    if (!id) {
+      await fail("spawn", "no terminal tab could be opened");
+      return;
+    }
+    const deps: OrchestrateDeps = {
+      ...tauriHandoffDeps,
+      journal: (stage, detail) => {
+        void invoke("record_handoff_event", { sessionId, stage, detail: detail ?? null }).catch(() => {});
+      },
+      getRunState: (sid) => invoke<string | null>("get_run_state", { sessionId: sid }),
+      rearm,
+    };
+    const result = await orchestrateHandoff(deps, id, sessionId, launchCmd, prompt);
+    if (result.ok) {
+      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+      setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
+    } else await fail(result.stage, result.reason);
+  };
+  // A pre-flight or a pause is waiting on the user: mount the cards (lazy).
+  const [scaledAttention, setScaledAttention] = useState(0);
+  useEffect(() => {
+    const bump = () => setScaledAttention((n) => n + 1);
+    const subs = [listen("scaled-preflight", bump), listen("scaled-paused", bump)];
+    void invoke<unknown[]>("scaled_pending")
+      .then((rows) => { if (rows?.length) bump(); })
+      .catch(() => {});
+    return () => subs.forEach((s) => void s.then((f) => f()));
+  }, []);
 
   // Reopen for review: rescind the approval, then restore the session so the
   // plan comes back held, in review, with its comments — the stand-down it
@@ -9907,6 +10008,7 @@ function App() {
         onSubmit={submitReview}
         onApprove={approvePlan}
         onApproveLater={() => void approvePlanLater()}
+        onBuildTeam={(scale) => void startTeamBuild(scale)}
         approval={
           session?.status === "approved"
             ? {
@@ -10003,6 +10105,24 @@ function App() {
         />
       </Suspense>
       {toast && <RedlineToast key={toast.id} toast={toast} onDismiss={dismissToast} />}
+      {scaleDialogFor && (
+        <Suspense fallback={null}>
+          <ScaledBuildDialog
+            defaults={scaleDialogFor.defaults}
+            onClose={() => setScaleDialogFor(null)}
+            onLaunch={(config) => {
+              const sid = scaleDialogFor.sessionId;
+              setScaleDialogFor(null);
+              void launchScaledBuild(sid, config);
+            }}
+          />
+        </Suspense>
+      )}
+      {scaledAttention > 0 && (
+        <Suspense fallback={null}>
+          <ScaledBuildCards nonce={scaledAttention} onIdle={() => setScaledAttention(0)} onToast={setToast} />
+        </Suspense>
+      )}
       {/* A5: a failed Orchestrate handoff is persistent and actionable —
           never a 10-second toast. The run state was already rolled back to
           NULL when this appears; the plan stays approved. */}
@@ -10018,7 +10138,7 @@ function App() {
           }}
         >
           <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            Orchestrate handoff failed at {handoffFailure.stage}
+            {handoffFailure.retryScaled ? "Team build" : "Orchestrate"} handoff failed at {handoffFailure.stage}
           </div>
           <div
             style={{ color: "var(--color-ink-muted)", marginBottom: 8 }}
@@ -10030,7 +10150,9 @@ function App() {
             <button
               type="button"
               onClick={() =>
-                void relaunchOrchestrator(handoffFailure.sessionId)
+                void (handoffFailure.retryScaled
+                  ? launchScaledBuild(handoffFailure.sessionId, handoffFailure.retryScaled)
+                  : relaunchOrchestrator(handoffFailure.sessionId))
               }
               className="rounded px-2 py-1"
               style={{

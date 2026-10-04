@@ -1998,6 +1998,24 @@ impl Database {
             );
             "#,
         )?;
+        // Scaled builds (Track O): a run's scale config, its current limits
+        // (Extend raises them) and its phase, so a restart neither loses the
+        // budget nor re-opens a stopped build. Additive; no FK (schema law).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS scaled_runs (
+                run_id TEXT PRIMARY KEY,
+                plan_session_id TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                limits_json TEXT NOT NULL,
+                phase_json TEXT NOT NULL,
+                started_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS scaled_runs_by_plan ON scaled_runs(plan_session_id, created_at);
+            "#,
+        )?;
         // The live-monitor anchor, written at the ingest-claim beacon — the one
         // moment the orchestrator's transcript path is in hand. Separate from
         // `plan_runs` deliberately: that row exists only from exit-report time
@@ -2508,6 +2526,64 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    /// Write a scaled build's durable state (config, limits, phase).
+    pub fn upsert_scaled_run(&self, ctl: &crate::scaled::RunCtl) -> rusqlite::Result<()> {
+        let now = crate::state::now_millis();
+        let json = |v: serde_json::Result<String>| v.unwrap_or_else(|_| "null".into());
+        let conn = self.lock_conn();
+        conn.execute(
+            "INSERT INTO scaled_runs (run_id, plan_session_id, config_json, limits_json, phase_json, started_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(run_id) DO UPDATE SET config_json = ?3, limits_json = ?4, phase_json = ?5, started_at = ?6, updated_at = ?7",
+            params![
+                ctl.run_id,
+                ctl.plan_session_id,
+                json(serde_json::to_string(&ctl.config)),
+                json(serde_json::to_string(&ctl.limits)),
+                json(serde_json::to_string(&ctl.phase)),
+                ctl.started_at,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A scaled build rebuilt from its row. A pre-flight that was waiting
+    /// when the app went down cannot still be held, so it reads as Launching
+    /// (the lead's next Workflow call brings a fresh one).
+    pub fn get_scaled_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::scaled::RunCtl>> {
+        let conn = self.lock_conn();
+        let row = conn
+            .query_row(
+                "SELECT plan_session_id, config_json, limits_json, phase_json, started_at FROM scaled_runs WHERE run_id = ?1",
+                params![run_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<i64>>(4)?)),
+            )
+            .optional()?;
+        let Some((plan, config, limits, phase, started_at)) = row else { return Ok(None) };
+        let Ok(config) = serde_json::from_str(&config) else { return Ok(None) };
+        let mut ctl = crate::scaled::RunCtl::new(run_id, &plan, config);
+        if let Ok(limits) = serde_json::from_str(&limits) {
+            ctl.limits = limits;
+        }
+        ctl.phase = match serde_json::from_str(&phase) {
+            Ok(crate::scaled::Phase::Preflight) | Err(_) => crate::scaled::Phase::Launching,
+            Ok(phase) => phase,
+        };
+        ctl.started_at = started_at;
+        Ok(Some(ctl))
+    }
+
+    pub fn latest_scaled_run_id(&self, plan_session_id: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.lock_conn();
+        conn.query_row(
+            "SELECT run_id FROM scaled_runs WHERE plan_session_id = ?1 ORDER BY created_at DESC LIMIT 1",
+            params![plan_session_id],
+            |r| r.get(0),
+        )
+        .optional()
     }
 
     /// The newest journal rows of one kind, newest first. The chat room's

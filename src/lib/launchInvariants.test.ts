@@ -80,6 +80,17 @@ describe("one launch pipeline", () => {
     expect(hits, `built in ${hits} places`).toBe(1);
   });
 
+  it("a team build's lead is launched in exactly one place, with its own hooks and a cd", () => {
+    // The scaled build's lead runs acceptEdits with the run's pre-flight and
+    // budget hooks; a second construction site is how one would launch
+    // without them (unbudgeted) or without the cd (in the home directory).
+    expect(countIn("src", "buildScaledLaunchCommand(")).toBe(1);
+    expect(countIn("src", "buildScaledPrompt(")).toBe(1);
+    const builder = read("src/lib/planLaunchCommand.ts");
+    const body = builder.slice(builder.indexOf("export function buildScaledLaunchCommand("));
+    expect(body.slice(0, body.indexOf("\n}\n"))).toContain("cd ${shq(projectPath)} && claude --settings");
+  });
+
   it("the run launch command is built in exactly one place, and only runs skip the sandbox", () => {
     // "Just run it" and the approved-plan hand-off launch through the same
     // builder. The bypass flag is the user's explicit choice for a RUN; a

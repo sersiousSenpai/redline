@@ -435,6 +435,8 @@ pub(crate) struct AgentCall {
     pub label: Option<String>,
     pub phase: Option<String>,
     pub literal: Option<String>,
+    /// A per-agent `model:` override (the scaled-build pre-flight counts them).
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -677,6 +679,7 @@ pub(crate) fn extract_agent_calls(src: &str) -> Vec<AgentCall> {
             label: find_string_field(window, "label"),
             phase: find_string_field(window, "phase"),
             literal,
+            model: find_string_field(window, "model"),
         });
     }
     calls
@@ -1215,6 +1218,16 @@ impl RunWatchState {
         RunWatchState {
             inner: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The live workflow's budget tokens (input + output + cache writes; cache
+    /// reads excluded) for a scaled build's limits. `None` without a watcher.
+    pub fn live_budget_tokens(&self, plan_sid: &str) -> Option<u64> {
+        let map = self.inner.lock().unwrap();
+        let h = map.get(plan_sid)?;
+        let snap = h.snapshot.lock().unwrap();
+        let t = &snap.totals;
+        Some(t.input_tokens + t.output_tokens + t.cache_creation_tokens)
     }
 
     fn snapshot_of(&self, plan_sid: &str) -> Option<RunSnapshot> {

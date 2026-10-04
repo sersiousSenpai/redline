@@ -242,3 +242,34 @@ export function buildOrchestratePrompt(sessionId: string): string {
     `Follow your orchestrate skill for the execution discipline.`
   );
 }
+
+/** The bare launch for a SCALED build's lead (Track O). Like the Orchestrate
+ *  launch it carries no prompt: the Workflow opt-in is gated on typed input,
+ *  so `buildScaledPrompt` is typed once claude is up. `--settings` adds the
+ *  run's own pre-flight and budget hooks for THIS session only; `--model` and
+ *  `--effort` are hard limits every workflow agent inherits. Always `cd`s: a
+ *  write-capable team must never start in the home directory. */
+export function buildScaledLaunchCommand(
+  projectPath: string,
+  settingsPath: string,
+  model: string,
+  effort: string | null,
+): string {
+  const effortFlag = effort ? ` --effort ${shq(effort)}` : "";
+  return (
+    `cd ${shq(projectPath)} && claude --settings ${shq(settingsPath)} ` +
+    `--permission-mode acceptEdits --model ${shq(model)}${effortFlag}`
+  );
+}
+
+/** The lead's typed prompt: ONE line (Enter submits typed input). The brief
+ *  route carries the plan, the budget and the contract, so this stays short
+ *  and the curl shape is the pre-authorized bridge GET. */
+export function buildScaledPrompt(sessionId: string, runId: string): string {
+  return (
+    `ultracode: build the approved plan for Redline session ${sessionId} as ONE ` +
+    `multi-agent workflow within its budget. First read your brief: ` +
+    `curl -s http://127.0.0.1:7676/v1/scaled/${runId}/brief — it has the plan, ` +
+    `the agent and model budget, and the reporting steps.`
+  );
+}
