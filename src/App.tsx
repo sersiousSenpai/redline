@@ -7190,6 +7190,21 @@ function App() {
   // and the spring starts on the gesture frame, and `chatOpening` holds a
   // placeholder for the round-trip rather than letting the previous
   // conversation flash up in the half-second before the new one exists.
+  // The chat room's agent is a warm `claude` (companion_warm.rs). Spawn it
+  // when the Chat destination is picked, before the first ⏎, so turn one
+  // skips the CLI boot; the room's first turn adopts it. Claude only; Codex
+  // stays per-turn. ONE cwd for the pre-warm and the room, or they never match.
+  const chatCwd = activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null);
+  const chatPrewarmKey =
+    monochatVisible && !chatId && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
+      ? JSON.stringify([chatCwd, frontDoorBackend])
+      : null;
+  useEffect(() => {
+    if (!chatPrewarmKey) return;
+    void invoke("companion_prewarm", { companionId: null, cwd: chatCwd, harness: frontDoorBackend }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatPrewarmKey]);
+
   const chatFromFrontDoor = async () => {
     if (chatOpening || (chatSeed && chatSeed.autoSend !== false)) return;
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
@@ -10188,10 +10203,12 @@ function App() {
               // The agent's read-only file tools are scoped to
               // whatever folder the user is browsing; HOME when
               // there is none.
-              cwd={
-                activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null)
-              }
+              cwd={chatCwd}
               dictationEnabled={!dockOwnsMic && monochatVisible}
+              expanded={frontDoorOpen}
+              // `selectSurface("drafter")` inside collapses the room; the
+              // conversation comes along in the column.
+              onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
               // Only in the room: shrink it to the column beside the door,
               // keeping the conversation up. The other way out is simply
               // going somewhere — `selectSurface` collapses the room and the

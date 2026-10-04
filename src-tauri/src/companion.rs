@@ -30,6 +30,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use crate::claude_proc::{
     bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin, StreamLine,
 };
+use crate::companion_warm::{self, WarmChild, WarmIo, WarmKey, WarmPool, NEXT_CHAT};
 use crate::db::{Database, JournalRow};
 use crate::state::{now_millis, Companion, CompanionMessage};
 use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
@@ -200,6 +201,8 @@ pub struct CompanionState {
     turns: Arc<Turns<QueuedCompanionSend>>,
     db: Arc<Database>,
     claude_bin: Arc<OnceLock<String>>,
+    /// One warm `claude` per open room (`companion_warm`).
+    warm: WarmPool,
 }
 
 impl CompanionState {
@@ -208,6 +211,7 @@ impl CompanionState {
             turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
+            warm: WarmPool::default(),
         }
     }
 
@@ -227,6 +231,7 @@ impl CompanionState {
     /// Kill every running companion turn. Backs app teardown.
     pub fn kill_all(&self) {
         self.turns.kill_all();
+        self.warm.clear();
     }
 }
 
@@ -455,7 +460,20 @@ fn plan_history_grounding(counts: Result<(i64, i64, i64), String>, loaded: usize
     text
 }
 
-const CHAT_INVESTIGATION_POLICY: &str = "\nINVESTIGATION PACE — answer as soon as the available evidence resolves the user's question. For work needing several tool calls, give a short public progress update before investigating and another when the diagnosis changes or a useful step completes. State the operation and finding, never private reasoning. Start with supplied ground truth and one relevant supported route. Do not repeat empty, unsupported, or permission-denied queries without a concrete new reason. A tool denial is not a diagnosis; use another supported read or state the remaining uncertainty. Avoid a broad source-code investigation for a simple app-state question unless the supplied facts are insufficient or the user asks for that depth. Preserve the work needed to answer correctly.\n\n";
+/// The room's persona. Diverge, then converge: the shape a brainstorm needs,
+/// which a stock chat app does not give it.
+const CHAT_PERSONA: &str = "You are Redline's CHAT ROOM: the user's brainstorm partner, and ONE continuous conversation that follows them across every surface of the app (plan reviews, the Prompt Drafter, the embedded browser, research missions, code reviews). You are bound to no object and carry no goal of your own. Each turn tells you where they are now; weave continuity across everything you have seen, and refer back to earlier surfaces by name. Everything you need is in this prompt; you do not need to load the `companion` skill.\n\n\
+HOW TO THINK WITH THEM: diverge, then converge.\n\
+- Open the space first: name the real options (usually two to four), including the one they have not said.\n\
+- When there are tradeoffs to weigh, compare the options in a compact table.\n\
+- Surface the assumptions and unknowns the choice hinges on.\n\
+- Then converge: give your recommendation and why, and close with **Next moves**: one to three concrete steps.\n\
+- Ground it in their record. When you draw on memory, a plan, a repo or a page, cite it BY NAME; the workspace brief and the prefetched evidence name them.\n\
+- Short by default. A quick question gets a quick answer, without the scaffolding; offer depth (\"want the full comparison?\") rather than dumping it.\n\
+- Read-only by default: you think, compare and recommend. You write only at their explicit direction, through the routes below.\n\n\
+WORKSPACE BRIEF: a conversation's first turn carries a WORKSPACE BRIEF that Redline read from local state (plan sessions and their status, repos with branch and changed files, ready work, recent decisions, the active mission, recently browsed pages). Later turns carry WORKSPACE CHANGES only when something changed. Trust it for what exists and where things stand; curl only for detail it does not hold.\n\n";
+
+const CHAT_INVESTIGATION_POLICY: &str ="\nINVESTIGATION PACE — answer as soon as the available evidence resolves the user's question. For work needing several tool calls, give a short public progress update before investigating and another when the diagnosis changes or a useful step completes. State the operation and finding, never private reasoning. Start with supplied ground truth and one relevant supported route. Do not repeat empty, unsupported, or permission-denied queries without a concrete new reason. A tool denial is not a diagnosis; use another supported read or state the remaining uncertainty. Avoid a broad source-code investigation for a simple app-state question unless the supplied facts are insufficient or the user asks for that depth. Preserve the work needed to answer correctly.\n\n";
 
 /// The cross-surface map + consult + staged-write contract. `pub(crate)`
 /// because the voice agent embeds this verbatim too (the Companion's scope
@@ -671,11 +689,49 @@ pub struct FirstTurnGround<'a> {
     pub prefetch: Option<&'a str>,
     /// The active mission's `(title, goal)`.
     pub mission: Option<(&'a str, &'a str)>,
+    /// The workspace brief (`workspace_brief::render`), before the catalog.
+    pub brief: Option<&'a str>,
 }
 
-/// First turn: the spanning-app role, where the user is, the journal delta,
-/// the map + consult contract, mission inheritance, the user's record (catalog
-/// + prefetched evidence), and their message.
+/// The room's whole invariant contract: persona, the map + consult + staged
+/// write routes, the pacing policy, and the evidence and formatting rules.
+///
+/// It rides `--append-system-prompt` at spawn, so it is said once per CLI
+/// session (once per warm child) rather than in turn 1's body and again on
+/// every follow-up, and the agent never spends a round trip loading the
+/// `companion` skill. Byte-identical on every call: it is the cacheable
+/// prefix. Codex has no system-prompt flag, so a Codex first turn carries it
+/// at the head of its body instead.
+pub fn system_prompt() -> &'static str {
+    static PROMPT: OnceLock<String> = OnceLock::new();
+    PROMPT.get_or_init(|| {
+        let mut p = String::from(CHAT_PERSONA);
+        p.push_str(routes_block());
+        p.push_str(CHAT_INVESTIGATION_POLICY);
+        p.push_str(
+            "PREFETCHED EVIDENCE: a turn may arrive with a `PREFETCHED EVIDENCE` \
+             block, assembled server-side from the user's message before the \
+             turn reached you. It is the same batched read you would have made, \
+             already done. READ IT FIRST, and if it answers the question, ANSWER; \
+             do not curl. It states what it searched, what it resolved and on \
+             what basis, and whether anything was TRIMMED. Its absence means the \
+             message produced no search terms, not that the record is empty.\n\n\
+             FORMATTING: your replies render through Redline's markdown pipeline \
+             (tables, strict-mode mermaid, fenced code, callouts). Never raw HTML. \
+             You observe by default and WRITE only at the user's explicit \
+             direction, through the write routes above. Everything you write is a \
+             staged, reviewable artifact, never a silent change; confirm an \
+             ambiguous target in one line first. Never edit files, never produce \
+             a plan, never call ExitPlanMode.\n",
+        );
+        p
+    })
+}
+
+/// First turn: where the user is, the journal delta, mission inheritance, the
+/// workspace brief, the user's record (catalog + prefetched evidence), and
+/// their message. The invariant contract is NOT here: it is the
+/// `system_prompt()`.
 pub fn build_first_turn_prompt(
     surface: &SurfaceInfo,
     self_id: &str,
@@ -683,41 +739,7 @@ pub fn build_first_turn_prompt(
     user_text: &str,
     ground: &FirstTurnGround<'_>,
 ) -> String {
-    // CACHE-STABLE ORDERING — ALL invariant text (role intro, skill
-    // reference, routes, the formatting/write contract) forms one stable
-    // prefix; every variable section (mission, surface, journal delta, user
-    // text) comes after it. Same information, pinned order — two first turns
-    // share a byte-identical cacheable prefix. Guarded by
-    // `first_turn_invariant_prefix_is_byte_stable`.
-    let mut p = String::from(
-        "You are the user's COMPANION in Redline: ONE continuous discussion that \
-         follows them across every surface of the app — plan reviews, the Prompt \
-         Drafter, the embedded browser, research missions, code reviews. You are \
-         not bound to any surface and you carry no goal of your own; you are the \
-         spanning conversation and the colleague who always knows where they've \
-         been. Each turn tells you where they are now; weave continuity across \
-         everything you've seen, referring back to earlier surfaces by name.\n\n\
-         Follow your `companion` skill if you have it.\n\n",
-    );
-    p.push_str(routes_block());
-    p.push_str(CHAT_INVESTIGATION_POLICY);
-    p.push_str(
-        "\nPREFETCHED EVIDENCE — a turn may arrive with a `PREFETCHED EVIDENCE` \
-         block below, assembled server-side from the user's message before you \
-         were spawned. It is the same batched read you would have made, already \
-         done. READ IT FIRST, and if it answers the question, ANSWER — do not \
-         curl. It states what it searched, what it resolved and on what basis, \
-         and whether anything was TRIMMED. Its absence means the message \
-         produced no search terms, not that the record is empty.\n\n\
-         FORMATTING — your replies render through Redline's markdown pipeline \
-         (tables, strict-mode mermaid, fenced code, callouts). Never raw HTML. \
-         You observe by default and WRITE only at the user's explicit \
-         direction, through the write routes above — everything you write is a \
-         staged, reviewable artifact, never a silent change; confirm an \
-         ambiguous target in one line first. Never edit files, never produce a \
-         plan, never call ExitPlanMode.\n\n",
-    );
-    // --- variable content below; nothing invariant may follow ---
+    let mut p = String::new();
     p.push_str(&mission_context_block(ground.mission));
     p.push_str(&format!(
         "The user is currently on {}.\n\n",
@@ -729,6 +751,10 @@ pub fn build_first_turn_prompt(
             "\n\nAbsorb that silently — it is ground truth of what happened, not \
              something to recite back unless asked.\n\n",
         );
+    }
+    if let Some(brief) = ground.brief.filter(|b| !b.trim().is_empty()) {
+        p.push_str(brief.trim_end());
+        p.push_str("\n\n");
     }
     // Catalog, then recap, then evidence, then the question — the evidence sits
     // closest to what it answers, and the recap between the catalog and the
@@ -767,18 +793,23 @@ pub fn build_first_turn_prompt(
     p
 }
 
-/// Follow-up: re-ground on the current surface + the journal delta since the
-/// last turn. The resumed session already carries the role and the routes.
+/// Follow-up: re-ground on the current surface, the journal delta since the
+/// last turn, and the workspace changes, if any. The session already carries
+/// the contract (the system prompt), so none of it is re-sent.
 pub fn build_followup_prompt(
     surface: &SurfaceInfo,
     self_id: &str,
     journal_delta: &str,
+    brief_delta: Option<&str>,
     user_text: &str,
 ) -> String {
     let mut p = format!("The user is now on {}.\n\n", surface_line(surface, self_id));
-    p.push_str(CHAT_INVESTIGATION_POLICY);
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
+        p.push_str("\n\n");
+    }
+    if let Some(delta) = brief_delta.filter(|d| !d.trim().is_empty()) {
+        p.push_str(delta.trim_end());
         p.push_str("\n\n");
     }
     p.push_str("The user says:\n");
@@ -958,6 +989,8 @@ pub fn companion_set_model(
             tracing::warn!(effort = %e, "chat: unrecognized effort level, passing it through");
         }
     }
+    // The warm child runs the old model; the next turn spawns one on the new.
+    companion.warm.drop_chat(&companion_id);
     companion
         .db
         .set_companion_seat(&companion_id, model.as_deref(), effort.as_deref())
@@ -974,6 +1007,7 @@ pub fn companion_delete(
     if let Some(mut child) = companion.turns.discard(&companion_id).and_then(|p| p.child) {
         let _ = child.start_kill();
     }
+    companion.warm.drop_chat(&companion_id);
     // Nothing else to clean up: the rotation mark is a column on the row this
     // deletes, so a recreated chat cannot inherit it.
     companion
@@ -982,11 +1016,159 @@ pub fn companion_delete(
         .map_err(|e| format!("failed to delete companion: {e}"))
 }
 
+/// The CLI session a chat's NEXT Claude turn will continue, by the same rules
+/// `start_companion_turn` applies: none after a hand-off from another
+/// harness, and none when the turn budget says the session rotates.
+fn next_claude_session(db: &Database, companion_id: &str) -> Option<String> {
+    let previous_provider = db.get_setting(&runtime_key(companion_id, "provider"));
+    if previous_provider.as_deref().is_some_and(|p| p != "claude-code") {
+        return None;
+    }
+    let session = db.get_companion_session(companion_id)?;
+    let thread = db.load_companion_thread(companion_id).unwrap_or_default();
+    let turns = completed_assistant_turns(&thread);
+    let rotated_at = db.get_companion_rotated_at(companion_id).min(turns);
+    (turns - rotated_at < ROTATE_AFTER_ASSISTANT_TURNS).then_some(session)
+}
+
+/// Spawn the room's warm `claude` before the first ⏎: when the Chat
+/// destination is picked (no chat yet: `companionId` is null and the child
+/// waits under `NEXT_CHAT`) or when a room mounts. Idempotent, and a no-op
+/// for Codex, which stays per-turn. Returns whether a warm child is waiting.
+#[tauri::command]
+pub async fn companion_prewarm(
+    companion: tauri::State<'_, CompanionState>,
+    companion_id: Option<String>,
+    cwd: Option<String>,
+    harness: Option<ConversationHarness>,
+) -> Result<bool, String> {
+    let harness = harness.unwrap_or_default();
+    if !matches!(harness.backend.as_deref(), None | Some("claude-code")) {
+        return Ok(false);
+    }
+    let id = companion_id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| NEXT_CHAT.to_string());
+    if companion.turns.is_running(&id) {
+        return Ok(false);
+    }
+    let fresh = id == NEXT_CHAT;
+    let session = if fresh { None } else { next_claude_session(&companion.db, &id) };
+    let (saved_model, saved_effort) = if fresh { (None, None) } else { companion.db.get_companion_seat(&id) };
+    let model = harness.model.or(saved_model);
+    let effort = harness.effort.or(saved_effort);
+    let seat_flags = crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref());
+    let key = WarmKey { binary: companion.claude_bin().await?, cwd: resolve_cwd(cwd), flags: seat_flags.clone() };
+    if companion.warm.has(&id, &key, session.as_deref()) {
+        return Ok(true);
+    }
+    let args = companion_warm::warm_args(system_prompt(), session.as_deref(), seat_flags);
+    let warm = companion_warm::spawn(key, args, session).await?;
+    // A turn may have begun during the spawn; its own child wins.
+    if companion.turns.is_running(&id) {
+        return Ok(false);
+    }
+    companion.warm.put(&id, warm);
+    companion.warm.ensure_reaper();
+    Ok(true)
+}
+
+/// The room closed: let its warm child go now rather than at the idle reap.
+#[tauri::command]
+pub fn companion_release(companion: tauri::State<'_, CompanionState>, companion_id: String) {
+    companion.warm.drop_chat(&companion_id);
+}
+
+/// What this chat's last turn injected (the Context chip on a remount).
+#[tauri::command]
+pub fn companion_context(companion: tauri::State<'_, CompanionState>, companion_id: String) -> Option<Value> {
+    companion
+        .db
+        .get_setting(&runtime_key(&companion_id, "context"))
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
 // --- Chat ------------------------------------------------------------------
 
 /// How many journal bytes a turn preamble may spend. Breadcrumbs, not content.
 const JOURNAL_DELTA_MAX_BYTES: usize = 4_000;
 const JOURNAL_DELTA_MAX_ROWS: i64 = 300;
+/// An ordinary follow-up's answer-pack budget. Turn 1 and a recall get the
+/// full `INLINE_PACK_MAX_BYTES`.
+const FOLLOWUP_PREFETCH_MAX_BYTES: usize = 4_000;
+
+/// What a turn injected, for the room's Context chip (`companion-context`,
+/// and `companion_context` for a remount).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionContext {
+    companion_id: String,
+    /// `full` (the whole brief went in), `delta` (only changes) or
+    /// `unchanged` (nothing re-sent; the conversation already has it).
+    delivery: &'static str,
+    brief: crate::workspace_brief::BriefInputs,
+    brief_bytes: usize,
+    /// The prefetch's status line, when this turn carried evidence.
+    memory: Option<String>,
+    at: i64,
+}
+
+/// The working directory a chat's agent runs in. ONE resolution for the turn
+/// and the pre-warm, or a pre-warmed child would never match its turn.
+fn resolve_cwd(cwd: Option<String>) -> String {
+    cwd.filter(|c| !c.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string())
+}
+
+/// How a turn's stream reaches the reader.
+enum Transport {
+    /// A process spawned for this turn alone (`-p --resume`, or Codex's
+    /// `app-server`), read to EOF.
+    Cold { stdout: ChildStdout, stderr: ChildStderr, stdin: Option<ChildStdin> },
+    /// A warm child, read to the turn's `result` and then pooled again. `cold`
+    /// is the spawn to fall back on if it dies before answering.
+    Warm { io: Box<WarmIo>, cold: Option<ColdSpawn> },
+}
+
+struct ColdSpawn {
+    binary: String,
+    cwd: String,
+    args: Vec<String>,
+}
+
+fn spawn_cold(binary: &str, cwd: &str, args: &[String], codex: bool) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = if codex {
+        tokio::process::Command::new(binary)
+    } else {
+        crate::claude_proc::claude_command_for_seat("companion", binary)
+    };
+    cmd.current_dir(cwd)
+        .args(args)
+        .stdin(if codex { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+}
+
+/// The last stderr lines of a turn's process: a per-turn drain task for a
+/// cold spawn, the warm child's long-lived tail otherwise.
+enum StderrSource {
+    Task(tokio::task::JoinHandle<String>),
+    Tail(companion_warm::StderrTail),
+}
+
+fn drain_stderr_task(stderr: ChildStderr) -> tokio::task::JoinHandle<String> {
+    // Drain both pipes concurrently; a full stderr pipe must never stop tokens.
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut tail = std::collections::VecDeque::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            tail.push_back(line.chars().take(1_000).collect::<String>());
+            if tail.len() > 16 { tail.pop_front(); }
+        }
+        tail.into_iter().collect::<Vec<_>>().join("\n")
+    })
+}
 
 /// Send a turn with an immutable surface and harness (legacy callers use the
 /// mirrored ActiveSurface). The backend adds the journal delta, then
@@ -1253,13 +1435,40 @@ fn start_companion_turn(
         let journal_delta = format!("{journal_delta}\n\n{history_ground}");
         let head = journal_rows.last().map(|r| r.id);
 
-        // SERVER-SIDE PREFETCH, first turn only. "The full context of all my
+        // THE WORKSPACE BRIEF. Turn 1 (and a rotated session's first turn)
+        // gets the whole brief; a follow-up gets only what changed since the
+        // brief this conversation last saw, keyed on its hash, and nothing at
+        // all when nothing changed.
+        let brief_inputs = crate::workspace_brief::gather(
+            app.state::<crate::state::SessionStore>().list(),
+            &companion.db,
+            app.state::<crate::ActiveMission>().active_goal(),
+        )
+        .await;
+        let brief = crate::workspace_brief::render(&brief_inputs);
+        let previous_brief = companion.db.get_setting(&runtime_key(&companion_id, "brief"));
+        let (brief_full, brief_delta, delivery) = match previous_brief.as_deref() {
+            Some(previous) if !first_turn => match crate::workspace_brief::delta(previous, &brief) {
+                Some(delta) => (None, Some(delta), "delta"),
+                None => (None, None, "unchanged"),
+            },
+            _ => (Some(brief.clone()), None, "full"),
+        };
+        let _ = companion.db.set_setting(&runtime_key(&companion_id, "brief"), &brief);
+
+        // SERVER-SIDE PREFETCH, every turn. "The full context of all my
         // projects" is precisely the answer-pack, and the agent's opening move
-        // would otherwise be a curl we can just as well make here — a whole
-        // model turn saved on the turn where latency is most visible. A
-        // follow-up fragment borrows the previous turn's terms, because a
-        // fragment carries its subject implicitly.
-        let prefetch = if first_turn || intent == crate::monochat::Intent::Recall {
+        // would otherwise be a curl we can just as well make here. Turn 1 and
+        // an explicit recall get the full inline budget; an ordinary follow-up
+        // gets a small one, enough to keep the conversation grounded without
+        // re-sending the record. A follow-up fragment borrows the previous
+        // turn's terms, because a fragment carries its subject implicitly.
+        let prefetch_budget = if first_turn || intent == crate::monochat::Intent::Recall {
+            crate::context::INLINE_PACK_MAX_BYTES
+        } else {
+            FOLLOWUP_PREFETCH_MAX_BYTES
+        };
+        let prefetch = {
             let prior_user_text = thread
                 .iter()
                 .rev()
@@ -1272,11 +1481,7 @@ fn start_companion_turn(
                     None,
                     crate::context::INLINE_PACK_LIMIT,
                 );
-                let block = crate::context::render_answer_pack_block(
-                    &pack,
-                    Some(&plan),
-                    crate::context::INLINE_PACK_MAX_BYTES,
-                );
+                let block = crate::context::render_answer_pack_block(&pack, Some(&plan), prefetch_budget);
                 let label = crate::context::prefetch_status_label(
                     pack.node.as_ref().map(|n| n.node.title.as_str()),
                     pack.notes.len()
@@ -1287,10 +1492,6 @@ fn start_companion_turn(
                 );
                 (block, label)
             })
-        } else {
-            // Follow-ups get NO prefetch: the routes block names the
-            // answer-pack and grep, so the agent reaches when it needs to.
-            None
         };
         // The ticker. Emitted BEFORE the spawn — the hook's `send` reducer sets
         // `phase: "streaming"` synchronously before `invoke` resolves, so the
@@ -1298,7 +1499,23 @@ fn start_companion_turn(
         if let Some((_, label)) = &prefetch {
             emit_companion_status(&app, &companion_id, label);
         }
+        let memory_label = prefetch.as_ref().filter(|(b, _)| b.is_some()).map(|(_, l)| l.clone());
         let prefetch_block = prefetch.and_then(|(b, _)| b);
+
+        // What the room now knows, for its Context chip. Persisted so a
+        // remounted room shows it without waiting for the next turn.
+        let context = CompanionContext {
+            companion_id: companion_id.clone(),
+            delivery,
+            brief_bytes: brief.len(),
+            brief: brief_inputs,
+            memory: memory_label,
+            at: now_millis(),
+        };
+        if let Ok(json) = serde_json::to_string(&context) {
+            let _ = companion.db.set_setting(&runtime_key(&companion_id, "context"), &json);
+        }
+        let _ = app.emit("companion-context", context);
 
         let mut prompt = if first_turn {
             // Bake the catalog in, so the opening move can be an answer rather
@@ -1314,7 +1531,7 @@ fn start_companion_turn(
                     )
                 })
                 .ok();
-            build_first_turn_prompt(
+            let body = build_first_turn_prompt(
                 &surface,
                 &companion_id,
                 &journal_delta,
@@ -1324,12 +1541,22 @@ fn start_companion_turn(
                     recap: recap.as_deref(),
                     prefetch: prefetch_block.as_deref(),
                     mission: mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+                    brief: brief_full.as_deref(),
                 },
-            )
+            );
+            // Codex has no system-prompt flag: its first turn carries the
+            // contract at the head of the body.
+            if codex { format!("{}\n{body}", system_prompt()) } else { body }
         } else {
-            build_followup_prompt(&surface, &companion_id, &journal_delta, &text)
+            // A follow-up whose conversation never saw a brief (it predates
+            // them) gets the whole one, once.
+            let delta = brief_delta.as_deref().or(brief_full.as_deref());
+            let mut p = build_followup_prompt(&surface, &companion_id, &journal_delta, delta, &text);
+            if let Some(block) = prefetch_block.as_deref() {
+                p.push_str(block);
+            }
+            p
         };
-        if !first_turn { if let Some(block) = prefetch_block.as_deref() { prompt.push_str(block); } }
         prompt.push_str(&browser_turn_context(browser_target.as_ref()));
 
         // The per-conversation seat override. Resolved HERE so a chat whose
@@ -1370,39 +1597,53 @@ fn start_companion_turn(
             let _ = companion.db.set_companion_journal_seq(&companion_id, h);
         }
 
-        let cwd = cwd
-            .filter(|c| !c.trim().is_empty())
-            .or_else(|| std::env::var("HOME").ok())
-            .unwrap_or_else(|| "/".to_string());
+        let cwd = resolve_cwd(cwd);
 
         emit_companion_status(&app, &companion_id, "Starting the selected model");
         let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline));
         let binary = if codex { crate::codex_app_server::resolve_codex_bin() } else { companion.claude_bin().await? };
-        let mut cmd = if codex { tokio::process::Command::new(&binary) } else { crate::claude_proc::claude_command_for_seat("companion", &binary) };
-        let args = if codex { vec!["app-server".to_string()] } else { bridge_args_with_flags(prompt, prior_session.as_deref(), seat_flags) };
-        let mut child = cmd
-            .current_dir(&cwd)
-            .args(&args)
-            .stdin(if codex { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    format!(
-                        "Could not find {provider} at {binary}. Open the harness menu to locate or install it."
-                    )
-                } else {
-                    format!("Failed to start {provider}: {e}")
+        let cold_args = if codex {
+            vec!["app-server".to_string()]
+        } else {
+            let mut args = bridge_args_with_flags(prompt.clone(), prior_session.as_deref(), seat_flags.clone());
+            args.push("--append-system-prompt".to_string());
+            args.push(system_prompt().to_string());
+            args
+        };
+
+        // THE WARM PATH (Claude). A warm child already holding this session
+        // takes the turn as a stdin line; otherwise one is spawned now and
+        // stays warm for the next turn. Any failure lands on the cold spawn
+        // below, so a turn is never worse than it was.
+        let warm = if codex {
+            None
+        } else {
+            let key = WarmKey { binary: binary.clone(), cwd: cwd.clone(), flags: seat_flags.clone() };
+            let args = companion_warm::warm_args(system_prompt(), prior_session.as_deref(), seat_flags.clone());
+            companion_warm::open_turn(&companion.warm, &companion_id, key, args, prior_session.as_deref(), &prompt).await
+        };
+        let cold_retry = (!codex).then(|| ColdSpawn { binary: binary.clone(), cwd: cwd.clone(), args: cold_args.clone() });
+        let (child, transport) = match warm {
+            Some(WarmChild { child, io }) => (child, Transport::Warm { io: Box::new(io), cold: cold_retry }),
+            None => {
+                let mut child = spawn_cold(&binary, &cwd, &cold_args, codex).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        format!(
+                            "Could not find {provider} at {binary}. Open the harness menu to locate or install it."
+                        )
+                    } else {
+                        format!("Failed to start {provider}: {e}")
+                    }
+                })?;
+                let stdout = child.stdout.take().ok_or("harness stdout unavailable")?;
+                let stderr = child.stderr.take().ok_or("harness stderr unavailable")?;
+                let mut stdin = child.stdin.take();
+                if native.is_some() {
+                    write_native(stdin.as_mut().ok_or("Codex input unavailable")?, &crate::codex_conversation::NativeTurn::initialize()).await?;
                 }
-            })?;
-        let stdout = child.stdout.take().ok_or("harness stdout unavailable")?;
-        let stderr = child.stderr.take().ok_or("harness stderr unavailable")?;
-        let mut stdin = child.stdin.take();
-        if native.is_some() {
-            write_native(stdin.as_mut().ok_or("Codex input unavailable")?, &crate::codex_conversation::NativeTurn::initialize()).await?;
-        }
+                (child, Transport::Cold { stdout, stderr, stdin })
+            }
+        };
 
         let buf = slot.buf();
         let token = slot.token();
@@ -1420,9 +1661,7 @@ fn start_companion_turn(
             token,
             companion_id,
             surface,
-            stdout,
-            stderr,
-            stdin,
+            transport,
             native.take(),
             trace,
         ));
@@ -1503,24 +1742,26 @@ async fn read_companion(
     token: u64,
     companion_id: String,
     surface: SurfaceInfo,
-    stdout: ChildStdout,
-    stderr: ChildStderr,
-    mut stdin: Option<ChildStdin>,
+    transport: Transport,
     mut native: Option<crate::codex_conversation::NativeTurn>,
     mut trace: crate::monochat::Span,
 ) {
     let db = companion.db.clone();
-    let mut lines = BufReader::new(stdout).lines();
-    // Drain both pipes concurrently; a full stderr pipe must never stop tokens.
-    let mut stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut tail = std::collections::VecDeque::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            tail.push_back(line.chars().take(1_000).collect::<String>());
-            if tail.len() > 16 { tail.pop_front(); }
+    // A warm turn ends at its `result` line, not at EOF: the process stays up
+    // for the next turn. `warm` holds what goes back to the pool with it.
+    let (mut lines, mut stderr_src, mut stdin, mut warm, mut cold_retry) = match transport {
+        Transport::Cold { stdout, stderr, stdin } => {
+            (BufReader::new(stdout).lines(), StderrSource::Task(drain_stderr_task(stderr)), stdin, None, None)
         }
-        tail.into_iter().collect::<Vec<_>>().join("\n")
-    });
+        Transport::Warm { io, cold } => {
+            let WarmIo { stdin, lines, stderr_tail, key, session } = *io;
+            (lines, StderrSource::Tail(stderr_tail), None, Some((stdin, key, session)), cold)
+        }
+    };
+    // Whether this turn produced anything of its own. A warm child that dies
+    // before it does is retried cold, which is safe exactly because nothing
+    // of the turn happened yet.
+    let mut turn_output = false;
     let provider = if native.is_some() { "codex" } else { "claude-code" };
     let mut session: Option<String> = None;
     let mut final_text: Option<String> = None;
@@ -1532,7 +1773,32 @@ async fn read_companion(
         let deadline = if native.as_ref().is_some_and(|turn| turn.turn_id.is_none()) { 45 } else { 600 };
         let line = match tokio::time::timeout(std::time::Duration::from_secs(deadline), lines.next_line()).await {
             Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => break,
+            Ok(Ok(None)) => {
+                let Some(cold) = cold_retry.take().filter(|_| warm.is_some() && !turn_output) else { break };
+                // A Stop kills the warm child too, and that EOF is not a
+                // failure to retry.
+                if !companion.turns.with_owned(&companion_id, token, || {}) { break; }
+                // The warm child died before answering: take the cold path
+                // inside the SAME reservation, so Stop and the queue see one
+                // continuous turn.
+                tracing::warn!("chat: the warm session exited before answering; retrying cold");
+                warm = None;
+                let mut child = match spawn_cold(&cold.binary, &cold.cwd, &cold.args, false) {
+                    Ok(child) => child,
+                    Err(error) => { errored = Some(format!("Failed to start {provider}: {error}")); break; }
+                };
+                let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+                    errored = Some("harness output unavailable".to_string());
+                    break;
+                };
+                match companion.turns.reattach(&companion_id, token, child) {
+                    Ok(previous) => { if let Some(mut dead) = previous { let _ = dead.start_kill(); } }
+                    Err(mut child) => { let _ = child.start_kill(); break; }
+                }
+                lines = BufReader::new(stdout).lines();
+                stderr_src = StderrSource::Task(drain_stderr_task(stderr));
+                continue;
+            }
             Ok(Err(error)) => { errored = Some(format!("Harness connection failed: {error}")); break; }
             Err(_) => { errored = Some(format!("{provider} stopped responding. Your conversation is saved; retry after checking the harness connection.")); break; }
         };
@@ -1583,6 +1849,7 @@ async fn read_companion(
         // rides an `assistant` line, which `classify_line` (rightly) ignores —
         // it carries no answer text.
         for (name, input) in crate::claude_proc::tool_uses(&v) {
+            turn_output = true;
             emit_companion_status(
                 &app,
                 &companion_id,
@@ -1590,8 +1857,9 @@ async fn read_companion(
             );
         }
         match classify_line(&v) {
-            StreamLine::Init(sid) => session = Some(sid),
+            StreamLine::Init(sid) => { turn_output = true; session = Some(sid) }
             StreamLine::Delta(text) => {
+                turn_output = true;
                 // Append-before-emit: see `turn::push_delta`.
                 let seq = turn::push_delta(&buf, &text);
                 let _ = app.emit(
@@ -1611,6 +1879,10 @@ async fn read_companion(
             }
             StreamLine::Failed(msg) => errored = Some(msg),
             StreamLine::Ignore => {}
+        }
+        // A warm child does not exit after its turn; its `result` closes it.
+        if warm.is_some() && (final_text.is_some() || errored.is_some()) {
+            break;
         }
     }
     drop(stdin.take());
@@ -1632,16 +1904,42 @@ async fn read_companion(
     // neither steal a successor turn's proc nor drain its queue.
     let (proc, next) = companion.turns.finish_and_pop(&companion_id, token);
     let cancelled = proc.is_none();
-    let exit_ok = match proc.and_then(|p| p.child) {
+    let mut child = proc.and_then(|p| p.child);
+    // A warm child that closed its turn cleanly goes back to the pool BEFORE
+    // the queue drains below, so the next turn leases it. Any other ending
+    // (an error, an empty reply, a cancel) discards it.
+    let mut warm_ended = false;
+    if let Some((stdin, key, _)) = warm.take() {
+        warm_ended = true;
+        let clean = !cancelled
+            && errored.is_none()
+            && session.is_some()
+            && final_text.as_ref().is_some_and(|text| !text.trim().is_empty());
+        if let (true, Some(process), StderrSource::Tail(tail)) = (clean, child.take(), &stderr_src) {
+            companion.warm.put(
+                &companion_id,
+                WarmChild {
+                    child: process,
+                    io: WarmIo { stdin, lines, stderr_tail: tail.clone(), key, session: session.clone() },
+                },
+            );
+            companion.warm.ensure_reaper();
+        }
+    }
+    let exit_ok = match child {
+        Some(mut child) if warm_ended => { let _ = child.start_kill(); false }
         Some(mut child) => match tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await {
             Ok(result) => result.map(|status| status.success()).unwrap_or(false),
             Err(_) => { let _ = child.kill().await; let _ = child.wait().await; false }
         },
         None => false,
     };
-    let stderr_text = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut stderr_task).await {
-        Ok(Ok(text)) => text,
-        _ => { stderr_task.abort(); String::new() }
+    let stderr_text = match stderr_src {
+        StderrSource::Tail(tail) => companion_warm::stderr_text(&tail),
+        StderrSource::Task(mut task) => match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
+            Ok(Ok(text)) => text,
+            _ => { task.abort(); String::new() }
+        },
     };
     // ABOVE the terminal branch, so success, error and cancelled all
     // book. A cancelled turn spent its input tokens too.
@@ -2048,6 +2346,10 @@ impl CompanionState {
             return Err("no such chat".to_string());
         }
         let prior_session = self.db.get_companion_session(&companion_id);
+        // The consult appends to the chat's CLI session from another process;
+        // a warm child still holding the old transcript must not serve the
+        // next turn.
+        self.warm.drop_chat(&companion_id);
 
         let check_in = CompanionMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2097,11 +2399,13 @@ impl CompanionState {
         crate::ledger::register_agent_prompt(&prompt);
 
         let (model, effort) = self.db.get_companion_seat(&companion_id);
-        let args = bridge_args_with_flags(
+        let mut args = bridge_args_with_flags(
             prompt,
             prior_session.as_deref(),
             crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref()),
         );
+        args.push("--append-system-prompt".to_string());
+        args.push(system_prompt().to_string());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         let claude_bin = self.claude_bin().await?;
         let mut cmd = crate::claude_proc::claude_command_for_seat("companion", &claude_bin);
@@ -2326,7 +2630,7 @@ mod tests {
     #[test]
     fn first_turn_embeds_role_surface_journal_and_consult_contract() {
         let s = surface("plan", Some("Companion plan"), None);
-        let p = build_first_turn_prompt(
+        let body = build_first_turn_prompt(
             &s,
             SELF_ID,
             "WHILE YOU WERE AWAY — what the user did since your last turn:\n- browsed to X\n",
@@ -2336,20 +2640,26 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(p.contains("COMPANION"));
-        assert!(p.contains("the plan review — Companion plan"));
+        assert!(body.contains("the plan review — Companion plan"));
         // The surface id rides the per-turn line (the write routes key on it).
-        assert!(p.contains("[surface id: x-1]"));
-        assert!(p.contains("WHILE YOU WERE AWAY"));
+        assert!(body.contains("[surface id: x-1]"));
+        assert!(body.contains("WHILE YOU WERE AWAY"));
+        // Mission inheritance rides the shared block.
+        assert!(body.contains("Find the best DB"));
+        assert!(body.contains("what did I miss?"));
+        // The contract is the SYSTEM PROMPT now (`--append-system-prompt`),
+        // said once per CLI session, never in a turn body.
+        assert!(!body.contains("/v1/global/consult"));
+        assert!(!body.contains("CHAT ROOM"));
+        let p = system_prompt();
+        assert!(p.contains("CHAT ROOM"));
         assert!(p.contains("/v1/global/agents"));
         assert!(p.contains("/v1/global/consult"));
         assert!(p.contains("/v1/context/threads/"));
         assert!(p.contains("/v1/context/tree/"));
         assert!(p.contains("/v1/journal/recent"));
-        assert!(p.contains("`companion` skill"));
-        // Mission inheritance rides the shared block.
-        assert!(p.contains("Find the best DB"));
-        assert!(p.contains("what did I miss?"));
+        // No skill round trip: the prompt says the skill is not needed.
+        assert!(p.contains("do not need to load the `companion` skill"));
 
         // The write contract: user-directed only, staged/reviewable, all four
         // recipes present with the auth header, and the exclusions explicit.
@@ -2397,9 +2707,12 @@ mod tests {
                 recap: Some("\nCONVERSATION SO FAR — rotated for speed.\n\n- They said: hi\n"),
                 prefetch: Some("PREFETCHED EVIDENCE\n- searched: beta\n"),
                 mission: None,
+                brief: Some("WORKSPACE BRIEF: read by Redline\nRepos (recently worked in):\n- redline · main · clean · /r\n"),
             },
         );
+        let brief = p.find("WORKSPACE BRIEF").expect("brief block");
         let catalog = p.find("THEIR CATALOG").expect("catalog block");
+        assert!(brief < catalog, "the workspace brief leads the record");
         let recap = p.find("CONVERSATION SO FAR").expect("recap block");
         let evidence = p
             .find("PREFETCHED EVIDENCE\n- searched")
@@ -2421,6 +2734,7 @@ mod tests {
         assert!(!plain.contains("THEIR CATALOG"));
         assert!(!plain.contains("CONVERSATION SO FAR"));
         assert!(!plain.contains("- searched: beta"));
+        assert!(!plain.contains("WORKSPACE BRIEF"));
     }
 
     #[test]
@@ -2451,63 +2765,60 @@ mod tests {
             &surface("chat", None, None),
             SELF_ID,
             "",
+            None,
             "Why is history empty?",
         );
-        assert!(followup.contains(CHAT_INVESTIGATION_POLICY));
+        // Said once, in the system prompt; a follow-up no longer re-sends it.
+        assert!(system_prompt().contains(CHAT_INVESTIGATION_POLICY));
+        assert!(!followup.contains(CHAT_INVESTIGATION_POLICY));
         // The policy is prompt framing only; model/effort argv stay on the
         // existing per-chat seat override path tested below.
         assert!(!CHAT_INVESTIGATION_POLICY.contains("--model"));
         assert!(!CHAT_INVESTIGATION_POLICY.contains("--max-turns"));
     }
 
-    /// Two first turns with different VARIABLE inputs (surface, journal
-    /// delta, mission, catalog, evidence, user text) share a byte-identical
-    /// prefix spanning the whole invariant block — the cache-stable ordering
-    /// contract.
+    /// The invariant contract is the system prompt: byte-identical on every
+    /// call (the cacheable prefix, and what lets a pre-warmed child match its
+    /// turn), carrying the whole contract and none of a turn's variables.
     #[test]
-    fn first_turn_invariant_prefix_is_byte_stable() {
-        fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
-            let n = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
-            &a[..n]
-        }
-        let a = build_first_turn_prompt(
-            &surface("plan", Some("Plan A"), None),
-            SELF_ID,
-            "WHILE YOU WERE AWAY — delta one\n",
-            "question one",
-            &FirstTurnGround::default(),
-        );
-        let b = build_first_turn_prompt(
+    fn the_system_prompt_is_the_invariant_contract() {
+        let a = system_prompt();
+        assert_eq!(a, system_prompt());
+        assert!(a.contains("/v1/global/consult"));
+        assert!(a.contains("/v1/memory/answer-pack"));
+        assert!(a.contains("never call ExitPlanMode."));
+        assert!(a.contains("PREFETCHED EVIDENCE"));
+        assert!(a.contains("WORKSPACE BRIEF"));
+        assert!(!a.contains("The user is currently on"));
+        assert!(!a.contains("WHILE YOU WERE AWAY"));
+        // The brainstorm posture: diverge, then converge.
+        assert!(a.contains("diverge, then converge"));
+        assert!(a.contains("compact table"));
+        assert!(a.contains("assumptions and unknowns"));
+        assert!(a.contains("**Next moves**"));
+        assert!(a.contains("cite it BY NAME"));
+        assert!(a.contains("Short by default"));
+        // A first turn's body starts with variable content; nothing of the
+        // contract leaks back into it.
+        let body = build_first_turn_prompt(
             &surface("drafter", None, None),
             SELF_ID,
             "",
             "another question",
-            &FirstTurnGround {
-                catalog: Some("- A [a] (1 links)\n"),
-                prefetch: Some("PREFETCHED EVIDENCE\n"),
-                mission: Some(("Research", "Find the best DB")),
-                ..Default::default()
-            },
+            &FirstTurnGround::default(),
         );
-        let shared = common_prefix(&a, &b);
-        // The shared prefix must reach the END of the invariant block — the
-        // formatting/write contract closes it.
-        assert!(shared.contains("`companion` skill"));
-        assert!(shared.contains("/v1/global/consult"));
-        assert!(shared.contains("/v1/memory/answer-pack"));
-        assert!(shared.contains("never call ExitPlanMode."));
-        // And every variable section sits after it.
-        assert!(!shared.contains("The user is currently on"));
-        assert!(!shared.contains("WHILE YOU WERE AWAY"));
-        assert!(!shared.contains("THEIR CATALOG"));
-        assert!(!shared.contains("question one"));
+        assert!(body.starts_with("The user is currently on"));
+        assert!(!body.contains("/v1/memory/answer-pack"));
     }
 
     #[test]
     fn followup_regrounds_on_surface_without_reembedding_the_role() {
         let s = surface("drafter", None, None);
-        let p = build_followup_prompt(&s, SELF_ID, "", "and now?");
+        let p = build_followup_prompt(&s, SELF_ID, "", None, "and now?");
         assert!(p.contains("the Prompt Drafter"));
+        assert!(!p.contains("WORKSPACE CHANGES"), "an unchanged workspace adds nothing");
+        let changed = build_followup_prompt(&s, SELF_ID, "", Some("WORKSPACE CHANGES since the last brief\n- x\n"), "and now?");
+        assert!(changed.find("WORKSPACE CHANGES").unwrap() < changed.find("The user says:").unwrap());
         // The surface id rides every turn — follow-up writes need it too.
         assert!(p.contains("[surface id: x-1]"));
         assert!(!p.contains("COMPANION"), "role is not re-embedded");

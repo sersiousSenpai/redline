@@ -110,6 +110,9 @@ pub use polis_core::types::{BrowseHit, GrepHit, GrepScope};
 #[allow(unused_imports)]
 pub use polis_store::{GrepError, ARCHIVE_ALGO, GREP_MIN_LITERAL, PROMPT_TEXT};
 
+/// `(seq, kind, session_id, comment body)`: one row of `recent_decisions`.
+pub type DecisionRow = (i64, String, Option<String>, Option<String>);
+
 /// One context-journal row — a meaningful app activity the Companion folds into
 /// its "while you were away" delta (surface switch, revision, nav, pin, …).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2504,6 +2507,48 @@ impl Database {
                 detail: r.get(6)?,
             })
         })?;
+        rows.collect()
+    }
+
+    /// The newest journal rows of one kind, newest first. The chat room's
+    /// workspace brief reads its "recently browsed" list from the `nav` rows.
+    pub fn list_recent_journal_kind(&self, kind: &str, limit: i64) -> rusqlite::Result<Vec<JournalRow>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, surface_kind, surface_id, label, detail
+             FROM context_journal WHERE kind = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![kind, limit.max(1)], |r| {
+            Ok(JournalRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                surface_kind: r.get(3)?,
+                surface_id: r.get(4)?,
+                label: r.get(5)?,
+                detail: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The newest decision events (`DECISION_KINDS`), newest first, as
+    /// `(seq, kind, session_id, comment body)`. The comment body is joined only
+    /// when the event references one. Deliberately lighter than
+    /// `decision_event_context`, which reads each session's whole plan.
+    pub fn recent_decisions(&self, limit: i64) -> rusqlite::Result<Vec<DecisionRow>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            // A subquery, not a join: a comment id repeats across the
+            // revisions it was carried into, and a join would repeat the event.
+            "SELECT e.seq, e.kind, e.session_id,
+                    (SELECT c.body FROM comments c
+                     WHERE e.ref_kind = 'comment' AND c.id = e.ref_id LIMIT 1)
+             FROM ledger_events e
+             WHERE e.kind IN ('resolution', 'approval', 'review_verdict')
+             ORDER BY e.seq DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.collect()
     }
 

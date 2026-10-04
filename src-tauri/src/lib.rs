@@ -34,6 +34,7 @@ mod codex_profile;
 mod confine;
 mod combine;
 mod companion;
+mod companion_warm;
 mod compose;
 mod context;
 mod cursor_hook;
@@ -135,6 +136,7 @@ mod voice;
 mod webview_guard;
 mod work;
 mod worktree;
+mod workspace_brief;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -12775,6 +12777,9 @@ pub fn run() {
             companion::companion_cancel,
             companion::companion_unqueue,
             companion::companion_kill_all,
+            companion::companion_prewarm,
+            companion::companion_release,
+            companion::companion_context,
             draft_suggestions_pending,
             draft_suggestion_resolve,
             draft_suggestion_unresolve,

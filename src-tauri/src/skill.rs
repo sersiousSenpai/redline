@@ -37,10 +37,11 @@ struct EmbeddedSkill {
 /// - `drafter`: the Prompt Drafter discussion agent — prompt-crafting
 ///   collaborator persona, the live-doc re-read discipline, and the tracked
 ///   write-suggestions contract (append/replace/insert/delete by block id).
-/// - `companion`: the chat room's agent — the unbound conversation grounded in
-///   the user's record. The spanning-app discipline, the while-you-were-away
-///   journal feed, the global consult contract, answer-pack-first retrieval,
-///   and graduating a conversation into a plan or a document.
+/// - `companion`: spanning the app's surfaces as one conversation — the
+///   while-you-were-away journal feed, the global consult contract,
+///   answer-pack-first retrieval and the staged writes. The chat room carries
+///   this contract in its own system prompt (`companion::system_prompt`) and
+///   no longer loads the skill; v7 slimmed it for the uses that still do.
 /// - `redline-code-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
 /// - `classmemory`: the ClassMemory classifier + retrieval contract (the lake's
@@ -84,7 +85,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "companion",
-        version: 6,
+        version: 7,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {

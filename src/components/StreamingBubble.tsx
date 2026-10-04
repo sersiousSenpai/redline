@@ -118,6 +118,8 @@ export interface StreamingBubbleProps {
    *  chip. Omit and no chip renders — and nothing is ever captured. */
   inspect?: { surface: string; key: string };
   onOpenLink?: (url: string) => void;
+  /** The chat room at plate scale: roomy prose and larger meta text. */
+  room?: boolean;
 }
 
 export default function StreamingBubble({
@@ -128,6 +130,7 @@ export default function StreamingBubble({
   activity,
   inspect,
   onOpenLink,
+  room = false,
 }: StreamingBubbleProps) {
   const [inspecting, setInspecting] = useState(false);
   const badge = retrying ? null : meterBadgeLabel(meter ?? null);
@@ -143,6 +146,7 @@ export default function StreamingBubble({
         <span
           style={{
             ...BYLINE,
+            ...(room ? { fontSize: "11px" } : null),
             color: retrying ? "var(--color-ink-muted)" : "var(--color-info)",
           }}
           title={meter?.model ?? undefined}
@@ -194,7 +198,7 @@ export default function StreamingBubble({
         <div
           className="flex items-center gap-1"
           style={{
-            fontSize: "calc(10.5px * var(--rl-discussion-zoom, 1))",
+            fontSize: `calc(${room ? 12 : 10.5}px * var(--rl-discussion-zoom, 1))`,
             lineHeight: 1.4,
             color: stalled ? "var(--color-warning)" : "var(--color-ink-muted)",
           }}
@@ -205,7 +209,7 @@ export default function StreamingBubble({
       )}
       {text ? (
         <div>
-          <MarkdownView body={text} compact onLinkClick={onOpenLink} />
+          <MarkdownView body={text} compact room={room} onLinkClick={onOpenLink} />
           <span style={{ color: "var(--color-ink-muted)" }}>
             {retrying ? "" : "▌"}
           </span>
@@ -214,7 +218,7 @@ export default function StreamingBubble({
         !doing && (
           <div
             style={{
-              fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
+              fontSize: `calc(${room ? 13 : 12.5}px * var(--rl-discussion-zoom, 1))`,
               lineHeight: 1.5,
               color: "var(--color-ink-muted)",
             }}

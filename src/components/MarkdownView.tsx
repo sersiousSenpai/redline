@@ -95,6 +95,8 @@ interface MarkdownViewProps {
   body: string;
   /** Adds extra-tight vertical rhythm for inline chat-style bubbles. */
   compact?: boolean;
+  /** Roomy prose for the chat room at plate scale. Wins over `compact`. */
+  room?: boolean;
   /** Render ```mermaid fences as live diagrams (interleaved React components).
    *  Off by default — enabled for settled discussion replies. */
   rich?: boolean;
@@ -158,6 +160,7 @@ export function splitMermaidSegments(body: string): Segment[] {
 export const MarkdownView = memo(function MarkdownView({
   body,
   compact = false,
+  room = false,
   rich = false,
   onLinkClick,
 }: MarkdownViewProps) {
@@ -166,7 +169,7 @@ export const MarkdownView = memo(function MarkdownView({
   // onClick below owns them, so the link opens in a Redline tab instead of also
   // being handed to the OS browser by that capture-phase handler.
   const cls =
-    (compact ? "rl-md rl-md-compact" : "rl-md") +
+    (room ? "rl-md rl-md-room" : compact ? "rl-md rl-md-compact" : "rl-md") +
     (onLinkClick ? " rl-md-own-links" : "");
   // Event-delegated handling for the raw-HTML body (no React handlers on the
   // injected nodes): a click on a fenced-block copy button copies that block,

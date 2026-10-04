@@ -30,6 +30,9 @@ import TurnFooter from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import ChatTurnProgress, { type ChatProgressStatus } from "./ChatTurnProgress";
+import { ChatContextChip } from "./ChatContextChip";
+import { ideaNote, planFromReplyInstruction, type ChatContext } from "../lib/chatRoom";
+import { standaloneNote } from "../lib/notes";
 
 // THE CHAT ROOM — Redline's unbound conversation.
 //
@@ -99,6 +102,11 @@ export interface ChatRoomProps {
   onShowTerminal?: (id: string) => void;
   onOpenPlan?: (id: string) => void;
   onFix?: (item: import("../lib/readiness").ReadinessItem) => Promise<boolean>;
+  /** The room has the whole plate (the island is open), so it reads at plate
+   *  scale. The ~360px pose keeps the compact rhythm whatever this says. */
+  expanded?: boolean;
+  /** "→ Draft" on a reply: open the Drafter seeded with it. */
+  onDraft?: (markdown: string) => void;
   onClose: () => void;
 }
 
@@ -117,6 +125,8 @@ export function ChatRoom({
   projectOptions = [],
   lastLaunchProject = null,
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
+  expanded = false,
+  onDraft,
   onClose,
   seed,
   seedId,
@@ -252,6 +262,35 @@ export function ChatRoom({
     };
   }, [refreshChats]);
 
+
+  // A WARM agent per open room (companion_warm.rs): spawn it on mount, so the
+  // next turn skips the CLI boot and the transcript replay, and let it go on
+  // unmount. Claude only; Codex stays per-turn. Keyed on what the spawn
+  // depends on, so a model or folder change re-warms on the new one.
+  const warmKey = JSON.stringify([cwd, harness ?? null]);
+  useEffect(() => {
+    if (harness && harness.backend !== "claude-code") return;
+    void invoke("companion_prewarm", { companionId, cwd, harness: harness ?? null }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companionId, warmKey]);
+  useEffect(() => () => { void invoke("companion_release", { companionId }).catch(() => {}); }, [companionId]);
+
+  // What the room knows: the workspace brief and evidence the last turn
+  // carried, for the Context chip. Read once on mount, then pushed per turn.
+  const [context, setContext] = useState<ChatContext | null>(null);
+  useEffect(() => {
+    let live = true;
+    void invoke<ChatContext | null>("companion_context", { companionId })
+      .then((value) => { if (live && value?.brief) setContext(value); })
+      .catch(() => {});
+    const un = listen<ChatContext>("companion-context", (e) => {
+      if (e.payload.companionId === companionId && e.payload.brief) setContext(e.payload);
+    });
+    return () => {
+      live = false;
+      void un.then((f) => f());
+    };
+  }, [companionId]);
 
   const send = useCallback(
     (text: string, opts?: { localBody?: string }) => {
@@ -407,6 +446,26 @@ export function ChatRoom({
     return () => ro.disconnect();
   }, []);
   const compact = pose === "compact";
+  const roomy = expanded && !compact;
+  const columnWidth = roomy ? 820 : 780;
+
+  // Per-reply capture, so an idea does not evaporate with the scrollback.
+  // All three reuse existing paths: the plan graduation, the Drafter seed and
+  // a standalone memory note.
+  const saveIdea = useCallback(async (body: string) => {
+    await invoke("memory_note_write", {
+      write: standaloneNote(ideaNote(body, { id: companionId, title: me?.title ?? "Chat" }, project?.path ?? cwd)),
+    });
+  }, [companionId, me?.title, project?.path, cwd]);
+  const replyActions = (m: CompanionMessage) => (
+    <ReplyActions
+      body={m.body}
+      room={roomy}
+      onPlan={canPlan ? () => plan(planFromReplyInstruction(m.body)) : undefined}
+      onDraft={onDraft ? () => onDraft(m.body) : undefined}
+      onSaveIdea={() => saveIdea(m.body)}
+    />
+  );
   const [activityOpen, setActivityOpen] = useState(false);
   useEffect(() => setActivityOpen(false), [companionId]);
 
@@ -448,7 +507,7 @@ export function ChatRoom({
         : <p>The conversation will be deleted. Its captured memory stays in the lake.</p>}
       {actionError && <p role="alert">{actionError}</p>}
     </BrowserDialog>}
-    <div data-chat-room data-chat-empty={!!composer && loaded && messages.length === 0 && status === "idle" && !receipt} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
+    <div data-chat-room data-room={roomy || undefined} data-chat-empty={!!composer && loaded && messages.length === 0 && status === "idle" && !receipt} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
       {/* Header: which chat, on what model, and the two ways out of it. */}
       <div
         ref={headerRef}
@@ -497,6 +556,8 @@ export function ChatRoom({
         </div>
       )}
 
+      {context && <ChatContextChip context={context} onOpenPlan={onOpenPlan} maxWidth={columnWidth} />}
+
       {/* Thread */}
       <div
         ref={scrollRef}
@@ -507,12 +568,12 @@ export function ChatRoom({
       >
         <div
           style={{
-            maxWidth: 780,
+            maxWidth: columnWidth,
             margin: "0 auto",
-            padding: "18px 20px 20px",
+            padding: roomy ? "22px 24px 28px" : "18px 20px 20px",
             display: "flex",
             flexDirection: "column",
-            gap: 14,
+            gap: roomy ? 22 : 14,
           }}
         >
           {!loaded ? null : messages.length === 0 && status === "idle" ? (
@@ -524,6 +585,8 @@ export function ChatRoom({
                 msg={m}
                 meter={meters[m.id]}
                 contextReset={resets.has(m.id)}
+                room={roomy}
+                actions={m.role === "assistant" && m.status === "complete" && m.body.trim() ? replyActions(m) : undefined}
                 onUnqueue={() => {
                   void unqueue(m.id).then((text) => {
                     if (text)
@@ -552,6 +615,7 @@ export function ChatRoom({
                 inspect={{ surface: "companion", key: companionId }}
                 meter={meter}
                 activity={activity}
+                room={roomy}
               />
             </>
           )}
@@ -566,7 +630,7 @@ export function ChatRoom({
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
       >
-        <div style={{ maxWidth: 780, margin: "0 auto" }}>
+        <div style={{ maxWidth: columnWidth, margin: "0 auto" }}>
           {attachments.length > 0 && (
             <div className="mb-1.5 flex min-w-0 flex-wrap gap-1.5" style={{ maxHeight: 64, overflowY: "auto" }}>
               {attachments.map((p) => (
@@ -621,8 +685,8 @@ export function ChatRoom({
                 maxHeight: 160,
                 overflowY: "auto",
                 resize: "none",
-                padding: "7px 10px",
-                fontSize: 12.5,
+                padding: roomy ? "9px 12px" : "7px 10px",
+                fontSize: roomy ? 15 : 12.5,
                 lineHeight: 1.5,
                 color: "var(--color-ink)",
                 background: "var(--color-paper)",
@@ -691,13 +755,13 @@ export function ChatRoom({
   );
 }
 
-function RoleTag({ role }: { role: string }) {
+function RoleTag({ role, room = false }: { role: string; room?: boolean }) {
   const isUser = role === "user";
   return (
     <span
       className="font-sans"
       style={{
-        fontSize: "9px",
+        fontSize: room ? "11px" : "9px",
         fontWeight: 600,
         textTransform: "uppercase",
         letterSpacing: "0.07em",
@@ -715,6 +779,8 @@ function ChatBubble({
   onResend,
   meter,
   contextReset,
+  room = false,
+  actions,
 }: {
   msg: CompanionMessage;
   onUnqueue?: () => void;
@@ -723,21 +789,40 @@ function ChatBubble({
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
+  /** Plate scale: the user's turn is a right-aligned tinted block, the
+   *  reply full-width prose with no bubble, like a desktop chat app. */
+  room?: boolean;
+  /** The reply's capture row (Copy · → Plan · → Draft · Save idea). */
+  actions?: ReactNode;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
   const isQueued = isUser && msg.status === "queued";
   const isUnsent = isUser && msg.status === "unsent";
+  const userBlock = room && isUser;
   return (
     <div
+      data-chat-turn={msg.role}
       className="flex flex-col gap-0.5"
-      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+      style={{
+        ...(isQueued || isUnsent ? { opacity: 0.65 } : null),
+        ...(userBlock
+          ? {
+              alignSelf: "flex-end",
+              maxWidth: "85%",
+              padding: "10px 14px",
+              borderRadius: 14,
+              background: "color-mix(in srgb, var(--color-info) 9%, var(--color-paper))",
+              border: "1px solid color-mix(in srgb, var(--color-info) 16%, transparent)",
+            }
+          : null),
+      }}
     >
-      <RoleTag role={msg.role} />
+      {!userBlock && <RoleTag role={msg.role} room={room} />}
       {isError ? (
         <div
           style={{
-            fontSize: "12.5px",
+            fontSize: room ? "13px" : "12.5px",
             lineHeight: 1.5,
             whiteSpace: "pre-wrap",
             color: "var(--color-warning)",
@@ -746,11 +831,60 @@ function ChatBubble({
           {msg.body}
         </div>
       ) : (
-        <MarkdownView body={msg.body} compact rich={!isUser} />
+        <MarkdownView body={msg.body} compact room={room} rich={!isUser} />
       )}
       {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
+      {!isUser && actions}
       {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
+    </div>
+  );
+}
+
+/** Copy · → Plan · → Draft · Save idea, under a settled reply. Each label
+ *  flips to a short confirmation in place rather than raising a toast. */
+function ReplyActions({
+  body,
+  room,
+  onPlan,
+  onDraft,
+  onSaveIdea,
+}: {
+  body: string;
+  room: boolean;
+  onPlan?: () => void;
+  onDraft?: () => void;
+  onSaveIdea: () => Promise<void>;
+}) {
+  const [done, setDone] = useState<"copy" | "idea" | "idea-failed" | null>(null);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current); }, []);
+  const flash = (what: NonNullable<typeof done>) => {
+    setDone(what);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setDone(null), 1600);
+  };
+  const style: React.CSSProperties = {
+    fontSize: room ? 12 : 11,
+    padding: "2px 8px",
+    borderRadius: 999,
+    border: "1px solid transparent",
+    background: "transparent",
+    color: "var(--color-ink-muted)",
+    cursor: "pointer",
+  };
+  return (
+    <div data-reply-actions className="font-sans" style={{ display: "flex", flexWrap: "wrap", gap: 2, marginTop: 2, marginLeft: -8 }}>
+      <button type="button" style={style} title="Copy this reply as markdown"
+        onClick={() => void navigator.clipboard?.writeText(body).then(() => flash("copy"), () => {})}>
+        {done === "copy" ? "Copied ✓" : "Copy"}
+      </button>
+      {onPlan && <button type="button" style={style} title="Plan from this conversation, built around this reply" onClick={onPlan}>→ Plan</button>}
+      {onDraft && <button type="button" style={style} title="Open the Drafter with this reply" onClick={onDraft}>→ Draft</button>}
+      <button type="button" style={style} title="Save this reply to your memory as a note"
+        onClick={() => void onSaveIdea().then(() => flash("idea"), () => flash("idea-failed"))}>
+        {done === "idea" ? "Saved ✓" : done === "idea-failed" ? "Couldn't save" : "Save idea"}
+      </button>
     </div>
   );
 }
