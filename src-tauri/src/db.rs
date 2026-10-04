@@ -637,7 +637,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 4;
+    const SCHEMA_VERSION: i64 = 5;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -656,6 +656,7 @@ impl Database {
             (2, Self::migrate_v2),
             (3, Self::migrate_v3),
             (4, Self::migrate_v4),
+            (5, Self::migrate_v5),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -706,6 +707,12 @@ impl Database {
             // leave the stamp alone (never downgrade someone else's marker),
             // and carry on. Only a forward stamp whose schema is genuinely
             // missing something we need is refused.
+            //
+            // Except what v5 adds, which is applied first: a nullable column
+            // and a new table this build owns, both idempotent. A foreign
+            // lineage has never heard of either, and refusing over them would
+            // brick a database that is otherwise perfectly usable.
+            Self::migrate_v5(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -771,6 +778,13 @@ impl Database {
     /// missing something exotic will fail at that feature's first query, which
     /// is the same failure mode the app had before versioning existed.
     fn verify_schema(conn: &Connection) -> rusqlite::Result<()> {
+        Self::verify_schema_at(conn, Self::SCHEMA_VERSION)
+    }
+
+    /// `verify_schema` against the shape a given version promises. A step in
+    /// the middle of the chain (v3 verifies itself) must not demand columns a
+    /// LATER step adds: a fresh database would fail its own migration.
+    fn verify_schema_at(conn: &Connection, version: i64) -> rusqlite::Result<()> {
         // Present at all, or nothing works. Cheap: one `sqlite_master` read.
         const CORE_TABLES: &[&str] = &[
             "sessions",
@@ -814,12 +828,18 @@ impl Database {
                 ],
             ),
         ];
-        for (table, columns) in REQUIRED {
+        // Columns later steps add, keyed by the version that adds them.
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"])];
+        let later = REQUIRED_SINCE
+            .iter()
+            .filter(|(since, ..)| *since <= version)
+            .map(|(_, table, columns)| (*table, *columns));
+        for (table, columns) in REQUIRED.iter().copied().chain(later) {
             let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
             let present: std::collections::HashSet<String> = stmt
                 .query_map([], |row| row.get::<_, String>(1))?
                 .collect::<rusqlite::Result<_>>()?;
-            for column in *columns {
+            for column in columns {
                 if !present.contains(*column) {
                     return Err(rusqlite::Error::SqliteFailure(
                         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -907,6 +927,50 @@ impl Database {
         Ok(())
     }
 
+    /// v4 → v5: the run-it batch's additions (Tracks S and O).
+    ///
+    /// * `comments.research`: a research comment's link (Search from the
+    ///   plan), JSON `{query, browseId, url?, answerHash?, answerExcerpt?}`;
+    ///   NULL for every other comment. The history load reads it, so a
+    ///   database without it cannot start.
+    /// * `scaled_runs`: a scaled build's config, current limits (Extend
+    ///   raises them) and phase, so a restart neither loses the budget nor
+    ///   re-opens a stopped build. Additive; no FK (schema law).
+    ///
+    /// Both first shipped inside `migrate_v1`, which a database already at v4
+    /// never runs again: every existing install failed at "no such column:
+    /// research". Idempotent, so it is also safe on the forward-stamp path.
+    fn migrate_v5(conn: &Connection) -> rusqlite::Result<()> {
+        let has_research = {
+            let mut stmt = conn.prepare("PRAGMA table_info(comments)")?;
+            let columns = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            // No `comments` table at all is a foreign schema: leave it to
+            // `verify_schema` to refuse it with a message, not a raw error.
+            columns.is_empty() || columns.iter().any(|c| c == "research")
+        };
+        if !has_research {
+            conn.execute("ALTER TABLE comments ADD COLUMN research TEXT", [])?;
+        }
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS scaled_runs (
+                run_id TEXT PRIMARY KEY,
+                plan_session_id TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                limits_json TEXT NOT NULL,
+                phase_json TEXT NOT NULL,
+                started_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS scaled_runs_by_plan ON scaled_runs(plan_session_id, created_at);
+            "#,
+        )?;
+        Ok(())
+    }
+
     /// v2 → v3: repair the stamp collision with the older cockpit lineage.
     /// Its version 2 had neither sessions.effort nor the native run tables.
     /// Reusing the additive, idempotent step preserves all existing history
@@ -915,7 +979,8 @@ impl Database {
         Self::migrate_v2(conn)?;
         // Verify before the caller writes version 3, including on a partial
         // legacy schema whose unrelated required columns are still missing.
-        Self::verify_schema(conn)
+        // Against the v3 shape: what v5 adds does not exist yet.
+        Self::verify_schema_at(conn, 3)
     }
 
     /// v0 → v1: the whole schema as of this build.
@@ -1832,10 +1897,6 @@ impl Database {
         // `<app_data_dir>/attachments/<session_id>/`. NULL for every comment
         // without one.
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN attachments TEXT", []);
-        // A research comment's link (Search from the plan): JSON
-        // `{query, browseId, url?, answerHash?, answerExcerpt?}`. NULL for
-        // every other comment.
-        let _ = conn.execute("ALTER TABLE comments ADD COLUMN research TEXT", []);
         // The same, per sidecar-discussion turn: a reviewer can drop an image
         // into a follow-up inside a comment's Discuss thread.
         let _ = conn.execute(
@@ -1998,24 +2059,7 @@ impl Database {
             );
             "#,
         )?;
-        // Scaled builds (Track O): a run's scale config, its current limits
-        // (Extend raises them) and its phase, so a restart neither loses the
-        // budget nor re-opens a stopped build. Additive; no FK (schema law).
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS scaled_runs (
-                run_id TEXT PRIMARY KEY,
-                plan_session_id TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                limits_json TEXT NOT NULL,
-                phase_json TEXT NOT NULL,
-                started_at INTEGER,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS scaled_runs_by_plan ON scaled_runs(plan_session_id, created_at);
-            "#,
-        )?;
+
         // The live-monitor anchor, written at the ingest-claim beacon — the one
         // moment the orchestrator's transcript path is in hand. Separate from
         // `plan_runs` deliberately: that row exists only from exit-report time
@@ -15118,6 +15162,37 @@ body.
         );
         assert!(err.to_string().contains("only partly migrated"), "{err}");
         drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The run-it batch shipped `comments.research` and `scaled_runs` inside
+    /// `migrate_v1`, so an existing v4 database never got them and every
+    /// launch died at "no such column: research". Built from a real database
+    /// with both removed and the stamp put back to 4: exactly a pre-batch
+    /// install.
+    #[test]
+    fn a_v4_database_gains_the_research_column_and_scaled_runs() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE comments DROP COLUMN research;
+                 DROP TABLE scaled_runs;
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let db = Database::open(&path).expect("a v4 database must open");
+        {
+            let conn = db.lock_conn();
+            let stamp: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(stamp, Database::SCHEMA_VERSION);
+        }
+        // The history load that crashed reads the column; the build table works.
+        db.load_all().expect("the history load reads the research column");
+        assert!(db.latest_scaled_run_id("plan").unwrap().is_none());
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 
