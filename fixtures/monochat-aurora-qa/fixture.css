@@ -1,0 +1,13 @@
+html,body,#root { height:100%; margin:0; overflow:hidden; }
+#root { display:flex; flex-direction:column; }
+.qa-nav,.rl-app-footer { flex-shrink:0; }
+.qa-terminal { height:180px; flex-shrink:0; padding:16px; font-size:12px; }
+body { font-family:-apple-system,BlinkMacSystemFont,sans-serif; }
+.qa-nav { height:70px; padding:0 6vw; display:flex; gap:24px; align-items:center; border-bottom:1px solid var(--color-rule); font-size:11px; }
+.qa-nav strong { letter-spacing:3px; margin-right:auto; }.qa-nav span { font-size:8px; color:#7ce3c3; margin-left:14px; }
+.qa-nav button { border:0; background:none; color:var(--color-ink-muted); }
+.qa-document { max-width:850px; flex:1; min-height:0; overflow:auto; margin:30px auto; padding:50px 70px; border:1px solid var(--color-rule); border-radius:20px; background:color-mix(in srgb,var(--color-paper) 80%,transparent); position:relative; }
+.qa-eyebrow { color:var(--color-info); letter-spacing:2px; font-size:10px; }.qa-document h1 { font-weight:450; font-size:48px; line-height:1.08; letter-spacing:-2px; margin:24px 0; }.qa-lede { font-size:17px!important; }.qa-document p { font-size:14px; line-height:1.9; max-width:600px; color:var(--color-ink-muted); margin:15px 0; }.qa-document h2 { font-size:19px; margin:28px 0 12px; }.qa-rule { margin:30px 0; border-top:1px solid var(--color-rule); }.qa-note { border-left:2px solid var(--color-selection); padding:12px; background:#bc9bff0d; color:var(--color-selection); font-size:12px; }.qa-discussion { font-size:13px; line-height:1.7; }.qa-discussion h3 { font-size:20px; margin:20px 0; }.qa-discussion small { color:var(--color-info); }.qa-action { padding:16px; margin:20px 0; border:1px solid var(--color-rule); border-radius:12px; }.qa-action button { margin-left:12px; color:var(--color-info); }.qa-discussion textarea { display:block; padding:12px; border:1px solid var(--color-rule); border-radius:10px; min-height:70px; width:100%; margin-bottom:12px; }
+@media(max-width:650px) { .qa-nav { padding:0 18px; gap:10px; }.qa-nav strong span { display:none; }.qa-document { margin:16px; padding:26px; }.qa-document h1 { font-size:34px; } }
+
+.qa-discussion { position:absolute; right:20px; top:100px; bottom:170px; width:min(340px,80vw); padding:22px; background:var(--color-bg-elevated); border:1px solid var(--color-rule); border-radius:16px; overflow:auto; }

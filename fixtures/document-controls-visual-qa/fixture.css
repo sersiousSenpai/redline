@@ -1,0 +1,11 @@
+html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+body { background: var(--color-paper); color: var(--color-ink); }
+.qa-heading { height: 52px; display: flex; align-items: center; gap: 22px; padding: 0 24px; font: 12px system-ui; border-bottom: 1px solid var(--color-rule); }
+.qa-heading strong { font: 600 22px Georgia; }
+.qa-heading span { color: var(--color-ink-muted); }
+.qa-document-viewport { margin: 20px auto; height: calc(100% - 180px); overflow: auto; border: 1px solid var(--color-rule); border-radius: 5px; background: var(--color-bg-elevated); }
+.qa-document-viewport article { width: 100%; box-sizing: border-box; margin: 0 auto; padding: 26px 32px 28px 64px; font: 16px/1.6 Georgia; }
+.qa-document-viewport article h2 { font-size: 26px; margin: 0 0 18px; }
+.qa-document-viewport article p { margin: 0 0 18px; }
+.qa-width-control { position: fixed; right: 24px; bottom: 48px; padding: 4px; border: 1px solid var(--color-rule); border-radius: 18px; background: var(--color-paper); }
+.qa-caption { position: fixed; bottom: 12px; width: 100%; text-align: center; font: 11px system-ui; color: var(--color-ink-muted); }

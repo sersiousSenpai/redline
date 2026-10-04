@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "notice": "Synthetic conformance data. Dates and issuers below are fictional; this is not a current research report.",
+  "definition": {
+    "name": "Securities Dev reference",
+    "mandate": "Monitor securities investigations, Rule 10b-5 and Section 11 announcements, filed actions, class periods, published lead-plaintiff deadlines, notices, press releases and dated market observations. Explain relevance. Verify dates afresh, retain missing or conflicting dates, distinguish announcements from filed complaints, deduplicate across publishers and runs, and report partial source coverage. Rank only with confirmed examples. Describe observed publishing patterns separately from broader trend interpretations.",
+    "cadence": "daily",
+    "timeZone": "America/Los_Angeles",
+    "contextMode": "follow",
+    "contextScope": ["mandate", "artifact", "evidence", "judgments", "procedure", "runHistory"],
+    "allowedTools": ["read", "fetch", "snapshot"],
+    "allowedHosts": ["firm-a.test", "firm-b.test", "firm-c.test", "firm-d.test", "firm-e.test", "firm-f.test", "firm-g.test", "firm-h.test", "firm-i.test", "firm-j.test", "firm-k.test", "firm-l.test"],
+    "localOnly": true
+  },
+  "identity": {
+    "model": {"provider": "fixture", "model": "securities-reference-v1", "local": true, "capabilities": ["text", "structured-output", "cancellation"], "contextLimit": 32768},
+    "execution": {"environmentId": "headless-reference-computer", "workspaceId": "replace-with-mission-id", "allowedTools": ["read", "fetch"], "allowedHosts": ["firm-a.test", "firm-b.test"], "credentialRefs": [], "maxActions": 24, "maxSeconds": 120}
+  },
+  "findings": [
+    {
+      "body": "Fictional Example Industries investigation announced. A filed complaint and lead-plaintiff deadline are unverified.",
+      "fingerprint": "fixture-example-industries|investigation|2026-09-10",
+      "category": "investigation_announcement",
+      "relevance": "Within the securities investigations mandate; monitor for a dated, attributable complaint.",
+      "scope": "Fictional Example Industries September 2026 investigation",
+      "priority": 70,
+      "classPeriod": null,
+      "leadPlaintiffDeadline": null,
+      "sources": [{"url": "https://firm-a.test/announcements/example-industries", "title": "Synthetic firm A announcement", "excerpt": "An investigation of fictional Example Industries was announced. No court filing or deadline is supplied.", "publishedAt": 1788998400000, "observedAt": 1789084800000, "evidenceType": "firm_announcement"}]
+    },
+    {
+      "body": "A second publisher repeated the fictional Example Industries announcement; this is duplicate coverage.",
+      "fingerprint": "fixture-example-industries|investigation|2026-09-10",
+      "category": "investigation_announcement",
+      "relevance": "Repeated coverage does not independently establish a filed action.",
+      "scope": "Fictional Example Industries September 2026 investigation",
+      "sources": [{"url": "https://firm-b.test/news/example-industries", "title": "Synthetic firm B announcement", "excerpt": "The same fictional investigation is repeated without a complaint or deadline.", "publishedAt": 1789084800000, "observedAt": 1789171200000, "evidenceType": "firm_announcement"}]
+    }
+  ],
+  "coverage": {
+    "expectedSources": 12,
+    "checkedSources": ["firm-a.test", "firm-b.test", "firm-c.test", "firm-d.test", "firm-e.test", "firm-f.test", "firm-g.test", "firm-h.test", "firm-i.test", "firm-j.test", "firm-k.test"],
+    "failedSources": [{"host": "firm-l.test", "error": "simulated timeout", "attempts": 2}],
+    "summary": "Synthetic partial coverage: 11 of 12 publishers checked. One publisher timed out. Repeated announcements are deduplicated; no assertion that nothing changed is made."
+  },
+  "confirmedCorrectionForNextVersion": "An investigation announcement is not evidence of a filed action. Preserve unknown dates until a dated source verifies them."
+}

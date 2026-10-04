@@ -1,0 +1,11 @@
+/* Fixture shell only; production component geometry is never overridden. */
+.qa-shell { height:100dvh; display:flex; flex-direction:column; overflow:hidden; padding:10px; gap:8px; }
+.qa-shell-heading { height:24px; flex:none; display:flex; align-items:center; gap:16px; color:var(--color-ink-muted); font-size:11px; padding:0 8px; }
+.qa-shell-heading strong { color:var(--color-ink); font-size:13px; }
+.qa-shell-heading small { margin-left:auto; }
+.qa-plate { display:flex; min-width:0; min-height:0; flex:1; overflow:hidden; border:1px solid var(--color-rule); border-radius:10px; }
+.qa-browser-body { display:flex; flex:1; min-height:0; min-width:0; overflow:hidden; }
+.qa-chat-dock { display:flex; flex-direction:column; width:380px; flex:none; min-height:0; min-width:0; border-left:1px solid var(--color-rule); }
+.qa-room { display:flex; min-height:0; min-width:0; flex:1; max-width:850px; margin:0 auto; }
+.qa-other { padding:30px; }
+@media(min-width:1400px) { .qa-chat-dock { width:420px; } }

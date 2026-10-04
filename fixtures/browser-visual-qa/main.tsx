@@ -1,0 +1,83 @@
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { createPortal, flushSync } from "react-dom";
+import { BrowserChrome } from "../../src/components/BrowserChrome";
+import { BrowserDialog } from "../../src/components/BrowserSurfaces";
+import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "../../src/components/BrowserPagePanels";
+import { BrowserTileStage, type TilePage } from "../../src/components/BrowserTileStage";
+import { createBoundedPortalHost, PersistentPortalSlot } from "../../src/components/PersistentPortalSlot";
+import { ChatRoom } from "../../src/components/ChatRoom";
+import { BrowserChat } from "../../src/components/BrowserChat";
+import { reorderTabs, startTabPointerDrag } from "../../src/lib/browserTabDrag";
+import { assignVisibleTile, swapVisibleTiles, tileBadges, visibleGrid, visibleTileIds, type BrowserLayout } from "../../src/lib/browserLayout";
+import { MosaicEditDialog, MosaicManagerDialog } from "../../src/components/MosaicDialogs";
+import { applyTheme } from "../../src/theme/applyTheme";
+import "../../src/styles.css";
+import "../../src/components/BrowserWorkspace.css";
+import "./fixture.css";
+
+const noop = () => {};
+const initialTabs: TilePage[] = ["Research overview", "Evidence and source comparison", "Design notes and decisions", "Implementation reference"].map((title, i) => ({ id: `qa-tab-${i}`, browseId: `qa-page-${i}`, title, url: `https://example.test/source-${i + 1}` }));
+const mosaicTabs: TilePage[] = ["Wall Street Journal", "Seeking Alpha", "Yahoo Finance", "MarketWatch", "Barron's", "Financial Times", "Bloomberg", "Reuters Markets", "CNBC"].map((title, i) => ({ id: `qa-mosaic-${i}`, browseId: `qa-mosaic-page-${i}`, title, url: `https://example.test/markets-${i + 1}` }));
+const shots = new Map([...initialTabs, ...mosaicTabs].map((tab, i) => [tab.id, "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1100"><rect width="900" height="1100" fill="#faf9f6"/><rect width="900" height="64" fill="#ecebe5"/><text x="42" y="41" fill="#52564d" font-family="system-ui" font-size="18">FIELD NOTES · SOURCE ${i + 1}</text><text x="42" y="132" fill="#222921" font-family="Georgia" font-size="36">${tab.title}</text><text x="42" y="175" fill="#697263" font-family="system-ui" font-size="16">Synthetic local page · actual tile component</text>${Array.from({ length: 21 }, (_, n) => `<rect x="42" y="${225 + n * 30}" width="${n % 3 === 2 ? 620 : 795}" height="10" rx="3" fill="#dddfd6"/>`).join("")}<rect x="42" y="880" width="795" height="130" rx="10" fill="#e6ebe2"/></svg>`)]));
+
+function Fixture() {
+  const [tabs, setTabs] = useState(initialTabs), [activeId, setActiveId] = useState(initialTabs[0].id);
+  const [address, setAddress] = useState(initialTabs[0].url);
+  const [menuOpen, setMenuOpen] = useState(false), [dialog, setDialog] = useState("");
+  const [surface, setSurface] = useState("browser"), [chatKind, setChatKind] = useState("room"), [chatOpen, setChatOpen] = useState(true);
+  const [followingTabs, setFollowingTabs] = useState(true);
+  const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
+  const [layout, setLayout] = useState<BrowserLayout>({ preset: "grid", tiles: initialTabs.map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: initialTabs[0].browseId });
+  const [stageWidth, setStageWidth] = useState(1000);
+  const [host] = useState(() => createBoundedPortalHost("visual-qa-chat"));
+  const stageRef = useRef<HTMLDivElement>(null), slots = useRef(new Map<string, HTMLDivElement>());
+  useLayoutEffect(() => {
+    const node = stageRef.current; if (!node) return;
+    const observer = new ResizeObserver(() => setStageWidth(node.clientWidth));
+    observer.observe(node); setStageWidth(node.clientWidth);
+    return () => observer.disconnect();
+  }, [surface, chatOpen]);
+  useEffect(() => {
+    const openMosaic = () => { setTabs(mosaicTabs.slice(0, 7)); setActiveId(mosaicTabs[0].id); setLayout({ preset: "grid", grid: { rows: 3, cols: 3 }, tiles: mosaicTabs.slice(0, 7).map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: mosaicTabs[0].browseId }); };
+    (window as any).__qa = { setSurface, setDialog, setChatKind, setChatOpen, setLayout, setTabs, openMosaic, host, getState: () => ({ surface, chatKind, chatOpen, layout, stageWidth, tabs }), setTheme: applyTheme };
+    document.documentElement.dataset.qaReady = "true";
+  }, [host, surface, chatKind, chatOpen, layout, stageWidth, tabs]);
+  const ids = visibleTileIds(layout, tabs.map((tab) => tab.browseId), tabs.find((tab) => tab.id === activeId)?.browseId ?? tabs[0].browseId, stageWidth);
+  const pages = ids.map((id) => tabs.find((tab) => tab.browseId === id)!).filter(Boolean);
+  // The same projection BrowserPane hands its stage.
+  const stageLayout = layout.grid ? { ...layout, grid: visibleGrid(layout, tabs.map((tab) => tab.browseId), stageWidth) } : layout;
+  function select(id: string) { setActiveId(id); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
+  const conversation = chatKind === "room" ? <ChatRoom companionId="qa-carried" cwd={null} dictationEnabled={false} onSelectChat={noop} onEmpty={noop} onClose={noop} presentation={surface === "room" ? "room" : "browser"}/> : <BrowserChat
+    browseId="qa-browse" label="qa-native-absent" workspaceId="regular" onClose={noop}
+    title="Research sources and evidence" linked={followingTabs} onToggleLinked={() => setFollowingTabs(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
+    onResearch={noop}/>;
+  return <div className="qa-shell">
+    <div className="qa-shell-heading"><strong>Redline</strong><span>Browser workspace · isolated visual fixture</span><small>Native pages are synthetic images</small></div>
+    <main className="qa-plate">
+      {surface === "browser" ? <div className="rb-workspace">
+        <BrowserChrome tabs={tabs} activeId={activeId} address={address} onAddress={setAddress} onAddressFocus={noop} onNavigate={noop} onBack={noop} onForward={noop} onReload={noop} onSelect={select}
+          onCloseTab={(id) => { const remaining = tabs.filter((tab) => tab.id !== id); if (remaining.length) { setTabs(remaining); if (id === activeId) select(remaining[0].id); } }} onNewTab={noop} onTabDrag={(event, id) => { if ((event.target as HTMLElement).closest("button")) return; startTabPointerDrag(event.nativeEvent, event.currentTarget as HTMLElement, {
+            onDragging: noop, onDrop: (over, tile) => flushSync(() => { const tab = tabs.find(tab => tab.id === id)!; if (tile !== null) setLayout(old => assignVisibleTile(old, ids, tile, tab.browseId));
+              else if (over && over !== id) setTabs(old => reorderTabs(old, id, over)); }),
+          }); }} tileBadges={tileBadges(ids)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+          chatOpen={chatOpen} onToggleChat={() => setChatOpen(!chatOpen)} split={pages.length > 1} onArrange={() => setDialog("layout")} menuOpen={menuOpen} onMenu={setMenuOpen}
+          onBookmarks={() => setDialog("bookmarks")} onAppearance={() => setDialog("long")} onPreferences={() => setDialog("preferences")} onInspect={noop} onCloseBrowser={() => setSurface("room")}
+          onMosaics={() => setDialog("mosaics")} mosaic={layout.grid ? { name: "Stock News", onClose: noop } : null}/>
+        <div className="qa-browser-body"><BrowserTileStage stageRef={stageRef} slots={slots} pages={pages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={false} shots={shots} showShots onFocus={select} onAssign={(index, id) => setLayout(old => assignVisibleTile(old, ids, index, id))} onSwap={(from, to) => setLayout(old => swapVisibleTiles(old, ids, from, to))} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} onAddPage={noop} onLayout={(patch) => setLayout((old) => ({ ...old, ...patch }))} onDragging={noop}/>
+          {chatOpen && <aside className="qa-chat-dock" aria-label="Browser conversation"><PersistentPortalSlot host={host} name="browser-chat"/></aside>}
+        </div>
+      </div> : surface === "room" ? <div className="qa-room"><PersistentPortalSlot host={host} name="chat-room"/></div> : <div className="qa-other"><h1>Surface switched</h1><p>The chat portal is detached and retains its mounted conversation.</p></div>}
+    </main>
+    {createPortal(conversation, host)}
+    {dialog === "layout" && <BrowserLayoutDialog layout={layout} available={tabs.length} tabs={tabs} activeBrowseId={pages[0]?.browseId} onChoose={(preset) => setLayout((old) => ({ ...old, preset, maximized: null }))} onSaveDefault={noop} onClose={() => setDialog("")}/>}
+    {dialog === "bookmarks" && <BrowserBookmarksDialog bookmarks={Array.from({ length: 28 }, (_, i) => ({ title: `Saved source ${i + 1}: context and evidence for this investigation`, url: `https://example.test/long-source-path/${i}` }))} title={tabs[0].title} url={tabs[0].url} onSave={noop} onRemove={noop} onOpen={noop} onClose={() => setDialog("")}/>}
+    {dialog === "mosaics" && <MosaicManagerDialog mosaics={[{ id: "mosaic:news", name: "Stock News", grid: { rows: 3, cols: 3 }, tabCount: 9, updatedAt: Date.now() - 3 * 3_600_000 }, { id: "mosaic:dev", name: "Morning dev dashboards and release notes", grid: { rows: 2, cols: 2 }, tabCount: 4, updatedAt: Date.now() - 2 * 86_400_000 }]}
+      error={null} activeId={layout.grid ? "mosaic:news" : null} activeName="Stock News" startupId="mosaic:news" canSaveCurrent onOpen={noop} onEdit={() => setDialog("mosaic-edit")} onNew={() => setDialog("mosaic-edit")} onSaveCurrent={noop} onDelete={noop} onStartup={noop} onLeave={noop} onClose={() => setDialog("")}/>}
+    {dialog === "mosaic-edit" && <MosaicEditDialog draft={{ id: "mosaic:news", name: "Stock News", grid: { rows: 3, cols: 3 }, entries: mosaicTabs.slice(0, 7).map((tab, i) => ({ url: tab.url, label: i < 3 ? tab.title : "" })) }} previous={null} createId={() => crypto.randomUUID()} onSave={async () => setDialog("")} onCancel={() => setDialog("")}/>}
+    {dialog === "preferences" && <BrowserPreferencesDialog selectionActions onSelectionActions={noop} onClose={() => setDialog("")}/>}
+    {dialog === "long" && <BrowserDialog title="Long content fixture" subtitle="The actual dialog component must keep its heading and footer visible while the body scrolls." onClose={() => setDialog("")}>{Array.from({ length: 60 }, (_, i) => <p key={i}>Setting {i + 1}. A deliberately long settings description verifies bounded dialog scrolling and visible dismissal controls.</p>)}</BrowserDialog>}
+  </div>;
+}
+applyTheme("studio");
+createRoot(document.getElementById("root")!).render(<Fixture/>);
