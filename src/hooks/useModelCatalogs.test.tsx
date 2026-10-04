@@ -35,6 +35,15 @@ describe("revalidating model catalogs", () => {
     expect(current.catalogs.codex?.[0].slug).toBe("codex-model");
     expect(invokeMock).toHaveBeenCalledWith("model_catalog_snapshot", { backend: "cursor", force: false });
   });
+  it("treats a missing snapshot as a failed refresh, never a crash", async () => {
+    invokeMock.mockResolvedValueOnce(snapshot("saved"));
+    await act(async () => current.request("codex", "same"));
+    invokeMock.mockResolvedValueOnce(null);
+    await act(async () => current.request("codex", "same"));
+    expect(current.catalogs.codex?.[0].slug).toBe("saved");
+    expect(current.errors.codex).toMatch(/Couldn't refresh/);
+    expect(current.status.codex?.refreshing).toBe(false);
+  });
   it("retains usable rows while refreshing and after an IPC failure", async () => {
     invokeMock.mockResolvedValueOnce(snapshot("saved"));
     await act(async () => current.request("codex", "same"));

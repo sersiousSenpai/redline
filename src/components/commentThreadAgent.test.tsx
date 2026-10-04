@@ -103,7 +103,15 @@ beforeEach(() => {
   statusReply = idle;
   history = [];
   listenMock.mockImplementation(() => Promise.resolve(() => {}));
-  invokeMock.mockImplementation((cmd: string) => {
+  invokeMock.mockImplementation((cmd: string, args?: { backend?: string }) => {
+    // The live catalog command (`useModelCatalogs`); the per-backend
+    // commands below are what it replaced.
+    if (cmd === "model_catalog_snapshot") return Promise.resolve({
+      models: args?.backend === "codex"
+        ? [{ slug: "gpt-fixture", displayName: "Fixture GPT", description: "", defaultEffort: "high", efforts: ["high", "ultra"] }]
+        : [{ slug: "opus", displayName: "opus", description: "", defaultEffort: null, efforts: [] }],
+      checkedAt: 1, source: "harness", warning: null,
+    });
     if (cmd === "fork_thread_model") return Promise.resolve([null, null]);
     if (cmd === "get_agent_seats") return Promise.resolve({ seats: { fork_plan: { model: "opus", effort: "xhigh" } } });
     if (cmd === "claude_model_catalog") return Promise.resolve([{ id: "opus", label: "opus", alias: true }, { id: "sonnet", label: "sonnet", alias: true }]);

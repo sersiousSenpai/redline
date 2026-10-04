@@ -38,8 +38,11 @@ export function useModelCatalogs() {
     if (!same) setCatalogs(prev => ({ ...prev, [backend]: [] }));
     setErrors(prev => ({ ...prev, [backend]: undefined }));
     setStatus(prev => ({ ...prev, [backend]: { checkedAt: same ? prev[backend]?.checkedAt ?? null : null, refreshing: true } }));
-    void invoke<ModelCatalogSnapshot>("model_catalog_snapshot", { backend, force }).then(snapshot => {
+    void invoke<ModelCatalogSnapshot | null>("model_catalog_snapshot", { backend, force }).then(snapshot => {
       if (generations.current.get(backend) !== generation) return;
+      // No snapshot is a failed refresh, never a crash: a render that reads
+      // `snapshot.models` off null takes the whole chip (and its thread) down.
+      if (!snapshot) throw new Error("no model catalog snapshot");
       setCatalogs(prev => ({ ...prev, [backend]: snapshot.models }));
       setErrors(prev => ({ ...prev, [backend]: snapshot.warning ?? undefined }));
       setStatus(prev => ({ ...prev, [backend]: { refreshing: false, checkedAt: snapshot.checkedAt, source: snapshot.source } }));

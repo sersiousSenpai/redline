@@ -130,13 +130,18 @@ describe("landing wiring", () => {
     expect(frontDoor).toContain('data-tour="landing"');
   });
 
-  it("the front door is REACHABLE — something clears the session selection", () => {
-    // The door renders only when no plan is selected, and boot auto-selects
-    // the most recent one. Without a deselect path it is unreachable for
-    // anyone who has ever reviewed a plan — it would show on a virgin
-    // install and never again. This shipped broken exactly once.
-    expect(app).toContain("setActiveId(null)");
+  it("the front door is REACHABLE from any state, a plan selected or not", () => {
+    // It once rendered only when no plan was selected, and boot auto-selects
+    // the most recent one, so it was unreachable for anyone who had ever
+    // reviewed a plan. It shipped broken exactly once. The door is now an
+    // island over every surface, opened by `openFrontDoor` (New plan, ⌘⇧N),
+    // which must not depend on the session selection.
+    const open = app.slice(app.indexOf("const openFrontDoor = useCallback("));
+    const body = open.slice(0, open.indexOf("}, []);"));
+    expect(body).toContain("setFrontDoorOpen(true)");
+    expect(body).not.toMatch(/activeId|session/);
     expect(app).toContain("onNewPlan={openFrontDoor}");
+    expect(app).toContain("openFrontDoorRef.current = openFrontDoor;");
   });
 
   it("the door survives the sidebar going away — two entries outside it", () => {

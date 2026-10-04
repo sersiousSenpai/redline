@@ -106,12 +106,15 @@ describe("the animation never gates actionability", () => {
     //   2. `tourActive`      — a coachmark pinned to a moving plate misses
     //   3. the tour's render — same, at the mount site
     //   4. the document plate's "Loading…" — a flash inside parting doors
-    // Plus the destructuring in App's body. A fifth consumer needs its own
+    //   5. the conversation island's `clearanceKey` — the island measures its
+    //      clearance against the plate, so it re-measures when the doors land
+    // Plus the destructuring in App's body. A sixth consumer needs its own
     // geometry reason; an actionability reason is exactly what is banned.
     const uses = [...app.matchAll(/bootAnimating/g)].length;
     expect(uses, "a new bootAnimating consumer needs a geometry reason").toBe(
-      5,
+      6,
     );
+    expect(app).toMatch(/clearanceKey=\{`[^`]*\$\{bootAnimating\}`\}/);
     expect(app).not.toContain("bootSettled");
   });
 
