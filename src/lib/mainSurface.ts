@@ -90,3 +90,20 @@ export function migrateMainSurfaceOnce(storage: Storage): void {
     /* storage unavailable — in-memory defaults apply */
   }
 }
+
+/** Every launch opens on the Front Door. The persisted surface is a within-
+ *  run preference, not something to restore: the first frame reads it
+ *  synchronously, and the bootstrap's landing decision only arrives after an
+ *  async round-trip — so restoring, say, the browser painted that surface
+ *  (and its native webview) first, then the document plate's composer landed
+ *  over it as boot switched away. Rewriting the key before the first
+ *  `usePersistedState` read makes frame one the Front Door. A held plan still
+ *  claims the plate afterwards, and an explicit workspace/harness landing is
+ *  still honored by `initialSurface`. */
+export function bootOnFrontDoor(storage: Storage): void {
+  try {
+    storage.setItem(MAIN_SURFACE_KEY, JSON.stringify("document"));
+  } catch {
+    /* storage unavailable — the in-memory default is already "document" */
+  }
+}

@@ -82,9 +82,9 @@
    sits on top of the terminals. Engaged, the layer lets go of those insets and
    glides to fill the window while the paper backdrop fades in: the door
    expands into the room rather than cutting to it. */
-.rl-frontdoor-focus { transition: top 300ms cubic-bezier(.2,.8,.2,1), bottom 300ms cubic-bezier(.2,.8,.2,1); }
-.rl-frontdoor-focus[data-rest] { top: var(--fd-rest-top, 0px); bottom: var(--fd-rest-bottom, 0px); }
-.rl-frontdoor-focus[data-rest] .rl-monochat { height: min(760px, 100%); }
+.rl-frontdoor-focus { transition: top 300ms cubic-bezier(.2,.8,.2,1), bottom 300ms cubic-bezier(.2,.8,.2,1), left 300ms cubic-bezier(.2,.8,.2,1), right 300ms cubic-bezier(.2,.8,.2,1); }
+.rl-frontdoor-focus[data-rest] { top: var(--fd-rest-top, 0px); bottom: var(--fd-rest-bottom, 0px); left: var(--fd-rest-left, 0px); right: var(--fd-rest-right, 0px); }
+.rl-frontdoor-focus[data-rest] .rl-monochat { height: min(760px, 100%); width: min(800px, calc(100% - 48px)); }
 .rl-frontdoor-focus[data-reduced="true"] { transition: none; }
 @media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus { transition: none; } }
 

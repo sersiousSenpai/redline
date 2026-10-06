@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   DOC_PINNED_KEY,
   MAIN_SURFACE_KEY,
+  bootOnFrontDoor,
   legacyMainSurface,
   migrateMainSurfaceOnce,
 } from "./mainSurface";
@@ -75,5 +76,25 @@ describe("migrateMainSurfaceOnce", () => {
     localStorage.setItem("redline.browser.open", "not-json{");
     migrateMainSurfaceOnce(localStorage);
     expect(localStorage.getItem(MAIN_SURFACE_KEY)).toBe('"document"');
+  });
+});
+
+describe("bootOnFrontDoor", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("rewrites a persisted non-document surface to the document plate", () => {
+    localStorage.setItem(MAIN_SURFACE_KEY, JSON.stringify("browser"));
+    bootOnFrontDoor(localStorage);
+    expect(localStorage.getItem(MAIN_SURFACE_KEY)).toBe('"document"');
+  });
+
+  it("leaves the doc pin alone — it only matters off the document surface", () => {
+    localStorage.setItem(MAIN_SURFACE_KEY, JSON.stringify("review"));
+    localStorage.setItem(DOC_PINNED_KEY, "true");
+    bootOnFrontDoor(localStorage);
+    expect(localStorage.getItem(MAIN_SURFACE_KEY)).toBe('"document"');
+    expect(localStorage.getItem(DOC_PINNED_KEY)).toBe("true");
   });
 });

@@ -23,6 +23,9 @@ export function landingFit(height: number): LandingFit {
   return "none";
 }
 
+/** Below this much plate width the resting door does not land at all. */
+const MIN_LANDING_WIDTH = 360;
+
 /** A quiet entrance, not the host for surface discussions. The hit target and
  * native browser geometry stay still while only the inner membrane responds. */
 export function MonochatIsland({ open, onOpenChange, context, busy, children, landing = false, surfaceKey = "", onVisibilityChange, clearanceKey = "" }: {
@@ -78,6 +81,10 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
     const footer = document.querySelector<HTMLElement>(".rl-app-footer");
     const header = document.querySelector<HTMLElement>(".rl-app-header");
     const termDock = document.querySelector<HTMLElement>(".rl-term-dock");
+    // The plate's column. Its horizontal edges bound the resting door the way
+    // the header and dock bound it vertically — without them the layer spans
+    // the whole window and the composer lands across the sessions sidebar.
+    const plate = document.querySelector<HTMLElement>(".rl-doc-column");
     const position = () => {
       const rect = footer?.getBoundingClientRect();
       // Center within the existing footer row. This fixed overlay contributes
@@ -99,13 +106,20 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
       const areaBottom = dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
       layer.current?.style.setProperty("--fd-rest-top", `${Math.max(0, areaTop)}px`);
       layer.current?.style.setProperty("--fd-rest-bottom", `${Math.max(0, window.innerHeight - areaBottom)}px`);
-      setFit(landingFit(areaBottom - areaTop));
+      const plateRect = plate?.getBoundingClientRect();
+      const areaLeft = plateRect && plateRect.width > 0 ? plateRect.left : 0;
+      const areaRight = plateRect && plateRect.width > 0 ? plateRect.right : window.innerWidth;
+      layer.current?.style.setProperty("--fd-rest-left", `${Math.max(0, areaLeft)}px`);
+      layer.current?.style.setProperty("--fd-rest-right", `${Math.max(0, window.innerWidth - areaRight)}px`);
+      // Too narrow for even a bare composer: don't land (the notch remains).
+      setFit(areaRight - areaLeft < MIN_LANDING_WIDTH ? "none" : landingFit(areaBottom - areaTop));
     };
     position();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     if (footer) observer?.observe(footer);
     if (header) observer?.observe(header);
     if (termDock) observer?.observe(termDock);
+    if (plate) observer?.observe(plate);
     window.addEventListener("resize", position);
     return () => { observer?.disconnect(); window.removeEventListener("resize", position); };
   }, [surfaceKey, clearanceKey, open]);

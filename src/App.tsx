@@ -364,6 +364,7 @@ import {
 } from "./lib/tocRail";
 import {
   type MainSurface,
+  bootOnFrontDoor,
   migrateMainSurfaceOnce,
 } from "./lib/mainSurface";
 import {
@@ -631,6 +632,9 @@ migrateMainSurfaceOnce(localStorage);
 // …and the chat room's fold into the conversation dock (A3): a persisted
 // `mainSurface === "chat"` names a surface this build no longer renders.
 migrateChatSurfaceOnce(localStorage);
+// …and every launch opens on the Front Door: frame one must not paint the
+// surface the last run ended on (see bootOnFrontDoor).
+bootOnFrontDoor(localStorage);
 
 interface ComposingState {
   type: CommentType;
@@ -694,7 +698,16 @@ const surfaceFallback =
   );
 
 function App() {
-  const [frontDoorOpen, setFrontDoorOpen] = useState(() => takeDockSeed(localStorage));
+  // Every launch opens the door ENGAGED — the opaque layer that owns the
+  // window — never in its resting pose. At rest the island is a transparent
+  // full-width layer over the plate, so on a fresh launch it laid the composer
+  // across the sessions sidebar. Leaving works as ever: Esc / the backdrop, or
+  // anything that changes the surface key (a held plan claiming the plate).
+  // The chat-surface seed is still consumed so its key can't linger.
+  const [frontDoorOpen, setFrontDoorOpen] = useState(() => {
+    takeDockSeed(localStorage);
+    return true;
+  });
   const [monochatVisible, setMonochatVisible] = useState(false);
   const [monochatBusy, setMonochatBusy] = useState(false);
   const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
@@ -10359,7 +10372,10 @@ function App() {
       <MonochatIsland
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
         landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
-        surfaceKey={`${mainSurface}:${activeId ?? ""}:${drafterDraftId ?? ""}`}
+        // The draft id only names a place while the Drafter is showing. Off it,
+        // the id still changes — a first launch mints one in an effect — and
+        // that must not read as navigation and close the boot door.
+        surfaceKey={`${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`}
         onVisibilityChange={setMonochatVisible}
         open={frontDoorOpen}
         onOpenChange={onDoorOpenChange}
