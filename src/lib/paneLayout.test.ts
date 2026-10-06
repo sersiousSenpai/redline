@@ -3,6 +3,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  clampDockHeight,
+  docMinHFor,
   CANONICAL_PANE_W,
   CANONICAL_SIDEBAR_W,
   CANONICAL_TERM_COLLAPSE_H,
@@ -313,5 +315,15 @@ describe("isLayoutAtRest", () => {
     expect(
       isLayoutAtRest({ ...atRest(winH), termCollapsed: false }, canonical),
     ).toBe(false);
+  });
+});
+
+describe("clampDockHeight", () => {
+  it("leaves the document its floor when a saved height outgrows the window", () => {
+    // 1037px saved on a taller display, relaunched in a ~1000px window.
+    expect(clampDockHeight(1037, 1000)).toBe(1000 - docMinHFor(1000));
+  });
+  it("passes a height that fits through untouched", () => {
+    expect(clampDockHeight(260, 1000)).toBe(260);
   });
 });

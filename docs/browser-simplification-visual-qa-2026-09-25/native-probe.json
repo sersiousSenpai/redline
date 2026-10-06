@@ -1,0 +1,40 @@
+{
+  "profile": "probe on 127.0.0.1:55264",
+  "dataDir": "/var/folders/cw/9cr_94rn76dbkfks6yggdlj00000gn/T/redline-browser-simplification-probe-vtasle12/data",
+  "daemonAddr": "127.0.0.1:55264",
+  "steps": [
+    {
+      "milestone": "started",
+      "atMs": 0,
+      "detail": "probe on 127.0.0.1:55264"
+    },
+    {
+      "milestone": "database",
+      "atMs": 224,
+      "detail": "opened and migrated"
+    },
+    {
+      "milestone": "daemon",
+      "atMs": 348,
+      "detail": "bound 127.0.0.1:55264"
+    },
+    {
+      "milestone": "frontend",
+      "atMs": 2367,
+      "detail": "rendered and completed an IPC round trip"
+    },
+    {
+      "milestone": "reads",
+      "atMs": 2620,
+      "detail": "0 plan sessions, 0 runs, settings readable: true"
+    },
+    {
+      "milestone": "shutdown",
+      "atMs": 2620,
+      "detail": "exiting on request"
+    }
+  ],
+  "ok": true,
+  "failure": "",
+  "interactiveMs": 2367
+}

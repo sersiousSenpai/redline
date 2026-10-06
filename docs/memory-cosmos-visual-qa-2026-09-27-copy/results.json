@@ -1,0 +1,122 @@
+{
+  "startedAt": "2026-09-28T03:27:25.840Z",
+  "fixture": "fixtures/memory-cosmos",
+  "screenshots": [
+    "overview-150.png",
+    "orbit-behind-clusters.png",
+    "focused-neighborhood.png",
+    "close-range-planet.png",
+    "compact-900.png",
+    "single-memory.png",
+    "context-loss-fallback.png"
+  ],
+  "checks": [
+    {
+      "name": "150-node scene renders",
+      "passed": true
+    },
+    {
+      "name": "drag rotates camera without selecting",
+      "passed": true
+    },
+    {
+      "name": "keyboard selection stays in cosmos",
+      "passed": true
+    },
+    {
+      "name": "Approach keeps the selected memory and its immediate branches in view",
+      "passed": true,
+      "details": {
+        "memories": 8
+      }
+    },
+    {
+      "name": "Timeline receives exact class focus and releases context",
+      "passed": true
+    },
+    {
+      "name": "return restores camera and selection",
+      "passed": true,
+      "details": {
+        "cameraError": 0
+      }
+    },
+    {
+      "name": "edge filter preserves spatial landmarks",
+      "passed": true
+    },
+    {
+      "name": "flight moves along view",
+      "passed": true
+    },
+    {
+      "name": "Escape returns to orbit",
+      "passed": true
+    },
+    {
+      "name": "resize preserves positions and stays in viewport",
+      "passed": true
+    },
+    {
+      "name": "reduced motion freezes ambient effects",
+      "passed": true
+    },
+    {
+      "name": "over-limit data shows explicit hidden count",
+      "passed": true
+    },
+    {
+      "name": "single node renders",
+      "passed": true
+    },
+    {
+      "name": "empty corpus releases graphics",
+      "passed": true
+    },
+    {
+      "name": "context loss exposes usable list and releases lease",
+      "passed": true
+    },
+    {
+      "name": "retry allocates exactly one replacement context",
+      "passed": true
+    },
+    {
+      "name": "repeated Map–Timeline switches retain one context",
+      "passed": true
+    }
+  ],
+  "errors": [],
+  "sourceSha256": {
+    "src/components/MemoryMap.tsx": "65e2babacf6c412045e6fc87036674909b290f22dffcc85222013aae2f560f4f",
+    "src/lib/memoryMap3d.ts": "fd7509c58faa47029667b7611be74e6a0e90f475a25584ad012b4b11464091f8",
+    "src/components/memory-cosmos/MemoryCosmosScene.tsx": "4f8e1213c240c18d541a25fe79d8bb862acb2cebafb4497f23c464df18aebc17",
+    "src/components/memory-cosmos/scene.ts": "962d077d1ce0b0a7c62dc8a5ab2021a2febb19c300a54f92eaf84a2e650e184a",
+    "src/components/memory-cosmos/planets.ts": "da73fa305b538053ed6b2fc2b806826ba6301aca5fe7ecfbe7053276a2f0268e",
+    "src/components/memory-cosmos/halos.ts": "0a19fb6d7dfe77a0addab95c669c91d2f47fa85c9ef356095edb772522607f72",
+    "src/components/memory-cosmos/filaments.ts": "29fc7ca721df014d31159914f71e7338ca49544627d78557641889c7a39ed356",
+    "src/components/memory-cosmos/cosmos.css": "98ff3443c7d8d367965279ec2bc8538c9c3eddc646be811861fffd260091b1f1"
+  },
+  "limitations": [
+    "Headless Chrome component fixture; not WKWebView/native hit-testing or live Redline.",
+    "Agent, dictation, audio and Tauri service interfaces are synthetic; no capture, database, user profile or agent launch.",
+    "Real Three.js renderer with a synthetic 150-node memory corpus; timings are Chrome on this Mac, not WKWebView."
+  ],
+  "fixtureUrl": "http://127.0.0.1:5173/fixtures/memory-cosmos/",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/154.0.8037.58",
+    "revision": "@a654841425914cbb703a2931e07b70a83aedbafd",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+    "jsVersion": "15.4.80.11"
+  },
+  "performance": {
+    "median": 16.69999999999891,
+    "p95": 16.799999999999272,
+    "resolution": 1,
+    "nodes": 150,
+    "draws": 153
+  },
+  "finishedAt": "2026-09-28T03:27:49.098Z",
+  "passed": true
+}

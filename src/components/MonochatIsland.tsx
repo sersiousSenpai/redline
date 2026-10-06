@@ -7,10 +7,29 @@ import { SHELL_EDGE } from "../lib/paneLayout";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
 import "./MonochatIsland.css";
 
+export type SummonVia = "pointer" | "key";
+export type LandingFit = "full" | "pills" | "bare" | "none";
+
+/** What a resting door can show in `height` px of free plate: headline +
+ *  composer + pills, composer + pills, the composer alone, or nothing. */
+export function landingFit(height: number): LandingFit {
+  // The pills are up to three labelled rows hung below the composer, and
+  // the composer is centred, so each threshold pays for the taller side twice.
+  // The page list sizes itself to whatever is left below (FrontDoor's
+  // `browseRoom`), so these only budget for the headline and the chip rows.
+  if (height >= 480) return "full";
+  if (height >= 360) return "pills";
+  if (height >= 170) return "bare";
+  return "none";
+}
+
 /** A quiet entrance, not the host for surface discussions. The hit target and
  * native browser geometry stay still while only the inner membrane responds. */
 export function MonochatIsland({ open, onOpenChange, context, busy, children, landing = false, surfaceKey = "", onVisibilityChange, clearanceKey = "" }: {
-  open: boolean; onOpenChange: (open: boolean) => void;
+  /** `via` is set only when the door is SUMMONED from elsewhere (footer pill or
+   *  shortcut) — the owner resets it to its home. "pointer" opens on the full
+   *  welcome without reaching for the composer; "key" puts the caret in it. */
+  open: boolean; onOpenChange: (open: boolean, via?: SummonVia) => void;
   context: string; busy: boolean; children: ReactNode;
   landing?: boolean; surfaceKey?: string; clearanceKey?: string; onVisibilityChange?: (visible: boolean) => void;
 }) {
@@ -27,11 +46,19 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
   const previousSurface = useRef(surfaceKey);
   const previousOpen = useRef(false);
   const close = useRef(onOpenChange); close.current = onOpenChange;
-  const visible = open || landing;
+  const summonVia = useRef<SummonVia | null>(null);
+  // How much of the door the plate's free area can hold at rest. The door
+  // lands in the space BETWEEN the header and the terminal dock — never on top
+  // of the terminals — and sheds its furniture rather than overflow: headline
+  // first, then the starters, and below a bare composer it does not land at
+  // all (the notch in the footer is still the way in).
+  const [fit, setFit] = useState<LandingFit>("full");
+  const landed = landing && fit !== "none";
+  const visible = open || landed;
   useNativeOverlayRegion(launcher, !visible);
 
   useEffect(() => {
-    const summon = () => close.current(true);
+    const summon = () => { summonVia.current = "key"; close.current(true, "key"); };
     const onKey = (event: KeyboardEvent) => {
       // Capture before editors/xterm can consume the chord. Once the front
       // door is open, Shift+Enter remains a newline in its composer.
@@ -50,6 +77,7 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
   useLayoutEffect(() => {
     const footer = document.querySelector<HTMLElement>(".rl-app-footer");
     const header = document.querySelector<HTMLElement>(".rl-app-header");
+    const termDock = document.querySelector<HTMLElement>(".rl-term-dock");
     const position = () => {
       const rect = footer?.getBoundingClientRect();
       // Center within the existing footer row. This fixed overlay contributes
@@ -63,11 +91,21 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
       // content. Only transparent hit regions use this measurement.
       const top = Math.max(SHELL_EDGE, Math.min(header?.getBoundingClientRect().bottom || 28, room.current?.getBoundingClientRect().top || 28));
       layer.current?.style.setProperty("--portal-drag-top", `${top}px`);
+      // The plate's free area: header bottom down to the dock's top (or the
+      // footer's, with the dock folded). Published as insets the resting
+      // pose applies; engaged, the layer lets go of them and fills the window.
+      const dockRect = termDock?.getBoundingClientRect();
+      const areaTop = header?.getBoundingClientRect().bottom ?? 0;
+      const areaBottom = dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
+      layer.current?.style.setProperty("--fd-rest-top", `${Math.max(0, areaTop)}px`);
+      layer.current?.style.setProperty("--fd-rest-bottom", `${Math.max(0, window.innerHeight - areaBottom)}px`);
+      setFit(landingFit(areaBottom - areaTop));
     };
     position();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     if (footer) observer?.observe(footer);
     if (header) observer?.observe(header);
+    if (termDock) observer?.observe(termDock);
     window.addEventListener("resize", position);
     return () => { observer?.disconnect(); window.removeEventListener("resize", position); };
   }, [surfaceKey, clearanceKey, open]);
@@ -104,7 +142,7 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
     return () => { for (const [element, inert] of restored) element.inert = inert; };
   }, [open]);
   useLayoutEffect(() => {
-    if (!open || landing || reduced || !room.current?.animate) return;
+    if (!open || landed || reduced || !room.current?.animate) return;
     // The home composer is already in place: focusing it only fades the
     // backdrop. A tucked-away chat enters gently without squashing its text
     // down to the dimensions of the footer pill or measuring layout.
@@ -113,26 +151,30 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
       { transform: "none", opacity: 1 },
     ], { duration: 260, easing: "cubic-bezier(.2,.8,.2,1)" });
     return () => animation.cancel();
-  }, [open, landing, reduced]);
+  }, [open, landed, reduced]);
   useEffect(() => {
     if (open && !previousOpen.current) {
       const active = document.activeElement;
       if (!returnFocus.current && active instanceof HTMLElement && active !== document.body && !layer.current?.contains(active)) returnFocus.current = active;
-      (body.current?.querySelector<HTMLElement>("textarea") ?? body.current)?.focus({ preventScroll: true });
+      // Summoned by pointer, the door arrives on its welcome: focus the room,
+      // not the composer, so the headline and pills stay until you click in.
+      const quiet = summonVia.current === "pointer";
+      ((quiet ? null : body.current?.querySelector<HTMLElement>("textarea")) ?? body.current)?.focus({ preventScroll: true });
     } else if (!open && previousOpen.current) {
       if (layer.current?.contains(document.activeElement)) {
         const target = returnFocus.current?.isConnected ? returnFocus.current : launcher.current;
-        if (landing && target === launcher.current) (document.activeElement as HTMLElement)?.blur();
+        if (landed && target === launcher.current) (document.activeElement as HTMLElement)?.blur();
         else target?.focus({ preventScroll: true });
       }
       returnFocus.current = null;
     }
     previousOpen.current = open;
+    summonVia.current = null;
   }, [open]);
 
   useEffect(() => {
     const button = launcher.current, skin = membrane.current;
-    if (!button || !skin || open || landing || reduced) return;
+    if (!button || !skin || open || landed || reduced) return;
     let rect = button.getBoundingClientRect(), frame = 0;
     let point: { x: number; y: number } | null = null;
     let last = "";
@@ -176,12 +218,13 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
       window.removeEventListener("resize", measure);
       skin.style.removeProperty("--portal-x"); skin.style.removeProperty("--portal-y"); skin.style.removeProperty("--portal-pull");
     };
-  }, [open, landing, reduced, surfaceKey, clearanceKey]);
+  }, [open, landed, reduced, surfaceKey, clearanceKey]);
 
-  const engage = () => {
+  const engage = (via?: SummonVia) => {
     const active = document.activeElement;
     if (!returnFocus.current && active instanceof HTMLElement && active !== document.body && !layer.current?.contains(active)) returnFocus.current = active;
-    onOpenChange(true);
+    summonVia.current = via ?? null;
+    onOpenChange(true, via);
   };
   const isBackdrop = (target: EventTarget) =>
     target === layer.current || target === room.current || target === body.current || target === conversation.current;
@@ -224,13 +267,14 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
     title="Open front door (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
     aria-expanded={open} aria-controls="rl-monochat-content"
     onFocus={event => { if (event.relatedTarget instanceof HTMLElement && !layer.current?.contains(event.relatedTarget)) returnFocus.current = event.relatedTarget; }}
-    onClick={engage}>
+    onClick={() => engage("pointer")}>
     <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span></span>
   </button>;
 
   return <>
     <div ref={dock} className="rl-frontdoor-dock">{entrance}</div>
     <div ref={layer} className="rl-frontdoor-focus" data-open={open} data-visible={visible} data-reduced={reduced}
+      data-rest={landed && !open ? fit : undefined}
       role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label={open ? "Front door" : undefined}
       inert={!visible} aria-hidden={!visible}
       onClickCapture={event => {
@@ -249,8 +293,8 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
           <div data-window-drag-edge="bottom" onMouseDown={dragWindow} style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: SHELL_EDGE, pointerEvents: "auto" }}/>
         </div>}
         {open && <button className="rl-frontdoor-return" type="button" onClick={() => onOpenChange(false)} aria-label="Return to workspace" title="Return to workspace (Esc)"><ChevronDown size={18}/></button>}
-      <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landing ? "entry" : "notch"} data-reduced={reduced}>
-        <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} onFocusCapture={() => { if (landing && !open) engage(); }}>
+      <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced}>
+        <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} onFocusCapture={() => { if (landed && !open) engage(); }}>
           <div ref={conversation} className="rl-monochat-conversation">{children}</div>
         </div>
       </div>

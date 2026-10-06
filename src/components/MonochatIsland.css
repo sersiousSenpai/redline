@@ -75,3 +75,94 @@
 .rl-footer-status, .rl-footer-actions { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
 .rl-footer-status::-webkit-scrollbar, .rl-footer-actions::-webkit-scrollbar { display: none; }
 .rl-footer-status > *, .rl-footer-actions > * { flex-shrink: 0; }
+
+/* ── The resting door ──────────────────────────────────────────────────────
+   At rest the door lands in the plate's free area (header → terminal dock,
+   measured in MonochatIsland) instead of the middle of the window, so it never
+   sits on top of the terminals. Engaged, the layer lets go of those insets and
+   glides to fill the window while the paper backdrop fades in: the door
+   expands into the room rather than cutting to it. */
+.rl-frontdoor-focus { transition: top 300ms cubic-bezier(.2,.8,.2,1), bottom 300ms cubic-bezier(.2,.8,.2,1); }
+.rl-frontdoor-focus[data-rest] { top: var(--fd-rest-top, 0px); bottom: var(--fd-rest-bottom, 0px); }
+.rl-frontdoor-focus[data-rest] .rl-monochat { height: min(760px, 100%); }
+.rl-frontdoor-focus[data-reduced="true"] { transition: none; }
+@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus { transition: none; } }
+
+/* At rest only what you can touch takes the pointer. The room is a transparent
+   800×760 box; left to catch clicks it would swallow every terminal and doc
+   control underneath it. */
+.rl-monochat[data-pose="entry"], .rl-monochat[data-pose="entry"] .rl-frontdoor { pointer-events: none; }
+.rl-monochat[data-pose="entry"] .rl-frontdoor > :not(.rl-fd-welcome), .rl-monochat[data-pose="entry"] .rl-fd-recent { pointer-events: auto; }
+
+/* Headline above, recents below — both OUT of flow, hung off the composer, so
+   showing, shedding or fading them never moves the box you are typing in. */
+.rl-monochat .rl-frontdoor.has-welcome { overflow: visible; }
+.rl-monochat .rl-floating-composer > .rl-fd-welcome { position: absolute; left: 0; right: 0; }
+.rl-fd-welcome-hero { bottom: calc(100% + 26px); text-align: center; pointer-events: none; }
+.rl-fd-welcome-hero .rl-fd-title { font-size: 36px; }
+.rl-fd-welcome-hero .rl-fd-sub { margin: 10px 0 0; }
+.rl-fd-recents { top: calc(100% + 12px); padding: 0 8px; }
+
+/* Fades on ENGAGEMENT (a caret or a sentence in the box), not on the door
+   opening: summoned from the footer, the door arrives with its welcome. */
+.rl-fd-welcome { transition: opacity 260ms ease 60ms, transform 340ms cubic-bezier(.16,1,.3,1) 60ms, visibility 0s 0s; }
+.rl-frontdoor.is-engaged .rl-fd-welcome, .rl-fd-recents.is-hidden {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 160ms ease, transform 220ms ease, visibility 0s 220ms;
+}
+.rl-frontdoor.is-engaged .rl-fd-welcome-hero { transform: translateY(-10px); }
+.rl-frontdoor.is-engaged .rl-fd-recents, .rl-fd-recents.is-hidden { transform: translateY(6px); }
+
+/* Shed furniture before overflowing a short plate: headline first, then the
+   pills (MonochatIsland's `landingFit`). */
+.rl-frontdoor-focus[data-rest="pills"] .rl-fd-welcome-hero,
+.rl-frontdoor-focus[data-rest="bare"] .rl-fd-welcome { visibility: hidden; opacity: 0; }
+
+/* One labelled row per kind — Plans, Chats, Browser — in the standard chip
+   style. The row head says what a chip opens; the chip just names it. */
+/* The way back, set as type rather than controls: no pills, no boxes — each
+   entry is a line of text over a hairline underline, generously spaced.
+   Plans and Chats sit as labelled rows; pages run full width below. */
+.rl-monochat .rl-floating-composer > .rl-fd-recents { display: flex; flex-direction: column; gap: 22px; padding: 0 16px; }
+/* One table for Plans and Chats: head | first | second. The rows and their
+   item lists are `display: contents`, so every entry sits in a SHARED column
+   and the second entries line up whatever the first ones measure. */
+.rl-fd-recent-chips {
+  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, max-content);
+  justify-content: center; align-items: baseline; gap: 12px 20px;
+}
+.rl-fd-recent-row { display: contents; }
+.rl-fd-recent-head { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: color-mix(in srgb, var(--color-ink-muted) 80%, transparent); text-align: right; }
+.rl-fd-recent-items { display: contents; }
+.rl-fd-recent-head { grid-column: 1; }
+.rl-fd-recent-chips .rl-fd-recent { justify-self: start; }
+/* Head → first entry keeps its 20px; first → second keeps its 22px. */
+.rl-fd-recent-chips .rl-fd-recent:nth-child(2) { margin-left: 2px; }
+.rl-monochat .rl-fd-recent.rl-fd-suggestion {
+  max-width: min(220px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 0 3px; border: 0; border-radius: 0; background: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
+  color: var(--color-ink-muted); font-size: 12.5px;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.rl-monochat .rl-fd-recent.rl-fd-suggestion:hover, .rl-monochat .rl-fd-recent.rl-fd-suggestion:focus-visible {
+  background: none; color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 60%, transparent); outline: none;
+}
+
+/* Pages: one line each, full width, divided by hairlines and laid out
+   statically — FrontDoor renders only as many as the space below holds
+   (BROWSE_ROW/GAP mirror these). */
+.rl-fd-browse-section { display: flex; flex-direction: column; gap: 4px; }
+.rl-fd-browse-section > .rl-fd-recent-head { text-align: left; line-height: 14px; }
+.rl-fd-browse-list { display: flex; flex-direction: column; }
+.rl-fd-browse {
+  display: block; width: 100%; height: 36px; padding: 0 2px; border: 0; border-radius: 0; background: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--color-ink-muted); font-size: 12.5px; text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.rl-fd-browse:hover, .rl-fd-browse:focus-visible {
+  color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 50%, transparent); outline: none;
+}
+.rl-monochat[data-pose="entry"] .rl-fd-browse { pointer-events: auto; }

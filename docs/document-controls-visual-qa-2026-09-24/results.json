@@ -1,0 +1,1240 @@
+{
+  "startedAt": "2026-09-24T20:44:52.196Z",
+  "fixture": "fixtures/document-controls-visual-qa",
+  "screenshots": [
+    "1600px-paragraph-style.png",
+    "1600px-font.png",
+    "1600px-font-size.png",
+    "1600px-text-color.png",
+    "1600px-highlight-color.png",
+    "1600px-bulleted-list.png",
+    "1600px-numbered-list.png",
+    "1600px-line-spacing.png",
+    "1600px-table.png",
+    "1600px-editing-mode.png",
+    "900px-font.png",
+    "900px-numbered-list.png",
+    "900px-table.png",
+    "900px-editing-mode.png",
+    "520px-font.png",
+    "520px-numbered-list.png",
+    "520px-table.png",
+    "520px-editing-mode.png",
+    "width-initial-saved-measure.png",
+    "width-tap-full.png",
+    "width-live-drag.png",
+    "width-committed-measure.png",
+    "width-escape-restored.png",
+    "width-full-endpoint.png",
+    "width-narrow-pane.png"
+  ],
+  "checks": [
+    {
+      "name": "1600px: all ten dropdown triggers",
+      "passed": true,
+      "details": [
+        "Paragraph style",
+        "Font",
+        "Font size",
+        "Text color",
+        "Highlight color",
+        "Bulleted list",
+        "Numbered list",
+        "Line spacing",
+        "Table",
+        "Editing mode — whether your edits are tracked"
+      ]
+    },
+    {
+      "name": "1600px Paragraph style: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 83,
+          "y": 94,
+          "width": 183,
+          "height": 201,
+          "bottom": 295,
+          "right": 266,
+          "scrollHeight": 201,
+          "clientHeight": 201,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 168,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Paragraph style: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Paragraph style: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Paragraph style: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Font: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 213,
+          "y": 94,
+          "width": 235,
+          "height": 340,
+          "bottom": 434,
+          "right": 448,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 220,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Font: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Font: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Font: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Font size: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 342,
+          "y": 94,
+          "width": 135,
+          "height": 340,
+          "bottom": 434,
+          "right": 477,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 120,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Font size: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Font size: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Font size: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Text color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 580,
+          "y": 94,
+          "width": 203,
+          "height": 117.5,
+          "bottom": 211.5,
+          "right": 783,
+          "scrollHeight": 118,
+          "clientHeight": 118,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 188,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Text color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Text color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Text color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "1600px Text color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Highlight color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 633,
+          "y": 94,
+          "width": 195,
+          "height": 73.5,
+          "bottom": 167.5,
+          "right": 828,
+          "scrollHeight": 74,
+          "clientHeight": 74,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 180,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Highlight color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Highlight color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Highlight color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "1600px Highlight color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Bulleted list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 836,
+          "y": 94,
+          "width": 175,
+          "height": 178.5,
+          "bottom": 272.5,
+          "right": 1011,
+          "scrollHeight": 179,
+          "clientHeight": 179,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 160,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Bulleted list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Bulleted list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Bulleted list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Numbered list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 889,
+          "y": 94,
+          "width": 199,
+          "height": 340,
+          "bottom": 434,
+          "right": 1088,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 184,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Numbered list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Numbered list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Numbered list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Line spacing: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 1004,
+          "y": 94,
+          "width": 155,
+          "height": 169.5,
+          "bottom": 263.5,
+          "right": 1159,
+          "scrollHeight": 170,
+          "clientHeight": 170,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 140,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Line spacing: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Line spacing: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Line spacing: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Table: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 1070,
+          "y": 94,
+          "width": 220,
+          "height": 340,
+          "bottom": 434,
+          "right": 1290,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 205,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Table: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Table: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Table: all 10×8 cells visible and unclipped",
+      "passed": true,
+      "details": {
+        "count": 80,
+        "columns": 10,
+        "rows": 8,
+        "clipRight": 1274,
+        "lastCellRight": 1261,
+        "contained": true
+      }
+    },
+    {
+      "name": "1600px Table: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "1600px Editing mode — whether your edits are tracked: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 1337,
+          "y": 94,
+          "width": 255,
+          "height": 106.5,
+          "bottom": 200.5,
+          "right": 1592,
+          "scrollHeight": 107,
+          "clientHeight": 107,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 240,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "1600px Editing mode — whether your edits are tracked: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "1600px Editing mode — whether your edits are tracked: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "1600px Editing mode — whether your edits are tracked: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px: all ten dropdown triggers",
+      "passed": true,
+      "details": [
+        "Paragraph style",
+        "Font",
+        "Font size",
+        "Text color",
+        "Highlight color",
+        "Bulleted list",
+        "Numbered list",
+        "Line spacing",
+        "Table",
+        "Editing mode — whether your edits are tracked"
+      ]
+    },
+    {
+      "name": "900px Paragraph style: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 83,
+          "y": 94,
+          "width": 183,
+          "height": 201,
+          "bottom": 295,
+          "right": 266,
+          "scrollHeight": 201,
+          "clientHeight": 201,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 168,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Paragraph style: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Paragraph style: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Paragraph style: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Font: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 213,
+          "y": 94,
+          "width": 235,
+          "height": 340,
+          "bottom": 434,
+          "right": 448,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 220,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Font: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Font: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Font: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Font size: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 342,
+          "y": 94,
+          "width": 135,
+          "height": 340,
+          "bottom": 434,
+          "right": 477,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 120,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Font size: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Font size: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Font size: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Text color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 580,
+          "y": 94,
+          "width": 203,
+          "height": 117.5,
+          "bottom": 211.5,
+          "right": 783,
+          "scrollHeight": 118,
+          "clientHeight": 118,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 188,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Text color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Text color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Text color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "900px Text color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Highlight color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 633,
+          "y": 94,
+          "width": 195,
+          "height": 73.5,
+          "bottom": 167.5,
+          "right": 828,
+          "scrollHeight": 74,
+          "clientHeight": 74,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 180,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Highlight color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Highlight color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Highlight color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "900px Highlight color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Bulleted list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 8,
+          "y": 126,
+          "width": 175,
+          "height": 178.5,
+          "bottom": 304.5,
+          "right": 183,
+          "scrollHeight": 179,
+          "clientHeight": 179,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 160,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Bulleted list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Bulleted list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Bulleted list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Numbered list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 61,
+          "y": 126,
+          "width": 199,
+          "height": 340,
+          "bottom": 466,
+          "right": 260,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 184,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Numbered list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Numbered list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Numbered list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Line spacing: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 176,
+          "y": 126,
+          "width": 155,
+          "height": 169.5,
+          "bottom": 295.5,
+          "right": 331,
+          "scrollHeight": 170,
+          "clientHeight": 170,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 140,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Line spacing: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Line spacing: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Line spacing: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Table: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 242,
+          "y": 126,
+          "width": 220,
+          "height": 340,
+          "bottom": 466,
+          "right": 462,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 205,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Table: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Table: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Table: all 10×8 cells visible and unclipped",
+      "passed": true,
+      "details": {
+        "count": 80,
+        "columns": 10,
+        "rows": 8,
+        "clipRight": 446,
+        "lastCellRight": 433,
+        "contained": true
+      }
+    },
+    {
+      "name": "900px Table: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "900px Editing mode — whether your edits are tracked: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 510.890625,
+          "y": 126,
+          "width": 255,
+          "height": 106.5,
+          "bottom": 232.5,
+          "right": 765.890625,
+          "scrollHeight": 107,
+          "clientHeight": 107,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 240,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "900px Editing mode — whether your edits are tracked: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "900px Editing mode — whether your edits are tracked: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "900px Editing mode — whether your edits are tracked: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px: all ten dropdown triggers",
+      "passed": true,
+      "details": [
+        "Paragraph style",
+        "Font",
+        "Font size",
+        "Text color",
+        "Highlight color",
+        "Bulleted list",
+        "Numbered list",
+        "Line spacing",
+        "Table",
+        "Editing mode — whether your edits are tracked"
+      ]
+    },
+    {
+      "name": "520px Paragraph style: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 83,
+          "y": 94,
+          "width": 183,
+          "height": 201,
+          "bottom": 295,
+          "right": 266,
+          "scrollHeight": 201,
+          "clientHeight": 201,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 168,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Paragraph style: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Paragraph style: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Paragraph style: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Font: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 213,
+          "y": 94,
+          "width": 235,
+          "height": 340,
+          "bottom": 434,
+          "right": 448,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 220,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Font: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Font: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Font: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Font size: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 342,
+          "y": 94,
+          "width": 135,
+          "height": 340,
+          "bottom": 434,
+          "right": 477,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 120,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Font size: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Font size: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Font size: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Text color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 176,
+          "y": 126,
+          "width": 203,
+          "height": 117.5,
+          "bottom": 243.5,
+          "right": 379,
+          "scrollHeight": 118,
+          "clientHeight": 118,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 188,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Text color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Text color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Text color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "520px Text color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Highlight color: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 229,
+          "y": 126,
+          "width": 195,
+          "height": 73.5,
+          "bottom": 199.5,
+          "right": 424,
+          "scrollHeight": 74,
+          "clientHeight": 74,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 180,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Highlight color: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Highlight color: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Highlight color: seven swatch columns fit",
+      "passed": true,
+      "details": {
+        "columns": 7,
+        "contained": true
+      }
+    },
+    {
+      "name": "520px Highlight color: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Bulleted list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 8,
+          "y": 158,
+          "width": 175,
+          "height": 178.5,
+          "bottom": 336.5,
+          "right": 183,
+          "scrollHeight": 179,
+          "clientHeight": 179,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 160,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Bulleted list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Bulleted list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Bulleted list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Numbered list: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 61,
+          "y": 158,
+          "width": 199,
+          "height": 340,
+          "bottom": 498,
+          "right": 260,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 184,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Numbered list: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Numbered list: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Numbered list: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Line spacing: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 176,
+          "y": 158,
+          "width": 155,
+          "height": 169.5,
+          "bottom": 327.5,
+          "right": 331,
+          "scrollHeight": 170,
+          "clientHeight": 170,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 140,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Line spacing: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Line spacing: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Line spacing: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Table: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 242,
+          "y": 158,
+          "width": 220,
+          "height": 340,
+          "bottom": 498,
+          "right": 462,
+          "scrollHeight": 340,
+          "clientHeight": 340,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 205,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Table: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Table: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Table: all 10×8 cells visible and unclipped",
+      "passed": true,
+      "details": {
+        "count": 80,
+        "columns": 10,
+        "rows": 8,
+        "clipRight": 446,
+        "lastCellRight": 433,
+        "contained": true
+      }
+    },
+    {
+      "name": "520px Table: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "520px Editing mode — whether your edits are tracked: content width and viewport bounds",
+      "passed": true,
+      "details": {
+        "panel": {
+          "x": 8,
+          "y": 190,
+          "width": 255,
+          "height": 106.5,
+          "bottom": 296.5,
+          "right": 263,
+          "scrollHeight": 107,
+          "clientHeight": 107,
+          "visible": true,
+          "within": true
+        },
+        "contentAndChrome": 240,
+        "scrollbar": 15
+      }
+    },
+    {
+      "name": "520px Editing mode — whether your edits are tracked: native overlay registered",
+      "passed": true
+    },
+    {
+      "name": "520px Editing mode — whether your edits are tracked: editor selection preserved",
+      "passed": true
+    },
+    {
+      "name": "520px Editing mode — whether your edits are tracked: Escape closes and clears native overlay",
+      "passed": true
+    },
+    {
+      "name": "width tap: expands without overwriting saved measure",
+      "passed": true
+    },
+    {
+      "name": "width tap: returns to saved 1000px measure",
+      "passed": true
+    },
+    {
+      "name": "width drag: live geometry changes with no persisted commit",
+      "passed": true,
+      "details": {
+        "live": 1252,
+        "state": {
+          "wide": false,
+          "measure": 1000,
+          "commits": [],
+          "toggles": 0,
+          "overlays": 0,
+          "resizing": true,
+          "selection": {
+            "from": 1,
+            "to": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "width drag: exactly one commit, no click toggle, no layout jump",
+      "passed": true,
+      "details": {
+        "state": {
+          "wide": false,
+          "measure": 1252,
+          "commits": [
+            {
+              "wide": false,
+              "measure": 1252
+            }
+          ],
+          "toggles": 0,
+          "overlays": 0,
+          "resizing": false,
+          "selection": {
+            "from": 1,
+            "to": 1
+          }
+        },
+        "live": 1252,
+        "after": 1252
+      }
+    },
+    {
+      "name": "width Escape: has live preview",
+      "passed": true
+    },
+    {
+      "name": "width Escape: restores committed article and cursor without another write",
+      "passed": true,
+      "details": {
+        "width": 1252,
+        "state": {
+          "wide": false,
+          "measure": 1252,
+          "commits": [
+            {
+              "wide": false,
+              "measure": 1252
+            }
+          ],
+          "toggles": 0,
+          "overlays": 0,
+          "resizing": false,
+          "selection": {
+            "from": 1,
+            "to": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "width long hold without motion: no toggle or commit",
+      "passed": true
+    },
+    {
+      "name": "width upper endpoint: full width preserves saved measure",
+      "passed": true
+    },
+    {
+      "name": "width narrow pane: drag safely disabled",
+      "passed": true
+    },
+    {
+      "name": "width narrow pane: ordinary tap still works",
+      "passed": true
+    }
+  ],
+  "errors": [],
+  "sourceSha256": {
+    "src/components/DrafterToolbar.tsx": "25c4aa3cbced407f7b9a1a7e64ec6707d89c9ba45f93328c877ccad087be0588",
+    "src/components/DocWidthToggle.tsx": "c2bbfaf5a95b086d7bdadc0d86cea6d357f92d2cfa8c18c0e05e5828ffb2d3a0"
+  },
+  "limitations": [
+    "Headless Chrome component fixture; not WKWebView/native hit-testing or live Redline.",
+    "Actual Tiptap editor, toolbar, width gesture component, and theme CSS. Host callbacks record commits and overlay registrations; no daemon, database, or user state."
+  ],
+  "fixtureUrl": "http://127.0.0.1:5173/fixtures/document-controls-visual-qa/",
+  "browserVersion": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/153.0.8010.53",
+    "revision": "@792bf6722e73a45aa9e47c163b9901bdc17f3230",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "jsVersion": "15.3.76.13"
+  },
+  "finishedAt": "2026-09-24T20:45:18.769Z",
+  "passed": true
+}

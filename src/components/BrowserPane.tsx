@@ -234,6 +234,9 @@ interface BrowserPaneProps {
     /** Prefer an existing tab by its thread (a research comment's "View
      *  result"); falls back to opening `url` when that tab is gone. */
     focusBrowseId?: string;
+    /** Just bring the tab back — don't open its chat (the Front Door's
+     *  recent-tab pill). */
+    quiet?: boolean;
   } | null;
   /** Called once the pane has acted on `openRequest`, so the owner clears it.
    *  Without this the request outlives its click: `lastOpenNonceRef` resets on
@@ -2112,7 +2115,7 @@ function BrowserPaneBase({
     } else {
       browseId = openTabRef.current(openRequest.url, {});
     }
-    if (browseId && (openRequest.chat || openRequest.focusBrowseId)) {
+    if (browseId && (openRequest.chat || (openRequest.focusBrowseId && !openRequest.quiet))) {
       if (openRequest.chat) {
         seedPageChat({ text: openRequest.chat.text, nonce: openRequest.nonce, autoSend: openRequest.chat.autoSend });
       }

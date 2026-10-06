@@ -336,7 +336,8 @@ import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
-import { MonochatIsland } from "./components/MonochatIsland";
+import { MonochatIsland, type SummonVia } from "./components/MonochatIsland";
+import { doorRecents, loadDoorTabs, type DoorRecent, type DoorTab } from "./lib/doorRecents";
 import { MonochatContext } from "./components/MonochatContext";
 // The dock's body is fetched with its mount, not with the shell — see
 // `terminalMounted` below. `import type` is erased, so the handle's type
@@ -424,6 +425,7 @@ import {
   VOICE_PANE_MIN,
   VOICE_PANE_W,
   canonicalLayout,
+  clampDockHeight,
   computePaneLayout,
   isLayoutAtRest,
   paneCollapseOnMask,
@@ -2508,11 +2510,19 @@ function App() {
   // Live terminal ids. Null until the dock first reports — an absent report
   // must never read as "the terminal is gone".
   const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
+  // Baseline for tile-driven dock growth (see the effect below).
+  const prevTileCountRef = useRef(1);
+  const tilesReportedRef = useRef(false);
   const handleTileCountChange = useCallback(
-    (count: number, rows: number) =>
+    (count: number, rows: number) => {
+      if (!tilesReportedRef.current) {
+        tilesReportedRef.current = true;
+        prevTileCountRef.current = count;
+      }
       setTermTiles((prev) =>
         prev.count === count && prev.rows === rows ? prev : { count, rows },
-      ),
+      );
+    },
     [],
   );
   const [termHasUnseen, setTermHasUnseen] = useState(false);
@@ -3044,7 +3054,9 @@ function App() {
       setGeom(
         termDockRef.current,
         "height",
-        f.termFullscreen ? "" : `${f.termCollapsed ? 0 : sizes.termHeight}px`,
+        f.termFullscreen
+          ? ""
+          : `${f.termCollapsed ? 0 : clampDockHeight(sizes.termHeight, window.innerHeight)}px`,
       );
       // Discrete curtain styling (overflow / stacking / the drop shadow that
       // reads as "painted over the doc") is a CSS rule keyed on this attribute,
@@ -3543,7 +3555,9 @@ function App() {
 
   const { isDragging: termDragging, startDrag: startTermDrag } =
     useResizablePane({
-      width: termHeight,
+      // Start the drag from the height actually painted, not a saved one the
+      // window can no longer fit — or the first pixel of drag jumps.
+      width: clampDockHeight(termHeight, window.innerHeight),
       onWidthChange: setTermHeight,
       onLiveSize: (h) => applyLiveLayout({ termHeight: h }),
       axis: "y",
@@ -3558,7 +3572,11 @@ function App() {
   // directly). It never touches termFullscreen. The divider's own max is
   // looser than this cap, so growth can never exceed what a manual drag
   // allows.
-  const prevTileCountRef = useRef(1);
+  //
+  // The dock's FIRST report is its restored workspace, not tiles being added:
+  // relaunching with seven saved tiles must not reopen a dock the user left
+  // collapsed, nor grow it over the document.
+  // `handleTileCountChange` seeds the baseline from that first report.
   useEffect(() => {
     const prev = prevTileCountRef.current;
     prevTileCountRef.current = termTiles.count;
@@ -6175,6 +6193,7 @@ function App() {
     nonce: number;
     chat?: { text: string; autoSend?: boolean };
     focusBrowseId?: string;
+    quiet?: boolean;
   } | null>(null);
   // Search from the plan, mid-flight: the anchored passage waiting for the
   // browser to report which thread it opened, so the research comment can
@@ -7770,11 +7789,66 @@ function App() {
       ? (runFlight.startedAt > frontDoorPlan.startedAt ? runFlight : frontDoorPlan)
       : (runFlight ?? frontDoorPlan);
 
-  const renderMonochatComposer = (accessories?: React.ReactNode) => (
+  // The welcome's pills: the way back into recent plans, chats and browser
+  // tabs. Tabs are ranked research-first against the unresolved plans, read
+  // from the saved workspaces whenever the door shows (the lazy browser pane
+  // may never have mounted this launch). Keyed on the unresolved plans'
+  // identity, not the summaries array, which every poll replaces.
+  const [doorTabs, setDoorTabs] = useState<DoorTab[]>([]);
+  const unresolvedKey = summaries
+    .filter((s) => s.status === "in_review")
+    .map((s) => `${s.sessionId}:${s.updatedAt}`)
+    .join(",");
+  const summariesRef = useRef(summaries);
+  summariesRef.current = summaries;
+  useEffect(() => {
+    if (!monochatVisible) return;
+    let live = true;
+    void loadDoorTabs(invoke, summariesRef.current)
+      .then((tabs) => { if (live) setDoorTabs(tabs); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [monochatVisible, frontDoorOpen, unresolvedKey]);
+  const doorRecentItems = useMemo(
+    () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
+    [summaries, chats, doorTabs],
+  );
+  const openDoorRecent = (r: DoorRecent) => {
+    if (r.kind === "chat") return openChat(r.id);
+    setFrontDoorOpen(false);
+    if (r.kind === "plan") {
+      selectSessions();
+      setActiveId(r.id);
+      selectSurface("document");
+      return;
+    }
+    // By thread. A plan's explicit research link reopens with its answer (the
+    // same as "View result"); any other tab comes back quietly, chat closed.
+    setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
+    selectSurface("browser");
+  };
+  // A pointer summon (the footer pill) opens on the full welcome and leaves
+  // the composer alone until you click in; the shortcut still lands the caret.
+  const [doorSummonedQuiet, setDoorSummonedQuiet] = useState(false);
+  const onDoorOpenChange = (open: boolean, via?: SummonVia) => {
+    if (open && via) {
+      // Summoned from elsewhere, the door is its home — the recents row is the
+      // way back into whichever chat was last open.
+      setChatId(null);
+      setDoorSummonedQuiet(via === "pointer");
+    } else if (!open) {
+      setDoorSummonedQuiet(false);
+    }
+    setFrontDoorOpen(open);
+  };
+  const renderMonochatComposer = (accessories?: React.ReactNode, welcome = false) => (
               <FrontDoor
                 visible={shellReady && monochatVisible}
                 floating
-                autoFocusOnShow={frontDoorOpen}
+                welcome={welcome}
+                recents={doorRecentItems}
+                onOpenRecent={openDoorRecent}
+                autoFocusOnShow={frontDoorOpen && !doorSummonedQuiet}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 text={frontDoorText}
@@ -10288,12 +10362,12 @@ function App() {
         surfaceKey={`${mainSurface}:${activeId ?? ""}:${drafterDraftId ?? ""}`}
         onVisibilityChange={setMonochatVisible}
         open={frontDoorOpen}
-        onOpenChange={setFrontDoorOpen}
+        onOpenChange={onDoorOpenChange}
         context={activeSurface.label ?? activeSurface.kind}
         busy={monochatBusy || monochatForks.size > 0}
       >
         <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
-        {!chatId && renderMonochatComposer()}
+        {!chatId && renderMonochatComposer(undefined, true)}
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom

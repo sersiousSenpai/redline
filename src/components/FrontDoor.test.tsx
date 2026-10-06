@@ -367,6 +367,87 @@ describe("the floating replacement composer", () => {
     expect(onLaunch).toHaveBeenCalledOnce();
   });
 
+  it("wears the headline and the way back into recent work", async () => {
+    await mount({
+      floating: true,
+      welcome: true,
+      onOpenRecent: () => {},
+      recents: [
+        { kind: "plan", id: "s1", label: "Auth rewrite", detail: "Plan · npla — Auth rewrite" },
+        { kind: "chat", id: "c1", label: "Pricing", detail: "Chat — Pricing" },
+        { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "LiDAR-GS", url: "https://github.com/x/lidar-gs" },
+      ],
+    });
+    expect(host.querySelector("h1")?.textContent).toBe("Every build starts as a draft.");
+    const pills = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-recent"));
+    expect(pills.map((b) => [b.dataset.kind, b.textContent])).toEqual([
+      ["plan", "Auth rewrite"],
+      ["chat", "Pricing"],
+    ]);
+    // Pages stack as plain full-width rows: the title, nothing under it.
+    const pages = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-browse-list .rl-fd-browse"));
+    expect(pages.map((b) => b.textContent)).toEqual(["LiDAR-GS"]);
+    // Each kind is its own labelled row, so it is plain what a chip opens.
+    expect(Array.from(host.querySelectorAll(".rl-fd-recent-head")).map((h) => h.textContent)).toEqual([
+      "Plans",
+      "Chats",
+      "Searches",
+    ]);
+    // No harness row: the welcome is a way back, not a directory.
+    expect(host.textContent).not.toContain("Your harnesses");
+  });
+
+  it("lays out only as many pages as fit below the composer — never a scroll", async () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
+    // A 300px layer whose composer ends at 100px: room for a few rows only.
+    const layer = document.createElement("div");
+    layer.className = "rl-frontdoor-focus";
+    document.body.appendChild(layer);
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
+    vi.spyOn(layer, "getBoundingClientRect").mockReturnValue(rect(0, 300) as DOMRect);
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === layer) return rect(0, 300) as DOMRect;
+      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
+      // The page list starts under the chip rows.
+      if (this.classList.contains("rl-fd-browse-list")) return rect(120, 120) as DOMRect;
+      return proto.call(this);
+    });
+    try {
+      layer.appendChild(host);
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+      const shown = host.querySelectorAll(".rl-fd-browse").length;
+      // (300 − 120 list top − 72 breathing room) / 36 per row → 3.
+      expect(shown).toBe(3);
+    } finally {
+      vi.restoreAllMocks();
+      document.body.appendChild(host);
+      layer.remove();
+    }
+  });
+
+  it("a recent pill opens that place and never launches or steals focus", async () => {
+    const onOpenRecent = vi.fn();
+    const onLaunch = vi.fn();
+    const chat = { kind: "chat" as const, id: "c1", label: "Pricing", detail: "Chat — Pricing" };
+    await mount({ floating: true, welcome: true, onLaunch, onOpenRecent, recents: [chat] });
+    const pill = host.querySelector<HTMLButtonElement>(".rl-fd-recent")!;
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    pill.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    await act(async () => pill.click());
+    expect(onOpenRecent).toHaveBeenCalledWith(chat);
+    expect(onLaunch).not.toHaveBeenCalled();
+  });
+
+  it("fades the welcome only once the composer is engaged", async () => {
+    await mount({ floating: true, welcome: true, autoFocusOnShow: false });
+    const root = host.querySelector(".rl-frontdoor")!;
+    expect(root.classList.contains("is-engaged")).toBe(false);
+    await act(async () => composer()!.focus());
+    expect(root.classList.contains("is-engaged")).toBe(true);
+  });
+
   it("portals the destination picker, supports keyboard choice, and never sends on selection", async () => {
     const destination = vi.fn(), launch = vi.fn();
     await mount({ floating: true, onDestinationChange: destination, onLaunch: launch, text: "Keep this draft" });

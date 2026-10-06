@@ -34,6 +34,7 @@ import {
   type ProjectChoice,
 } from "../lib/launch";
 import type { CombineSource } from "../types";
+import type { DoorRecent } from "../lib/doorRecents";
 import type { ReadinessItem } from "../lib/readiness";
 import {
   BACKENDS,
@@ -70,6 +71,14 @@ function basename(path: string): string {
 export interface FrontDoorProps {
   /** The single floating entry point; omit the retired landing-page furniture. */
   floating?: boolean;
+  /** The floating door at rest on an empty plate: it wears the headline above
+   *  and starter chips below. Both fade the moment the composer is engaged,
+   *  leaving only the box. Never set where the composer lives inside a chat. */
+  welcome?: boolean;
+  /** The welcome's pills: the way BACK into recent plans, chats and browser
+   *  tabs. Empty hides the row. */
+  recents?: DoorRecent[];
+  onOpenRecent?: (recent: DoorRecent) => void;
   autoFocusOnShow?: boolean;
   chatPending?: boolean;
   accessories?: React.ReactNode;
@@ -182,10 +191,33 @@ export interface FrontDoorProps {
   hero?: { eyebrow?: string; title?: string; sub?: string } | null;
 }
 
+/** The recents' sections, in reading order. The label says what a pill in
+ *  that row opens, so the pills themselves can stay plain chips. */
+/** Page rows: the most the list ever shows, and the geometry `browseRoom`
+ *  measures against (kept in step with `.rl-fd-browse` in MonochatIsland.css). */
+const BROWSE_MAX = 10;
+const BROWSE_ROW = 36;
+const BROWSE_GAP = 0;
+/** Breathing room under the last page: the list ends well short of the edge. */
+const BROWSE_AIR = 72;
+/** Composer bottom → page list top when the list has no box yet (the gap to
+ *  the recents, two chip rows, the section gap and the head). Only a first
+ *  guess; the real top wins. */
+const BROWSE_ABOVE = 12 + 2 * 30 + 22 + 18;
+
+const RECENT_SECTIONS = [
+  { kind: "plan", label: "Plans" },
+  { kind: "chat", label: "Chats" },
+  { kind: "browse", label: "Searches" },
+] as const;
+
 export function FrontDoor(props: FrontDoorProps) {
   const {
     visible,
     floating = false,
+    welcome = false,
+    recents = [],
+    onOpenRecent,
     autoFocusOnShow = true,
     chatPending = false,
     accessories,
@@ -242,6 +274,13 @@ export function FrontDoor(props: FrontDoorProps) {
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // How many page rows fit under the composer without scrolling or running
+  // off the layer: measured, not guessed, and re-measured whenever the space
+  // changes (window resize, the dock moving, the door gliding open). The page
+  // list is laid out statically from it — never a scroll box.
+  const recentsRef = useRef<HTMLDivElement | null>(null);
+  const browseListRef = useRef<HTMLDivElement | null>(null);
+  const [browseRoom, setBrowseRoom] = useState(BROWSE_MAX);
   const [focused, setFocused] = useState(false);
 
   // The door has to survive being squeezed. The document column floors at
@@ -599,6 +638,38 @@ export function FrontDoor(props: FrontDoorProps) {
   // one.
   const suggestionsHidden = hasText || !!offer || tight;
 
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!floating || !welcome || !root) return;
+    const layer = root.closest<HTMLElement>(".rl-frontdoor-focus");
+    let frame = 0;
+    const measure = () => {
+      frame = 0;
+      const bounds = layer?.getBoundingClientRect();
+      // Unlaid-out (hidden, or a test DOM): no evidence of a limit.
+      if (!bounds || bounds.height === 0) return setBrowseRoom(BROWSE_MAX);
+      // The list grows DOWN from a top that does not depend on how many rows
+      // it holds, so measuring from it is stable. Before it has a box, fall
+      // back to the composer's bottom plus the rows above it.
+      const listTop = browseListRef.current?.getBoundingClientRect().top || root.getBoundingClientRect().bottom + BROWSE_ABOVE;
+      const free = bounds.bottom - listTop - BROWSE_AIR;
+      const rows = Math.floor((free + BROWSE_GAP) / (BROWSE_ROW + BROWSE_GAP));
+      setBrowseRoom(Math.max(0, Math.min(BROWSE_MAX, rows)));
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
+    measure();
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    ro?.observe(root);
+    if (layer) ro?.observe(layer);
+    if (recentsRef.current) ro?.observe(recentsRef.current);
+    window.addEventListener("resize", schedule);
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      ro?.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [floating, welcome, recents.length]);
+
   // The island's shape state. `lifted` is focus-or-content: the slab settles
   // when you aren't using it and rises when you are. A launch in flight is
   // neither — it left, and the door is back at rest.
@@ -613,6 +684,12 @@ export function FrontDoor(props: FrontDoorProps) {
 
   const rootClass = [
     floating ? "rl-frontdoor rl-floating-composer font-sans" : "rl-frontdoor font-sans",
+    floating && welcome ? "has-welcome" : "",
+    // Engaged = there is a caret in the box or a sentence in it. The welcome
+    // furniture fades on THIS, not on the door being open: summoned from the
+    // footer, the door opens on the full welcome and fades only once you
+    // click in to type.
+    floating && welcome && (focused || hasText) ? "is-engaged" : "",
     entered ? "is-in" : "",
     compact ? "is-compact" : "",
     tight ? "is-tight" : "",
@@ -648,6 +725,16 @@ export function FrontDoor(props: FrontDoorProps) {
       </p>
 
       </>}
+      {floating && welcome && (
+        <div className="rl-fd-welcome rl-fd-welcome-hero">
+          <h1 className="rl-fd-title font-serif">
+            {hero?.title || "Every build starts as a draft."}
+          </h1>
+          <p className="rl-fd-sub">
+            {hero?.sub || "Describe it. Redline the plan. Then build."}
+          </p>
+        </div>
+      )}
       <div className={islandClass}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
@@ -900,6 +987,65 @@ export function FrontDoor(props: FrontDoorProps) {
           />
         )}
       </div>
+
+      {/* Recents: the way back to where you were. Plans and chats are short,
+          so they sit as labelled rows; pages are wide, so they run full width
+          below — as many as the free space under the box holds, never a
+          scroll. They retire with the headline the moment the composer is
+          engaged. `mousedown` is swallowed so a press never moves focus into
+          the door (that would engage it and fade the entry out from under
+          the click). */}
+      {floating && welcome && recents.length > 0 && onOpenRecent && (() => {
+        const entry = (r: DoorRecent, className: string) => (
+          <button
+            key={r.id}
+            type="button"
+            className={className}
+            data-kind={r.kind}
+            tabIndex={suggestionsHidden ? -1 : 0}
+            title={r.detail}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onOpenRecent(r)}
+          >
+            {r.label}
+          </button>
+        );
+        const pages = recents.filter((r) => r.kind === "browse");
+        return (
+          <div
+            ref={recentsRef}
+            className={`rl-fd-welcome rl-fd-recents${suggestionsHidden ? " is-hidden" : ""}`}
+            role="group"
+            aria-label="Jump back in"
+            aria-hidden={suggestionsHidden}
+          >
+            <div className="rl-fd-recent-chips">
+              {RECENT_SECTIONS.filter((x) => x.kind !== "browse").map(({ kind, label }) => {
+                const items = recents.filter((r) => r.kind === kind);
+                if (!items.length) return null;
+                return (
+                  <div key={kind} className="rl-fd-recent-row" data-kind={kind}>
+                    <span className="rl-fd-recent-head">{label}</span>
+                    <div className="rl-fd-recent-items">
+                      {items.map((r) => entry(r, "rl-fd-suggestion rl-fd-recent"))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {pages.length > 0 && (
+              <div className="rl-fd-browse-section">
+                <span className="rl-fd-recent-head">
+                  {RECENT_SECTIONS.find((x) => x.kind === "browse")!.label}
+                </span>
+                <div ref={browseListRef} className="rl-fd-browse-list">
+                  {pages.slice(0, browseRoom).map((r) => entry(r, "rl-fd-browse"))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* In flight. The sentence LEFT on ⏎ — the composer above is blank and
           focused — so what survives is a receipt, not a copy: an indicator

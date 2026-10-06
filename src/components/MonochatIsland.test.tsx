@@ -2,7 +2,7 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { MonochatIsland } from "./MonochatIsland";
+import { MonochatIsland, landingFit } from "./MonochatIsland";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
@@ -103,7 +103,8 @@ it("closes a saved chat mounted through an App-owned portal and restores workspa
   await act(async () => root.render(<SavedChat/>));
   host.querySelector<HTMLButtonElement>("#saved-chat-source")!.focus();
   await click('[aria-label="Open front door"]');
-  expect(document.activeElement).toBe(host.querySelector("textarea"));
+  // The footer pill opens on the door's welcome; the composer waits for a click.
+  expect(document.activeElement).toBe(host.querySelector("#rl-monochat-content"));
   await act(async () => host.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
   expect(pose()).toBe("notch");
   expect(document.activeElement?.id).toBe("saved-chat-source");
@@ -155,7 +156,7 @@ it("closes in one Escape, restores focus and preserves the same draft node", asy
   documentButton.focus();
   const draft = host.querySelector<HTMLTextAreaElement>("textarea")!;
   await click('[aria-label="Open front door"]');
-  expect(document.activeElement).toBe(draft);
+  expect(document.activeElement).toBe(host.querySelector("#rl-monochat-content"));
   expect(host.querySelector("article")!.inert).toBe(true);
   await act(async () => draft.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   expect(pose()).toBe("notch");
@@ -230,4 +231,19 @@ it("does not dismiss for text selection ending outside or an outside click that 
     backdrop.click();
   });
   expect(pose()).toBe("conversation");
+});
+
+it("sheds the resting door's furniture before it would overflow a short plate", () => {
+  expect(landingFit(600)).toBe("full");
+  expect(landingFit(400)).toBe("pills");
+  expect(landingFit(200)).toBe("bare");
+  // Below a bare composer it does not land on the terminals at all.
+  expect(landingFit(120)).toBe("none");
+});
+
+it("tells the owner a footer-pill open is a pointer summon, and a landing focus is not", async () => {
+  const onOpenChange = vi.fn();
+  await act(async () => root.render(<MonochatIsland open={false} onOpenChange={onOpenChange} context="Plan" busy={false}><textarea/></MonochatIsland>));
+  await click('[aria-label="Open front door"]');
+  expect(onOpenChange).toHaveBeenLastCalledWith(true, "pointer");
 });

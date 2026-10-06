@@ -25,6 +25,14 @@ export const DOC_MIN_H_FRAC = 0.2;
 export function docMinHFor(winHeight: number): number {
   return Math.max(DOC_MIN_H, Math.round(winHeight * DOC_MIN_H_FRAC));
 }
+/** The tallest the terminal dock may PAINT in a window this tall: whatever
+ *  leaves the document its floor. Applied at read time, never written back —
+ *  a height saved on a taller display (or grown past the window) must not
+ *  squeeze the document to nothing on a shorter one, and must come back when
+ *  the window does. */
+export function clampDockHeight(height: number, winHeight: number): number {
+  return Math.max(0, Math.min(height, winHeight - docMinHFor(winHeight)));
+}
 /** Width of one pane gutter — the strip of hull canvas between two plates.
  *  The gutter IS the divider: PaneDivider's layout box spans it, transparent at
  *  rest so the canvas shows through, painting a slim bar only on hover/drag. */

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://redline.local/schemas/mission-context.v1.schema.json",
+  "title": "Redline immutable mission context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "versionId", "missionId", "workspaceId", "publishedAt", "sourceLedgerHead", "artifactRevision", "includedScope", "localOnly", "assets", "manifestHash"],
+  "properties": {
+    "schema": {"const": 1},
+    "versionId": {"type": "string", "minLength": 1},
+    "missionId": {"type": "string", "minLength": 1},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "publishedAt": {"type": "integer"},
+    "sourceLedgerHead": {"$ref": "#/$defs/hash"},
+    "artifactRevision": {"type": ["string", "null"]},
+    "includedScope": {"type": "array", "uniqueItems": true, "items": {"enum": ["mandate", "artifact", "evidence", "judgments", "procedure", "runHistory"]}},
+    "localOnly": {"type": "boolean"},
+    "manifestHash": {"$ref": "#/$defs/hash"},
+    "assets": {"type": "object", "additionalProperties": {"$ref": "#/$defs/asset"}}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "hash", "content"],
+      "properties": {
+        "status": {"enum": ["available", "omitted", "expired", "redacted"]},
+        "hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+        "content": {}
+      }
+    }
+  }
+}
