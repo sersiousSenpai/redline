@@ -248,6 +248,3 @@ export function pickTransition(
     to: seatSummary(applyPick(current, pick)) ?? defaultLabel,
   };
 }
-
-/** Built-in default for the small, tool-free Guided change narration seat. */
-export const CHANGE_NARRATOR_DEFAULT: SeatConfig = { model: "haiku", effort: "low" };

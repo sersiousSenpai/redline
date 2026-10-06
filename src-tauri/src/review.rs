@@ -98,6 +98,10 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
     /// Line content WITHOUT the leading `+`/`-`/space sign.
     pub text: String,
+    /// Git followed this line with "\ No newline at end of file". A patch
+    /// rebuilt from the line must restore that marker or `git apply` rejects it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_newline: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -314,10 +318,11 @@ pub fn parse_unified_diff(text: &str) -> Vec<DiffFile> {
                 break;
             }
             let header = lines.next().unwrap();
+            // Git appends a TAB after a `---`/`+++` name that contains a space.
             if let Some(p) = header.strip_prefix("--- ") {
-                old_path = strip_prefix(p);
+                old_path = strip_prefix(p.strip_suffix('\t').unwrap_or(p));
             } else if let Some(p) = header.strip_prefix("+++ ") {
-                new_path = strip_prefix(p);
+                new_path = strip_prefix(p.strip_suffix('\t').unwrap_or(p));
             } else if let Some(p) = header.strip_prefix("rename from ") {
                 old_path = p.to_string();
                 status = Some(FileStatus::Renamed);
@@ -360,9 +365,12 @@ pub fn parse_unified_diff(text: &str) -> Vec<DiffFile> {
                     Some('+') => (DiffLineKind::Add, &body[1..]),
                     Some('-') => (DiffLineKind::Del, &body[1..]),
                     Some(' ') => (DiffLineKind::Context, &body[1..]),
-                    // "\ No newline at end of file" — metadata, not a line.
+                    // "\ No newline at end of file" — metadata on the line before.
                     Some('\\') => {
                         lines.next();
+                        if let Some(last) = hunk.lines.last_mut() {
+                            last.no_newline = true;
+                        }
                         continue;
                     }
                     // Some tools emit a truly empty line for empty context.
@@ -397,7 +405,16 @@ pub fn parse_unified_diff(text: &str) -> Vec<DiffFile> {
                     old_line,
                     new_line,
                     text: text.to_string(),
+                    no_newline: false,
                 });
+            }
+            // The hunk's counts run out on its last line, so a marker that
+            // follows it is still waiting here.
+            if lines.peek().is_some_and(|line| line.starts_with('\\')) {
+                lines.next();
+                if let Some(last) = hunk.lines.last_mut() {
+                    last.no_newline = true;
+                }
             }
             hunks.push(hunk);
         }
@@ -1523,7 +1540,7 @@ Binary files a/logo.png and b/logo.png differ
     }
 
     #[test]
-    fn no_newline_marker_is_skipped_not_a_line() {
+    fn no_newline_marker_flags_the_line_before_it() {
         let text = "\
 diff --git a/x b/x
 --- a/x
@@ -1539,6 +1556,9 @@ diff --git a/x b/x
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].kind, DiffLineKind::Del);
         assert_eq!(lines[1].kind, DiffLineKind::Add);
+        assert!(lines[0].no_newline && lines[1].no_newline);
+        let json = serde_json::to_value(&lines[0]).unwrap();
+        assert_eq!(json["noNewline"], true);
     }
 
     #[test]
@@ -2312,7 +2332,7 @@ pub async fn history_restore(state: tauri::State<'_, ReviewState>, repo: String,
 #[cfg(test)]
 mod guided_history_tests {
     use super::*;
-    use crate::sync::tests::{fixture, git};
+    use crate::git_test_support::{fixture, git};
     #[tokio::test]
     async fn a_conflicting_undo_is_aborted_to_identical_status_and_refs() {
         let (_root, local, _) = fixture();
@@ -2337,7 +2357,7 @@ mod guided_history_tests {
         git(&local, &["add", "."]); git(&local, &["commit", "-m", "Ours"]);
         std::fs::write(team.join("theirs.txt"), "theirs").unwrap();
         git(&team, &["add", "."]); git(&team, &["commit", "-m", "Theirs"]); git(&team, &["push"]);
-        crate::sync::check_for(&local).await.unwrap(); crate::sync::bring_in_for(&local).await.unwrap();
+        git(&local, &["pull", "--no-rebase", "--no-edit"]);
         let refs = git(&local, &["show-ref"]);
         restore_for(&local, &first, "project", None).await.unwrap();
         assert_eq!(git(&local, &["show-ref"]), refs);

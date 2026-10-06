@@ -2,11 +2,8 @@
 // Feature preferences load only when Settings is opened.
 import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useReviewPose } from "../hooks/useReviewPose";
 export default function WorkflowSettings({ Row }: { Row: ComponentType<{label:string;children:ReactNode}> }) {
-  const [reviewPose, setReviewPose] = useReviewPose();
   return <>
-    <Row label="Show Git in plain language"><input type="checkbox" aria-label="Show Git in plain language" checked={reviewPose === "guided"} onChange={event => setReviewPose(event.target.checked ? "guided" : "expert")}/></Row>
     <Row label="New terminal tabs"><TerminalDefaultSetting/></Row>
     <Row label="Group shell commands"><ShellIntegrationSetting/></Row>
   </>;

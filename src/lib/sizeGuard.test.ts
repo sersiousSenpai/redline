@@ -28,10 +28,14 @@ const files = sourceFiles(SRC_ROOT).map((path) => ({
 }));
 
 describe("size guard", () => {
-  it("keeps Guided review behind its own lazy chunk", () => {
+  it("keeps the Repository view behind its own lazy chunk", () => {
     const panel = files.find(({ rel }) => rel === "components/ReviewPanel.tsx")!.text;
-    expect(panel).toMatch(/const GuidedReview = lazy\(/);
-    expect(panel).not.toMatch(/from ["'][^"']*guided\/GuidedReview/);
+    expect(panel).toMatch(/const GitRepositoryView = lazy\(\(\) => import\(["']\.\/git\/GitRepositoryView["']\)\)/);
+    // Nothing outside the git client may import it statically.
+    const offenders = files.filter(({ rel, text }) =>
+      !rel.startsWith("components/git/") && /from\s+["'][^"']*components\/git\/|from\s+["']\.\/git\//.test(text),
+    ).map(({ rel }) => rel);
+    expect(offenders, "the git client loads only through the lazy GitRepositoryView boundary").toEqual([]);
   });
 
   it("keeps Three.js behind the Map-only lazy scene boundary", () => {

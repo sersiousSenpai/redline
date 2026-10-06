@@ -36,7 +36,7 @@ interface Shortcut {
   text: string;
 }
 
-export interface TourStep {
+interface TourStep {
   id: string;
   /** `data-tour` id of the region to spotlight. Omit for a centered card. */
   anchor?: string;
@@ -61,7 +61,6 @@ interface Rect {
 }
 
 interface OnboardingTourProps {
-  steps?: TourStep[];
   onClose: () => void;
   /** Fires with the current step's anchor id (or undefined) whenever the step
    *  changes. App uses it to reveal a collapsed region (e.g. the terminal dock)
@@ -369,15 +368,15 @@ function cardPosition(
   }
 }
 
-export function OnboardingTour({ onClose, onAnchorChange, steps = STEPS }: OnboardingTourProps) {
+export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps) {
   const [index, setIndex] = useState(0);
   const [rect, setRect] = useState<Rect | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
-  const step = steps[index];
+  const step = STEPS[index];
   const isFirst = index === 0;
-  const isLast = index === steps.length - 1;
+  const isLast = index === STEPS.length - 1;
 
   const close = useCallback(() => {
     onAnchorChange?.(undefined); // restore any region the tour revealed
@@ -623,7 +622,7 @@ export function OnboardingTour({ onClose, onAnchorChange, steps = STEPS }: Onboa
 
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-1" style={{ marginRight: 4 }}>
-              {steps.map((s, i) => (
+              {STEPS.map((s, i) => (
                 <span
                   key={s.id}
                   aria-hidden

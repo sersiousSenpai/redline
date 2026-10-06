@@ -37,14 +37,14 @@ const SURFACES: ReadonlyArray<readonly [region: string, component: string]> = [
 const WINDOW = 400;
 
 describe("per-surface error boundaries", () => {
-  it("contains the lazily loaded Guided review", () => {
+  it("contains the lazily loaded Repository view", () => {
     const panel = readFileSync(join(process.cwd(), "src/components/ReviewPanel.tsx"), "utf8");
-    const start = panel.indexOf('<ErrorBoundary region="guided review"');
+    const start = panel.indexOf('<ErrorBoundary region="repository"');
     expect(start).toBeGreaterThan(-1);
     const window = panel.slice(start, start + 800);
     expect(window).toContain("fallback=");
     expect(window).toContain("<Suspense");
-    expect(window).toContain("<GuidedReview");
+    expect(window).toContain("<GitRepositoryView");
   });
 
   for (const [region, component] of SURFACES) {

@@ -61,7 +61,6 @@ pub const KNOWN_SEATS: &[&str] = &[
     "seatassign",
     "ai_review",
     "ai_commit",
-    "change_narrator",
     "browse_locator",
     "browse_organizer",
     "orchestrator",
@@ -186,11 +185,6 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
         "Pre-reviews a code-review diff and files schema-constrained findings \
          as draft annotations.",
         "When a code review opens with pre-review enabled.",
-    ),
-    (
-        "change_narrator",
-        "Explains reviewed changes in plain language using a sampled diff and no tools.",
-        "When Guided review opens or a saved version is inspected.",
     ),
     (
         "ai_commit",

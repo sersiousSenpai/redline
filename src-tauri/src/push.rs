@@ -56,6 +56,21 @@ pub(crate) async fn git_write(
     run_bin("/usr/bin/git", dir, &argv, stdin, timeout).await
 }
 
+/// `git_write` with extra environment, for callers that must pin variables
+/// such as `GIT_EDITOR` (a `-c core.editor` flag loses to an inherited
+/// `GIT_EDITOR`, so the env is the only reliable override).
+pub(crate) async fn git_write_env(
+    dir: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> Result<GitRun, String> {
+    let mut argv: Vec<String> = vec!["-C".to_string(), dir.to_string_lossy().into_owned()];
+    argv.extend(args.iter().map(|s| s.to_string()));
+    run_bin_env("/usr/bin/git", dir, &argv, stdin, timeout, envs).await
+}
+
 /// Shared spawn/feed/collect for git and gh: null-safe stdio, stdin fed then
 /// closed so `-F -` / `--body-file -` see EOF, kill on timeout.
 pub(crate) async fn run_bin(
@@ -65,10 +80,22 @@ pub(crate) async fn run_bin(
     stdin: Option<&[u8]>,
     timeout: Duration,
 ) -> Result<GitRun, String> {
+    run_bin_env(bin, cwd, args, stdin, timeout, &[]).await
+}
+
+async fn run_bin_env(
+    bin: &str,
+    cwd: &Path,
+    args: &[String],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+    envs: &[(&str, &str)],
+) -> Result<GitRun, String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .envs(envs.iter().copied())
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -1134,7 +1161,7 @@ pub async fn review_revert(
     finish_undo(&dir, &backup_dir, &undo_id, &file_path, had_file, action).await
 }
 
-async fn undo_folder(dir: &Path, id: &str) -> Result<PathBuf, String> {
+pub(crate) async fn undo_folder(dir: &Path, id: &str) -> Result<PathBuf, String> {
     if uuid::Uuid::parse_str(id).is_err() {
         return Err("Invalid recovery copy.".into());
     }

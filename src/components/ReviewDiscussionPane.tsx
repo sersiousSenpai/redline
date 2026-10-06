@@ -4,8 +4,6 @@ import { useMemo, useState } from "react";
 
 import type { ReviewAnnotation, ReviewQuestion } from "../types";
 import type { UseReview } from "../hooks/useReview";
-import { getGuidedContext } from "../lib/guidedContext";
-import { nextQuestionId } from "../lib/reviewSelection";
 import { nextAnnotationId } from "../lib/reviewSelection";
 import {
   anchorLabel,
@@ -107,9 +105,6 @@ export default function ReviewDiscussionPane({ review }: ReviewDiscussionPanePro
           round {session?.round ?? 1}
           {orphanCount > 0 ? ` · ${orphanCount} unmatched (see the review pane)` : ""}
         </span>
-        <button type="button" className="rl-review-btn" onClick={() => {
-          void review.addQuestion({ id: nextQuestionId(questions), reviewId: activeReviewId, filePath: "", side: "new", startLine: 0, endLine: 0, quotedText: getGuidedContext(activeReviewId), createdAt: Date.now() });
-        }}>Ask about this</button>
         <button
           type="button"
           className="rl-review-btn"
@@ -259,11 +254,11 @@ function PaneQuestionCard({
           className="font-mono"
           style={{ fontSize: "10.5px", color: "var(--color-ink-muted)" }}
         >
-          {q.filePath ? `${q.filePath}:${q.side} L${q.startLine}` : "About this project"}
+          {q.filePath}:{q.side} L{q.startLine}
           {q.endLine !== q.startLine ? `–${q.endLine}` : ""}
         </span>
       </div>
-      {q.quotedText && q.filePath && <pre className="rl-review-card-quote">{q.quotedText}</pre>}
+      {q.quotedText && <pre className="rl-review-card-quote">{q.quotedText}</pre>}
       <div className="rl-review-card-actions">
         <button
           type="button"

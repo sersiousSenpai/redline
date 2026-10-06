@@ -36,8 +36,8 @@ import RouterVerdictBanner from "./RouterVerdictBanner";
 import { PlanSearchBox } from "./PlanSearchBox";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { useReviewPose } from "../hooks/useReviewPose";
-import type { ActionResult } from "./guided/types";
-const GuidedReview = lazy(() => import("./guided/GuidedReview"));
+// The Repository pose is a full git client; its own chunk, fetched on first use.
+const GitRepositoryView = lazy(() => import("./git/GitRepositoryView"));
 
 // Code Review pane: pick a repo + diff source, read the annotatable diff.
 // Read-only browsing shell in P2 — annotation entry (P3) and the blocking
@@ -92,7 +92,11 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
   } = review;
 
   const [pose, setPose] = useReviewPose();
-  const [codeTarget, setCodeTarget] = useState<string | null>(null);
+  // A held review request always lands on the review pose: the agent is
+  // waiting on annotations, and those live there.
+  useEffect(() => {
+    if (holdActive) setPose("review");
+  }, [holdActive, activeReviewId, setPose]);
   const ai = useAiReview(review.activeReviewId);
   const push = usePush(repo, activeReviewId);
   const [pushOpen, setPushOpen] = useState(false);
@@ -125,11 +129,6 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
   const diffKey = `${repo ?? ""}|${source}|${base ?? ""}|${sha ?? ""}|${session?.round ?? 1}`;
 
   const diffRef = useRef<DiffViewHandle | null>(null);
-  useEffect(() => {
-    if (pose !== "expert" || !codeTarget) return;
-    const frame = requestAnimationFrame(() => { diffRef.current?.scrollToFile(codeTarget); setCodeTarget(null); });
-    return () => cancelAnimationFrame(frame);
-  }, [pose, codeTarget]);
   const [showTree, setShowTree] = usePersistedState("redline.review.showTree", true);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -396,7 +395,7 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
   // Panel-level keys: ⌘F search, ⌘B tree, ⌘↩ submit, ? help.
   const handlePanelKeys = useCallback(
     (e: React.KeyboardEvent) => {
-      if (pose === "guided") return;
+      if (pose === "repository") return;
       const target = e.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT";
       if (e.metaKey && e.key.toLowerCase() === "f") {
@@ -472,11 +471,11 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
           ))}
         </select>
 
-        <div className="rl-review-seg" role="group" aria-label="Review language">
-          <button type="button" data-active={pose === "guided" ? "" : undefined} onClick={() => setPose("guided")}>Guided</button>
-          <button type="button" data-active={pose === "expert" ? "" : undefined} onClick={() => setPose("expert")}>Expert</button>
+        <div className="rl-review-seg" role="group" aria-label="Code review view">
+          <button type="button" aria-pressed={pose === "review"} data-active={pose === "review" ? "" : undefined} onClick={() => setPose("review")}>Review</button>
+          <button type="button" aria-pressed={pose === "repository"} data-active={pose === "repository" ? "" : undefined} onClick={() => setPose("repository")}>Repository</button>
         </div>
-        {pose === "expert" && <>
+        {pose === "review" && <>
         <select
           value={source}
           onChange={(e) => setSource(e.target.value as DiffSource)}
@@ -602,7 +601,7 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
 
         </>}
         <div className="ml-auto flex items-center gap-1.5">
-          {pose === "expert" && <>
+          {pose === "review" && <>
           <button
             type="button"
             className="rl-review-btn rl-review-btn-iconic"
@@ -656,7 +655,7 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
                 }
                 onClick={() => void submitReview(false)}
               >
-                {pose === "guided" ? "Send my notes to Claude" : "Submit"} {liveCount > 0 ? `(${liveCount})` : ""}
+                Submit {liveCount > 0 ? `(${liveCount})` : ""}
               </button>
               <button
                 type="button"
@@ -664,7 +663,7 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
                 title="Approve — no changes requested"
                 onClick={() => void submitReview(true, approvePrompt || null)}
               >
-                {pose === "guided" ? "Looks good, keep going" : "Approve"}
+                Approve
               </button>
               <button
                 type="button"
@@ -672,11 +671,11 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
                 title="Unblock the agent without feedback"
                 onClick={() => void dismissReview()}
               >
-                {pose === "guided" ? "Not now" : "Dismiss"}
+                Dismiss
               </button>
             </span>
           )}
-          {pose === "expert" && !holdActive && (
+          {pose === "review" && !holdActive && (
             <button
               type="button"
               className="rl-review-btn rl-review-btn-iconic"
@@ -691,15 +690,17 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
               ⧉
             </button>
           )}
-          <button
-            type="button"
-            onClick={() => void refreshDiff()}
-            title="Refresh diff"
-            aria-label="Refresh diff"
-            className="rl-review-btn rl-review-btn-iconic"
-          >
-            ↻
-          </button>
+          {pose === "review" && (
+            <button
+              type="button"
+              onClick={() => void refreshDiff()}
+              title="Refresh diff"
+              aria-label="Refresh diff"
+              className="rl-review-btn rl-review-btn-iconic"
+            >
+              ↻
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -712,16 +713,13 @@ function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: Review
         </div>
       </div>
 
-      {pose === "guided" ? <ErrorBoundary region="guided review" fallback={(_error, reset) => <div className="p-4">Guided review could not open. <button className="rl-review-btn" onClick={reset}>Try again</button><button className="rl-review-btn" onClick={() => setPose("expert")}>Open Expert</button></div>}>
-        <Suspense fallback={<Empty>Opening Guided review…</Empty>}>
-          <GuidedReview review={review} push={push} ai={ai} onOpenTerminal={onOpenTerminal}
-            onCode={file => { setHideViewed(false); setCodeTarget(file); setPose("expert"); }}
-            onUndo={async filePath => {
-              const result = await invoke<ActionResult>("review_revert", { repo, source, base, sha, filePath, scope: "file", hunkIndex: null, fingerprint: review.getFingerprint() });
-              await refreshDiff(); void push.refreshStatus(); return result;
-            }} />
-        </Suspense>
-      </ErrorBoundary> : <>
+      {pose === "repository" ? (
+        <ErrorBoundary region="repository" fallback={(_error, reset) => <div className="p-4 flex items-center gap-2" style={{ fontSize: 13, color: "var(--color-ink-muted)" }}>The repository view could not open. <button type="button" className="rl-review-btn" onClick={reset}>Try again</button><button type="button" className="rl-review-btn" onClick={() => setPose("review")}>Back to Review</button></div>}>
+          <Suspense fallback={<Empty>Opening repository…</Empty>}>
+            {repo ? <GitRepositoryView repo={repo} onOpenTerminal={onOpenTerminal} /> : <Empty>Choose a project to open its repository.</Empty>}
+          </Suspense>
+        </ErrorBoundary>
+      ) : <>
       {repo && <ReviewGitStrip status={push.status} lastPush={push.lastPush} />}
 
       {/* Shadow attention router: informational banner only — no behavior. */}

@@ -10,6 +10,9 @@ use std::{
     time::Duration,
 };
 
+/// The narration and workspace features are gone, but their tables stay:
+/// the schema is the authority (`db.rs` checks these columns) and must not
+/// regress.
 pub(crate) fn migrate(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     conn.execute_batch("CREATE TABLE IF NOT EXISTS change_narrations (repo TEXT NOT NULL, fingerprint TEXT NOT NULL, story TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(repo,fingerprint));
 CREATE TABLE IF NOT EXISTS commit_narrations (repo TEXT NOT NULL, sha TEXT NOT NULL, story TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(repo,sha));
@@ -18,78 +21,17 @@ CREATE TABLE IF NOT EXISTS git_workspaces (id TEXT PRIMARY KEY, repo TEXT NOT NU
 
 #[derive(Debug)]
 pub(crate) enum GuidedOp {
-    Fetch {
-        remote: String,
-    },
-    Merge {
-        target: String,
-        fast_forward: bool,
-        workspace: bool,
-    },
-    AbortMerge,
-    AbortCherryPick,
-    // Recovery of an operation started outside Guided is the sole rebase argv.
-    AbortRebase,
     AbortRevert,
-    WorktreeAdd {
-        path: String,
-        branch: String,
-        from: String,
-    },
-    WorktreeRemove {
-        path: String,
-    },
-    WorktreePrune,
-    Revert {
-        revision: String,
-    },
-    RestoreFile {
-        revision: String,
-        path: String,
-    },
-    UndoFile {
-        path: String,
-    },
-    ReversePatch {
-        check: bool,
-        index: bool,
-    },
-    RestoreProject {
-        revision: String,
-    },
-    Stage {
-        paths: Vec<String>,
-    },
-    Commit,
-    Share {
-        remote: String,
-        branch: String,
-    },
+    Revert { revision: String },
+    RestoreFile { revision: String, path: String },
+    UndoFile { path: String },
+    ReversePatch { check: bool, index: bool },
+    RestoreProject { revision: String },
 }
 impl GuidedOp {
     pub(crate) fn args(&self) -> Vec<String> {
         let args: Vec<&str> = match self {
-            Self::Fetch { remote } => vec!["fetch", "--prune", "--", remote],
-            Self::Merge {
-                target,
-                fast_forward: true,
-                ..
-            } => vec!["merge", "--ff-only", "--", target],
-            Self::Merge {
-                target,
-                workspace: true,
-                ..
-            } => vec!["merge", "--no-ff", "--no-edit", "--", target],
-            Self::Merge { target, .. } => vec!["merge", "--no-edit", "--", target],
-            Self::AbortMerge => vec!["merge", "--abort"],
-            Self::AbortCherryPick => vec!["cherry-pick", "--abort"],
-            Self::AbortRebase => vec!["rebase", "--abort"],
             Self::AbortRevert => vec!["revert", "--abort"],
-            Self::WorktreeAdd { path, branch, from } => {
-                vec!["worktree", "add", "-b", branch, "--", path, from]
-            }
-            Self::WorktreeRemove { path } => vec!["worktree", "remove", "--", path],
-            Self::WorktreePrune => vec!["worktree", "prune", "--expire", "now"],
             Self::Revert { revision } => vec!["revert", "--no-commit", "--mainline", "1", revision],
             Self::RestoreFile { revision, path } => {
                 vec!["restore", "--source", revision, "--", path]
@@ -118,36 +60,14 @@ impl GuidedOp {
                 "--",
                 ".",
             ],
-            Self::Stage { paths } => {
-                let mut args = vec!["add".into(), "-A".into(), "--".into()];
-                args.extend(paths.iter().map(|p| format!(":(literal){p}")));
-                return args;
-            }
-            Self::Commit => vec!["commit", "-F", "-"],
-            Self::Share { remote, branch } => {
-                return vec![
-                    "push".into(),
-                    "-u".into(),
-                    "--".into(),
-                    remote.clone(),
-                    format!("HEAD:refs/heads/{branch}"),
-                ]
-            }
         };
         args.into_iter().map(str::to_string).collect()
     }
     fn meaning(&self) -> &'static str {
         match self {
-            Self::Fetch { .. } => "Checked your team copy for new saved versions.",
-            Self::Merge { .. } => "Brought saved versions together without rewriting history.",
-            Self::AbortMerge | Self::AbortCherryPick | Self::AbortRebase | Self::AbortRevert => {
+            Self::AbortRevert => {
                 "Cancelled the unfinished operation and restored its starting point."
             }
-            Self::WorktreeAdd { .. } => "Created a separate folder and workspace for this idea.",
-            Self::WorktreeRemove { .. } => {
-                "Archived the clean workspace folder; its saved versions remain."
-            }
-            Self::WorktreePrune => "Removed records of workspace folders that no longer exist.",
             Self::Revert { .. } => "Prepared an undo as unsaved changes for you to review.",
             Self::RestoreFile { .. } => "Restored this file as an unsaved change.",
             Self::ReversePatch { .. } | Self::UndoFile { .. } => {
@@ -156,9 +76,6 @@ impl GuidedOp {
             Self::RestoreProject { .. } => {
                 "Prepared the old project's contents as unsaved changes, preserving history."
             }
-            Self::Stage { .. } => "Included the reviewed files in this version.",
-            Self::Commit => "Saved a new version on this computer.",
-            Self::Share { .. } => "Shared this workspace with your team.",
         }
     }
 }
@@ -263,69 +180,12 @@ pub(crate) async fn repo_lock(dir: &Path) -> tokio::sync::OwnedMutexGuard<()> {
         .clone();
     lock.lock_owned().await
 }
-pub(crate) async fn merge(
-    dir: &Path,
-    target: String,
-    ff: bool,
-    workspace: bool,
-    result: &mut ActionResult,
-) -> Result<(), String> {
-    let ours = read(dir, &["log", "-1", "--format=%h %s", "HEAD"])
-        .await
-        .unwrap_or_default();
-    let theirs = read(dir, &["log", "-1", "--format=%h %s", &target])
-        .await
-        .unwrap_or_default();
-    let attempt = run(
-        dir,
-        GuidedOp::Merge {
-            target,
-            fast_forward: ff,
-            workspace,
-        },
-        None,
-        result,
-    )
-    .await;
-    if attempt.as_ref().is_ok_and(|out| out.code == 0) {
-        result.message = "Your versions are together. Your saved history is intact.".into();
-        return Ok(());
-    }
-    let files = read(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).await?;
-    let files: Vec<_> = files
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect();
-    if !files.is_empty() || crate::push::in_progress_op(dir).await.as_deref() == Some("merge") {
-        let abort = run(dir, GuidedOp::AbortMerge, None, result).await?;
-        if abort.code != 0 {
-            return Err("The combine could not be cancelled automatically. Keep this folder open and ask a teammate to help finish it.".into());
-        }
-        result.conflict = Some(ConflictReport {
-            files,
-            ours_summary: format!("Your saved work is unchanged: {}", ours.trim()),
-            theirs_summary: format!(
-                "The incoming version is {}. Combine this version in a separate workspace.",
-                theirs.trim()
-            ),
-        });
-        result.message =
-            "Two edits to the same spot. Redline cancelled the combine and kept your work.".into();
-        return Ok(());
-    }
-    match attempt {
-        Ok(out) => Err(crate::git_human::explain(&out.stderr).message),
-        Err(error) => Err(error),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[tokio::test]
     async fn whole_file_undo_clears_both_layers_but_keeps_other_prepared_edits() {
-        use crate::sync::tests::{fixture, git};
+        use crate::git_test_support::{fixture, git};
         let (_root, local, _) = fixture();
         let refs = git(&local, &["show-ref"]);
         std::fs::write(local.join("shared.txt"), "prepared\n").unwrap();
@@ -357,32 +217,7 @@ mod tests {
     #[test]
     fn whitelisted_ops_build_fixed_arg_vectors() {
         let ops = [
-            GuidedOp::Fetch {
-                remote: "origin".into(),
-            },
-            GuidedOp::Merge {
-                target: "a".into(),
-                fast_forward: true,
-                workspace: false,
-            },
-            GuidedOp::Merge {
-                target: "a".into(),
-                fast_forward: false,
-                workspace: true,
-            },
-            GuidedOp::AbortMerge,
-            GuidedOp::AbortCherryPick,
-            GuidedOp::AbortRebase,
             GuidedOp::AbortRevert,
-            GuidedOp::WorktreeAdd {
-                path: "/tmp/a".into(),
-                branch: "redline/ws/a".into(),
-                from: "a".into(),
-            },
-            GuidedOp::WorktreeRemove {
-                path: "/tmp/a".into(),
-            },
-            GuidedOp::WorktreePrune,
             GuidedOp::Revert {
                 revision: "a".into(),
             },
@@ -390,10 +225,6 @@ mod tests {
                 revision: "a".into(),
                 path: ":(literal)a".into(),
             },
-            GuidedOp::Stage {
-                paths: vec!["a".into()],
-            },
-            GuidedOp::Commit,
             GuidedOp::UndoFile {
                 path: "[id]".into(),
             },
@@ -404,10 +235,6 @@ mod tests {
             GuidedOp::RestoreProject {
                 revision: "a".into(),
             },
-            GuidedOp::Share {
-                remote: "origin".into(),
-                branch: "redline/ws/a".into(),
-            },
         ];
         for op in ops {
             let args = op.args();
@@ -415,16 +242,21 @@ mod tests {
                 "reset", "stash", "clean", "switch", "checkout", "--force", "-f", "-D"
             ]
             .contains(&a.as_str())));
-            if args[0] == "rebase" {
-                assert_eq!(args, ["rebase", "--abort"]);
-            }
         }
         assert_eq!(
-            GuidedOp::Stage {
-                paths: vec!["[id]".into()]
+            GuidedOp::UndoFile {
+                path: "[id]".into()
             }
             .args(),
-            ["add", "-A", "--", ":(literal)[id]"]
+            [
+                "restore",
+                "--source",
+                "HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                ":(literal)[id]"
+            ]
         );
     }
 }

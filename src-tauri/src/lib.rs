@@ -119,10 +119,10 @@ mod pty;
 mod shell_integration;
 mod push;
 mod guided;
+mod git_gui;
 mod git_human;
-mod narrate;
-mod sync;
-mod workspaces;
+#[cfg(test)]
+mod git_test_support;
 mod query;
 mod queue;
 mod repoicon;
@@ -12875,18 +12875,37 @@ pub fn run() {
             push::push_status,
             push::review_restore_undo,
             push::review_push,
-            narrate::narrate_changes,
-            narrate::narrate_commit,
-            sync::sync_check,
-            sync::sync_bring_in,
-            sync::sync_cancel,
-            workspaces::workspace_create,
-            workspaces::workspace_list,
-            workspaces::workspace_status,
-            workspaces::workspace_archive,
-            workspaces::workspace_bring_in,
-            workspaces::guided_save,
-            workspaces::guided_share,
+            git_gui::git_gui_status,
+            git_gui::git_gui_file_diff,
+            git_gui::git_gui_log,
+            git_gui::git_gui_commit_detail,
+            git_gui::git_gui_commit_files,
+            git_gui::git_gui_refs,
+            git_gui::git_gui_stage,
+            git_gui::git_gui_unstage,
+            git_gui::git_gui_discard,
+            git_gui::git_gui_apply_patch,
+            git_gui::git_gui_commit,
+            git_gui::git_gui_last_message,
+            git_gui::git_gui_fetch,
+            git_gui::git_gui_pull,
+            git_gui::git_gui_push,
+            git_gui::git_gui_checkout,
+            git_gui::git_gui_branch_create,
+            git_gui::git_gui_branch_delete,
+            git_gui::git_gui_merge,
+            git_gui::git_gui_rebase,
+            git_gui::git_gui_continue,
+            git_gui::git_gui_abort,
+            git_gui::git_gui_cherry_pick,
+            git_gui::git_gui_revert_commit,
+            git_gui::git_gui_reset,
+            git_gui::git_gui_tag_create,
+            git_gui::git_gui_tag_delete,
+            git_gui::git_gui_stash_save,
+            git_gui::git_gui_stash_apply,
+            git_gui::git_gui_stash_drop,
+            git_gui::git_gui_stash_files,
             review::history_list,
             review::history_restore,
             push::review_revert,

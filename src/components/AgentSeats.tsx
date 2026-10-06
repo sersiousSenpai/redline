@@ -159,8 +159,6 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
       { name: "mission", label: "Missions" },
       { name: "ai_review", label: "AI code review" },
       { name: "ai_commit", label: "Commit drafter" },
-      { name: "change_narrator", label: "Change narrator" },
-      { name: "browse_organizer", label: "Browser tab organizer" },
       { name: "browse_locator", label: "Browser list locator" },
       { name: "orchestrator", label: "Plan orchestrator" },
       { name: "harness", label: "Shelf agents" },

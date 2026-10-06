@@ -943,6 +943,7 @@ mod tests {
                     old_line: None,
                     new_line: Some(1),
                     text: "let x = 1;".into(),
+                    no_newline: false,
                 }],
             }],
         };
@@ -994,6 +995,7 @@ mod tests {
                         old_line: None,
                         new_line: Some(i as u32 + 1),
                         text: (*t).to_string(),
+                        no_newline: false,
                     })
                     .collect(),
             }],

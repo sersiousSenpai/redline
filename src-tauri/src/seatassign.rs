@@ -229,13 +229,6 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         note: None,
     },
     SeatFact {
-        seat: "change_narrator",
-        label: "Change narrator",
-        role: "Explains a sampled diff in plain language with no tools and a 15-second deadline; uses haiku by default.",
-        traits: &["interactive", "latency_sensitive"],
-        note: None,
-    },
-    SeatFact {
         seat: "ai_commit",
         label: "Commit drafter",
         role: "Drafts one short commit subject from a sampled review diff; branch \
