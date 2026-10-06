@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { ConversationDescriptor } from "../lib/conversationContext";
+import { ListTodo } from "lucide-react";
 
 // The conversation dock's context switcher: which conversation this one column
 // is holding right now.
@@ -63,6 +64,7 @@ export function DockContextStrip({
               textOverflow: "ellipsis",
             }}
           >
+            {d.kind === "browselist" && <ListTodo size={12} aria-hidden style={{ display: "inline", marginRight: 4, verticalAlign: "-2px" }}/>}
             {d.label}
           </button>
         );

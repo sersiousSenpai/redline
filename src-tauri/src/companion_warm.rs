@@ -193,6 +193,14 @@ pub fn warm_args(system_prompt: &str, resume: Option<&str>, seat_flags: Vec<Stri
     args
 }
 
+pub fn mode_args(system_prompt: &str, resume: Option<&str>, seat_flags: Vec<String>, build: bool) -> Result<Vec<String>, String> {
+    let mut args = crate::claude_proc::companion_args(String::new(), resume, seat_flags, build)?;
+    args.remove(1); // stream input supplies the prompt
+    args.extend(["--input-format".into(), "stream-json".into(), "--append-system-prompt".into(), system_prompt.into()]);
+    if !build { crate::claude_proc::assert_read_only_argv(&args)?; }
+    Ok(args)
+}
+
 async fn drain_stderr(stderr: ChildStderr, tail: StderrTail) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {

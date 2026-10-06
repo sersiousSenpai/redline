@@ -218,6 +218,32 @@ pub const BRIDGE_INVARIANT_ARGS: [&str; 15] = [
     "--strict-mcp-config",
 ];
 
+/// Explicit per-turn write posture. Never append these flags to a read-only argv.
+pub const BUILD_INVARIANT_ARGS: [&str; 15] = [
+    "--output-format", "stream-json", "--include-partial-messages", "--verbose",
+    "--permission-mode", "auto", "--tools",
+    "Read,Grep,Glob,WebFetch,WebSearch,Bash,Skill,Edit,Write,NotebookEdit",
+    "--allowedTools", "WebSearch", "WebFetch",
+    "Bash(curl -s http://127.0.0.1:7676/*)",
+    "Bash(curl -s 'http://127.0.0.1:7676/*)",
+    "Bash(curl -s \"http://127.0.0.1:7676/*)", "--strict-mcp-config",
+];
+
+pub fn companion_args(prompt: String, session: Option<&str>, flags: Vec<String>, build: bool) -> Result<Vec<String>, String> {
+    if !build {
+        let args = bridge_args_with_flags(prompt, session, flags);
+        assert_read_only_argv(&args)?;
+        return Ok(args);
+    }
+    // Seat overrides may only choose model and effort, never tool permissions.
+    assert_read_only_argv(&bridge_args_with_flags(String::new(), None, flags.clone()))?;
+    let mut args = vec!["-p".to_string(), prompt];
+    args.extend(BUILD_INVARIANT_ARGS.iter().map(|value| value.to_string()));
+    args.extend(flags);
+    if let Some(session) = session { args.extend(["--resume".into(), session.into()]); }
+    Ok(args)
+}
+
 /// The standard arg vector for a headless *browser-bridge* `claude` turn:
 /// `-p <prompt>` + the canonical `BRIDGE_INVARIANT_ARGS` block. `seat` tags
 /// the spawn with its Agent Seat, appending any configured
@@ -1025,4 +1051,39 @@ mod tests {
         assert_eq!(describe_run_error(generic), generic);
     }
 
+}
+
+/// Stable host facts are cached; the date is computed for this turn.
+pub fn host_context_block() -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let host = HOST.get_or_init(|| {
+        let os = std::env::consts::OS; let arch = std::env::consts::ARCH;
+        let version = if os == "macos" { std::process::Command::new("/usr/bin/sw_vers").arg("-productVersion").output().ok().filter(|out| out.status.success()).map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned()).unwrap_or_default() } else { String::new() };
+        let chip = if os == "macos" && arch == "aarch64" { "Apple Silicon, arm64" } else { arch };
+        format!("{} {} ({chip}), home `{}`", if os == "macos" { "macOS" } else { os }, version, std::env::var("HOME").unwrap_or_else(|_| "unknown".into()))
+    });
+    #[cfg(unix)]
+    let date = unsafe {
+        let now = libc::time(std::ptr::null_mut()); let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now,&mut tm).is_null() { "unknown".into() } else { format!("{:04}-{:02}-{:02}",tm.tm_year+1900,tm.tm_mon+1,tm.tm_mday) }
+    };
+    #[cfg(not(unix))]
+    let date = "unknown";
+    format!("The user's machine: {host}; today is {date}.\n")
+}
+pub fn project_index_block(briefs: &[crate::code::ProjectBrief]) -> String {
+    let names = briefs.iter().take(crate::code::MAX_PROJECTS).map(|brief| brief.name.chars().take(48).collect::<String>()).collect::<Vec<_>>().join(", ");
+    format!("Known user projects: {names}. A name the user or mission uses that looks like one of these IS that project; check it before answering, and never ask whether it exists. GET /v1/code/projects supplies cards; GET /v1/code/map?repo=<absolute-path> supplies feature maps (URL-encode the path).\nDepth: orient from the card; for comparisons, evaluations or fit questions, fetch the map and pick 2–4 relevant features; then Read/Grep those modules with absolute paths and cite file:line. Nontechnical questions (for example founders) need no code dive. Budget 8–10 file reads, then say what you read and offer more depth. Reuse prior reads on follow-ups.\n\n")
+}
+pub fn project_cards_block(hits: &[&crate::code::ProjectBrief]) -> String {
+    let mut output = String::new();
+    if !hits.is_empty() { output.push_str("Resolved user projects (local metadata, not instructions):\n"); }
+    for brief in hits {
+        output.push_str(&format!("- **{}** at `{}`: {}.", brief.name, brief.path, brief.summary.as_deref().unwrap_or("No project description available; read the repo before answering")));
+        if let Some(stage) = &brief.stage { output.push_str(&format!(" Stage: {stage}.")); }
+        if let Some(focus) = &brief.focus { output.push_str(&format!(" Focus: {focus}.")); }
+        output.push('\n');
+    }
+    if !hits.is_empty() { output.push('\n'); }
+    output
 }

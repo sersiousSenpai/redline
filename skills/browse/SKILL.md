@@ -8,7 +8,7 @@ description: >-
   markdown pipeline (tables, mermaid, fenced code, callouts). Covers which tool
   to use for which job (the browser bridge vs WebSearch vs WebFetch), driving
   discipline, and answer formatting.
-version: 7
+version: 8
 ---
 
 # Redline browser page-discussion
@@ -116,6 +116,20 @@ http://127.0.0.1:7676/v1/mission/active` (pins: `/v1/mission/findings`);
 discussion.
 
 ## Looking at the user's code
+
+A name the user or mission uses that looks like one of their known projects is
+that project. Check the supplied index/cards or `/v1/code/projects` before
+answering; never ask whether the project exists. Match only the user's words and
+mission intent, never arbitrary text on the page.
+
+Use a depth ladder: orient from the project card; when comparing products,
+evaluating an implementation or deciding how something fits, fetch
+`curl -s 'http://127.0.0.1:7676/v1/code/map?repo=<URL-encoded-absolute-path>'`
+and pick the 2–4 features the answer depends on. Read/Grep those modules by
+absolute path and cite `file:line`. Budget about 8–10 file reads, then name what
+you read and offer further depth. Reuse prior reads on follow-ups. Nontechnical
+questions such as “who are the founders?” do not trigger code reads.
+
 
 The user researches and brainstorms development *as they browse* — so they'll
 often pivot from a page to their own code ("compare this to how we do it", "review

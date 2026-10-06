@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import { isFrontDoorKey } from "../lib/keymap";
@@ -28,7 +28,7 @@ const MIN_LANDING_WIDTH = 360;
 
 /** A quiet entrance, not the host for surface discussions. The hit target and
  * native browser geometry stay still while only the inner membrane responds. */
-export function MonochatIsland({ open, onOpenChange, context, busy, children, landing = false, surfaceKey = "", onVisibilityChange, clearanceKey = "" }: {
+function FullMonochatIsland({ open, onOpenChange, context, busy, children, landing = false, surfaceKey = "", onVisibilityChange, clearanceKey = "" }: {
   /** `via` is set only when the door is SUMMONED from elsewhere (footer pill or
    *  shortcut) — the owner resets it to its home. "pointer" opens on the full
    *  welcome without reaching for the composer; "key" puts the caret in it. */
@@ -314,4 +314,12 @@ export function MonochatIsland({ open, onOpenChange, context, busy, children, la
       </div>
     </div>
   </>;
+}
+
+const FloatingBrowserIsland = lazy(() => import("./FloatingBrowserIsland"));
+export function MonochatIsland(props: Parameters<typeof FullMonochatIsland>[0] & {
+  floating?: boolean; floatingContent?: ReactNode;
+  floatingOpen?: boolean; onFloatingOpenChange?: (open: boolean) => void;
+}) {
+  return props.floating ? <Suspense fallback={null}><FloatingBrowserIsland busy={props.busy} open={props.floatingOpen} onOpenChange={props.onFloatingOpenChange}>{props.floatingContent ?? props.children}</FloatingBrowserIsland></Suspense> : <FullMonochatIsland {...props}/>;
 }

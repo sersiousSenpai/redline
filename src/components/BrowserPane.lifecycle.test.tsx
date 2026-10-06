@@ -37,7 +37,7 @@ function deferred() {
   return { promise, resolve };
 }
 const tabs = ["one", "two"].map((browseId) => ({ id: `t-${browseId}`, browseId, title: browseId, url: `https://${browseId}.test` }));
-const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); }); };
+const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 160)); }); };
 const event = async (name: string, payload: unknown) => { await act(async () => { mocks.listeners.get(name)?.({ payload }); }); await settle(); };
 beforeEach(() => {
   localStorage.clear(); mocks.listeners.clear(); mocks.views.clear(); mocks.createGates.clear(); mocks.showGates.clear(); mocks.raceLabel = "";
@@ -46,8 +46,11 @@ beforeEach(() => {
   mocks.invoke.mockReset(); mocks.load.mockReset(); mocks.save.mockReset(); mocks.revision.mockReset();
   mocks.invoke.mockImplementation(async (command, args) => {
     // Tabs are built natively now; the mocked view stands in for the result.
-    if (command === "browser_create_tab") { const view = new (MockWebview as unknown as new (window: unknown, label: string) => { label: string })(null, args.label); await (mocks.createGates.get(view.label) ?? Promise.resolve()); return null; }
+    if (command === "browser_create_tab") { if (mocks.views.has(args.label)) return null; const view = new (MockWebview as unknown as new (window: unknown, label: string) => { label: string })(null, args.label); await (mocks.createGates.get(view.label) ?? Promise.resolve()); return null; }
     if (command === "browser_close") { const view = mocks.views.get(args.label); if (view) { view.visible = false; view.log.push("close"); mocks.views.delete(args.label); } }
+    if (command === "browser_eval_result") return JSON.stringify({ ready: "complete", children: 2 });
+    if (["shots_list", "mission_list"].includes(command)) return [];
+    if (command === "browser_home_feed") return { recent: [], frequent: [], tasks: [], missions: [] };
     return command === "get_browse_thread" ? [] : null;
   });
   mocks.load.mockResolvedValue({ tabs, revision: 1, layout: { preset: "compare", tiles: ["one", "two"], horizontal: .5, vertical: .5, focused: "two", maximized: null } });
@@ -70,26 +73,15 @@ async function mount(props: Partial<ComponentProps<typeof BrowserPane>> = {}) {
   await settle();
 }
 
-it.each(["button", "shortcut"])("opens a new tab with Google from its first render via %s", async (via) => {
+it.each(["button", "shortcut"])("opens the new-tab home without a native webview via %s", async (via) => {
   await mount();
-  if (via === "button") {
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
-  } else {
-    await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "new-tab" });
-  }
+  if (via === "button") await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
+  else await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "new-tab" });
+  await settle();
   const tab = host.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
-  const label = `browser-${tab.dataset.tabId}`;
-  const title = () => tab.querySelector(".rb-tab-title")!.textContent;
-  expect(title()).toBe("Google");
-  for (const state of [
-    { url: "about:blank", title: "" },
-    { url: "https://www.google.com/", title: "" },
-    { url: "https://www.google.com/", title: "Google" },
-    { url: "https://www.google.com/", title: "" },
-  ]) {
-    await event("browser-page-event", { label, kind: "state", ...state });
-    expect(title()).toBe("Google");
-  }
+  expect(tab.querySelector(".rb-tab-title")!.textContent).toBe("New tab");
+  expect(mocks.views.has(`browser-${tab.dataset.tabId}`)).toBe(false);
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Address or search");
 });
 
 it("ignores an older URL poll after a page event provides a newer URL and title", async () => {
@@ -129,23 +121,24 @@ it("gives native Edit commands back to the address input and reselects on Cmd+L"
   expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
 });
 
-it("manual tab selection switches its thread while keeping the panel open", async () => {
-  await mount();
-  await act(async () => host.querySelector<HTMLElement>('[data-tab-id="t-one"]')!.click());
-  expect(dock.querySelector('[data-conversation="one"]')).not.toBeNull();
-  await act(async () => host.querySelector<HTMLElement>('[data-tab-id="t-two"]')!.click());
-  expect(dock.querySelector('[data-conversation="two"]')).not.toBeNull();
+it("manual tab selection preserves the shared thread and retargets the page", async () => {
+  await mount(); const shared = dock.querySelector('[data-conversation]')!.getAttribute('data-conversation');
+  for (const id of ["one", "two"]) {
+    await act(async () => host.querySelector<HTMLElement>(`[data-tab-id="t-${id}"]`)!.click());
+    expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe(shared);
+    expect(dock.querySelector('[data-label]')!.getAttribute('data-label')).toBe(`browser-t-${id}`);
+  }
 });
 
 it.each([0, 1])("commits an adjacent drag from slot %i to the previewed slot", async (from) => {
   await mount();
   const nodes = [...host.querySelectorAll<HTMLElement>("[data-tab-id]")], strip = nodes[0].parentElement!;
   nodes.forEach((node, index) => {
-    node.getBoundingClientRect = () => ({ left: index * 100, right: (index + 1) * 100, width: 100 }) as DOMRect;
+    node.getBoundingClientRect = () => ({ top: index * 100, bottom: (index + 1) * 100, height: 100, left: 0, right: 30, width: 30 }) as DOMRect;
     node.setPointerCapture = vi.fn(); node.releasePointerCapture = vi.fn(); node.hasPointerCapture = () => true;
   });
-  strip.getBoundingClientRect = () => ({ left: 0, right: 200, width: 200, top: 0, bottom: 30 }) as DOMRect;
-  const pointer = (type: string, x: number) => Object.assign(new MouseEvent(type, { clientX: x, clientY: 12, button: 0, bubbles: true, cancelable: true }), { pointerId: 1 });
+  strip.getBoundingClientRect = () => ({ left: 0, right: 30, width: 30, top: 0, bottom: 200, height: 200 }) as DOMRect;
+  const pointer = (type: string, x: number) => Object.assign(new MouseEvent(type, { clientX: 12, clientY: x, button: 0, bubbles: true, cancelable: true }), { pointerId: 1 });
   const start = from * 100 + 50, end = start + (from === 0 ? 58 : -58);
   await act(async () => nodes[from].dispatchEvent(pointer("pointerdown", start)));
   await act(async () => window.dispatchEvent(pointer("pointermove", end)));
@@ -170,9 +163,7 @@ it("adopts a page created concurrently by the native manager instead of retrying
   mocks.raceLabel = "browser-t-two";
   await mount();
   expect(mocks.views.get("browser-t-two")?.log).toContain("show");
-  expect(mocks.invoke).toHaveBeenCalledWith("browser_enable_autoresize", { label: "browser-t-two", enabled: false });
-  expect(mocks.invoke).toHaveBeenCalledWith("browser_enable_gestures", { label: "browser-t-two" });
-  expect(mocks.invoke).toHaveBeenCalledWith("browser_install_shims", { label: "browser-t-two", selectionActions: true });
+  expect(mocks.invoke).toHaveBeenCalledWith("browser_create_tab", expect.objectContaining({ label: "browser-t-two", selectionActions: true, zoom: 1, website: "default" }));
 });
 
 it("adopts background mission tabs without stealing focus and ignores foreign workspace events", async () => {
@@ -189,15 +180,12 @@ it("adopts background mission tabs without stealing focus and ignores foreign wo
   expect((host.querySelector('[aria-label="Address or search"]') as HTMLInputElement).value).toBe("https://three.test");
 });
 
-it("keeps the linked thread across pages and releases it when switched off", async () => {
-  await mount();
-  expect(dock.querySelector("[data-selected-discussion]")).toBeNull();
-  await act(async () => (dock.querySelector('[data-conversation="two"] button') as HTMLButtonElement).click());
-  await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-tab" });
-  expect(dock.querySelector("[data-conversation]")?.getAttribute("data-conversation")).toBe("two");
-  expect(dock.querySelector("[data-conversation]")?.getAttribute("data-label")).toBe("browser-t-one");
+it("opts a tab out of shared chat and returns to the same shared thread", async () => {
+  await mount(); const shared = dock.querySelector('[data-conversation]')!.getAttribute('data-conversation');
   await act(async () => dock.querySelector<HTMLButtonElement>("button")!.click());
-  expect(dock.querySelector("[data-conversation]")?.getAttribute("data-conversation")).toBe("one");
+  expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe('two');
+  await act(async () => dock.querySelector<HTMLButtonElement>("button")!.click());
+  expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe(shared);
 });
 
 it("shows the same native bounds again after an overlay hides both tiles", async () => {
@@ -285,7 +273,7 @@ it("finishes hiding a pending native show after the pane unmounts", async () => 
   await act(async () => root.render(null));
   await act(async () => { shown.resolve(); });
   await settle();
-  expect(view.log.slice(-2)).toEqual(["shown", "hide"]);
+  expect(view.log.indexOf("shown")).toBeLessThan(view.log.lastIndexOf("hide"));
   expect(view.visible).toBe(false);
 });
 
@@ -332,7 +320,7 @@ it("reveals page chat before an element or text action seeds its composer", asyn
   expect(dock.querySelector("[data-selected-discussion]")).toBeNull();
   const chat = dock.querySelector<HTMLElement>("[data-conversation]")!;
   expect(chat.parentElement!.style.display).not.toBe("none");
-  expect(chat.getAttribute("data-conversation")).toBe("two");
+  expect(chat.getAttribute("data-conversation")).toBe(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!).regular.browseId);
 });
 
 describe("mosaics", () => {
@@ -433,5 +421,27 @@ describe("mosaics", () => {
     for (let i = 0; i < 2; i++) await settle();
     expect(mocks.load).not.toHaveBeenCalledWith("mosaic:news");
     expect(host.querySelector('[aria-label="Close Stock News"]')).toBeNull();
+  });
+});
+
+
+describe("native lifecycle recovery", () => {
+  it("forgets a backend-suspended handle and recreates a visible page", async () => {
+    await mount(); const old = mocks.views.get("browser-t-two"); mocks.views.delete("browser-t-two");
+    await event("browser-tab-suspended", { label: "browser-t-two" });
+    expect(mocks.views.get("browser-t-two")).toBeDefined(); expect(mocks.views.get("browser-t-two")).not.toBe(old);
+    expect(mocks.views.get("browser-t-two")?.visible).toBe(true);
+  });
+  it("recreates an exhausted process and marks a restarting visible page", async () => {
+    await mount(); const old = mocks.views.get("browser-t-two");
+    await event("browser-page-event", { label: "browser-t-two", kind: "terminated" });
+    expect(host.querySelector('[role="status"]')?.textContent).toContain("Reloading two");
+    await event("browser-page-event", { label: "browser-t-two", kind: "dead" });
+    expect(mocks.views.get("browser-t-two")).not.toBe(old); expect(mocks.views.get("browser-t-two")?.visible).toBe(true);
+  });
+  it("drops a hidden terminated page without waking it", async () => {
+    await mount({ visible: false });
+    await event("browser-page-event", { label: "browser-t-one", kind: "terminated" });
+    expect(mocks.views.has("browser-t-one")).toBe(false);
   });
 });

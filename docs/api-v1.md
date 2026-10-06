@@ -75,6 +75,7 @@ This is not a failure to report: anything written in either window could be take
 | POST | `/v1/global/consult` | token: `consult` | Companion fan-out: consult any surface's agent for a digest | JSON {surface/agent, question} | JSON digest text |
 | GET | `/v1/global/agents` | open | The agent map: which per-surface agents exist right now | — | JSON agent list |
 | GET | `/v1/code/projects` | open | The user's known project folders (the browse agent's code map) | — | JSON project path list |
+| GET | `/v1/code/map` | open | Bounded file and symbol map of an allowlisted project | ?repo= known project | JSON map output |
 | GET | `/v1/code/git` | open | Whitelisted read-only git ops (status/branch/log/diff/show) in a known project | ?repo= known project, ?op= whitelisted op | JSON git output |
 | GET | `/v1/context/overview` | open | Librarian friction digest: ground-truth counts and staleness | — | JSON overview |
 | GET | `/v1/context/codehealth` | open | Shipwright code digest: git state, recorded corrections, static repo health, runtime failures, unfinished work | ?repo=<absolute path> | JSON code digest |

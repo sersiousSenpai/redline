@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -34,6 +34,10 @@ import ReviewFileTree from "./ReviewFileTree";
 import ReviewShortcutHelp from "./ReviewShortcutHelp";
 import RouterVerdictBanner from "./RouterVerdictBanner";
 import { PlanSearchBox } from "./PlanSearchBox";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { useReviewPose } from "../hooks/useReviewPose";
+import type { ActionResult } from "./guided/types";
+const GuidedReview = lazy(() => import("./guided/GuidedReview"));
 
 // Code Review pane: pick a repo + diff source, read the annotatable diff.
 // Read-only browsing shell in P2 — annotation entry (P3) and the blocking
@@ -46,15 +50,17 @@ const SOURCE_LABEL: Record<DiffSource, string> = {
   lastCommit: "Last commit",
   vsBase: "Vs base branch…",
   commitSha: "A specific commit…",
+  runBranch: "Queued run branch…",
 };
 
 interface ReviewPanelProps {
   review: UseReview;
   projectOptions: ProjectOption[];
   onClose: () => void;
+  onOpenTerminal?: (cwd: string, command?: string) => void;
 }
 
-function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
+function ReviewPanel({ review, projectOptions, onClose, onOpenTerminal }: ReviewPanelProps) {
   const {
     activeReviewId,
     review: session,
@@ -85,6 +91,8 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
     deleteQuestion,
   } = review;
 
+  const [pose, setPose] = useReviewPose();
+  const [codeTarget, setCodeTarget] = useState<string | null>(null);
   const ai = useAiReview(review.activeReviewId);
   const push = usePush(repo, activeReviewId);
   const [pushOpen, setPushOpen] = useState(false);
@@ -117,6 +125,11 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
   const diffKey = `${repo ?? ""}|${source}|${base ?? ""}|${sha ?? ""}|${session?.round ?? 1}`;
 
   const diffRef = useRef<DiffViewHandle | null>(null);
+  useEffect(() => {
+    if (pose !== "expert" || !codeTarget) return;
+    const frame = requestAnimationFrame(() => { diffRef.current?.scrollToFile(codeTarget); setCodeTarget(null); });
+    return () => cancelAnimationFrame(frame);
+  }, [pose, codeTarget]);
   const [showTree, setShowTree] = usePersistedState("redline.review.showTree", true);
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -383,6 +396,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
   // Panel-level keys: ⌘F search, ⌘B tree, ⌘↩ submit, ? help.
   const handlePanelKeys = useCallback(
     (e: React.KeyboardEvent) => {
+      if (pose === "guided") return;
       const target = e.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT";
       if (e.metaKey && e.key.toLowerCase() === "f") {
@@ -414,7 +428,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
         setHelpOpen(true);
       }
     },
-    [holdActive, liveCount, submitReview, setShowTree, helpOpen, repo, activeReviewId],
+    [pose, holdActive, liveCount, submitReview, setShowTree, helpOpen, repo, activeReviewId],
   );
 
   // First open with exactly one known project → pick it, no empty state.
@@ -450,6 +464,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           <option value="" disabled>
             Choose a project…
           </option>
+          {repo && !projectOptions.some(p => p.path === repo) && <option value={repo}>{repo.split("/").filter(Boolean).pop()}</option>}
           {projectOptions.map((p) => (
             <option key={p.path} value={p.path}>
               {p.name}
@@ -457,6 +472,11 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           ))}
         </select>
 
+        <div className="rl-review-seg" role="group" aria-label="Review language">
+          <button type="button" data-active={pose === "guided" ? "" : undefined} onClick={() => setPose("guided")}>Guided</button>
+          <button type="button" data-active={pose === "expert" ? "" : undefined} onClick={() => setPose("expert")}>Expert</button>
+        </div>
+        {pose === "expert" && <>
         <select
           value={source}
           onChange={(e) => setSource(e.target.value as DiffSource)}
@@ -580,7 +600,9 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           </label>
         )}
 
+        </>}
         <div className="ml-auto flex items-center gap-1.5">
+          {pose === "expert" && <>
           <button
             type="button"
             className="rl-review-btn rl-review-btn-iconic"
@@ -619,6 +641,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
               ⇧ Push to…
             </button>
           )}
+          </>}
           {holdActive && (
             <span className="rl-review-holdbar">
               <span className="rl-review-hold-dot" title="The agent is waiting on this review" />
@@ -633,7 +656,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
                 }
                 onClick={() => void submitReview(false)}
               >
-                Submit {liveCount > 0 ? `(${liveCount})` : ""}
+                {pose === "guided" ? "Send my notes to Claude" : "Submit"} {liveCount > 0 ? `(${liveCount})` : ""}
               </button>
               <button
                 type="button"
@@ -641,7 +664,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
                 title="Approve — no changes requested"
                 onClick={() => void submitReview(true, approvePrompt || null)}
               >
-                Approve
+                {pose === "guided" ? "Looks good, keep going" : "Approve"}
               </button>
               <button
                 type="button"
@@ -649,11 +672,11 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
                 title="Unblock the agent without feedback"
                 onClick={() => void dismissReview()}
               >
-                Dismiss
+                {pose === "guided" ? "Not now" : "Dismiss"}
               </button>
             </span>
           )}
-          {!holdActive && (
+          {pose === "expert" && !holdActive && (
             <button
               type="button"
               className="rl-review-btn rl-review-btn-iconic"
@@ -689,6 +712,16 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
         </div>
       </div>
 
+      {pose === "guided" ? <ErrorBoundary region="guided review" fallback={(_error, reset) => <div className="p-4">Guided review could not open. <button className="rl-review-btn" onClick={reset}>Try again</button><button className="rl-review-btn" onClick={() => setPose("expert")}>Open Expert</button></div>}>
+        <Suspense fallback={<Empty>Opening Guided review…</Empty>}>
+          <GuidedReview review={review} push={push} ai={ai} onOpenTerminal={onOpenTerminal}
+            onCode={file => { setHideViewed(false); setCodeTarget(file); setPose("expert"); }}
+            onUndo={async filePath => {
+              const result = await invoke<ActionResult>("review_revert", { repo, source, base, sha, filePath, scope: "file", hunkIndex: null, fingerprint: review.getFingerprint() });
+              await refreshDiff(); void push.refreshStatus(); return result;
+            }} />
+        </Suspense>
+      </ErrorBoundary> : <>
       {repo && <ReviewGitStrip status={push.status} lastPush={push.lastPush} />}
 
       {/* Shadow attention router: informational banner only — no behavior. */}
@@ -873,6 +906,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
       ) : (
         <Empty>{loading ? "Resolving diff…" : ""}</Empty>
       )}
+      </>}
       {helpOpen && <ReviewShortcutHelp onClose={() => setHelpOpen(false)} />}
       {repo && activeReviewId && (
         <ReviewPushDialog

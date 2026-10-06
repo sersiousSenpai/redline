@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { continuationOrigin, handoffGate, continuationBriefError, hasContinuationMessages, prepareConversationPreview } from "./conversationContinuation";
+import { describe, expect, it, vi } from "vitest";
+import { continuationOrigin, handoffGate, continuationBriefError, hasContinuationMessages, prepareCompanionContinuation, prepareConversationPreview } from "./conversationContinuation";
 describe("conversation brief provenance", () => {
   it("honors the selected message boundary and keeps suggestions separate from user direction", () => {
     const result = prepareConversationPreview({ conversationKind: "browse", conversationId: "stable", messages: [
@@ -34,6 +34,29 @@ describe("conversation brief provenance", () => {
 
 describe("chat planning", () => {
   const source = { conversationKind: "companion" as const, conversationId: "chat", messages: [{ id: "first", role: "user", body: "Original direction", status: "complete" }] };
+  it("persists an empty chat's exact instruction and links the durable row", async () => {
+    const text = "  Build the editor\nKeep the existing database.\n";
+    const seed = vi.fn(async (body: string) => ({ id: "durable-seed", role: "user", status: "complete", body }));
+    const first = await prepareCompanionContinuation("chat", [], text, seed);
+    const retry = await prepareCompanionContinuation("chat", [], text, seed);
+    expect(seed).toHaveBeenCalledWith(text);
+    expect(first.source.messageIds).toEqual(["durable-seed"]);
+    expect(retry.source.messageIds).toEqual(first.source.messageIds);
+    expect(first.markdown).toContain(text);
+  });
+  it("uses existing complete history without inserting another user turn", async () => {
+    const seed = vi.fn();
+    const preview = await prepareCompanionContinuation("chat", source.messages, "Plan it", seed);
+    expect(seed).not.toHaveBeenCalled();
+    expect(preview.source.messageIds).toEqual(["first"]);
+  });
+  it("does not prepare a launch when seed persistence fails or direction is empty", async () => {
+    const seed = vi.fn().mockRejectedValue(new Error("disk unavailable"));
+    await expect(prepareCompanionContinuation("chat", [], "Build it", seed)).rejects.toThrow("disk unavailable");
+    seed.mockClear();
+    await expect(prepareCompanionContinuation("chat", [], "  ", seed)).rejects.toThrow("Write an instruction");
+    expect(seed).not.toHaveBeenCalled();
+  });
   it("uses a final instruction as the Objective while preserving original context", () => {
     const preview = prepareConversationPreview(source, undefined, { instruction: "Local only" });
     expect(preview.markdown).toContain("## Objective\nLocal only");

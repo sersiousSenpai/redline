@@ -1,6 +1,13 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal, flushSync } from "react-dom";
+import BrowserTabRail from "../../src/components/BrowserTabRail";
+import BrowserHomePage from "../../src/components/BrowserHomePage";
+import FloatingBrowserIsland from "../../src/components/FloatingBrowserIsland";
+import { FrontDoor } from "../../src/components/FrontDoor";
+import { fallbackGroups } from "../../src/lib/tabGroups";
+import type { LaunchDestination } from "../../src/lib/launch";
+import "../../src/components/MonochatIsland.css";
 import { BrowserChrome } from "../../src/components/BrowserChrome";
 import { BrowserDialog } from "../../src/components/BrowserSurfaces";
 import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "../../src/components/BrowserPagePanels";
@@ -27,6 +34,10 @@ function Fixture() {
   const [menuOpen, setMenuOpen] = useState(false), [dialog, setDialog] = useState("");
   const [surface, setSurface] = useState("browser"), [chatKind, setChatKind] = useState("room"), [chatOpen, setChatOpen] = useState(true);
   const [followingTabs, setFollowingTabs] = useState(true);
+  const [organized, setOrganized] = useState(false), [showHome, setShowHome] = useState(false);
+  const [islandOpen, setIslandOpen] = useState(false), [draft, setDraft] = useState("");
+  const [destination, setDestination] = useState<LaunchDestination>("plan");
+  const [groups, setGroups] = useState(() => fallbackGroups(initialTabs));
   const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
   const [layout, setLayout] = useState<BrowserLayout>({ preset: "grid", tiles: initialTabs.map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: initialTabs[0].browseId });
   const [stageWidth, setStageWidth] = useState(1000);
@@ -40,7 +51,7 @@ function Fixture() {
   }, [surface, chatOpen]);
   useEffect(() => {
     const openMosaic = () => { setTabs(mosaicTabs.slice(0, 7)); setActiveId(mosaicTabs[0].id); setLayout({ preset: "grid", grid: { rows: 3, cols: 3 }, tiles: mosaicTabs.slice(0, 7).map((tab) => tab.browseId), horizontal: .5, vertical: .5, maximized: null, focused: mosaicTabs[0].browseId }); };
-    (window as any).__qa = { setSurface, setDialog, setChatKind, setChatOpen, setLayout, setTabs, openMosaic, host, getState: () => ({ surface, chatKind, chatOpen, layout, stageWidth, tabs }), setTheme: applyTheme };
+    (window as any).__qa = { setOrganized, setShowHome, setIslandOpen, setSurface, setDialog, setChatKind, setChatOpen, setLayout, setTabs, openMosaic, host, getState: () => ({ surface, chatKind, chatOpen, layout, stageWidth, tabs }), setTheme: applyTheme };
     document.documentElement.dataset.qaReady = "true";
   }, [host, surface, chatKind, chatOpen, layout, stageWidth, tabs]);
   const ids = visibleTileIds(layout, tabs.map((tab) => tab.browseId), tabs.find((tab) => tab.id === activeId)?.browseId ?? tabs[0].browseId, stageWidth);
@@ -50,12 +61,16 @@ function Fixture() {
   function select(id: string) { setActiveId(id); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
   const conversation = chatKind === "room" ? <ChatRoom companionId="qa-carried" cwd={null} dictationEnabled={false} onSelectChat={noop} onEmpty={noop} onClose={noop} presentation={surface === "room" ? "room" : "browser"}/> : <BrowserChat
     browseId="qa-browse" label="qa-native-absent" workspaceId="regular" onClose={noop}
-    title="Research sources and evidence" linked={followingTabs} onToggleLinked={() => setFollowingTabs(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
+    title="Research sources and evidence" ownChat={!followingTabs} linked={followingTabs} onToggleLinked={() => setFollowingTabs(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
     onResearch={noop}/>;
   return <div className="qa-shell">
     <div className="qa-shell-heading"><strong>Redline</strong><span>Browser workspace · isolated visual fixture</span><small>Native pages are synthetic images</small></div>
     <main className="qa-plate">
       {surface === "browser" ? <div className="rb-workspace">
+        <BrowserTabRail tabs={tabs} activeId={activeId} onSelect={select} onCloseTab={id => { setTabs(old => old.filter(tab => tab.id !== id)); if (activeId === id) setActiveId(tabs.find(tab => tab.id !== id)!.id); }} onNewTab={() => setShowHome(true)} onResize={noop}
+          onTabDrag={(event, id) => startTabPointerDrag(event.nativeEvent, event.currentTarget as HTMLElement, { axis:"y", onDragging:noop, onDrop:(over, tile) => flushSync(() => { const tab=tabs.find(tab => tab.id === id)!; if(tile!==null) setLayout(old=>assignVisibleTile(old,ids,tile,tab.browseId)); else if(over && over!==id) setTabs(old=>reorderTabs(old,id,over)); }) })}
+          tileBadges={tileBadges(ids)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} groups={groups} organized={organized} organizing={false} onMode={setOrganized} onOrganize={()=>setGroups(fallbackGroups(tabs))} onToggleGroup={id=>setGroups(old=>old.map(group=>group.id===id?{...group,collapsed:!group.collapsed}:group))}/>
+        <div className="rb-workspace-pages">
         <BrowserChrome tabs={tabs} activeId={activeId} address={address} onAddress={setAddress} onAddressFocus={noop} onNavigate={noop} onBack={noop} onForward={noop} onReload={noop} onSelect={select}
           onCloseTab={(id) => { const remaining = tabs.filter((tab) => tab.id !== id); if (remaining.length) { setTabs(remaining); if (id === activeId) select(remaining[0].id); } }} onNewTab={noop} onTabDrag={(event, id) => { if ((event.target as HTMLElement).closest("button")) return; startTabPointerDrag(event.nativeEvent, event.currentTarget as HTMLElement, {
             onDragging: noop, onDrop: (over, tile) => flushSync(() => { const tab = tabs.find(tab => tab.id === id)!; if (tile !== null) setLayout(old => assignVisibleTile(old, ids, tile, tab.browseId));
@@ -64,11 +79,16 @@ function Fixture() {
           chatOpen={chatOpen} onToggleChat={() => setChatOpen(!chatOpen)} split={pages.length > 1} onArrange={() => setDialog("layout")} menuOpen={menuOpen} onMenu={setMenuOpen}
           onBookmarks={() => setDialog("bookmarks")} onAppearance={() => setDialog("long")} onPreferences={() => setDialog("preferences")} onInspect={noop} onCloseBrowser={() => setSurface("room")}
           onMosaics={() => setDialog("mosaics")} mosaic={layout.grid ? { name: "Stock News", onClose: noop } : null}/>
-        <div className="qa-browser-body"><BrowserTileStage stageRef={stageRef} slots={slots} pages={pages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={false} shots={shots} showShots onFocus={select} onAssign={(index, id) => setLayout(old => assignVisibleTile(old, ids, index, id))} onSwap={(from, to) => setLayout(old => swapVisibleTiles(old, ids, from, to))} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} onAddPage={noop} onLayout={(patch) => setLayout((old) => ({ ...old, ...patch }))} onDragging={noop}/>
+        <div className="qa-browser-body">{showHome ? <BrowserHomePage tabs={tabs} onOpen={url => {setAddress(url);setShowHome(false);}} onMission={noop}/> : <BrowserTileStage stageRef={stageRef} slots={slots} pages={pages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={false} shots={shots} showShots onFocus={select} onAssign={(index, id) => setLayout(old => assignVisibleTile(old, ids, index, id))} onSwap={(from, to) => setLayout(old => swapVisibleTiles(old, ids, from, to))} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} onAddPage={noop} onLayout={(patch) => setLayout((old) => ({ ...old, ...patch }))} onDragging={noop}/>}
           {chatOpen && <aside className="qa-chat-dock" aria-label="Browser conversation"><PersistentPortalSlot host={host} name="browser-chat"/></aside>}
+        </div>
         </div>
       </div> : surface === "room" ? <div className="qa-room"><PersistentPortalSlot host={host} name="chat-room"/></div> : <div className="qa-other"><h1>Surface switched</h1><p>The chat portal is detached and retains its mounted conversation.</p></div>}
     </main>
+    {surface === "browser" && <FloatingBrowserIsland busy={false} open={islandOpen} onOpenChange={setIslandOpen}>
+      <div className="rl-browser-context-chips"><button aria-pressed="true">This page</button><button aria-pressed="false">Task list</button></div>
+      <FrontDoor visible={islandOpen} floating text={draft} onTextChange={setDraft} choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} resolvedProject="/tmp/qa-redline" attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={()=>setDraft("")} refusal={null} onDrafter={noop} onRun={()=>setDraft("")} onChat={noop} chatEnabled={false} allowedDestinations={["plan","run"]} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onHowItWorks={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""} dictationEnabled={false}/>
+    </FloatingBrowserIsland>}
     {createPortal(conversation, host)}
     {dialog === "layout" && <BrowserLayoutDialog layout={layout} available={tabs.length} tabs={tabs} activeBrowseId={pages[0]?.browseId} onChoose={(preset) => setLayout((old) => ({ ...old, preset, maximized: null }))} onSaveDefault={noop} onClose={() => setDialog("")}/>}
     {dialog === "bookmarks" && <BrowserBookmarksDialog bookmarks={Array.from({ length: 28 }, (_, i) => ({ title: `Saved source ${i + 1}: context and evidence for this investigation`, url: `https://example.test/long-source-path/${i}` }))} title={tabs[0].title} url={tabs[0].url} onSave={noop} onRemove={noop} onOpen={noop} onClose={() => setDialog("")}/>}

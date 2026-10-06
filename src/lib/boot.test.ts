@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import {
   advance,
   BOOT_FAILSAFE_MS,
@@ -233,6 +234,14 @@ describe("boot-path JS contract", () => {
     }
   });
 
+  it("the shell views stay behind the deferred terminal dock", () => {
+    const dock = readFileSync(join(process.cwd(), "src/components/TerminalTabs.tsx"), "utf8");
+    for (const name of ["AgentShellView", "ShellBlocksView"]) {
+      expect(dock).toContain(`import("./shell/${name}")`);
+      expect(dock).not.toMatch(new RegExp(`^import (?!type\\b)[^;]*from ["']\\./shell/${name}["']`, "m"));
+    }
+  });
+
   // The raw-wire inspector is devtools: most turns never open it, and it is
   // reached from a chip on the turn badge rather than from App. So the guard
   // is not "App doesn't import it" — it is "NOTHING imports it statically",
@@ -270,14 +279,39 @@ describe("boot-path JS contract", () => {
     // The whole reason deferral is safe: launch intent WAITS for the dock
     // instead of finding no handle and reporting "couldn't open a terminal".
     expect(app).toContain("const ensureTerminalReady = useCallback(");
-    const openers = [...app.matchAll(/openSessionTerminal\(/g)].length;
-    const awaited = [
-      ...app.matchAll(/ensureTerminalReady\(\)\)?[\s\S]{0,60}?openSessionTerminal/g),
-    ].length;
-    expect(
-      awaited,
-      `${openers - awaited} openSessionTerminal call(s) bypass ensureTerminalReady`,
-    ).toBe(openers);
+    // Parse call sites rather than a 60-character window: hosted branches
+    // retain the awaited handle across ledger registration before starting.
+    const file = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const unparen = (node: ts.Expression): ts.Expression => ts.isParenthesizedExpression(node) ? unparen(node.expression) : node;
+    const readyCall = (node: ts.Expression) => { const value = unparen(node); return ts.isCallExpression(value) && value.expression.getText(file) === "ensureTerminalReady"; };
+    const awaitedHandle = (node: ts.Expression) => { const value = unparen(node); return ts.isAwaitExpression(value) && readyCall(value.expression); };
+    const valid = (receiver: ts.Expression, site: ts.Node): boolean => {
+      if (awaitedHandle(receiver)) return true;
+      if (!ts.isIdentifier(receiver)) return false;
+      for (let parent = site.parent; parent; parent = parent.parent) {
+        if (ts.isBlock(parent)) for (const statement of parent.statements) {
+          if (statement.pos >= site.pos || !ts.isVariableStatement(statement)) continue;
+          for (const declaration of statement.declarationList.declarations) if (declaration.name.getText(file) === receiver.text) return !!declaration.initializer && awaitedHandle(declaration.initializer);
+        }
+        if (ts.isArrowFunction(parent) || ts.isFunctionExpression(parent)) {
+          const call = parent.parent;
+          if (parent.parameters.some(param => param.name.getText(file) === receiver.text) && ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === "then" && readyCall(call.expression.expression)) return true;
+          return false;
+        }
+      }
+      return false;
+    };
+    const violations: string[] = []; let openers = 0;
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ["openSessionTerminal", "openAgentShell"].includes(node.expression.name.text)) {
+        openers++;
+        if (!valid(node.expression.expression, node)) violations.push(node.getText(file).slice(0, 100));
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    expect(openers).toBeGreaterThan(0);
+    expect(violations, "every raw/hosted launch must await the dock").toEqual([]);
   });
 
   it("the dock is never unmounted by surface navigation", () => {

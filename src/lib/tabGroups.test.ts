@@ -1,0 +1,11 @@
+import { describe, expect, it } from "vitest";
+import { fallbackGroups, fileNewTab, moveTabToGroup, reconcileGroups, tabHost, validateGroups } from "./tabGroups";
+const tabs = [{ browseId:"a",title:"A",url:"https://docs.example.co.uk/a" },{ browseId:"b",title:"B",url:"https://example.co.uk/b" },{ browseId:"c",title:"C",url:"https://other.test" }];
+describe("tab groups", () => {
+  it("respects public-suffix exceptions and private hosting tenants", () => { expect(tabHost("https://docs.city.kawasaki.jp")).toBe("city.kawasaki.jp"); expect(tabHost("https://docs.alice.github.io")).toBe("alice.github.io"); expect(tabHost("https://bob.github.io")).toBe("bob.github.io"); });
+  it("groups registrable hosts without changing manual order", () => { const before = tabs.slice(); const groups = fallbackGroups(tabs); expect(groups.map(group => group.browseIds)).toEqual([["a","b"],["c"]]); expect(tabs).toEqual(before); expect(tabHost("http://127.0.0.1:3000")).toBe("127.0.0.1"); });
+  it("requires every durable identity exactly once", () => { const groups = fallbackGroups(tabs); expect(validateGroups(groups,tabs)).toBe(true); expect(validateGroups(groups.slice(0,1),tabs)).toBe(false); expect(validateGroups([...groups,groups[0]],tabs)).toBe(false); expect(validateGroups([{ ...groups[0],name:"x".repeat(33)},groups[1]],tabs)).toBe(false); });
+  it("files a known host quietly and batches an unknown one", () => { const groups = fallbackGroups(tabs); expect(fileNewTab(groups,{browseId:"d",title:"D",url:"https://api.example.co.uk"},tabs)?.[0].browseIds).toEqual(["a","b","d"]); expect(fileNewTab(groups,{browseId:"e",title:"E",url:"https://elsewhere.test"},tabs)).toBeNull(); });
+  it("moves between groups and preserves collapse state on reconciliation", () => { const groups = fallbackGroups(tabs); groups[1].collapsed = true; const moved = moveTabToGroup(groups,"b",groups[1].id); expect(moved[1].browseIds).toEqual(["c","b"]); expect(validateGroups(moved,tabs)).toBe(true); expect(reconcileGroups(moved,tabs.filter(tab=>tab.browseId!=="a"))[0].collapsed).toBe(true); });
+  it("caps fallback groups while retaining all pages", () => { const many = Array.from({length:20},(_,i)=>({browseId:String(i),title:String(i),url:`https://host${i}.test`})); expect(fallbackGroups(many)).toHaveLength(8); expect(validateGroups(fallbackGroups(many),many)).toBe(true); });
+});

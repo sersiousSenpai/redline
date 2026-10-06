@@ -20,6 +20,7 @@ import type { TurnMeter } from "../lib/turnMeter";
 import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMonochat } from "./MonochatContext";
+import { useDiscussMode, type DiscussMode } from "../hooks/useDiscussMode";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 
 interface CommentThreadProps {
@@ -41,6 +42,7 @@ interface CommentThreadProps {
   autoDiscuss?: boolean;
   /** Called once the seed is sent (or found already sent). */
   onAutoDiscussConsumed?: () => void;
+  onHasDiscussion?: (value: boolean) => void;
 }
 
 /** Comments whose Send-started discussion has already fired, app-wide. The
@@ -78,9 +80,12 @@ export const CommentThread = memo(function CommentThread({
   onAutoOpenConsumed,
   autoDiscuss = false,
   onAutoDiscussConsumed,
+  onHasDiscussion,
 }: CommentThreadProps) {
   const monochat = useMonochat();
   const commentId = comment.id;
+  const [mode, setMode] = useDiscussMode(sessionId, commentId);
+  const [reportAfter, setReportAfter] = useState<number | null>(null);
   // Derived ONCE and threaded through every label below: the entry button, the
   // bubbles, the collapsed summary, the sidecar status copy and the escalated
   // transcript must all name the same agent, because they describe one process.
@@ -138,6 +143,7 @@ export const CommentThread = memo(function CommentThread({
         sessionId,
         commentId,
         text,
+        mode,
         conversationId: monochat?.conversationId,
         // The fork has `Read`, so naming the paths is all it needs to look at
         // what the reviewer just dropped in.
@@ -156,6 +162,15 @@ export const CommentThread = memo(function CommentThread({
     }),
   });
   const { messages, liveText, loaded, retrying } = turn;
+  const seed = discussSeed(comment);
+  const visible = messages.filter((m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed));
+  const hasDiscussion = visible.length > 0 || !!liveText;
+  useEffect(() => { if (loaded) onHasDiscussion?.(hasDiscussion); }, [loaded, hasDiscussion, onHasDiscussion]);
+  const switchMode = (next: DiscussMode) => {
+    if (next === mode) return;
+    setMode(next);
+    setReportAfter(next === "report" && visible.some(m => m.role === "assistant") ? messages.length : null);
+  };
   useEffect(() => { if (loaded) monochat?.reportActivity?.(`${sessionId}:${commentId}`, turn.status === "streaming"); }, [loaded, sessionId, commentId, turn.status, monochat?.reportActivity]);
   const status: ThreadStatus = turn.status;
   // When the current wait began — drives the WorkingIndicator's elapsed
@@ -288,10 +303,7 @@ export const CommentThread = memo(function CommentThread({
   // we just hide the redundant first "You:" turn here. Covers both the
   // optimistic path (seed is messages[0]) and the persisted reload (get_thread
   // returns it as rows[0]).
-  const seed = discussSeed(comment);
-  const visible = messages.filter(
-    (m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed),
-  );
+
   // Escalation is available the moment the discussion has substance — before
   // any round-trip (a draft's rider rides with the next submit) and after a
   // resolution (reopen with the transcript as follow-up). Excluded: submitted
@@ -339,6 +351,7 @@ export const CommentThread = memo(function CommentThread({
         >
           💬 Discuss with {agent}
         </button>
+        <ModeToggle mode={mode} onChange={switchMode} disabled={false} />
         <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
         {sidecar && <p style={{ color: "var(--color-ink-muted)", fontSize: "10px", marginTop: 5 }}>A separate read-only discussion seeded with this {author} plan.</p>}
       </div>
@@ -359,7 +372,7 @@ export const CommentThread = memo(function CommentThread({
       style={{ borderColor: "var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center gap-1.5">
+      <div className="rl-thread-heading flex flex-wrap items-center gap-1.5">
         <button
           type="button"
           onClick={() =>
@@ -370,17 +383,17 @@ export const CommentThread = memo(function CommentThread({
               return !x;
             })
           }
-          className="flex items-center gap-1.5 text-left"
+          className="rl-thread-heading-label flex items-center gap-1.5 text-left"
           style={{
             fontSize: "10px",
             fontWeight: 600,
-            textTransform: "uppercase",
+            fontFamily: "var(--font-mono)",
             letterSpacing: "0.06em",
-            color: "var(--color-info)",
+            color: "var(--color-ink-muted)",
           }}
         >
           <span aria-hidden>{expanded ? "▾" : "▸"}</span>
-          <span>Discussion</span>
+          <span>{sidecar ? "separate sidecar" : "forked from the plan session"} · read-only</span>
           <span
             className="font-mono normal-case"
             style={{ color: "var(--color-ink-muted)" }}
@@ -420,7 +433,8 @@ export const CommentThread = memo(function CommentThread({
             open. Siblings of the collapse button (buttons can't nest); each
             stops propagation so it never toggles collapse. */}
         {expanded && (
-          <div className="flex items-center gap-1 ml-auto">
+          <div className="rl-thread-heading-tools flex items-center gap-1 ml-auto">
+            <ModeToggle mode={mode} onChange={switchMode} disabled={status === "streaming"} />
             <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
             <button
               type="button"
@@ -501,6 +515,7 @@ export const CommentThread = memo(function CommentThread({
                     ticker used to — so the bubble renders from the first line
                     of the stream, not the first token. */}
                 <StreamingBubble
+                  card
                   text={liveText}
                   agent={agent}
                   inspect={{ surface: "fork", key: commentId }}
@@ -515,6 +530,13 @@ export const CommentThread = memo(function CommentThread({
             )}
           </div>
 
+          {mode === "report" && settled && reportAfter !== null && messages.length === reportAfter && (
+            <button type="button" className="rl-write-report" onClick={() => {
+              setReportAfter(null);
+              send("Write this up — the full answer to my original comment given everything we've discussed.");
+            }}>Write it up →</button>
+          )}
+          <div className="rl-discussion-footer">
           <Composer
             sessionId={sessionId}
             draft={draft}
@@ -551,7 +573,7 @@ export const CommentThread = memo(function CommentThread({
               }
             >
               {comment.type === "question"
-                ? "Add to plan →"
+                ? "Make this a change"
                 : "Attach to next submit →"}
             </button>
           )}
@@ -604,13 +626,14 @@ export const CommentThread = memo(function CommentThread({
                 ? "Remove this discussion and its draft comment"
                 : "Remove this discussion (the comment stays — it's part of the review)"
             }
-            className="self-start hover:opacity-100 opacity-60"
+            className="rl-discard-thread hover:opacity-100 opacity-60"
             style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
           >
             {discardRemovesComment
               ? "Discard thread & comment"
               : "Discard thread"}
           </button>
+          </div>
         </>
       )}
     </div>
@@ -619,7 +642,6 @@ export const CommentThread = memo(function CommentThread({
 
 function MessageBubble({
   msg,
-  agent,
   onRetry,
   onResend,
   meter,
@@ -637,8 +659,8 @@ function MessageBubble({
   const isError = msg.status === "error";
   const isUnsent = msg.status === "unsent";
   return (
-    <div className="flex flex-col gap-0.5">
-      <span
+    <div className={`flex flex-col gap-0.5 ${isUser ? "rl-thread-user" : "rl-reply-card"}`}>
+      {isError && <span
         style={{
           fontSize: "9px",
           fontWeight: 600,
@@ -654,8 +676,8 @@ function MessageBubble({
         {/* Redline wrote the error sentence, not the model. Bylining it
             `agent` is what made a raw machine token read as something Claude
             had said. */}
-        {isUser ? "You" : isError ? "Redline" : agent}
-      </span>
+        Redline
+      </span>}
       {isError ? (
         <div
           style={{
@@ -668,7 +690,7 @@ function MessageBubble({
           {msg.body}
         </div>
       ) : (
-        <MarkdownView body={msg.body} compact rich />
+        <MarkdownView body={msg.body} compact rich figure={isUser ? "plate" : "ink"} />
       )}
       {isError && onRetry && <RetryNote onRetry={onRetry} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
@@ -701,6 +723,10 @@ function Composer({
   onStop: () => void;
 }) {
   const files = useAttachmentCapture(sessionId);
+  const [open, setOpen] = useState(false);
+  const expanded = open || !!draft || streaming || files.attachments.length > 0 || files.dragOver;
+  const focusReply = useRef(false);
+  useEffect(() => { if (streaming) setOpen(false); }, [streaming]);
   const submit = () => {
     onSend(files.attachments);
     files.clear();
@@ -715,9 +741,12 @@ function Composer({
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   };
-  useEffect(autosize, [draft]);
+  useEffect(autosize, [draft, expanded]);
+  useEffect(() => { if (open && focusReply.current) { focusReply.current = false; taRef.current?.focus(); } }, [open]);
   return (
-    <div ref={files.hostRef}>
+    <div ref={files.hostRef} className={expanded ? "rl-thread-composer is-open" : "rl-thread-composer"}>
+      {!expanded ? <button type="button" className="rl-reply-pill" onClick={() => { focusReply.current = true; setOpen(true); }}>Reply…</button> : <>
+
       {/* Same capture as the main composer: Tauri swallows HTML5 drops, so the
           webview-level event does the work and each host hit-tests itself. */}
       <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
@@ -738,7 +767,14 @@ function Composer({
           autosize();
         }}
         onPaste={files.onPaste}
+        onFocus={() => setOpen(true)}
+        onBlur={(e) => {
+          if (!draft.trim() && files.attachments.length === 0 && !e.currentTarget.parentElement?.contains(e.relatedTarget)) setOpen(false);
+        }}
         onKeyDown={(e) => {
+          if (e.key === "Escape" && !draft.trim() && files.attachments.length === 0) {
+            e.preventDefault(); setOpen(false); taRef.current?.blur();
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             if (!streaming) submit();
@@ -790,6 +826,13 @@ function Composer({
         </button>
       )}
       </div>
+      </>}
     </div>
   );
+}
+
+function ModeToggle({ mode, onChange, disabled }: { mode: DiscussMode; onChange: (mode: DiscussMode) => void; disabled: boolean }) {
+  return <span className="rl-discuss-mode" role="group" aria-label="Reply mode">
+    {(["report", "conversation"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} disabled={disabled} onClick={() => onChange(value)}>{value === "report" ? "Report" : "Conversation"}</button>)}
+  </span>;
 }

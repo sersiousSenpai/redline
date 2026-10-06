@@ -1,0 +1,4 @@
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Before steer"}}}
+{"type":"steer","messageId":"queued"}
+{"type":"stream_event","event":{"delta":{"type":"text_delta","text":"After steer"}}}
+{"type":"result","result":"After steer","is_error":false}

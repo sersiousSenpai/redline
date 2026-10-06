@@ -303,6 +303,16 @@ describe("buildResumeCommand — the codex arm", () => {
 });
 
 describe("buildResumeBuildCommand — building an approved plan with the same agent", () => {
+  it("resumes from the original cwd while building in the corrected repo", () => {
+    const cmd = buildResumeBuildCommand("abc", NOW, "/old", 1, { backend: "claude-code" }, "/new repo");
+    expect(cmd).toContain("cd '/old'");
+    expect(cmd).toContain("--add-dir '/new repo'");
+    expect(cmd).toContain("Implement in /new repo (the plan was moved there from /old)");
+    const same = buildResumeBuildCommand("abc", NOW, "/old", 1, { backend: "claude-code" }, "/old");
+    expect(same).not.toContain("--add-dir");
+    const codex = buildResumeBuildCommand("abc", NOW, "/old", 1, { backend: "codex" }, "/new");
+    expect(codex).toContain("-C '/new'");
+  });
   const NOW = new Date(2026, 9, 2, 9, 5);
   it("resumes Claude in auto mode from the startup cwd, voiding the stand-down", () => {
     const cmd = buildResumeBuildCommand("abc-123", NOW, "/w/app", 3, { backend: "claude-code", claudeBin: "/bin/claude" });

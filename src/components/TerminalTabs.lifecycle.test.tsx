@@ -13,6 +13,11 @@ vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
   return { enqueuePtyOp, tauriHandoffDeps: {}, TerminalView: ({ id, visible, onUserInput }: { id: string; visible: boolean; onUserInput: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button></div> };
 });
+vi.mock("./shell/ShellBlocksView", async () => {
+  const { TerminalView } = await import("./TerminalView");
+  return { default: TerminalView };
+});
+vi.mock("./shell/AgentShellView", () => ({default:({id}:{id:string})=><div data-agent-id={id}/> }));
 vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed}><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
 import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
@@ -33,6 +38,7 @@ const click = async (selector: string) => {
   await act(async () => button!.click());
 };
 async function mount() {
+  await import("./shell/ShellBlocksView");
   await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} onActivityChange={() => {}} collapsed={false} /></StrictMode>));
 }
 async function open(background = false) {
@@ -46,6 +52,7 @@ beforeEach(() => {
   mocks.cwd = null;
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
     if (command === "pty_list") return mocks.inventory;
+    if (command === "agent_shell_list") return [];
     if (command === "pty_cwds") return mocks.cwd ? Object.fromEntries(args.ids.map((id: string) => [id, mocks.cwd])) : {};
     return null;
   });
@@ -149,7 +156,7 @@ describe("terminal workspace recovery", () => {
     expect(tiled()).toEqual([first, second]);
     expect(focused()).toBe(first);
     expect(host.querySelector<HTMLElement>('[data-zoomed="true"]')?.dataset.headerId).toBe(first);
-    expect(saved()).toEqual(before);
+    expect(saved()).toEqual({...before,tabs:before.tabs.map((tab:object)=>({...tab,kind:"shell",view:"shell"}))});
     expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
   });
 

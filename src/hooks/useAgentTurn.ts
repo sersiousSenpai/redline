@@ -125,6 +125,10 @@ export interface AgentTurnConfig<M extends TurnMessage> {
 
 export interface AgentTurn<M extends TurnMessage> {
   messages: M[];
+  queue: M[];
+  steerNotice?: string;
+  steer: (messageId: string) => Promise<boolean>;
+  promote: (messageId: string) => Promise<void>;
   liveText: string;
   status: TurnPhase;
   /** What the in-flight turn is spending, and which model is spending it. */
@@ -155,6 +159,8 @@ export interface SendOpts {
   localBody?: string;
   /** Passed through to `buildSendArgs` (e.g. the mission `synthesize` flag). */
   extra?: unknown;
+  steer?: boolean;
+  mode?: "chat" | "build";
 }
 
 /** Re-probe cadence while a turn streams (also the self-heal clock). */
@@ -287,6 +293,12 @@ export class AgentTurnController<M extends TurnMessage> {
       on<QueueAdvancedPayload>("queue-advanced", (p) =>
         this.dispatch({ type: "queue-advanced", messageId: p.messageId }),
       ),
+      ...(surface === "companion" ? [on<{ messageId: string; mode: "inject" | "interrupt"; assistantId?: string; body?: string; text?: string; seq?: number }>("steered", p => {
+        if (p.mode === "interrupt") {this.dispatch({type:"steer-notice",message:"Interrupted the previous turn and sent your instruction next"});return;}
+        this.dispatch({ type: "steered", seq: p.seq ?? this.state.lastSeq,
+          message: this.cfg().makeMessage({ id: p.messageId, role: "user", body: p.text ?? this.state.queue.find(row => row.id === p.messageId)?.body ?? "", status: "complete" }),
+          assistant: p.body && p.assistantId ? this.cfg().makeMessage({ id: p.assistantId, role: "assistant", body: p.body, status: "complete" }) : undefined });
+      })] : []),
       // Only `fork` emits this today. Subscribing it here rather than in the
       // component is the point of the shared hook: a surface that later grows
       // an auto-retry gets the caption for free.
@@ -331,17 +343,17 @@ export class AgentTurnController<M extends TurnMessage> {
     const id = tmpId(cfg.surface);
     this.dispatch({
       type: "send-optimistic",
-      message: cfg.makeMessage({
+      message: { ...cfg.makeMessage({
         id,
         role: "user",
         body: opts?.localBody ?? trimmed,
         status: "complete",
-      }),
+      }), mode: opts?.mode },
     });
-    void this.dispatchSend(id, trimmed, opts?.extra);
+    void this.dispatchSend(id, trimmed, opts?.extra, opts?.steer);
   }
 
-  private async dispatchSend(tmp: string, text: string, extra?: unknown): Promise<void> {
+  private async dispatchSend(tmp: string, text: string, extra?: unknown, steer?: boolean): Promise<void> {
     const cfg = this.cfg();
     let args: Record<string, unknown>;
     try {
@@ -367,6 +379,7 @@ export class AgentTurnController<M extends TurnMessage> {
           messageId: outcome.messageId,
           queued: outcome.queued,
         });
+        if (steer && outcome.queued) await this.steer(outcome.messageId);
       }
     } catch (err) {
       if (this.alive) { cfg.onSendFailed?.(text, err); this.sendFailed(tmp, err); }
@@ -408,6 +421,16 @@ export class AgentTurnController<M extends TurnMessage> {
     } catch {
       return null;
     }
+  }
+
+  async steer(messageId: string): Promise<boolean> {
+    if (this.cfg().surface !== "companion") return false;
+    return this.io.invoke<boolean>("companion_steer", { ...this.keyArgs(), messageId });
+  }
+
+  async promote(messageId: string): Promise<void> {
+    if (this.cfg().surface !== "companion") return;
+    if (await this.io.invoke<boolean>("companion_queue_promote", { ...this.keyArgs(), messageId })) this.dispatch({ type: "promoted", messageId });
   }
 
   /** Local wipe after a backend-side discard: empty thread, but `loaded` so
@@ -538,7 +561,11 @@ export function useAgentTurn<M extends TurnMessage>(
   const clear = useCallback(() => ctl?.clear(), [ctl]);
 
   return {
-    messages: state.messages,
+    messages: config.surface === "companion" ? state.messages : [...state.messages, ...state.queue],
+    queue: state.queue,
+    steerNotice: state.steerNotice,
+    steer: (id: string) => ctl?.steer(id) ?? Promise.resolve(false),
+    promote: (id: string) => ctl?.promote(id) ?? Promise.resolve(),
     liveText: state.liveText,
     status: state.phase,
     meter: state.meter,

@@ -22,7 +22,7 @@ async function publish() {
   catch (error) { console.warn("Could not position the floating browser overlay", error); }
   finally { inFlight = false; if (again) { again = false; schedule(); } }
 }
-export function useNativeOverlayRegion(ref: RefObject<HTMLElement | null>, enabled = true) {
+export function useNativeOverlayRegion(ref: RefObject<HTMLElement | null>, enabled = true, animating = false) {
   useLayoutEffect(() => {
     if (!enabled || !("__TAURI_INTERNALS__" in window) || !ref.current) return;
     const element = ref.current;
@@ -35,7 +35,12 @@ export function useNativeOverlayRegion(ref: RefObject<HTMLElement | null>, enabl
     if (element.parentElement) mutation.observe(element.parentElement, { attributes: true, attributeFilter: ["style", "class"] });
     window.addEventListener("resize", schedule);
     window.addEventListener("scroll", schedule, true);
+    let animationFrame = 0;
+    const animate = () => { schedule(); animationFrame = requestAnimationFrame(animate); };
+    if (animating) animationFrame = requestAnimationFrame(animate);
+    element.addEventListener("animationend", schedule);
+    element.addEventListener("transitionend", schedule);
     schedule();
-    return () => { resize.disconnect(); mutation.disconnect(); window.removeEventListener("resize", schedule); window.removeEventListener("scroll", schedule, true); regions.delete(element); schedule(); };
-  }, [ref, enabled]);
+    return () => { cancelAnimationFrame(animationFrame); element.removeEventListener("animationend", schedule); element.removeEventListener("transitionend", schedule); resize.disconnect(); mutation.disconnect(); window.removeEventListener("resize", schedule); window.removeEventListener("scroll", schedule, true); regions.delete(element); schedule(); };
+  }, [ref, enabled, animating]);
 }

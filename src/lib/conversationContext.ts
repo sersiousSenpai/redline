@@ -200,7 +200,7 @@ export function conversationContexts(
         kind: "browselist",
         key: `browselist:${s.cartId ?? "cart:regular"}`,
         id: s.cartId ?? "cart:regular",
-        label: "Cart",
+        label: "Task list",
         voiceCapable: false,
       });
     }

@@ -107,3 +107,29 @@
 .rb-fullscreen-edge kbd { color:var(--color-ink-muted); font:inherit; font-size:11px; }
 @media (max-width:520px) { .rb-mosaic-pages li { grid-template-columns:22px minmax(0,1fr); } .rb-mosaic-pages li>input:last-child { grid-column:2; } .rb-mosaic-shape { flex-direction:column; align-items:stretch; } }
 @media(max-width:700px) { .rb-navigation-row { gap:4px; padding:7px 6px; } .rb-history { gap:0; } .rb-icon-button { width:28px; } .rb-chat-toggle { padding:0 7px; } .rb-chat-toggle span { display:none; } .rb-tabs-row { padding-left:6px; } }
+
+/* Browser refresh: rail and page form one measurable stage. */
+.rb-workspace { flex-direction:row; }
+.rb-workspace-pages { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+.rb-tab-rail { position:relative; display:flex; flex-direction:column; flex:none; width:var(--browser-rail-width,220px); min-height:0; border-right:1px solid var(--color-rule); background:var(--color-bg-elevated); }
+.rb-rail-heading { display:flex; align-items:center; gap:4px; padding:6px; }
+.rb-rail-heading strong { flex:1; font-size:12px; font-weight:500; }
+.rb-tab-rail[data-collapsed] .rb-rail-heading { flex-direction:column; }
+.rb-tab-rail .rb-tabs { flex:1; display:flex; flex-direction:column; gap:3px; overflow-y:auto; overflow-x:hidden; padding:5px; }
+.rb-tab-rail .rb-tab { min-height:34px; min-width:0; max-width:none; flex:0 0 auto; border-radius:6px; border:1px solid transparent; padding:7px; transform:translateY(var(--tab-drag-y,0px)); }
+.rb-tab-rail .rb-tab[aria-selected=true] { border-color:var(--color-rule); }
+.rb-favicon { width:14px; height:14px; flex:none; object-fit:contain; }
+.rb-rail-mode { display:flex; padding:3px 8px; gap:3px; }
+.rb-rail-mode button { flex:1; padding:5px; border:0; border-radius:5px; background:transparent; color:var(--color-ink-muted); font:inherit; font-size:11px; cursor:pointer; }
+.rb-rail-mode button[aria-pressed=true] { background:var(--color-paper); color:var(--color-ink); }
+.rb-organize { margin:4px 8px; justify-content:center; }
+.rb-group-title { display:flex; align-items:center; gap:5px; width:100%; padding:9px 6px 5px; border:0; background:none; color:var(--color-ink-muted); font:inherit; font-size:11px; text-align:left; cursor:pointer; }
+.rb-group-title span { margin-left:auto; }
+.rb-group-title[aria-expanded=false] svg { transform:rotate(-90deg); }
+.rb-rail-resize { position:absolute; z-index:5; top:0; bottom:0; right:-3px; width:6px; cursor:col-resize; touch-action:none; }
+.rb-rail-resize:hover,.rb-rail-resize:focus-visible { background:var(--color-info); opacity:.35; }
+.rb-page-cover:has(.rb-waking-label) { background:transparent; z-index:1; pointer-events:none; }
+.rb-waking-label { padding:7px 12px; border:1px solid var(--color-rule); border-radius:20px; background:var(--color-paper); box-shadow:0 2px 9px #0002; }
+.rb-waking-label::before { content:""; display:inline-block; width:10px; height:10px; margin-right:7px; border:1px solid var(--color-rule); border-top-color:var(--color-ink-muted); border-radius:50%; animation:rb-wake 800ms linear infinite; }
+@keyframes rb-wake { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .rb-waking-label::before { animation:none; } }

@@ -311,7 +311,7 @@ function readTabActivity(storage: Pick<Storage, "getItem"> | null): Map<string, 
   }
 }
 
-async function candidateTabs(invoke: Invoke, storage: Pick<Storage, "getItem"> | null): Promise<CandidateTab[]> {
+export async function candidateTabs(invoke: Invoke, storage: Pick<Storage, "getItem"> | null): Promise<CandidateTab[]> {
   type Saved = { tabs?: { browseId?: string | null; url?: string; title?: string }[] } | null;
   const read = (id: string) => invoke<Saved>("browser_workspace_read", { workspaceId: id }).catch(() => null);
   const missions = await invoke<{ missionId: string; title: string; goal: string; status: string; updatedAt: number }[]>(

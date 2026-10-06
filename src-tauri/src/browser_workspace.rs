@@ -124,7 +124,7 @@ fn normalize_tabs(tabs: &[Value]) -> Vec<Value> {
 
 /// An address a saved tab can be reopened at.
 fn durable_url(url: &str) -> bool {
-    url.len() <= 8192 && (url == "about:blank" || tauri::Url::parse(url).is_ok_and(|url| match url.scheme() {
+    url.len() <= 8192 && (url == "about:blank" || url == "redline:newtab" || tauri::Url::parse(url).is_ok_and(|url| match url.scheme() {
         "http" | "https" => url.host_str().is_some(),
         "file" => url.to_file_path().is_ok(),
         _ => false,

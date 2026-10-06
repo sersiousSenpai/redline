@@ -172,7 +172,7 @@ describe("BrowseList", () => {
     await render();
     expect(list?.list.template).toBe("cart");
     expect(host.querySelector("textarea")).toBeTruthy();
-    expect(host.textContent).toContain("Cart · 0 items");
+    expect(host.textContent).toContain("Task list · 0 items");
     expect(host.textContent).not.toContain("Punch list");
   });
 
@@ -237,7 +237,7 @@ describe("BrowseList", () => {
     await typeAndEnter("do the thing");
     await click(byText("Clear"));
     expect(list?.items).toEqual([]);
-    expect(host.textContent).toContain("Cart · 0 items");
+    expect(host.textContent).toContain("Task list · 0 items");
   });
 
   it("surfaces a failed write instead of silently doing nothing", async () => {

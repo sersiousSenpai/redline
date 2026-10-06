@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
@@ -69,6 +70,7 @@ function basename(path: string): string {
 }
 
 export interface FrontDoorProps {
+  workbench?: import("./ChatRoom").ChatWorkbenchComposer;
   /** The single floating entry point; omit the retired landing-page furniture. */
   floating?: boolean;
   /** The floating door at rest on an empty plate: it wears the headline above
@@ -134,6 +136,8 @@ export interface FrontDoorProps {
    *  entirely rather than offering a route that bounces straight back off a
    *  disabled surface. */
   chatEnabled: boolean;
+  /** Compact surfaces may offer only the destinations they can launch in place. */
+  allowedDestinations?: LaunchDestination[];
   /** Where ⏎ sends. Sticky and persisted — `Plan ▾` sets it. */
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
@@ -241,8 +245,10 @@ export function FrontDoor(props: FrontDoorProps) {
     onRun,
     onChat,
     chatEnabled,
+    allowedDestinations,
     destination,
     onDestinationChange,
+    workbench,
     backend,
     onBackendChange,
     modelCatalogs,
@@ -274,6 +280,38 @@ export function FrontDoor(props: FrontDoorProps) {
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const islandRef = useRef<HTMLDivElement | null>(null);
+  const [dropHot, setDropHot] = useState(false);
+  const attachmentDropRef = useRef({ attachments, onAttachmentsChange, visible });
+  attachmentDropRef.current = { attachments, onAttachmentsChange, visible };
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // Native drop coordinates are logical AppKit points, already CSS pixels.
+    // Hit-testing the topmost DOM node also prevents an obscured composer
+    // from accepting files through a dialog or another overlay.
+    const overIsland = (x: number, y: number) => {
+      const top = document.elementFromPoint?.(x, y);
+      return attachmentDropRef.current.visible && !!top && !!islandRef.current?.contains(top);
+    };
+    void Promise.resolve().then(() => getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (disposed) return;
+      if (payload.type === "leave") return setDropHot(false);
+      if (payload.type === "over" || payload.type === "enter") {
+        setDropHot(overIsland(payload.position.x, payload.position.y));
+        return;
+      }
+      if (payload.type !== "drop") return;
+      setDropHot(false);
+      if (!payload.paths.length || !overIsland(payload.position.x, payload.position.y)) return;
+      const current = attachmentDropRef.current;
+      const next = [...new Set([...current.attachments, ...payload.paths])];
+      attachmentDropRef.current = { ...current, attachments: next };
+      current.onAttachmentsChange(next);
+      taRef.current?.focus();
+    })).then((u) => { if (disposed) u(); else unlisten = u; }).catch(() => {});
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
   // How many page rows fit under the composer without scrolling or running
   // off the layer: measured, not guessed, and re-measured whenever the space
   // changes (window resize, the dock moving, the door gliding open). The page
@@ -486,6 +524,7 @@ export function FrontDoor(props: FrontDoorProps) {
         refuse();
         return;
       }
+      if (workbench) { workbench.onSubmit(); return; }
       // While plans are pilled the destination is locked to `plan`: neither
       // the drafter nor a chat has a meaning for a combination in v1.
       if (combine.length > 0) {
@@ -540,6 +579,7 @@ export function FrontDoor(props: FrontDoorProps) {
     },
     [
       canSubmit,
+      workbench,
       refuse,
       onDrafter,
       onRun,
@@ -560,12 +600,17 @@ export function FrontDoor(props: FrontDoorProps) {
   //
   // Same for a run left selected on a harness that doesn't offer one.
   const liveDestination: LaunchDestination =
+    (allowedDestinations && !allowedDestinations.includes(destination)) ||
     (destination === "chat" && !chatEnabled) ||
     (destination === "run" && !runSupported(backend.backend))
       ? "plan"
       : destination;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (workbench && !e.nativeEvent.isComposing) {
+      if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); workbench.cycleMode(); return; }
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); workbench.onSubmit(e.altKey); return; }
+    }
     const action = submitAction(
       {
         key: e.key,
@@ -578,7 +623,10 @@ export function FrontDoor(props: FrontDoorProps) {
     );
     if (action === "ignore" || action === "newline") return;
     e.preventDefault();
-    send(action);
+    const allowedAction = allowedDestinations && !allowedDestinations.includes(action)
+      ? allowedDestinations.find(value => value !== liveDestination && (value !== "run" || runSupported(backend.backend))) ?? liveDestination
+      : action;
+    send(allowedAction);
   };
 
   const attach = async () => {
@@ -735,7 +783,7 @@ export function FrontDoor(props: FrontDoorProps) {
           </p>
         </div>
       )}
-      <div className={islandClass}>
+      <div ref={islandRef} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
               attachment is a file handed to a prompt, and these are whole
@@ -838,7 +886,7 @@ export function FrontDoor(props: FrontDoorProps) {
             </div>
           )}
           <div className="rl-fd-tools">
-            <BackendMenu
+            {workbench ? workbench.picker : <BackendMenu
               choice={backend}
               onChange={onBackendChange}
               modelCatalogs={modelCatalogs}
@@ -850,11 +898,11 @@ export function FrontDoor(props: FrontDoorProps) {
               onOpen={onNeedModels}
               compact={tight}
               allowedBackends={liveDestination === "chat" ? ["claude-code", "codex"] : undefined}
-            />
+            />}
             <ProjectPicker
               options={projectOptions}
-              value={choice ? choice.path : resolvedProject}
-              onChange={(path) => onChoiceChange({ path })}
+              value={workbench ? workbench.project?.path ?? null : choice ? choice.path : resolvedProject}
+              onChange={(path) => workbench ? workbench.onProjectChange({ path }) : onChoiceChange({ path })}
               onNewProject={() =>
                 setOffer({
                   name: projectNameFromPrompt(text),
@@ -868,17 +916,18 @@ export function FrontDoor(props: FrontDoorProps) {
             {/* Locked while plans are pilled: the destination picker also
                 offers drafter and chat, and neither has a meaning for a
                 combination in v1. */}
-            {combine.length === 0 && (
+            {!workbench && combine.length === 0 && (
               <PlanMenu
                 destination={liveDestination}
                 onDestinationChange={onDestinationChange}
                 chatEnabled={chatEnabled}
+                allowedDestinations={allowedDestinations}
                 runEnabled={runSupported(backend.backend)}
               />
             )}
             {/* Honesty, in the chip row and never as a modal: a direct run
                 does not stop to ask, and on Codex it is not sandboxed. */}
-            {combine.length === 0 && liveDestination === "run" && (
+            {!workbench && combine.length === 0 && liveDestination === "run" && (
               <span
                 className={`rl-fd-runmode${backend.backend === "codex" ? " is-unsafe" : ""}`}
                 title={
@@ -1220,15 +1269,17 @@ function PlanMenu({
   onDestinationChange,
   chatEnabled,
   runEnabled,
+  allowedDestinations,
 }: {
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
   chatEnabled: boolean;
   runEnabled: boolean;
+  allowedDestinations?: LaunchDestination[];
 }) {
-  const rows = DESTINATIONS.filter(d => (d.id !== "chat" || chatEnabled) && (d.id !== "run" || runEnabled));
+  const rows = DESTINATIONS.filter(d => (!allowedDestinations || allowedDestinations.includes(d.id)) && (d.id !== "chat" || chatEnabled) && (d.id !== "run" || runEnabled));
   const current = rows.find(d => d.id === destination) ?? rows[0];
-  const alternate = fallbackDestination(destination);
+  const alternate = rows.some(row => row.id === fallbackDestination(destination)) ? fallbackDestination(destination) : rows.find(row => row.id !== destination)?.id;
   return <ComposerMenu label="Destination" value={destination} onChange={next => onDestinationChange(next as LaunchDestination)}
     icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : destination === "run" ? <Play size={12}/> : <Sparkles size={12}/>}
     options={rows.map(d => ({ value: d.id, label: d.label, detail: d.id === destination ? "Enter to send" : d.id === alternate ? "⌘ Enter shortcut" : undefined }))}>

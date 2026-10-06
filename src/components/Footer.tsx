@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { Comment } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
 import { Button } from "./ui/Button";
+import type { ManualPlanState, PlanStateTarget } from "./PlanStateMenu";
 import { MenuSurface } from "./ui/MenuSurface";
 import { ridesSubmit } from "../lib/planSearch";
+
+const PlanStateMenu = lazy(() => import("./PlanStateMenu").then((module) => ({ default: module.PlanStateMenu })));
 
 /** Where an approved plan can be built from — the same agent, or a hand-off. */
 export interface BuildTarget {
@@ -25,6 +28,9 @@ export interface FooterApproval {
 
 interface FooterProps {
   comments: Comment[];
+  planState?: PlanStateTarget;
+  onSetPlanState?: (state: ManualPlanState) => void;
+  onMoveProject?: () => void;
   /** A session is open in the main pane — false when the app sits idle. */
   sessionReady: boolean;
   canSubmit: boolean;
@@ -56,6 +62,7 @@ interface FooterProps {
 
 export function Footer({
   comments,
+  planState, onSetPlanState, onMoveProject,
   sessionReady,
   canSubmit,
   canApprove,
@@ -158,12 +165,16 @@ export function Footer({
           </button>
         ) : approval ? (
           <span style={{ color: "var(--color-success)" }}>
+          {planState && onSetPlanState ? <Suspense fallback={<>Approved · v{approval.version}</>}><PlanStateMenu session={planState} onState={onSetPlanState} onMove={onMoveProject}>
+            Approved · v{approval.version} · {approval.runState === null ? "not built" : approval.runState.replace(/_/g, " ")}
+          </PlanStateMenu></Suspense> : <>
             Approved · v{approval.version}
             <span style={{ color: "var(--color-ink-muted)" }}>
               {approval.runState === null
                 ? " · not built"
                 : ` · ${approval.runState.replace(/_/g, " ")}`}
             </span>
+          </>}
           </span>
         ) : idle ? (
           <span>
@@ -194,6 +205,7 @@ export function Footer({
             />
           </>
         )}
+        {!approval && planState && !planState.held && onSetPlanState && <Suspense fallback={null}><PlanStateMenu session={planState} onState={onSetPlanState} onMove={onMoveProject}/></Suspense>}
         {termCollapsed && (
           <>
             <span style={{ color: "var(--color-rule)" }}>·</span>

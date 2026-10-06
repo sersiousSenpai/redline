@@ -18,6 +18,13 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(() => Promise.resolve(null)),
 }));
+const dropListeners = vi.hoisted(() => new Set<(event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) => void>());
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: (handler: (event: any) => void) => {
+    dropListeners.add(handler);
+    return Promise.resolve(() => dropListeners.delete(handler));
+  } }),
+}));
 
 // jsdom has no ResizeObserver. The door measures itself to decide `compact` /
 // `short`; unmeasured reads as roomy, which is the layout these assertions
@@ -52,6 +59,7 @@ afterEach(() => {
   act(() => root.unmount());
   host.remove();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const PENDING = { prompt: "Ship the auth rewrite", startedAt: Date.now() - 3000 };
@@ -119,6 +127,33 @@ async function mount(props: Partial<FrontDoorProps> = {}): Promise<void> {
 
 const composer = () => host.querySelector<HTMLTextAreaElement>(".rl-fd-input");
 const flight = () => host.querySelector<HTMLElement>(".rl-fd-flight");
+
+it("attaches native drops once, merges paths, and highlights the topmost island", async () => {
+  const onAttachmentsChange = vi.fn();
+  await mount({ attachments: ["/a/x.md"], onAttachmentsChange });
+  const original = document.elementFromPoint;
+  document.elementFromPoint = () => composer();
+  try {
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "over", position: { x: 20, y: 30 } } })));
+    expect(host.querySelector(".rl-fd-island.is-drop-target")).not.toBeNull();
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md", "/a/y.md"], position: { x: 20, y: 30 } } })));
+    expect(onAttachmentsChange).toHaveBeenCalledOnce();
+    expect(onAttachmentsChange).toHaveBeenCalledWith(["/a/x.md", "/a/y.md"]);
+    expect(host.querySelector(".is-drop-target")).toBeNull();
+    expect(document.activeElement).toBe(composer());
+  } finally { document.elementFromPoint = original; }
+});
+
+it("ignores native drops when a different surface covers the island", async () => {
+  const onAttachmentsChange = vi.fn();
+  await mount({ onAttachmentsChange });
+  const original = document.elementFromPoint;
+  document.elementFromPoint = () => document.body;
+  try {
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
+    expect(onAttachmentsChange).not.toHaveBeenCalled();
+  } finally { document.elementFromPoint = original; }
+});
 
 it("lets a floating hover preview appear without taking focus from the document", async () => {
   const documentFocus = document.createElement("button");
@@ -481,6 +516,15 @@ it("offers history as an explicit choice without selecting it when the blank com
 });
 
 describe("FrontDoor — Just run it", () => {
+  it("restricts a compact browser composer to Plan and Run, including the modifier shortcut", async () => {
+    const onRun = vi.fn(), onDrafter = vi.fn();
+    await mount({ destination: "plan", allowedDestinations: ["plan", "run"], onRun, onDrafter, text: "Build this" });
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Destination"]')!.click());
+    const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Destination"]')!;
+    expect(menu.textContent).toContain("Just run it"); expect(menu.textContent).not.toContain("Draft a document"); expect(menu.textContent).not.toContain("Talk it through");
+    await act(async () => composer()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true })));
+    expect(onRun).toHaveBeenCalledOnce(); expect(onDrafter).not.toHaveBeenCalled();
+  });
   it("sends ⏎ to the run path, never the plan launch", async () => {
     const onRun = vi.fn(), onLaunch = vi.fn();
     await mount({ destination: "run", onRun, onLaunch, text: "Bump the lockfile" });

@@ -285,7 +285,7 @@ export default function Cart({
   const markdown = () =>
     view ? renderListMarkdown(view.list, view.items, source) : "";
 
-  if (!loaded || !view) return <Shell onClose={onClose} title="Cart · 0 items" error={error} />;
+  if (!loaded || !view) return <Shell onClose={onClose} title="Task list · 0 items" error={error} />;
 
   // ── The list ─────────────────────────────────────────────────────────────
   // Sections are PAGES, in the order the user walked them. Coming back to a
@@ -302,7 +302,7 @@ export default function Cart({
   return (
     <Shell
       onClose={onClose}
-      title={`Cart · ${items.length} items`}
+      title={`Task list · ${items.length} items`}
       error={error}
       onClear={clear}
     >
@@ -577,7 +577,7 @@ export default function Cart({
             placeholder={
               pending
                 ? "What's wrong with it?"
-                : "Add a note to the Cart…"
+                : "Add a task…"
             }
             rows={2}
             className="flex-1 rounded px-2 py-1"
@@ -697,7 +697,7 @@ function Shell({
             <button
               type="button"
               onClick={onClear}
-              title="Clear the Cart"
+              title="Clear the task list"
               className="px-1 leading-none hover:opacity-100 opacity-60"
               style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
             >

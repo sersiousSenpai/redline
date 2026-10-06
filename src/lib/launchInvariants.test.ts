@@ -116,7 +116,11 @@ describe("one launch pipeline", () => {
 
   it("a run never claims a plan: it skips the intercept registry and the pending card", () => {
     const launch = app.slice(app.indexOf("const launchPlan ="), app.indexOf('// "Run" on a Localhost'));
-    expect(launch).toContain("if (!run) launchedPlansRef.current.set(launchId, pending);");
+    const registrations = [...launch.matchAll(/launchedPlansRef\.current\.set\(/g)];
+    expect(registrations).toHaveLength(2); // raw delivery and hosted beforeStart
+    for (const registration of registrations) expect(launch.slice(registration.index! - 12, registration.index)).toContain("if (!run)");
+    expect(launch).toContain("beforeStart: id => { if (!run)");
+    expect(launch.indexOf('invoke("record_plan_launch"')).toBeLessThan(launch.indexOf("terminals.openAgentShell("));
     const branch = launch.slice(launch.indexOf("    if (run) {\n      // Its own pill"));
     const body = branch.slice(0, branch.indexOf("\n    }\n"));
     expect(body.length).toBeGreaterThan(0);

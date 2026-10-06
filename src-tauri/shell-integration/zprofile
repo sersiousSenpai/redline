@@ -1,0 +1,9 @@
+if [[ ${REDLINE_USER_ZDOTDIR_SET:-0} == 1 ]]; then
+  export ZDOTDIR="$REDLINE_USER_ZDOTDIR"
+else
+  unset ZDOTDIR
+fi
+[[ -r "${ZDOTDIR:-$HOME}/.zprofile" ]] && source "${ZDOTDIR:-$HOME}/.zprofile"
+export REDLINE_USER_ZDOTDIR_SET=${+ZDOTDIR}
+export REDLINE_USER_ZDOTDIR="${ZDOTDIR:-$HOME}"
+export ZDOTDIR="$REDLINE_SHELL_INTEGRATION_DIR"

@@ -1357,6 +1357,22 @@ impl SessionStore {
         }
     }
 
+    /// Correct project attribution in memory and on disk under the same lock.
+    /// Roll memory back if persistence fails so a later upsert cannot undo it.
+    pub fn set_project(&self, session_id: &str, project_path: &str) -> Result<(), String> {
+        let mut map = self.inner.lock().unwrap();
+        let session = map.get_mut(session_id).ok_or("no such session")?;
+        let before = (session.project_path.clone(), session.project_name.clone(), session.updated_at);
+        session.project_path = project_path.to_string();
+        session.project_name = derive_project_name(project_path);
+        session.updated_at = now_millis();
+        if let Err(error) = self.db.set_session_project(session_id, project_path, &session.project_name, session.updated_at) {
+            (session.project_path, session.project_name, session.updated_at) = before;
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
     /// Bump a session's in-memory last-activity timestamp. Used by callers
     /// that persist activity through the `Database` directly (fork threads),
     /// where the DB row is already touched but the store copy would go stale.

@@ -1,0 +1,20 @@
+.rl-queue-tray { margin: 4px 12px 0; padding: 5px 8px; border: 1px solid var(--color-rule); border-radius: 10px 10px 0 0; background: var(--color-paper); font-size: 12px; }
+.rl-queue-tray-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; }
+.rl-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-queue-text:hover, .rl-queue-text:focus { white-space: pre-wrap; overflow-wrap: anywhere; }
+.rl-queue-tray button, .rl-chat-mode-picker button, .rl-changes-card button { color: var(--color-ink); border: 1px solid var(--color-rule); background: var(--color-paper); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
+.rl-queue-tray button:disabled { opacity: .4; cursor: default; }
+.rl-queue-more, .rl-chat-mode-picker { position: relative; }
+.rl-queue-more [role=menu], .rl-chat-mode-menu { position: absolute; bottom: 100%; right: 0; z-index: 100; min-width: 180px; padding: 10px; background: var(--color-paper); border: 1px solid var(--color-rule); border-radius: 9px; box-shadow: 0 8px 24px #0002; }
+.rl-chat-mode-menu { right: auto; left: 0; min-width: 265px; }
+.rl-chat-mode-menu fieldset { border: 0; padding: 8px 0; margin: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.rl-chat-mode-menu legend { font-size: 10px; text-transform: uppercase; color: var(--color-ink-muted); }
+.rl-chat-mode-menu label { display: flex; width: 100%; justify-content: space-between; gap: 8px; font-size: 12px; }
+.rl-chat-mode-menu select { max-width: 175px; color: var(--color-ink); background: var(--color-paper); border: 1px solid var(--color-rule); }
+.rl-chat-mode-picker button[aria-pressed=true] { border-color: var(--color-info); background: color-mix(in srgb,var(--color-info) 10%,var(--color-paper)); }
+.rl-chat-mode-chip.is-build, .rl-chat-build-warning { color: var(--color-warning); }
+.rl-chat-build-warning { display: block; font-size: 11px; }
+.rl-changes-card { padding: 12px; border: 1px solid var(--color-rule); border-radius: 9px; font-size: 12px; margin: 8px 0; background: var(--color-paper); }
+.rl-changes-card ul { list-style: none; padding: 0; overflow-wrap: anywhere; }
+.rl-changes-card button { margin-right: 6px; }
+.rl-changes-card small { color: var(--color-ink-muted); }

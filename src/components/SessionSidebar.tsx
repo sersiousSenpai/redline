@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { memo, useEffect, useState } from "react";
+import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
@@ -31,6 +32,8 @@ interface SessionSidebarProps {
    *  drains the orphaned hook response so Claude Code's terminal unblocks
    *  before the row disappears. */
   onDelete: (id: string) => void;
+  onSetPlanState?: (id: string, state: ManualPlanState) => void;
+  onMoveProject?: (id: string) => void;
   /** Download a specific revision as a clean .md file. Kept as a separate
    *  affordance (header button) — sidebar row clicks no longer download. */
   onExport: (sessionId: string, versionNumber: number) => void;
@@ -111,6 +114,7 @@ function SessionSidebarBase({
   onLeaveJoined,
   onSelect,
   onDelete,
+  onSetPlanState, onMoveProject,
   onExport,
   onSelectRevision,
   viewedVersionNumber,
@@ -290,6 +294,8 @@ function SessionSidebarBase({
               }
               onToggleExpand={() => toggleExpand(s.sessionId)}
               onDelete={() => onDelete(s.sessionId)}
+              onSetPlanState={onSetPlanState}
+              onMoveProject={onMoveProject}
               onExport={onExport}
               onSelectRevision={onSelectRevision}
               onOpenRunReport={onOpenRunReport}
@@ -452,6 +458,7 @@ function SessionRow({
   onClick,
   onToggleExpand,
   onDelete,
+  onSetPlanState, onMoveProject,
   onExport,
   onSelectRevision,
   onOpenRunReport,
@@ -476,6 +483,8 @@ function SessionRow({
   onClick: () => void;
   onToggleExpand: () => void;
   onDelete: () => void;
+  onSetPlanState?: (id: string, state: ManualPlanState) => void;
+  onMoveProject?: (id: string) => void;
   onExport: (sessionId: string, versionNumber: number) => void;
   onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
   onOpenRunReport?: (sessionId: string) => void;
@@ -683,12 +692,11 @@ function SessionRow({
             two sessions in one project stay tellable apart by title, and one
             title across two projects by this line. */}
         {session.planTitle && session.projectName && (
-          <div
-            className="truncate mb-1"
-            style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
-          >
+          <button type="button" className="truncate mb-1" title={session.projectPath} aria-label="Move to repo…"
+            onClick={event => { event.stopPropagation(); onMoveProject?.(session.sessionId); }}
+            style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}>
             {session.projectName}
-          </div>
+          </button>
         )}
         <div
           className="flex items-center gap-2"
@@ -719,9 +727,10 @@ function SessionRow({
             {/* Approved with nothing building is its own state — it waits on
                 you (Build or Reopen), so it says so rather than reading as
                 done. NULL run_state is exactly that state. */}
-            {session.status === "approved" && !session.runState
-              ? "approved · not built"
-              : STATUS_LABELS[session.status]}
+            {onSetPlanState ? <PlanStateMenu session={session} onState={state => onSetPlanState(session.sessionId, state)}
+              onMove={onMoveProject ? () => onMoveProject(session.sessionId) : undefined}>
+              {session.status === "approved" && !session.runState ? "approved · not built" : STATUS_LABELS[session.status]}
+            </PlanStateMenu> : STATUS_LABELS[session.status]}
           </span>
           {/* The harness is no longer holding this review — comments and
               discussions still save, but sending needs a restore first.

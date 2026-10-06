@@ -259,12 +259,12 @@ describe("renderListMarkdown", () => {
   });
 
   it("says so plainly when there is nothing on it", () => {
-    expect(renderListMarkdown(list, [])).toContain("Cart is empty");
+    expect(renderListMarkdown(list, [])).toContain("Task list is empty");
   });
 
   it("titles from the list, falling back to the template's label", () => {
     expect(renderListMarkdown({ template: "punch-list", title: "  " }, [])).toContain(
-      "# Cart",
+      "# Task list",
     );
   });
 });

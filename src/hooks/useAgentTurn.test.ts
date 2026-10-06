@@ -317,7 +317,7 @@ describe("send", () => {
     const s = ctl.getState();
     // The live stream must survive the type-ahead untouched.
     expect(s.liveText).toBe("partial ");
-    const queuedRow = s.messages[s.messages.length - 1];
+    const queuedRow = s.queue[s.queue.length - 1];
     expect(queuedRow?.id).toBe("q-db");
     expect(queuedRow?.status).toBe("queued");
     // The drain announces the queued turn going live.
@@ -480,6 +480,7 @@ describe("the companion surface", () => {
       "companion-meter",
       "companion-queue-advanced",
       "companion-retry",
+      "companion-steered",
     ]);
     expect(
       invoke.mock.calls.find((c) => c[0] === "companion_turn_status")?.[1],
@@ -551,7 +552,7 @@ describe("the companion surface", () => {
     await flush();
     ctl.send("and the beta?");
     await flush();
-    expect(last(ctl.getState().messages)?.status).toBe("queued");
+    expect(last(ctl.getState().queue)?.status).toBe("queued");
 
     // The drain flips the chip off.
     emit("companion-queue-advanced", { companionId: "chat-1", messageId: "m-queued" });

@@ -263,7 +263,7 @@ impl Helper {
             }
             let report = Handshake::read_for(&self.dir, &self.txn.txn_id, &self.txn.release_id);
             if let Some(report) = &report {
-                if best.map_or(true, |b| report.stage > b) {
+                if best.is_none_or(|b| report.stage > b) {
                     best = Some(report.stage);
                     self.log(&format!("handshake: {:?} {}", report.stage, report.detail));
                 }

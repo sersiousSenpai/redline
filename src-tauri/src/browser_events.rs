@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Bounded page events. This channel exposes no Tauri commands or filesystem access.
 use serde_json::Value;
+use tauri::Manager;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -14,6 +15,11 @@ fn note_input(label: &str) {
     *revision = revision.saturating_add(1);
 }
 fn browser_label(label: &str) -> bool { label.starts_with("browser-") && label.len() > 8 && label.len() <= 160 }
+pub(crate) fn hide_browser_tabs(app: &tauri::AppHandle) {
+    for (label, view) in app.webviews() {
+        if browser_label(&label) { let _ = view.hide(); }
+    }
+}
 fn page_url(url: &str) -> bool {
     url.len() <= 8192 && (url == "about:blank" || tauri::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()))
 }
@@ -31,6 +37,7 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
         "selection" => {
             let payload = value.get("value")?.as_object()?;
             if !["ask", "define", "explain", "research", "list"].contains(&payload.get("action")?.as_str()?) { return None; }
+            if payload.get("note").is_some_and(|note| note.as_str().is_none_or(|s| s.chars().count() > 4000)) { return None; }
             let text = payload.get("text")?.as_str()?;
             if text.is_empty() || text.chars().count() > 4001 { return None; }
         }
@@ -135,7 +142,7 @@ pub fn browser_inspect(app: tauri::AppHandle, label: String) -> Result<(), Strin
     view.eval(include_str!("browser_inspector.js")).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_set_appearance(app: tauri::AppHandle, label: String, website: String, zoom: f64) -> Result<(), String> {
     use tauri::Manager;
     if !browser_label(&label) || !["default", "light", "dark", "forced"].contains(&website.as_str()) { return Err("Invalid browser appearance target".into()); }

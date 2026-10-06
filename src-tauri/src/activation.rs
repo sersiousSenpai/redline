@@ -215,7 +215,12 @@ pub fn start_health_watch(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let responsive = app
                 .try_state::<crate::state::SessionStore>()
-                .map(|store| store.database().get_setting(WORKSPACE_KEY).is_some() || true)
+                .map(|store| {
+                    // Completing the read proves responsiveness. A missing
+                    // saved workspace is valid on a fresh installation.
+                    let _ = store.database().get_setting(WORKSPACE_KEY);
+                    true
+                })
                 .unwrap_or(false);
             if !responsive {
                 let report = Handshake::new(&txn_id, &release, Stage::Failed)

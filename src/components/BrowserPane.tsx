@@ -11,6 +11,7 @@ import { ensureCart } from "../lib/browseCart";
 import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
 import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
 import { BrowserFullscreenEdge } from "./BrowserFullscreenEdge";
+import { fallbackGroups, reconcileGroups, validateGroups, moveTabToGroup, type TabGroup } from "../lib/tabGroups";
 import { BrowserChrome } from "./BrowserChrome";
 import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "./BrowserPagePanels";
 import { BrowserDialog } from "./BrowserSurfaces";
@@ -29,7 +30,7 @@ import { Webview } from "@tauri-apps/api/webview";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { usePersistedState } from "../theme/usePersistedState";
 import { resolveOmniboxInput } from "../lib/omnibox";
-import { BROWSER_HOME_URL as HOME, browserPageTitle, initialBrowserTitle } from "../lib/browserTitle";
+import { BROWSER_HOME_URL as HOME, NEWTAB, browserPageTitle, initialBrowserTitle } from "../lib/browserTitle";
 import {
   chatEntryFor,
   pruneChatState,
@@ -57,6 +58,8 @@ import { isDurableTabUrl } from "../lib/browserOutput";
 // list panel only exists once a user picks the pill, so it has no business
 // costing boot bytes — and `scripts/size-budget.json` has limited headroom.
 const MissionFoundationPanel = lazy(() => import("./MissionFoundationPanel").then((module) => ({ default: module.MissionFoundationPanel })));
+const BrowserTabRail = lazy(() => import("./BrowserTabRail"));
+const BrowserHomePage = lazy(() => import("./BrowserHomePage"));
 const Cart = lazy(() => import("./Cart"));
 import type {
   BinaryFile,
@@ -147,6 +150,7 @@ interface Tab {
   url: string;
   /** Page title, or a stable initial label while the page loads. */
   title: string;
+  favicon?: string;
   /** Stable id for this tab's browse-agent discussion thread. Survives reload
    *  (persisted with the tab list) and the recreated native webview, so a tab's
    *  conversation reattaches to it. */
@@ -198,6 +202,7 @@ interface Bookmark {
 }
 
 interface BrowserPaneProps {
+  onPageContext?: (page: import("../lib/browserIsland").BrowserIslandPage | null) => void;
   /** Close the browser (toggle it off). */
   onClose: () => void;
   onOpenDraft?: (draftId: string) => void;
@@ -283,6 +288,7 @@ const hostnameOf = (u: string): string => {
 
 function BrowserPaneBase({
   onClose,
+  onPageContext,
   onOpenDraft,
   onMissionContinue,
   visible = true,
@@ -306,6 +312,9 @@ function BrowserPaneBase({
   const [stageWidth, setStageWidth] = useState(window.innerWidth);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [reloading, setReloading] = useState<Set<string>>(() => new Set());
+  const reloadingRef = useRef(reloading); reloadingRef.current = reloading;
+  const switchTiming = useRef<{ id: string; at: number } | null>(null);
   const [pageErrors, setPageErrors] = useState<Record<string, string>>({});
   const pageErrorsRef = useRef(pageErrors); pageErrorsRef.current = pageErrors;
   const nativeEpochRef = useRef(0);
@@ -323,10 +332,15 @@ function BrowserPaneBase({
   const eventPagesRef = useRef(new Set<string>());
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
-  const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {});
+  const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {}, { debounceMs: 120 });
   const [linkedByWorkspace, setLinkedByWorkspace] = usePersistedState<Record<string, LinkedConversation | null>>("redline.browser.followByWorkspace", {});
-  const linkedConversation = linkedByWorkspace[workspaceKey] ?? null;
-  const setLinkedConversation = (value: LinkedConversation | null) => setLinkedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }));
+  const [ownChatsByWorkspace, setOwnChatsByWorkspace] = usePersistedState<Record<string, string[]>>("redline.browser.ownChatTabs", {});
+  const [groupsByWorkspace, setGroupsByWorkspace] = usePersistedState<Record<string, TabGroup[]>>("redline.browser.groups", {});
+  const [organizedByWorkspace, setOrganizedByWorkspace] = usePersistedState<Record<string, boolean>>("redline.browser.organized", {});
+  const [organizing, setOrganizing] = useState(false);
+  const organizeEpoch = useRef(0);
+  const organized = organizedByWorkspace[workspaceKey] ?? false;
+  useEffect(() => { try { if (!localStorage.getItem("redline.browser.followDefaultV1")) { setLinkedByWorkspace(prev => Object.fromEntries(Object.entries(prev).filter(([, value]) => value))); localStorage.setItem("redline.browser.followDefaultV1", "true"); } } catch { /* optional migration */ } }, []);
 
   // id → live Webview handle. Kept in a ref (not state) because these are
   // native resources we create/destroy imperatively, not render outputs.
@@ -502,13 +516,37 @@ function BrowserPaneBase({
   // slot. See lib/browseChatState.ts.
   const [chatState, setChatState] = usePersistedState<ChatStateMap>(
     "redline.browser.chatState",
-    {},
+    {}, { debounceMs: 120 },
   );
   // Keyed on the ACTIVE tab, not `discussionId`: the memory should follow the
   // tab the user is looking at, and those two deliberately diverge when an
   // agent opens a tab on the current conversation's behalf.
   const activeBrowseId =
     (tabs.find((t) => t.id === activeId) ?? tabs[0])?.browseId ?? null;
+  const ownChat = !!activeBrowseId && (ownChatsByWorkspace[workspaceKey] ?? []).includes(activeBrowseId);
+  const linkedConversation = ownChat ? null : linkedByWorkspace[workspaceKey] ?? null;
+  useEffect(() => {
+    if (dockPill !== "page" || ownChat || linkedByWorkspace[workspaceKey]) return;
+    setLinkedByWorkspace(prev => prev[workspaceKey] ? prev : { ...prev, [workspaceKey]: { browseId: newBrowseId(), title: "Browser chat", originTabId: activeId } });
+  }, [dockPill, ownChat, workspaceKey, linkedByWorkspace, activeId, setLinkedByWorkspace]);
+  const groups = reconcileGroups(groupsByWorkspace[workspaceKey] ?? [], tabs);
+  const setGroups = (next: TabGroup[]) => setGroupsByWorkspace(prev => ({ ...prev, [workspaceKey]: next }));
+  const organizeTabs = async (fileOnly = false) => {
+    const epoch = ++organizeEpoch.current, key = workspaceKey, snapshot = tabs;
+    setOrganizing(true);
+    try {
+      const result = await invoke<TabGroup[]>("browser_organize_tabs", { tabs: snapshot.map(tab => ({ browseId: tab.browseId, title: tab.title, url: tab.url })), groups, fileOnly });
+      if (epoch === organizeEpoch.current && workspaceKeyRef.current === key) setGroups(validateGroups(result, snapshot) ? reconcileGroups(result, tabsRef.current) : fallbackGroups(tabsRef.current));
+    } catch { if (epoch === organizeEpoch.current && workspaceKeyRef.current === key) setGroups(fallbackGroups(tabsRef.current)); }
+    finally { if (epoch === organizeEpoch.current) setOrganizing(false); }
+  };
+  const organizeRef = useRef(organizeTabs); organizeRef.current = organizeTabs;
+  const groupMembership = groups.map(group => `${group.id}:${group.browseIds.join(",")}`).join("|");
+  useEffect(() => {
+    if (!organized || !groups.some(group => group.id === "unfiled")) return;
+    const timer = window.setTimeout(() => void organizeRef.current(true), 3000);
+    return () => window.clearTimeout(timer);
+  }, [organized, groupMembership, workspaceKey]);
   const chatHere = chatEntryFor(chatState, activeBrowseId);
   // Which panel is up is the DOCK's answer now — one column, one open bit, one
   // place in the app that knows what conversation you are in. `chatState`
@@ -640,7 +678,7 @@ function BrowserPaneBase({
       if (workspaceKeyRef.current !== workspace) return;
       setListReloadKey(n => n + 1);
       setChatHere({ open: true, pill: "cart" });
-    } catch (error) { setWorkspaceError(`Could not add to Cart: ${String(error)}`); }
+    } catch (error) { setWorkspaceError(`Could not add to task list: ${String(error)}`); }
   }, [workspaceKey, setChatHere, refineLocator]);
 
   const addReplyToCart = async (body: string): Promise<boolean> => {
@@ -653,7 +691,7 @@ function BrowserPaneBase({
         pageUrl: page?.url ?? tab?.url ?? null, pageTitle: page?.title ?? tab?.title ?? null });
       if (workspaceKeyRef.current === workspace) setListReloadKey(n => n + 1);
       return true;
-    } catch (error) { setWorkspaceError(`Could not add to Cart: ${String(error)}`); return false; }
+    } catch (error) { setWorkspaceError(`Could not add to task list: ${String(error)}`); return false; }
   };
 
   /** One action off the in-page selection bar.
@@ -682,7 +720,7 @@ function BrowserPaneBase({
       seedPageChat({
         text: promptForSelection(ev),
         nonce,
-        autoSend: autoSends(ev.action),
+        autoSend: autoSends(ev.action, ev.note),
       });
       setChatHere({ open: true, pill: "page" });
     },
@@ -704,6 +742,8 @@ function BrowserPaneBase({
   const layoutSnapshotKey = JSON.stringify(tileLayout);
   const updateTileLayout = (patch: Partial<BrowserLayout>) => setLayouts((prev) => ({ ...prev, [workspaceKey]: { ...normalizeBrowserLayout(prev[workspaceKey] ?? prev.default), ...patch } }));
   // Escape (from Redline or from inside a page) restores a maximized tile.
+  const updateTileLayoutRef = useRef(updateTileLayout); updateTileLayoutRef.current = updateTileLayout;
+  const forgetNativeRef = useRef<(id: string, recreate: boolean) => void>(() => {});
   const restoreTilesRef = useRef(() => {});
   restoreTilesRef.current = () => { if (tileLayout.maximized) updateTileLayout({ maximized: null }); };
 
@@ -887,7 +927,7 @@ function BrowserPaneBase({
         id: t.id,
         url: t.url,
         title: t.title,
-        browseId: t.browseId,
+        browseId: t.browseId, favicon: t.favicon,
       }));
       const mid = activeMissionIdRef.current;
       if (mid) {
@@ -920,25 +960,25 @@ function BrowserPaneBase({
         label: t.label,
         url: t.url,
         title: t.title,
-        browseId: t.browseId,
+        browseId: t.browseId, favicon: t.favicon,
       })),
     }).catch(() => {});
   }, [tabs]);
 
   useEffect(() => {
     if (missionRestorePendingRef.current || swappingRef.current) return;
-    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url })), layout: tileLayout } };
+    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url, favicon: tab.favicon })), layout: tileLayout, groups, organized, ownChatTabs: ownChatsByWorkspace[workspaceKey] ?? [] } };
     pendingWorkspaceSaveRef.current = pending;
     const timer = window.setTimeout(() => {
       if (pendingWorkspaceSaveRef.current === pending) pendingWorkspaceSaveRef.current = null;
       void saveBrowserWorkspace(pending.workspaceId, pending.value).catch((error) => setWorkspaceError(`Workspace save failed: ${String(error)}`));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [tabs, workspaceKey, layoutSnapshotKey]);
+  }, [tabs, workspaceKey, layoutSnapshotKey, groupMembership, groupsByWorkspace, organized, ownChatsByWorkspace]);
   useEffect(() => () => {
     const pending = pendingWorkspaceSaveRef.current;
     pendingWorkspaceSaveRef.current = null;
-    if (pending) void saveBrowserWorkspace(pending.workspaceId, pending.value).catch((error) => console.error("Browser workspace could not be saved on close", error));
+    if (pending) void saveBrowserWorkspace(pending.workspaceId, { ...pending.value, layout: pending.value.layout ? { ...pending.value.layout, focused: activeBrowseIdRef.current } : undefined }).catch((error) => console.error("Browser workspace could not be saved on close", error));
   }, []);
 
   // Mirror the active tab into the backend so the browse agent's
@@ -972,6 +1012,9 @@ function BrowserPaneBase({
   );
 
   const activeUrl = tabs.find((t) => t.id === activeId)?.url ?? "";
+  const activeTitle = tabs.find(tab => tab.id === activeId)?.title ?? "";
+  useEffect(() => { onPageContext?.({ label: `browser-${activeId}`, url: activeUrl, title: activeTitle }); }, [activeId, activeUrl, activeTitle, onPageContext]);
+  useEffect(() => () => onPageContext?.(null), [onPageContext]);
   const activeUrlRef = useRef(activeUrl);
   activeUrlRef.current = activeUrl;
 
@@ -994,12 +1037,12 @@ function BrowserPaneBase({
     return () => { nativeMountedRef.current = false; nativeEpochRef.current++; geometry.stop(); };
   }, [geometry]);
   const measureTiles = useCallback(() => [...wvMapRef.current].map(([id, view]) => ({ id, view,
-    rect: visibleRef.current && !pageErrorsRef.current[id] && tileIdsRef.current.includes(id)
+    rect: visibleRef.current && !reloadingRef.current.has(id) && !pageErrorsRef.current[id] && tileIdsRef.current.includes(id)
       ? takeoverRef.current && id === activeIdRef.current ? fullWindowRect({ width: window.innerWidth, height: window.innerHeight })
         : measureNativeBrowserRect(tileSlotsRef.current.get(id), slotRef.current) : null,
   })), []);
   const syncBounds = useCallback(() => { geometry.sync(measureTiles()); }, [geometry, measureTiles]);
-  useLayoutEffect(() => { syncBounds(); }, [pageErrors, syncBounds]);
+  useLayoutEffect(() => { syncBounds(); }, [pageErrors, reloading, syncBounds]);
   // Hide before paint whenever an overlay or another surface takes ownership.
   useLayoutEffect(() => { if (!effectiveVisible) geometry.hideAll(); }, [effectiveVisible, geometry]);
   useEffect(() => {
@@ -1024,26 +1067,16 @@ function BrowserPaneBase({
       // Reuse an existing webview with this label if one is still alive (a
       // StrictMode remount or cancelled teardown left it around) — recreating
       // it would either flash or error on the duplicate label.
-      const adopt = async (view: Webview) => {
-        await invoke("browser_enable_autoresize", { label: tab.label, enabled: false }).catch(() => {});
-        await Promise.all([
-          invoke("browser_enable_gestures", { label: tab.label }).catch(() => {}),
-          invoke("browser_install_shims", { label: tab.label, selectionActions: selectionActionsRef.current }).catch(() => {}),
-        ]);
-        await invoke("browser_overlay_attach", { label: tab.label }).catch(() => {});
-        return { view, adopted: true };
-      };
+      const profile = normalizeAppearance(siteAppearancesRef.current[siteKey(tab.url)]);
       const existing = await Webview.getByLabel(tab.label).catch(() => null);
-      if (existing) return adopt(existing);
-      // Built natively (`browser_create_tab`), never with the JS `new Webview`:
-      // only a Rust-built webview can carry the download handler, and it shares
-      // one builder (user agent included) with a background wake.
+      const adopt = async (view: Webview) => ({ view, adopted: true });
       const create = async (): Promise<Webview> => {
-        await invoke("browser_create_tab", { label: tab.label, url: tab.url });
-        const w = await Webview.getByLabel(tab.label);
-        if (!w) throw new Error("The page's view did not open");
-        return w;
+        await invoke("browser_create_tab", { label: tab.label, url: tab.url, css: appearanceCss(profile), website: profile.website, zoom: profile.zoom, selectionActions: selectionActionsRef.current });
+        const view = await Webview.getByLabel(tab.label);
+        if (!view) throw new Error("The page's view did not open");
+        return view;
       };
+      if (existing) { await create(); return adopt(existing); }
       // A just-suspended tab's webview may still be mid-teardown (close() is
       // async); recreating the same live label would throw. If creation fails,
       // wait for the old webview to actually disappear, then retry once.
@@ -1067,23 +1100,6 @@ function BrowserPaneBase({
           throw firstErr;
         }
       }
-      await invoke("browser_overlay_attach", { label: tab.label }).catch(() => {});
-      // Native-only: turn on two-finger back/forward swipe (off by default).
-      void invoke("browser_enable_gestures", { label: tab.label }).catch(
-        () => {},
-      );
-      // Tile bounds are owned by the stage; full-window native autoresizing
-      // would expand each page over its neighbours during window resizing.
-      await invoke("browser_enable_autoresize", { label: tab.label, enabled: false }).catch(
-        () => {},
-      );
-      // Native-only: install the in-window fullscreen shim (so a video player's
-      // fullscreen button fills the app window instead of being ignored). Also
-      // re-installed by browser_set_view alongside any view filter.
-      void invoke("browser_install_shims", {
-        label: tab.label,
-        selectionActions: selectionActionsRef.current,
-      }).catch(() => {});
       return { view: wv, adopted: false };
     },
     [],
@@ -1099,6 +1115,7 @@ function BrowserPaneBase({
     const rank = (tab: Tab) => tab.id === activeIdRef.current ? 0 : tileIdsRef.current.includes(tab.id) ? 1 : 2;
     for (const tab of [...tabs].sort((a, b) => rank(a) - rank(b))) {
       if (
+        tab.url === NEWTAB ||
         !liveIntentRef.current.has(tab.id) ||
         wvMapRef.current.has(tab.id) ||
         creatingRef.current.has(tab.id) ||
@@ -1127,7 +1144,7 @@ function BrowserPaneBase({
           wvMapRef.current.set(tab.id, wv);
           wakeAttemptsRef.current.delete(tab.id); // created → clear retry count
           retryAtRef.current.delete(tab.id);
-          applySiteAppearanceRef.current(tab);
+          setReloading(prev => { const next = new Set(prev); next.delete(tab.id); return next; });
           // A just-opened mosaic shows today's page, not where it was left: a
           // fresh view already loads `tab.url`, an adopted one is sent there.
           const goHome = homeNavigateRef.current.delete(tab.id);
@@ -1152,6 +1169,7 @@ function BrowserPaneBase({
             })
             .catch(() => {});
           syncBounds();
+          if (switchTiming.current?.id === tab.id) { console.info("[rl-tabswitch]", tab.id, `${Math.round(performance.now() - switchTiming.current.at)}ms`); switchTiming.current = null; }
           setLiveVersion((v) => v + 1);
         })
         .catch((e) => {
@@ -1212,12 +1230,7 @@ function BrowserPaneBase({
           if (keep.has(id) || tileIdsRef.current.includes(id) || id === activeIdRef.current || !wvMapRef.current.has(id)) {
             return;
           }
-          geometry.hide(id, wvMapRef.current.get(id)!);
-          wvMapRef.current.delete(id);
-          liveIntentRef.current.delete(id);
-          void invoke("browser_suspend", { label: `browser-${id}` }).catch(
-            () => {},
-          );
+          void invoke("browser_suspend", { label: `browser-${id}` }).catch(() => {});
         })
         .catch(() => {});
     }
@@ -1226,27 +1239,38 @@ function BrowserPaneBase({
   // On tab switch: snapshot the tab we're leaving, hide the others, reflect the
   // active URL in the bar, show the new one.
   const prevActiveIdRef = useRef(activeId);
+  const activeSinceRef = useRef(performance.now());
   useEffect(() => {
-    const leaving = prevActiveIdRef.current;
-    // Capture the outgoing tab's snapshot before it's backgrounded, so it stays
-    // discussable and ready to be suspended. Short delay.
-    if (leaving && leaving !== activeId && wvMapRef.current.has(leaving)) {
-      scheduleCacheRef.current(leaving, 100);
-    }
-    prevActiveIdRef.current = activeId;
-    // The active tab must be live and most-recent; then trim the rest to budget.
-    // `ensureLive` (not `markLive`) so an activation reached by any path — tab
-    // close shifting focus, an agent opening a tab — also recreates a webview
-    // that died or failed to materialize, instead of showing a blank pane.
-    ensureLive(activeId);
-    touchMru(activeId);
-    enforceLiveBudget();
-    for (const [id, wv] of wvMapRef.current) {
-      if (!tileIdsRef.current.includes(id)) geometry.hide(id, wv);
-    }
-    const t = tabsRef.current.find((x) => x.id === activeId);
-    if (t) setAddr(t.url);
+    const leaving = prevActiveIdRef.current, lingered = performance.now() - activeSinceRef.current >= 1000;
+    prevActiveIdRef.current = activeId; activeSinceRef.current = performance.now();
+    for (const [id, view] of wvMapRef.current) if (!tileIdsRef.current.includes(id)) geometry.hide(id, view);
+    const tab = tabsRef.current.find(tab => tab.id === activeId);
+    if (tab) setAddr(tab.url === NEWTAB ? "" : tab.url);
     syncBounds();
+    let shownFrame = 0;
+    if (tab && (tab.url === NEWTAB || wvMapRef.current.has(activeId))) shownFrame = requestAnimationFrame(() => {
+      if (switchTiming.current?.id !== activeId || activeIdRef.current !== activeId) return;
+      console.info("[rl-tabswitch]", activeId, `${Math.round(performance.now() - switchTiming.current.at)}ms`);
+      switchTiming.current = null;
+    });
+    const timer = window.setTimeout(() => {
+      ensureLive(activeId); touchMru(activeId); enforceLiveBudget();
+      if (tab) updateTileLayoutRef.current({ focused: tab.browseId, ...(tileLayout.maximized && tileLayout.maximized !== tab.browseId ? { maximized: null } : {}) });
+      if (lingered && leaving !== activeId && wvMapRef.current.has(leaving)) {
+        const snapshot = () => scheduleCacheRef.current(leaving, 0);
+        if (window.requestIdleCallback) window.requestIdleCallback(snapshot, { timeout: 1000 }); else window.setTimeout(snapshot, 0);
+      }
+      if (!tab || tab.url === NEWTAB || !wvMapRef.current.has(activeId)) return;
+      const handle = wvMapRef.current.get(activeId);
+      let timeout = 0;
+      void Promise.race([
+        invoke<string>("browser_eval_result", { label: tab.label, script: "JSON.stringify({ready:document.readyState,children:document.body?document.body.children.length:0})" }),
+        new Promise<string>((_, reject) => { timeout = window.setTimeout(() => reject(new Error("Page probe timed out")), 1500); }),
+      ]).then(raw => { const state = JSON.parse(raw); if (/^https?:/.test(tab.url) && !state.children) throw new Error("Empty page"); })
+        .catch(() => { if (wvMapRef.current.get(activeId) !== handle || activeIdRef.current !== activeId) return; void invoke("browser_close", { label: tab.label }).finally(() => forgetNativeRef.current(activeId, true)); })
+        .finally(() => window.clearTimeout(timeout));
+    }, 120);
+    return () => { window.clearTimeout(timer); cancelAnimationFrame(shownFrame); };
   }, [activeId, ensureLive, touchMru, enforceLiveBudget, syncBounds]);
 
   // (Visibility reflows are handled by the active-tracking effect below, which
@@ -1266,8 +1290,9 @@ function BrowserPaneBase({
   }, [scheduleSync, chatOpen, dockSlot, browserFullscreen]);
 
   useEffect(() => {
-    for (const id of tileIdsRef.current) ensureLive(id);
+    const timer = window.setTimeout(() => { for (const id of tileIdsRef.current) ensureLive(id); scheduleSync(); }, 120);
     scheduleSync();
+    return () => window.clearTimeout(timer);
   }, [tileGeometryKey, effectiveVisible, ensureLive, scheduleSync]);
 
   useEffect(() => {
@@ -1299,6 +1324,8 @@ function BrowserPaneBase({
         }
         // A page event or explicit navigation may have overtaken this poll.
         if (tabsRef.current.find((tab) => tab.id === id)?.url !== requestedUrl) return;
+        const favicon = await invoke<string>("browser_eval_result", { label: `browser-${id}`, script: "String(document.querySelector('link[rel~=icon]')?.href || new URL('/favicon.ico',location.href))" }).catch(() => "");
+        if (/^https?:/.test(favicon)) setTabs(prev => prev.map(tab => tab.id === id && tab.favicon !== favicon ? { ...tab, favicon } : tab));
         const changed = tabsRef.current.find((t) => t.id === id)?.url !== url;
         // Only re-key state when the URL actually moved — `ts.map` would
         // otherwise allocate a fresh array every poll tick (once a second) and
@@ -1389,12 +1416,36 @@ function BrowserPaneBase({
     };
   }, []);
 
+  const forgetNative = useCallback((id: string, recreate: boolean) => {
+    const view = wvMapRef.current.get(id); if (view) geometry.hide(id, view);
+    wvMapRef.current.delete(id); liveIntentRef.current.delete(id); creatingRef.current.delete(id);
+    eventPagesRef.current.delete(id); wakeAttemptsRef.current.delete(id); retryAtRef.current.delete(id);
+    if (recreate) ensureLive(id); else setLiveVersion(value => value + 1);
+  }, [geometry, ensureLive]);
+  forgetNativeRef.current = forgetNative;
+  useEffect(() => {
+    const subscription = listen<{ label: string }>("browser-tab-suspended", ({ payload }) => {
+      const tab = tabsRef.current.find(tab => tab.label === payload.label);
+      if (tab) forgetNative(tab.id, visibleRef.current && tileIdsRef.current.includes(tab.id));
+    });
+    return () => { void subscription.then(stop => stop()); };
+  }, [forgetNative]);
   useEffect(() => {
     const subscription = listen<{ label: string; kind: string; url?: string; title?: string; fullscreen?: boolean; value?: unknown }>("browser-page-event", ({ payload: event }) => {
       const tab = tabsRef.current.find((t) => t.label === event.label);
       if (!tab) return;
+      if (event.kind === "terminated" || event.kind === "dead") {
+        const shown = visibleRef.current && tileIdsRef.current.includes(tab.id);
+        if (shown) setReloading(prev => new Set(prev).add(tab.id));
+        if (!shown || event.kind === "dead") {
+          // Closing first prevents getByLabel from adopting the crashed process.
+          void invoke("browser_close", { label: tab.label }).finally(() => forgetNative(tab.id, shown));
+        }
+        return;
+      }
       eventPagesRef.current.add(tab.id);
       if (event.kind === "state" && event.url) {
+        setReloading(prev => { if (!prev.has(tab.id)) return prev; const next = new Set(prev); next.delete(tab.id); return next; });
         // The transient document created before navigation isn't the tab's page.
         if (event.url === "about:blank") return;
         const url = event.url;
@@ -1424,7 +1475,7 @@ function BrowserPaneBase({
           if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();
           else if (videoFsRef.current.stage === "screen") void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
         }
-        else if (event.value === "new-tab") openTabRef.current(HOME);
+        else if (event.value === "new-tab") openTabRef.current(NEWTAB);
         else if (event.value === "close-tab") closeTabRef.current(tab.id);
         else if (event.value === "next-tab" || event.value === "previous-tab") {
           const id = shortcutTabId(tabsRef.current.map((page) => page.id), tab.id, event.value);
@@ -1600,13 +1651,10 @@ function BrowserPaneBase({
     }
     // Selecting a suspended tab wakes it: ensure it has a live webview (recreate
     // if its prior one died or never materialized), and bump its recency.
-    ensureLive(id);
-    touchMru(id);
+    switchTiming.current = { id, at: performance.now() };
     setActiveId(id);
     setDiscussionId(id);
-    const focused = tabsRef.current.find((t) => t.id === id)?.browseId ?? null;
-    if (focused && dockPillRef.current !== "mission") setChatFor(focused, { pill: linkedConversation ? "page" : chatEntryFor(chatState, focused).pill });
-    updateTileLayout({ focused, ...(tileLayout.maximized && tileLayout.maximized !== focused ? { maximized: null } : {}) });
+    if (id === activeIdRef.current) ensureLive(id);
   };
 
   const tabDragCleanupRef = useRef<(() => void) | null>(null);
@@ -1615,6 +1663,7 @@ function BrowserPaneBase({
     if (e.button !== 0 || (e.target as HTMLElement).closest("button")) return;
     tabDragCleanupRef.current?.();
     tabDragCleanupRef.current = startTabPointerDrag(e.nativeEvent, e.currentTarget as HTMLElement, {
+      axis: "y",
       onDragging: setTabDragging,
       onDrop: (overId, tileIndex) => flushSync(() => {
         suppressTabClickRef.current = true;
@@ -1623,7 +1672,10 @@ function BrowserPaneBase({
         if (tileIndex !== null && tab) {
           updateTileLayout(assignVisibleTile(tileLayout, visibleBrowseIds, tileIndex, tab.browseId));
           setActiveId(tab.id); setDiscussionId(tab.id);
-        } else if (overId && overId !== id) setTabs(ts => reorderTabs(ts, id, overId));
+        } else if (overId && overId !== id) {
+          if (organized && tab) { const target = tabsRef.current.find(page => page.id === overId); const group = groups.find(group => group.browseIds.includes(target?.browseId ?? "")); if (group) setGroups(moveTabToGroup(groups, tab.browseId, group.id)); }
+          else setTabs(ts => reorderTabs(ts, id, overId));
+        }
       }),
     });
   };
@@ -1640,7 +1692,7 @@ function BrowserPaneBase({
     // `http://localhost:3000` is holding `http://localhost:3000/dashboard` by
     // the time you click the card again. Blank tabs are exempt: "+" on HOME is
     // an intentional second empty tab.
-    if (url !== HOME) {
+    if (url !== HOME && url !== NEWTAB) {
       const existing = tabsRef.current.find((t) => sameTabUrl(t.url, url));
       if (existing) {
         ensureLive(existing.id);
@@ -1669,7 +1721,7 @@ function BrowserPaneBase({
     // Move the conversation onto the new tab unless an agent opened it on behalf
     // of the current conversation (then it stays anchored to its origin tab).
     if (!opts.anchorDiscussion) setDiscussionId(id);
-    if (dockPillRef.current !== "mission") setChatFor(browseId, { pill: "page" });
+    if (url === NEWTAB) window.setTimeout(() => focusAddressRef.current(), 0);
     return browseId;
   };
 
@@ -1729,7 +1781,7 @@ function BrowserPaneBase({
   const saveCurrentWorkspace = async () => {
     const descs = tabsRef.current.map(descriptorOf);
     const mid = activeMissionIdRef.current;
-    await saveBrowserWorkspace(workspaceKeyRef.current, { tabs: descs, layout: tileLayout });
+    await saveBrowserWorkspace(workspaceKeyRef.current, { tabs: descs, layout: tileLayout, groups, organized, ownChatTabs: ownChatsByWorkspace[workspaceKey] ?? [] });
     if (mid) {
       await mission.setMissionTabs(mid, descs);
     } else if (workspaceKeyRef.current === "regular") {
@@ -1764,6 +1816,10 @@ function BrowserPaneBase({
     let definition: Mosaic | null = null;
     try {
       const savedWorkspace = await loadBrowserWorkspace(destinationId);
+      if (epoch !== workspaceSwapEpoch.current) throw new Error("A newer workspace switch replaced this request");
+      if (savedWorkspace?.groups) setGroupsByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.groups! }));
+      if (savedWorkspace?.organized !== undefined) setOrganizedByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.organized! }));
+      if (savedWorkspace?.ownChatTabs) setOwnChatsByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.ownChatTabs! }));
       if (target.kind === "mosaic") {
         // A mosaic opens from its definition: every cell at its saved address.
         definition = mosaicFromWorkspace(destinationId, savedWorkspace);
@@ -1869,7 +1925,7 @@ function BrowserPaneBase({
   };
 
   const toggleLinked = () => {
-    setLinkedConversation(linkedConversation ? null : { browseId: dockBrowseId!, title: dockTitle ?? "Page", originTabId: dockDiscussionTab.id });
+    if (activeBrowseId) setOwnChatsByWorkspace(prev => ({ ...prev, [workspaceKey]: ownChat ? (prev[workspaceKey] ?? []).filter(id => id !== activeBrowseId) : [...(prev[workspaceKey] ?? []), activeBrowseId] }));
     setDiscussionId(activeId);
     setChatHere({ open: true, pill: "page" });
   };
@@ -1880,7 +1936,7 @@ function BrowserPaneBase({
     if (!detail?.conversationId || !/^[a-zA-Z0-9_-]+$/.test(detail.conversationId)) return;
     if (detail.conversationKind === "browse") {
       const tab = tabsRef.current.find(item => item.browseId === detail.conversationId);
-      setLinkedConversation(null);
+      setOwnChatsByWorkspace(prev => ({ ...prev, [workspaceKey]: [...new Set([...(prev[workspaceKey] ?? []), detail.conversationId!])] }));
       if (tab) selectTabRef.current(tab.id);
       else setWorkspaceError("This page conversation's tab is no longer open.");
       setChatHere({ open: true, pill: "page" });
@@ -2202,7 +2258,7 @@ function BrowserPaneBase({
         else void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); openTabRef.current(HOME); return; }
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); openTabRef.current(NEWTAB); return; }
       if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r") { event.preventDefault(); reloadPageRef.current(); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l") { event.preventDefault(); focusAddressRef.current(); }
       if ((event.metaKey || event.ctrlKey) && event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -2235,6 +2291,9 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+        groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
+      <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
         onAddressFocus={(focused) => {
           addrFocusedRef.current = focused;
@@ -2243,7 +2302,7 @@ function BrowserPaneBase({
         onAddressCopyError={() => setWorkspaceError("Could not copy the selected address.")}
         onBack={() => evalActive("history.back()")} onForward={() => evalActive("history.forward()")}
         onReload={() => reloadPageRef.current()}
-        onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab()} onTabDrag={startTabDrag}
+        onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag}
         tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         chatOpen={chatOpen} onToggleChat={() => {
           if (chatOpen) setChatHere({ open: false });
@@ -2265,7 +2324,7 @@ function BrowserPaneBase({
           rect, so it resizes automatically). */}
       {(() => {
         const slot = <BrowserTileStage stageRef={slotRef} slots={tileSlotsRef} pages={tilePages} tabs={tabs} activeId={activeId} layout={stageLayout} fullscreen={browserFullscreen}
-          shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => !wvMapRef.current.has(page.id) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
+          renderHome={page => <Suspense fallback={<div className="rb-page-cover">Opening new tab…</div>}><BrowserHomePage tabs={tabs} onOpen={url => { const open = tabs.find(tab => tab.url === url && tab.id !== page.id); if (open) selectTab(open.id); else navigate(url, page.id); }} onMission={id => void switchToMission(id)}/></Suspense>} shots={tabShots} showShots={!effectiveVisible} errors={pageErrors} loading={new Set(tilePages.filter((page) => page.url !== NEWTAB && (!wvMapRef.current.has(page.id) || reloading.has(page.id)) && !pageErrors[page.id]).map((page) => page.id))} onRetry={retryPage} onFocus={selectTab}
           onAssign={(index, browseId) => { const next = assignVisibleTile(tileLayout, visibleBrowseIds, index, browseId); updateTileLayout(next); const tab = tabs.find((t) => t.browseId === browseId); if (tab) selectTab(tab.id); }}
           onAddPage={(index) => { const browseId = openTab(); if (browseId) updateTileLayout(assignTile(tileLayout, index, browseId)); }}
           onSwap={(from, to) => updateTileLayout(swapVisibleTiles(tileLayout, visibleBrowseIds, from, to))}
@@ -2341,7 +2400,7 @@ function BrowserPaneBase({
                   title={dockTitle ?? "Page chat"}
                   key={dockBrowseId}
                   {...pageChatIdentity(discussionTab, activeId, linkedConversation)}
-                  linked={!!linkedConversation} onToggleLinked={toggleLinked}
+                  linked={!ownChat} ownChat={ownChat} onToggleLinked={toggleLinked}
                   workspaceId={workspaceKey}
                   projectDir={projectDir}
                   anchoredFromTitle={
@@ -2385,6 +2444,7 @@ function BrowserPaneBase({
         );
       })()}
 
+      </div>
       {picker.picking && <div role="status" className="shrink-0 px-3 py-1 text-xs">Click an element · Esc to cancel <button type="button" onClick={picker.cancel}>Cancel</button></div>}
       {workspaceError && <div role="alert" className="flex items-center justify-between px-3 py-2 text-xs" style={{ color: "var(--color-danger)", background: "var(--color-paper)" }}>{workspaceError}<button type="button" onClick={() => setWorkspaceError(null)}>Dismiss</button></div>}
       {mission.error && <div role="alert" className="px-3 py-2 text-xs">{mission.error}<button type="button" onClick={() => void mission.refreshMissions()}>Retry</button></div>}

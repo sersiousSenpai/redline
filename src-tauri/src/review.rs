@@ -2235,3 +2235,131 @@ diff --git a/src/main.rs b/src/main.rs
         assert!(g.ends_with('…'));
     }
 }
+
+// --- Guided timeline: forward-only changes ---------------------------------
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryVersion {
+    pub sha: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub files_changed: usize,
+    pub shared: bool,
+    pub from_team: bool,
+}
+#[tauri::command]
+pub async fn history_list(state: tauri::State<'_, ReviewState>, repo: String, n: Option<u32>, skip: Option<u32>) -> Result<Vec<HistoryVersion>, String> {
+    let dir = checked_repo_dir(&state.db, &repo).await?;
+    let n = n.unwrap_or(30).clamp(1, 100).to_string();
+    let skip = skip.unwrap_or(0).min(100_000).to_string();
+    let log = crate::guided::read(&dir, &["log", "--all", "-n", &n, "--skip", &skip, "--format=%H%x1f%s%x1f%an%x1f%ct%x1f%P%x1f%D"]).await?;
+    let mut rows = Vec::new();
+    for line in log.lines() {
+        let p: Vec<_> = line.split('\u{1f}').collect();
+        if p.len() != 6 { continue; }
+        let files = crate::guided::read(&dir, &["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", p[0]]).await?;
+        let shared = !crate::guided::read(&dir, &["branch", "--remotes", "--contains", p[0]]).await?.trim().is_empty();
+        let in_ours = crate::guided::read(&dir, &["merge-base", "--is-ancestor", p[0], "HEAD"]).await.is_ok();
+        rows.push(HistoryVersion { sha: p[0].into(), subject: p[1].into(), author: p[2].into(), committed_at: p[3].parse().unwrap_or(0), parents: p[4].split_whitespace().map(str::to_string).collect(), refs: p[5].split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(), files_changed: files.split('\0').filter(|f| !f.is_empty()).count(), shared, from_team: shared && !in_ours });
+    }
+    Ok(rows)
+}
+pub(crate) async fn restore_for(dir: &Path, sha: &str, mode: &str, path: Option<&str>) -> Result<crate::guided::ActionResult, String> {
+    use crate::guided::{self, GuidedOp};
+    guided::require_clean(dir).await?;
+    let sha = guided::revision(dir, sha).await?;
+    let head = guided::revision(dir, "HEAD").await?;
+    let op = match mode {
+        "undo" => GuidedOp::Revert { revision: sha.clone() },
+        "file" => GuidedOp::RestoreFile { revision: sha.clone(), path: format!(":(literal){}", safe_rel_path(path.ok_or("Choose a file to restore.")?)?) },
+        "project" => {
+            if sha == head { return Ok(guided::ActionResult { message: "Your project already matches this version.".into(), ..Default::default() }); }
+            if guided::read(dir, &["merge-base", "--is-ancestor", &sha, &head]).await.is_err() { return Err("Choose a saved version from this workspace's own history to restore the whole project.".into()); }
+            // A merge graph cannot be inverted correctly by blindly reverting
+            // every reachable commit (it would undo merged changes twice).
+            let merges = guided::read(dir, &["rev-list", "--merges", &format!("{sha}..{head}")]).await?;
+            if !merges.trim().is_empty() { GuidedOp::RestoreProject { revision: sha.clone() } }
+            else { GuidedOp::Revert { revision: format!("{sha}..{head}") } }
+        },
+        _ => return Err("Choose undo, restore a file, or restore the project.".into()),
+    };
+    let mut action = guided::ActionResult::default();
+    let attempt = guided::run(dir, op, None, &mut action).await;
+    if !attempt.as_ref().is_ok_and(|out| out.code == 0) {
+        let conflicts = guided::read(dir, &["diff", "--name-only", "--diff-filter=U", "-z"]).await?;
+        if !conflicts.is_empty() || crate::push::in_progress_op(dir).await.as_deref() == Some("revert") {
+            let abort = guided::run(dir, GuidedOp::AbortRevert, None, &mut action).await?;
+            if abort.code != 0 { return Err("The undo could not be cancelled automatically. Ask a teammate to help finish it before editing more files.".into()); }
+            action.conflict = Some(guided::ConflictReport { files: conflicts.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect(), ours_summary: "Your current saved version is unchanged.".into(), theirs_summary: "The older changes need help fitting into your current work.".into() });
+            action.message = "The undo touched changes that no longer match. Redline cancelled it and kept your work.".into();
+            return Ok(action);
+        }
+        return match attempt { Ok(out) => Err(crate::git_human::explain(&out.stderr).message), Err(error) => Err(error) };
+    }
+    if guided::revision(dir, "HEAD").await? != head { return Err("The project changed in another tool during this action. Refresh the timeline before continuing.".into()); }
+    action.message = "The restored changes are ready to review. Save a version when you're happy with them.".into();
+    Ok(action)
+}
+#[tauri::command]
+pub async fn history_restore(state: tauri::State<'_, ReviewState>, repo: String, sha: String, mode: String, path: Option<String>) -> Result<crate::guided::ActionResult, String> {
+    let dir = checked_repo_dir(&state.db, &repo).await?;
+    let _lock = crate::guided::repo_lock(&dir).await;
+    restore_for(&dir, &sha, &mode, path.as_deref()).await
+}
+#[cfg(test)]
+mod guided_history_tests {
+    use super::*;
+    use crate::sync::tests::{fixture, git};
+    #[tokio::test]
+    async fn a_conflicting_undo_is_aborted_to_identical_status_and_refs() {
+        let (_root, local, _) = fixture();
+        std::fs::write(local.join("shared.txt"), "second\n").unwrap();
+        git(&local, &["add", "."]); git(&local, &["commit", "-m", "Second"]);
+        let second = git(&local, &["rev-parse", "HEAD"]);
+        std::fs::write(local.join("shared.txt"), "third\n").unwrap();
+        git(&local, &["add", "."]); git(&local, &["commit", "-m", "Third"]);
+        let before = git(&local, &["status", "--porcelain=v1"]);
+        let refs = git(&local, &["show-ref"]);
+        let result = restore_for(&local, &second, "undo", None).await.unwrap();
+        assert!(result.conflict.is_some());
+        assert_eq!(git(&local, &["status", "--porcelain=v1"]), before);
+        assert_eq!(git(&local, &["show-ref"]), refs);
+        assert!(crate::push::in_progress_op(&local).await.is_none());
+    }
+    #[tokio::test]
+    async fn restoring_across_a_merge_recovers_the_tree_without_reverting_commits_twice() {
+        let (_root, local, team) = fixture();
+        let first = git(&local, &["rev-parse", "HEAD"]);
+        std::fs::write(local.join("ours.txt"), "ours").unwrap();
+        git(&local, &["add", "."]); git(&local, &["commit", "-m", "Ours"]);
+        std::fs::write(team.join("theirs.txt"), "theirs").unwrap();
+        git(&team, &["add", "."]); git(&team, &["commit", "-m", "Theirs"]); git(&team, &["push"]);
+        crate::sync::check_for(&local).await.unwrap(); crate::sync::bring_in_for(&local).await.unwrap();
+        let refs = git(&local, &["show-ref"]);
+        restore_for(&local, &first, "project", None).await.unwrap();
+        assert_eq!(git(&local, &["show-ref"]), refs);
+        assert!(!local.join("ours.txt").exists()); assert!(!local.join("theirs.txt").exists());
+        assert_eq!(std::fs::read_to_string(local.join("shared.txt")).unwrap(), "one\n");
+    }
+    #[tokio::test]
+    async fn every_restore_leaves_unsaved_changes_without_moving_refs() {
+        for mode in ["undo", "file", "project"] {
+            let (_root, local, _) = fixture();
+            let first = git(&local, &["rev-parse", "HEAD"]);
+            std::fs::write(local.join("shared.txt"), "second\n").unwrap();
+            git(&local, &["add", "."]); git(&local, &["commit", "-m", "Second"]);
+            let head = git(&local, &["rev-parse", "HEAD"]);
+            let refs = git(&local, &["show-ref"]);
+            let sha = if mode == "undo" { &head } else { &first };
+            restore_for(&local, sha, mode, Some("shared.txt")).await.unwrap();
+            assert_eq!(git(&local, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git(&local, &["show-ref"]), refs);
+            assert!(!git(&local, &["status", "--porcelain=v1"]).is_empty());
+            assert_eq!(std::fs::read_to_string(local.join("shared.txt")).unwrap(), "one\n");
+            assert!(restore_for(&local, sha, mode, Some("shared.txt")).await.unwrap_err().contains("Save or undo"));
+        }
+    }
+}
