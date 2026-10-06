@@ -1625,7 +1625,10 @@ function BrowserPaneBase({
       .catch(() => {});
 
     return () => {
+      // Clear the guard too: a cancelled frame left in it makes scheduleSync a
+      // permanent no-op after a StrictMode remount (rail collapse, resizes).
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
       window.removeEventListener("resize", onWin);
       trailing.forEach(clearTimeout);
       resizeSubscriptionCancelled = true;

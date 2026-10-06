@@ -1,4 +1,4 @@
-import { act, type ComponentProps } from "react";
+import { act, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), load: vi.fn(), save: vi.fn(), revision: vi.fn(), raceLabel: "", windowFullscreen: false, setFullscreen: vi.fn(), resized: null as (() => void) | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), views: new Map<string, { label: string; log: string[]; visible: boolean; position?: { x: number; y: number }; size?: { width: number; height: number } }>(), createGates: new Map<string, Promise<void>>(), showGates: new Map<string, Promise<void>>() }));
@@ -424,6 +424,20 @@ describe("mosaics", () => {
   });
 });
 
+
+it("moves native pages when the tab rail collapses after a StrictMode remount", async () => {
+  // StrictMode's effect replay used to cancel the pending sync frame without
+  // clearing its guard, so every later scheduleSync (rail collapse, resizes)
+  // was dropped and the page stayed at the expanded rail's bounds.
+  await act(async () => root.render(<StrictMode><BrowserPane onClose={() => {}} dockSlot={dock} dockPill="page"/></StrictMode>));
+  await settle();
+  const view = mocks.views.get("browser-t-two")!;
+  expect(view.position?.x).toBe(10);
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 182, y: 80, left: 182, top: 80, right: 1210, bottom: 880, width: 1028, height: 800, toJSON: () => ({}) });
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Collapse tab rail"]')!.click());
+  await settle();
+  expect(view.position?.x).toBe(182);
+});
 
 describe("native lifecycle recovery", () => {
   it("forgets a backend-suspended handle and recreates a visible page", async () => {
