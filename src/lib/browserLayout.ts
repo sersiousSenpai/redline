@@ -31,7 +31,7 @@ export const DEFAULT_BROWSER_LAYOUT: BrowserLayout = {
   preset: "browse", tiles: [], horizontal: 0.5, vertical: 0.5, maximized: null, focused: null,
 };
 export function canonicalTabId(browseId: string): string { return `t-${browseId}`; }
-export interface BrowserTabDescriptor { id?: string | null; browseId?: string | null; url: string; title?: string }
+export interface BrowserTabDescriptor { id?: string | null; browseId?: string | null; url: string; title?: string; favicon?: string }
 export function restoreBrowserTabs(descriptors: BrowserTabDescriptor[], createId: () => string, titleOf: (url: string) => string) {
   const seen = new Set<string>();
   return descriptors.flatMap((descriptor) => {
@@ -40,7 +40,7 @@ export function restoreBrowserTabs(descriptors: BrowserTabDescriptor[], createId
     if (seen.has(browseId)) return [];
     seen.add(browseId);
     const id = canonicalTabId(browseId);
-    return [{ id, label: `browser-${id}`, browseId, url: descriptor.url, title: typeof descriptor.title === "string" && descriptor.title ? descriptor.title : titleOf(descriptor.url) }];
+    return [{ id, label: `browser-${id}`, browseId, url: descriptor.url, ...(typeof descriptor.favicon === "string" && /^https?:/.test(descriptor.favicon) ? { favicon: descriptor.favicon } : {}), title: typeof descriptor.title === "string" && descriptor.title ? descriptor.title : titleOf(descriptor.url) }];
   });
 }
 export function focusedWorkspaceTab<T extends { browseId: string }>(tabs: T[], layout: BrowserLayout): T | undefined {

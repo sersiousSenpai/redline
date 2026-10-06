@@ -100,6 +100,7 @@ async function mount(backend: string | null) {
 
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  localStorage.clear();
   statusReply = idle;
   history = [];
   listenMock.mockImplementation(() => Promise.resolve(() => {}));
@@ -146,7 +147,7 @@ describe("CommentThread names the agent that will actually answer", () => {
     history = [seed, reply];
     await mount("antigravity");
     expect(text()).toContain("Claude sidecar: Because the parser needs it first.");
-    await act(async () => clickWith("Discussion"));
+    await act(async () => clickWith("read-only"));
     await flush();
     await act(async () => clickWith("Attach to next submit"));
     await flush();
@@ -188,9 +189,10 @@ describe("CommentThread names the agent that will actually answer", () => {
     expect(text()).toContain("Codex: Because the parser needs it first.");
 
     // Expanded: the bubble's own speaker label.
-    await act(async () => clickWith("Discussion"));
+    await act(async () => clickWith("read-only"));
     await flush();
-    expect(text()).toContain("Codex");
+    expect(text()).toContain(reply.body);
+    expect(host.querySelector(".rl-reply-card")).not.toBeNull();
     expect(text()).not.toContain("Claude");
   });
 
@@ -208,7 +210,7 @@ describe("CommentThread names the agent that will actually answer", () => {
   it("escalates a transcript attributed to the agent that wrote it", async () => {
     history = [seed, reply];
     await mount("codex");
-    await act(async () => clickWith("Discussion"));
+    await act(async () => clickWith("read-only"));
     await flush();
     await act(async () => clickWith("Attach to next submit"));
     await flush();
@@ -279,5 +281,49 @@ describe("one-press Send starts the discussion", () => {
     await flush();
     expect(sends()).toHaveLength(0);
     expect(text()).toContain("Discuss with Claude");
+  });
+});
+
+
+describe("discussion modes and compact composer", () => {
+  it("defaults to conversation and sends the mode without changing the user text", async () => {
+    await mount("codex");
+    expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe("Conversation");
+    await act(async () => clickWith("Discuss with"));
+    const send = invokeMock.mock.calls.find(([cmd]) => cmd === "fork_thread_send");
+    expect(send?.[1]).toMatchObject({ mode: "conversation", text: comment.body });
+  });
+  it("persists the toggle and writes a report only on an explicit click", async () => {
+    history = [seed, reply];
+    await mount(null);
+    await act(async () => clickWith("read-only"));
+    expect(text()).not.toContain("Write it up");
+    await act(async () => clickWith("Report"));
+    expect(localStorage.getItem(`redline.sidecarMode.${SESSION}.${ITEM}`)).toBe("report");
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_send")).toHaveLength(0);
+    expect(text()).toContain("Write it up →");
+    await act(async () => clickWith("Write it up"));
+    expect(invokeMock.mock.calls.find(([cmd]) => cmd === "fork_thread_send")?.[1]).toMatchObject({ mode: "report", text: "Write this up — the full answer to my original comment given everything we've discussed." });
+    expect(text()).not.toContain("Write it up →");
+  });
+  it("focuses Reply and collapses an empty composer on Escape", async () => {
+    history = [seed, reply];
+    await mount(null);
+    await act(async () => clickWith("read-only"));
+    expect(host.querySelector("textarea")).toBeNull();
+    await act(async () => clickWith("Reply…"));
+    const ta = host.querySelector("textarea")!;
+    expect(document.activeElement).toBe(ta);
+    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(host.querySelector("textarea")).toBeNull();
+  });
+  it("reports visible discussion and promotes questions with their transcript", async () => {
+    history = [seed, reply];
+    const onHasDiscussion = vi.fn();
+    await act(async () => root.render(createElement(CommentThread, { sessionId: SESSION, comment: { ...comment, type: "question" }, autoOpen: true, onHasDiscussion })));
+    await flush();
+    expect(onHasDiscussion).toHaveBeenCalledWith(true);
+    await act(async () => clickWith("Make this a change"));
+    expect(invokeMock.mock.calls.find(([cmd]) => cmd === "attach_discussion")?.[1]).toMatchObject({ asChange: true });
   });
 });

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { invoke } from "@tauri-apps/api/core";
+import type { TabGroup } from "./tabGroups";
 import type { BrowserLayout } from "./browserLayout";
 export interface SavedBrowserWorkspace {
   tabs: { id?: string | null; url: string; title?: string; browseId?: string | null }[];
   layout?: BrowserLayout;
+  groups?: TabGroup[];
+  ownChatTabs?: string[];
+  organized?: boolean;
   /** A mosaic's definition (see browserMosaics). The backend keeps these when a save omits them. */
   name?: string;
   grid?: { rows: number; cols: number };

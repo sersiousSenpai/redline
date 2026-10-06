@@ -83,7 +83,7 @@ export function parseSelectionEvents(raw: unknown): SelectionEvent[] {
     const text = typeof o.text === "string" ? clampSelection(o.text) : "";
     if (!text) continue;
     const note =
-      typeof o.note === "string" ? o.note.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+      typeof o.note === "string" ? o.note.replace(/\s+/g, " ").trim().slice(0, action === "ask" ? 2000 : 500) : "";
     // A `list` tap with no note is not an item. The bar refuses to submit an
     // empty field, so this only fires for a malformed queue — and writing the
     // highlighted passage as the item instead (the old behaviour) files the
@@ -110,7 +110,7 @@ export function promptForSelection(ev: SelectionEvent): string {
   const quoted = clampSelection(ev.text)
     .split("\n")
     .map((line) => `> ${line}`.trimEnd());
-  const intent = INTENT[ev.action] ?? "";
+  const intent = ev.action === "ask" ? ev.note : INTENT[ev.action] ?? "";
   return [...quoted, "", intent].join("\n");
 }
 
@@ -120,6 +120,6 @@ export function promptForSelection(ev: SelectionEvent): string {
  *  already complete instructions, so making the user press ⌘↵ to confirm what
  *  they just tapped would be friction with no payoff. (`list` never reaches the
  *  composer — it's appended to the tab's working list instead.) */
-export function autoSends(action: SelectionAction): boolean {
-  return action !== "ask";
+export function autoSends(action: SelectionAction, note = ""): boolean {
+  return action !== "ask" || !!note.trim();
 }

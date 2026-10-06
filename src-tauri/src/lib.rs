@@ -12,6 +12,8 @@ mod boot_trace;
 mod browse;
 mod browse_list;
 mod browse_locate;
+mod browse_organize;
+mod browser_home;
 mod browser_actions;
 mod browser_events;
 #[cfg(target_os = "macos")]
@@ -34,6 +36,10 @@ mod codex_profile;
 mod confine;
 mod combine;
 mod companion;
+mod companion_build;
+mod agent_shell;
+mod shell_events;
+mod shell_context;
 mod companion_warm;
 mod compose;
 mod context;
@@ -110,7 +116,13 @@ mod preflight;
 mod probe;
 mod project;
 mod pty;
+mod shell_integration;
 mod push;
+mod guided;
+mod git_human;
+mod narrate;
+mod sync;
+mod workspaces;
 mod query;
 mod queue;
 mod repoicon;
@@ -1003,27 +1015,16 @@ fn watchdog_step(
 /// feedback, stall, resolution) shares. The store setter journals and
 /// reports whether the state actually changed; only a real transition emits.
 fn advance_run_state(app: &AppHandle, store: &SessionStore, session_id: &str, state: &str) {
-    if store.set_run_state(session_id, state) {
-        // Landing a run closes out the work that run opened. Every close path
-        // in `db.rs` already existed and none of them was ever reached from a
-        // transition — `work_items` carries 595 rows and has never closed one,
-        // so "open work" had stopped meaning anything.
-        //
-        // The scope is deliberately narrow: items whose origin IS this plan
-        // session. Exit-report residue (origin `"plan_run"`) stays open on
-        // purpose — that is precisely the work the run did NOT deliver, and
-        // landing the run is not evidence it got done. Librarian items keep
-        // their own close-then-recur cycle.
-        if run_state_closes_work(state) {
-            close_run_work_items(&store.database(), session_id);
-        }
-        let _ = app.emit(
-            "run-state-changed",
-            SessionEvent {
-                session_id: session_id.to_string(),
-            },
-        );
+    if advance_run_state_inner(store, session_id, state) {
+        let _ = app.emit("run-state-changed", SessionEvent { session_id: session_id.to_string() });
     }
+}
+
+/// Share work-item closing with manual completion without requiring a window.
+fn advance_run_state_inner(store: &SessionStore, session_id: &str, state: &str) -> bool {
+    if !store.set_run_state(session_id, state) { return false; }
+    if run_state_closes_work(state) { close_run_work_items(&store.database(), session_id); }
+    true
 }
 
 /// Which run states retire the run's open work. Exactly one: `landed` is the
@@ -1652,6 +1653,8 @@ struct TabInfo {
     label: String,
     url: String,
     title: String,
+    #[serde(default)]
+    favicon: Option<String>,
     /// This tab's discussion-thread key. Used by `/v1/browser/thread`; never
     /// returned by `/v1/browser/tabs` (it's a backend-internal handle).
     browse_id: String,
@@ -2544,7 +2547,7 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
                         if payload.get("redline_provider").and_then(Value::as_str) == Some("codex") {
                             let approval_id = ticket.as_ref().map(|t| t.id.as_str()).unwrap_or_default();
                             let socket = ticket.as_ref().and_then(|t| t.codex_socket.as_deref());
-                            if let Err(error) = codex_app_server::queue_plan_implementation(socket, &session_id, &plan, approval_id).await {
+                            if let Err(error) = async {if !agent_shell::queue_codex_implementation(&app_state.app_handle,&session_id,&plan,approval_id).await? {codex_app_server::queue_plan_implementation(socket, &session_id, &plan, approval_id).await?;} Ok::<(),String>(())}.await {
                                 tracing::warn!(%session_id, %error, "Codex Ambient handoff failed; awaiting explicit approval");
                                 drop(_approval_guard);
                                 let response = match (&mut rx).await {
@@ -3406,6 +3409,7 @@ async fn run_server(state: AppState) {
         // agent can "check our local branch" without fighting the Bash sandbox.
         // Both ride the same pre-authorized `curl` allow as `/v1/browser/*`.
         .route("/v1/code/projects", get(handle_code_projects))
+        .route("/v1/code/map", get(handle_code_map))
         .route("/v1/code/git", get(handle_code_git))
         // Polis Memory (Session A6 of the extraction): the capture route
         // (`/v1/prompts/ingest`), the ClassMemory reads + proposals sink
@@ -4055,7 +4059,7 @@ fn load_file_url(wv: &tauri::Webview, path: &std::path::Path) -> Result<(), Stri
 /// the wake lock with `ensure_live`, so a pane create racing a background wake
 /// yields one webview, not a duplicate-label error.
 #[tauri::command(async)]
-async fn browser_create_tab(app: AppHandle, label: String, url: String) -> Result<(), String> {
+async fn browser_create_tab(app: AppHandle, label: String, url: String, css: Option<String>, website: Option<String>, zoom: Option<f64>, selection_actions: Option<bool>) -> Result<(), String> {
     if !label.starts_with("browser-") || label.len() > 160 {
         return Err("Invalid browser tab label".into());
     }
@@ -4063,8 +4067,9 @@ async fn browser_create_tab(app: AppHandle, label: String, url: String) -> Resul
     let lock = preparation_lock(&format!("wake:{label}"));
     let _guard = lock.lock().await;
     if app.get_webview(&label).is_some() {
-        return Ok(());
+        return configure_browser_tab(&app, &label, css.as_deref().unwrap_or(""), website.as_deref().unwrap_or("default"), zoom.unwrap_or(1.0), selection_actions.unwrap_or(true));
     }
+    let setup_label = label.clone();
     let window = app.get_window("main").ok_or("Browser window is unavailable")?;
     let handle = app.clone();
     let (send, receive) = tokio::sync::oneshot::channel();
@@ -4080,7 +4085,22 @@ async fn browser_create_tab(app: AppHandle, label: String, url: String) -> Resul
     tokio::time::timeout(std::time::Duration::from_secs(6), receive)
         .await
         .map_err(|_| "Browser creation is still pending".to_string())?
-        .map_err(|_| "Browser creation was interrupted".to_string())?
+        .map_err(|_| "Browser creation was interrupted".to_string())??;
+    configure_browser_tab(&app, &setup_label, css.as_deref().unwrap_or(""), website.as_deref().unwrap_or("default"), zoom.unwrap_or(1.0), selection_actions.unwrap_or(true))
+}
+
+fn configure_browser_tab(app: &AppHandle, label: &str, css: &str, website: &str, zoom: f64, selection_actions: bool) -> Result<(), String> {
+    let view = app.get_webview(label).ok_or("Browser view unavailable")?;
+    browser_enable_gestures(app.clone(), label.to_owned())?;
+    browser_enable_autoresize(app.clone(), label.to_owned(), Some(false))?;
+    browser_overlay::attach_current(app, label)?;
+    #[cfg(target_os = "macos")] {
+        browser_events::install(app.clone(), &view)?;
+        install_user_scripts(&view, css, selection_actions)?;
+        let _ = browser_popup::install_new_window_delegate(&view);
+    }
+    #[cfg(not(target_os = "macos"))] let _ = (view, css, selection_actions);
+    browser_events::browser_set_appearance(app.clone(), label.to_owned(), website.to_owned(), zoom)
 }
 
 /// Materialize a saved or suspended tab without requiring a mounted browser
@@ -4110,11 +4130,7 @@ async fn ensure_live(app_state: &AppState, label: &str) -> Result<(), axum::resp
         ).map_err(|e| e.to_string()).and_then(|view| {
             let setup = (|| {
                 view.hide().map_err(|e| e.to_string())?;
-                browser_events::install(handle.clone(), &view)?;
-                install_user_scripts(&view, "", true)?;
-                browser_enable_gestures(handle.clone(), label_owned.clone())?;
-                browser_enable_autoresize(handle.clone(), label_owned.clone(), Some(false))?;
-                let _ = browser_popup::install_new_window_delegate(&view);
+                configure_browser_tab(&handle, &label_owned, "", "default", 1.0, true)?;
                 if let Some(path) = &file { load_file_url(&view, path)?; }
                 Ok(())
             })();
@@ -4205,6 +4221,9 @@ async fn handle_browser_snapshot(
         Ok(l) => l,
         Err(resp) => return resp,
     };
+    if known_browser_tab(&app_state, &label).is_some_and(|tab| tab.url == "redline:newtab") {
+        return eval_json_response(Ok(serde_json::json!({"url":"redline:newtab","title":"New tab","text":"Redline new tab home. Navigate to a URL to inspect a page.","links":[]}).to_string()));
+    }
     // Live: snapshot the page and refresh the cache. Not live: serve the cached
     // snapshot. (Phase 3 will wake a suspended tab here when there is no cache
     // entry; for now that case is a 502.)
@@ -5835,6 +5854,17 @@ async fn handle_review_annotations_clear(
     }
 }
 
+#[derive(Deserialize)]
+struct CodeMapQuery { repo: String }
+async fn handle_code_map(State(app_state): State<AppState>, Query(query): Query<CodeMapQuery>) -> axum::response::Response {
+    let db = app_state.store.database();
+    match tokio::task::spawn_blocking(move || code::known_project_map(&db, &query.repo)).await {
+        Ok(Ok(output)) => Json(serde_json::json!({ "ok": true, "output": output })).into_response(),
+        Ok(Err(error)) => browser_error_response(error),
+        Err(error) => browser_error_response(error.to_string()),
+    }
+}
+
 async fn handle_code_projects(State(app_state): State<AppState>) -> axum::response::Response {
     let db = app_state.store.database();
     let projects = code::list_projects(&db).await;
@@ -6483,7 +6513,7 @@ fn mission_set_active(
 /// `/v1/browser/tabs` registry and cross-tab routes can resolve a tab selector
 /// to a webview label / discussion `browse_id`. Called by `BrowserPane`
 /// whenever the tab list changes (open/close/navigate/title update).
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_set_tabs(
     tabs: tauri::State<'_, BrowserTabs>,
     cache: tauri::State<'_, SnapshotCache>,
@@ -6500,6 +6530,7 @@ fn browser_set_tabs(
 /// `SNAPSHOT_JS`. macOS-only (the underlying eval is).
 #[tauri::command(async)]
 async fn browser_snapshot(app: AppHandle, label: String) -> Result<String, String> {
+    if app.state::<BrowserTabs>().get().iter().any(|tab| tab.label == label && tab.url == "redline:newtab") { return Ok(serde_json::json!({"url":"redline:newtab","title":"New tab","text":"Redline new tab home"}).to_string()); }
     daemon_eval(&app, &label, SNAPSHOT_JS).await
 }
 
@@ -6802,9 +6833,11 @@ async fn browser_suspend(app: AppHandle, label: String) -> Result<(), String> {
         },
     );
     // Stop in-page media, then destroy the webview (same teardown as a close).
+    if browser_workspace::protected(&label) { return Err("Page became visible while suspending".into()); }
     if let Some(wv) = app.get_webview(&label) {
         let _ = wv.eval(STOP_MEDIA_JS);
         wv.close().map_err(|e| e.to_string())?;
+        let _ = app.emit("browser-tab-suspended", serde_json::json!({ "label": label }));
     }
     Ok(())
 }
@@ -7934,7 +7967,7 @@ async fn submit_review(
     // prompt by feeding the configured keystroke into the embedded terminal.
     // Off by default; a missing PTY is a silent no-op (the reviewer probably
     // closed the tab — the menu will surface for them in their own terminal).
-    if auto_continue.unwrap_or(false) {
+    if auto_continue.unwrap_or(false) && !terminal_id.as_deref().is_some_and(agent_shell::is_hosted) {
         if let Some(tid) = terminal_id.as_deref() {
             if let Err(e) = pty::pty_write_bytes(&pty, tid, MENU_SKIP_KEYSTROKE.as_bytes()) {
                 tracing::warn!(
@@ -7995,6 +8028,7 @@ async fn approve_plan(
     }) {
         // Do this while Stop is still held, and propagate errors to the Approve
         // button. Never mark a plan approved when Codex cannot start building.
+        if !agent_shell::queue_codex_implementation(&app,&session_id,&plan,&ticket.id).await? {
         codex_app_server::queue_plan_implementation(
             ticket.codex_socket.as_deref(),
             &session_id,
@@ -8002,6 +8036,7 @@ async fn approve_plan(
             &ticket.id,
         )
         .await?;
+        }
     }
     let Some(tx) = ticket
         .as_ref()
@@ -8593,6 +8628,62 @@ fn unapprove_plan(
     Ok(())
 }
 
+/// Manual attribution never resolves a held hook or races a running build.
+fn set_plan_state_inner(store: &SessionStore, pending: &PendingResponses, session_id: &str, state: &str) -> Result<(), String> {
+    let session = store.get(session_id).ok_or("no such session")?;
+    if !matches!(state, "in_review" | "approved" | "completed") {
+        return Err("Choose In review, Approved · not built, or Completed".into());
+    }
+    if pending.has(session_id) {
+        return Err("Claude is waiting on this plan — use Approve in the footer".into());
+    }
+    if runwatch::is_live_run_state(session.run_state.as_deref()) {
+        return Err("Stand the live run down before changing this plan's state".into());
+    }
+    if state == "in_review" {
+        if session.status == SessionStatus::Approved { unapprove_plan_inner(store, session_id)?; }
+        else { store.set_status(session_id, SessionStatus::InReview); }
+        reset_run_rows(store, session_id);
+        store.set_attach_state(session_id, AttachState::Detached);
+    } else {
+        store.set_status(session_id, SessionStatus::Approved);
+        store.clear_run_state(session_id);
+        store.set_attach_state(session_id, AttachState::Idle);
+        if state == "completed" { advance_run_state_inner(store, session_id, "landed"); }
+    }
+    let detail = serde_json::json!({ "from": { "status": session.status, "runState": session.run_state }, "to": state }).to_string();
+    let _ = store.database().append_journal("manual_state", Some("session"), Some(session_id), None, Some(&detail));
+    Ok(())
+}
+
+#[tauri::command]
+fn set_plan_state(app: AppHandle, store: tauri::State<'_, SessionStore>, pending: tauri::State<'_, PendingResponses>, session_id: String, state: String) -> Result<(), String> {
+    set_plan_state_inner(&store, &pending, &session_id, &state)?;
+    runwatch::stop(&app, &session_id);
+    let _ = app.emit("run-state-changed", SessionEvent { session_id: session_id.clone() });
+    let _ = app.emit("session-status-changed", SessionEvent { session_id });
+    refresh_tray(&app, &store);
+    Ok(())
+}
+
+fn set_session_project_inner(store: &SessionStore, session_id: &str, project_path: &str) -> Result<(), String> {
+    let path = std::fs::canonicalize(project_path).map_err(|_| "Choose an existing project folder".to_string())?;
+    if !path.is_dir() { return Err("Choose a project folder, not a file".into()); }
+    let before = store.get(session_id).ok_or("no such session")?.project_path;
+    let path = path.to_str().ok_or("The project path is not valid text")?;
+    store.set_project(session_id, path)?;
+    let detail = serde_json::json!({"from":before,"to":path}).to_string();
+    let _ = store.database().append_journal("project_moved", Some("session"), Some(session_id), None, Some(&detail));
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn set_session_project(app: AppHandle, store: tauri::State<'_, SessionStore>, session_id: String, project_path: String) -> Result<(), String> {
+    set_session_project_inner(&store, &session_id, &project_path)?;
+    let _ = app.emit("session-status-changed", SessionEvent { session_id });
+    Ok(())
+}
+
 /// B4: abort a live run. Terminal chip value `abandoned`; the watcher exits
 /// (excluded from `is_live_run_state`) and boot rehydration skips it. Does
 /// NOT kill the orchestrator process — returns the launch tab id (when known)
@@ -8808,12 +8899,14 @@ struct UiPrefs {
     /// blob owned by `src/lib/seatAssign.ts`, in the DB so the choice survives
     /// reopening the dialog.
     seat_assign_prefs: Option<String>,
+    review_pose: Option<String>,
 }
 
 /// `key` → `app_settings` row; the allowlist keeps this command from becoming
 /// a generic KV write surface.
 fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
     match key {
+        "reviewPose" => Some("redline.ui.reviewPose"),
         "theme" => Some("redline.ui.theme"),
         "font" => Some("redline.ui.font"),
         "lint" => Some("redline.ui.lint"),
@@ -8826,6 +8919,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
 #[tauri::command]
 fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
     UiPrefs {
+        review_pose: settings.db.get_setting("redline.ui.reviewPose"),
         theme: settings.db.get_setting("redline.ui.theme"),
         font: settings.db.get_setting("redline.ui.font"),
         lint: settings.db.get_setting("redline.ui.lint"),
@@ -9484,6 +9578,10 @@ fn prepare_restore(
 /// marker. Claude only; everything else resumes from the project path.
 #[tauri::command(async)]
 fn resume_startup_cwd(session_id: String, project_path: Option<String>, backend: Option<String>) -> Option<String> {
+    resume_cwd_for(&session_id, project_path, backend.as_deref())
+}
+
+pub(crate) fn resume_cwd_for(session_id: &str, project_path: Option<String>, backend: Option<&str>) -> Option<String> {
     let claude = backend
         .as_deref()
         .map(|b| b.trim().to_ascii_lowercase())
@@ -9491,7 +9589,7 @@ fn resume_startup_cwd(session_id: String, project_path: Option<String>, backend:
     if !claude {
         return project_path;
     }
-    find_transcript(&session_id)
+    find_transcript(session_id)
         .and_then(|t| startup_cwd_from_transcript(&t))
         .or(project_path)
 }
@@ -9559,7 +9657,7 @@ fn resurrect_main_window(app: &AppHandle) {
 /// `Webview` class can create/position/show/hide a child webview but cannot
 /// navigate it or run scripts in it, so the browser pane routes those here.
 /// `label` identifies the tab's webview (e.g. "browser-t0").
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9577,7 +9675,7 @@ fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), St
 /// Evaluate JavaScript inside a browser tab's webview. This is the foundation
 /// for the AI/scripting layer (DOM scraping, JSON export) — each tab can be
 /// scripted independently by label; for now the pane uses it for back/forward.
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_eval(app: AppHandle, label: String, script: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9669,7 +9767,7 @@ fn webview_current_url<R: tauri::Runtime>(wv: &tauri::Webview<R>) -> Option<Stri
 /// bar / tab title in sync with in-page navigation (link clicks, redirects).
 /// A nil URL (tab not yet navigated) reports as the empty string, which the
 /// pane's poll treats as "no change".
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
     let wv = app
         .get_webview(&label)
@@ -9941,9 +10039,9 @@ fn selection_shim_js() -> &'static str {
   window.__redline_sel_installed = true;
   var MAXQ=10, MAXLEN=4000, MINLEN=3, MAXHTML=1200, HOST_ATTR='data-redline-selection';
   var ACTIONS=[['ask','Ask about this'],['define','Define'],['explain','Explain'],
-               ['research','Look up'],['copy','Copy'],['list','＋ Cart']];
+               ['research','Look up'],['copy','Copy'],['list','＋ Task']];
   var seq=0, host=null, bar=null, noteRow=null, noteInput=null;
-  var pending=null, timer=0, suppressUntil=0, composing=false;
+  var pending=null, timer=0, suppressUntil=0, composing=false, noteMode='list', noteGo=null;
 
   function off(){ try{ return !!window.__redline_sel_off; }catch(e){ return false; } }
   // Never hijack typing: a selection anchored in a field or a rich-text editor
@@ -10205,7 +10303,7 @@ fn selection_shim_js() -> &'static str {
     var go=document.createElement('button');
     go.type='button';
     go.className='go';
-    go.textContent='Add';
+    go.textContent='Add'; noteGo=go;
     // The input MUST keep the default mousedown (it needs focus); the button
     // must not (it would blur the field and collapse the page selection).
     go.addEventListener('mousedown',function(e){ e.preventDefault(); e.stopPropagation(); },true);
@@ -10261,11 +10359,14 @@ fn selection_shim_js() -> &'static str {
     if (noteRow){ noteRow.style.display='none'; noteInput.value=''; }
   }
   function hide(){ closeNote(); if (bar) bar.style.display='none'; }
-  function openNote(){
+  function openNote(mode){
+    noteMode=mode;
     if (!pending) return;
     composing=true;
     var excerpt=pending.text.length>24 ? pending.text.slice(0,24)+'…' : pending.text;
-    noteInput.placeholder='What about “'+excerpt+'”?';
+    noteInput.placeholder=(mode==='ask'?'Ask about “':'What about “')+excerpt+'”?';
+    noteInput.maxLength=mode==='ask'?2000:500;
+    noteGo.textContent=mode==='ask'?'Ask':'Add';
     noteRow.style.display='flex';
     // Re-place: the bar just grew a row and would otherwise overlap the passage.
     var r=null;
@@ -10276,7 +10377,7 @@ fn selection_shim_js() -> &'static str {
   function commitNote(){
     var note=flat(noteInput.value);
     if (!note){ try{ noteInput.focus(); }catch(e){} return; }
-    emit('list', note);
+    emit(noteMode, note.slice(0,noteMode==='ask'?2000:500));
   }
   function evaluate(){
     if (off()){ pending=null; publish(); hide(); return; }
@@ -10343,7 +10444,7 @@ fn selection_shim_js() -> &'static str {
     }
     // ＋ List asks for the note first; every other action is already a complete
     // instruction and goes straight out.
-    if (action==='list'){ openNote(); return; }
+    if (action==='list'||action==='ask'){ openNote(action); return; }
     emit(action,'');
   }
 
@@ -10495,7 +10596,7 @@ fn install_user_scripts(
 /// flicker across navigation), and is also eval'd into the current page so the
 /// toggle takes effect immediately. An empty `css` clears the filter. macOS-
 /// only; a no-op elsewhere. The CSS comes from the pane's own presets.
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_set_view(
     app: AppHandle,
     label: String,
@@ -10529,7 +10630,7 @@ fn browser_set_view(
 /// `install_user_scripts`, which re-runs on every view-filter swap and would
 /// otherwise churn the delegate and drop any open popups). macOS-only; a no-op
 /// elsewhere.
-#[tauri::command]
+#[tauri::command(async)]
 fn browser_install_shims(
     app: AppHandle,
     label: String,
@@ -10616,7 +10717,9 @@ async fn eval_with_result(app: &AppHandle, label: &str, script: &str) -> Result<
         }
     })
     .map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "page eval cancelled".to_string())?
+    tokio::time::timeout(std::time::Duration::from_secs(3), rx).await
+        .map_err(|_| "Page evaluation timed out".to_string())?
+        .map_err(|_| "page eval cancelled".to_string())?
 }
 
 /// Evaluate a self-contained JS program in a browser tab and return its STRING
@@ -10889,7 +10992,7 @@ fn record_plan_launch(
         .filter(|o| {
             matches!(
                 o.as_str(),
-                "front-door" | "drafter" | "browser" | "chat" | "combine" | "front-door-run" | "plan-handoff"
+                "front-door" | "drafter" | "browser" | "browser-island" | "chat" | "combine" | "front-door-run" | "plan-handoff"
             )
         })
         .unwrap_or_else(|| "drafter".to_string());
@@ -12444,7 +12547,12 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     scroller_guard::pin_scroller_style();
 
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default()
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
+                browser_events::hide_browser_tabs(webview.app_handle());
+            }
+        });
     // Must be the first plugin (Tauri v2 requirement). A second `redline`
     // launch hands off to the running instance and focuses its window
     // instead of opening a daemon-less duplicate that can't bind :7676 and
@@ -12549,6 +12657,8 @@ pub fn run() {
             reset_run,
             relaunch_run,
             unapprove_plan,
+            set_plan_state,
+            set_session_project,
             stand_down_run,
             get_run_state,
             record_handoff_event,
@@ -12652,6 +12762,9 @@ pub fn run() {
             install_codex_skill,
             get_skill_status,
             install_skill,
+            shell_integration::shell_complete_path,
+            shell_integration::shell_integration_get,
+            shell_integration::shell_integration_set,
             pty::pty_spawn,
             pty::pty_list,
             pty::pty_attach,
@@ -12663,6 +12776,24 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_kill_all,
+            agent_shell::agent_shell_start,
+            shell_context::shell_context_options,
+            shell_context::shell_context_preview,
+            agent_shell::agent_shell_list,
+            agent_shell::agent_shell_attach,
+            agent_shell::agent_shell_detach,
+            agent_shell::agent_shell_ack,
+            agent_shell::agent_shell_send,
+            agent_shell::agent_shell_permission_respond,
+            agent_shell::agent_shell_control,
+            agent_shell::agent_shell_interrupt,
+            agent_shell::agent_shell_stop,
+            agent_shell::agent_shell_kill_all,
+            agent_shell::agent_shell_handoff,
+            agent_shell::agent_shell_history,
+            agent_shell::agent_shell_resume_hosted,
+            agent_shell::terminal_default_view_get,
+            agent_shell::terminal_default_view_set,
             pty::pty_cwd,
             pty::pty_cwds,
             fsbrowse::list_dir,
@@ -12742,7 +12873,22 @@ pub fn run() {
             ai_review::ai_review_cancel,
             ai_review::ai_review_active,
             push::push_status,
+            push::review_restore_undo,
             push::review_push,
+            narrate::narrate_changes,
+            narrate::narrate_commit,
+            sync::sync_check,
+            sync::sync_bring_in,
+            sync::sync_cancel,
+            workspaces::workspace_create,
+            workspaces::workspace_list,
+            workspaces::workspace_status,
+            workspaces::workspace_archive,
+            workspaces::workspace_bring_in,
+            workspaces::guided_save,
+            workspaces::guided_share,
+            review::history_list,
+            review::history_restore,
             push::review_revert,
             push::review_last_push,
             ai_commit::ai_commit_draft,
@@ -12788,6 +12934,8 @@ pub fn run() {
             devmap::dev_server_set_thumb,
             browser_navigate,
             browser_create_tab,
+            browse_organize::browser_organize_tabs,
+            browser_home::browser_home_feed,
             browser_output::browser_print,
             browser_output::browser_save_page,
             browser_eval,
@@ -12873,9 +13021,17 @@ pub fn run() {
             companion::companion_set_model,
             companion::companion_delete,
             companion::companion_send,
+            companion::companion_handoff_seed,
             companion::companion_turn_status,
             companion::companion_cancel,
             companion::companion_unqueue,
+            companion::companion_get_project,
+            companion::companion_build_activity,
+            companion::companion_set_project,
+            companion::companion_steer,
+            companion::companion_queue_promote,
+            companion_build::companion_changes,
+            companion_build::companion_undo,
             companion::companion_kill_all,
             companion::companion_prewarm,
             companion::companion_release,
@@ -13089,6 +13245,7 @@ pub fn run() {
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
+            app.manage(agent_shell::AgentShellState::default());
             app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());
             app.manage(self_develop::SelfDevelopState::new());
@@ -13675,6 +13832,7 @@ pub fn run() {
                         let _ = snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
                     }
                 }
+                if let Some(hosted) = app_handle.try_state::<agent_shell::AgentShellState>() { hosted.kill_all(); }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
                 }
@@ -13808,7 +13966,7 @@ mod tests {
         assert!(js.contains("e.preventDefault(); e.stopPropagation(); },true);"));
         // ＋ List asks for the note instead of filing the highlighted passage as
         // one: the passage is WHERE, the note is WHAT.
-        assert!(js.contains("if (action==='list'){ openNote(); return; }"));
+        assert!(js.contains("if (action==='list'||action==='ask'){ openNote(action); return; }"));
         // The side-pane composer reads its location from this, so it has to be
         // published on every evaluate AND cleared when the selection goes.
         assert!(js.contains("window.__redline_sel_last"));
@@ -14540,7 +14698,7 @@ mod tests {
             .expect("record_plan_launch exists")
             .1;
         let filter = f.split_once("unwrap_or_else").expect("origin filter").0;
-        for origin in ["front-door", "drafter", "browser", "chat", "combine", "front-door-run", "plan-handoff"] {
+        for origin in ["front-door", "drafter", "browser", "browser-island", "chat", "combine", "front-door-run", "plan-handoff"] {
             assert!(
                 filter.contains(&format!("\"{origin}\"")),
                 "{origin} must be an accepted launch origin"
@@ -15356,6 +15514,58 @@ mod tests {
         );
         // Twice in a row is fine.
         reset_run_rows(&store, "s1");
+    }
+
+    #[test]
+    fn manual_plan_state_records_completion_reopen_and_refuses_active_work() {
+        let store = make_store(); let pending = PendingResponses::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("manual", "/tmp/d", md.into(), reparse_sections(md), true, false);
+        set_plan_state_inner(&store, &pending, "manual", "approved").unwrap();
+        let approved = store.get("manual").unwrap();
+        assert_eq!(approved.status, SessionStatus::Approved);
+        assert_eq!(approved.run_state, None);
+        assert_eq!(approved.attach_state, AttachState::Idle);
+        let approval = store.database().latest_approval_seq("manual").unwrap();
+        set_plan_state_inner(&store, &pending, "manual", "completed").unwrap();
+        assert_eq!(store.get("manual").unwrap().run_state.as_deref(), Some("landed"));
+        set_plan_state_inner(&store, &pending, "manual", "in_review").unwrap();
+        let reopened = store.get("manual").unwrap();
+        assert_eq!(reopened.status, SessionStatus::InReview);
+        assert_eq!(reopened.attach_state, AttachState::Detached);
+        assert_eq!(reopened.run_state, None);
+        assert!(store.database().supersessions_for_seqs(&[approval]).unwrap().contains_key(&approval));
+        let (_rx, _token) = pending.register("manual", None).unwrap();
+        assert!(set_plan_state_inner(&store, &pending, "manual", "completed").unwrap_err().contains("waiting"));
+        pending.take("manual");
+        store.set_run_state("manual", "running");
+        assert!(set_plan_state_inner(&store, &pending, "manual", "approved").unwrap_err().contains("live run"));
+    }
+
+    #[test]
+    fn moved_project_survives_upsert_and_moves_origin_work() {
+        let store = make_store(); let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("moved", "/old", md.into(), reparse_sections(md), true, false);
+        store.set_status("moved", SessionStatus::Approved);
+        store.database().insert_work_item(&crate::work::WorkItem {
+            id: "move-work".into(), title: "Linked work".into(), body: None,
+            status: "open".into(), priority: 2, kind: "task".into(), assignee: None,
+            claimed_at: None, lease_expires_at: None, closed_at: None, close_reason: None,
+            defer_until: None, origin_kind: Some("session".into()), origin_id: Some("moved".into()),
+            project_path: Some("/old".into()), pinned: false, created_at: 1, updated_at: 1,
+        }).unwrap();
+        let dir = std::env::temp_dir().join(format!("redline-move-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        set_session_project_inner(&store, "moved", dir.to_str().unwrap()).unwrap();
+        let path = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let moved = store.get("moved").unwrap();
+        assert_eq!(moved.project_path, path);
+        assert_eq!(store.database().get_work_item("move-work").unwrap().project_path.as_deref(), Some(path.as_str()));
+        store.database().upsert_session(&moved).unwrap();
+        assert_eq!(store.database().load_session("moved").unwrap().unwrap().project_path, path);
+        assert!(set_session_project_inner(&store, "moved", "/does-not-exist/redline").is_err());
+        assert_eq!(resume_cwd_for("nonexistent-test-session", Some(path.clone()), Some("claude-code")), Some(path));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

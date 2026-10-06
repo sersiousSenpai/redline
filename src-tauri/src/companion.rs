@@ -33,7 +33,7 @@ use crate::claude_proc::{
 use crate::companion_warm::{self, WarmChild, WarmIo, WarmKey, WarmPool, NEXT_CHAT};
 use crate::db::{Database, JournalRow};
 use crate::state::{now_millis, Companion, CompanionMessage};
-use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
+use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, Turns};
 use crate::SurfaceInfo;
 
 /// How many completed assistant turns a chat's CLI session may accumulate
@@ -58,6 +58,10 @@ pub struct ConversationHarness {
     pub effort: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnMode { #[default] Chat, Build }
+
 fn runtime_key(id: &str, field: &str) -> String { format!("monochat.{id}.{field}") }
 
 /// Everything a queued chat send needs to start later. Deliberately only the
@@ -66,7 +70,9 @@ fn runtime_key(id: &str, field: &str) -> String { format!("monochat.{id}.{field}
 /// session, journal watermark, and ledger row are
 /// a START-time fact and is read inside `start_companion_turn`; see the comment
 /// there for why capturing them here would be wrong.
+#[derive(Clone)]
 pub struct QueuedCompanionSend {
+    mode: TurnMode,
     message_id: String,
     text: String,
     cwd: Option<String>,
@@ -145,6 +151,7 @@ mod browser_dock_tests {
             ..SurfaceInfo::default()
         };
         let payload = QueuedCompanionSend {
+            mode: TurnMode::Chat,
             message_id: "queued".into(),
             text: "Fill the field".into(),
             cwd: None,
@@ -199,7 +206,7 @@ mod browser_dock_tests {
 #[derive(Clone)]
 pub struct CompanionState {
     turns: Arc<Turns<QueuedCompanionSend>>,
-    db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
     claude_bin: Arc<OnceLock<String>>,
     /// One warm `claude` per open room (`companion_warm`).
     warm: WarmPool,
@@ -721,8 +728,8 @@ pub fn system_prompt() -> &'static str {
              You observe by default and WRITE only at the user's explicit \
              direction, through the write routes above. Everything you write is a \
              staged, reviewable artifact, never a silent change; confirm an \
-             ambiguous target in one line first. Never edit files, never produce \
-             a plan, never call ExitPlanMode.\n",
+             ambiguous target in one line first. In Chat mode never edit files or produce \
+             a plan, never call ExitPlanMode.\n\nBUILD MODE: Only when the turn explicitly says BUILD, edit files in the bound project. Change only what the user asked. Run the project checks, do not commit or push unless asked, and end with a short factual summary.\n",
         );
         p
     })
@@ -1041,6 +1048,7 @@ pub async fn companion_prewarm(
     companion_id: Option<String>,
     cwd: Option<String>,
     harness: Option<ConversationHarness>,
+    mode: Option<TurnMode>,
 ) -> Result<bool, String> {
     let harness = harness.unwrap_or_default();
     if !matches!(harness.backend.as_deref(), None | Some("claude-code")) {
@@ -1056,11 +1064,15 @@ pub async fn companion_prewarm(
     let model = harness.model.or(saved_model);
     let effort = harness.effort.or(saved_effort);
     let seat_flags = crate::seat::flag_args_override("companion", model.as_deref(), effort.as_deref());
-    let key = WarmKey { binary: companion.claude_bin().await?, cwd: resolve_cwd(cwd), flags: seat_flags.clone() };
+    let mode = mode.unwrap_or_default();
+    let cwd = companion.db.companion_project(&id).or(cwd);
+    let mut key_flags = seat_flags.clone();
+    key_flags.push(format!("mode:{mode:?}"));
+    let key = WarmKey { binary: companion.claude_bin().await?, cwd: resolve_cwd(cwd), flags: key_flags };
     if companion.warm.has(&id, &key, session.as_deref()) {
         return Ok(true);
     }
-    let args = companion_warm::warm_args(system_prompt(), session.as_deref(), seat_flags);
+    let args = companion_warm::mode_args(system_prompt(), session.as_deref(), seat_flags, mode == TurnMode::Build)?;
     let warm = companion_warm::spawn(key, args, session).await?;
     // A turn may have begun during the spawn; its own child wins.
     if companion.turns.is_running(&id) {
@@ -1191,10 +1203,13 @@ pub async fn companion_send(
     queue: Option<bool>,
     harness: Option<ConversationHarness>,
     target: Option<SurfaceInfo>,
+    mode: Option<TurnMode>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    let mode = mode.unwrap_or_default();
+    if mode == TurnMode::Build && companion.db.companion_project(&companion_id).is_none() { return Err("Pick a project to build in".into()); }
     let message_id = uuid::Uuid::new_v4().to_string();
     let surface = target.unwrap_or_else(|| active_surface.get());
     let harness = harness.unwrap_or_default();
@@ -1210,6 +1225,7 @@ pub async fn companion_send(
         crate::monochat::conversation_budget(&companion.db, &companion_id)?;
     }
     let payload = QueuedCompanionSend {
+        mode,
         message_id: message_id.clone(),
         text: text.clone(),
         cwd,
@@ -1321,6 +1337,7 @@ fn start_companion_turn(
 ) -> turn::BoxStartFuture {
     Box::pin(async move {
         let QueuedCompanionSend {
+            mode,
             message_id,
             text,
             cwd,
@@ -1328,6 +1345,7 @@ fn start_companion_turn(
             harness,
             browser_target,
         } = payload;
+        let _ = companion.db.set_setting(&runtime_key(&companion_id, "activeMode"), if mode == TurnMode::Build { "build" } else { "chat" });
         let intent = crate::monochat::classify(&text, &surface);
         let provider = harness.backend.as_deref().unwrap_or("claude-code");
         let mut trace = crate::monochat::Span::begin(companion.db.clone(), &companion_id, &message_id, &surface, &intent, provider);
@@ -1352,7 +1370,7 @@ fn start_companion_turn(
             trace.finish(status, None);
             let _ = app.emit("companion-done", CompanionDone { companion_id: companion_id.clone(), message_id: msg.id, body });
             if let Some((queued, payload, slot)) = next {
-                let _ = companion.db.set_thread_message_status("companion", &queued.message_id, "complete");
+                let _ = companion.db.advance_companion_message(&queued.message_id);
                 let _ = app.emit("companion-queue-advanced", CompanionQueueAdvanced { companion_id: companion_id.clone(), message_id: queued.message_id.clone() });
                 if let Err(error) = start_companion_turn(app.clone(), companion.clone(), companion_id.clone(), payload, slot).await {
                     let _ = companion.db.set_thread_message_status("companion", &queued.message_id, "unsent");
@@ -1557,6 +1575,7 @@ fn start_companion_turn(
             }
             p
         };
+        prompt.push_str(if mode == TurnMode::Build { "\nTURN MODE: BUILD. The user authorizes scoped file edits and project checks in the bound project for this turn.\n" } else { "\nTURN MODE: CHAT. Read-only investigation; do not edit project files.\n" });
         prompt.push_str(&browser_turn_context(browser_target.as_ref()));
 
         // The per-conversation seat override. Resolved HERE so a chat whose
@@ -1597,15 +1616,16 @@ fn start_companion_turn(
             let _ = companion.db.set_companion_journal_seq(&companion_id, h);
         }
 
-        let cwd = resolve_cwd(cwd);
+        let cwd = resolve_cwd(companion.db.companion_project(&companion_id).or(cwd));
+        let snapshot = if mode == TurnMode::Build { let root = cwd.clone(); Some(tokio::task::spawn_blocking(move || crate::companion_build::Snapshot::capture(&root)).await.map_err(|error| error.to_string())??) } else { None };
 
         emit_companion_status(&app, &companion_id, "Starting the selected model");
-        let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline));
+        let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline).workspace_write(mode == TurnMode::Build));
         let binary = if codex { crate::codex_app_server::resolve_codex_bin() } else { companion.claude_bin().await? };
         let cold_args = if codex {
             vec!["app-server".to_string()]
         } else {
-            let mut args = bridge_args_with_flags(prompt.clone(), prior_session.as_deref(), seat_flags.clone());
+            let mut args = crate::claude_proc::companion_args(prompt.clone(), prior_session.as_deref(), seat_flags.clone(), mode == TurnMode::Build)?;
             args.push("--append-system-prompt".to_string());
             args.push(system_prompt().to_string());
             args
@@ -1618,8 +1638,10 @@ fn start_companion_turn(
         let warm = if codex {
             None
         } else {
-            let key = WarmKey { binary: binary.clone(), cwd: cwd.clone(), flags: seat_flags.clone() };
-            let args = companion_warm::warm_args(system_prompt(), prior_session.as_deref(), seat_flags.clone());
+            let mut key_flags = seat_flags.clone();
+            key_flags.push(format!("mode:{mode:?}"));
+            let key = WarmKey { binary: binary.clone(), cwd: cwd.clone(), flags: key_flags };
+            let args = companion_warm::mode_args(system_prompt(), prior_session.as_deref(), seat_flags.clone(), mode == TurnMode::Build)?;
             companion_warm::open_turn(&companion.warm, &companion_id, key, args, prior_session.as_deref(), &prompt).await
         };
         let cold_retry = (!codex).then(|| ColdSpawn { binary: binary.clone(), cwd: cwd.clone(), args: cold_args.clone() });
@@ -1650,7 +1672,18 @@ fn start_companion_turn(
         if let Err(mut child) = slot.attach(child) {
             // Cancelled during the spawn window.
             let _ = child.start_kill();
-            let _ = app.emit("companion-cancelled", CompanionCancelled { companion_id });
+            let _ = app.emit("companion-cancelled", CompanionCancelled { companion_id:companion_id.clone() });
+            // A Steer can cancel while process setup is still awaiting I/O.
+            // No reader exists in that window, so the spawner owns queue drain.
+            let (_,next)=companion.turns.finish_and_pop(&companion_id,token);
+            if let Some((queued,payload,slot))=next {
+                companion.db.advance_companion_message(&queued.message_id).map_err(|error|error.to_string())?;
+                let _=app.emit("companion-queue-advanced",CompanionQueueAdvanced{companion_id:companion_id.clone(),message_id:queued.message_id.clone()});
+                if let Err(error)=start_companion_turn(app.clone(),companion.clone(),companion_id.clone(),payload,slot).await {
+                    let _=companion.db.set_thread_message_status("companion",&queued.message_id,"unsent");
+                    finish_error(&app,&companion.db,&companion_id,&surface,&error);
+                }
+            }
             return Ok(());
         }
         emit_companion_status(&app, &companion_id, "Waiting for the model");
@@ -1664,6 +1697,8 @@ fn start_companion_turn(
             transport,
             native.take(),
             trace,
+            mode,
+            snapshot,
         ));
         Ok(())
     })
@@ -1673,11 +1708,62 @@ fn start_companion_turn(
 /// is streaming, since when, and the partial text streamed so far (with its
 /// delta `seq` watermark).
 #[tauri::command]
+pub async fn companion_handoff_seed(
+    companion: tauri::State<'_, CompanionState>,
+    companion_id: String,
+    message_id: String,
+    text: String,
+    project_path: Option<String>,
+) -> Result<CompanionMessage, String> {
+    if text.trim().is_empty() || text.len() > 1024 * 1024 {
+        return Err("Enter a handoff instruction under 1 MB".into());
+    }
+    if uuid::Uuid::parse_str(&message_id).is_err() {
+        return Err("Invalid handoff nonce".into());
+    }
+    if companion.is_running(&companion_id) {
+        return Err("Wait for the current chat turn before handing it off".into());
+    }
+    let db = companion.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let project = project_path
+            .map(|path| std::fs::canonicalize(path).map_err(|error| error.to_string()))
+            .transpose()?;
+        if project.as_ref().is_some_and(|path| !path.is_dir()) {
+            return Err("Choose a project folder".into());
+        }
+        let project = project.map(|path| path.to_string_lossy().into_owned());
+        if let (Some(existing), Some(chosen)) =
+            (db.companion_project(&companion_id), project.as_ref())
+        {
+            if existing != *chosen {
+                return Err("The handoff project changed; select the chat project again".into());
+            }
+        }
+        db.seed_companion_handoff(
+            &companion_id,
+            &message_id,
+            &text,
+            project.as_deref(),
+            now_millis(),
+        )
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Chat not found or this handoff nonce belongs to another instruction".into())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub fn companion_turn_status(
     companion: tauri::State<'_, CompanionState>,
     companion_id: String,
-) -> TurnStatus {
-    companion.turns.status(&companion_id)
+) -> Value {
+    let mut status = serde_json::to_value(companion.turns.status(&companion_id)).unwrap_or_default();
+    if let Some(rows) = status["queued"].as_array_mut() { for row in rows {
+        if let Some(payload) = row["messageId"].as_str().and_then(|id| companion.turns.queued_payload(&companion_id, id)) { row["mode"] = serde_json::json!(if payload.mode == TurnMode::Build { "build" } else { "chat" }); }
+    } }
+    status
 }
 
 #[tauri::command]
@@ -1700,6 +1786,81 @@ pub fn companion_cancel(
         let _ = child.start_kill();
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn companion_build_activity(companion: tauri::State<'_, CompanionState>, store: tauri::State<'_, crate::state::SessionStore>, companion_id: String, project_path: String) -> bool {
+    companion.db.list_companions().unwrap_or_default().iter().any(|chat| chat.companion_id != companion_id && companion.is_running(&chat.companion_id) && companion.db.companion_project(&chat.companion_id).as_deref() == Some(&project_path) && companion.db.get_setting(&runtime_key(&chat.companion_id, "activeMode")).as_deref() == Some("build"))
+        || store.list().iter().any(|session| session.project_path == project_path && session.run_state.as_deref() == Some("running"))
+}
+
+#[tauri::command]
+pub fn companion_get_project(companion: tauri::State<'_, CompanionState>, companion_id: String) -> Option<String> { companion.db.companion_project(&companion_id) }
+
+#[tauri::command]
+pub fn companion_set_project(companion: tauri::State<'_, CompanionState>, companion_id: String, project_path: Option<String>) -> Result<Option<String>, String> {
+    if companion.is_running(&companion_id) { return Err("Wait for this turn to finish before changing its project".into()); }
+    let path = project_path.map(|path| std::fs::canonicalize(path).map_err(|e| e.to_string())).transpose()?;
+    if path.as_ref().is_some_and(|path| !path.is_dir()) { return Err("Pick a project folder".into()); }
+    let path = path.map(|path| path.to_string_lossy().into_owned());
+    if !companion.db.set_companion_project(&companion_id, path.as_deref()).map_err(|e| e.to_string())? { return Err("Chat not found".into()); }
+    companion.warm.drop_chat(&companion_id);
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn companion_queue_promote(companion: tauri::State<'_, CompanionState>, companion_id: String, message_id: String) -> bool { companion.turns.promote(&companion_id, &message_id) }
+
+#[tauri::command]
+pub async fn companion_steer(companion: tauri::State<'_, CompanionState>, app: AppHandle, companion_id: String, message_id: String) -> Result<bool, String> {
+    if companion.turns.queued_payload(&companion_id, &message_id).is_none() { return Ok(false); }
+    if let Some(control) = companion.turns.control(&companion_id) {
+        let (ack, delivered) = tokio::sync::oneshot::channel();
+        if control.send(turn::Control::Steer { message_id: message_id.clone(), ack }).await.is_ok() && delivered.await.unwrap_or(false) { return Ok(true); }
+    }
+    // Never remove a message until injection is acknowledged. A cold turn or
+    // permission-mode switch instead drains the promoted send after Stop.
+    if !companion.turns.promote(&companion_id, &message_id) { return Ok(false); }
+    let _ = app.emit("companion-steered", serde_json::json!({"companionId":companion_id,"messageId":message_id,"mode":"interrupt"}));
+    companion_cancel(companion, companion_id)?;
+    Ok(true)
+}
+
+fn persist_steer(app: &AppHandle, companion: &CompanionState, id: &str, buf: &Arc<Mutex<PartialBuf>>, payload: &QueuedCompanionSend) -> Result<(), String> {
+    if companion.turns.unqueue(id, &payload.message_id).is_none() { return Err("Queued instruction already advanced".into()); }
+    let (assistant_id,body,seq)=persist_steer_segment(&companion.db,id,buf,payload)?;
+    crate::ledger::record_agent_prompt(&companion.db, crate::ledger::PromptSource::RustFirstTurn, "companion", &payload.text, Some(&payload.text), None, None, None, Some(crate::ledger::ThreadRef { thread_kind:"companion", thread_id:id.into(), parent_session_id:None }), crate::seat::model_for_override("companion", payload.harness.model.as_deref(), payload.harness.effort.as_deref()));
+    let _ = app.emit("companion-steered", serde_json::json!({"companionId":id,"messageId":payload.message_id,"text":payload.text,"mode":"inject","assistantId":assistant_id,"body":body,"seq":seq}));
+    Ok(())
+}
+
+fn persist_steer_segment(
+    db: &Database,
+    id: &str,
+    buf: &Arc<Mutex<PartialBuf>>,
+    payload: &QueuedCompanionSend,
+) -> Result<(String, String, u64), String> {
+    let mut partial = buf.lock().unwrap();
+    let body = partial.text.clone();
+    let seq = partial.seq;
+    let assistant_id = uuid::Uuid::new_v4().to_string();
+    db.persist_companion_steer_segment(
+        &CompanionMessage {
+            id: assistant_id.clone(),
+            companion_id: id.into(),
+            role: "assistant".into(),
+            body: body.clone(),
+            status: "complete".into(),
+            surface_kind: Some(payload.surface.kind.clone()),
+            surface_id: payload.surface.id.clone(),
+            surface_label: payload.surface.label.clone(),
+            created_at: now_millis(),
+        },
+        &payload.message_id,
+    )
+    .map_err(|error| error.to_string())?;
+    partial.text.clear();
+    Ok((assistant_id, body, seq))
 }
 
 /// Remove a queued send (the bubble's ×). Returns its text so the composer can
@@ -1745,6 +1906,8 @@ async fn read_companion(
     transport: Transport,
     mut native: Option<crate::codex_conversation::NativeTurn>,
     mut trace: crate::monochat::Span,
+    mode: TurnMode,
+    snapshot: Option<crate::companion_build::Snapshot>,
 ) {
     let db = companion.db.clone();
     // A warm turn ends at its `result` line, not at EOF: the process stays up
@@ -1768,10 +1931,40 @@ async fn read_companion(
     let mut errored: Option<String> = None;
     let mut saw_json = false;
     let mut pacer = turn::MeterPacer::default();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
+    if warm.is_some() || native.is_some() { companion.turns.attach_control(&companion_id, token, control_tx); }
+    let mut pending_steer: Option<(QueuedCompanionSend, tokio::sync::oneshot::Sender<bool>, u64)> = None;
+    let mut steer_seq = 100_u64;
+    let mut injected = false;
 
     loop {
         let deadline = if native.as_ref().is_some_and(|turn| turn.turn_id.is_none()) { 45 } else { 600 };
-        let line = match tokio::time::timeout(std::time::Duration::from_secs(deadline), lines.next_line()).await {
+        let next_line = tokio::select! {
+            biased;
+            line = tokio::time::timeout(std::time::Duration::from_secs(deadline), lines.next_line()) => line,
+            control = control_rx.recv(), if (warm.is_some() || native.is_some()) && pending_steer.is_none() => {
+                let Some(turn::Control::Steer { message_id, ack }) = control else { continue; };
+                let Some(payload) = companion.turns.queued_payload(&companion_id, &message_id) else { let _ = ack.send(false); continue; };
+                if payload.mode != mode { let _ = ack.send(false); continue; }
+                if let Some(native) = &native {
+                    steer_seq += 1;
+                    if let (Some(request), Some(pipe)) = (native.steer(&payload.text, steer_seq), stdin.as_mut()) {
+                        if write_native(pipe, &request).await.is_ok() { pending_steer = Some((payload, ack, steer_seq)); continue; }
+                    }
+                    let _ = ack.send(false);
+                } else if let Some((pipe, _, _)) = warm.as_mut() {
+                    let frame = companion_warm::user_turn_line(&payload.text);
+                    let written = tokio::time::timeout(std::time::Duration::from_secs(10), async { pipe.write_all(frame.as_bytes()).await?; pipe.flush().await }).await;
+                    if matches!(written, Ok(Ok(()))) {
+                        injected = true;
+                        let result = persist_steer(&app, &companion, &companion_id, &buf, &payload);
+                        let _ = ack.send(result.is_ok());
+                    } else { let _ = ack.send(false); }
+                } else { let _ = ack.send(false); }
+                continue;
+            }
+        };
+        let line = match next_line {
             Ok(Ok(Some(line))) => line,
             Ok(Ok(None)) => {
                 let Some(cold) = cold_retry.take().filter(|_| warm.is_some() && !turn_output) else { break };
@@ -1783,6 +1976,7 @@ async fn read_companion(
                 // continuous turn.
                 tracing::warn!("chat: the warm session exited before answering; retrying cold");
                 warm = None;
+                companion.turns.clear_control(&companion_id, token);
                 let mut child = match spawn_cold(&cold.binary, &cold.cwd, &cold.args, false) {
                     Ok(child) => child,
                     Err(error) => { errored = Some(format!("Failed to start {provider}: {error}")); break; }
@@ -1805,6 +1999,13 @@ async fn read_companion(
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if pending_steer.as_ref().is_some_and(|(_, _, id)| v.get("id").and_then(Value::as_u64) == Some(*id)) {
+            let (payload, ack, _) = pending_steer.take().unwrap();
+            let accepted = v.get("error").is_none() && v.pointer("/result/turnId").and_then(Value::as_str) == native.as_ref().and_then(|n| n.turn_id.as_deref());
+            if accepted { injected = true; let _ = ack.send(persist_steer(&app, &companion, &companion_id, &buf, &payload).is_ok()); }
+            else { let _ = ack.send(false); }
+            continue;
+        }
         saw_json = true;
         // The raw wire, for the inspector. A no-op when it's off —
         // one relaxed atomic load, nothing buffered.
@@ -1885,7 +2086,12 @@ async fn read_companion(
             break;
         }
     }
+    drop(pending_steer.take());
+    companion.turns.clear_control(&companion_id, token);
     drop(stdin.take());
+    // A provider final can repeat pre-steer text. Only the current segment
+    // belongs after the injected user row.
+    if injected { let text = buf.lock().unwrap().text.clone(); if !text.trim().is_empty() { final_text = Some(text); } }
 
     if let Some(turn) = &native {
         companion.turns.with_owned(&companion_id, token, || {
@@ -1961,6 +2167,17 @@ async fn read_companion(
                 },
             },
         );
+    }
+
+    if let Some(snapshot) = snapshot {
+        let message_id = trace.trace.message_id.clone();
+        match tokio::task::spawn_blocking(move || snapshot.finish(&message_id)).await.unwrap_or_else(|error| Err(error.to_string())) {
+            Ok(changes) => {
+                if let Ok(raw) = serde_json::to_string(&changes) { let _ = db.set_companion_meta(&trace.trace.message_id, &raw); }
+                let _ = app.emit("companion-changes", serde_json::json!({"companionId": companion_id, "changes": changes}));
+            }
+            Err(error) => tracing::warn!(%error, "could not collect build changes"),
+        }
     }
 
     'terminal: {
@@ -2062,7 +2279,7 @@ async fn read_companion(
     // so no concurrent send can slip in between the terminal above and the
     // start below.
     if let Some((queued, payload, slot)) = next {
-        if let Err(e) = db.set_thread_message_status("companion", &queued.message_id, "complete") {
+        if let Err(e) = db.advance_companion_message(&queued.message_id) {
             tracing::warn!(error = %e, "failed to flip a drained chat row");
         }
         let _ = app.emit(
@@ -3017,6 +3234,7 @@ mod tests {
             queued_at: 2,
         };
         let payload = QueuedCompanionSend {
+            mode: TurnMode::Chat,
             text: "and the beta?".to_string(),
             cwd: None,
             message_id: "m2".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
@@ -3067,6 +3285,7 @@ mod tests {
                 queued_at: 3,
             },
             QueuedCompanionSend {
+                mode: TurnMode::Chat,
                 text: "wait, scratch that".to_string(),
                 cwd: None,
                 message_id: "m3".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
@@ -3295,6 +3514,27 @@ mod tests {
         assert_eq!(origin.messages.len(), 1);
         assert!(origin_chat_for_session(&db, "from-draft").is_none());
         assert!(origin_chat_for_session(&db, "unlinked").is_none());
+    }
+
+    #[test]
+    fn scripted_steer_reader_persists_assistant_user_assistant_order() {
+        let db=Database::open_in_memory().unwrap();db.insert_companion(&chat("steer")).unwrap();
+        let mut user=msg("queued","steer","user","Use the new direction",1);user.status="queued".into();db.insert_companion_message(&user).unwrap();
+        let payload=QueuedCompanionSend{mode:TurnMode::Chat,message_id:user.id.clone(),text:user.body.clone(),cwd:None,surface:SurfaceInfo::default(),harness:ConversationHarness::default(),browser_target:None};
+        let buf=Arc::new(Mutex::new(PartialBuf::new()));let mut results=0;
+        for line in include_str!("../../scripts/fixtures/chat-steer.jsonl").lines(){let event:Value=serde_json::from_str(line).unwrap();match event["type"].as_str().unwrap(){
+            "stream_event"=>{turn::push_delta(&buf,event["event"]["delta"]["text"].as_str().unwrap());},
+            "steer"=>{let(_,body,seq)=persist_steer_segment(&db,"steer",&buf,&payload).unwrap();assert_eq!(body,"Before steer");assert_eq!(seq,1);},
+            "result"=>{results+=1;db.insert_companion_message(&msg("final","steer","assistant",&buf.lock().unwrap().text,now_millis())).unwrap();},_=>{}
+        }}
+        let rows=db.load_companion_thread("steer").unwrap();assert_eq!(results,1);assert_eq!(rows.iter().map(|row|(row.role.as_str(),row.body.as_str())).collect::<Vec<_>>(),vec![("assistant","Before steer"),("user","Use the new direction"),("assistant","After steer")]);assert_eq!(buf.lock().unwrap().seq,2);
+    }
+    #[test]
+    fn handoff_seed_is_exact_idempotent_and_does_not_send_a_turn() {
+        let db=Database::open_in_memory().unwrap();db.insert_companion(&chat("seed")).unwrap();let body="  Plan this\nwith attachments\n";
+        let first=db.seed_companion_handoff("seed","nonce",body,Some("/project"),1).unwrap().unwrap();let again=db.seed_companion_handoff("seed","nonce",body,Some("/project"),20).unwrap().unwrap();
+        assert_eq!(first.id,again.id);assert_eq!(first.created_at,again.created_at);assert_eq!(again.body,body);assert_eq!(db.load_companion_thread("seed").unwrap().len(),1);assert_eq!(db.companion_project("seed").as_deref(),Some("/project"));
+        assert!(db.seed_companion_handoff("seed","nonce","different",None,30).unwrap().is_none());assert!(db.seed_companion_handoff("missing","other",body,None,40).unwrap().is_none());
     }
 
 }

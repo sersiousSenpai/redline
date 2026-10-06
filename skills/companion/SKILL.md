@@ -10,7 +10,7 @@ description: >-
   memory with the answer-pack first, or WRITE a staged, reviewable artifact at
   the user's explicit direction. Redline's chat room carries this contract in
   its system prompt and does not need to load this skill.
-version: 7
+version: 8
 ---
 
 # Spanning Redline
@@ -107,3 +107,7 @@ or ExitPlanMode.
   staged routes.
 - Lead with the answer; keep the machinery invisible unless asked.
 - Strict-mode mermaid only; markdown always; no raw HTML.
+
+## Per-turn Build mode
+
+Chat turns remain read-only. A turn explicitly marked BUILD authorizes scoped file edits in the bound project. Change only what the user asked, run the project checks, do not commit or push unless asked, and finish with a short factual summary. Returning to Chat removes write authorization.

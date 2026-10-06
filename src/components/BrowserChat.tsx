@@ -5,10 +5,10 @@ import { useMemo, memo, useEffect, useRef, useState } from "react";
 import { useContext } from "react";
 import {
   Copy,
+  ListTodo,
   MoreHorizontal,
   PenLine,
   Pin,
-  Link2,
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -71,6 +71,7 @@ interface BrowserChatProps {
   onSeedConsumed?: () => void;
   title?: string;
   linked?: boolean;
+  ownChat?: boolean;
   onToggleLinked?: () => void;
   onResearch?: () => void;
 }
@@ -102,6 +103,7 @@ export const BrowserChat = memo(function BrowserChat({
   onSeedConsumed,
   title = "Page chat",
   linked = false,
+  ownChat = false,
   onToggleLinked,
   onResearch,
 }: BrowserChatProps) {
@@ -119,6 +121,7 @@ export const BrowserChat = memo(function BrowserChat({
   // restore (partial text + spinner), self-heal — lives in the shared hook,
   // keyed by browseId: switching tabs rebinds it; a turn left streaming keeps
   // running backend-side and is picked up loss-free on return.
+  const lastGroundedLabel = useRef<string | null>(null);
   const {
     messages,
     liveText,
@@ -156,7 +159,8 @@ export const BrowserChat = memo(function BrowserChat({
         // suspended discussion tab still grounds the first turn). A miss just
         // means a slower first answer. The hook drops the send if the tab
         // switched mid-capture.
-        const snapshot = firstTurn ? await captureSnapshotOrCached(targetLabel) : undefined;
+        const snapshot = firstTurn || lastGroundedLabel.current !== targetLabel ? await captureSnapshotOrCached(targetLabel) : undefined;
+        lastGroundedLabel.current = targetLabel;
         return {
           browseId,
           text,
@@ -273,15 +277,16 @@ export const BrowserChat = memo(function BrowserChat({
     >
       <div className="rb-thread-tools" data-browser-chat-header>
         <div className="min-w-0 flex-1">
-          <span className="block truncate" style={{ fontSize: 13, fontWeight: 600 }}>{linked ? "Linked conversation" : title}</span>
+          <span className="block truncate" style={{ fontSize: 13, fontWeight: 600 }}>{linked ? "Browser chat" : title}</span>
         </div>
-        <button type="button" className="rb-icon-button" aria-label="Linked" aria-pressed={linked} title="Keep this conversation across tabs" onClick={onToggleLinked}><Link2 size={17}/></button>
+        <button type="button" className="rb-button" onClick={onToggleLinked}>{ownChat ? "Back to shared chat" : "New chat for this tab"}</button>
         <button ref={moreRef} type="button" className="rb-icon-button" aria-label="Conversation actions" aria-haspopup="menu" aria-expanded={conversationPanel === "menu"}
           onClick={() => setConversationPanel((panel) => panel === "menu" ? null : "menu")}><MoreHorizontal size={17} /></button>
         <button type="button" className="rb-icon-button" aria-label="Close discussion" onClick={onClose}><X size={16} /></button>
       </div>
+      {ownChat && <div className="rb-thread-context px-3 py-1">This tab’s own chat</div>}
       {anchoredFromTitle && <div className="rb-thread-context shrink-0 px-3 py-1">
-        <span>{linked ? "🔗 Linked · from" : "From"} {anchoredFromTitle}</span>
+        <span>{linked ? "Following" : "From"} {anchoredFromTitle}</span>
       </div>}
       {conversationPanel === "menu" && <BrowserPopover anchor={moreRef} title="Conversation actions" onClose={() => setConversationPanel(null)}>
         <BrowserMenuItem onClick={() => { setConversationPanel(null); onResearch?.(); }}>Start a research mission</BrowserMenuItem>
@@ -540,14 +545,15 @@ function MessageActions({
               window.setTimeout(() => setListed("idle"), 1400);
             });
           }}
-          title="Add this reply to the Cart"
+          title="Add this reply to the task list"
           style={{ ...actionStyle, color: "var(--color-info)" }}
         >
+          <ListTodo size={12} aria-hidden style={{ display: "inline", marginRight: 4, verticalAlign: "-2px" }}/>
           {listed === "ok"
             ? "Added ✓"
             : listed === "failed"
               ? "Add failed ✗"
-              : "＋ Add to cart"}
+              : "＋ Add to task list"}
         </button>
       )}
       <ContinueAs through={messageId} />

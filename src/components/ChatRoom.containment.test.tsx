@@ -76,17 +76,18 @@ describe("Home chat containment", () => {
     expect(composer.querySelector("textarea")?.style.maxHeight).toBe("160px");
   });
 
-  it("resets Plan mode after sending and holds a streaming handoff until idle", async () => {
+  it("keeps the sticky Plan mode and holds a tray handoff until idle", async () => {
     turn.messages = [{ id: "reply", role: "assistant", body: "A complete reply", status: "complete" }];
     const onPlan = vi.fn();
     const renderPlanning = () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} dictationEnabled={false} onClose={() => {}} onPlan={onPlan} />);
     await act(async () => renderPlanning());
-    await act(async () => (host.querySelector('[aria-label="Composer mode"] button:last-child') as HTMLButtonElement).click());
-    expect(host.querySelector('[aria-label="Composer mode"] button:last-child')?.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-chat-mode-chip")!.click());
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".rl-chat-mode-menu button")].find(button => button.textContent === "Plan")!.click());
+    expect(host.querySelector(".rl-chat-mode-chip")?.textContent).toContain("Plan");
     const send = [...host.querySelectorAll<HTMLButtonElement>("[data-chat-composer] button")].slice(-1)[0]!;
     await act(async () => send.click());
-    expect(host.querySelector('[aria-label="Composer mode"] button:first-child')?.getAttribute("aria-pressed")).toBe("true");
-    expect(host.textContent).toContain("Will plan when this reply lands");
+    expect(host.querySelector(".rl-chat-mode-chip")?.textContent).toContain("Plan");
+    expect(host.querySelector('[aria-label="Queued messages"]')).not.toBeNull();
     expect(onPlan).not.toHaveBeenCalled();
     turn.status = "idle";
     await act(async () => renderPlanning());

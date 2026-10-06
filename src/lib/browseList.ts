@@ -216,7 +216,8 @@ export function renderListMarkdown(
   items: BrowseListItem[],
   _source?: ListSource,
 ): string {
-  const out = [`# ${list.title?.trim() || "Cart"}`, ""];
+  const title = list.title?.trim();
+  const out = [`# ${!title || title === "Cart" ? "Task list" : title}`, ""];
   if (items.some(item => normalizeLocator(item.locator))) {
     out.push("[location] is a pointer resolved by Redline from the page; the text after it is the user's note.", "");
   }
@@ -226,7 +227,7 @@ export function renderListMarkdown(
     for (const item of section.items) out.push(`- [${item.done ? "x" : " "}] ${formatItemLine(item)}`);
     out.push("");
   }
-  if (!items.length) out.push("_(Cart is empty)_", "");
+  if (!items.length) out.push("_(Task list is empty)_", "");
   return out.join("\n").trimEnd() + "\n";
 }
 

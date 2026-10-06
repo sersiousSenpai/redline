@@ -120,6 +120,7 @@ export interface StreamingBubbleProps {
   onOpenLink?: (url: string) => void;
   /** The chat room at plate scale: roomy prose and larger meta text. */
   room?: boolean;
+  card?: boolean;
 }
 
 export default function StreamingBubble({
@@ -131,6 +132,7 @@ export default function StreamingBubble({
   inspect,
   onOpenLink,
   room = false,
+  card = false,
 }: StreamingBubbleProps) {
   const [inspecting, setInspecting] = useState(false);
   const badge = retrying ? null : meterBadgeLabel(meter ?? null);
@@ -141,9 +143,9 @@ export default function StreamingBubble({
   return (
     // `contain: content` follows `.rl-comment-card`: a bubble that repaints on
     // every token must not invalidate layout for the thread above it.
-    <div className="flex flex-col gap-0.5" style={{ contain: "content" }}>
+    <div className={`flex flex-col gap-0.5${card ? " rl-reply-card" : ""}`} style={{ contain: "content" }}>
       <div className="flex items-baseline justify-between gap-2">
-        <span
+        <span hidden={card && !retrying}
           style={{
             ...BYLINE,
             ...(room ? { fontSize: "11px" } : null),

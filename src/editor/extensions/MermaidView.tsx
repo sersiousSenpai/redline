@@ -59,15 +59,19 @@ async function loadMermaid() {
 interface MermaidViewProps {
   /** The mermaid source — the code-block node's text content. */
   code: string;
+  variant?: "plate" | "ink";
 }
 
-export function MermaidView({ code }: MermaidViewProps) {
+export function MermaidView({ code, variant = "plate" }: MermaidViewProps) {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    const source = code.trim();
+    const sourceText = code.trim();
+    const font = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim() || "ui-monospace, SFMono-Regular, Menlo, monospace";
+    const directive = `%%{init: ${JSON.stringify({ theme:"base", fontFamily:font, flowchart:{curve:"step",htmlLabels:true} })}}%%\n`;
+    const source = variant === "ink" && sourceText ? directive + sourceText : sourceText;
     if (!source) {
       setSvg(null);
       setError(null);
@@ -102,7 +106,7 @@ export function MermaidView({ code }: MermaidViewProps) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code]);
+  }, [code, variant]);
 
   if (error) {
     return (
@@ -124,7 +128,7 @@ export function MermaidView({ code }: MermaidViewProps) {
       // `--ready` flips the card to the fixed light figure plate (see CSS); the
       // pending/error states above keep the bare `rl-mermaid` elevated surface
       // so their muted/warning text stays legible on dark themes.
-      className="rl-mermaid rl-mermaid--ready"
+      className={`rl-mermaid rl-mermaid--ready${variant === "ink" ? " rl-mermaid--ink" : ""}`}
       contentEditable={false}
       // mermaid output, sanitized by `securityLevel: "strict"`.
       dangerouslySetInnerHTML={{ __html: svg }}

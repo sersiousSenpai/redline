@@ -48,7 +48,7 @@ async function measureLayout(label, browserChat = false) {
 }
 try {
   await mkdir(output, { recursive: true });
-  for (const name of ["BrowserChrome", "BrowserSurfaces", "BrowserPagePanels", "BrowserTileStage", "MosaicDialogs", "PersistentPortalSlot", "ChatRoom", "BrowserChat"]) {
+  for (const name of ["BrowserTabRail", "BrowserHomePage", "FloatingBrowserIsland", "FrontDoor", "BrowserChrome", "BrowserSurfaces", "BrowserPagePanels", "BrowserTileStage", "MosaicDialogs", "PersistentPortalSlot", "ChatRoom", "BrowserChat"]) {
     const file = `src/components/${name}.tsx`; report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   }
   for (const file of ["src/lib/browserTabDrag.ts", "src/components/BrowserWorkspace.css"]) {
@@ -56,8 +56,8 @@ try {
   }
   server = await createServer({ configFile: false, root, cacheDir: path.join(temporary, "vite-cache"), optimizeDeps: { entries: ["fixtures/browser-visual-qa/index.html"] }, plugins: [react(), tailwindcss()], resolve: { alias: [
     { find: /^.*\/hooks\/useAgentTurn$/, replacement: service }, { find: /^.*\/audio\/useReadAloud$/, replacement: service }, { find: /^.*\/lib\/useDictation$/, replacement: service },
-    ...["@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener"].map((find) => ({ find, replacement: service })),
-  ] }, server: { host: "127.0.0.1", port: 0, strictPort: false, watch: { ignored: ["**/src-tauri/**", "**/docs/**"] } }, clearScreen: false });
+    ...["@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/api/webview", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener"].map((find) => ({ find, replacement: service })),
+  ] }, server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false, watch: null }, clearScreen: false });
   await server.listen();
   const address = server.httpServer.address();
   report.fixtureUrl = `http://127.0.0.1:${address.port}/fixtures/browser-visual-qa/`;
@@ -105,20 +105,23 @@ try {
     await cdp.evaluate("window.__qa.setChatKind('browser')"); await settle();
     await click("[data-browser-chat-composer] textarea"); await cdp.call("Input.insertText", { text: "A browser conversation draft with several lines.\n".repeat(12) }); await settle();
     await measureLayout(`${size} page conversation`, true); await screenshot(`${size}-page-conversation`);
-    check(`${size}: linked is a pressed header toggle`, await cdp.evaluate("document.querySelector('[aria-label=Linked]').getAttribute('aria-pressed')==='true'"));
+    check(`${size}: shared chat has per-tab opt out`, await cdp.evaluate("[...document.querySelectorAll('[data-browser-chat-header] button')].some(button=>button.textContent==='New chat for this tab')"));
     await click('[aria-label="Conversation actions"]'); check(`${size}: conversation menu bounded`, (await bounds('[role="menu"]'))?.within);
     const actions = await cdp.evaluate("[...document.querySelector('[role=menu]').children].map(e=>e.textContent.trim())");
     check(`${size}: exactly three conversation menu rows`, JSON.stringify(actions) === JSON.stringify(["Start a research mission", "Text sizeA−A+", "Clear history"]), actions);
     await screenshot(`${size}-conversation-actions`); await key("Escape", "Escape", 27);
-    check(`${size}: new tab immediately follows the last tab`, await cdp.evaluate("document.querySelector('.rb-tabs [data-tab-id]:last-of-type').nextElementSibling?.getAttribute('aria-label')==='New tab'"));
-    const savedSpacingTabs = await cdp.evaluate("window.__qa.getState().tabs");
-    for (const count of [1, 2, 4]) for (const longTitle of [false, true]) {
-      await cdp.evaluate(`window.__qa.setTabs(${JSON.stringify(savedSpacingTabs.slice(0, count).map((tab, i) => ({ ...tab, title: longTitle ? 'A long page title that should keep the new-tab button nearby ' + i : 'Page ' + i })))})`); await settle();
-      const gap = await cdp.evaluate("document.querySelector('.rb-new-tab').getBoundingClientRect().left - document.querySelector('.rb-tabs [data-tab-id]:last-of-type').getBoundingClientRect().right");
-      check(`${size}: + stays beside ${count} ${longTitle ? 'long' : 'short'} tabs`, gap >= 0 && gap <= 4, {gap});
-    }
-    if (width === 1600) await screenshot(`${size}-new-tab-spacing`);
-    await cdp.evaluate(`window.__qa.setTabs(${JSON.stringify(savedSpacingTabs)})`); await settle();
+    check(`${size}: vertical rail and new-tab button stay visible`, (await bounds('.rb-tab-rail'))?.within && (await bounds('.rb-rail-heading [aria-label="New tab"]'))?.within);
+    await click('[aria-label="Collapse tab rail"]'); check(`${size}: rail collapses to icons`, (await bounds('.rb-tab-rail')).width === 48);
+    await click('[aria-label="Expand tab rail"]');
+    await cdp.evaluate("window.__qa.setOrganized(true)"); await settle(); check(`${size}: organized groups render`, await cdp.evaluate("!!document.querySelector('[data-tab-group]')")); await screenshot(`${size}-organized-rail`);
+    await cdp.evaluate("window.__qa.setOrganized(false)"); await settle();
+    const savedHomeLayout = await cdp.evaluate("window.__qa.getState().layout");
+    await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true)"); await settle();
+    check(`${size}: homepage presents resumable work and recent pages`, await cdp.evaluate("!!document.querySelector('.rb-home [aria-label=\"Pick back up\"]') && !!document.querySelector('.rb-home [aria-label=Recent]')")); await screenshot(`${size}-homepage`);
+    await click('[aria-label="Open browser prompter"]'); const island = await bounds('.rl-monochat-float');
+    check(`${size}: floating island bounded to 640x320 over mounted page`, island?.within && island.width <= 641 && island.height <= 321 && await cdp.evaluate("!!document.querySelector('.rb-home') && !document.querySelector('[inert]')"), island);
+    await screenshot(`${size}-floating-island`); await key("Escape", "Escape", 27);
+    await cdp.evaluate("window.__qa.setShowHome(false);window.__qa.setChatOpen(true)"); await settle();
     if (width === 1600) {
       await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
       await click('[aria-label="Assign tab to page 1"]');
@@ -127,13 +130,13 @@ try {
       const originalLayout = await cdp.evaluate("window.__qa.getState().layout");
       const tabOrder = () => cdp.evaluate("[...document.querySelectorAll('[data-tab-id]')].map(e=>e.dataset.tabId)");
       const order = await tabOrder(), first = await bounds(`[data-tab-id="${order[0]}"]`), second = await bounds(`[data-tab-id="${order[1]}"]`);
-      const start = { x: first.x + first.width / 2, y: first.y + first.height / 2 }, end = { x: second.right - 12, y: start.y };
+      const start = { x: first.x + first.width / 2, y: first.y + first.height / 2 }, end = { x: start.x, y: second.bottom - 6 };
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...start }); await settle();
       check("hovering tab highlights its tile header", await cdp.evaluate("!!document.querySelector('[data-tile-index=\"0\"] .rb-tile-header[data-tile-hover]')"));
       check("tabs use the normal arrow cursor on hover", await cdp.evaluate("getComputedStyle(document.querySelector('[data-tab-id]')).cursor==='default'"));
       await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...start });
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, ...end }); await settle();
-      check("tab drag follows pointer and shifts siblings before committing", JSON.stringify(await tabOrder()) === JSON.stringify(order) && await cdp.evaluate("document.querySelector('[data-dragging]').style.getPropertyValue('--tab-drag-x') !== '0px' && [...document.querySelectorAll('[data-tab-id]:not([data-dragging])')].some(e=>parseFloat(e.style.getPropertyValue('--tab-drag-x'))!==0 && e.style.getPropertyValue('--tab-drag-x'))"));
+      check("tab drag follows pointer and shifts siblings before committing", JSON.stringify(await tabOrder()) === JSON.stringify(order) && await cdp.evaluate("document.querySelector('[data-dragging]').style.getPropertyValue('--tab-drag-y') !== '0px' && [...document.querySelectorAll('[data-tab-id]:not([data-dragging])')].some(e=>parseFloat(e.style.getPropertyValue('--tab-drag-y'))!==0 && e.style.getPropertyValue('--tab-drag-y'))"));
       check("tab drag prevents selection", await cdp.evaluate("getComputedStyle(document.querySelector('.rb-tabs')).userSelect === 'none' && !window.getSelection().toString()"));
       check("tab dragging keeps the normal arrow cursor", await cdp.evaluate("getComputedStyle(document.querySelector('[data-dragging]')).cursor==='default'"));
       await screenshot(`${size}-tab-drag`);
@@ -141,11 +144,11 @@ try {
       check("tab order commits on release and drag styles clear", JSON.stringify(await tabOrder()) === JSON.stringify([order[1], order[0], ...order.slice(2)]) && await cdp.evaluate("!document.querySelector('[data-dragging], .rb-tabs-dragging')"));
       await delay(180);
       const edgeGrab = await bounds(`[data-tab-id="${order[1]}"]`);
-      const shortStart = { x: edgeGrab.x + 8, y: edgeGrab.y + edgeGrab.height / 2 };
-      const shortEnd = { x: shortStart.x + edgeGrab.width * .58, y: edgeGrab.bottom + 25 };
+      const shortStart = { x: edgeGrab.x + edgeGrab.width / 2, y: edgeGrab.y + 8 };
+      const shortEnd = { x: shortStart.x + 25, y: shortStart.y + edgeGrab.height * .80 };
       await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...shortStart });
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, ...shortEnd }); await settle(); await delay(160);
-      await cdp.evaluate(`window.__qaBeforeRelease = document.querySelector('[data-tab-id="${order[1]}"]').getBoundingClientRect().left; window.addEventListener('pointerup', () => { window.__qaAfterRelease = document.querySelector('[data-tab-id="${order[1]}"]').getBoundingClientRect().left; }, {once:true})`);
+      await cdp.evaluate(`window.__qaBeforeRelease = document.querySelector('[data-tab-id="${order[1]}"]').getBoundingClientRect().top; window.addEventListener('pointerup', () => { window.__qaAfterRelease = document.querySelector('[data-tab-id="${order[1]}"]').getBoundingClientRect().top; }, {once:true})`);
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...shortEnd }); await settle();
       check("short edge-grab drag swaps with a loose diagonal release", JSON.stringify(await tabOrder()) === JSON.stringify(order), await tabOrder());
       check("release preserves the dragged tab's screen position before settling", await cdp.evaluate("Math.abs(window.__qaAfterRelease-window.__qaBeforeRelease)<2"), await cdp.evaluate("({before:window.__qaBeforeRelease,after:window.__qaAfterRelease})"));
@@ -153,13 +156,13 @@ try {
       const savedTabs = await cdp.evaluate("window.__qa.getState().tabs");
       await cdp.evaluate("window.__qa.setTabs([...window.__qa.getState().tabs, ...Array.from({length:20}, (_,i)=>({id:'overflow-'+i,browseId:'overflow-'+i,title:'Overflow page '+i,url:'https://example.test/overflow/'+i}))])"); await settle();
       const overflowStrip = await bounds('.rb-tabs'), overflowTab = await bounds(`[data-tab-id="${order[0]}"]`);
-      const overflowPlus = await bounds('.rb-new-tab');
-      check("new-tab button remains visible when tabs overflow", overflowPlus?.within && Math.abs(overflowPlus.right - overflowStrip.right) < 2, overflowPlus);
-      const overflowEnd = { x: overflowStrip.right - 3, y: overflowTab.y + overflowTab.height / 2 };
-      await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x: overflowTab.x + 12, y: overflowEnd.y });
+      const overflowPlus = await bounds('.rb-rail-heading [aria-label="New tab"]');
+      check("new-tab button remains visible when tabs overflow", overflowPlus?.within, overflowPlus);
+      const overflowEnd = { x: overflowTab.x + overflowTab.width / 2, y: overflowStrip.bottom - 3 };
+      await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x: overflowTab.x + 12, y: overflowTab.y + overflowTab.height / 2 });
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", button: "left", buttons: 1, ...overflowEnd }); await settle();
-      const scrollBefore = await cdp.evaluate("document.querySelector('.rb-tabs').scrollLeft"); await delay(350);
-      const scrollAfter = await cdp.evaluate("document.querySelector('.rb-tabs').scrollLeft");
+      const scrollBefore = await cdp.evaluate("document.querySelector('.rb-tabs').scrollTop"); await delay(350);
+      const scrollAfter = await cdp.evaluate("document.querySelector('.rb-tabs').scrollTop");
       check("overflow keeps scrolling while the pointer rests at the edge", scrollAfter > scrollBefore + 80, {scrollBefore, scrollAfter});
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...overflowEnd }); await settle(); await delay(180);
       await cdp.evaluate(`window.__qa.setTabs(${JSON.stringify(savedTabs)})`); await settle();
@@ -177,6 +180,7 @@ try {
       check("clicking a tab selects it and removes address focus", await cdp.evaluate(`document.activeElement?.dataset.tabId===${JSON.stringify(order[1])} && document.activeElement.getAttribute('aria-selected')==='true' && !document.querySelector('.rb-address input:focus')`));
       await screenshot(`${size}-tab-selected`);
       await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+      await click('[aria-label="Collapse tab rail"]');
       const fromTile = await bounds('[data-tile-index="0"] .rb-tile-header'), toTile = await bounds('[data-tile-index="2"] .rb-tile-header');
       const fromPoint = { x: fromTile.x + 4, y: fromTile.y + fromTile.height / 2 }, toPoint = { x: toTile.x + 4, y: toTile.y + toTile.height / 2 };
       await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...fromPoint });
@@ -212,6 +216,8 @@ try {
       await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false }); await settle();
       check("live resize: four-page arrangement restored", await cdp.evaluate(`document.querySelectorAll('section[aria-label^=Page]').length===4 && JSON.stringify(window.__qa.getState().layout)===${JSON.stringify(savedLayout)}`));
       await cdp.evaluate("window.__qa.setTheme('basic')"); await settle(); await screenshot("1600x900-light-theme");
+      await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true);window.__qa.setIslandOpen(true)"); await settle(); await screenshot("1600x900-light-home-island");
+      await key("Escape","Escape",27); await cdp.evaluate("window.__qa.setShowHome(false);window.__qa.setChatOpen(true)"); await settle();
     }
   }
   // Mosaics: a saved uniform grid of live pages.
@@ -234,7 +240,7 @@ try {
   const grid = await sections(), stage = await stageBox(), fit = tiling(grid, stage);
   check("mosaic 3×3: nine cells, seven pages and two empty spaces", grid.length === 9 && grid.filter((s) => s.label.startsWith("Page ")).length === 7 && grid.filter((s) => s.label.startsWith("Empty space")).length === 2, grid.map((s) => s.label));
   check("mosaic 3×3: tiles cover the stage without gaps or overlap", fit.overlap < 1 && Math.abs(fit.coverage - 1) < .005, fit);
-  check("mosaic 3×3: no draggable dividers", !(await cdp.evaluate("!!document.querySelector('[role=separator]')")));
+  check("mosaic 3×3: no draggable dividers", !(await cdp.evaluate("!!document.querySelector('.rb-workspace-pages [role=separator]')")));
   check("mosaic chip names the open mosaic", await cdp.evaluate("!!document.querySelector('[aria-label=\"Close Stock News\"]')"));
   await screenshot("1600x900-mosaic-3x3");
   const header = await bounds('section[aria-label="Page 5: Barron\'s"] > div');

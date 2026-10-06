@@ -1,6 +1,6 @@
 import { useQueuedChatPlans } from "./hooks/useQueuedChatPlans";
-import type { ChatPlanReceipt, ChatPlanRequest } from "./components/ChatRoom";
-import { CONTINUE_EVENT, continuationKey, continuationOrigin, prepareConversationPreview, type ContinueRequest, type ContinueDestination } from "./lib/conversationContinuation";
+import type { ChatPlanReceipt, ChatPlanRequest, ChatWorkbenchComposer } from "./components/ChatRoom";
+import { CONTINUE_EVENT, continuationKey, continuationOrigin, prepareCompanionContinuation, type ContinuationMessage, type ContinueRequest, type ContinueDestination } from "./lib/conversationContinuation";
 import { createPortal } from "react-dom";
 import { createBoundedPortalHost, PersistentPortalSlot } from "./components/PersistentPortalSlot";
 import { HookConflictWarning } from "./components/HookConflictWarning";
@@ -182,7 +182,7 @@ import {
 } from "./lib/terminalHandoff";
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems";
 import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
-import { SidebarTabStrip } from "./components/SidebarTabStrip";
+const SidebarTabStrip = lazy(() => import("./components/SidebarTabStrip").then((module) => ({ default: module.SidebarTabStrip })));
 import { PlanToc } from "./components/PlanToc";
 import { FileTree } from "./components/FileTree";
 // Lazy: the read-only viewer only mounts once a folder tab opens a file.
@@ -352,7 +352,7 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
-import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
+import { buildApprovedPrompt, buildRestorePrompt, buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isDockKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -605,6 +605,8 @@ const AgentShelf = lazy(() =>
 );
 import { DocumentsMenu } from "./components/DocumentsMenu";
 import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
+import type { ManualPlanState } from "./components/PlanStateMenu";
+const MoveToRepoDialog = lazy(() => import("./components/MoveToRepoDialog").then(m => ({ default: m.MoveToRepoDialog })));
 import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
@@ -695,6 +697,12 @@ const surfaceFallback =
 
 function App() {
   const [frontDoorOpen, setFrontDoorOpen] = useState(() => takeDockSeed(localStorage));
+  const [browserIslandOpen, setBrowserIslandOpen] = useState(false);
+  const [browserIslandLaunching, setBrowserIslandLaunching] = useState(false);
+  const [browserIslandPage, setBrowserIslandPage] = useState<import("./lib/browserIsland").BrowserIslandPage | null>(null);
+  const [browserIslandAttachPage, setBrowserIslandAttachPage] = useState(true);
+  const [browserIslandAttachTasks, setBrowserIslandAttachTasks] = useState(false);
+  const [browserIslandDestination, setBrowserIslandDestination] = useState<LaunchDestination>("plan");
   const [monochatVisible, setMonochatVisible] = useState(false);
   const [monochatBusy, setMonochatBusy] = useState(false);
   const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
@@ -718,6 +726,7 @@ function App() {
     [],
   );
   const [session, setSession] = useState<ReviewSession | null>(null);
+  const [movePlan, setMovePlan] = useState<ReviewSession | null>(null);
   // ── The four readiness axes ───────────────────────────────────────────────
   //
   // There used to be one global `loading` boolean covering everything boot
@@ -1447,6 +1456,7 @@ function App() {
   >(null);
   const launchedPlansRef = useRef(new Map<string, PendingLaunch>());
   const [chatReceipts, setChatReceipts] = useState<Record<string, ChatPlanReceipt>>({});
+  const chatHandoffSeeds = useRef(new Map<string, { text: string; id: string }>());
   const [planSwap, setPlanSwap] = useState<{ launchId: string; from: SwapRect } | null>(null);
   // Focus + seed handoff from the type-to-start listener (see lib/landing.ts).
   const [frontDoorFocus, setFrontDoorFocus] = useState(0);
@@ -1917,7 +1927,7 @@ function App() {
     initialProject: string | null;
     destination?: ContinueDestination;
     source?: ContinueRequest["source"];
-    missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" };
+    missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" | "run" };
   } | null>(null);
   const [sendPending, setSendPending] = useState(false);
   const sendPendingRef = useRef(false);
@@ -3611,6 +3621,24 @@ function App() {
       return [];
     }
   }
+  const setPlanState = async (id: string, state: ManualPlanState) => {
+    try {
+      await invoke("set_plan_state", { sessionId: id, state });
+      await refreshSummaries();
+      if (id === activeId) await loadSession(id);
+    } catch (error) { setToast(String(error), 6000); }
+  };
+  const openMovePlan = async (id: string) => {
+    try { setMovePlan(await invoke<ReviewSession>("get_session", { id })); }
+    catch (error) { setToast(String(error), 6000); }
+  };
+  const moveSessionProject = async (id: string, path: string) => {
+    await invoke("set_session_project", { sessionId: id, projectPath: path });
+    await refreshSummaries();
+    if (id === activeId) await loadSession(id);
+    setToast(`Moved to ${path.split("/").filter(Boolean).pop() ?? path}`);
+  };
+
 
   async function deleteSession(id: string): Promise<void> {
     // Always force=true: the UI confirm step is the user's intent gate, and
@@ -5381,19 +5409,20 @@ function App() {
           codexBin: health?.preflight.codex?.path ?? preflightRef.current?.codex?.path ?? null,
           model: session.model,
           effort: session.effort,
-        })}\r`;
+        }, projectPath)}\r`;
         suppressTerminalRevealFocus();
         setTermFullscreen(false);
         revealTerm();
-        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
-        if (!id) {
-          setToast("Couldn't open a terminal to build in", 6000);
-          return;
-        }
-        const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
-        if (!delivery.ok) {
-          setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000);
-          return;
+        const terminals = await ensureTerminalReady();
+        if (!terminals) { setToast("Couldn't open a terminal to build in", 6000); return; }
+        if (await useHostedShell(planHarness)) {
+          await terminals.openAgentShell({ cwd: planHarness === "codex" ? projectPath ?? cwd : cwd, sessionId, prompt: buildApprovedPrompt(version, new Date(), cwd, projectPath),
+            permissionMode: "auto", model: session.model, effort: session.effort,
+            addDirs: projectPath && projectPath !== cwd ? [projectPath] : [], backend: planHarness === "codex" ? "codex" : "claude-code" });
+        } else {
+          const id = terminals.openSessionTerminal(projectPath);
+          const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
+          if (!delivery.ok) { setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000); return; }
         }
         await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
         setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
@@ -5466,22 +5495,31 @@ function App() {
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
-    const id = (await ensureTerminalReady())?.openSessionTerminal(launch.projectPath) ?? null;
+    const terminals = await ensureTerminalReady();
+    const hosted = await useHostedShell("claude-code");
+    let id: string | null = hosted ? null : terminals?.openSessionTerminal(launch.projectPath) ?? null;
     // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
     // claim links the lead under the plan and starts the Runs watcher.
     const rearm = () =>
       invoke("record_orchestration_launch", { prompt, planSessionId: sessionId, terminalId: id }).then(() => undefined);
-    await rearm().catch((err) => console.error("record_orchestration_launch failed", err));
     const fail = async (stage: string, reason: string) => {
       await invoke("scaled_stop", { runId: launch.runId }).catch(() => {});
       await invoke("reset_run", { sessionId }).catch(() => {});
       setHandoffFailure({ sessionId, stage, reason, launchCmd, prompt, projectPath: launch.projectPath, retryScaled: config });
       void refreshSummaries();
     };
-    if (!id) {
-      await fail("spawn", "no terminal tab could be opened");
+    if (hosted && terminals) {
+      try {
+        await terminals.openAgentShell({ cwd: launch.projectPath, prompt, permissionMode: "acceptEdits",
+          model: launch.leadModel, effort: launch.effort, settingsPath: launch.settingsPath, backend: "claude-code",
+        }, { beforeStart: async terminalId => { id = terminalId; await rearm(); } });
+        setHandoffFailure(cur => cur?.sessionId === sessionId ? null : cur);
+        setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
+      } catch (error) { await fail("launch", String(error)); }
       return;
     }
+    if (!id) { await fail("spawn", "no terminal tab could be opened"); return; }
+    try { await rearm(); } catch (error) { await fail("record", String(error)); return; }
     const deps: OrchestrateDeps = {
       ...tauriHandoffDeps,
       journal: (stage, detail) => {
@@ -5751,6 +5789,13 @@ function App() {
     dock?.hailTerminal(terminalId);
   };
 
+  const showRestoreRawTerminal = async (terminalId: string | null) => {
+    await showRawTerminal(terminalId);
+    if (!terminalId) return;
+    try { await (await ensureTerminalReady())?.setTabView(terminalId, "raw"); }
+    catch (error) { setToast(`The shell is open. Raw view is unavailable right now: ${String(error)}`, 7000); }
+  };
+
   // One-click recovery for a detached plan: resume the exact conversation that
   // wrote it, with a compact control event that re-establishes the held
   // ExitPlanMode. Because the resumed session keeps the same session_id, its
@@ -5828,6 +5873,20 @@ function App() {
       await invoke("arm_restore", { sessionId });
     } catch (e) {
       fail(`Couldn't arm the restore: ${String(e)}`);
+      return;
+    }
+
+    if (await useHostedShell(restoreDecision.harness)) {
+      try {
+        const terminals = await ensureTerminalReady();
+        if (!terminals) { fail("Couldn't open a shell to resume in."); return; }
+        await terminals.openAgentShell({ cwd: target.cwd, sessionId,
+          prompt: buildRestorePrompt(sessionId, new Date(), target.primed, rescindedIds.has(sessionId) || !!opts.rescinded),
+          permissionMode: "plan", model: session.model, effort: session.effort,
+          addDirs: projectPath && projectPath !== target.cwd ? [projectPath] : [], backend: restoreDecision.harness === "codex" ? "codex" : "claude-code",
+          restore: true, restorePrimed: target.primed, restoreRescinded: rescindedIds.has(sessionId) || !!opts.rescinded,
+        }, { background: true, beforeStart: id => onRestore({ type: "dispatched", sessionId, terminalId: id, history: target.history }) });
+      } catch (error) { fail(`Couldn't resume the shell: ${String(error)}`); }
       return;
     }
 
@@ -5961,6 +6020,9 @@ function App() {
   // themselves so they can order their own steps (render the blocker inside
   // their own island, hold the ⏎ to carry through). This catches the door that
   // forgets — which is exactly how the Drafter shipped with zero preflight.
+  const useHostedShell = async (backend: string | null | undefined) =>
+    ["claude-code", "codex"].includes(backend ?? "claude-code") && await invoke<string>("terminal_default_view_get").catch(() => "raw") === "shell";
+
   const launchPlan = async (req: {
     choice?: BackendChoice;
     /** `run` is "Just run it": the same terminal, handoff and lineage, but a
@@ -5968,6 +6030,7 @@ function App() {
      *  plan claim, no pending plan card. Default `plan`. */
     mode?: "plan" | "run";
     origin: LaunchOrigin;
+    background?: boolean;
     prompt: string;
     projectPath: string | null;
     draftId: string | null;
@@ -6095,16 +6158,15 @@ function App() {
         ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
         : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
     }\r`;
-    suppressTerminalRevealFocus();
-    setTermFullscreen(false);
-    revealTerm();
-    const terminalId =
-      (await ensureTerminalReady())?.openSessionTerminal(req.projectPath) ??
-      null;
+    if (!req.background) { suppressTerminalRevealFocus(); setTermFullscreen(false); revealTerm(); }
+    const hosted = await useHostedShell(choice.backend);
+    const terminals = await ensureTerminalReady();
+    if (!terminals) return { ok: false, reason: "couldn't open a terminal", retryable: true };
+    let terminalId = hosted ? null : terminals.openSessionTerminal(req.projectPath, { background: req.background });
     // No terminal means the command was never typed and nothing will ever
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
-    if (!terminalId) return { ok: false, reason: "couldn't open a terminal", retryable: true };
+    if (!hosted && !terminalId) return { ok: false, reason: "couldn't open a terminal", retryable: true };
 
     // Polis ledger: record the launched prompt (the plan session doesn't exist
     // yet, so this is the only place its body is first-class). `origin` is
@@ -6135,21 +6197,32 @@ function App() {
     }).then(() => null).catch((err: unknown) => String(err));
     if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
-    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
-    // Register before typing: an immediate intercept must be able to match the
-    // launch. A run sends no plan, so it registers nothing for an intercept to
-    // match and claims no decision window.
-    if (!run) launchedPlansRef.current.set(launchId, pending);
-    const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId, [{ stage: "launch", data: cmd }]);
-    if (!delivery.ok) {
-      launchedPlansRef.current.delete(launchId);
-      return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
+    const makePending = (id: string): PendingLaunch => ({ launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId: id, draftId: req.draftId, restore: req.restore });
+    if (hosted) {
+      try {
+        terminalId = await terminals.openAgentShell({ cwd: req.projectPath, prompt: trimmed,
+          permissionMode: run ? "auto" : "plan", model: choice.model, effort: choice.effort,
+          addDirs, launchId, backend: choice.backend === "codex" ? "codex" : "claude-code",
+        }, { background: req.background, beforeStart: id => { if (!run) launchedPlansRef.current.set(launchId, makePending(id)); } });
+      } catch (error) {
+        launchedPlansRef.current.delete(launchId);
+        return { ok: false, reason: `Couldn't start the shell: ${String(error)}`, retryable: true };
+      }
+    } else {
+      if (!run) launchedPlansRef.current.set(launchId, makePending(terminalId!));
+      const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId!, [{ stage: "launch", data: cmd }]);
+      if (!delivery.ok) {
+        launchedPlansRef.current.delete(launchId);
+        return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
+      }
     }
+    if (!terminalId) return { ok: false, reason: "The shell did not return a terminal", retryable: true };
+    const pending = makePending(terminalId);
     if (run) {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
       setLastLaunchProject(req.projectPath!);
-      setToast("Running in the terminal below ↓");
+      setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
       return { ok: true, terminalId, launchId };
     }
 
@@ -6161,7 +6234,7 @@ function App() {
     setReadinessNow(startedAt);
     if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
-    setToast("Launching plan in the terminal below ↓");
+    setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
     return { ok: true, terminalId, launchId };
   };
 
@@ -6232,9 +6305,12 @@ function App() {
       folder ??
       drafterProjectPath ??
       lastLaunchProject;
-    selectSurface("document");
-    setSendError(null);
-    setSendConfirm({ markdown, initialProject });
+    setFrontDoorText(markdown);
+    setFrontDoorProject({ path: initialProject });
+    setBrowserIslandDestination("plan");
+    setFrontDoorOpen(false);
+    setBrowserIslandOpen(true);
+    setFrontDoorFocus(value => value + 1);
   };
 
   useEffect(() => {
@@ -6253,10 +6329,10 @@ function App() {
 
   // Repo confirmed in SendToRedlineDialog: bring the document pane forward and
   // launch the held plan in a terminal scoped to the chosen repo.
-  const runContinuation = async ({ markdown, source, destination, project, missionHandoff }: { markdown: string; source?: ContinueRequest["source"]; destination: ContinueDestination; project: string | null; missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" } }) => {
+  const runContinuation = async ({ markdown, source, destination, project, missionHandoff, harness }: { markdown: string; source?: ContinueRequest["source"]; destination: ContinueDestination; project: string | null; harness?: BackendChoice; missionHandoff?: { missionId: string; handoffId: string; destination: "plan" | "auto" | "run" } }) => {
     if (sendPendingRef.current || !markdown.trim()) throw new Error("Another continuation is starting; try again in a moment.");
     let handoff = missionHandoff;
-    if (destination === "auto" && !project) throw new Error("Choose a project for the auto session.");
+    if ((destination === "auto" || destination === "run") && !project) throw new Error("Choose a project to build in.");
     sendPendingRef.current = true; setSendPending(true); setSendError(null);
     let claimToken: string | undefined;
     let preparedDraftId: string | null = null;
@@ -6310,6 +6386,7 @@ function App() {
         return;
       }
       const result = await launchPlan({
+        mode: destination === "run" ? "run" : "plan", choice: harness,
         origin: source ? continuationOrigin(source.conversationKind) : "browser", prompt: markdown, projectPath: project,
         // Preserve the actual saved brief's lineage; unrelated open drafts
         // are never inherited by a direct browser-reply launch.
@@ -6347,19 +6424,31 @@ function App() {
     try { await runContinuation({ ...sendConfirm, destination: sendConfirm.destination ?? sendConfirm.missionHandoff?.destination ?? "plan", project }); }
     catch (error) { setSendError(String(error)); }
   };
-  const continueChatAsPlan = async (request: ChatPlanRequest) => {
+  const continueChat = async (request: ChatPlanRequest, destination: "plan" | "run") => {
     const { companionId, instruction } = request;
-    setChatReceipts(previous => ({ ...previous, [companionId]: { status: "starting", instruction } }));
+    setChatReceipts(previous => ({ ...previous, [companionId]: { kind: destination, status: "starting", instruction } }));
     try {
-      const brief = prepareConversationPreview({ conversationKind: "companion", conversationId: companionId, messages: request.messages }, undefined, { instruction });
+      const brief = await prepareCompanionContinuation(companionId, request.messages, instruction, text => {
+        let seed = chatHandoffSeeds.current.get(companionId);
+        if (!seed || seed.text !== text) {
+          seed = { text, id: crypto.randomUUID() };
+          chatHandoffSeeds.current.set(companionId, seed);
+        }
+        return invoke<ContinuationMessage>("companion_handoff_seed", {
+          companionId, messageId: seed.id, text, projectPath: request.project?.path ?? null,
+        });
+      });
       const project = resolveLaunchProject(brief.markdown, request.project, { projectOptions, openFolder: null, lastLaunchProject });
-      const result = await runContinuation({ ...brief, destination: "plan", project });
-      setChatReceipts(previous => previous[companionId]?.status === "done" && result?.ok && previous[companionId]?.launchId === result.launchId ? previous : ({ ...previous, [companionId]: result?.ok ? { status: "planning", instruction, terminalId: result.terminalId, launchId: result.launchId } : { status: "error", instruction, error: result && !result.ok ? result.reason : "The brief is saved; its existing launch is already claimed.", blocked: result && !result.ok ? result.blocked : undefined } }));
-    } catch (error) { setChatReceipts(previous => ({ ...previous, [companionId]: { status: "error", instruction, error: String(error) } })); }
+      const result = await runContinuation({ ...brief, destination, project, harness: request.harness });
+      setChatReceipts(previous => previous[companionId]?.status === "done" && result?.ok && previous[companionId]?.launchId === result.launchId ? previous : ({ ...previous, [companionId]: result?.ok ? { kind: destination, status: "planning", instruction, terminalId: result.terminalId, launchId: result.launchId } : { kind: destination, status: "error", instruction, error: result && !result.ok ? result.reason : "The brief is saved; its existing launch is already claimed.", blocked: result && !result.ok ? result.blocked : undefined } }));
+    } catch (error) { setChatReceipts(previous => ({ ...previous, [companionId]: { kind: destination, status: "error", instruction, error: String(error) } })); }
   };
 
+  const continueChatAsPlan = (request: ChatPlanRequest) => continueChat(request, "plan");
+  const continueChatAsRun = (request: ChatPlanRequest) => continueChat(request, "run");
+
   const queuedChatPlans = useQueuedChatPlans(request => { void continueChatAsPlan(request); }, (request, error) => {
-    setChatReceipts(previous => ({ ...previous, [request.companionId]: { status: "error", instruction: request.instruction, error } }));
+    setChatReceipts(previous => ({ ...previous, [request.companionId]: { kind: "plan", status: "error", instruction: request.instruction, error } }));
     setToast({ message: error, action: { label: "Open chat", onAction: () => openChat(request.companionId) } });
   });
 
@@ -6516,6 +6605,45 @@ function App() {
     const note = restoreCopiedNote(restoreDecision, target);
     setToast(note.message, note.ms);
   };
+
+  const [shellRestoreTarget, setShellRestoreTarget] = useState<string | null>(null);
+  const shellNavigation = useRef<(detail: { kind: string; value: string; sessionId: string; cwd?: string | null }) => void>(() => {});
+  shellNavigation.current = ({ kind, value, sessionId, cwd }) => {
+    if (kind === "url") { openUrlInBrowser(value); return; }
+    if (kind === "file") {
+      const path = value.replace(/:\d+(?::\d+)?$/, "");
+      const repo = cwd ?? summaries.find(s => s.sessionId === sessionId)?.projectPath;
+      handleOpenFile(path.startsWith("/") ? path : repo ? `${repo.replace(/\/$/, "")}/${path}` : path);
+      return;
+    }
+    if (kind === "block") {
+      if (!summaries.some(plan => plan.sessionId === sessionId)) { setToast("This shell has no captured plan containing that block yet."); return; }
+      setActiveId(sessionId); selectSessions(); selectSurface("document");
+      setRunPlanAnchor({ sessionId, blockId: value.replace(/^rl:/, "") }); return;
+    }
+    if (kind === "restore") {
+      if (!summaries.some(plan => plan.sessionId === sessionId)) {
+        setToast("This shell has no captured plan to restore yet.");
+        return;
+      }
+      setActiveId(sessionId); selectSessions(); selectSurface("document"); setShellRestoreTarget(sessionId); return;
+    }
+    if (kind === "review") {
+      if (summaries.some(s => s.sessionId === sessionId)) { setActiveId(sessionId); selectSessions(); selectSurface("document"); }
+      else if (cwd) { codeReview.setSource("uncommitted"); void codeReview.openReview(cwd, "uncommitted"); selectSurface("review"); }
+      else setToast("No plan or repository is linked to this shell yet.");
+    }
+  };
+  useEffect(() => {
+    const navigate = (event: Event) => { const detail = (event as CustomEvent).detail; if (detail && typeof detail.kind === "string" && typeof detail.value === "string" && typeof detail.sessionId === "string") shellNavigation.current(detail); };
+    window.addEventListener("redline-shell-open", navigate);
+    return () => window.removeEventListener("redline-shell-open", navigate);
+  }, []);
+  useEffect(() => {
+    if (!shellRestoreTarget || session?.sessionId !== shellRestoreTarget || busy) return;
+    setShellRestoreTarget(null);
+    void restorePlanSessionWith({});
+  }, [shellRestoreTarget, session?.sessionId, busy]);
 
   // Local date/time stamp embedded in export file names.
   const exportStamp = () => {
@@ -7273,6 +7401,29 @@ function App() {
     setFrontDoorAttachments([]);
   };
 
+  const launchFromBrowserIsland = async (projectOverride?: string, mode: "plan" | "run" = "plan") => {
+    if (browserIslandLaunching) return;
+    const text = composePrompt(frontDoorText, frontDoorAttachments); if (!text) return;
+    const capturedPage = browserIslandAttachPage ? browserIslandPage : null;
+    const capturedCartId = browserDock.cartId;
+    setBrowserIslandLaunching(true);
+    try {
+      const [{ browserIslandPrompt }, taskMarkdown, selection] = await Promise.all([
+        import("./lib/browserIsland"),
+        browserIslandAttachTasks ? Promise.all([invoke<import("./types").BrowseListView | null>("browse_list_get", { browseId: capturedCartId }), import("./lib/browseList")]).then(([view, module]) => view ? module.renderListMarkdown(view.list, view.items) : "") : Promise.resolve(""),
+        capturedPage ? invoke<string>("browser_snapshot", { label: capturedPage.label }).then(raw => { const value = JSON.parse(raw); return typeof value.selection === "string" ? value.selection : ""; }).catch(() => "") : Promise.resolve(""),
+      ]);
+      const result = await launchPlan({ mode, origin: "browser-island", background: true,
+        prompt: browserIslandPrompt(text, capturedPage ? { ...capturedPage, selection } : null, taskMarkdown),
+        projectPath: projectOverride ?? frontDoorResolvedProject, draftId: null,
+        restore: { kind: "composer", text: frontDoorText, attachments: frontDoorAttachments },
+      });
+      if (!result.ok) { setFrontDoorRefusal(prev => ({ item: result.blocked ?? null, reason: result.blocked ? null : result.reason, nonce: (prev?.nonce ?? 0) + 1 })); setToast({ message: result.reason, placement: "top" }); return; }
+      setFrontDoorText(""); setFrontDoorAttachments([]);
+    } catch (error) { setToast({ message: `Could not launch: ${String(error)}`, placement: "top" }); }
+    finally { setBrowserIslandLaunching(false); }
+  };
+
   // The Front Door's island opening into the Drafter's page.
   //
   // Two things made this a route change instead of an expansion. First, it
@@ -7783,7 +7934,7 @@ function App() {
 
   // The door's one flight pill: its own plan launch or its own run, whichever
   // started last.
-  const frontDoorPlan = pendingLaunch?.origin === "front-door" ? { ...pendingLaunch, kind: "plan" as const } : null;
+  const frontDoorPlan = (pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island") ? { ...pendingLaunch, kind: "plan" as const } : null;
   const frontDoorFlight =
     frontDoorPlan && runFlight
       ? (runFlight.startedAt > frontDoorPlan.startedAt ? runFlight : frontDoorPlan)
@@ -7841,16 +7992,17 @@ function App() {
     }
     setFrontDoorOpen(open);
   };
-  const renderMonochatComposer = (accessories?: React.ReactNode, welcome = false) => (
+  const renderMonochatComposer = (accessories?: React.ReactNode, welcome = false, workbench?: ChatWorkbenchComposer, browserCompact = false) => (
               <FrontDoor
-                visible={shellReady && monochatVisible}
+                visible={shellReady && (browserCompact ? browserIslandOpen : monochatVisible)}
                 floating
-                welcome={welcome}
+                welcome={welcome && !browserCompact}
                 recents={doorRecentItems}
                 onOpenRecent={openDoorRecent}
-                autoFocusOnShow={frontDoorOpen && !doorSummonedQuiet}
+                autoFocusOnShow={!browserCompact && frontDoorOpen && !doorSummonedQuiet}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
+                workbench={workbench}
                 text={frontDoorText}
                 onTextChange={setFrontDoorText}
                 choice={frontDoorProject}
@@ -7867,16 +8019,17 @@ function App() {
                 // Only ITS launch: one pending state serves every door, so the
                 // front door must not render a card for the Drafter's launch.
                 pending={frontDoorFlight}
-                onLaunch={(project) => void launchFromFrontDoor(project)}
-                onRun={(project) => void launchFromFrontDoor(project, "run")}
+                onLaunch={(project) => void (browserCompact ? launchFromBrowserIsland(project) : launchFromFrontDoor(project))}
+                onRun={(project) => void (browserCompact ? launchFromBrowserIsland(project, "run") : launchFromFrontDoor(project, "run"))}
                 // A refusal from App's own backstop gate, so the fix lands in
                 // the island rather than only in a corner toast.
                 refusal={frontDoorRefusal}
                 onDrafter={drafterFromFrontDoor}
                 onChat={() => void chatFromFrontDoor()}
-                chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                destination={frontDoorDest}
-                onDestinationChange={setFrontDoorDest}
+                chatEnabled={!browserCompact && surfaceEnabled(effectiveWorkspace, "chat")}
+                allowedDestinations={browserCompact ? ["plan", "run"] : undefined}
+                destination={browserCompact ? browserIslandDestination : frontDoorDest}
+                onDestinationChange={browserCompact ? setBrowserIslandDestination : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -7927,7 +8080,7 @@ function App() {
                 onOpenChat={openChat}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
-                dictationEnabled={!dockOwnsMic && monochatVisible}
+                dictationEnabled={!dockOwnsMic && (browserCompact ? browserIslandOpen : monochatVisible)}
               />
   );
 
@@ -8140,7 +8293,7 @@ function App() {
           data-tour="sessions"
           className="flex flex-col shrink-0 rl-sidebar-aside"
         >
-          <SidebarTabStrip
+          {openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
             openFolders={openFolders}
             sidebarTab={sidebarTab}
             linkNav={linkNav}
@@ -8148,7 +8301,7 @@ function App() {
             onSelectFolder={selectFolderTab}
             onCloseFolder={closeFolder}
             onToggleLink={() => setLinkNav((v) => !v)}
-          />
+          /></Suspense>}
           {sidebarTab.kind === "sessions" ? (
             // Chunk warmed by the boot effect; null while it lands — the house
             // rule is a quietly blank plate, never a spinner.
@@ -8166,6 +8319,8 @@ function App() {
               onNewPlan={openFrontDoor}
               onCombine={(ids) => void beginCombine(ids)}
               onDelete={deleteSession}
+              onSetPlanState={(id, state) => { void setPlanState(id, state); }}
+              onMoveProject={id => { void openMovePlan(id); }}
               onExport={exportRevision}
               onSelectRevision={(sessionId, versionNumber) => {
                 // The sidebar fires this for the row click. The session it
@@ -8732,6 +8887,17 @@ function App() {
                   <ReviewPanel
                     review={codeReview}
                     projectOptions={projectOptions}
+                    onOpenTerminal={(cwd, command) => {
+                      suppressTerminalRevealFocus(); setTermFullscreen(false); revealTerm();
+                      void ensureTerminalReady().then(async terminals => {
+                        const id = terminals?.openSessionTerminal(cwd);
+                        if (!id) { setToast("Couldn't open a terminal", 6000); return; }
+                        if (command) {
+                          const result = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: command }]);
+                          if (!result.ok) setToast(`Couldn't prepare the command: ${result.reason}`, 6000);
+                        }
+                      }).catch(error => setToast(`Couldn't open a terminal: ${String(error)}`, 6000));
+                    }}
                     onClose={() => selectSurface("document")}
                   />
                 </Suspense>
@@ -9175,7 +9341,7 @@ function App() {
                 <DockContextStrip
                   contexts={browserOpen ? dockContexts.map((context) => ({
                     ...context,
-                    label: ({ browse: "Page chat", browselist: "Cart", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
+                    label: ({ browse: "Page chat", browselist: "Task list", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
                   })) : dockContexts}
                   activeKey={dockContext.key}
                   onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); }}
@@ -9523,7 +9689,7 @@ function App() {
                         <button
                           type="button"
                           onClick={() =>
-                            void showRawTerminal(attemptHere?.terminalId ?? null)
+                            void showRestoreRawTerminal(attemptHere?.terminalId ?? null)
                           }
                           disabled={!attemptHere?.terminalId}
                           title="Open the terminal this restore is running in."
@@ -9573,7 +9739,7 @@ function App() {
                         <button
                           type="button"
                           onClick={() =>
-                            void showRawTerminal(restoreFailure.terminalId)
+                            void showRestoreRawTerminal(restoreFailure.terminalId)
                           }
                           disabled={!restoreFailure.terminalId}
                           title="Open the terminal this restore was running in."
@@ -10073,6 +10239,9 @@ function App() {
           hides outright behind a SHELL_EDGE strip of hull. */}
       <ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
       <Footer
+        planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
+        onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
+        onMoveProject={session ? () => { void openMovePlan(session.sessionId); } : undefined}
         comments={threadComments}
         sessionReady={sessionReady}
         canSubmit={canSubmit}
@@ -10144,6 +10313,9 @@ function App() {
           onCancel={() => setPlanSearch(null)}
         />
       )}
+      {movePlan && <Suspense fallback={null}><MoveToRepoDialog markdown={movePlan.revisions[movePlan.revisions.length - 1]?.rawPlanMarkdown ?? ""}
+        currentProject={movePlan.projectPath} options={projectOptions}
+        onCancel={() => setMovePlan(null)} onConfirm={path => moveSessionProject(movePlan.sessionId, path)}/></Suspense>}
       {sendConfirm && (
         <SendToRedlineDialog
           markdown={sendConfirm.markdown}
@@ -10357,6 +10529,16 @@ function App() {
         </Suspense>
       )}
       <MonochatIsland
+        floating={mainSurface === "browser"}
+        floatingOpen={browserIslandOpen}
+        onFloatingOpenChange={setBrowserIslandOpen}
+        floatingContent={<div className="rl-browser-island-content">
+          <div className="rl-browser-context-chips" role="group" aria-label="Attach browser context">
+            <button type="button" aria-pressed={browserIslandAttachPage} title={browserIslandPage?.url ?? "Current page"} onClick={() => setBrowserIslandAttachPage(value => !value)}>This page</button>
+            <button type="button" aria-pressed={browserIslandAttachTasks} onClick={() => setBrowserIslandAttachTasks(value => !value)}>Task list</button>
+          </div>
+          {renderMonochatComposer(undefined, false, undefined, true)}
+        </div>}
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
         landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
         surfaceKey={`${mainSurface}:${activeId ?? ""}:${drafterDraftId ?? ""}`}
@@ -10364,15 +10546,20 @@ function App() {
         open={frontDoorOpen}
         onOpenChange={onDoorOpenChange}
         context={activeSurface.label ?? activeSurface.kind}
-        busy={monochatBusy || monochatForks.size > 0}
+        busy={browserIslandLaunching || monochatBusy || monochatForks.size > 0}
       >
         <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
         {!chatId && renderMonochatComposer(undefined, true)}
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
-              composer={{ text: frontDoorText, onTextChange: setFrontDoorText, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: renderMonochatComposer }}
+              composer={{ text: frontDoorText, onTextChange: setFrontDoorText, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer(actions, false, workbench) }}
               harness={frontDoorBackend}
+              modelCatalogs={modelCatalogs}
+              onHarnessChange={setFrontDoorBackend}
+              onNeedModels={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)}
+              onRun={request => { void continueChatAsRun(request); }}
+              onReviewChanges={projectPath => { setFrontDoorOpen(false); codeReview.setSource("uncommitted"); void codeReview.openReview(projectPath, "uncommitted"); selectSurface("review"); }}
               target={activeSurface}
               modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
               onActivityChange={setMonochatBusy}
@@ -10425,6 +10612,7 @@ function App() {
 <Suspense fallback={null}>
               <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
                 <BrowserPane
+                  onPageContext={setBrowserIslandPage}
                   onOpenDraft={(draftId) => { setDrafterDraftId(draftId); setDrafterShelfOpen(false); selectSurface("drafter"); }}
                   onMissionContinue={(missionId, destination, body, handoffId) => {
                     const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;

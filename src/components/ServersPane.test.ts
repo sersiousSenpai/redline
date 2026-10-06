@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatLastRun, middleTruncate } from "./ServersPane";
+import { formatLastRun, middleTruncate, splitStack } from "./ServersPane";
 
 describe("middleTruncate", () => {
   it("leaves a short path alone", () => {
@@ -136,33 +136,36 @@ describe("Redline service row", () => {
     expect(row.textContent).toContain("App frontend :1420");
     expect(row.textContent).toContain("App service :7676");
     expect(row.querySelectorAll("button, img").length).toBe(0);
-    expect(c.querySelector(".rl-server-grid")).toBeNull();
+    expect(c.querySelector(".rl-server-row")).toBeNull();
   });
 });
 
-it("uses repo artwork for live and recent servers without capturing pages, and falls back after a broken logo", async () => {
-  const logo = "data:image/png;base64,project-logo";
-  mocks.invoke.mockImplementation(async (command, args) => command === "repo_icon"
-    ? { root: args.cwd, name: "my-repo", dataUrl: logo } : []);
+it("renders status rows without fetching artwork and opens or runs a server", async () => {
   const server = { pid: 42, port: 3100, extraPorts: [], url: "http://localhost:3100", comm: "node", args: "vite",
-    projectPath: "/projects/artwork", projectName: "web", stack: "Vite — web", runCommand: "npm run dev", thumbPath: "/old-screenshot.png" };
-  let c!: HTMLElement;
-  await act(async () => {
-    c = mountComponent(createElement(ServersPane, {
-      scan: { running: [server], recent: [{ ...server, id: 1, port: 3101, lastSeenAt: Date.now(), portBusy: false }], others: [] },
-      error: null, projectOptions: [], onRun: vi.fn(), onRefresh: vi.fn(), onStop: vi.fn(),
-      onPlanStop: async () => null, onOpenUrl: vi.fn(),
-    }));
-  });
-  expect(mocks.invoke.mock.calls).toEqual([["repo_icon", { cwd: "/projects/artwork" }]]);
-  expect(c.querySelectorAll('img[alt="my-repo logo"]')).toHaveLength(2);
-  const first = c.querySelector<HTMLImageElement>("img")!;
-  expect(first.getAttribute("src")).toBe(logo);
-  act(() => first.dispatchEvent(new Event("error")));
-  const artwork = c.querySelector(".rl-project-art")!;
-  expect(artwork.getAttribute("data-has-logo")).toBe("false");
-  expect(artwork.querySelector("img")).toBeNull();
-  expect(artwork.textContent).toBe("my-repo");
+    projectPath: "/projects/artwork", projectName: "web", stack: "Vite — web", runCommand: "npm run dev", thumbPath: null };
+  const onOpenUrl = vi.fn(), onRun = vi.fn();
+  const c = mountComponent(createElement(ServersPane, {
+    scan: { running: [server], recent: [{ ...server, id: 1, port: 3101, lastSeenAt: Date.now(), portBusy: false },
+      { ...server, id: 2, port: 3102, lastSeenAt: Date.now(), portBusy: false, runCommand: "" }], others: [] },
+    error: null, projectOptions: [], onRun, onRefresh: vi.fn(), onStop: vi.fn(), onPlanStop: async () => null, onOpenUrl,
+  }));
+  expect(mocks.invoke).not.toHaveBeenCalled();
+  expect(c.querySelectorAll('.rl-server-row')).toHaveLength(3);
+  expect([...c.querySelectorAll('.rl-server-dot')].map(dot => dot.getAttribute('data-live'))).toEqual(['true', 'false', 'false']);
+  expect(c.querySelector('.rl-server-name')?.textContent).toBe('web');
+  expect(c.querySelector('.rl-server-stack')?.textContent).toBe('Vite');
+  await clickText('localhost:3100');
+  expect(onOpenUrl).toHaveBeenCalledWith('http://localhost:3100');
+  const run = c.querySelectorAll<HTMLButtonElement>('.rl-server-btn--go');
+  await act(async () => run[0].click());
+  expect(onRun).toHaveBeenCalledWith('/projects/artwork', 'npm run dev');
+  expect(run[1].disabled).toBe(true);
+});
+
+it("splits framework and project without losing dashes in the name", () => {
+  expect(splitStack('Next.js — hireboard-web', 'fallback')).toEqual({ framework:'Next.js', name:'hireboard-web' });
+  expect(splitStack('rapportd', 'system')).toEqual({ framework:'rapportd', name:'system' });
+  expect(splitStack('Node — one — two', 'fallback').name).toBe('one — two');
 });
 
 const probe: ProbeView = { projectName: "web", stack: "Node — web", runCommand: "pnpm run dev", scripts: ["dev", "test"], exists: true, packageManager: "pnpm" };

@@ -676,6 +676,7 @@ export interface ThreadMessage {
 
 /** One send waiting behind an in-flight turn. */
 export interface QueuedTurn {
+  mode?: "chat" | "build";
   messageId: string;
   text: string;
   queuedAt: number;
@@ -964,6 +965,7 @@ export interface Companion {
 
 /** One persisted Companion turn, surface-tagged with where the user was. */
 export interface CompanionMessage {
+  mode?: "chat" | "build";
   id: string;
   companionId: string;
   /** "user" | "assistant". */
@@ -1068,7 +1070,8 @@ export type DiffSource =
   | "unstagedPlusUntracked"
   | "lastCommit"
   | "vsBase"
-  | "commitSha";
+  | "commitSha"
+  | "runBranch";
 
 export type DiffLineKind = "context" | "add" | "del";
 
@@ -1292,6 +1295,8 @@ export interface PrRequest {
 /** The `review_push` command's request. The target is the PUSH destination
  *  only — the checkout is never switched. */
 export interface PushRequest {
+  /** Save locally without requiring a connected team copy. Defaults to true. */
+  push?: boolean;
   repo: string;
   reviewId: string;
   message: string;

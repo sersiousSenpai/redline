@@ -61,7 +61,9 @@ pub const KNOWN_SEATS: &[&str] = &[
     "seatassign",
     "ai_review",
     "ai_commit",
+    "change_narrator",
     "browse_locator",
+    "browse_organizer",
     "orchestrator",
     "fork_plan",
     "fork_review",
@@ -186,11 +188,17 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
         "When a code review opens with pre-review enabled.",
     ),
     (
+        "change_narrator",
+        "Explains reviewed changes in plain language using a sampled diff and no tools.",
+        "When Guided review opens or a saved version is inspected.",
+    ),
+    (
         "ai_commit",
         "Drafts a short commit subject at low effort from a sampled review \
          diff, then derives branch and PR defaults. Limited to 15 seconds.",
         "When you click Draft in a review's push dialog.",
     ),
+    ("browse_organizer", "Names and files browser tab groups from bounded page metadata, with no tools.", "On Organize or a quiet batch of new pages."),
     (
         "browse_locator",
         "Names the component a browser working-list note is about, from the \

@@ -93,6 +93,7 @@ md.core.ruler.push("rl_callouts", (state) => {
 
 interface MarkdownViewProps {
   body: string;
+  figure?: "plate" | "ink";
   /** Adds extra-tight vertical rhythm for inline chat-style bubbles. */
   compact?: boolean;
   /** Roomy prose for the chat room at plate scale. Wins over `compact`. */
@@ -162,6 +163,7 @@ export const MarkdownView = memo(function MarkdownView({
   compact = false,
   room = false,
   rich = false,
+  figure = "plate",
   onLinkClick,
 }: MarkdownViewProps) {
   // `rl-md-own-links` tells the global external-link handler (installExternal-
@@ -233,7 +235,7 @@ export const MarkdownView = memo(function MarkdownView({
     <div className={cls} onClick={onClick}>
       {segments.map((seg, i) =>
         seg.kind === "mermaid" ? (
-          <MermaidView key={i} code={seg.code} />
+          <MermaidView key={i} code={seg.code} variant={figure} />
         ) : (
           <Fragment key={i}>
             <div dangerouslySetInnerHTML={{ __html: segmentHtml[i] ?? "" }} />

@@ -637,7 +637,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 5;
+    const SCHEMA_VERSION: i64 = 6;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -657,6 +657,7 @@ impl Database {
             (3, Self::migrate_v3),
             (4, Self::migrate_v4),
             (5, Self::migrate_v5),
+            (6, Self::migrate_v6),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -713,6 +714,7 @@ impl Database {
             // lineage has never heard of either, and refusing over them would
             // brick a database that is otherwise perfectly usable.
             Self::migrate_v5(conn)?;
+            Self::migrate_v6(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -829,7 +831,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -968,6 +970,19 @@ impl Database {
             CREATE INDEX IF NOT EXISTS scaled_runs_by_plan ON scaled_runs(plan_session_id, created_at);
             "#,
         )?;
+        Ok(())
+    }
+
+    /// Additive v6 workbench and Guided Git state; safe to replay after interruption.
+    fn migrate_v6(conn: &Connection) -> rusqlite::Result<()> {
+        for (table, column) in [("companion_sessions", "project_path"), ("companion_messages", "meta")] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if !columns.is_empty() && !columns.iter().any(|name| name == column) {
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
+            }
+        }
+        crate::guided::migrate(conn)?;
         Ok(())
     }
 
@@ -2517,6 +2532,16 @@ impl Database {
     // Memory-by-session: session tree + context journal
     // -----------------------------------------------------------------------
 
+    /// Move a plan and its session-origin work together. Prompt provenance is
+    /// historical and deliberately retains the directory recorded at capture.
+    pub fn set_session_project(&self, session_id: &str, path: &str, name: &str, at: i64) -> rusqlite::Result<()> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE sessions SET project_path=?2, project_name=?3, updated_at=?4 WHERE session_id=?1", params![session_id, path, name, at])?;
+        tx.execute("UPDATE work_items SET project_path=?2 WHERE origin_kind='session' AND origin_id=?1", params![session_id, path])?;
+        tx.commit()
+    }
+
     /// Append a context-journal row (the Companion's passive-awareness feed),
     /// pruning the working set on insert: keep the newest `JOURNAL_KEEP_ROWS`
     /// and nothing older than `JOURNAL_KEEP_MS`. Best-effort at call sites.
@@ -2559,6 +2584,35 @@ impl Database {
              FROM context_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![since_id.max(0), limit.max(1)], |r| {
+            Ok(JournalRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                surface_kind: r.get(3)?,
+                surface_id: r.get(4)?,
+                label: r.get(5)?,
+                detail: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The newest bounded delta, returned in chronological order. Interactive
+    /// shells need the current surface context even when a conversation is new
+    /// or was idle long enough to accumulate more than one page of journal rows.
+    pub fn recent_journal_since(
+        &self,
+        since_id: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<JournalRow>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, surface_kind, surface_id, label, detail FROM (
+                SELECT id, ts, kind, surface_kind, surface_id, label, detail
+                FROM context_journal WHERE id > ?1 ORDER BY id DESC LIMIT ?2
+             ) ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![since_id.max(0), limit.clamp(1, 2000)], |r| {
             Ok(JournalRow {
                 id: r.get(0)?,
                 ts: r.get(1)?,
@@ -2729,6 +2783,31 @@ impl Database {
         rows.collect()
     }
 
+    pub fn companion_project(&self, id: &str) -> Option<String> {
+        self.lock_conn().query_row("SELECT project_path FROM companion_sessions WHERE companion_id=?1", [id], |r| r.get(0)).optional().ok().flatten().flatten()
+    }
+
+    pub fn set_companion_project(&self, id: &str, path: Option<&str>) -> rusqlite::Result<bool> {
+        Ok(self.lock_conn().execute("UPDATE companion_sessions SET project_path=?2 WHERE companion_id=?1", params![id, path])? > 0)
+    }
+
+    pub fn set_companion_meta(&self, id: &str, meta: &str) -> rusqlite::Result<()> {
+        self.lock_conn().execute("UPDATE companion_messages SET meta=?2 WHERE id=?1", params![id, meta])?;
+        Ok(())
+    }
+
+    pub fn companion_meta(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare("SELECT id,meta FROM companion_messages WHERE companion_id=?1 AND meta IS NOT NULL ORDER BY created_at,id")?;
+        let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
+        rows
+    }
+
+    pub fn advance_companion_message(&self, id: &str) -> rusqlite::Result<()> {
+        self.lock_conn().execute("UPDATE companion_messages SET status='complete',created_at=MAX(?2,1+(SELECT COALESCE(MAX(created_at),0) FROM companion_messages WHERE companion_id=(SELECT companion_id FROM companion_messages WHERE id=?1))) WHERE id=?1", params![id, crate::state::now_millis()])?;
+        Ok(())
+    }
+
     /// One chat's per-conversation seat override, as `(model, effort)`. Both
     /// `None` means "use the `companion` seat's own flags" — the override is
     /// additive, never a second source of truth for the seat.
@@ -2876,6 +2955,40 @@ impl Database {
         Ok(())
     }
 
+    /// A first Plan/Run action still belongs to its chat. The supplied nonce
+    /// makes a retry reuse the source row without sending an agent turn.
+    pub fn persist_companion_steer_segment(
+        &self,
+        segment: &crate::state::CompanionMessage,
+        user_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
+        if !segment.body.is_empty() {
+            tx.execute("INSERT INTO companion_messages(id,companion_id,role,body,status,surface_kind,surface_id,surface_label,created_at) VALUES(?1,?2,'assistant',?3,'complete',?4,?5,?6,MAX(?7,1+(SELECT COALESCE(MAX(created_at),0) FROM companion_messages WHERE companion_id=?2)))",params![segment.id,segment.companion_id,segment.body,segment.surface_kind,segment.surface_id,segment.surface_label,segment.created_at])?;
+        }
+        if tx.execute("UPDATE companion_messages SET status='complete',created_at=1+(SELECT COALESCE(MAX(created_at),0) FROM companion_messages WHERE companion_id=?2) WHERE id=?1 AND companion_id=?2",params![user_id,segment.companion_id])?!=1{return Err(rusqlite::Error::QueryReturnedNoRows);}
+        tx.commit()
+    }
+
+    pub fn seed_companion_handoff(
+        &self,
+        companion_id: &str,
+        message_id: &str,
+        body: &str,
+        project_path: Option<&str>,
+        at: i64,
+    ) -> rusqlite::Result<Option<crate::state::CompanionMessage>> {
+        let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO companion_messages(id,companion_id,role,body,status,surface_kind,created_at) SELECT ?1,?2,'user',?3,'complete','chat',MAX(?4,1+(SELECT COALESCE(MAX(created_at),0) FROM companion_messages WHERE companion_id=?2)) WHERE EXISTS(SELECT 1 FROM companion_sessions WHERE companion_id=?2) ON CONFLICT(id) DO NOTHING",params![message_id,companion_id,body,at])?;
+        let row=tx.query_row("SELECT id,companion_id,role,body,status,surface_kind,surface_id,surface_label,created_at FROM companion_messages WHERE id=?1 AND companion_id=?2 AND body=?3 AND role='user' AND status='complete'",params![message_id,companion_id,body],|r|Ok(crate::state::CompanionMessage{id:r.get(0)?,companion_id:r.get(1)?,role:r.get(2)?,body:r.get(3)?,status:r.get(4)?,surface_kind:r.get(5)?,surface_id:r.get(6)?,surface_label:r.get(7)?,created_at:r.get(8)?})).optional()?;
+        if row.is_some() {
+            tx.execute("UPDATE companion_sessions SET project_path=COALESCE(project_path,?2),updated_at=MAX(updated_at,?3) WHERE companion_id=?1",params![companion_id,project_path,at])?;
+        }
+        tx.commit()?;
+        Ok(row)
+    }
     pub fn insert_companion_message(
         &self,
         msg: &crate::state::CompanionMessage,
@@ -2885,7 +2998,7 @@ impl Database {
             "INSERT INTO companion_messages
                 (id, companion_id, role, body, status, surface_kind, surface_id,
                  surface_label, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, MAX(?9, 1 + (SELECT COALESCE(MAX(created_at),0) FROM companion_messages WHERE companion_id=?2)))",
             params![
                 msg.id,
                 msg.companion_id,
@@ -6637,10 +6750,11 @@ impl Database {
     pub fn list_project_paths(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT project_path AS path FROM sessions
-             WHERE project_path IS NOT NULL AND project_path <> ''
-             GROUP BY project_path
-             ORDER BY MAX(created_at) DESC",
+            "SELECT path FROM (
+                 SELECT project_path AS path, MAX(created_at) AS seen FROM sessions
+                 WHERE project_path IS NOT NULL AND project_path <> '' GROUP BY project_path
+                 UNION ALL SELECT path, created_at AS seen FROM git_workspaces WHERE state = 'active'
+             ) GROUP BY path ORDER BY MAX(seen) DESC",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
@@ -10459,7 +10573,8 @@ mod tests {
     #[test]
     fn timeline_query_class_filing_probes_respect_target_keyspaces() {
         let db = Database::open_in_memory().unwrap();
-        // seq 1 = browse event (browse row id 1); seq 2 = prompt.
+        // seq 1 = prompt; seq 2 = page, whose browse row id is 1.
+        tprompt(&db, "pty", "filed prompt", "cs-1", "/p", "human");
         crate::ledger::record_browse_event(
             &db,
             crate::ledger::BrowseEventInput {
@@ -10474,15 +10589,15 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        tprompt(&db, "pty", "filed prompt", "cs-1", "/p", "human");
 
         accepted_node(&db, "cn-p", None, "Prompts");
         accepted_node(&db, "cn-b", None, "Pages");
-        add_link(&db, "cn-p", "prompt", "2"); // prompt filed by ledger seq
-        add_link(&db, "cn-b", "browse_event", "1"); // page filed by browse row id
-        // A browse link whose numeric key collides with the prompt's seq must
-        // never shadow the seq-keyed filing (`target_kind` splits the keyspaces).
-        add_link(&db, "cn-b", "browse_event", "2");
+        add_link(&db, "cn-p", "prompt", "1"); // prompt filed by ledger seq
+        add_link(&db, "cn-b", "browse_event", "2"); // page filed by ledger seq
+        // Historical malformed link: the page row id collides with a prompt
+        // seq. It must never attach to the page (new writers also refuse it).
+        accepted_node(&db, "cn-decoy", None, "Decoy");
+        add_link(&db, "cn-decoy", "browse_event", "1");
 
         let all = db.query_ledger_events(&Default::default()).unwrap();
         let prompt = all.iter().find(|i| i.event.kind == "prompt").unwrap();
@@ -10496,7 +10611,8 @@ mod tests {
     #[test]
     fn timeline_query_citation_focus_filters_by_seqs_and_class_node() {
         let db = Database::open_in_memory().unwrap();
-        // seq 1 = browse event (browse row id 1); seq 2, 3 = prompts.
+        // seq 1 = first prompt, seq 2 = page (row id 1), seq 3 = second prompt.
+        tprompt(&db, "pty", "first prompt", "cs-1", "/p", "human");
         crate::ledger::record_browse_event(
             &db,
             crate::ledger::BrowseEventInput {
@@ -10511,7 +10627,6 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        tprompt(&db, "pty", "first prompt", "cs-1", "/p", "human");
         tprompt(&db, "pty", "second prompt", "cs-2", "/p", "human");
 
         // The Ask agent's `#seq` chips: exact rows, still newest-first; an
@@ -10535,12 +10650,10 @@ mod tests {
             .unwrap();
         assert_eq!(unfiltered.len(), 3);
 
-        // The class chip: only events filed under the node, across BOTH
-        // target keyspaces (prompt by ledger seq, page by browse row id) —
-        // and only accepted links count.
+        // All seq-addressable links share one keyspace. Only accepted links count.
         accepted_node(&db, "cn-x", None, "X");
-        add_link(&db, "cn-x", "prompt", "2"); // the first prompt, by seq
-        add_link(&db, "cn-x", "browse_event", "1"); // the page, by browse row id
+        add_link(&db, "cn-x", "prompt", "1"); // the first prompt, by seq
+        add_link(&db, "cn-x", "browse_event", "2"); // the page, by ledger seq
         let filed = db
             .query_ledger_events(&crate::context::LedgerFilters {
                 class_node: Some("cn-x".into()),
@@ -11159,6 +11272,21 @@ mod tests {
                 .unwrap()
         };
         assert!(n <= 2000, "journal working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn recent_journal_delta_keeps_newest_rows_chronological_without_replaying() {
+        let db = Database::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..45 {
+            ids.push(db.append_journal("nav", Some("browser"), None, Some(&format!("Page {i}")), None).unwrap());
+        }
+        let rows = db.recent_journal_since(0, 30).unwrap();
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), ids[15..]);
+        assert_eq!(rows.last().unwrap().label.as_deref(), Some("Page 44"));
+        assert!(db.recent_journal_since(ids[44], 30).unwrap().is_empty());
+        let next = db.append_journal("nav", Some("plan"), Some("s1"), None, None).unwrap();
+        assert_eq!(db.recent_journal_since(ids[44], 30).unwrap()[0].id, next);
     }
 
     #[test]
@@ -15194,6 +15322,38 @@ body.
         assert!(db.latest_scaled_run_id("plan").unwrap().is_none());
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_v5_database_gains_chat_project_and_changes_metadata() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE companion_sessions DROP COLUMN project_path; ALTER TABLE companion_messages DROP COLUMN meta; PRAGMA user_version=5;").unwrap();
+            Database::verify_schema_at(&conn, 5).unwrap();
+            assert!(Database::verify_schema_at(&conn, 6).is_err());
+        }
+        drop(Database::open(&path).unwrap());
+        let conn = Connection::open(&path).unwrap();
+        Database::verify_schema_at(&conn, 6).unwrap();
+        Database::migrate_v6(&conn).unwrap(); // replay-safe
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires a SQLite backup, never the user's live database"]
+    fn migrate_real_v5_backup_for_workbench() {
+        let source = std::env::var("REDLINE_TEST_V5_DB").expect("set REDLINE_TEST_V5_DB to the disposable SQLite backup");
+        let path = tempfile_path();
+        std::fs::copy(source, &path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+        Database::migrate(&conn).unwrap();
+        Database::verify_schema_at(&conn, 6).unwrap();
+        drop(conn);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

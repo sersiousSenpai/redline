@@ -45,7 +45,7 @@ pub(crate) struct GitRun {
 /// (an HTTPS push with no cached credential must fail, not block forever on a
 /// tty that doesn't exist), and a hard timeout with `start_kill` on expiry
 /// (the stall discipline from `ai_review.rs`).
-async fn git_write(
+pub(crate) async fn git_write(
     dir: &Path,
     args: &[&str],
     stdin: Option<&[u8]>,
@@ -58,7 +58,7 @@ async fn git_write(
 
 /// Shared spawn/feed/collect for git and gh: null-safe stdio, stdin fed then
 /// closed so `-F -` / `--body-file -` see EOF, kill on timeout.
-async fn run_bin(
+pub(crate) async fn run_bin(
     bin: &str,
     cwd: &Path,
     args: &[String],
@@ -77,7 +77,9 @@ async fn run_bin(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("failed to run {bin}: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run {bin}: {e}"))?;
     if let Some(bytes) = stdin {
         let mut pipe = child.stdin.take().ok_or("stdin unavailable")?;
         pipe.write_all(bytes).await.map_err(|e| e.to_string())?;
@@ -87,10 +89,7 @@ async fn run_bin(
         Ok(r) => r.map_err(|e| e.to_string())?,
         Err(_) => {
             // wait_with_output consumed the child; kill_on_drop already fired.
-            return Err(format!(
-                "timed out after {}s — killed",
-                timeout.as_secs()
-            ));
+            return Err(format!("timed out after {}s — killed", timeout.as_secs()));
         }
     };
     Ok(GitRun {
@@ -101,14 +100,23 @@ async fn run_bin(
 }
 
 /// Convenience: run and require exit 0, mapping failure to trimmed stderr.
-async fn git_ok(dir: &Path, args: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Result<GitRun, String> {
+async fn git_ok(
+    dir: &Path,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<GitRun, String> {
     let run = git_write(dir, args, stdin, timeout).await?;
     if run.code == 0 {
         Ok(run)
     } else {
         let err = run.stderr.trim();
         Err(if err.is_empty() {
-            format!("git {} failed (exit {})", args.first().unwrap_or(&""), run.code)
+            format!(
+                "git {} failed (exit {})",
+                args.first().unwrap_or(&""),
+                run.code
+            )
         } else {
             err.to_string()
         })
@@ -220,7 +228,7 @@ pub(crate) async fn status_for(dir: &Path) -> GitStatus {
             .map(|r| r.stdout.trim().to_string())
     };
 
-    let branch = quick(&["rev-parse", "--abbrev-ref", "HEAD"])
+    let branch = quick(&["symbolic-ref", "--quiet", "--short", "HEAD"])
         .await
         .filter(|b| !b.is_empty() && b != "HEAD");
     let (head_short, head_subject) = match quick(&["log", "-1", "--format=%h%x1f%s"]).await {
@@ -239,17 +247,11 @@ pub(crate) async fn status_for(dir: &Path) -> GitStatus {
         Some(out) => parse_ahead_behind(&out),
         None => (0, 0),
     };
-    let (staged, unstaged, untracked) = match git_write(
-        dir,
-        &["status", "--porcelain=v1"],
-        None,
-        LOCAL_TIMEOUT,
-    )
-    .await
-    {
-        Ok(r) if r.code == 0 => parse_porcelain_counts(&r.stdout),
-        _ => (0, 0, 0),
-    };
+    let (staged, unstaged, untracked) =
+        match git_write(dir, &["status", "--porcelain=v1"], None, LOCAL_TIMEOUT).await {
+            Ok(r) if r.code == 0 => parse_porcelain_counts(&r.stdout),
+            _ => (0, 0, 0),
+        };
     let remotes: Vec<String> = quick(&["remote"])
         .await
         .map(|out| out.lines().map(str::to_string).collect())
@@ -268,10 +270,16 @@ pub(crate) async fn status_for(dir: &Path) -> GitStatus {
     let gh_authed = match &gh_bin {
         // `gh auth token` is purely local and fast — `gh auth status` hits
         // the network.
-        Some(bin) => run_bin(bin, dir, &["auth".into(), "token".into()], None, LOCAL_TIMEOUT)
-            .await
-            .map(|r| r.code == 0)
-            .unwrap_or(false),
+        Some(bin) => run_bin(
+            bin,
+            dir,
+            &["auth".into(), "token".into()],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .map(|r| r.code == 0)
+        .unwrap_or(false),
         None => false,
     };
 
@@ -297,10 +305,15 @@ pub(crate) async fn status_for(dir: &Path) -> GitStatus {
 /// `refs/remotes/<remote>/HEAD` → the branch name it points at, if set.
 async fn remote_default_branch(dir: &Path, remote: &str) -> Option<String> {
     let refname = format!("refs/remotes/{remote}/HEAD");
-    let run = git_write(dir, &["symbolic-ref", "--quiet", &refname], None, LOCAL_TIMEOUT)
-        .await
-        .ok()
-        .filter(|r| r.code == 0)?;
+    let run = git_write(
+        dir,
+        &["symbolic-ref", "--quiet", &refname],
+        None,
+        LOCAL_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|r| r.code == 0)?;
     run.stdout
         .trim()
         .strip_prefix(&format!("refs/remotes/{remote}/"))
@@ -308,7 +321,7 @@ async fn remote_default_branch(dir: &Path, remote: &str) -> Option<String> {
 }
 
 /// Detect an in-flight merge/rebase/cherry-pick/bisect via `.git`-dir probes.
-async fn in_progress_op(dir: &Path) -> Option<String> {
+pub(crate) async fn in_progress_op(dir: &Path) -> Option<String> {
     let run = git_write(dir, &["rev-parse", "--git-dir"], None, LOCAL_TIMEOUT)
         .await
         .ok()
@@ -325,6 +338,8 @@ async fn in_progress_op(dir: &Path) -> Option<String> {
         Some("rebase".to_string())
     } else if git_dir.join("MERGE_HEAD").is_file() {
         Some("merge".to_string())
+    } else if git_dir.join("REVERT_HEAD").is_file() {
+        Some("revert".to_string())
     } else if git_dir.join("CHERRY_PICK_HEAD").is_file() {
         Some("cherry-pick".to_string())
     } else if git_dir.join("BISECT_LOG").is_file() {
@@ -356,9 +371,15 @@ pub struct PrRequest {
     pub body: String,
 }
 
+fn default_push() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PushRequest {
+    #[serde(default = "default_push")]
+    pub push: bool,
     pub repo: String,
     pub review_id: String,
     pub message: String,
@@ -421,12 +442,20 @@ struct PushLogEvent {
 /// the user read in the dialog.
 async fn validate_target(dir: &Path, target: &str) -> Result<String, String> {
     let t = crate::code::safe_token(target)?.to_string();
-    let run = git_write(dir, &["check-ref-format", "--branch", &t], None, LOCAL_TIMEOUT).await?;
+    let run = git_write(
+        dir,
+        &["check-ref-format", "--branch", &t],
+        None,
+        LOCAL_TIMEOUT,
+    )
+    .await?;
     if run.code != 0 {
         return Err(format!("`{t}` is not a valid branch name"));
     }
     if run.stdout.trim() != t {
-        return Err(format!("`{t}` is a branch shorthand — spell out the branch name"));
+        return Err(format!(
+            "`{t}` is a branch shorthand — spell out the branch name"
+        ));
     }
     Ok(t)
 }
@@ -439,32 +468,16 @@ async fn validate_remote(dir: &Path, remote: &str) -> Result<String, String> {
     if run.stdout.lines().any(|r| r == wanted) {
         Ok(wanted.to_string())
     } else {
-        Err(format!("`{wanted}` is not a configured remote of this repository"))
+        Err(format!(
+            "`{wanted}` is not a configured remote of this repository"
+        ))
     }
 }
 
 /// Translate a failed `git push`'s stderr into something actionable. Force is
 /// NEVER offered — a non-fast-forward means pull first, full stop.
-fn translate_push_error(stderr: &str, remote: &str) -> String {
-    let s = stderr.to_lowercase();
-    if s.contains("non-fast-forward") || s.contains("fetch first") || s.contains("[rejected]") {
-        return "push rejected: the remote has commits you don't have — pull first".to_string();
-    }
-    if s.contains("authentication")
-        || s.contains("could not read username")
-        || s.contains("permission denied")
-        || s.contains("403")
-    {
-        return format!(
-            "git couldn't authenticate to `{remote}` — try `gh auth setup-git` or an SSH key"
-        );
-    }
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
-        "git push failed".to_string()
-    } else {
-        trimmed.to_string()
-    }
+fn translate_push_error(stderr: &str, _remote: &str) -> String {
+    crate::git_human::explain(stderr).message
 }
 
 /// The push core, DB-free so tests can drive it against a temp repo + a bare
@@ -493,11 +506,16 @@ pub(crate) async fn run_push(
             "a {op} is in progress in this repository — finish or abort it first"
         ));
     }
-    let head_branch = git_write(dir, &["rev-parse", "--abbrev-ref", "HEAD"], None, LOCAL_TIMEOUT)
-        .await
-        .ok()
-        .filter(|r| r.code == 0)
-        .map(|r| r.stdout.trim().to_string());
+    let head_branch = git_write(
+        dir,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        None,
+        LOCAL_TIMEOUT,
+    )
+    .await
+    .ok()
+    .filter(|r| r.code == 0)
+    .map(|r| r.stdout.trim().to_string());
     let detached = head_branch.as_deref() == Some("HEAD");
     if detached && !req.skip_commit {
         return Err(
@@ -509,15 +527,23 @@ pub(crate) async fn run_push(
     step(&mut steps, "preflight", true, "clean".to_string());
 
     // 2. Validate refs.
-    let target = validate_target(dir, &req.target).await?;
-    let remote = validate_remote(dir, &req.remote).await?;
+    let target = if req.push {
+        validate_target(dir, &req.target).await?
+    } else {
+        head_branch.clone().unwrap_or_default()
+    };
+    let remote = if req.push {
+        validate_remote(dir, &req.remote).await?
+    } else {
+        String::new()
+    };
     step(&mut steps, "validate", true, format!("{remote} ← {target}"));
 
     // 3. Protected branch gate.
     let default_branch = remote_default_branch(dir, &remote).await;
-    let protected =
-        default_branch.as_deref() == Some(target.as_str()) || matches!(target.as_str(), "main" | "master");
-    if protected && !req.confirm_protected {
+    let protected = default_branch.as_deref() == Some(target.as_str())
+        || matches!(target.as_str(), "main" | "master");
+    if req.push && protected && !req.confirm_protected {
         return Err(format!(
             "`{target}` is a protected branch — confirm the push explicitly"
         ));
@@ -535,7 +561,13 @@ pub(crate) async fn run_push(
                 return Err("no files selected to commit".to_string());
             }
             let mut present = vec!["add".to_string(), "-A".into(), "--".into()];
-            let mut missing = vec!["rm".to_string(), "--cached".into(), "-q".into(), "--ignore-unmatch".into(), "--".into()];
+            let mut missing = vec![
+                "rm".to_string(),
+                "--cached".into(),
+                "-q".into(),
+                "--ignore-unmatch".into(),
+                "--".into(),
+            ];
             for p in paths {
                 let path = review::safe_rel_path(p)?;
                 let literal = format!(":(literal){path}");
@@ -569,7 +601,8 @@ pub(crate) async fn run_push(
 
         // 5. Commit — message on stdin (multi-line, no argv quoting games).
         //    Nothing staged is a plain error, not an empty commit.
-        let staged_probe = git_write(dir, &["diff", "--cached", "--quiet"], None, LOCAL_TIMEOUT).await?;
+        let staged_probe =
+            git_write(dir, &["diff", "--cached", "--quiet"], None, LOCAL_TIMEOUT).await?;
         if staged_probe.code == 0 {
             return Err("nothing to commit — the selected files have no changes".to_string());
         }
@@ -580,7 +613,13 @@ pub(crate) async fn run_push(
         if req.no_verify {
             commit_args.push("--no-verify");
         }
-        git_ok(dir, &commit_args, Some(req.message.as_bytes()), LOCAL_TIMEOUT).await?;
+        git_ok(
+            dir,
+            &commit_args,
+            Some(req.message.as_bytes()),
+            LOCAL_TIMEOUT,
+        )
+        .await?;
         let sha = git_ok(dir, &["rev-parse", "HEAD"], None, LOCAL_TIMEOUT)
             .await?
             .stdout
@@ -607,7 +646,25 @@ pub(crate) async fn run_push(
             .map(|r| r.stdout.trim().to_string());
         committed = sha;
         committed_short = short;
-        step(&mut steps, "commit", true, "skipped — pushing HEAD as-is".to_string());
+        step(
+            &mut steps,
+            "commit",
+            true,
+            "skipped — pushing HEAD as-is".to_string(),
+        );
+    }
+
+    if !req.push {
+        return Ok(PushOutcome {
+            committed,
+            committed_short,
+            branch: target,
+            remote,
+            pushed_ref: String::new(),
+            pr_url: None,
+            pr_number: None,
+            steps,
+        });
     }
 
     // 6. Push — the explicit refspec is the design's keystone: the commit
@@ -630,9 +687,19 @@ pub(crate) async fn run_push(
     if req.create_local_branch && head_branch.as_deref() != Some(target.as_str()) {
         let br = git_write(dir, &["branch", &target, "HEAD"], None, LOCAL_TIMEOUT).await?;
         if br.code == 0 {
-            step(&mut steps, "branch", true, format!("local `{target}` created"));
+            step(
+                &mut steps,
+                "branch",
+                true,
+                format!("local `{target}` created"),
+            );
         } else if br.stderr.contains("already exists") {
-            step(&mut steps, "branch", true, format!("local `{target}` already exists"));
+            step(
+                &mut steps,
+                "branch",
+                true,
+                format!("local `{target}` already exists"),
+            );
         } else {
             step(&mut steps, "branch", false, br.stderr.trim().to_string());
         }
@@ -757,6 +824,11 @@ pub async fn review_push(
         );
     };
     let outcome = run_push(&dir, &req, &emit).await?;
+
+    if !req.push {
+        let _ = app.emit("review-push-done", review_id);
+        return Ok(outcome);
+    }
 
     // 9. Record — the row `review_feedback.rs` later reports to the agent.
     let files = match &req.paths {
@@ -892,22 +964,31 @@ pub async fn review_revert(
     scope: String,
     hunk_index: Option<usize>,
     fingerprint: String,
-) -> Result<(), String> {
+) -> Result<crate::guided::ActionResult, String> {
+    use crate::guided::{self, GuidedOp};
     let dir = review::checked_repo_dir(&state.db, &repo).await?;
+    let _lock = guided::repo_lock(&dir).await;
+    if !matches!(
+        source,
+        DiffSource::Uncommitted | DiffSource::Staged | DiffSource::UnstagedPlusUntracked
+    ) {
+        return Err("Use the timeline to undo a saved version.".into());
+    }
+    if in_progress_op(&dir).await.is_some() {
+        return Err(
+            "Cancel or finish the unfinished operation before undoing individual changes.".into(),
+        );
+    }
+    let mut action = guided::ActionResult::default();
     let live = review::fingerprint_for(&dir, source, base.as_deref(), sha.as_deref()).await?;
     if live != fingerprint {
         return Err(
             "the code changed underneath this diff — refresh the review, then revert".to_string(),
         );
     }
-    let (_, diff) = review::resolve_for_route(
-        &state.db,
-        &repo,
-        source,
-        base.as_deref(),
-        sha.as_deref(),
-    )
-    .await?;
+    let (_, diff) =
+        review::resolve_for_route(&state.db, &repo, source, base.as_deref(), sha.as_deref())
+            .await?;
     let file = diff
         .iter()
         .find(|f| review::display_path(f) == file_path)
@@ -916,7 +997,33 @@ pub async fn review_revert(
         return Err("binary files can't be reverted from the diff".to_string());
     }
     if file.status == FileStatus::Renamed {
-        return Err("renamed files can't be reverted from the diff — undo the rename by hand".to_string());
+        return Err(
+            "renamed files can't be reverted from the diff — undo the rename by hand".to_string(),
+        );
+    }
+
+    // Preserve removed unsaved edits; recovery only applies to the exact
+    // post-undo fingerprint, never over a later edit.
+    let undo_id = uuid::Uuid::new_v4().to_string();
+    let backup_dir = undo_folder(&dir, &undo_id).await?;
+    std::fs::create_dir_all(&backup_dir).map_err(|e| e.to_string())?;
+    let original = dir.join(review::safe_rel_path(&file_path)?);
+    let had_file = original.symlink_metadata().is_ok();
+    if had_file {
+        if original
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(
+                "This file is a link. Undo it in your editor so its target stays safe.".into(),
+            );
+        }
+        let canonical = std::fs::canonicalize(&original).map_err(|e| e.to_string())?;
+        let root = std::fs::canonicalize(&dir).map_err(|e| e.to_string())?;
+        if !canonical.starts_with(root) {
+            return Err("This file points outside the project.".into());
+        }
+        std::fs::copy(&original, backup_dir.join("contents")).map_err(|e| e.to_string())?;
     }
 
     // An untracked file's diff came from a `--no-index` pass; reverting it
@@ -930,7 +1037,46 @@ pub async fn review_revert(
             return Err("invalid file path".to_string());
         }
         std::fs::remove_file(&full).map_err(|e| e.to_string())?;
-        return Ok(());
+        action.commands.push(guided::ActionCommand {
+            command: format!("fs::remove_file({:?})", full),
+            meaning: "Removed the added file after keeping a recovery copy.".into(),
+            ok: true,
+        });
+        return finish_undo(&dir, &backup_dir, &undo_id, &file_path, had_file, action).await;
+    }
+
+    // A whole-file Guided undo covers both prepared and later edits. A
+    // reverse worktree-only patch would otherwise leave an invisible staged
+    // intermediate version that a later commit could accidentally include.
+    if source == DiffSource::Uncommitted && scope == "file" {
+        if guided::revision(&dir, "HEAD").await.is_ok() {
+            let out = guided::run(
+                &dir,
+                GuidedOp::UndoFile {
+                    path: file_path.clone(),
+                },
+                None,
+                &mut action,
+            )
+            .await?;
+            if out.code != 0 {
+                return Err(crate::git_human::explain(&out.stderr).message);
+            }
+            return finish_undo(&dir, &backup_dir, &undo_id, &file_path, had_file, action).await;
+        }
+        let unstaged = guided::read(
+            &dir,
+            &[
+                "diff",
+                "--name-only",
+                "--",
+                &format!(":(literal){file_path}"),
+            ],
+        )
+        .await?;
+        if !unstaged.trim().is_empty() {
+            return Err("This new file has separately prepared edits. Review them in the code view before undoing the file.".into());
+        }
     }
 
     let hunk_indices: Vec<usize> = match scope.as_str() {
@@ -940,11 +1086,14 @@ pub async fn review_revert(
     };
     let patch = render_reverse_patch(file, &hunk_indices)?;
 
-    let check = git_write(
+    let check = guided::run(
         &dir,
-        &["apply", "--reverse", "--check"],
+        GuidedOp::ReversePatch {
+            check: true,
+            index: false,
+        },
         Some(patch.as_bytes()),
-        LOCAL_TIMEOUT,
+        &mut action,
     )
     .await?;
     if check.code != 0 {
@@ -955,30 +1104,139 @@ pub async fn review_revert(
     }
     // `--index` first (keeps a staged file consistent); fall back to the
     // worktree alone when the index doesn't match the patch.
-    let indexed = git_write(
+    let indexed = guided::run(
         &dir,
-        &["apply", "--reverse", "--index"],
+        GuidedOp::ReversePatch {
+            check: false,
+            index: true,
+        },
         Some(patch.as_bytes()),
-        LOCAL_TIMEOUT,
+        &mut action,
     )
     .await?;
     if indexed.code != 0 {
-        git_ok(
+        let out = guided::run(
             &dir,
-            &["apply", "--reverse"],
+            GuidedOp::ReversePatch {
+                check: false,
+                index: false,
+            },
             Some(patch.as_bytes()),
-            LOCAL_TIMEOUT,
+            &mut action,
         )
         .await?;
+        if out.code != 0 {
+            return Err(
+                "The change could not be undone. Refresh this review and try again.".into(),
+            );
+        }
     }
-    Ok(())
+    finish_undo(&dir, &backup_dir, &undo_id, &file_path, had_file, action).await
+}
+
+async fn undo_folder(dir: &Path, id: &str) -> Result<PathBuf, String> {
+    if uuid::Uuid::parse_str(id).is_err() {
+        return Err("Invalid recovery copy.".into());
+    }
+    let git_path = crate::guided::read(dir, &["rev-parse", "--git-path", "redline-undo"]).await?;
+    let path = PathBuf::from(git_path.trim());
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    }
+    .join(id))
+}
+async fn finish_undo(
+    dir: &Path,
+    backup: &Path,
+    id: &str,
+    path: &str,
+    had_file: bool,
+    mut action: crate::guided::ActionResult,
+) -> Result<crate::guided::ActionResult, String> {
+    let fingerprint = review::fingerprint_for(dir, DiffSource::Uncommitted, None, None).await?;
+    let metadata = serde_json::json!({"repo": std::fs::canonicalize(dir).map_err(|e| e.to_string())?, "path": path, "hadFile": had_file, "fingerprint": fingerprint});
+    std::fs::write(backup.join("meta.json"), metadata.to_string()).map_err(|e| e.to_string())?;
+    action.undo_id = Some(id.into());
+    action.message =
+        "The change was undone. A recovery copy is available if you change your mind.".into();
+    Ok(action)
+}
+#[tauri::command]
+pub async fn review_restore_undo(
+    state: tauri::State<'_, ReviewState>,
+    repo: String,
+    id: String,
+) -> Result<crate::guided::ActionResult, String> {
+    let dir = review::checked_repo_dir(&state.db, &repo).await?;
+    let _lock = crate::guided::repo_lock(&dir).await;
+    let folder = undo_folder(&dir, &id).await?;
+    let meta: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(folder.join("meta.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let root = std::fs::canonicalize(&dir).map_err(|e| e.to_string())?;
+    if meta["repo"].as_str() != root.to_str() {
+        return Err("This recovery copy belongs to another project.".into());
+    }
+    let current = review::fingerprint_for(&dir, DiffSource::Uncommitted, None, None).await?;
+    if meta["fingerprint"].as_str() != Some(current.as_str()) {
+        return Err("The project changed after that undo. Save your current work before restoring the recovery copy.".into());
+    }
+    let path = review::safe_rel_path(meta["path"].as_str().ok_or("Invalid recovery copy.")?)?;
+    let target = root.join(path);
+    let parent = target.parent().ok_or("Invalid recovery path.")?;
+    let mut ancestor = parent;
+    while !ancestor.exists() {
+        ancestor = ancestor.parent().ok_or("Invalid recovery path.")?;
+    }
+    if !std::fs::canonicalize(ancestor)
+        .map_err(|e| e.to_string())?
+        .starts_with(&root)
+    {
+        return Err("This recovery path points outside the project.".into());
+    }
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    if !std::fs::canonicalize(parent)
+        .map_err(|e| e.to_string())?
+        .starts_with(&root)
+        || target
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err("This recovery path points outside the project.".into());
+    }
+    let command = if meta["hadFile"].as_bool() == Some(true) {
+        std::fs::copy(folder.join("contents"), &target).map_err(|e| e.to_string())?;
+        format!("fs::copy({:?}, {:?})", folder.join("contents"), target)
+    } else {
+        if target.exists() {
+            std::fs::remove_file(&target).map_err(|e| e.to_string())?;
+        }
+        format!("fs::remove_file({:?})", target)
+    };
+    Ok(crate::guided::ActionResult {
+        commands: vec![crate::guided::ActionCommand {
+            command,
+            meaning: "Restored the recovery copy as an unsaved change.".into(),
+            ok: true,
+        }],
+        message: "Your earlier edit is restored. Review it before saving.".into(),
+        ..Default::default()
+    })
 }
 
 async fn is_tracked(dir: &Path, path: &str) -> bool {
-    git_write(dir, &["ls-files", "--error-unmatch", "--", path], None, LOCAL_TIMEOUT)
-        .await
-        .map(|r| r.code == 0)
-        .unwrap_or(false)
+    git_write(
+        dir,
+        &["ls-files", "--error-unmatch", "--", path],
+        None,
+        LOCAL_TIMEOUT,
+    )
+    .await
+    .map(|r| r.code == 0)
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -990,7 +1248,8 @@ mod tests {
 
     #[test]
     fn porcelain_counts_classify_staged_unstaged_untracked() {
-        let out = "M  staged.rs\nMM both.rs\n M unstaged.rs\n?? new.txt\nA  added.rs\nR  old -> new\n";
+        let out =
+            "M  staged.rs\nMM both.rs\n M unstaged.rs\n?? new.txt\nA  added.rs\nR  old -> new\n";
         let (staged, unstaged, untracked) = parse_porcelain_counts(out);
         assert_eq!(staged, 4, "M / MM / A / R all have a staged half");
         assert_eq!(unstaged, 2, "MM and ' M'");
@@ -1007,7 +1266,8 @@ mod tests {
 
     #[test]
     fn pr_url_and_number_parse_from_gh_stdout() {
-        let stdout = "Creating pull request for fix in me/repo\n\nhttps://github.com/me/repo/pull/12\n";
+        let stdout =
+            "Creating pull request for fix in me/repo\n\nhttps://github.com/me/repo/pull/12\n";
         let url = parse_pr_url(stdout).unwrap();
         assert_eq!(url, "https://github.com/me/repo/pull/12");
         assert_eq!(parse_pr_number(&url), Some(12));
@@ -1021,10 +1281,13 @@ mod tests {
             " ! [rejected]        HEAD -> main (non-fast-forward)\nerror: failed to push",
             "origin",
         );
-        assert!(msg.contains("pull first"), "{msg}");
+        assert!(msg.contains("Get updates"), "{msg}");
         assert!(!msg.to_lowercase().contains("force"));
-        let auth = translate_push_error("fatal: could not read Username for 'https://github.com'", "origin");
-        assert!(auth.contains("gh auth setup-git"), "{auth}");
+        let auth = translate_push_error(
+            "fatal: could not read Username for 'https://github.com'",
+            "origin",
+        );
+        assert!(auth.contains("Connect your GitHub"), "{auth}");
     }
 
     // --- temp-repo harness (matches review.rs's TempRepo convention) ---------
@@ -1062,7 +1325,9 @@ mod tests {
         run(d, &["init", "-q", "-b", "main"]).await;
         run(d, &["config", "user.email", "t@t"]).await;
         run(d, &["config", "user.name", "t"]).await;
-        tokio::fs::write(d.join("a.txt"), "one\ntwo\nthree\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\ntwo\nthree\n")
+            .await
+            .unwrap();
         run(d, &["add", "a.txt"]).await;
         run(d, &["commit", "-qm", "init"]).await;
         td
@@ -1070,7 +1335,8 @@ mod tests {
 
     /// A second temp dir as a bare "remote" — the whole push path offline.
     async fn bare_remote(repo: &Path) -> TempRepo {
-        let dir = std::env::temp_dir().join(format!("redline-push-remote-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("redline-push-remote-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let ok = tokio::process::Command::new("/usr/bin/git")
             .arg("init")
@@ -1089,6 +1355,7 @@ mod tests {
 
     fn req(repo: &Path, target: &str) -> PushRequest {
         PushRequest {
+            push: true,
             repo: repo.to_string_lossy().to_string(),
             review_id: "rev-1".to_string(),
             message: "test: pushed from the review pane\n\nWith a body line.".to_string(),
@@ -1108,13 +1375,29 @@ mod tests {
         |_| {}
     }
 
+    #[tokio::test]
+    async fn commit_only_save_needs_no_remote_and_never_publishes() {
+        let repo = temp_repo().await;
+        std::fs::write(repo.0.join("saved.txt"), "saved locally").unwrap();
+        let mut request = req(&repo.0, "main");
+        request.push = false;
+        request.remote.clear();
+        let out = run_push(&repo.0, &request, &no_emit()).await.unwrap();
+        assert!(out.committed.is_some());
+        assert!(out.pushed_ref.is_empty());
+        assert!(!out.steps.iter().any(|step| step.name == "push"));
+        assert_eq!(status_for(&repo.0).await.untracked, 0);
+    }
+
     // --- status --------------------------------------------------------------
 
     #[tokio::test]
     async fn status_reads_branch_head_and_dirty_counts() {
         let td = temp_repo().await;
         let d = td.path();
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n")
+            .await
+            .unwrap();
         tokio::fs::write(d.join("new.txt"), "hi\n").await.unwrap();
         let s = status_for(d).await;
         assert_eq!(s.branch.as_deref(), Some("main"));
@@ -1151,14 +1434,20 @@ mod tests {
                 "target `{bad}` must be rejected"
             );
         }
-        assert_eq!(validate_target(d, "fix/review-notes").await.unwrap(), "fix/review-notes");
+        assert_eq!(
+            validate_target(d, "fix/review-notes").await.unwrap(),
+            "fix/review-notes"
+        );
     }
 
     #[tokio::test]
     async fn remote_validation_is_exact_membership() {
         let td = temp_repo().await;
         let _remote = bare_remote(td.path()).await;
-        assert_eq!(validate_remote(td.path(), "origin").await.unwrap(), "origin");
+        assert_eq!(
+            validate_remote(td.path(), "origin").await.unwrap(),
+            "origin"
+        );
         assert!(validate_remote(td.path(), "upstream").await.is_err());
         assert!(validate_remote(td.path(), "orig").await.is_err());
     }
@@ -1170,20 +1459,31 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let remote = bare_remote(d).await;
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n")
+            .await
+            .unwrap();
 
-        let outcome = run_push(d, &req(d, "fix/review-notes"), &no_emit()).await.unwrap();
+        let outcome = run_push(d, &req(d, "fix/review-notes"), &no_emit())
+            .await
+            .unwrap();
         assert_eq!(outcome.branch, "fix/review-notes");
         assert_eq!(outcome.pushed_ref, "origin/fix/review-notes");
         let sha = outcome.committed.clone().unwrap();
 
         // The commit landed on the CURRENT branch (main) — the checkout never
         // switched.
-        let head = git_ok(d, &["rev-parse", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
-        assert_eq!(head.stdout.trim(), sha);
-        let branch = git_ok(d, &["rev-parse", "--abbrev-ref", "HEAD"], None, LOCAL_TIMEOUT)
+        let head = git_ok(d, &["rev-parse", "HEAD"], None, LOCAL_TIMEOUT)
             .await
             .unwrap();
+        assert_eq!(head.stdout.trim(), sha);
+        let branch = git_ok(
+            d,
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(branch.stdout.trim(), "main");
 
         // …and the bare remote's target ref carries the same commit.
@@ -1198,7 +1498,9 @@ mod tests {
         assert_eq!(published.stdout.trim(), sha);
 
         // The multi-line stdin message survived verbatim.
-        let msg = git_ok(d, &["log", "-1", "--format=%B"], None, LOCAL_TIMEOUT).await.unwrap();
+        let msg = git_ok(d, &["log", "-1", "--format=%B"], None, LOCAL_TIMEOUT)
+            .await
+            .unwrap();
         assert!(msg.stdout.contains("With a body line."));
     }
 
@@ -1207,17 +1509,26 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let _remote = bare_remote(d).await;
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n").await.unwrap();
-        tokio::fs::write(d.join("junk.txt"), "unrelated\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n")
+            .await
+            .unwrap();
+        tokio::fs::write(d.join("junk.txt"), "unrelated\n")
+            .await
+            .unwrap();
 
         let mut r = req(d, "scoped");
         r.paths = Some(vec!["a.txt".to_string()]);
         run_push(d, &r, &no_emit()).await.unwrap();
 
         // junk.txt stayed out of the commit and is still untracked.
-        let shown = git_ok(d, &["show", "--format=", "--name-only", "HEAD"], None, LOCAL_TIMEOUT)
-            .await
-            .unwrap();
+        let shown = git_ok(
+            d,
+            &["show", "--format=", "--name-only", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(shown.stdout.trim(), "a.txt");
         let s = status_for(d).await;
         assert_eq!(s.untracked, 1);
@@ -1229,17 +1540,32 @@ mod tests {
         let d = td.path();
         let _remote = bare_remote(d).await;
         tokio::fs::create_dir_all(d.join("app/[id]")).await.unwrap();
-        tokio::fs::write(d.join("app/[id]/page.tsx"), "page\n").await.unwrap();
+        tokio::fs::write(d.join("app/[id]/page.tsx"), "page\n")
+            .await
+            .unwrap();
         run(d, &["add", "-A"]).await;
         run(d, &["commit", "-qm", "page"]).await;
         run(d, &["rm", "--", "app/[id]/page.tsx"]).await;
-        tokio::fs::write(d.join("a.txt"), "changed\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "changed\n")
+            .await
+            .unwrap();
         let mut r = req(d, "staged-deletion");
         r.paths = Some(vec!["a.txt".into(), "app/[id]/page.tsx".into()]);
         run_push(d, &r, &no_emit()).await.unwrap();
-        let shown = git_ok(d, &["show", "--format=", "--name-status", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        let shown = git_ok(
+            d,
+            &["show", "--format=", "--name-status", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert!(shown.stdout.contains("M\ta.txt"), "{}", shown.stdout);
-        assert!(shown.stdout.contains("D\tapp/[id]/page.tsx"), "{}", shown.stdout);
+        assert!(
+            shown.stdout.contains("D\tapp/[id]/page.tsx"),
+            "{}",
+            shown.stdout
+        );
     }
 
     #[tokio::test]
@@ -1247,14 +1573,23 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let _remote = bare_remote(d).await;
-        tokio::fs::write(d.join("old.txt"), "rename me\n").await.unwrap();
+        tokio::fs::write(d.join("old.txt"), "rename me\n")
+            .await
+            .unwrap();
         run(d, &["add", "old.txt"]).await;
         run(d, &["commit", "-qm", "old file"]).await;
         run(d, &["mv", "old.txt", "new.txt"]).await;
         let mut r = req(d, "staged-rename");
         r.paths = Some(vec!["new.txt".into(), "old.txt".into()]);
         run_push(d, &r, &no_emit()).await.unwrap();
-        let shown = git_ok(d, &["show", "--format=", "--name-status", "-M", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        let shown = git_ok(
+            d,
+            &["show", "--format=", "--name-status", "-M", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(shown.stdout.trim(), "R100\told.txt\tnew.txt");
     }
 
@@ -1264,13 +1599,26 @@ mod tests {
         let d = td.path();
         let _remote = bare_remote(d).await;
         tokio::fs::remove_file(d.join("a.txt")).await.unwrap();
-        tokio::fs::write(d.join("unselected.txt"), "keep untracked\n").await.unwrap();
+        tokio::fs::write(d.join("unselected.txt"), "keep untracked\n")
+            .await
+            .unwrap();
         let mut r = req(d, "unstaged-deletion");
         r.paths = Some(vec!["a.txt".into()]);
         run_push(d, &r, &no_emit()).await.unwrap();
-        let shown = git_ok(d, &["show", "--format=", "--name-status", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        let shown = git_ok(
+            d,
+            &["show", "--format=", "--name-status", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(shown.stdout.trim(), "D\ta.txt");
-        assert_eq!(status_for(d).await.untracked, 1, "missing-only scope cannot stage unrelated files");
+        assert_eq!(
+            status_for(d).await.untracked,
+            1,
+            "missing-only scope cannot stage unrelated files"
+        );
     }
 
     #[tokio::test]
@@ -1280,7 +1628,9 @@ mod tests {
         let _remote = bare_remote(d).await;
         for dir in ["x/[ab]", "x/a"] {
             tokio::fs::create_dir_all(d.join(dir)).await.unwrap();
-            tokio::fs::write(d.join(dir).join("f.txt"), "before\n").await.unwrap();
+            tokio::fs::write(d.join(dir).join("f.txt"), "before\n")
+                .await
+                .unwrap();
         }
         run(d, &["add", "-A"]).await;
         run(d, &["commit", "-qm", "routes"]).await;
@@ -1290,9 +1640,18 @@ mod tests {
         let mut r = req(d, "literal-routes");
         r.paths = Some(vec!["x/[ab]/f.txt".into()]);
         run_push(d, &r, &no_emit()).await.unwrap();
-        let shown = git_ok(d, &["show", "--format=", "--name-only", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        let shown = git_ok(
+            d,
+            &["show", "--format=", "--name-only", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(shown.stdout.trim(), "x/[ab]/f.txt");
-        let unstaged = git_ok(d, &["diff", "--name-only"], None, LOCAL_TIMEOUT).await.unwrap();
+        let unstaged = git_ok(d, &["diff", "--name-only"], None, LOCAL_TIMEOUT)
+            .await
+            .unwrap();
         assert_eq!(unstaged.stdout.trim(), "x/a/f.txt");
     }
 
@@ -1301,7 +1660,9 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let _remote = bare_remote(d).await;
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n")
+            .await
+            .unwrap();
 
         let err = run_push(d, &req(d, "main"), &no_emit()).await.unwrap_err();
         assert!(err.contains("protected"), "{err}");
@@ -1340,7 +1701,9 @@ mod tests {
         let mut r = req(d, "head-only");
         r.skip_commit = true;
         let outcome = run_push(d, &r, &no_emit()).await.unwrap();
-        let head = git_ok(d, &["rev-parse", "HEAD"], None, LOCAL_TIMEOUT).await.unwrap();
+        let head = git_ok(d, &["rev-parse", "HEAD"], None, LOCAL_TIMEOUT)
+            .await
+            .unwrap();
         assert_eq!(outcome.committed.as_deref(), Some(head.stdout.trim()));
         let s = status_for(d).await;
         assert_eq!(s.unstaged, 1, "the dirty edit was left alone");
@@ -1360,15 +1723,28 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let _remote = bare_remote(d).await;
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\n")
+            .await
+            .unwrap();
         let mut r = req(d, "also-local");
         r.create_local_branch = true;
         run_push(d, &r, &no_emit()).await.unwrap();
-        let branch = git_ok(d, &["rev-parse", "--abbrev-ref", "HEAD"], None, LOCAL_TIMEOUT)
-            .await
-            .unwrap();
+        let branch = git_ok(
+            d,
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(branch.stdout.trim(), "main", "checkout untouched");
-        let local = git_ok(d, &["rev-parse", "refs/heads/also-local"], None, LOCAL_TIMEOUT).await;
+        let local = git_ok(
+            d,
+            &["rev-parse", "refs/heads/also-local"],
+            None,
+            LOCAL_TIMEOUT,
+        )
+        .await;
         assert!(local.is_ok(), "local branch exists");
     }
 
@@ -1379,10 +1755,19 @@ mod tests {
         let td = temp_repo().await;
         let d = td.path();
         let before = tokio::fs::read_to_string(d.join("a.txt")).await.unwrap();
-        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\nfour\n").await.unwrap();
+        tokio::fs::write(d.join("a.txt"), "one\nTWO\nthree\nfour\n")
+            .await
+            .unwrap();
 
         let diff_out = tokio::process::Command::new("/usr/bin/git")
-            .args(["-C", d.to_str().unwrap(), "diff", "-U3", "--no-color", "HEAD"])
+            .args([
+                "-C",
+                d.to_str().unwrap(),
+                "diff",
+                "-U3",
+                "--no-color",
+                "HEAD",
+            ])
             .output()
             .await
             .unwrap();
@@ -1391,9 +1776,14 @@ mod tests {
         let all: Vec<usize> = (0..files[0].hunks.len()).collect();
         let patch = render_reverse_patch(&files[0], &all).unwrap();
 
-        git_ok(d, &["apply", "--reverse"], Some(patch.as_bytes()), LOCAL_TIMEOUT)
-            .await
-            .unwrap();
+        git_ok(
+            d,
+            &["apply", "--reverse"],
+            Some(patch.as_bytes()),
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         let after = tokio::fs::read_to_string(d.join("a.txt")).await.unwrap();
         assert_eq!(after, before, "revert restored the pre-change content");
     }
@@ -1407,11 +1797,20 @@ mod tests {
         tokio::fs::write(d.join("b.txt"), &base).await.unwrap();
         run(d, &["add", "b.txt"]).await;
         run(d, &["commit", "-qm", "base"]).await;
-        let edited = base.replace("line3\n", "LINE3\n").replace("line35\n", "LINE35\n");
+        let edited = base
+            .replace("line3\n", "LINE3\n")
+            .replace("line35\n", "LINE35\n");
         tokio::fs::write(d.join("b.txt"), &edited).await.unwrap();
 
         let diff_out = tokio::process::Command::new("/usr/bin/git")
-            .args(["-C", d.to_str().unwrap(), "diff", "-U3", "--no-color", "HEAD"])
+            .args([
+                "-C",
+                d.to_str().unwrap(),
+                "diff",
+                "-U3",
+                "--no-color",
+                "HEAD",
+            ])
             .output()
             .await
             .unwrap();
@@ -1421,9 +1820,14 @@ mod tests {
 
         // Revert only the second hunk; the first edit survives.
         let patch = render_reverse_patch(file, &[1]).unwrap();
-        git_ok(d, &["apply", "--reverse"], Some(patch.as_bytes()), LOCAL_TIMEOUT)
-            .await
-            .unwrap();
+        git_ok(
+            d,
+            &["apply", "--reverse"],
+            Some(patch.as_bytes()),
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         let after = tokio::fs::read_to_string(d.join("b.txt")).await.unwrap();
         assert!(after.contains("LINE3\n"), "first hunk still applied");
         assert!(after.contains("line35\n"), "second hunk reverted");
@@ -1435,7 +1839,14 @@ mod tests {
         let d = td.path();
         run(d, &["rm", "-q", "a.txt"]).await;
         let diff_out = tokio::process::Command::new("/usr/bin/git")
-            .args(["-C", d.to_str().unwrap(), "diff", "-U3", "--no-color", "HEAD"])
+            .args([
+                "-C",
+                d.to_str().unwrap(),
+                "diff",
+                "-U3",
+                "--no-color",
+                "HEAD",
+            ])
             .output()
             .await
             .unwrap();
@@ -1443,9 +1854,14 @@ mod tests {
         assert_eq!(files[0].status, FileStatus::Deleted);
         let all: Vec<usize> = (0..files[0].hunks.len()).collect();
         let patch = render_reverse_patch(&files[0], &all).unwrap();
-        git_ok(d, &["apply", "--reverse"], Some(patch.as_bytes()), LOCAL_TIMEOUT)
-            .await
-            .unwrap();
+        git_ok(
+            d,
+            &["apply", "--reverse"],
+            Some(patch.as_bytes()),
+            LOCAL_TIMEOUT,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             tokio::fs::read_to_string(d.join("a.txt")).await.unwrap(),
             "one\ntwo\nthree\n"
@@ -1454,10 +1870,9 @@ mod tests {
 
     #[test]
     fn reverse_patch_refuses_binary_and_bad_hunk_index() {
-        let mut f = parse_unified_diff(
-            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n",
-        )
-        .remove(0);
+        let mut f =
+            parse_unified_diff("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n")
+                .remove(0);
         assert!(render_reverse_patch(&f, &[5]).is_err());
         f.binary = true;
         assert!(render_reverse_patch(&f, &[0]).is_err());

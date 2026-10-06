@@ -10,6 +10,7 @@ export function useAgentTurn() { return { messages, liveText: "Reviewing the fin
 export function useReadAloud() { return { speaking: false, stop: noop, speak: noop }; }
 export function useDictation() { return { listening: false, partial: "", toggle: noop }; }
 export async function invoke(command: string) {
+  if (command === "browser_home_feed") return { recent:[{url:"https://docs.example.test/start",title:"Getting started"},{url:"https://design.example.test/library",title:"Design library"}],frequent:[{url:"https://example.test",title:"Project dashboard"}],tasks:[{url:"https://docs.example.test/start",title:"Review the launch checklist",count:3}],missions:[{missionId:"qa-mission",title:"Research browser responsiveness"}] };
   if (command === "companion_list") return [{ companionId: "qa-carried", title: "Research carried into the browser", createdAt: 1_789_286_000_000 }];
   if (command === "browse_feedback_list") return {};
   if (/prefs|settings/.test(command)) return null;
@@ -24,3 +25,5 @@ export async function openUrl() {}
 export function convertFileSrc(path: string) { return path; }
 export function isTauri() { return false; }
 export class Channel { onmessage = noop; }
+
+export function getCurrentWebview() { return { onDragDropEvent: async () => noop }; }

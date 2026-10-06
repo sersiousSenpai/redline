@@ -487,6 +487,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "GET",
+        path: "/v1/code/map",
+        class: RouteClass::Open,
+        purpose: "Bounded file and symbol map of an allowlisted project",
+        request: "?repo= known project",
+        response: "JSON map output",
+    },
+    RouteSpec {
+        method: "GET",
         path: "/v1/code/git",
         class: RouteClass::Open,
         purpose: "Whitelisted read-only git ops (status/branch/log/diff/show) in a known project",

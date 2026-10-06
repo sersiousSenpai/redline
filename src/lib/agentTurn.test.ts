@@ -265,8 +265,9 @@ describe("sending", () => {
       { type: "send-optimistic", message: msg({ id: "tmp-1", role: "user", body: "go" }) },
       { type: "send-resolved", tmpId: "tmp-1", messageId: "u-db", queued: true },
     ]);
-    expect(s.messages[0].id).toBe("u-db");
-    expect(s.messages[0].status).toBe("queued");
+    expect(s.messages).toHaveLength(0);
+    expect(s.queue[0].id).toBe("u-db");
+    expect(s.queue[0].status).toBe("queued");
   });
 
   it("a type-ahead send leaves the live stream untouched and guesses queued", () => {
@@ -277,7 +278,8 @@ describe("sending", () => {
     expect(s.liveText).toBe("mid-stream");
     expect(s.lastSeq).toBe(3);
     expect(s.phase).toBe("streaming");
-    expect(s.messages[0].status).toBe("queued");
+    expect(s.messages).toHaveLength(0);
+    expect(s.queue[0].status).toBe("queued");
   });
 
   it("send-resolved corrects a wrong queued guess back to a plain sent row", () => {
@@ -475,5 +477,53 @@ describe("the meter", () => {
     ]);
     expect(s.meter).toBeNull();
     expect(s.activity).toEqual([]);
+  });
+});
+
+describe("workbench queue and steering", () => {
+  it("keeps queued instructions after the answer when the queue drains", () => {
+    const s = run([
+      { type: "send-optimistic", message: msg({ id: "u1", role: "user", body: "first" }) },
+      { type: "delta", seq: 1, text: "answer" },
+      { type: "send-optimistic", message: msg({ id: "tmp-q", role: "user", body: "next" }) },
+      { type: "send-resolved", tmpId: "tmp-q", messageId: "q", queued: true },
+      { type: "done", message: msg({ id: "a1", body: "answer" }) },
+      { type: "queue-advanced", messageId: "q" },
+    ]);
+    expect(s.messages.map(row => row.id)).toEqual(["u1", "a1", "q"]);
+    expect(s.queue).toEqual([]);
+  });
+  it("preserves queue order when acknowledgements arrive in another order", () => {
+    const s = run([
+      { type: "delta", seq: 1, text: "working" },
+      { type: "send-optimistic", message: msg({ id: "tmp-a", role: "user" }) },
+      { type: "send-optimistic", message: msg({ id: "tmp-b", role: "user" }) },
+      { type: "send-resolved", tmpId: "tmp-b", messageId: "b", queued: true },
+      { type: "send-resolved", tmpId: "tmp-a", messageId: "a", queued: true },
+    ]);
+    expect(s.queue.map(row => row.id)).toEqual(["a", "b"]);
+    expect(s.messages).toEqual([]);
+  });
+  it("steering freezes the first segment, inserts the user, and keeps the sequence watermark", () => {
+    const s = run([
+      { type: "delta", seq: 4, text: "before" },
+      { type: "send-optimistic", message: msg({ id: "q", role: "user", body: "change direction" }) },
+      { type: "steered", message: msg({ id: "q", role: "user", body: "change direction" }), assistant: msg({ id: "segment", body: "before" }), seq: 4 },
+      { type: "delta", seq: 4, text: "before" },
+      { type: "delta", seq: 5, text: "after" },
+    ]);
+    expect(s.messages.map(row => row.body)).toEqual(["before", "change direction"]);
+    expect(s.queue).toEqual([]);
+    expect(s.liveText).toBe("after");
+  });
+  it("does not put a queue advancement back in the tray when its send acknowledgement arrives late", () => {
+    const s = run([
+      { type: "delta", seq: 1, text: "working" },
+      { type: "send-optimistic", message: msg({ id: "tmp", role: "user" }) },
+      { type: "queue-advanced", messageId: "q" },
+      { type: "send-resolved", tmpId: "tmp", messageId: "q", queued: true },
+    ]);
+    expect(s.queue).toEqual([]);
+    expect(s.messages.map(row => row.id)).toEqual(["q"]);
   });
 });

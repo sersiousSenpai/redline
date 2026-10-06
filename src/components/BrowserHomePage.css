@@ -1,0 +1,18 @@
+.rb-home { height:100%; overflow:auto; padding:clamp(20px,5vw,64px); color:var(--color-ink); background:var(--color-paper); }
+.rb-home header { margin:0 0 36px; }
+.rb-home header>span { font-size:12px; color:var(--color-ink-muted); }
+.rb-home h1 { font-family:var(--font-serif,Georgia,serif); font-size:clamp(24px,3vw,36px); font-weight:500; max-width:620px; margin:12px 0; }
+.rb-home header p,.rb-home-empty { color:var(--color-ink-muted); font-size:13px; }
+.rb-home section { margin-bottom:32px; }
+.rb-home h2 { font-size:13px; font-weight:600; margin:0 0 12px; }
+.rb-home-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:12px; }
+.rb-home-tile { display:flex; flex-direction:column; min-width:0; overflow:hidden; padding:0 0 12px; border:1px solid var(--color-rule); border-radius:10px; color:var(--color-ink); background:var(--color-bg-elevated); text-align:left; cursor:pointer; }
+.rb-home-tile:hover { border-color:var(--color-ink-muted); }
+.rb-home-tile:focus-visible { outline:2px solid var(--color-info); outline-offset:3px; }
+.rb-home-tile strong,.rb-home-tile>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; padding:0 12px; }
+.rb-home-tile strong { font-size:12px; font-weight:500; margin:11px 0 5px; }
+.rb-home-tile>span { font-size:11px; color:var(--color-ink-muted); }
+.rb-home-shot { height:96px; width:100%; overflow:hidden; display:grid; place-items:center; color:var(--color-ink-muted); border-bottom:1px solid var(--color-rule); background:var(--color-paper); }
+.rb-home-shot img { width:100%; height:100%; object-fit:cover; object-position:top; }
+.rb-home-task { padding-top:14px; }
+.rb-home-task svg { margin-left:12px; }

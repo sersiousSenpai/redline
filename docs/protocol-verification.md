@@ -798,3 +798,33 @@ Also observed: both matchers (`Workflow` and `*`) fire for the Workflow call,
 in parallel ("running PreToolUse hooks… 0/2"). The `*` gate route therefore
 ignores `tool_name: "Workflow"`, and the pre-flight route owns it. `--settings`
 hooks merge with the user's global hooks, which keep firing.
+
+## Hosted shell — October 6, 2026
+
+Measured with Claude Code 2.1.291 and Codex 0.160.1 in disposable directories. The re-runnable entry points are `scripts/verify-agent-shell.py`, `scripts/verify-agent-shell-handoff.py`, `scripts/verify-codex-shell.py`, and `scripts/probe-codex-hosted-approval.py`. Sanitized protocol events live in `scripts/fixtures/agent-shell/`; raw local logs are deliberately excluded because initialization reports account details.
+
+### Claude protocol results
+
+- `--permission-prompts host` **also needs** `--permission-prompt-tool stdio`. Without the second flag, the host never receives a usable permission request. The installed CLI emitted `control_request` / `can_use_tool` with a request ID, tool name, tool input and suggested permission rules. An allow response carries `updatedInput`; a deny carries a message. `AskUserQuestion` delivered the chosen answer through `updatedInput.answers`.
+- `initialize`, `set_permission_mode`, `set_model`, and `interrupt` responses were observed. The interrupt probe stopped a live sleep tool and produced one interrupted result. Controls share the live stdin pipe; they do not launch a second process.
+- A real PreToolUse HTTP hook for `ExitPlanMode` ran in print mode. Holding its response held the tool. Denying the first submission caused a revision and a second submission in the same turn; allowing the second allowed completion. The fixture held each request for two seconds with the production 43,200-second hook timeout configured. **A twelve-hour wall-clock hold was not executed.**
+- UserPromptSubmit's `additionalContext` supplied an ORCHID marker that appeared in the answer. Multiple input text blocks are joined into the hook's prompt, so they cannot hide supplemental context from Claude's prompt lake. Polis `annotate` therefore runs after capture, guard claims and lineage, and merges additional context with restore context.
+- A user frame delivered during a tool call was incorporated into the same final result, rather than becoming a separate completed turn. The Chat steer reader therefore splits its visible/persisted assistant segment while retaining the sequence watermark. Ordinary Shell type-ahead stays in the frontend queue until the current result.
+- Init lists slash commands and identifies terminal-only commands. `/context` executed in print mode and returned the context report. The shell offers raw view for terminal-only commands; the complete command catalog was not exhaustively executed.
+- `Workflow` appeared as a host permission request. Allowing the actual card started a disposable read-only workflow; the root probe observed both start and completion, including the child's file read. Orchestrate can use the hosted driver with its exact settings file, launch guard and prompt.
+
+### Continuous raw handoff
+
+The live handoff rig created session `e06b61c8-6a7b-4fb5-b43b-0ad29468fd01`, wrote marker `REDLINE-HANDOFF-235828f4` in hosted mode, resumed that same session and cwd in the real TUI, persisted a new `TUI_OK` reply, exited the TUI, then resumed hosted mode and recalled the original marker. Each previous process was reaped before the next driver started. Evidence is in `/tmp/redline-agent-shell-handoff/{summary,events}.json`.
+
+This verifies the native protocol, not the complete graphical app handoff. Redline refuses hosted-to-raw while busy, while permission requests are pending, or while a plan hook is held. Raw-to-hosted requires the raw agent to exit with `/exit`; a remaining PTY descendant refuses the switch. An old hosted `busy` flag is never used as evidence that the raw TUI is idle. The same cwd, session ID and conversation survive the switch. Resuming hosted mode reapplies its saved launch settings. The raw TUI uses the CLI’s session defaults; the live handoff fixture explicitly selected Haiku, so it does not establish automatic model/effort parity in the graphical app.
+
+### Codex adapter and context
+
+A real authenticated app-server run completed two turns, created/read a disposable file, and recalled both that content and a separately supplied ORCHID context marker. Native tools, approvals, questions, usage and completion map onto the same ShellEvent cards. A separate **real app-server with a local mock Responses model** exercised the full held Stop → settings update → queue acknowledgement → hook release → implementation sequence. It wrote `approved.txt`, retained the same thread/model/effort, and verified retry deduplication through `clientUserMessageId`. The fixture trusts only the exact discovered test-hook key/hash; production does not bypass hook trust.
+
+On this CLI version, `thread/resume.developerInstructions` and a context-only settings change were acknowledged but did not reliably expose the marker to the model. Codex follow-ups therefore carry original human text as the first input block and explicitly disclosed context as a separate `<redline-context>` block. Its UserPromptSubmit hook concatenates text blocks **with no separator**. Before delivery Redline claims that exact composed hook body with the existing one-shot prompt guard, then records only the original human text under the acknowledged session ID. The first launch remains unaugmented, preserving its launch hash and guard binding. Context never rewrites an active turn's instructions.
+
+### Shell integration and bounded delivery
+
+`scripts/test-shell-integration.py` passed real disposable zsh and bash PTY checks for user startup files, custom ZDOTDIR, dynamic prompts, exit status and interactive reads. One existing TerminalView remains mounted while plain-shell blocks/raw views change; completed output is serialized lazily, while the live xterm keeps the existing WebGL allocation budget. The scanner tests cover split OSC frames, replay, alternate-screen applications and literal Claude promotion. The native backend batches every 16 ms over a per-tab Channel, caps replay at 2 MB/4,096 events, enforces 256-event acknowledgement credit, and reconstructs unanswered permission cards from its registry on reattach.

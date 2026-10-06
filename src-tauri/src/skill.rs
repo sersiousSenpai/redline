@@ -60,17 +60,17 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "sidecar",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/sidecar/SKILL.md"),
     },
     EmbeddedSkill {
         name: "conversation",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/conversation/SKILL.md"),
     },
     EmbeddedSkill {
         name: "browse",
-        version: 7,
+        version: 8,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {
@@ -85,7 +85,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "companion",
-        version: 7,
+        version: 8,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// The Localhost surface: a grid of cards, one per dev server, answering "what
+// The Localhost surface: a status list, one per dev server, answering "what
 // do I have running, out of which repo?" at a glance — and letting you bring a
 // dead one back without hunting for the command.
 //
@@ -12,10 +12,9 @@
 // including the cycling one.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Globe, Play, RotateCw, ShieldCheck, Square } from "lucide-react";
+import { Play, RotateCw, ShieldCheck } from "lucide-react";
 import type { DevServerScan, OtherListener, RecentServer, RunningServer } from "../types";
-import { useRepoIcons } from "../hooks/useRepoIcons";
-import { ProjectThumb } from "./ProjectThumb";
+import "./ServersPane.css";
 import type { StopPlan } from "../lib/devServerTypes";
 import type { ProjectOption } from "./ProjectPicker";
 import { RunProjectDialog } from "./RunProjectDialog";
@@ -46,14 +45,11 @@ export function formatLastRun(lastSeenAt: number, now = Date.now()): string {
   return months < 12 ? `${months}mo ago` : `${Math.round(months / 12)}y ago`;
 }
 
-const cardStyle: React.CSSProperties = {
-  border: "1px solid var(--color-rule)",
-  background: "var(--color-bg-elevated)",
-  borderRadius: "6px",
-  overflow: "hidden",
-  display: "flex",
-  flexDirection: "column",
-};
+export function splitStack(stack: string, fallbackName: string): { framework: string; name: string } {
+  const separator = stack.indexOf(" — ");
+  return separator < 0 ? { framework: stack, name: fallbackName }
+    : { framework: stack.slice(0, separator), name: stack.slice(separator + 3) || fallbackName };
+}
 
 const btnStyle: React.CSSProperties = {
   display: "inline-flex",
@@ -88,8 +84,8 @@ export function StopButton({ onStop, onArm }: {
     ? `Really stop? · also ${plan.collateralPorts.map((port) => `:${port}`).join(", ")}`
     : plan && plan.pids.length > 1 ? `Really stop? · ${plan.pids.length} procs` : "Really stop?";
   return (
-    <button type="button" disabled={stopping}
-      style={{ ...btnStyle,
+    <button type="button" disabled={stopping} className="rl-server-btn rl-server-btn--ghost"
+      style={{
         color: armed ? "var(--color-danger, #d33)" : "var(--color-ink)",
         borderColor: armed ? "var(--color-danger, #d33)" : "var(--color-rule)",
       }}
@@ -117,101 +113,26 @@ export function StopButton({ onStop, onArm }: {
           if (generation.current === request) setStopping(false);
         });
       }}>
-      <Square size={12} strokeWidth={2} />
       {stopping ? "Stopping…" : armed ? label : "Stop"}
     </button>
   );
 }
 
-function PortLine({
-  url,
-  port,
-  extra,
-  onOpenUrl,
-}: {
-  url: string;
-  port: number;
-  extra: number[];
-  onOpenUrl: (url: string) => void;
+function ServerRow({ live, name, framework, url, port, extra = [], portBusy = false, tooltip, action, onOpenUrl }: {
+  live: boolean; name: string; framework: string; url: string; port: number; extra?: number[];
+  portBusy?: boolean; tooltip: string; action: React.ReactNode; onOpenUrl: (url: string) => void;
 }) {
-  return (
-    <div style={{ display: "flex", alignItems: "baseline", gap: "6px" }}>
-      <button
-        type="button"
-        onClick={() => onOpenUrl(url)}
-        title={url}
-        style={{
-          fontSize: "12px",
-          fontFamily: "var(--font-mono, ui-monospace, monospace)",
-          color: "var(--color-info)",
-          background: "transparent",
-          border: "none",
-          padding: 0,
-          cursor: "pointer",
-          textDecoration: "underline",
-        }}
-      >
-        localhost:{port}
-      </button>
-      {extra.length > 0 && (
-        <span
-          style={{ fontSize: "10.5px", color: "var(--color-ink-muted)" }}
-          title={extra.map((p) => `:${p}`).join(" ")}
-        >
-          +{extra.length} more
-        </span>
-      )}
-    </div>
-  );
-}
-
-function CardBody({
-  stack,
-  args,
-  projectPath,
-  children,
-}: {
-  stack: string;
-  args?: string;
-  projectPath: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        padding: "9px 10px 10px",
-        display: "flex",
-        flexDirection: "column",
-        gap: "5px",
-        minWidth: 0,
-      }}
-    >
-      <div
-        style={{
-          fontSize: "12.5px",
-          fontWeight: 600,
-          color: "var(--color-ink)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-        title={args || stack}
-      >
-        {stack}
-      </div>
-      <div
-        style={{
-          fontSize: "11px",
-          color: "var(--color-ink-muted)",
-          fontFamily: "var(--font-mono, ui-monospace, monospace)",
-        }}
-        title={projectPath}
-      >
-        {middleTruncate(projectPath)}
-      </div>
-      {children}
-    </div>
-  );
+  return <div className="rl-server-row">
+    <span className="rl-server-dot" data-live={live} title={live ? "Running" : "Stopped"} />
+    <span className="rl-server-name" title={tooltip}>{name}</span>
+    <span className="rl-server-stack" title={framework}>{framework}</span>
+    <span className="rl-server-address">
+      <button type="button" className="rl-server-url" onClick={() => onOpenUrl(url)} title={`Open ${url} in the browser`}>localhost:{port}</button>
+      {extra.length > 0 && <span className="rl-server-extra" title={extra.map(p => `:${p}`).join(" ")}>+{extra.length}</span>}
+      {portBusy && <span className="rl-server-extra" title="Another process is listening on this port — the server will pick a different one.">port in use</span>}
+    </span>
+    {action}
+  </div>;
 }
 
 export interface ServersPaneProps {
@@ -238,16 +159,8 @@ export function ServersPane({
   const [runDialogOpen, setRunDialogOpen] = useState(false);
   const running = useMemo(() => scan?.running ?? [], [scan]);
   const recent = useMemo(() => scan?.recent ?? [], [scan]);
-  const repoPaths = useMemo(() => [...running, ...recent].map((server) => server.projectPath), [running, recent]);
-  const repoIcons = useRepoIcons(repoPaths);
   const others = scan?.others ?? [];
   const empty = running.length === 0 && recent.length === 0;
-
-  const artwork = (server: RunningServer | RecentServer) => {
-    const repo = repoIcons.get(server.projectPath);
-    return <ProjectThumb projectName={repo?.name || server.projectName}
-      logo={repo?.dataUrl ?? null} />;
-  };
 
   return (
     <div
@@ -309,93 +222,29 @@ export function ServersPane({
         </div>
       )}
 
-      {running.length > 0 && (
-        <>
-          <SectionTitle>Running</SectionTitle>
-          <div className="rl-server-grid">
-            {running.map((s: RunningServer) => (
-              <div key={`${s.projectPath}:${s.port}`} style={cardStyle}>
-                {artwork(s)}
-                <CardBody stack={s.stack} args={s.args} projectPath={s.projectPath}>
-                  <PortLine
-                    url={s.url}
-                    port={s.port}
-                    extra={s.extraPorts}
-                    onOpenUrl={onOpenUrl}
-                  />
-                  <div style={{ display: "flex", gap: "6px", marginTop: "3px" }}>
-                    <button
-                      type="button"
-                      style={btnStyle}
-                      onClick={() => onOpenUrl(s.url)}
-                      title={`Open ${s.url} in the browser`}
-                    >
-                      <Globe size={12} strokeWidth={2} />
-                      Open
-                    </button>
-                    <StopButton
-                      key={`${s.pid}:${s.port}`}
-                      onArm={() => onPlanStop(s.pid, s.port, s.projectPath)}
-                      onStop={() => onStop(s.pid, s.port, s.projectPath)}
-                    />
-                  </div>
-                </CardBody>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {recent.length > 0 && (
-        <>
-          <SectionTitle>Recently run</SectionTitle>
-          <div className="rl-server-grid">
-            {recent.map((s: RecentServer) => (
-              <div key={s.id} style={cardStyle}>
-                {artwork(s)}
-                <CardBody stack={s.stack} projectPath={s.projectPath}>
-                  <div
-                    style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
-                  >
-                    last run {formatLastRun(s.lastSeenAt)} · :{s.port}
-                  </div>
-                  {s.portBusy && (
-                    <div
-                      style={{ fontSize: "10.5px", color: "var(--color-ink-muted)" }}
-                      title="Another process is listening on this port — the server will pick a different one."
-                    >
-                      port in use
-                    </div>
-                  )}
-                  <div style={{ display: "flex", gap: "6px", marginTop: "3px" }}>
-                    <button
-                      type="button"
-                      style={btnStyle}
-                      onClick={() => onRun(s.projectPath, s.runCommand)}
-                      title={s.runCommand || "Start this server"}
-                      disabled={!s.runCommand}
-                    >
-                      <Play size={12} strokeWidth={2} />
-                      Run
-                    </button>
-                  </div>
-                </CardBody>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {empty && !error && (
-        <div style={{ fontSize: "12px", color: "var(--color-ink-muted)", padding: "24px 0" }}>
-          {scan
-            ? "No dev servers running, and none remembered yet. Use Run a project to start one."
-            : "Looking for dev servers…"}
-        </div>
-      )}
+      {(!empty || !error) && <div className="rl-servers-panel">
+        {running.length > 0 && <>
+          <div className="rl-servers-label">Running</div>
+          {running.map((s: RunningServer) => <ServerRow key={`${s.projectPath}:${s.port}`} live
+            {...splitStack(s.stack, s.projectName)} url={s.url} port={s.port} extra={s.extraPorts}
+            tooltip={`${s.stack} · ${middleTruncate(s.projectPath)}`} onOpenUrl={onOpenUrl}
+            action={<StopButton key={`${s.pid}:${s.port}`} onArm={() => onPlanStop(s.pid, s.port, s.projectPath)} onStop={() => onStop(s.pid, s.port, s.projectPath)} />} />)}
+        </>}
+        {recent.length > 0 && <>
+          <div className="rl-servers-label">Recently run</div>
+          {recent.map((s: RecentServer) => <ServerRow key={s.id} live={false}
+            {...splitStack(s.stack, s.projectName)} url={`http://localhost:${s.port}`} port={s.port} portBusy={s.portBusy}
+            tooltip={`${s.stack} · ${middleTruncate(s.projectPath)} · last run ${formatLastRun(s.lastSeenAt)}`} onOpenUrl={onOpenUrl}
+            action={<button type="button" className="rl-server-btn rl-server-btn--go" disabled={!s.runCommand}
+              title={s.runCommand || "Start this server"} onClick={() => onRun(s.projectPath, s.runCommand)}>Run <Play size={12} /></button>} />)}
+        </>}
+        {empty && <div style={{ fontSize: "12px", color: "var(--color-ink-muted)", padding: "24px 0" }}>
+          {scan ? "No dev servers running, and none remembered yet. Use Run a project to start one." : "Looking for dev servers…"}
+        </div>}
+      </div>}
 
       {others.length > 0 && (
-        <details style={{ marginTop: "18px" }}>
+        <details className="rl-servers-others">
           <summary
             style={{
               fontSize: "11px",
@@ -432,23 +281,6 @@ export function ServersPane({
           </div>
         </details>
       )}
-    </div>
-  );
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        fontSize: "11px",
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.04em",
-        color: "var(--color-ink-muted)",
-        margin: "14px 0 8px",
-      }}
-    >
-      {children}
     </div>
   );
 }

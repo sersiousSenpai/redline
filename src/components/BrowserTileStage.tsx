@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { NEWTAB } from "../lib/browserTitle";
 import { Maximize2, Minimize2, Plus, ChevronDown, GripVertical } from "lucide-react";
 import { crossedDragThreshold } from "../lib/browserTabDrag";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { clampDivider, tileRects, type BrowserLayout } from "../lib/browserLayout";
 
-export interface TilePage { id: string; browseId: string; title: string; url: string }
+export interface TilePage { id: string; browseId: string; title: string; url: string; favicon?: string }
 interface Props {
+  renderHome?: (page: TilePage) => ReactNode;
   stageRef: RefObject<HTMLDivElement | null>;
   slots: RefObject<Map<string, HTMLDivElement>>;
   pages: TilePage[];
@@ -28,7 +30,7 @@ interface Props {
   hoveredTileTab?: string | null; onHoverTile?: (browseId: string | null) => void;
   onSwap?: (from: number, to: number) => void;
 }
-export function BrowserTileStage({ stageRef, slots, pages, tabs, activeId, layout, fullscreen, shots, showShots, errors = {}, loading, onRetry, onFocus, onAssign, onAddPage, onLayout, onDragging, hoveredTileTab, onHoverTile, onSwap }: Props) {
+export function BrowserTileStage({ renderHome, stageRef, slots, pages, tabs, activeId, layout, fullscreen, shots, showShots, errors = {}, loading, onRetry, onFocus, onAssign, onAddPage, onLayout, onDragging, hoveredTileTab, onHoverTile, onSwap }: Props) {
   const drag = useRef<{ axis: "horizontal" | "vertical"; rect: DOMRect } | null>(null);
   const rects = tileRects(pages.length, layout);
   // A grid draws every cell, filled or not; a freeform arrangement draws its pages.
@@ -57,9 +59,9 @@ export function BrowserTileStage({ stageRef, slots, pages, tabs, activeId, layou
         onHover={onHoverTile} onAssign={onAssign} onFocus={() => onFocus(page.id)} onMaximize={() => toggleMaximized(page)}
         onDragging={onDragging} onSwap={onSwap}/>}
       <div ref={(node) => { if (node) slots.current.set(page.id, node); else slots.current.delete(page.id); }} className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
-        {errors[page.id] ? <div className="rb-page-cover" role="alert"><strong>Page unavailable</strong><p>{errors[page.id]}</p><button type="button" className="rb-button" onClick={() => onRetry?.(page.id)}>Try again</button></div>
-          : loading?.has(page.id) && <div className="rb-page-cover" role="status"><span>Opening {page.title || "page"}…</span></div>}
-        {showShots && !errors[page.id] && shots.get(page.id) && <img src={shots.get(page.id)} alt="" aria-hidden draggable={false} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: "top left", pointerEvents: "none" }}/>}
+        {page.url === NEWTAB ? renderHome?.(page) : errors[page.id] ? <div className="rb-page-cover" role="alert"><strong>Page unavailable</strong><p>{errors[page.id]}</p><button type="button" className="rb-button" onClick={() => onRetry?.(page.id)}>Try again</button></div>
+          : loading?.has(page.id) && <div className="rb-page-cover" role="status"><span className="rb-waking-label">Reloading {page.title || "page"}…</span></div>}
+        {(showShots || loading?.has(page.id)) && !errors[page.id] && shots.get(page.id) && <img src={shots.get(page.id)} alt="" aria-hidden draggable={false} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", objectPosition: "top left", pointerEvents: "none", zIndex: 0 }}/>}
       </div>
     </section>; })}
     {!fullscreen && !layout.grid && pages.length > 1 && divider("horizontal")}

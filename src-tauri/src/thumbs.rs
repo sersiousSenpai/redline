@@ -207,18 +207,37 @@ pub fn looks_blank(png: &[u8], width: f64) -> bool {
 /// PNG bytes plus the image's real pixel dimensions.
 type Shot = (Vec<u8>, u32, u32);
 
-#[cfg(target_os = "macos")]
+// One capture per label for a short navigation settle window. A per-label lock
+// also coalesces the concurrent history screenshot and frontend thumbnail.
 async fn capture_png(app: &AppHandle, label: &str, width: f64) -> Result<Shot, String> {
+    use std::{collections::HashMap, sync::{Mutex, OnceLock}, time::{Duration, Instant}};
+    static SHOTS: OnceLock<Mutex<HashMap<String, (Instant, Shot)>>> = OnceLock::new();
+    let lock = crate::preparation_lock(&format!("thumbnail:{label}"));
+    let _guard = lock.lock().await;
+    let shots = SHOTS.get_or_init(Default::default);
+    let key = format!("{label}:{}", app.get_webview(label).and_then(|view| view.url().ok()).map(|url| url.to_string()).unwrap_or_default());
+    {
+        let mut cache = shots.lock().unwrap();
+        cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(2));
+        if let Some((_, shot)) = cache.get(&key) { return Ok(shot.clone()); }
+    }
+    let shot = capture_png_raw(app, label, width).await?;
+    if !looks_blank(&shot.0, width) { shots.lock().unwrap().insert(key, (Instant::now(), shot.clone())); }
+    Ok(shot)
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_png_raw(app: &AppHandle, label: &str, width: f64) -> Result<Shot, String> {
     use std::sync::{Arc, Mutex};
 
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
-    use objc2_foundation::{MainThreadMarker, NSDictionary, NSError, NSNumber};
+    use objc2_foundation::{MainThreadMarker, NSData, NSDictionary, NSError, NSNumber};
     use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
 
     let wv = app
         .get_webview(label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
-    let (tx, rx) = tokio::sync::oneshot::channel::<Result<Shot, String>>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, String>>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_cb = tx.clone();
 
@@ -250,25 +269,9 @@ async fn capture_png(app: &AppHandle, label: &str, width: f64) -> Result<Shot, S
                 // that keeps us on AppKit types we already depend on — a
                 // CGImage path would mean a new core-graphics dependency to
                 // save microseconds on a ~560px image.
-                let out = unsafe {
-                    image
-                        .as_ref()
-                        .and_then(|img| img.TIFFRepresentation())
-                        .and_then(|tiff| NSBitmapImageRep::imageRepWithData(&tiff))
-                        .and_then(|rep| {
-                            // Read the dimensions off the REP, not the NSImage:
-                            // the image's `size` is in points, the rep's is the
-                            // actual pixel grid — which is exactly the number
-                            // the frontend calibrates against.
-                            let w = rep.pixelsWide().max(0) as u32;
-                            let h = rep.pixelsHigh().max(0) as u32;
-                            rep.representationUsingType_properties(
-                                NSBitmapImageFileType::PNG,
-                                &NSDictionary::new(),
-                            )
-                            .map(|png| (png.to_vec(), w, h))
-                        })
-                };
+                // Copy only the TIFF bytes while on WebKit's main thread.
+                // No Objective-C object crosses the worker boundary.
+                let out = unsafe { image.as_ref().and_then(|img| img.TIFFRepresentation()).map(|data| data.to_vec()) };
                 if let Some(s) = tx_cb.lock().unwrap().take() {
                     let _ = s.send(
                         out.ok_or_else(|| "the page could not be rendered to an image".to_string()),
@@ -291,14 +294,24 @@ async fn capture_png(app: &AppHandle, label: &str, width: f64) -> Result<Shot, S
     )
     .await
     {
-        Ok(Ok(result)) => result,
+        Ok(Ok(result)) => {
+            let bytes = result?;
+            tokio::task::spawn_blocking(move || objc2::rc::autoreleasepool(|_| unsafe {
+                let data = NSData::with_bytes(&bytes);
+                let rep = NSBitmapImageRep::imageRepWithData(&data).ok_or("Invalid page bitmap")?;
+                let w = rep.pixelsWide().max(0) as u32;
+                let h = rep.pixelsHigh().max(0) as u32;
+                rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+                    .map(|png| (png.to_vec(), w, h)).ok_or_else(|| "Could not encode page bitmap".to_string())
+            })).await.map_err(|error| error.to_string())?
+        },
         Ok(Err(_)) => Err("the snapshot was cancelled".into()),
         Err(_) => Err("the page did not finish rendering in time".into()),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn capture_png(app: &AppHandle, label: &str, width: f64) -> Result<Shot, String> {
+async fn capture_png_raw(app: &AppHandle, label: &str, width: f64) -> Result<Shot, String> {
     let _ = (app, label, width);
     Err("page thumbnails are only supported on macOS".into())
 }

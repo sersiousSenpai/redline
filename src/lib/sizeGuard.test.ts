@@ -28,6 +28,12 @@ const files = sourceFiles(SRC_ROOT).map((path) => ({
 }));
 
 describe("size guard", () => {
+  it("keeps Guided review behind its own lazy chunk", () => {
+    const panel = files.find(({ rel }) => rel === "components/ReviewPanel.tsx")!.text;
+    expect(panel).toMatch(/const GuidedReview = lazy\(/);
+    expect(panel).not.toMatch(/from ["'][^"']*guided\/GuidedReview/);
+  });
+
   it("keeps Three.js behind the Map-only lazy scene boundary", () => {
     const surface = files.find(({ rel }) => rel === "components/MemorySurface.tsx")!.text;
     const map = files.find(({ rel }) => rel === "components/MemoryMap.tsx")!.text;

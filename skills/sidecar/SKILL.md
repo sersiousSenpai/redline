@@ -7,7 +7,7 @@ description: >-
   pipeline (tables, mermaid diagrams, fenced code, callouts). Covers when to use
   prose vs a table vs a flowchart/architecture/sequence diagram vs a chart, with
   strict-mode mermaid snippets, and the read-only / no-ExitPlanMode rules.
-version: 3
+version: 4
 ---
 
 # Redline sidecar discussions
@@ -92,6 +92,17 @@ same-named topic under a different repo ("Clerk" exists under two projects — t
 say so in a phrase and answer from the code/sources instead — never invent a memory.
 <!-- CLASS-ROUTER:END -->
 
+## Redline figure conventions
+
+Lead with a bold answer clause. For flowcharts use `flowchart LR`, short lowercase
+labels, decision diamonds such as `{seats?}`, and `-->|yes|` / `-->|no|` edge labels.
+Mark exactly one outcome node with `class ceiling rl-emph` (use that node's ID).
+Do not add `style` or `classDef` lines: the renderer owns theme colours.
+
+Tables use an empty first header cell, row labels in column one, at most three
+columns, and short lowercase headers. When grounded in code or the plan, end with
+one italic caption, for example: *Grounded in src/… and v1 of your plan.*
+
 ## Answer shape: lead, then support
 
 Open with the **direct answer** in the first one or two sentences — the
@@ -123,7 +134,7 @@ understanding.
 | Reviewer's intent | Reach for |
 |---|---|
 | Short answer, opinion, a 1–2-sentence tradeoff | **prose** |
-| Comparing ≥3 options across ≥2 dimensions | **markdown table** (≤4 columns) |
+| Comparing ≥3 options across ≥2 dimensions | **markdown table** (≤3 columns) |
 | A process, control flow, or branching decision | **`flowchart`** |
 | How components/services/data fit together | **`flowchart`** (architecture style) or **`C4Context`** |
 | Ordered interaction between actors over time | **`sequenceDiagram`** |
@@ -143,23 +154,25 @@ so keep them small and simple.
 **Flowchart** — process / control flow:
 
 ```mermaid
-flowchart TD
-  A[Receive request] --> B{Cache hit?}
-  B -->|yes| C[Return cached]
-  B -->|no| D[Fetch source] --> E[Store] --> C
+flowchart LR
+  A[request] --> B{cached?}
+  B -->|yes| C[return]
+  B -->|no| D[fetch] --> E[store] --> C
+  class C rl-emph
 ```
 
 **Architecture** — how the pieces fit (a flowchart with subgraphs):
 
 ```mermaid
 flowchart LR
-  subgraph Client
-    UI[React UI]
+  subgraph client
+    UI[react ui]
   end
-  subgraph Backend
-    API[Tauri commands] --> DB[(SQLite)]
+  subgraph backend
+    API[commands] --> DB[(sqlite)]
   end
   UI --> API
+  class DB rl-emph
 ```
 
 **Sequence** — ordered interaction over time:
@@ -224,7 +237,7 @@ xychart-beta
 ## Table and code patterns
 
 GitHub pipe tables suit option matrices, before/after comparisons, and field
-references — keep them to ≤4 columns so they don't scroll in the narrow pane.
+references — keep them to ≤3 columns so they don't scroll in the narrow pane.
 Always language-tag fenced code (` ```rust `, ` ```ts `, ` ```bash `) so it's
 syntax-highlighted, and quote real identifiers and paths from the code you read.
 

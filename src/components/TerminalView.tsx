@@ -22,7 +22,10 @@ import {
   type ResizeScheduler,
 } from "../lib/termSize";
 
-interface TerminalViewProps {
+export interface TerminalViewProps {
+  /** Read-only pre-parser tap, including the bounded replay frame on attach. */
+  onRawOutput?: (bytes: Uint8Array, replay: boolean) => void;
+  onTerminalReady?: (terminal: Terminal | null) => void;
   /** Stable per-tab id; keys the backend PTY and filters its events. */
   id: string;
   /** Workspace cwd the shell starts in (last session's project, else $HOME). */
@@ -358,6 +361,8 @@ export const TerminalView = memo(function TerminalView({
   onTitle,
   onPaneFocus,
   onUserInput,
+  onRawOutput,
+  onTerminalReady,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -453,6 +458,10 @@ export const TerminalView = memo(function TerminalView({
   const onActivityRef = useRef(onActivity);
   const onExitRef = useRef(onExit);
   const onTitleRef = useRef(onTitle);
+  const onRawOutputRef = useRef(onRawOutput);
+  const onTerminalReadyRef = useRef(onTerminalReady);
+  onRawOutputRef.current = onRawOutput;
+  onTerminalReadyRef.current = onTerminalReady;
   const onUserInputRef = useRef(onUserInput);
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
@@ -535,6 +544,7 @@ export const TerminalView = memo(function TerminalView({
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+    onTerminalReadyRef.current?.(term);
     const inputOrigin = terminalInputOrigin(term, () => onUserInputRef.current?.(id));
 
     // OSC 0/2. Disposed with the terminal below, along with every other addon
@@ -550,6 +560,7 @@ export const TerminalView = memo(function TerminalView({
     onOutput.onmessage = (buf) => {
       if (disposed) return;
       const bytes = new Uint8Array(buf);
+      onRawOutputRef.current?.(bytes, firstOutput);
       // Backend always sends one initial replay frame (empty for a fresh
       // shell), before live bytes. Parse this bounded frame even when hidden
       // so it never mixes with the deferred live buffer. xterm preserves write
@@ -660,6 +671,8 @@ export const TerminalView = memo(function TerminalView({
         const x = event.payload.position.x;
         const y = event.payload.position.y;
         if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+        const top = document.elementFromPoint?.(x, y);
+        if (top && !h.contains(top)) return;
       }
 
       const text = paths.map(shellQuote).join(" ") + " ";
@@ -741,6 +754,7 @@ export const TerminalView = memo(function TerminalView({
       schedulerRef.current?.cancel();
       dataSub.dispose();
       keySub.dispose();
+      onTerminalReadyRef.current?.(null);
       inputOrigin.dispose();
       host.removeEventListener("dragover", swallowDrag);
       host.removeEventListener("drop", swallowDrag);

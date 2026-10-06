@@ -149,6 +149,7 @@ export const CommentCard = memo(function CommentCard({
   // cards start collapsed (the reviewer is done with them — keep the pane
   // focused on what's still open); everything else starts expanded so nothing
   // is hidden by surprise.
+  const [hasDiscussion, setHasDiscussion] = useState(false);
   const [collapsed, setCollapsed] = useState(comment.status === "accepted");
   // Auto-collapse the moment a resolution is accepted. Guarded on the status
   // *transition* into "accepted" so a reviewer who manually re-expands an
@@ -894,6 +895,7 @@ export const CommentCard = memo(function CommentCard({
               )}
               {/* Promote a question into a plan-driving change. */}
               {comment.type === "question" &&
+                !hasDiscussion &&
                 !comment.actionable &&
                 (comment.status === "resolved" ||
                   comment.status === "accepted" ||
@@ -1083,6 +1085,7 @@ export const CommentCard = memo(function CommentCard({
           onAutoOpenConsumed={onAutoOpenConsumed}
           autoDiscuss={autoDiscuss}
           onAutoDiscussConsumed={onAutoDiscussConsumed}
+          onHasDiscussion={setHasDiscussion}
         />
       )}
     </div>

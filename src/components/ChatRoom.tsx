@@ -14,7 +14,6 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useDictation } from "../lib/useDictation";
 import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
-import { chatSubmitAction } from "../lib/frontDoor";
 import { CONTINUE_EVENT, handoffGate, prepareConversationPreview, type ContinueDestination, type ContinuationMessage } from "../lib/conversationContinuation";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { toolbarPose, type ToolbarPose } from "../lib/toolbarPose";
@@ -28,10 +27,14 @@ import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
-import { QueuedChip, UnsentNote } from "./QueuedChip";
+import { UnsentNote } from "./QueuedChip";
 import ChatTurnProgress, { type ChatProgressStatus } from "./ChatTurnProgress";
 import { ChatContextChip } from "./ChatContextChip";
 import { ideaNote, planFromReplyInstruction, type ChatContext } from "../lib/chatRoom";
+import { ChatModePicker, nextChatMode, type ChatMode, type BuildAssignee } from "./ChatModePicker";
+import { QueueTray, type QueueItem } from "./QueueTray";
+import { ChangesCard, type ChatChanges } from "./ChangesCard";
+import { defaultChoice, type BackendChoice, type ModelCatalogs } from "../lib/backendChoice";
 import { standaloneNote } from "../lib/notes";
 
 // THE CHAT ROOM — Redline's unbound conversation.
@@ -58,12 +61,22 @@ import { standaloneNote } from "../lib/notes";
 // is keyed per chat and `usePersistedState` reads its key once, so switching
 // chats is a remount by design rather than a stale draft carried across.
 
-export interface ChatPlanReceipt { status: "starting" | "planning" | "error" | "done"; instruction: string; terminalId?: string; launchId?: string; sessionId?: string; title?: string; error?: string; blocked?: import("../lib/readiness").ReadinessItem }
-export interface ChatPlanRequest { companionId: string; messages: ContinuationMessage[]; instruction: string; project: ProjectChoice; title: string }
+export interface ChatPlanReceipt { kind?: "plan" | "run"; status: "starting" | "planning" | "error" | "done"; instruction: string; terminalId?: string; launchId?: string; sessionId?: string; title?: string; error?: string; blocked?: import("../lib/readiness").ReadinessItem }
+export interface ChatPlanRequest { harness?: BackendChoice; companionId: string; messages: ContinuationMessage[]; instruction: string; project: ProjectChoice; title: string }
+
+export interface ChatWorkbenchComposer {
+  picker: ReactNode; mode: ChatMode; cycleMode: () => void; onSubmit: (steer?: boolean) => void;
+  project: ProjectChoice; onProjectChange: (project: ProjectChoice) => void;
+}
 
 export interface ChatRoomProps {
-  composer?: { text: string; onTextChange: React.Dispatch<React.SetStateAction<string>>; attachments?: string[]; onAttachmentsConsumed?: () => void; project?: ProjectChoice; render: (actions: ReactNode) => ReactNode };
-  harness?: import("../lib/backendChoice").BackendChoice;
+  composer?: { text: string; onTextChange: React.Dispatch<React.SetStateAction<string>>; attachments?: string[]; onAttachmentsConsumed?: () => void; project?: ProjectChoice; render: (actions: ReactNode, workbench: ChatWorkbenchComposer) => ReactNode };
+  harness?: BackendChoice;
+  modelCatalogs?: ModelCatalogs;
+  onHarnessChange?: (harness: BackendChoice) => void;
+  onNeedModels?: () => void;
+  onRun?: (request: ChatPlanRequest) => void;
+  onReviewChanges?: (projectPath: string) => void;
   target?: import("../lib/activeSurface").SurfaceInfo;
   modelControls?: React.ReactNode;
   onActivityChange?: (busy: boolean) => void;
@@ -113,6 +126,7 @@ export interface ChatRoomProps {
 export function ChatRoom({
   composer,
   harness,
+  modelCatalogs, onHarnessChange, onNeedModels, onRun, onReviewChanges,
   target,
   modelControls,
   onActivityChange,
@@ -152,9 +166,35 @@ export function ChatRoom({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [chats, setChats] = useState<Companion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
-  const [mode, setMode] = useState<"chat" | "plan">("chat");
-  const [savedProject, setProject] = usePersistedState<ProjectChoice>(`rl.chatProject.${companionId}`, null);
-  const project = composer ? composer.project ?? null : savedProject;
+  const [mode, setMode] = usePersistedState<ChatMode>(`rl.chatMode.${companionId}`, "chat");
+  const [assignee, setAssignee] = usePersistedState<BuildAssignee>(`rl.chatAssignee.${companionId}`, "chat");
+  const [localHarness, setLocalHarness] = usePersistedState<BackendChoice>(`rl.chatHarness.${companionId}`, defaultChoice());
+  const selectedHarness = harness ?? localHarness;
+  const changeHarness = (next: BackendChoice) => { setLocalHarness(next); onHarnessChange?.(next); };
+  const [project, setBoundProject] = useState<ProjectChoice>(null);
+  const [projectLoaded, setProjectLoaded] = useState(false);
+  const setProject = (next: ProjectChoice) => { void invoke<string | null>("companion_set_project", { companionId, projectPath: next?.path ?? null }).then(path => { setBoundProject(typeof path === "string" && path ? { path } : null); }).catch(error => setNotice(String(error))); };
+  useEffect(() => {
+    let alive = true;
+    void invoke<string | null>("companion_get_project", { companionId }).then(async path => {
+      // Migrate a previously explicit per-chat choice once; never infer write
+      // authorization from whichever repository happens to be on screen.
+      if (!path) { try { const prior = JSON.parse(localStorage.getItem(`rl.chatProject.${companionId}`) ?? "null") as ProjectChoice; if (prior?.path) path = await invoke<string | null>("companion_set_project", { companionId, projectPath: prior.path }); } catch { /* Keep a missing project unbound. */ } }
+      if (alive) { setBoundProject(typeof path === "string" && path ? { path } : null); setProjectLoaded(true); }
+    }).catch(() => { if (alive) setProjectLoaded(true); });
+    return () => { alive = false; };
+  }, [companionId]);
+  const [buildConflict, setBuildConflict] = useState(false);
+  useEffect(() => {
+    if (mode !== "build" || !project?.path) { setBuildConflict(false); return; }
+    let alive = true;
+    const poll = () => { void invoke<boolean>("companion_build_activity", { companionId, projectPath: project.path }).then(value => { if (alive) setBuildConflict(value); }).catch(() => {}); };
+    poll(); const timer = window.setInterval(poll, 10000); return () => { alive = false; window.clearInterval(timer); };
+  }, [companionId, mode, project?.path]);
+  const [armedRun, setArmedRun] = useState<ChatPlanRequest | null>(null);
+  const [changes, setChanges] = useState<ChatChanges[]>([]);
+  const refreshChanges = useCallback(() => { void invoke<ChatChanges[]>("companion_changes", { companionId }).then(rows => setChanges(rows ?? [])).catch(() => {}); }, [companionId]);
+  useEffect(() => { refreshChanges(); const un = listen<{companionId: string; changes: ChatChanges}>("companion-changes", event => { if (event.payload.companionId === companionId) setChanges(rows => [...rows.filter(row => row.messageId !== event.payload.changes.messageId), event.payload.changes]); }); return () => { void un.then(fn => fn()); }; }, [companionId, refreshChanges]);
   const [armedPlan, setArmedPlan] = useState<string | null>(null);
   const [graduations, setGraduations] = useState<{ sessionId: string; title: string }[]>([]);
   useEffect(() => { void invoke<typeof graduations>("companion_graduations", { companionId }).then(value => setGraduations(value ?? [])).catch(() => {}); }, [companionId, receipt?.status]);
@@ -181,6 +221,7 @@ export function ChatRoom({
     send: sendTurn,
     cancel,
     unqueue,
+    queue = [], steer, promote, steerNotice,
     meter,
     activity,
     meters,
@@ -199,7 +240,8 @@ export function ChatRoom({
       companionId,
       text,
       cwd,
-      harness,
+      harness: selectedHarness,
+      mode: (extra as { mode?: ChatMode } | undefined)?.mode ?? "chat",
       target: (extra as { target?: typeof target } | undefined)?.target ?? target,
     }),
     makeMessage: ({ id, role, body, status }) => ({
@@ -267,10 +309,10 @@ export function ChatRoom({
   // next turn skips the CLI boot and the transcript replay, and let it go on
   // unmount. Claude only; Codex stays per-turn. Keyed on what the spawn
   // depends on, so a model or folder change re-warms on the new one.
-  const warmKey = JSON.stringify([cwd, harness ?? null]);
+  const warmKey = JSON.stringify([project?.path ?? cwd, selectedHarness, mode]);
   useEffect(() => {
-    if (harness && harness.backend !== "claude-code") return;
-    void invoke("companion_prewarm", { companionId, cwd, harness: harness ?? null }).catch(() => {});
+    if (selectedHarness.backend !== "claude-code") return;
+    void invoke("companion_prewarm", { companionId, cwd: project?.path ?? cwd, harness: selectedHarness, mode: mode === "build" && assignee === "chat" ? "build" : "chat" }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companionId, warmKey]);
   useEffect(() => () => { void invoke("companion_release", { companionId }).catch(() => {}); }, [companionId]);
@@ -292,19 +334,21 @@ export function ChatRoom({
     };
   }, [companionId]);
 
+  useEffect(()=>{if(steerNotice)setNotice(steerNotice);},[steerNotice]);
   const send = useCallback(
-    (text: string, opts?: { localBody?: string }) => {
-      const composed = composePrompt(text, attachments);
+    (text: string, opts?: { localBody?: string; mode?: "chat" | "build"; steer?: boolean }) => {
+      const composed = composePrompt(text, composer?.attachments ?? attachments);
       if (!composed) return;
       onSent?.();
       stick();
       setNotice(null);
       sendTurn(composed, {
         localBody: opts?.localBody ?? composed,
+        extra: { mode: opts?.mode ?? "chat" }, mode: opts?.mode ?? "chat", steer: opts?.steer,
       });
-      setAttachments([]);
+      setAttachments([]); composer?.onAttachmentsConsumed?.();
     },
-    [attachments, sendTurn],
+    [attachments, composer, sendTurn, onSent],
   );
 
   // Send the door's sentence, exactly once, and only into a thread that is
@@ -323,30 +367,60 @@ export function ChatRoom({
 
   const streaming = status === "streaming";
   useEffect(() => { onActivityChange?.(streaming); }, [streaming, onActivityChange]);
-  const canPlan = !!onPlan && messages.some(message => message.role === "assistant" && message.status === "complete");
+  const canPlan = !!onPlan && (messages.some(message => message.status === "complete") || !!draft.trim());
   const armedInstruction = queuedInstruction ?? armedPlan;
   const planningProject = resolveLaunchProject([...messages.map(message => message.body), draft].join("\n"), project, { projectOptions, openFolder: null, lastLaunchProject });
-  const queued = messages.filter(message => message.status === "queued").length;
+  const queued = queue.length;
   const plan = (instruction: string) => {
-    if (!canPlan || receipt?.status === "starting" || receipt?.status === "planning") return;
-    setMode("chat"); setDraft("");
+    if ((!canPlan && !instruction.trim()) || receipt?.status === "starting" || (receipt?.status === "planning" && receipt.kind !== "run")) return;
+    setDraft("");
     if (!handoffGate(status, queued)) {
-      if (onQueuePlan) onQueuePlan({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+      if (onQueuePlan) onQueuePlan({ companionId, messages, instruction, project, harness: selectedHarness, title: me?.title ?? "Chat" });
       else setArmedPlan(instruction);
       return;
     }
-    onPlan?.({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+    onPlan?.({ companionId, messages, instruction, project, harness: selectedHarness, title: me?.title ?? "Chat" });
   };
   useEffect(() => {
     if (armedPlan === null || !handoffGate(status, queued)) return;
     const instruction = armedPlan;
     setArmedPlan(null);
-    onPlan?.({ companionId, messages, instruction, project, title: me?.title ?? "Chat" });
+    onPlan?.({ companionId, messages, instruction, project, harness: selectedHarness, title: me?.title ?? "Chat" });
   }, [armedPlan, status, queued, onPlan, companionId, messages, project, me?.title]);
-  const submit = (action: "chat" | "plan") => {
-    if (action === "plan") { plan(composePrompt(draft, attachments)); setAttachments([]); }
-    else if (draft.trim()) { send(draft); setDraft(""); }
+  useEffect(() => { if (armedRun && handoffGate(status, queued)) { setArmedRun(null); onRun?.({...armedRun,messages}); } }, [armedRun, status, queued, onRun,messages]);
+  const retryReceipt = () => {
+    if (!receipt) return;
+    if (receipt.kind === "run") {
+      const request = {companionId,messages,instruction:receipt.instruction,project,harness:selectedHarness,title:me?.title ?? "Chat"};
+      if (handoffGate(status,queued)) onRun?.(request); else setArmedRun(request);
+    } else plan(receipt.instruction);
   };
+  const submit = (action: ChatMode = mode, immediateSteer = false) => {
+    const instruction = composePrompt(draft, composer?.attachments ?? attachments);
+    if (action !== "plan" && !instruction.trim()) return;
+    if (action === "plan") { plan(instruction); setAttachments([]); composer?.onAttachmentsConsumed?.(); }
+    else if (action === "build" && assignee === "agent") {
+      if (!projectLoaded || !project?.path) { setNotice("Pick a project to build in"); return; }
+      if (!onRun) { setNotice("A new agent cannot be launched from this chat yet"); return; }
+      const request = { companionId, messages, instruction, project, harness: selectedHarness, title: me?.title ?? "Chat" };
+      if (handoffGate(status, queued)) onRun(request); else setArmedRun(request);
+      setDraft(""); setAttachments([]); composer?.onAttachmentsConsumed?.();
+    } else {
+      if (action === "build" && (!projectLoaded || !project?.path)) { setNotice("Pick a project to build in"); return; }
+      send(draft, { mode: action, steer: immediateSteer && streaming }); setDraft("");
+    }
+  };
+  const queueRows: QueueItem[] = queue.map(row => ({ id: row.id, text: row.body, mode: row.mode ?? "chat", assignee: "chat" }));
+  if (armedInstruction !== null) queueRows.push({ id: "armed-plan", text: armedInstruction, mode: "plan" });
+  if (armedRun) queueRows.push({ id: "armed-run", text: armedRun.instruction, mode: "build", assignee: "agent" });
+  const removeQueue = async (id: string, edit: boolean) => {
+    let text: string | null = null;
+    if (id === "armed-plan") { text = armedInstruction; setArmedPlan(null); onCancelQueuedPlan?.(); }
+    else if (id === "armed-run") { text = armedRun?.instruction ?? null; setArmedRun(null); }
+    else text = await unqueue(id);
+    if (edit && text) setDraft(previous => previous.trim() ? `${text}\n\n${previous}` : text);
+  };
+  const picker = <ChatModePicker mode={mode} onModeChange={setMode} assignee={assignee} onAssigneeChange={setAssignee} harness={selectedHarness} onHarnessChange={changeHarness} catalogs={modelCatalogs} onOpen={onNeedModels} warning={buildConflict ? "Another agent is building here" : null} />;
   const continueAs = (destination: ContinueDestination) => {
     const request = prepareConversationPreview({ conversationKind: "companion", conversationId: companionId, messages });
     window.dispatchEvent(new CustomEvent(CONTINUE_EVENT, { detail: { ...request, destination } }));
@@ -597,9 +671,9 @@ export function ChatRoom({
               />
             ))
           )}
-          {armedInstruction !== null && <div className="rl-fd-morph" role="status">Will plan when this reply lands · <button type="button" onClick={() => { setDraft(previous => previous ? `${armedInstruction}\n\n${previous}` : armedInstruction); setArmedPlan(null); onCancelQueuedPlan?.(); }}>Cancel</button></div>}
+          {changes.map(change => <ChangesCard key={change.messageId} changes={change} companionId={companionId} onReview={onReviewChanges} onUndone={refreshChanges} />)}
           {receipt && <div data-chat-plan-receipt={companionId} className="rl-fd-morph rl-fd-planning-prompt" role="status" style={{ padding: 16, border: "1px solid var(--color-rule)", borderRadius: 12 }}>
-            {receipt.status === "starting" ? "Starting…" : receipt.status === "planning" ? <>Planning: watch it in the terminal ↓ {receipt.terminalId && <button type="button" onClick={() => onShowTerminal?.(receipt.terminalId!)}>Show</button>}</> : receipt.status === "error" ? <>{receipt.error} <button type="button" onClick={() => plan(receipt.instruction)}>Retry</button>{receipt.blocked && onFix && <button type="button" onClick={() => void onFix(receipt.blocked!).then(fixed => { if (fixed) plan(receipt.instruction); })}>Fix</button>}</> : <>Became a plan: {receipt.title ?? "Plan"} {receipt.sessionId && <button type="button" onClick={() => onOpenPlan?.(receipt.sessionId!)}>Open →</button>}</>}
+            {receipt.status === "starting" ? "Starting…" : receipt.status === "planning" ? <>{receipt.kind === "run" ? "Build started" : "Planning: watch it in the terminal ↓"} {receipt.terminalId && <button type="button" onClick={() => onShowTerminal?.(receipt.terminalId!)}>Show</button>}</> : receipt.status === "error" ? <>{receipt.error} <button type="button" onClick={retryReceipt}>Retry</button>{receipt.blocked && onFix && <button type="button" onClick={() => void onFix(receipt.blocked!).then(fixed => { if (fixed) retryReceipt(); })}>Fix</button>}</> : <>{receipt.kind === "run" ? "Build session" : "Became a plan"}: {receipt.title ?? "Plan"} {receipt.sessionId && <button type="button" onClick={() => onOpenPlan?.(receipt.sessionId!)}>Open →</button>}</>}
           </div>}
           {graduations.filter(item => item.sessionId !== receipt?.sessionId).map(item => <div key={item.sessionId} className="rl-fd-planning-prompt">Became a plan: {item.title} <button type="button" onClick={() => onOpenPlan?.(item.sessionId)}>Open →</button></div>)}
           {streaming && (
@@ -625,7 +699,8 @@ export function ChatRoom({
       {streaming && <ChatTurnProgress startedAt={startedAt} activity={activity} meter={meter} status={retrieving} textLength={liveText.length} onStop={cancel} />}
 
       {/* The floating launch composer owns input when supplied. */}
-      {composer ? composer.render(conversationActions) : <div
+      <QueueTray rows={queueRows} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onDelete={id => { void removeQueue(id, false); }} onEdit={id => { void removeQueue(id, true); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
+      {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject }) : <div
         data-chat-composer
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
@@ -673,8 +748,9 @@ export function ChatRoom({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                const action = chatSubmitAction({ key: e.key, shiftKey: e.shiftKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing }, mode);
-                if (action && action !== "newline") { e.preventDefault(); submit(action); }
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); setMode(nextChatMode(mode)); return; }
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(mode, e.altKey); }
               }}
               aria-label="Message Redline"
               placeholder={mode === "plan" ? "Any final instruction for the plan?" : streaming ? "Type ahead — this queues behind the reply…" : "What are we working on?"}
@@ -690,7 +766,7 @@ export function ChatRoom({
                 lineHeight: 1.5,
                 color: "var(--color-ink)",
                 background: "var(--color-paper)",
-                border: `1px solid ${mode === "plan" ? "var(--color-info)" : "var(--color-rule)"}`,
+                border: `1px solid ${mode === "build" ? "var(--color-warning)" : mode === "plan" ? "var(--color-info)" : "var(--color-rule)"}`,
                 borderRadius: 8,
               }}
             />
@@ -717,18 +793,15 @@ export function ChatRoom({
             {!modelControls && <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={() => { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(value => !value); }} />}
             {modelControls ?? <ModelChip model={me?.model ?? null} effort={me?.effort ?? null} onChange={setModel} />}
             {modelControls && <MonochatTrace conversationId={companionId} busy={streaming}/>}
-            {mode === "plan" && <ProjectPicker value={planningProject} onChange={path => setProject({ path })} options={projectOptions} />}
+            {mode !== "chat" && <ProjectPicker value={project?.path ?? planningProject} onChange={path => setProject({ path })} options={projectOptions} />}
             {conversationActions}
 
-            <div role="group" aria-label="Composer mode" style={{ display: "flex", marginLeft: "auto", gap: 6 }}>
-              <button type="button" aria-pressed={mode === "chat"} onClick={() => setMode("chat")}>Chat</button>
-              <button type="button" disabled={!canPlan} aria-pressed={mode === "plan"} onClick={() => setMode("plan")}>Plan</button>
-            </div>
+            {picker}
             <button
               type="button"
               className="font-sans"
               onClick={() => submit(mode)}
-              disabled={mode === "chat" ? !draft.trim() : !canPlan || receipt?.status === "starting" || receipt?.status === "planning"}
+              disabled={mode === "chat" ? !draft.trim() : !canPlan || receipt?.status === "starting" || (receipt?.status === "planning" && receipt.kind !== "run")}
               title={
                 streaming
                   ? "Queue this — it sends when the reply finishes"
@@ -775,7 +848,6 @@ function RoleTag({ role, room = false }: { role: string; room?: boolean }) {
 
 function ChatBubble({
   msg,
-  onUnqueue,
   onResend,
   meter,
   contextReset,
@@ -833,7 +905,6 @@ function ChatBubble({
       ) : (
         <MarkdownView body={msg.body} compact room={room} rich={!isUser} />
       )}
-      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
       {!isUser && actions}
       {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}

@@ -182,6 +182,7 @@ export type LaunchOrigin =
   | "front-door"
   | "drafter"
   | "browser"
+  | "browser-island"
   | "chat"
   // A Combine stays its own origin even though the launch physically leaves
   // through the Front Door: `surface` feeds `resolve_parent` and the

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 export type ConversationKind = "browse" | "companion" | "drafter";
-export type ContinueDestination = "drafter" | "plan" | "auto";
+export type ContinueDestination = "drafter" | "plan" | "run" | "auto";
 export interface ContinuationMessage { id: string; role: string; body: string; status: string }
 export interface ConversationSource { conversationKind: ConversationKind; conversationId: string; messages: ContinuationMessage[] }
 export interface ContinueRequest { source: Omit<ConversationSource, "messages"> & { messageIds: string[]; idempotencyKey: string }; markdown: string; destination?: ContinueDestination }
@@ -47,6 +47,23 @@ export function prepareConversationPreview(source: ConversationSource, through?:
     source: { conversationKind: source.conversationKind, conversationId: source.conversationId, messageIds: selected.map(m => m.id), idempotencyKey: crypto.randomUUID() },
     markdown: `# Conversation brief\n\n## Objective\n${objective}${options?.instruction?.trim() ? `\n\n## Final instruction\n${options.instruction.trim()}` : ""}\n\n## Decisions and requirements\nUse the user's statements below as the source of decisions and constraints. Assistant proposals remain suggestions unless the user accepted them.\n\n## Open questions and acceptance criteria\nResolve any outstanding questions in the conversation before treating a suggestion as an agreed requirement. Refine this section before continuing.\n\n## Source conversation\n${source.conversationKind}: ${source.conversationId}\n\n${selected.map(m => `### ${m.role === "user" ? "User direction" : "Assistant suggestion or response"} · ${m.id}\n${m.body}`).join("\n\n")}\n`,
   };
+}
+
+/** Persist first-action instructions before handing an empty chat to an agent. */
+export async function prepareCompanionContinuation(
+  companionId: string,
+  messages: ContinuationMessage[],
+  instruction: string | undefined,
+  seed: (text: string) => Promise<ContinuationMessage>,
+): Promise<ContinueRequest> {
+  const source = { conversationKind: "companion" as const, conversationId: companionId, messages };
+  const preview = prepareConversationPreview(source, undefined, { instruction });
+  if (preview.source.messageIds.length) return preview;
+  if (!instruction?.trim()) throw new Error("Write an instruction before starting a plan or build.");
+  // A first-action Plan/Build still needs durable conversation provenance.
+  // The backend returns the same seed row on retry; no chat agent is invoked.
+  const message = await seed(instruction);
+  return prepareConversationPreview({ ...source, messages: [...messages, message] }, undefined, { instruction });
 }
 
 /** Identical prepared context cannot launch twice after a restart or UI retry. */

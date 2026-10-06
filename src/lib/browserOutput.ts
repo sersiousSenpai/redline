@@ -8,6 +8,7 @@ import type { ToastSpec } from "../components/RedlineToast";
  *  (`file:` is persisted only when it was asked for explicitly, by
  *  `navigate`, never picked up from a poll). */
 export function isDurableTabUrl(url: string): boolean {
+  if (url === "redline:newtab") return true;
   return /^https?:\/\//i.test(url);
 }
 

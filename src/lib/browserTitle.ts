@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
+export const NEWTAB = "redline:newtab";
 export const BROWSER_HOME_URL = "https://www.google.com";
 
 interface PageTitle { url: string; title: string }
@@ -16,6 +17,7 @@ function documentUrl(url: string): string {
 /** The default new tab has a known title before its first network response.
  *  Other pages use their host until the page supplies a real title. */
 export function initialBrowserTitle(url: string): string {
+  if (url === NEWTAB) return "New tab";
   try {
     const parsed = new URL(url);
     if (parsed.origin === new URL(BROWSER_HOME_URL).origin && parsed.pathname === "/" && !parsed.searchParams.has("q")) return "Google";

@@ -1,0 +1,16 @@
+.rl-browser-island { position:fixed; bottom:9px; left:50%; transform:translateX(-50%); z-index:85; display:flex; align-items:center; justify-content:center; }
+.rl-browser-island>.rl-monochat-notch { position:relative; }
+.rl-monochat-float { position:absolute; bottom:44px; left:calc(50% - min(320px, (100vw - 40px)/2)); width:min(640px,calc(100vw - 40px)); max-height:min(320px,calc(100dvh - 96px)); overflow:auto; padding:10px 14px 14px; border:1px solid var(--color-rule); border-radius:14px; background:var(--color-bg-elevated); color:var(--color-ink); box-shadow:0 12px 48px #0005; transform-origin:top left; }
+.rl-float-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; color:var(--color-ink-muted); font-size:11px; }
+.rl-float-heading button { display:grid; place-items:center; width:24px; height:24px; border:0; border-radius:5px; background:none; color:inherit; cursor:pointer; }
+.rl-monochat-float textarea { max-height:120px; }
+
+.rl-browser-context-chips { display:flex; gap:6px; margin:0 0 10px; }
+.rl-browser-context-chips button { padding:4px 9px; border:1px solid var(--color-rule); border-radius:20px; color:var(--color-ink-muted); background:transparent; font:inherit; font-size:11px; cursor:pointer; }
+.rl-browser-context-chips button[aria-pressed=true] { color:var(--color-ink); background:var(--color-paper); border-color:var(--color-ink-muted); }
+.rl-monochat-float .rl-floating-composer.rl-frontdoor { width:100%; max-width:none; padding:0; margin:0; min-height:0; max-height:none; opacity:1; animation:none; justify-content:flex-start; }
+.rl-monochat-float .rl-fd-island { padding:4px 0 0; border:0; background:transparent; box-shadow:none; border-radius:0; backdrop-filter:none; -webkit-backdrop-filter:none; transform:none; }
+.rl-monochat-float .rl-fd-input { min-height:40px; font-size:15px; line-height:1.5; padding:3px 4px 10px; }
+.rl-monochat-float .rl-fd-tools { flex-wrap:wrap; gap:7px; }
+.rl-monochat-float .rl-fd-tools>div[data-no-drag] { max-width:220px; }
+.rl-monochat-float .rl-fd-strip { margin-top:8px; }

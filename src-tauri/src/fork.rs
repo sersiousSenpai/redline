@@ -186,12 +186,16 @@ impl ForkState {
         } else { framed };
         crate::ledger::register_agent_prompt(&framed);
 
-        let args = if fresh_context { context_sidecar_args(framed) } else { claude_plan_consult_args(author, &session_id, framed) };
+        let mut args = if fresh_context { context_sidecar_args(framed) } else { claude_plan_consult_args(author, &session_id, framed) };
+        let startup = if fresh_context { cwd.clone() } else {
+            crate::resume_cwd_for(&session_id, Some(cwd.clone()), Some(author)).unwrap_or_else(|| cwd.clone())
+        };
+        if startup != cwd { args.extend(["--add-dir".into(), cwd.clone()]); }
 
         let claude_bin = self.claude_bin().await?;
         let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
         let mut child = cmd
-            .current_dir(&cwd)
+            .current_dir(&startup)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -400,6 +404,26 @@ fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscussMode { Report, Conversation }
+const REPORT_VOICE: &str = "Follow the `sidecar` skill for how to structure this reply: lead with the answer, then add a table, mermaid diagram, or callout only when it adds signal. Respond directly and concisely in markdown — no raw HTML.";
+const CONVERSATION_VOICE: &str = "Follow the `conversation` skill: reply like a colleague, a few sentences, your take first, prose over structure, end on the live question.";
+fn mode_directive(mode: DiscussMode, first_turn: bool) -> &'static str {
+    match (mode, first_turn) {
+        (DiscussMode::Report, true) => REPORT_VOICE,
+        (DiscussMode::Conversation, true) => CONVERSATION_VOICE,
+        (DiscussMode::Report, false) => "(Reply mode: report — lead with the answer, then a diagram or table if it earns it; follow the sidecar skill where available.)",
+        (DiscussMode::Conversation, false) => "(Reply mode: conversation — short prose, your take first, like a colleague; follow the conversation skill where available.)",
+    }
+}
+fn discuss_mode_prompt(prompt: String, mode: Option<DiscussMode>, first_turn: bool) -> String {
+    match mode {
+        None => prompt,
+        Some(mode) if first_turn => prompt.replace(REPORT_VOICE, mode_directive(mode, true)),
+        Some(mode) => format!("{prompt}\n\n{}", mode_directive(mode, false)),
+    }
 }
 
 fn build_first_turn_prompt(
@@ -681,7 +705,8 @@ fn context_sidecar_prompt_with(author_backend: &str, plan: &str, prompt: &str, r
         "You are discussing a plan you produced earlier in this session with the person reviewing it in Redline.",
         "You are discussing the supplied plan with the person reviewing it in Redline.",
     ).replace("You previously resolved this comment with:", "The plan author previously resolved this comment with:")
-    .replace("Follow the `sidecar` skill for how to structure this reply: lead with ", "For this reply, lead with ");
+    .replace("Follow the `sidecar` skill for how to structure this reply: lead with ", "For this reply, lead with ")
+    .replace("Follow the `conversation` skill: reply like a colleague", "Reply like a colleague");
     let tools = if restricted {
         "Your tools are Read, Grep, Glob, WebFetch, and WebSearch only. Shell commands and Skill are unavailable; you cannot curl Redline's memory bridge. Use the supplied plan context and do not claim to have retrieved memory."
     } else {
@@ -722,7 +747,7 @@ anything. Reading the repo, searching it and searching the web are all fine.
 - Answer the reviewer directly, in Markdown, leading with the answer. Add a \
 table, a mermaid diagram or a short code block only where it adds signal. No \
 raw HTML.
-- The turn prompt may mention a `sidecar` skill or `ExitPlanMode`; both are \
+- The turn prompt may mention a `sidecar` or `conversation` skill, or `ExitPlanMode`; these are \
 Claude-side and do not apply to you. Ignore them and answer directly.";
 
 /// Spawn args for one Codex discussion-fork turn.
@@ -912,7 +937,14 @@ pub async fn fork_thread_send(
     // Files the reviewer dropped into this follow-up composer.
     attachments: Option<Vec<CommentAttachment>>,
     conversation_id: Option<String>,
+    mode: Option<String>,
 ) -> Result<(), String> {
+    let mode = match mode.as_deref() {
+        None => None,
+        Some("report") => Some(DiscussMode::Report),
+        Some("conversation") => Some(DiscussMode::Conversation),
+        _ => return Err("Unknown discussion mode".into()),
+    };
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
@@ -1027,6 +1059,7 @@ pub async fn fork_thread_send(
         // itself — otherwise the fork never learns the path exists.
         Some(_) => format!("{text}{}", attachments_block(&turn_attachments)),
     };
+    let prompt = discuss_mode_prompt(prompt, mode, prior_fork.is_none());
     let prompt = if context_sidecar || seeded {
         context_sidecar_prompt_with(&author_backend, session.revisions.last().map(|revision| revision.raw_plan_markdown.as_str()).unwrap_or_default(), &prompt, context_sidecar)
     } else { prompt };
@@ -1072,13 +1105,17 @@ pub async fn fork_thread_send(
     // docs/protocol-verification.md Experiment (i).
     let spawn = match backend {
         ForkBackend::Claude => {
-            let args = claude_plan_discussion_args_with(&author_backend, &session_id, prior_fork.as_deref(), prompt, picked_model.as_deref(), picked_effort.as_deref(), seeded);
+            let mut args = claude_plan_discussion_args_with(&author_backend, &session_id, prior_fork.as_deref(), prompt, picked_model.as_deref(), picked_effort.as_deref(), seeded);
+            let startup = if context_sidecar || seeded { cwd.clone() } else {
+                crate::resume_cwd_for(prior_fork.as_deref().unwrap_or(&session_id), Some(cwd.clone()), Some(&author_backend)).unwrap_or_else(|| cwd.clone())
+            };
+            if startup != cwd { args.extend(["--add-dir".into(), cwd.clone()]); }
             ForkSpawn {
                 backend,
                 seat: "fork_plan",
                 requested_model: None,
                 bin: fork.claude_bin().await?,
-                cwd: cwd.clone(),
+                cwd: startup,
                 args,
             }
         }
@@ -2444,6 +2481,19 @@ mod tests {
             answer_excerpt: excerpt.map(str::to_string),
         });
         c
+    }
+
+    #[test]
+    fn discussion_voice_switch_preserves_legacy_report_and_read_only_boundary() {
+        let original = build_first_turn_prompt(true, "2", None, "Why?", None, &[], None);
+        assert_eq!(discuss_mode_prompt(original.clone(), None, true), original);
+        assert_eq!(discuss_mode_prompt(original.clone(), Some(DiscussMode::Report), true), original);
+        let conversation = discuss_mode_prompt(original, Some(DiscussMode::Conversation), true);
+        assert!(conversation.contains("Follow the `conversation` skill"));
+        assert!(conversation.contains("do not call ExitPlanMode"));
+        assert!(!context_sidecar_prompt_with("cursor", "plan", &conversation, true).contains("Follow the `conversation` skill"));
+        assert_eq!(discuss_mode_prompt("follow up".into(), None, false), "follow up");
+        assert!(discuss_mode_prompt("follow up".into(), Some(DiscussMode::Report), false).contains("Reply mode: report"));
     }
 
     #[test]

@@ -2,6 +2,8 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   forwardRef,
+  lazy,
+  Suspense,
   memo,
   useCallback,
   useEffect,
@@ -14,6 +16,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
+import { requiresHostedRestart } from "../lib/shell/launchReuse";
 import { usePersistedState } from "../theme/usePersistedState";
 import {
   attachRepos,
@@ -72,15 +75,15 @@ import {
   saveTerminalWorkspace,
   type LivePty,
   type TerminalWorkspace,
+  type TerminalTabState,
 } from "../lib/terminalWorkspace";
 
-interface Tab {
-  id: string;
-  /** cwd this tab's shell was spawned in (null = $HOME, resolved backend). */
-  cwd: string | null;
-  /** The dock's auto-spawned convenience shell; cleared the moment the user touches it. */
-  placeholder?: boolean;
-}
+type Tab = TerminalTabState;
+const AgentShellView = lazy(() => import("./shell/AgentShellView"));
+import { hostedClaudeCommand } from "../lib/shell/promote";
+const ShellBlocksView = lazy(() => import("./shell/ShellBlocksView"));
+import type { AgentShellLaunch, ShellInfo } from "../lib/shell/types";
+import { shq } from "../lib/resumeCommand";
 
 interface TerminalTabsProps {
   theme: string;
@@ -170,6 +173,8 @@ function InterceptStrip() {
  *  the reverse of linked navigation: clicking a folder tab focuses the
  *  terminal that lives in that folder. */
 export interface TerminalTabsHandle {
+  setTabView: (id: string, view: "shell" | "raw") => Promise<void>;
+  openAgentShell: (request: AgentShellLaunch, opts?: { background?: boolean; beforeStart?: (terminalId: string) => void | Promise<void> }) => Promise<string>;
   selectTab: (id: string) => void;
   /** Flash a one-shot ring around a terminal's tile. `selectTab` puts the
    *  right tile under the focus ring; on a wall of fourteen that is not
@@ -542,7 +547,7 @@ export const TerminalTabs = memo(
   // Keyed on the joined ids, not on `tabs`: that array's identity churns on
   // every cwd poll and title change, and re-firing this on all of those would
   // hand the host a new array to diff many times a second.
-  const tabIdKey = tabs.map((t) => t.id).join(",");
+  const tabIdKey = tabs.filter(tab => tab.kind !== "agent" || tab.alive !== false || tab.view === "raw").map((t) => t.id).join(",");
   useEffect(() => {
     onTabIdsChange?.(tabIdKey ? tabIdKey.split(",") : []);
   }, [tabIdKey, onTabIdsChange]);
@@ -844,6 +849,7 @@ export const TerminalTabs = memo(
   const forgetTab = useCallback((id: string) => {
     // Through the lifecycle fence: closing a terminal the instant it opened
     // must not let the kill overtake the still-queued spawn (orphan shell).
+    void invoke("agent_shell_stop", { id }).catch(() => {});
     void enqueuePtyOp(id, () => invoke("pty_kill", { id }));
     setUnseen((prev) => {
       if (!prev.has(id)) return prev;
@@ -1029,6 +1035,36 @@ export const TerminalTabs = memo(
         // this id may outlive the terminal it named.
         if (tabsRef.current.some((t) => t.id === id)) hailTileRef.current(id);
       },
+      setTabView: async (id, view) => { if (tabsRef.current.find(tab => tab.id === id)?.view !== view) await toggleView(id); },
+      openAgentShell: async (request: AgentShellLaunch, opts) => {
+        if (request.sessionId) {
+          const live = (await invoke<ShellInfo[]>("agent_shell_list")).find(session => session.sessionId === request.sessionId && session.alive && !session.raw);
+          if (live) {
+            if (live.busy) throw new Error("This conversation is still working. Wait for it to finish before continuing.");
+            await opts?.beforeStart?.(live.id);
+            if (requiresHostedRestart(live.cwd, tabsRef.current.find(tab => tab.id === live.id)?.launch, request)) {
+              await invoke("agent_shell_handoff",{id:live.id});
+              const restarted=await invoke<ShellInfo>("agent_shell_resume_hosted",{id:live.id,request});
+              setTabs(previous=>previous.map(tab=>tab.id===live.id?{...tab,cwd:request.cwd,sessionId:restarted.sessionId,driverId:restarted.driverId,alive:restarted.alive,launch:{...request,prompt:""}}:tab));
+              if (!opts?.background) selectTabRef.current(live.id);
+              return live.id;
+            }
+            await invoke("agent_shell_control", {id:live.id,subtype:"set_permission_mode",value:request.permissionMode});
+            if (request.model) await invoke("agent_shell_control", {id:live.id,subtype:"set_model",value:request.model});
+            if (request.prompt.trim()) await invoke("agent_shell_send", {id:live.id,text:request.prompt,memory:false,chips:null});
+            if (!opts?.background) selectTabRef.current(live.id);
+            return live.id;
+          }
+        }
+        const id = crypto.randomUUID();
+        await opts?.beforeStart?.(id);
+        addSessionTab({ id, cwd: request.cwd, kind: "agent", view: "shell", alive: true, sessionId: request.sessionId, launch: { ...request, prompt: "" } }, opts?.background);
+        try {
+          const info = await invoke<ShellInfo>("agent_shell_start", { id, request });
+          setTabs(previous => previous.map(tab => tab.id === id ? { ...tab, sessionId: info.sessionId, driverId: info.driverId, alive: info.alive } : tab));
+          return id;
+        } catch (error) { setTabs(previous => previous.map(tab => tab.id === id ? { ...tab, alive: false } : tab)); throw error; }
+      },
       openSessionTerminal: (cwd: string | null, opts) => {
         const id = crypto.randomUUID();
         addSessionTab({ id, cwd }, opts?.background);
@@ -1037,6 +1073,42 @@ export const TerminalTabs = memo(
     }),
     [addSessionTab],
   );
+
+  const updateAgentInfo = useCallback((info: ShellInfo) => {
+    setTabs(previous => previous.map(tab => tab.id === info.id && (tab.alive !== info.alive || tab.sessionId !== info.sessionId || tab.driverId !== info.driverId) ? { ...tab, alive: info.alive, sessionId: info.sessionId, driverId: info.driverId } : tab));
+  }, [setTabs]);
+  const promoteClaude = async (id:string, command:string, cwd:string|null) => {
+    const request=hostedClaudeCommand(command,cwd); if(!request)return false;
+    request.cwd=await invoke<string|null>("pty_cwd",{id});
+    if(!request.cwd)throw new Error("Could not verify the shell folder before starting the agent");
+    cwd=request.cwd;
+    // No CLI has been typed into the PTY yet; stop its idle shell before
+    // installing the single hosted driver for this same tab.
+    await invoke("pty_kill",{id});
+    const info=await invoke<ShellInfo>("agent_shell_start",{id,request});
+    setTabs(previous=>previous.map(tab=>tab.id===id?{...tab,cwd,kind:"agent",view:"shell",alive:info.alive,driverId:info.driverId,sessionId:info.sessionId,launch:{...request,prompt:""}}:tab));
+    return true;
+  };
+  const viewTransitions=useRef(new Set<string>());
+  const toggleView = async (id: string) => {
+    if(viewTransitions.current.has(id))return;
+    viewTransitions.current.add(id);
+    try {
+    const tab = tabsRef.current.find(tab => tab.id === id); if (!tab) return;
+    if (tab.kind !== "agent") { setTabs(previous => previous.map(item => item.id === id ? { ...item, view: item.view === "raw" ? "shell" : "raw" } : item)); return; }
+    try {
+      if (tab.view === "raw") {
+        const info = await invoke<ShellInfo>("agent_shell_resume_hosted", { id, request: { ...(tab.launch ?? { cwd: tab.cwd, permissionMode: "default" }), prompt: "", sessionId: tab.sessionId } });
+        setTabs(previous => previous.map(item => item.id === id ? { ...item, view: "shell", sessionId: info.sessionId, driverId: info.driverId, alive: true } : item));
+      } else {
+        const info = await invoke<ShellInfo>("agent_shell_handoff", { id });
+        setTabs(previous => previous.map(item => item.id === id ? { ...item, view: "raw", sessionId: info.sessionId, alive: false } : item));
+        const delivered = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: `${tab.launch?.backend === "codex" ? "codex resume" : "claude --resume"} ${shq(info.sessionId)}\r` }]);
+        if (!delivered.ok) throw new Error(delivered.reason);
+      }
+    } catch (error) { setRecoveryError(String(error)); }
+    } finally {viewTransitions.current.delete(id);}
+  };
 
   // Guard the window close: like a real terminal app, confirm before tearing
   // down a session that has work in flight. We treat "moved off the directory
@@ -1049,6 +1121,8 @@ export const TerminalTabs = memo(
 
     const norm = (p: string) => p.replace(/\/+$/, "") || "/";
     const anyTerminalMoved = async (): Promise<boolean> => {
+      const agents = await invoke<ShellInfo[]>("agent_shell_list").catch(() => []);
+      if (agents.some(agent => agent.alive && agent.busy)) return true;
       let home = "";
       try {
         home = await homeDir();
@@ -1251,6 +1325,8 @@ export const TerminalTabs = memo(
                   bottom: 0,
                 }}
               >
+                <Suspense fallback={<div style={{ padding: 12 }}>Opening shell…</div>}>
+                {t.kind === "agent" && t.view !== "raw" ? <AgentShellView key={`${t.id}:${t.driverId ?? "saved"}`} id={t.id} cwd={t.cwd} sessionId={t.sessionId} launch={t.launch} visible={visible} onActivity={handleActivity} onExit={handleExit} onTitle={handleTitle} onPaneFocus={handlePaneFocus} onRaw={() => void toggleView(t.id)} onInfo={updateAgentInfo} /> : t.kind === "agent" ? <><button type="button" className="rl-terminal-view-toggle" onClick={() => void toggleView(t.id)}>Structured view</button>
                 <TerminalView
                   id={t.id}
                   cwd={t.cwd}
@@ -1262,6 +1338,8 @@ export const TerminalTabs = memo(
                   onPaneFocus={handlePaneFocus}
                   onUserInput={handleUserInput}
                 />
+                </> : <><button type="button" className="rl-terminal-view-toggle" onClick={() => void toggleView(t.id)}>{t.view === "raw" ? "Structured view" : "Raw view"}</button><ShellBlocksView onPromoteClaude={promoteClaude} id={t.id} cwd={t.cwd} theme={theme} visible={visible} raw={t.view === "raw"} onActivity={handleActivity} onExit={handleExit} onTitle={handleTitle} onPaneFocus={handlePaneFocus} onUserInput={handleUserInput} /></>}
+                </Suspense>
               </div>
               {visible && heldTerminalIds?.has(t.id) && <InterceptStrip />}
             </div>
@@ -1292,7 +1370,7 @@ export const TerminalTabs = memo(
             // destroy() bypasses the onCloseRequested guard we set above —
             // and normal unmount teardown with it, so kill the shells first
             // rather than leaving orphans to outlive the window.
-            void invoke("pty_kill_all")
+            void Promise.all([invoke("pty_kill_all"), invoke("agent_shell_kill_all")])
               .catch(() => {})
               .finally(() => void getCurrentWindow().destroy());
           }}

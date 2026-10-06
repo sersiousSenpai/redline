@@ -32,50 +32,58 @@ const settling = new WeakMap<HTMLElement, Animation>();
 /** DOM transforms preview the order; onDrop must commit its DOM change
  * synchronously so the release animation can measure the new slots. */
 export function startTabPointerDrag(event: PointerEvent, node: HTMLElement, options: {
+  axis?: "x" | "y";
   onDragging: (dragging: boolean) => void;
   onDrop: (targetSlotTabId: string | null, tileIndex: number | null) => void;
 }): () => void {
   event.preventDefault();
   node.setPointerCapture(event.pointerId);
-  const strip = node.parentElement!;
+  const axis = options.axis ?? "x", vertical = axis === "y";
+  const start = (rect: DOMRect) => vertical ? rect.top : rect.left;
+  const end = (rect: DOMRect) => vertical ? rect.bottom : rect.right;
+  const size = (rect: DOMRect) => vertical ? rect.height : rect.width;
+  const offset = () => vertical ? strip.scrollTop : strip.scrollLeft;
+  const strip = node.closest<HTMLElement>("[role=tablist]") ?? node.parentElement!;
   const nodes = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
   nodes.forEach(tab => settling.get(tab)?.finish());
   const rects = nodes.map(tab => tab.getBoundingClientRect());
-  const midpoints = rects.map(rect => rect.left + rect.width / 2);
-  const from = nodes.indexOf(node), scrollLeft = strip.scrollLeft;
-  const gap = rects.length > 1 ? rects[1].left - rects[0].right : 0;
+  const midpoints = rects.map(rect => start(rect) + size(rect) / 2);
+  const from = nodes.indexOf(node), scrollLeft = offset();
+  const gap = rects.length > 1 ? start(rects[1]) - end(rects[0]) : 0;
   let moved = false, ended = false, to = from, tile: HTMLElement | null = null;
   let x = event.clientX, y = event.clientY, frame = 0, lastTime = 0;
   strip.classList.add("rb-tabs-dragging");
 
   const render = (elapsed = 0) => {
     const edge = strip.getBoundingClientRect();
-    const inStrip = y >= edge.top - TAB_STRIP_SLOP && y <= edge.bottom + TAB_STRIP_SLOP;
-    const beforeScroll = strip.scrollLeft;
+    const inStrip = vertical ? x >= edge.left - TAB_STRIP_SLOP && x <= edge.right + TAB_STRIP_SLOP : y >= edge.top - TAB_STRIP_SLOP && y <= edge.bottom + TAB_STRIP_SLOP;
+    const beforeScroll = offset();
+    const pointer = vertical ? y : x;
     if (inStrip && elapsed) {
-      const margin = Math.min(48, edge.width / 4);
-      const speed = x > edge.right - margin ? Math.min(1, (x - edge.right + margin) / margin)
-        : x < edge.left + margin ? -Math.min(1, (edge.left + margin - x) / margin) : 0;
-      strip.scrollLeft = Math.max(0, Math.min(strip.scrollWidth - strip.clientWidth, strip.scrollLeft + speed * elapsed * .65));
+      const margin = Math.min(48, size(edge) / 4);
+      const speed = pointer > end(edge) - margin ? Math.min(1, (pointer - end(edge) + margin) / margin)
+        : pointer < start(edge) + margin ? -Math.min(1, (start(edge) + margin - pointer) / margin) : 0;
+      const next = Math.max(0, Math.min(vertical ? strip.scrollHeight - strip.clientHeight : strip.scrollWidth - strip.clientWidth, offset() + speed * elapsed * .65));
+      if (vertical) strip.scrollTop = next; else strip.scrollLeft = next;
     }
-    const scroll = strip.scrollLeft - scrollLeft;
-    const delta = Math.max(rects[0].left - rects[from].left,
-      Math.min(rects[rects.length - 1].right - rects[from].right, x - event.clientX + scroll));
-    node.style.setProperty("--tab-drag-x", `${delta}px`);
-    to = tabDropIndex(midpoints, from, midpoints[from] + delta, rects[from].width, to);
+    const scroll = offset() - scrollLeft;
+    const delta = Math.max(start(rects[0]) - start(rects[from]),
+      Math.min(end(rects[rects.length - 1]) - end(rects[from]), pointer - (vertical ? event.clientY : event.clientX) + scroll));
+    node.style.setProperty(`--tab-drag-${axis}`, `${delta}px`);
+    to = tabDropIndex(midpoints, from, midpoints[from] + delta, size(rects[from]), to);
     const order = nodes.map((_, i) => i);
     order.splice(from, 1); order.splice(to, 0, from);
-    let left = rects[0].left;
+    let left = start(rects[0]);
     for (const index of order) {
-      if (index !== from) nodes[index].style.setProperty("--tab-drag-x", `${left - rects[index].left}px`);
-      left += rects[index].width + gap;
+      if (index !== from) nodes[index].style.setProperty(`--tab-drag-${axis}`, `${left - start(rects[index])}px`);
+      left += size(rects[index]) + gap;
     }
     tile?.removeAttribute("data-tile-drop");
     // A slightly diagonal reorder is still a reorder. Tile assignment only
     // starts after deliberately leaving the strip and its generous margin.
     tile = !inStrip ? document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-tile-index]") ?? null : null;
     tile?.setAttribute("data-tile-drop", "true");
-    return strip.scrollLeft !== beforeScroll;
+    return offset() !== beforeScroll;
   };
   const tick = (time: number) => {
     frame = 0;
@@ -96,10 +104,10 @@ export function startTabPointerDrag(event: PointerEvent, node: HTMLElement, opti
     window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
     window.removeEventListener("pointercancel", cancel); window.removeEventListener("blur", cancel);
     window.removeEventListener("keydown", key); node.removeEventListener("lostpointercapture", cancel);
-    const before = moved ? nodes.map(tab => tab.getBoundingClientRect().left) : [];
+    const before = moved ? nodes.map(tab => start(tab.getBoundingClientRect())) : [];
     const tileIndex = tile ? Number(tile.dataset.tileIndex) : null;
     strip.classList.remove("rb-tabs-dragging");
-    nodes.forEach(tab => { tab.style.removeProperty("--tab-drag-x"); delete tab.dataset.dragging; });
+    nodes.forEach(tab => { tab.style.removeProperty(`--tab-drag-${axis}`); delete tab.dataset.dragging; });
     tile?.removeAttribute("data-tile-drop");
     if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId);
     if (moved) options.onDragging(false);
@@ -109,9 +117,9 @@ export function startTabPointerDrag(event: PointerEvent, node: HTMLElement, opti
     // Removing CSS transforms alone would make siblings jump twice on release.
     nodes.forEach((tab, index) => {
       if (!tab.isConnected || !tab.animate) return;
-      const delta = before[index] - tab.getBoundingClientRect().left;
+      const delta = before[index] - start(tab.getBoundingClientRect());
       if (Math.abs(delta) < .5) return;
-      const animation = tab.animate([{ transform: `translateX(${delta}px)` }, { transform: "translateX(0px)" }],
+      const animation = tab.animate([{ transform: `translate${vertical ? "Y" : "X"}(${delta}px)` }, { transform: `translate${vertical ? "Y" : "X"}(0px)` }],
         { duration: 160, easing: "cubic-bezier(.2,.8,.2,1)" });
       settling.set(tab, animation);
       animation.onfinish = animation.oncancel = () => { if (settling.get(tab) === animation) settling.delete(tab); };

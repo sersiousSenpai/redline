@@ -150,6 +150,9 @@ impl Default for PartialBuf {
     }
 }
 
+/// A queued instruction selected by the user for immediate delivery.
+pub enum Control { Steer { message_id: String, ack: tokio::sync::oneshot::Sender<bool> } }
+
 /// One in-flight turn. `child` is `None` during the spawn window — the slot
 /// is *reserved* (busy to every other sender) before the async spawn begins.
 pub struct TurnProc {
@@ -159,6 +162,7 @@ pub struct TurnProc {
     /// Reservation generation, matched by `SlotGuard` so a stale guard from
     /// an aborted send can never release a successor turn's slot.
     token: u64,
+    control: Option<tokio::sync::mpsc::Sender<Control>>,
 }
 
 /// `begin` found the slot occupied: a turn is already streaming (or reserved
@@ -208,6 +212,7 @@ impl<Q> Turns<Q> {
                 started_at: now_millis(),
                 partial: partial.clone(),
                 token,
+                control: None,
             },
         );
         SlotGuard {
@@ -291,6 +296,34 @@ impl<Q> Turns<Q> {
             }
             None => (proc, None),
         }
+    }
+
+    pub fn promote(&self, key: &str, message_id: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(queue) = inner.queues.get_mut(key) else { return false; };
+        let Some(index) = queue.iter().position(|(row, _)| row.message_id == message_id) else { return false; };
+        if let Some(item) = queue.remove(index) { queue.push_front(item); }
+        true
+    }
+
+    pub fn attach_control(&self, key: &str, token: u64, control: tokio::sync::mpsc::Sender<Control>) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(proc) = inner.procs.get_mut(key).filter(|proc| proc.token == token) else { return false; };
+        proc.control = Some(control);
+        true
+    }
+
+    pub fn control(&self, key: &str) -> Option<tokio::sync::mpsc::Sender<Control>> {
+        self.inner.lock().unwrap().procs.get(key)?.control.clone()
+    }
+
+    pub fn clear_control(&self, key: &str, token: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(proc) = inner.procs.get_mut(key).filter(|proc| proc.token == token) { proc.control = None; }
+    }
+
+    pub fn queued_payload(&self, key: &str, message_id: &str) -> Option<Q> where Q: Clone {
+        self.inner.lock().unwrap().queues.get(key)?.iter().find(|(row, _)| row.message_id == message_id).map(|(_, payload)| payload.clone())
     }
 
     /// Remove one queued send by its message id (the composer's ×). `None`
@@ -601,6 +634,31 @@ mod tests {
 
     fn turns() -> Arc<Turns<()>> {
         Arc::new(Turns::new())
+    }
+
+    #[test]
+    fn promotion_and_controls_follow_the_owned_reservation() {
+        let t: Arc<Turns<()>> = Arc::new(Turns::new());
+        let guard = t.begin("k").unwrap();
+        let token = guard.token();
+        for id in ["a", "b", "c"] { assert!(matches!(t.begin_or_enqueue("k", QueuedTurn {message_id:id.into(),text:id.into(),queued_at:0}, ()), SendSlot::Enqueued)); }
+        assert!(t.promote("k", "c"));
+        assert_eq!(t.status("k").queued.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(), vec!["c","a","b"]);
+        assert!(!t.promote("k", "missing"));
+        let (tx, _) = tokio::sync::mpsc::channel(1);
+        assert!(!t.attach_control("k", token + 1, tx.clone()));
+        assert!(t.control("k").is_none());
+        assert!(t.attach_control("k", token, tx.clone()));
+        assert!(t.control("k").is_some());
+        t.take("k"); // interrupt the first turn
+        let (_, next) = t.finish_and_pop("k", token);
+        let (row, _, successor) = next.unwrap();
+        assert_eq!(row.message_id, "c");
+        assert!(t.control("k").is_none());
+        assert!(!t.attach_control("k", token, tx));
+        drop(guard);
+        assert!(t.is_running("k"));
+        drop(successor);
     }
 
     #[test]

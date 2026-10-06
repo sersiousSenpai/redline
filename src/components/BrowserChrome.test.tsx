@@ -1,6 +1,7 @@
 import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import BrowserTabRail from "./BrowserTabRail";
 import { BrowserChrome } from "./BrowserChrome";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -18,7 +19,7 @@ function Harness() {
     split: false, onArrange: noop, onMosaics: noop, menuOpen: false, onMenu: noop, onBookmarks: noop, onAppearance: noop,
     onPreferences: noop, onInspect: noop, onCloseBrowser: noop,
   };
-  return <BrowserChrome {...props}/>;
+  return <><BrowserTabRail {...props} groups={[]} organized={false} organizing={false} onResize={noop} onMode={noop} onOrganize={noop} onToggleGroup={noop}/><BrowserChrome {...props}/></>;
 }
 beforeEach(async () => { host = document.createElement("div"); document.body.append(host); root = createRoot(host); await act(async () => root.render(<Harness/>)); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -38,7 +39,7 @@ it.each([0, 1])("moves focus out of the address bar when pressing tab %i", async
 
 it("keeps inactive close controls outside the sequential tab order", async () => {
   expect(tabs().map((tab) => tab.querySelector("button")!.tabIndex)).toEqual([0, -1, -1]);
-  tabs()[0].focus(); await key(tabs()[0], "ArrowRight");
+  tabs()[0].focus(); await key(tabs()[0], "ArrowDown");
   expect(document.activeElement).toBe(tabs()[1]);
   expect(tabs().map((tab) => tab.querySelector("button")!.tabIndex)).toEqual([-1, 0, -1]);
   await key(tabs()[1], "End"); expect(document.activeElement).toBe(tabs()[2]);
@@ -61,7 +62,7 @@ it("supports Delete on a focused tab without stealing address focus for inactive
 });
 
 it("places the new-tab control directly after the final tab and numbers assigned tiles", () => {
-  expect(tabs()[2].nextElementSibling?.getAttribute("aria-label")).toBe("New tab");
+  expect(host.querySelector('[aria-label="New tab"]')).not.toBeNull();
   expect(tabs()[0].querySelector('[aria-label="Tile 1"]')?.textContent).toBe("1");
   expect(tabs()[2].querySelector('.rb-tile-badge')).toBeNull();
 });

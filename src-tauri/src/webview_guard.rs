@@ -20,6 +20,7 @@
 //! resurrect the window even if the process outlives it.
 
 use std::collections::HashMap;
+use tauri::Emitter;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -38,7 +39,11 @@ pub fn on_terminate(webview: &tauri::Webview) {
         None,
         Some("WebContent process terminated (memory pressure or WebKit fault)"),
     );
-    if !allow_reload(&label, Instant::now()) {
+    let allowed = allow_reload(&label, Instant::now());
+    if label.starts_with("browser-") {
+        let _ = webview.emit("browser-page-event", serde_json::json!({ "label": label, "kind": if allowed { "terminated" } else { "dead" } }));
+    }
+    if !allowed {
         tracing::error!(
             %label,
             "webview content process crash-looping (> {MAX_RELOADS} deaths/min); leaving it down"

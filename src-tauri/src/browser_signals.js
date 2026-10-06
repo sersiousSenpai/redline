@@ -36,7 +36,7 @@
     try { Object.defineProperty(window, key, { configurable: true, get: () => values, set: (array) => { values = wrap(array); } }); } catch (_) {}
   }
   document.addEventListener("keydown", (event) => {
-    if (!event.isTrusted) return;
+    if (!event.isTrusted || event.target?.closest?.("[data-redline-selection]")) return;
     let value;
     if (event.key === "Escape" && !window.__redline_inspect_stop) value = "exit-focus";
     if (event.metaKey || event.ctrlKey) {

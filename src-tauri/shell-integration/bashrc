@@ -1,0 +1,52 @@
+# --rcfile is an interactive non-login entry point; reproduce normal login
+# startup explicitly, including the user's first readable login profile.
+[[ -r /etc/profile ]] && . /etc/profile
+_rl_profile_loaded=0
+for _rl_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+  if [[ -r "$_rl_profile" ]]; then . "$_rl_profile"; _rl_profile_loaded=1; break; fi
+done
+if [[ $_rl_profile_loaded == 0 && -r "$HOME/.bashrc" ]]; then . "$HOME/.bashrc"; fi
+# An existing DEBUG trap can own a debugger or another shell integration.
+# Preserve it and degrade to the continuous terminal instead of breaking it.
+[[ -n "$(trap -p DEBUG)" ]] && return
+_rl_saved_prompt_command=("${PROMPT_COMMAND[@]}")
+_rl_running=0
+_rl_in_prompt=1
+_rl_preexec() {
+  local command=$1
+  [[ $_rl_in_prompt != 0 || $command == _rl_* ]] && return
+  _rl_in_prompt=1
+  local encoded
+  encoded=$(builtin printf '%s' "$command" | command base64 | command tr -d '\n')
+  builtin printf '\033]633;E;%s\007\033]133;C\007' "$encoded"
+  _rl_running=1
+}
+_rl_restore_status() { return "$1"; }
+_rl_precmd() {
+  local result=$?
+  _rl_in_prompt=1
+  [[ $_rl_running == 1 ]] && builtin printf '\033]133;D;%s\007' "$result"
+  _rl_running=0
+  local hook hook_status=$result
+  for hook in "${_rl_saved_prompt_command[@]}"; do
+    if [[ -n "$hook" ]]; then
+      # Restore the status seen by the user's first command, and then the
+      # previous prompt hook's status for each subsequent array entry. The
+      # conditional keeps a nonzero status from firing ERR/errexit itself.
+      if _rl_restore_status "$hook_status"; then eval "$hook"
+      else eval "$hook"; fi
+      hook_status=$?
+    fi
+  done
+  local cwd_value="$PWD" char encoded='' i
+  local LC_ALL=C
+  for ((i=0;i<${#cwd_value};i++)); do
+    char=${cwd_value:i:1}
+    case "$char" in [a-zA-Z0-9/._~-]) encoded+=$char;; *) builtin printf -v char '%%%02X' "'$char"; encoded+=$char;; esac
+  done
+  builtin printf '\033]7;file://localhost%s\007\033]133;A\007' "$encoded"
+  case "$PS1" in *$'\033]133;B\007'*) ;; *) PS1+=$'\[\033]133;B\007\]';; esac
+  _rl_in_prompt=0
+}
+PROMPT_COMMAND=_rl_precmd
+trap '_rl_preexec "$BASH_COMMAND"' DEBUG

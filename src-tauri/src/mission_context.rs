@@ -1610,7 +1610,7 @@ pub fn prepare_handoff(
     message_ids: &[String],
     key: &str,
 ) -> Result<Value, String> {
-    if !["drafter", "plan", "auto"].contains(&destination) {
+    if !["drafter", "plan", "run", "auto"].contains(&destination) {
         return Err("unsupported handoff destination".into());
     }
     if body.trim().is_empty() || body.len() > 256_000 || key.trim().is_empty() {
@@ -1759,7 +1759,7 @@ fn prepare_conversation_handoff(
             "select 1–100 completed source messages before preparing a conversation handoff".into(),
         );
     }
-    if !["drafter", "plan", "auto"].contains(&request.destination.as_str())
+    if !["drafter", "plan", "run", "auto"].contains(&request.destination.as_str())
         || request.body.trim().is_empty()
         || request.body.len() > 256_000
         || request.idempotency_key.is_empty()
@@ -1815,7 +1815,7 @@ fn prepare_conversation_handoff(
     let revision = uuid::Uuid::new_v4().to_string();
     let now = now_millis();
     let brief_title = if request.conversation_kind == "companion" {
-        tx.query_row("SELECT title FROM companions WHERE companion_id = ?1", params![request.conversation_id], |row| row.get::<_, String>(0)).ok().map(|title| format!("Brief · {title}"))
+        tx.query_row("SELECT title FROM companion_sessions WHERE companion_id = ?1", params![request.conversation_id], |row| row.get::<_, String>(0)).ok().map(|title| format!("Brief · {title}"))
     } else { None }.unwrap_or_else(|| "Conversation brief".into());
     tx.execute("INSERT INTO drafts(draft_id,title,doc_markdown,created_at,updated_at) VALUES(?1,?2,?3,?4,?4)",params![draft_id,brief_title,request.body,now]).map_err(|e|e.to_string())?;
     for msg in &selected {

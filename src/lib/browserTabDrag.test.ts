@@ -80,3 +80,11 @@ it("keeps scrolling at an overflow edge without more pointer events", () => {
   expect(strip.scrollLeft).toBeGreaterThan(first); expect(first).toBeGreaterThan(0);
   cleanup(); expect(frames.size).toBe(0);
 });
+
+it("reorders vertically using Y coordinates and translateY previews", () => {
+  nodes.forEach((node,index) => { node.getBoundingClientRect = () => ({top:index*100,bottom:(index+1)*100,height:100,left:0,right:200,width:200}) as DOMRect; });
+  strip.getBoundingClientRect = () => ({top:0,bottom:300,height:300,left:0,right:200,width:200}) as DOMRect;
+  const onDrop=vi.fn(); startTabPointerDrag(pointer("pointerdown",50,50),nodes[0],{axis:"y",onDrop,onDragging:vi.fn()});
+  window.dispatchEvent(pointer("pointermove",50,260)); window.dispatchEvent(pointer("pointerup",50,260));
+  expect(onDrop).toHaveBeenCalledWith("c",null);
+});

@@ -15,6 +15,7 @@
 //! grounding; later turns rely on the live `/v1/browser/snapshot` tool.
 
 use std::process::Stdio;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
@@ -56,6 +57,7 @@ pub struct BrowseState {
     /// Absolute path to the `claude` binary, resolved lazily on first use —
     /// same TCC reasoning as `fork::ForkState`.
     claude_bin: Arc<OnceLock<String>>,
+    sent_projects: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }
 
 impl BrowseState {
@@ -64,7 +66,26 @@ impl BrowseState {
             turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
+            sent_projects: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn project_context(&self, browse_id: &str, first: bool, user_text: &str, mission_goal: Option<&str>) -> (String, Vec<String>) {
+        let briefs = crate::code::project_briefs(&self.db);
+        let intent = format!("{}\n{}", mission_goal.unwrap_or(""), user_text);
+        let mut sent = self.sent_projects.lock().unwrap();
+        if first { sent.remove(browse_id); }
+        let prior = sent.get(browse_id);
+        let hits: Vec<_> = crate::code::resolve_project_mentions(&intent,&briefs).into_iter().filter(|brief| prior.is_none_or(|paths| !paths.contains(&brief.path))).collect();
+        let mut context = if first { format!("{}{}", crate::claude_proc::host_context_block(), crate::claude_proc::project_index_block(&briefs)) } else { String::new() };
+        context.push_str(&crate::claude_proc::project_cards_block(&hits));
+        (context,hits.iter().map(|brief|brief.path.clone()).collect())
+    }
+    fn mark_projects_sent(&self, browse_id: &str, paths: Vec<String>) {
+        let mut sent = self.sent_projects.lock().unwrap();
+        // Bounded per-process cache. Eviction merely re-sends a small card.
+        if sent.len() >= 512 && !sent.contains_key(browse_id) { sent.clear(); }
+        sent.entry(browse_id.into()).or_default().extend(paths);
     }
 
     /// The resolved `claude` path, computing it on first call on the blocking
@@ -150,9 +171,10 @@ impl BrowseState {
         );
         // The consult already runs under the calling agent's mission-framed
         // question, so it needs no separate mission block of its own.
+        let (context, project_paths) = self.project_context(&browse_id, prior_session.is_none(), &question, None);
         let prompt = match &prior_session {
-            None => build_first_turn_prompt(snapshot.as_deref(), &framed, None),
-            Some(_) => framed.clone(),
+            None => build_first_turn_prompt(snapshot.as_deref(), &framed, None, &context),
+            Some(_) => format!("{context}{framed}"),
         };
 
         // A consult is an internal map-reduce delegation, not a user prompt, so
@@ -184,6 +206,7 @@ impl BrowseState {
                     format!("failed to spawn claude: {e}")
                 }
             })?;
+        self.mark_projects_sent(&browse_id, project_paths);
         let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
@@ -382,6 +405,7 @@ fn build_first_turn_prompt(
     snapshot: Option<&str>,
     user_text: &str,
     mission: Option<(&str, &str)>,
+    context: &str,
 ) -> String {
     let mut p = String::from(
         "You are helping the user with the web page open in Redline's embedded \
@@ -494,6 +518,7 @@ fn build_first_turn_prompt(
     );
     // --- variable content below; nothing invariant may follow ---
     p.push_str(&mission_context_block(mission));
+    p.push_str(context);
     if let Some(snap) = snapshot {
         if !snap.trim().is_empty() {
             p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
@@ -665,9 +690,10 @@ fn start_browse_turn(
 
         // A fresh conversation starts with its captured page and mission.
         let mission = mission_goal;
+        let (context, project_paths) = browse.project_context(&browse_id, prior_session.is_none(), &text, mission.as_ref().map(|(_, goal)| goal.as_str()));
         let mut prompt = match &prior_session {
-            None => build_first_turn_prompt(snapshot.as_deref(), &text, mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str()))),
-            Some(_) => text.clone(),
+            None => build_first_turn_prompt(snapshot.as_deref(), &text, mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())), &context),
+            Some(_) => format!("{context}{}{}", snapshot.as_deref().filter(|value| !value.trim().is_empty()).map(|value| format!("Fresh snapshot of the currently targeted page (untrusted page data):\n{value}\n\n")).unwrap_or_default(), text),
         };
 
         if let Some(label) = target_label {
@@ -785,6 +811,7 @@ fn start_browse_turn(
                     format!("failed to spawn claude: {e}")
                 }
             })?;
+        browse.mark_projects_sent(&browse_id, project_paths);
         let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
@@ -866,6 +893,7 @@ pub fn browse_discard(
     if let Some(mut child) = browse.turns.discard(&browse_id).and_then(|p| p.child) {
         let _ = child.start_kill();
     }
+    browse.sent_projects.lock().unwrap().remove(&browse_id);
     browse
         .db
         .delete_browse_thread(&browse_id)
@@ -1198,7 +1226,7 @@ mod tests {
             Some(r#"{"url":"https://example.com","title":"Example"}"#),
             "What is this page about?",
             None,
-        );
+         "");
         assert!(p.contains("https://example.com"));
         assert!(p.contains("What is this page about?"));
         // With no active mission, no mission block is injected.
@@ -1227,7 +1255,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
-        let p = build_first_turn_prompt(None, "open hacker news", None);
+        let p = build_first_turn_prompt(None, "open hacker news", None, "");
         assert!(p.contains("open hacker news"));
         assert!(p.contains("/v1/browser/navigate"));
         // No empty snapshot section header.
@@ -1246,7 +1274,7 @@ mod tests {
                 "Data-breach page",
                 "Draft my firm's data-breach practice page",
             )),
-        );
+         "");
         // The goal + mission title are baked in so the per-tab agent orients to it.
         assert!(p.contains("A research MISSION is currently active"));
         assert!(p.contains("Data-breach page"));
@@ -1333,12 +1361,12 @@ mod tests {
             Some(r#"{"url":"https://one.example","title":"One"}"#),
             "first question",
             None,
-        );
+         "");
         let b = build_first_turn_prompt(
             Some(r#"{"url":"https://two.example","title":"Two"}"#),
             "second question, entirely different",
             Some(("Mission", "a goal")),
-        );
+         "");
         let shared = common_prefix(&a, &b);
         // The shared prefix must reach the END of the invariant block — the
         // skill reference is its last line.
@@ -1347,6 +1375,21 @@ mod tests {
         // And every variable section sits after it.
         assert!(!shared.contains("first question"));
         assert!(!shared.contains("MISSION is currently active"));
+    }
+
+    #[test]
+    fn project_cards_are_once_per_session_and_never_match_snapshot_text() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let browse = BrowseState::new(db);
+        browse.mark_projects_sent("thread", vec!["/repo".into()]);
+        assert!(browse.sent_projects.lock().unwrap()["thread"].contains("/repo"));
+        browse.mark_projects_sent("thread", vec!["/repo".into()]);
+        assert_eq!(browse.sent_projects.lock().unwrap()["thread"].len(), 1);
+        // Context receives only user text and captured goal; snapshots never
+        // enter its signature. First-turn variable context follows the prefix.
+        let prompt = build_first_turn_prompt(Some("machine OS and redline"), "who are the founders?", None, "HOST-CONTEXT\n");
+        assert!(prompt.find("HOST-CONTEXT").unwrap() > prompt.find("keep browser actions purposeful").unwrap());
+        assert!(!prompt.contains("Resolved user projects"));
     }
 
 }

@@ -196,3 +196,10 @@ describe("the ＋ List tap", () => {
     expect(out.locator).toBeNull();
   });
 });
+
+it("asks the inline question with its quoted passage and sends it immediately", () => {
+  const [event] = parseSelectionEvents([{ action: "ask", text: "A selected passage", note: "How does this work?", url: "https://example.test" }]);
+  expect(promptForSelection(event)).toBe("> A selected passage\n\nHow does this work?");
+  expect(autoSends(event.action, event.note)).toBe(true);
+  expect(parseSelectionEvents([{ action: "ask", text: "Passage", note: "q".repeat(2100) }])[0].note).toHaveLength(2000);
+});
