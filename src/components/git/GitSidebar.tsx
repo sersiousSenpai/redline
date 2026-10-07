@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Left sidebar: WORKSPACE, BRANCHES, REMOTES, TAGS, STASHES.
 import { useMemo } from "react";
-import { Archive, ChevronDown, ChevronRight, Cloud, FolderGit2, GitBranch, History, ListChecks, Tag } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, Cloud, FolderGit2, GitBranch, GitGraph, History, ListChecks, Tag } from "lucide-react";
 import { usePersistedState } from "../../theme/usePersistedState";
 import type { GitRefs } from "../../lib/git/types";
 import type { GitActions } from "./actions";
 import type { MenuItem, useContextMenu } from "./ui";
+import { branchMenu, remoteMenu, tagMenu } from "./menus";
 
-export type GitView = "status" | "history" | "stash";
+export type GitView = "status" | "branches" | "history" | "stash";
 
 interface Props {
   refs: GitRefs | null;
@@ -16,12 +17,15 @@ interface Props {
   stashIndex: number | null;
   onView: (view: GitView) => void;
   onStash: (index: number) => void;
+  /** A ref was clicked: show its tip in the current graph view. */
   onReveal: (sha: string) => void;
+  /** "Show in history" from a ref's menu. */
+  onShowInHistory: (sha: string) => void;
   actions: GitActions;
   menu: ReturnType<typeof useContextMenu>;
 }
 
-export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStash, onReveal, actions, menu }: Props) {
+export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStash, onReveal, onShowInHistory, actions, menu }: Props) {
   const [collapsed, setCollapsed] = usePersistedState<Record<string, boolean>>("redline.git.sidebarCollapsed", {});
   const toggle = (key: string) => setCollapsed((c: Record<string, boolean>) => ({ ...c, [key]: !c[key] }));
   const current = refs?.current ?? null;
@@ -100,26 +104,6 @@ export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStas
     </div>
   );
 
-  const branchMenu = (name: string, sha: string, isCurrent: boolean): MenuItem[] => [
-    { label: `Check out ${name}`, disabled: isCurrent, onSelect: () => void actions.checkoutBranch(name) },
-    { label: `Merge ${name} into ${current ?? "HEAD"}…`, disabled: isCurrent, onSelect: () => void actions.merge(name) },
-    { label: `Rebase ${current ?? "HEAD"} onto ${name}…`, disabled: isCurrent, onSelect: () => void actions.rebase(name) },
-    { separator: true },
-    { label: `New branch from ${name}…`, onSelect: () => void actions.newBranch(name, name) },
-    { label: `Push ${name}…`, onSelect: () => void actions.push(name) },
-    { label: "Show in history", onSelect: () => onReveal(sha) },
-    { separator: true },
-    { label: `Delete ${name}…`, danger: true, disabled: isCurrent, onSelect: () => void actions.deleteBranch(name) },
-  ];
-  const remoteMenu = (name: string, sha: string): MenuItem[] => [
-    { label: `Check out ${name} (track)`, onSelect: () => void actions.checkoutRemote(name) },
-    { label: `Merge ${name} into ${current ?? "HEAD"}…`, onSelect: () => void actions.merge(name) },
-    { label: `Rebase ${current ?? "HEAD"} onto ${name}…`, onSelect: () => void actions.rebase(name) },
-    { separator: true },
-    { label: `New branch from ${name}…`, onSelect: () => void actions.newBranch(name, name) },
-    { label: "Show in history", onSelect: () => onReveal(sha) },
-  ];
-
   return (
     <nav className="rl-git-sidebar" aria-label="Repository" onKeyDown={keyNav}>
       {section(
@@ -132,6 +116,7 @@ export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStas
             onClick: () => onView("status"),
             extra: changeCount > 0 ? <span className="rl-git-side-count">{changeCount}</span> : undefined,
           })}
+          {item("branches", "Branches", { icon: <GitGraph size={14} />, active: view === "branches", onClick: () => onView("branches") })}
           {item("history", "History", { icon: <History size={14} />, active: view === "history", onClick: () => onView("history") })}
         </>,
       )}
@@ -145,7 +130,7 @@ export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStas
             title: b.upstream ? `${b.name} → ${b.upstream}${b.gone ? " (gone)" : ""}` : b.name,
             onClick: () => onReveal(b.sha),
             onDouble: b.current ? undefined : () => void actions.checkoutBranch(b.name),
-            menu: () => branchMenu(b.name, b.sha, b.current),
+            menu: () => branchMenu(b.name, b.sha, b.current, current, actions, onShowInHistory),
             extra: (
               <span className="rl-git-side-ab">
                 {b.gone && <span className="rl-git-muted">gone</span>}
@@ -173,7 +158,7 @@ export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStas
                   title: b.name,
                   onClick: () => onReveal(b.sha),
                   onDouble: () => void actions.checkoutRemote(b.name),
-                  menu: () => remoteMenu(b.name, b.sha),
+                  menu: () => remoteMenu(b.name, b.sha, current, actions, onShowInHistory),
                 }),
               )}
           </div>
@@ -187,13 +172,7 @@ export function GitSidebar({ refs, changeCount, view, stashIndex, onView, onStas
             icon: <Tag size={12} />,
             onClick: () => onReveal(t.sha),
             onDouble: () => void actions.checkoutCommit(t.name, t.name),
-            menu: () => [
-              { label: `Check out ${t.name} (detached)`, onSelect: () => void actions.checkoutCommit(t.name, t.name) },
-              { label: `New branch from ${t.name}…`, onSelect: () => void actions.newBranch(t.name, t.name) },
-              { label: "Show in history", onSelect: () => onReveal(t.sha) },
-              { separator: true },
-              { label: `Delete tag ${t.name}…`, danger: true, onSelect: () => void actions.deleteTag(t.name) },
-            ],
+            menu: () => tagMenu(t.name, t.sha, actions, onShowInHistory),
           }),
         ),
         refs?.tags.length,

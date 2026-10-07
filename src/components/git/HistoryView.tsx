@@ -10,7 +10,8 @@ import { PAGE_SIZE, shortSha } from "./api";
 import { ChangesPane } from "./ChangesPane";
 import type { GitActions } from "./actions";
 import type { GitRepository } from "./useGitRepository";
-import type { MenuItem, useContextMenu } from "./ui";
+import type { useContextMenu } from "./ui";
+import { commitMenu } from "./menus";
 
 export const ROW_HEIGHT = 24;
 const LANE_WIDTH = 12;
@@ -102,23 +103,6 @@ export function HistoryView({
   const headSha = status?.head ?? null;
   const selectedCommit = commits.find((c) => c.sha === selected) ?? null;
 
-  const commitMenu = (commit: GitCommit): MenuItem[] => [
-    { heading: `${shortSha(commit.sha)} ${commit.subject.slice(0, 48)}` },
-    { label: "Check out (detached)", onSelect: () => void actions.checkoutCommit(commit.sha) },
-    { label: "New branch here…", onSelect: () => void actions.newBranch(commit.sha, shortSha(commit.sha)) },
-    { label: "Tag here…", onSelect: () => void actions.newTag(commit.sha) },
-    { separator: true },
-    { label: "Cherry-pick", disabled: commit.sha === headSha, onSelect: () => void actions.cherryPick(commit.sha) },
-    { label: "Revert commit", onSelect: () => void actions.revert(commit.sha) },
-    { separator: true },
-    { heading: `Reset ${status?.branch ?? "HEAD"} to here` },
-    { label: "Soft — keep all changes staged", onSelect: () => void actions.reset(commit.sha, "soft") },
-    { label: "Mixed — keep changes unstaged", onSelect: () => void actions.reset(commit.sha, "mixed") },
-    { label: "Hard — discard all changes…", danger: true, onSelect: () => void actions.reset(commit.sha, "hard") },
-    { separator: true },
-    { label: "Copy SHA", onSelect: () => void navigator.clipboard?.writeText(commit.sha) },
-  ];
-
   return (
     <div className="rl-git-history">
       <div className="rl-git-history-top">
@@ -143,7 +127,7 @@ export function HistoryView({
           onNearEnd={loadMore}
           onMenu={(event, commit) => {
             setSelected(commit.sha);
-            menu.open(event, commitMenu(commit));
+            menu.open(event, commitMenu(commit, actions, status));
           }}
         />
       </div>
@@ -337,7 +321,7 @@ export function RefChips({ refs }: { refs: GitRefDecoration[] }) {
   );
 }
 
-function CommitDetailPane({ git, commit, onSelect }: { git: GitRepository; commit: GitCommit | null; onSelect: (sha: string) => void }) {
+export function CommitDetailPane({ git, commit, onSelect }: { git: GitRepository; commit: GitCommit | null; onSelect: (sha: string) => void }) {
   const { api } = git;
   const [detail, setDetail] = useState<GitCommitDetail | null>(null);
   const [files, setFiles] = useState<GitDiffFile[] | null>(null);

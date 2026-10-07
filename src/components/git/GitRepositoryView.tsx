@@ -3,7 +3,7 @@
 // The Code Review surface's Repository pose: a full git client for one repo.
 // Toolbar, sidebar (workspace, branches, remotes, tags, stashes), File status
 // and History, with raw git output in a drawer. Loaded lazily by ReviewPanel.
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Archive,
   ArrowDownToLine,
@@ -28,6 +28,8 @@ import { HistoryView, formatDate } from "./HistoryView";
 import { ChangesPane } from "./ChangesPane";
 import "./git.css";
 
+const BranchGraphView = lazy(() => import("./BranchGraphView"));
+
 export interface GitRepositoryViewProps {
   repo: string;
   onOpenTerminal?: (cwd: string, command?: string) => void;
@@ -45,6 +47,11 @@ export default function GitRepositoryView({ repo, onOpenTerminal }: GitRepositor
   const { status, refs } = git;
   const view: GitView = stored === "stash" && (stashIndex === null || !refs?.stashes.some((s) => s.index === stashIndex)) ? "status" : stored;
   const changeCount = status ? status.staged.length + status.unstaged.length + status.conflicted.length : 0;
+  const revealSha = (sha: string) => setReveal((r) => ({ sha, nonce: (r?.nonce ?? 0) + 1 }));
+  const showInHistory = (sha: string) => {
+    setView("history");
+    revealSha(sha);
+  };
 
   return (
     <div className="rl-git" aria-label="Repository">
@@ -83,15 +90,21 @@ export default function GitRepositoryView({ repo, onOpenTerminal }: GitRepositor
             setView("stash");
           }}
           onReveal={(sha) => {
-            setView("history");
-            setReveal((r) => ({ sha, nonce: (r?.nonce ?? 0) + 1 }));
+            // The Branches view pans to the ref in place; anything else opens History.
+            if (view !== "branches") setView("history");
+            revealSha(sha);
           }}
+          onShowInHistory={showInHistory}
           actions={actions}
           menu={menu}
         />
         <main className="rl-git-content">
           {view === "status" ? (
             <FileStatusView git={git} dialogs={dialogs} menu={menu} focusCommitToken={focusCommit} />
+          ) : view === "branches" ? (
+            <Suspense fallback={<div className="rl-git-empty">Loading branches…</div>}>
+              <BranchGraphView git={git} actions={actions} menu={menu} reveal={reveal} onShowInHistory={showInHistory} />
+            </Suspense>
           ) : view === "history" ? (
             <HistoryView git={git} actions={actions} menu={menu} reveal={reveal} />
           ) : (

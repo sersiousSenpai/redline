@@ -38,6 +38,13 @@ describe("size guard", () => {
     expect(offenders, "the git client loads only through the lazy GitRepositoryView boundary").toEqual([]);
   });
 
+  it("keeps the Branches graph lazy inside the git client", () => {
+    const view = files.find(({ rel }) => rel === "components/git/GitRepositoryView.tsx")!.text;
+    expect(view).toMatch(/const BranchGraphView = lazy\(\(\) => import\(["']\.\/BranchGraphView["']\)\)/);
+    const offenders = files.filter(({ rel, text }) => rel !== "components/git/BranchGraphView.test.tsx" && /from\s+["'][^"']*BranchGraphView["']/.test(text)).map(({ rel }) => rel);
+    expect(offenders).toEqual([]);
+  });
+
   it("keeps Three.js behind the Map-only lazy scene boundary", () => {
     const surface = files.find(({ rel }) => rel === "components/MemorySurface.tsx")!.text;
     const map = files.find(({ rel }) => rel === "components/MemoryMap.tsx")!.text;

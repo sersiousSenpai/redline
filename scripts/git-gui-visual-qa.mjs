@@ -40,7 +40,7 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function bounds(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right,scrollHeight:e.scrollHeight,clientHeight:e.clientHeight,visible:r.width>0&&r.height>0,within:r.x>=-1&&r.y>=-1&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1};})()`); }
 try {
   await mkdir(output, { recursive: true });
-  for (const name of ["GitRepositoryView", "FileStatusView", "HistoryView", "HunkDiff", "GitSidebar"]) {
+  for (const name of ["GitRepositoryView", "FileStatusView", "HistoryView", "HunkDiff", "GitSidebar", "BranchGraphView"]) {
     const file = `src/components/git/${name}.tsx`; report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   }
   server = await createServer({ configFile: false, root, cacheDir: path.join(temporary, "vite-cache"), optimizeDeps: { entries: ["fixtures/git-gui-visual-qa/index.html"] }, plugins: [react(), tailwindcss()], resolve: { alias: [
@@ -78,9 +78,51 @@ try {
       check(`${theme} ${width}: history rows + detail`, await cdp.evaluate("document.querySelectorAll('.rl-git-row').length>10 && !!document.querySelector('.rl-git-detail .rl-git-line')"));
       check(`${theme} ${width}: graph draws merge curves`, await cdp.evaluate("[...document.querySelectorAll('.rl-git-graph path')].some(p=>p.getAttribute('d').includes('C'))"));
       await screenshot(`history-${theme === "studio" ? "dark" : "light"}-${width}`);
+      // Branches: horizontal rails
+      const tone = theme === "studio" ? "dark" : "light";
+      await cdp.evaluate("window.__qa.setView('branches')");
+      for (let i = 0; i < 50 && !(await cdp.evaluate("document.querySelectorAll('.rl-bg-node').length>20 && document.querySelectorAll('.rl-bg-label').length>3")); i++) await delay(100);
+      await settle(); await delay(120);
+      const rails = await cdp.evaluate("(()=>{const ls=[...document.querySelectorAll('.rl-bg-label')].map(e=>{const r=e.getBoundingClientRect();return {t:r.top,b:r.bottom,name:e.textContent}});return ls})()");
+      check(`${tone} ${width}: branches renders rails`, rails.length >= 8, rails.map((r) => r.name));
+      check(`${tone} ${width}: rail labels never overlap`, rails.every((r, i) => i === 0 || r.t >= rails[i - 1].b - 0.5), rails);
+      check(`${tone} ${width}: branches opens fitted: every rail's tip on screen`, await cdp.evaluate("(()=>{const c=document.querySelector('.rl-bg-canvas').getBoundingClientRect();const xs=[...document.querySelectorAll('.rl-bg-dot')].map(d=>+d.getAttribute('cx'));return !document.querySelector('.rl-bg-label[data-away]') && Math.max(...xs) < c.width})()"));
+      check(`${tone} ${width}: fitted spacing stays clickable`, await cdp.evaluate("(()=>{const xs=[...new Set([...document.querySelectorAll('.rl-bg-dot')].map(d=>Math.round(+d.getAttribute('cx')*10)/10))].sort((a,b)=>a-b);let m=1e9;for(let i=1;i<xs.length;i++)m=Math.min(m,xs[i]-xs[i-1]);return m>=7.99})()"));
+      check(`${tone} ${width}: tip chips + date axis`, await cdp.evaluate("document.querySelectorAll('.rl-bg-chipset').length>=4 && document.querySelectorAll('.rl-bg-tick').length>=3"));
+      check(`${tone} ${width}: no horizontal page overflow (branches)`, await cdp.evaluate("document.documentElement.scrollWidth<=innerWidth"));
+      await screenshot(`branches-${tone}-${width}`);
+      // select a mid-view commit on main: ancestors light up, descendants soften, the rest dims
+      const target = await cdp.evaluate("(()=>{const l=[...document.querySelectorAll('.rl-bg-label')].find(e=>e.textContent.trim()==='main');const lr=l.getBoundingClientRect();const y=lr.top+lr.height/2;const c=document.querySelector('.rl-bg-canvas').getBoundingClientRect();const nodes=[...document.querySelectorAll('.rl-bg-node')].map(n=>{const d=n.querySelector('.rl-bg-dot');return {sha:n.dataset.sha,x:c.left+(+d.getAttribute('cx')),y:c.top+(+d.getAttribute('cy'))}}).filter(n=>Math.abs(n.y-y)<2).sort((a,b)=>a.x-b.x);return nodes[Math.floor(nodes.length*0.55)]??null})()");
+      check(`${tone} ${width}: found a node to select`, !!target, target);
+      if (target) {
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y });
+        await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, x: target.x, y: target.y });
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, x: target.x, y: target.y });
+        await settle();
+        for (let i = 0; i < 40 && !(await cdp.evaluate("!!document.querySelector('.rl-bg-drawer .rl-git-line')")); i++) await delay(100);
+        check(`${tone} ${width}: selection highlights ancestors and dims the rest`, await cdp.evaluate("document.querySelectorAll('.rl-bg-node[data-state=anc]').length>3 && document.querySelectorAll('.rl-bg-node[data-state=dim]').length>3 && document.querySelectorAll('.rl-bg-node[data-state=desc]').length>0"));
+        check(`${tone} ${width}: selection opens the detail drawer`, await cdp.evaluate("!!document.querySelector('.rl-bg-drawer .rl-git-line')"));
+        await screenshot(`branches-${tone}-${width}-selected`);
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+        await click(".rl-bg-drawer-bar button");
+        check(`${tone} ${width}: drawer closes, selection stays`, await cdp.evaluate("!document.querySelector('.rl-bg-drawer') && !!document.querySelector('.rl-bg-node[data-state=sel]')"));
+        // hover tooltip on the HEAD node
+        const headPt = await cdp.evaluate("(()=>{const n=document.querySelector('.rl-bg-node[data-head] .rl-bg-dot');if(!n)return null;const c=document.querySelector('.rl-bg-canvas').getBoundingClientRect();return {x:c.left+(+n.getAttribute('cx')),y:c.top+(+n.getAttribute('cy'))}})()");
+        if (headPt) { await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: headPt.x, y: headPt.y }); await settle(); }
+        check(`${tone} ${width}: hover tooltip`, await cdp.evaluate("!!document.querySelector('.rl-bg-tip')"));
+        await screenshot(`branches-${tone}-${width}-selected-full`);
+        await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 });
+        await key("Escape", "Escape", 27);
+        check(`${tone} ${width}: Esc clears the selection`, await cdp.evaluate("!document.querySelector('.rl-bg-node[data-state]')"));
+        await click('button[aria-label="Fit"]');
+        check(`${tone} ${width}: Fit restores the fitted branches view`, await cdp.evaluate("!document.querySelector('.rl-bg-label[data-away]') && document.querySelectorAll('.rl-bg-node').length>=90"));
+        await screenshot(`branches-${tone}-${width}-fit`);
+      }
     }
   }
   // context menu + dialog
+  await cdp.evaluate("window.__qa.setView('history')");
+  for (let i = 0; i < 50 && !(await cdp.evaluate("document.querySelectorAll('.rl-git-row').length>10")); i++) await delay(100);
   await cdp.evaluate("(()=>{const r=document.querySelectorAll('.rl-git-row')[3];const b=r.getBoundingClientRect();r.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:b.x+300,clientY:b.y+12}));})()"); await settle();
   check("commit menu opens", await cdp.evaluate("!!document.querySelector('[role=menu]')"));
   await screenshot("history-menu-light");
