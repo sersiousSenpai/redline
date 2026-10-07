@@ -560,7 +560,7 @@ fn queue_implementation_with_rpc(
     Ok(())
 }
 
-pub(crate) fn implementation_settings(thread_id: &str, response: &Value) -> Result<Value, String> {
+fn implementation_settings(thread_id: &str, response: &Value) -> Result<Value, String> {
     let thread = response.get("thread").ok_or("Codex returned no thread")?;
     if thread.get("id").and_then(Value::as_str) != Some(thread_id)
         || thread.pointer("/status/type").and_then(Value::as_str) != Some("active") {

@@ -37,9 +37,6 @@ mod confine;
 mod combine;
 mod companion;
 mod companion_build;
-mod agent_shell;
-mod shell_events;
-mod shell_context;
 mod companion_warm;
 mod compose;
 mod context;
@@ -116,7 +113,6 @@ mod preflight;
 mod probe;
 mod project;
 mod pty;
-mod shell_integration;
 mod push;
 mod guided;
 mod git_gui;
@@ -2547,7 +2543,7 @@ async fn handle_plan_core(peer: SocketAddr, app_state: AppState, payload: Value)
                         if payload.get("redline_provider").and_then(Value::as_str) == Some("codex") {
                             let approval_id = ticket.as_ref().map(|t| t.id.as_str()).unwrap_or_default();
                             let socket = ticket.as_ref().and_then(|t| t.codex_socket.as_deref());
-                            if let Err(error) = async {if !agent_shell::queue_codex_implementation(&app_state.app_handle,&session_id,&plan,approval_id).await? {codex_app_server::queue_plan_implementation(socket, &session_id, &plan, approval_id).await?;} Ok::<(),String>(())}.await {
+                            if let Err(error) = codex_app_server::queue_plan_implementation(socket, &session_id, &plan, approval_id).await {
                                 tracing::warn!(%session_id, %error, "Codex Ambient handoff failed; awaiting explicit approval");
                                 drop(_approval_guard);
                                 let response = match (&mut rx).await {
@@ -7967,7 +7963,7 @@ async fn submit_review(
     // prompt by feeding the configured keystroke into the embedded terminal.
     // Off by default; a missing PTY is a silent no-op (the reviewer probably
     // closed the tab — the menu will surface for them in their own terminal).
-    if auto_continue.unwrap_or(false) && !terminal_id.as_deref().is_some_and(agent_shell::is_hosted) {
+    if auto_continue.unwrap_or(false) {
         if let Some(tid) = terminal_id.as_deref() {
             if let Err(e) = pty::pty_write_bytes(&pty, tid, MENU_SKIP_KEYSTROKE.as_bytes()) {
                 tracing::warn!(
@@ -8028,7 +8024,6 @@ async fn approve_plan(
     }) {
         // Do this while Stop is still held, and propagate errors to the Approve
         // button. Never mark a plan approved when Codex cannot start building.
-        if !agent_shell::queue_codex_implementation(&app,&session_id,&plan,&ticket.id).await? {
         codex_app_server::queue_plan_implementation(
             ticket.codex_socket.as_deref(),
             &session_id,
@@ -8036,7 +8031,6 @@ async fn approve_plan(
             &ticket.id,
         )
         .await?;
-        }
     }
     let Some(tx) = ticket
         .as_ref()
@@ -12762,9 +12756,6 @@ pub fn run() {
             install_codex_skill,
             get_skill_status,
             install_skill,
-            shell_integration::shell_complete_path,
-            shell_integration::shell_integration_get,
-            shell_integration::shell_integration_set,
             pty::pty_spawn,
             pty::pty_list,
             pty::pty_attach,
@@ -12776,24 +12767,6 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_kill_all,
-            agent_shell::agent_shell_start,
-            shell_context::shell_context_options,
-            shell_context::shell_context_preview,
-            agent_shell::agent_shell_list,
-            agent_shell::agent_shell_attach,
-            agent_shell::agent_shell_detach,
-            agent_shell::agent_shell_ack,
-            agent_shell::agent_shell_send,
-            agent_shell::agent_shell_permission_respond,
-            agent_shell::agent_shell_control,
-            agent_shell::agent_shell_interrupt,
-            agent_shell::agent_shell_stop,
-            agent_shell::agent_shell_kill_all,
-            agent_shell::agent_shell_handoff,
-            agent_shell::agent_shell_history,
-            agent_shell::agent_shell_resume_hosted,
-            agent_shell::terminal_default_view_get,
-            agent_shell::terminal_default_view_set,
             pty::pty_cwd,
             pty::pty_cwds,
             fsbrowse::list_dir,
@@ -13264,7 +13237,6 @@ pub fn run() {
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
-            app.manage(agent_shell::AgentShellState::default());
             app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());
             app.manage(self_develop::SelfDevelopState::new());
@@ -13851,7 +13823,6 @@ pub fn run() {
                         let _ = snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
                     }
                 }
-                if let Some(hosted) = app_handle.try_state::<agent_shell::AgentShellState>() { hosted.kill_all(); }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
                 }

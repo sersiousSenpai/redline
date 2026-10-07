@@ -352,7 +352,7 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
-import { buildApprovedPrompt, buildRestorePrompt, buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
+import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isDockKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -5426,16 +5426,15 @@ function App() {
         suppressTerminalRevealFocus();
         setTermFullscreen(false);
         revealTerm();
-        const terminals = await ensureTerminalReady();
-        if (!terminals) { setToast("Couldn't open a terminal to build in", 6000); return; }
-        if (await useHostedShell(planHarness)) {
-          await terminals.openAgentShell({ cwd: planHarness === "codex" ? projectPath ?? cwd : cwd, sessionId, prompt: buildApprovedPrompt(version, new Date(), cwd, projectPath),
-            permissionMode: "auto", model: session.model, effort: session.effort,
-            addDirs: projectPath && projectPath !== cwd ? [projectPath] : [], backend: planHarness === "codex" ? "codex" : "claude-code" });
-        } else {
-          const id = terminals.openSessionTerminal(projectPath);
-          const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
-          if (!delivery.ok) { setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000); return; }
+        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
+        if (!id) {
+          setToast("Couldn't open a terminal to build in", 6000);
+          return;
+        }
+        const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
+        if (!delivery.ok) {
+          setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000);
+          return;
         }
         await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
         setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
@@ -5508,31 +5507,22 @@ function App() {
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
-    const terminals = await ensureTerminalReady();
-    const hosted = await useHostedShell("claude-code");
-    let id: string | null = hosted ? null : terminals?.openSessionTerminal(launch.projectPath) ?? null;
+    const id = (await ensureTerminalReady())?.openSessionTerminal(launch.projectPath) ?? null;
     // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
     // claim links the lead under the plan and starts the Runs watcher.
     const rearm = () =>
       invoke("record_orchestration_launch", { prompt, planSessionId: sessionId, terminalId: id }).then(() => undefined);
+    await rearm().catch((err) => console.error("record_orchestration_launch failed", err));
     const fail = async (stage: string, reason: string) => {
       await invoke("scaled_stop", { runId: launch.runId }).catch(() => {});
       await invoke("reset_run", { sessionId }).catch(() => {});
       setHandoffFailure({ sessionId, stage, reason, launchCmd, prompt, projectPath: launch.projectPath, retryScaled: config });
       void refreshSummaries();
     };
-    if (hosted && terminals) {
-      try {
-        await terminals.openAgentShell({ cwd: launch.projectPath, prompt, permissionMode: "acceptEdits",
-          model: launch.leadModel, effort: launch.effort, settingsPath: launch.settingsPath, backend: "claude-code",
-        }, { beforeStart: async terminalId => { id = terminalId; await rearm(); } });
-        setHandoffFailure(cur => cur?.sessionId === sessionId ? null : cur);
-        setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
-      } catch (error) { await fail("launch", String(error)); }
+    if (!id) {
+      await fail("spawn", "no terminal tab could be opened");
       return;
     }
-    if (!id) { await fail("spawn", "no terminal tab could be opened"); return; }
-    try { await rearm(); } catch (error) { await fail("record", String(error)); return; }
     const deps: OrchestrateDeps = {
       ...tauriHandoffDeps,
       journal: (stage, detail) => {
@@ -5802,13 +5792,6 @@ function App() {
     dock?.hailTerminal(terminalId);
   };
 
-  const showRestoreRawTerminal = async (terminalId: string | null) => {
-    await showRawTerminal(terminalId);
-    if (!terminalId) return;
-    try { await (await ensureTerminalReady())?.setTabView(terminalId, "raw"); }
-    catch (error) { setToast(`The shell is open. Raw view is unavailable right now: ${String(error)}`, 7000); }
-  };
-
   // One-click recovery for a detached plan: resume the exact conversation that
   // wrote it, with a compact control event that re-establishes the held
   // ExitPlanMode. Because the resumed session keeps the same session_id, its
@@ -5886,20 +5869,6 @@ function App() {
       await invoke("arm_restore", { sessionId });
     } catch (e) {
       fail(`Couldn't arm the restore: ${String(e)}`);
-      return;
-    }
-
-    if (await useHostedShell(restoreDecision.harness)) {
-      try {
-        const terminals = await ensureTerminalReady();
-        if (!terminals) { fail("Couldn't open a shell to resume in."); return; }
-        await terminals.openAgentShell({ cwd: target.cwd, sessionId,
-          prompt: buildRestorePrompt(sessionId, new Date(), target.primed, rescindedIds.has(sessionId) || !!opts.rescinded),
-          permissionMode: "plan", model: session.model, effort: session.effort,
-          addDirs: projectPath && projectPath !== target.cwd ? [projectPath] : [], backend: restoreDecision.harness === "codex" ? "codex" : "claude-code",
-          restore: true, restorePrimed: target.primed, restoreRescinded: rescindedIds.has(sessionId) || !!opts.rescinded,
-        }, { background: true, beforeStart: id => onRestore({ type: "dispatched", sessionId, terminalId: id, history: target.history }) });
-      } catch (error) { fail(`Couldn't resume the shell: ${String(error)}`); }
       return;
     }
 
@@ -6033,9 +6002,6 @@ function App() {
   // themselves so they can order their own steps (render the blocker inside
   // their own island, hold the ⏎ to carry through). This catches the door that
   // forgets — which is exactly how the Drafter shipped with zero preflight.
-  const useHostedShell = async (backend: string | null | undefined) =>
-    ["claude-code", "codex"].includes(backend ?? "claude-code") && await invoke<string>("terminal_default_view_get").catch(() => "raw") === "shell";
-
   const launchPlan = async (req: {
     choice?: BackendChoice;
     /** `run` is "Just run it": the same terminal, handoff and lineage, but a
@@ -6171,15 +6137,18 @@ function App() {
         ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
         : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
     }\r`;
-    if (!req.background) { suppressTerminalRevealFocus(); setTermFullscreen(false); revealTerm(); }
-    const hosted = await useHostedShell(choice.backend);
-    const terminals = await ensureTerminalReady();
-    if (!terminals) return { ok: false, reason: "couldn't open a terminal", retryable: true };
-    let terminalId = hosted ? null : terminals.openSessionTerminal(req.projectPath, { background: req.background });
+    if (!req.background) {
+      suppressTerminalRevealFocus();
+      setTermFullscreen(false);
+      revealTerm();
+    }
+    const terminalId =
+      (await ensureTerminalReady())?.openSessionTerminal(req.projectPath, { background: req.background }) ??
+      null;
     // No terminal means the command was never typed and nothing will ever
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
-    if (!hosted && !terminalId) return { ok: false, reason: "couldn't open a terminal", retryable: true };
+    if (!terminalId) return { ok: false, reason: "couldn't open a terminal", retryable: true };
 
     // Polis ledger: record the launched prompt (the plan session doesn't exist
     // yet, so this is the only place its body is first-class). `origin` is
@@ -6210,27 +6179,16 @@ function App() {
     }).then(() => null).catch((err: unknown) => String(err));
     if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
-    const makePending = (id: string): PendingLaunch => ({ launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId: id, draftId: req.draftId, restore: req.restore });
-    if (hosted) {
-      try {
-        terminalId = await terminals.openAgentShell({ cwd: req.projectPath, prompt: trimmed,
-          permissionMode: run ? "auto" : "plan", model: choice.model, effort: choice.effort,
-          addDirs, launchId, backend: choice.backend === "codex" ? "codex" : "claude-code",
-        }, { background: req.background, beforeStart: id => { if (!run) launchedPlansRef.current.set(launchId, makePending(id)); } });
-      } catch (error) {
-        launchedPlansRef.current.delete(launchId);
-        return { ok: false, reason: `Couldn't start the shell: ${String(error)}`, retryable: true };
-      }
-    } else {
-      if (!run) launchedPlansRef.current.set(launchId, makePending(terminalId!));
-      const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId!, [{ stage: "launch", data: cmd }]);
-      if (!delivery.ok) {
-        launchedPlansRef.current.delete(launchId);
-        return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
-      }
+    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
+    // Register before typing: an immediate intercept must be able to match the
+    // launch. A run sends no plan, so it registers nothing for an intercept to
+    // match and claims no decision window.
+    if (!run) launchedPlansRef.current.set(launchId, pending);
+    const delivery = await deliverToTerminal(tauriHandoffDeps, terminalId, [{ stage: "launch", data: cmd }]);
+    if (!delivery.ok) {
+      launchedPlansRef.current.delete(launchId);
+      return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
     }
-    if (!terminalId) return { ok: false, reason: "The shell did not return a terminal", retryable: true };
-    const pending = makePending(terminalId);
     if (run) {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
@@ -6618,45 +6576,6 @@ function App() {
     const note = restoreCopiedNote(restoreDecision, target);
     setToast(note.message, note.ms);
   };
-
-  const [shellRestoreTarget, setShellRestoreTarget] = useState<string | null>(null);
-  const shellNavigation = useRef<(detail: { kind: string; value: string; sessionId: string; cwd?: string | null }) => void>(() => {});
-  shellNavigation.current = ({ kind, value, sessionId, cwd }) => {
-    if (kind === "url") { openUrlInBrowser(value); return; }
-    if (kind === "file") {
-      const path = value.replace(/:\d+(?::\d+)?$/, "");
-      const repo = cwd ?? summaries.find(s => s.sessionId === sessionId)?.projectPath;
-      handleOpenFile(path.startsWith("/") ? path : repo ? `${repo.replace(/\/$/, "")}/${path}` : path);
-      return;
-    }
-    if (kind === "block") {
-      if (!summaries.some(plan => plan.sessionId === sessionId)) { setToast("This shell has no captured plan containing that block yet."); return; }
-      setActiveId(sessionId); selectSessions(); selectSurface("document");
-      setRunPlanAnchor({ sessionId, blockId: value.replace(/^rl:/, "") }); return;
-    }
-    if (kind === "restore") {
-      if (!summaries.some(plan => plan.sessionId === sessionId)) {
-        setToast("This shell has no captured plan to restore yet.");
-        return;
-      }
-      setActiveId(sessionId); selectSessions(); selectSurface("document"); setShellRestoreTarget(sessionId); return;
-    }
-    if (kind === "review") {
-      if (summaries.some(s => s.sessionId === sessionId)) { setActiveId(sessionId); selectSessions(); selectSurface("document"); }
-      else if (cwd) { codeReview.setSource("uncommitted"); void codeReview.openReview(cwd, "uncommitted"); selectSurface("review"); }
-      else setToast("No plan or repository is linked to this shell yet.");
-    }
-  };
-  useEffect(() => {
-    const navigate = (event: Event) => { const detail = (event as CustomEvent).detail; if (detail && typeof detail.kind === "string" && typeof detail.value === "string" && typeof detail.sessionId === "string") shellNavigation.current(detail); };
-    window.addEventListener("redline-shell-open", navigate);
-    return () => window.removeEventListener("redline-shell-open", navigate);
-  }, []);
-  useEffect(() => {
-    if (!shellRestoreTarget || session?.sessionId !== shellRestoreTarget || busy) return;
-    setShellRestoreTarget(null);
-    void restorePlanSessionWith({});
-  }, [shellRestoreTarget, session?.sessionId, busy]);
 
   // Local date/time stamp embedded in export file names.
   const exportStamp = () => {
@@ -9702,7 +9621,7 @@ function App() {
                         <button
                           type="button"
                           onClick={() =>
-                            void showRestoreRawTerminal(attemptHere?.terminalId ?? null)
+                            void showRawTerminal(attemptHere?.terminalId ?? null)
                           }
                           disabled={!attemptHere?.terminalId}
                           title="Open the terminal this restore is running in."
@@ -9752,7 +9671,7 @@ function App() {
                         <button
                           type="button"
                           onClick={() =>
-                            void showRestoreRawTerminal(restoreFailure.terminalId)
+                            void showRawTerminal(restoreFailure.terminalId)
                           }
                           disabled={!restoreFailure.terminalId}
                           title="Open the terminal this restore was running in."

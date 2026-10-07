@@ -4,12 +4,6 @@
 export const TERMINAL_WORKSPACE_KEY = "redline.terminalWorkspace.v1";
 
 export interface TerminalTabState {
-  kind?: "shell" | "agent";
-  view?: "shell" | "raw";
-  sessionId?: string;
-  driverId?: string;
-  launch?: import("./shell/types").AgentShellLaunch;
-  alive?: boolean;
   id: string;
   cwd: string | null;
   placeholder?: boolean;
@@ -44,7 +38,7 @@ export function parseTerminalWorkspace(
     if (!tab || typeof tab.id !== "string" || !tab.id || ids.has(tab.id)) continue;
     if (tab.cwd !== null && typeof tab.cwd !== "string") continue;
     ids.add(tab.id);
-    tabs.push({ id: tab.id, cwd: tab.cwd, kind: tab.kind === "agent" ? "agent" : "shell", view: tab.view === "raw" ? "raw" : "shell", ...(typeof tab.sessionId === "string" ? { sessionId: tab.sessionId } : {}), ...(tab.launch && typeof tab.launch === "object" ? { launch: { ...tab.launch, prompt: "" } } : {}), ...(tab.placeholder === true ? { placeholder: true } : {}) });
+    tabs.push({ id: tab.id, cwd: tab.cwd, ...(tab.placeholder === true ? { placeholder: true } : {}) });
   }
   if (!tabs.length) return null;
   const tiles = Array.isArray(saved.tiles)

@@ -2597,35 +2597,6 @@ impl Database {
         rows.collect()
     }
 
-    /// The newest bounded delta, returned in chronological order. Interactive
-    /// shells need the current surface context even when a conversation is new
-    /// or was idle long enough to accumulate more than one page of journal rows.
-    pub fn recent_journal_since(
-        &self,
-        since_id: i64,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<JournalRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, ts, kind, surface_kind, surface_id, label, detail FROM (
-                SELECT id, ts, kind, surface_kind, surface_id, label, detail
-                FROM context_journal WHERE id > ?1 ORDER BY id DESC LIMIT ?2
-             ) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(params![since_id.max(0), limit.clamp(1, 2000)], |r| {
-            Ok(JournalRow {
-                id: r.get(0)?,
-                ts: r.get(1)?,
-                kind: r.get(2)?,
-                surface_kind: r.get(3)?,
-                surface_id: r.get(4)?,
-                label: r.get(5)?,
-                detail: r.get(6)?,
-            })
-        })?;
-        rows.collect()
-    }
-
     /// Write a scaled build's durable state (config, limits, phase).
     pub fn upsert_scaled_run(&self, ctl: &crate::scaled::RunCtl) -> rusqlite::Result<()> {
         let now = crate::state::now_millis();
@@ -11272,21 +11243,6 @@ mod tests {
                 .unwrap()
         };
         assert!(n <= 2000, "journal working set stays bounded, got {n}");
-    }
-
-    #[test]
-    fn recent_journal_delta_keeps_newest_rows_chronological_without_replaying() {
-        let db = Database::open_in_memory().unwrap();
-        let mut ids = Vec::new();
-        for i in 0..45 {
-            ids.push(db.append_journal("nav", Some("browser"), None, Some(&format!("Page {i}")), None).unwrap());
-        }
-        let rows = db.recent_journal_since(0, 30).unwrap();
-        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), ids[15..]);
-        assert_eq!(rows.last().unwrap().label.as_deref(), Some("Page 44"));
-        assert!(db.recent_journal_since(ids[44], 30).unwrap().is_empty());
-        let next = db.append_journal("nav", Some("plan"), Some("s1"), None, None).unwrap();
-        assert_eq!(db.recent_journal_since(ids[44], 30).unwrap()[0].id, next);
     }
 
     #[test]

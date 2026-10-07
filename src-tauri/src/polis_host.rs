@@ -329,13 +329,6 @@ impl IngestObserver for RedlineIngest {
         crate::restore_context::answer_with(cx.headers, cx.prompt)
     }
 
-    /// Hosted shell context rides the hook response only after capture, claim
-    /// consumption and lineage binding. Polis merges this with the one-shot
-    /// restore protocol instead of letting either reply hide the other.
-    fn annotate(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
-        cx.session_id.and_then(crate::agent_shell::take_context)
-    }
-
     /// The spawning Agent Seat, off the header the capture command forwards
     /// from the spawned `claude`'s own environment (`hook::CAPTURE_AGENT_HEADER`).
     fn agent_seat(&self, headers: &dyn IngestHeaders) -> Option<String> {

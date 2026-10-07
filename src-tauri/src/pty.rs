@@ -445,11 +445,7 @@ pub fn pty_spawn(
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let mut cmd = CommandBuilder::new(&shell);
-    match crate::shell_integration::configure(&app, &shell, &mut cmd) {
-        Ok(true) => {},
-        Ok(false) => cmd.arg("-l"),
-        Err(error) => { tracing::warn!(%error, "shell integration unavailable; using normal shell"); cmd.arg("-l"); },
-    }
+    cmd.arg("-l");
     // An explicit cwd wins; otherwise fall back to $HOME so a terminal never
     // inherits wherever the app process happened to be launched from.
     let start_dir = cwd
@@ -840,41 +836,6 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
     Ok(())
 }
 
-/// Switching a foreground conversation back to its hosted driver must wait
-/// for the entire old terminal process tree, including the CLI, to exit.
-pub async fn stop_for_handoff(state: tauri::State<'_, PtyState>, id: String) -> Result<(), String> {
-    let handoff_session = session_of(&state, &id);
-    let pid = handoff_session
-        .as_ref()
-        .and_then(|session| lock_ok(session).pid);
-    if let Some(pid) = pid {
-        tokio::task::spawn_blocking(move || -> Result<(),String> {
-            let output=std::process::Command::new("ps").args(["-axo","pid=,ppid="]).output().map_err(|e|e.to_string())?;
-            if !output.status.success() {return Err("Could not verify the terminal process tree".into());}
-            let pairs:Vec<(u32,u32)>=String::from_utf8_lossy(&output.stdout).lines().filter_map(|line|{let mut fields=line.split_whitespace();Some((fields.next()?.parse().ok()?,fields.next()?.parse().ok()?))}).collect();
-            let mut tree=vec![pid];loop {let found:Vec<u32>=pairs.iter().filter(|(child,parent)|tree.contains(parent)&&!tree.contains(child)).map(|(child,_)|*child).collect();if found.is_empty(){break;}tree.extend(found);}
-            let executable=std::process::Command::new("ps").args(["-p",&pid.to_string(),"-o","comm="]).output().map_err(|error|error.to_string())?;
-            let executable=String::from_utf8_lossy(&executable.stdout);let executable=executable.trim();
-            let basename=std::path::Path::new(executable).file_name().and_then(|name|name.to_str()).unwrap_or("").trim_start_matches('-');
-            if !["zsh","bash","sh","fish","dash","ksh","tcsh","csh"].contains(&basename){return Err("Exit the raw agent before returning to structured view; this process is not an idle shell".into());}
-            if tree.len()>1 {return Err("Exit the raw agent with /exit before returning to structured view. Its active driver must stop first.".into());}
-            if let Some(session)=handoff_session {lock_ok(&session).expected_exit.store(true,Ordering::SeqCst);}
-            #[cfg(unix)] {
-                for child in tree.iter().rev(){unsafe{libc::kill(*child as i32,libc::SIGTERM);}}
-                for attempt in 0..150 {
-                    let alive:Vec<_>=tree.iter().copied().filter(|child|unsafe{libc::kill(*child as i32,0)==0}).collect();
-                    if alive.is_empty(){return Ok(());}
-                    if attempt==100 {for child in alive {unsafe{libc::kill(child as i32,libc::SIGKILL);}}}
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err("The raw conversation driver is still exiting; retry in a moment".into())
-            }
-            #[cfg(not(unix))] {Err("Verified raw handoff is unavailable on this platform".into())}
-        }).await.map_err(|error|error.to_string())??;
-    }
-    pty_kill(state, id)
-}
-
 /// `(client_pid, terminal_id)` for the process that opened the held connection
 /// from `peer_port`. `client_pid` is the long-lived `claude`/node process that
 /// made the hook POST and blocks on it — returned **even when the terminal
@@ -886,8 +847,7 @@ pub fn client_pid_and_terminal_for_port(
     state: &PtyState,
     peer_port: u16,
 ) -> (Option<u32>, Option<String>) {
-    let mut shells = shell_pid_to_terminal(state);
-    shells.extend(crate::agent_shell::hosted_pids());
+    let shells = shell_pid_to_terminal(state);
     let Ok(output) = std::process::Command::new("lsof")
         .args([
             "-nP",

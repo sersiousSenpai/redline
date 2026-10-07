@@ -155,11 +155,6 @@ const compactRestorePrompt = (
   );
 };
 
-/** Shared visible trigger for hosted and raw Claude restores. */
-export function buildRestorePrompt(sessionId: string, now: Date, primed = false, rescinded = false): string {
-  return compactRestorePrompt(sessionId, primed, restoreStamp(now)) + (rescinded ? RESCINDED_CLAUSE : "");
-}
-
 /** The "Restore plan session" command. Used both by the embedded terminal (with
  *  a trailing \r appended by the caller) and the copy-to-clipboard fallback.
  *
@@ -199,7 +194,7 @@ export function buildResumeCommand(
       ? codexResume(sessionId, stamp, rescind, harness.codexBin, harness.model, harness.effort)
       : restoreEnvPrefix(sessionId, !!primed, !!rescinded) +
         `${harness?.claudeBin?.trim() ? shq(harness.claudeBin.trim()) : "claude"} --resume ${shq(sessionId)} --permission-mode plan ${shq(
-          buildRestorePrompt(sessionId, now, !!primed, !!rescinded),
+          compactRestorePrompt(sessionId, !!primed, stamp) + rescind,
         )}`;
   return projectPath ? `cd ${shq(projectPath)} && ${resume}` : resume;
 }
@@ -271,11 +266,6 @@ export function buildTrigger(version: number, stamp: string): string {
   );
 }
 
-/** Shared visible trigger for hosted/raw builds, including a moved repo. */
-export function buildApprovedPrompt(version: number, now: Date, cwd?: string | null, workDir?: string | null): string {
-  return buildTrigger(version, restoreStamp(now)) + (workDir && workDir !== cwd ? `\nImplement in ${workDir} (the plan was moved there from ${cwd ?? "its original directory"}).` : "");
-}
-
 /** Build an approved plan with the SAME agent that wrote it: the run-mode
  *  sibling of `buildResumeCommand`. Resumes the planning conversation (from
  *  its startup cwd — see `resolveResumeCwd`) in a building mode:
@@ -295,7 +285,9 @@ export function buildResumeBuildCommand(
   workDir?: string | null,
 ): string {
   const moved = !!workDir && workDir !== cwd;
-  const trigger = buildApprovedPrompt(version, now, cwd, workDir);
+  // A plan moved to another repo still resumes from its startup cwd; the
+  // trigger names where to build.
+  const trigger = buildTrigger(version, restoreStamp(now)) + (moved ? `\nImplement in ${workDir} (the plan was moved there from ${cwd ?? "its original directory"}).` : "");
   const backend = harness.backend ?? "claude-code";
   let cmd: string;
   if (backend === "codex") {

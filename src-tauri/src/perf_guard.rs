@@ -320,17 +320,4 @@ mod tests {
              freeze — stream over the Channel instead"
         );
     }
-    #[test]
-    fn hosted_shell_output_stays_bounded_and_batched_over_a_channel() {
-        let src=include_str!("agent_shell.rs");
-        assert!(src.contains("on_output: Channel<Batch>"));
-        assert!(src.contains("Duration::from_millis(16)"));
-        assert!(src.contains("REPLAY_BYTES"));
-        assert!(src.contains("IN_FLIGHT"));
-        assert!(src.contains("subscriber.token == attachment_id"));
-        assert!(!src.contains("app.emit("),"Hosted stdout must not become a global event firehose");
-        let frontend=include_str!("../../src/components/TerminalTabs.tsx");
-        assert!(frontend.contains("lazy(() => import(\"./shell/AgentShellView\"))"));
-    }
-
 }

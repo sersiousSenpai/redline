@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Button } from "./ui/Button";
-const WorkflowSettings = lazy(() => import("./WorkflowSettings"));
 
 // One "Settings" entry point that folds the formerly-loose header controls —
 // interception mode, theme, font, notifications — into a single dropdown, so
@@ -149,7 +148,6 @@ export function SettingsMenu({
           <Row label="Theme">{theme}</Row>
           <Row label="Font">{font}</Row>
           <Row label="Linting">{lint}</Row>
-          <Suspense fallback={null}><WorkflowSettings Row={Row}/></Suspense>
           <Row label="Agent Seats">{agents}</Row>
           <Row label="Surfaces">{surfaces}</Row>
           <Row label="Extensions">{extensions}</Row>

@@ -234,14 +234,6 @@ describe("boot-path JS contract", () => {
     }
   });
 
-  it("the shell views stay behind the deferred terminal dock", () => {
-    const dock = readFileSync(join(process.cwd(), "src/components/TerminalTabs.tsx"), "utf8");
-    for (const name of ["AgentShellView", "ShellBlocksView"]) {
-      expect(dock).toContain(`import("./shell/${name}")`);
-      expect(dock).not.toMatch(new RegExp(`^import (?!type\\b)[^;]*from ["']\\./shell/${name}["']`, "m"));
-    }
-  });
-
   // The raw-wire inspector is devtools: most turns never open it, and it is
   // reached from a chip on the turn badge rather than from App. So the guard
   // is not "App doesn't import it" — it is "NOTHING imports it statically",
@@ -279,8 +271,8 @@ describe("boot-path JS contract", () => {
     // The whole reason deferral is safe: launch intent WAITS for the dock
     // instead of finding no handle and reporting "couldn't open a terminal".
     expect(app).toContain("const ensureTerminalReady = useCallback(");
-    // Parse call sites rather than a 60-character window: hosted branches
-    // retain the awaited handle across ledger registration before starting.
+    // Parse call sites rather than a 60-character window: a caller may hold
+    // the awaited handle in a variable or a `.then` parameter.
     const file = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     const unparen = (node: ts.Expression): ts.Expression => ts.isParenthesizedExpression(node) ? unparen(node.expression) : node;
     const readyCall = (node: ts.Expression) => { const value = unparen(node); return ts.isCallExpression(value) && value.expression.getText(file) === "ensureTerminalReady"; };
@@ -303,7 +295,7 @@ describe("boot-path JS contract", () => {
     };
     const violations: string[] = []; let openers = 0;
     const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ["openSessionTerminal", "openAgentShell"].includes(node.expression.name.text)) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "openSessionTerminal") {
         openers++;
         if (!valid(node.expression.expression, node)) violations.push(node.getText(file).slice(0, 100));
       }
@@ -311,7 +303,7 @@ describe("boot-path JS contract", () => {
     };
     visit(file);
     expect(openers).toBeGreaterThan(0);
-    expect(violations, "every raw/hosted launch must await the dock").toEqual([]);
+    expect(violations, "every terminal launch must await the dock").toEqual([]);
   });
 
   it("the dock is never unmounted by surface navigation", () => {

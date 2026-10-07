@@ -801,6 +801,8 @@ hooks merge with the user's global hooks, which keep firing.
 
 ## Hosted shell — October 6, 2026
 
+> **Removed 2026-10-06.** The structured shell these findings were measured for was taken out of main (every terminal path is the raw xterm/PTY again) and parked on `parked/structured-shell`; the scripts and fixtures named below live on that branch. The CLI facts recorded here still hold.
+
 Measured with Claude Code 2.1.291 and Codex 0.160.1 in disposable directories. The re-runnable entry points are `scripts/verify-agent-shell.py`, `scripts/verify-agent-shell-handoff.py`, `scripts/verify-codex-shell.py`, and `scripts/probe-codex-hosted-approval.py`. Sanitized protocol events live in `scripts/fixtures/agent-shell/`; raw local logs are deliberately excluded because initialization reports account details.
 
 ### Claude protocol results

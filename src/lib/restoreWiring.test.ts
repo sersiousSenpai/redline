@@ -72,13 +72,8 @@ describe("Show raw terminal", () => {
   });
 
   it("is offered from both the running and the failed banner", () => {
-    expect(app).toContain("void showRestoreRawTerminal(attemptHere?.terminalId ?? null)");
-    expect(app).toContain("void showRestoreRawTerminal(restoreFailure.terminalId)");
-    const start = app.indexOf("const showRestoreRawTerminal = async");
-    const body = app.slice(start, app.indexOf("\n  };", start));
-    expect(body).toContain("await showRawTerminal(terminalId)");
-    expect(body).toContain('setTabView(terminalId, "raw")');
-    expect(body).not.toContain("openSessionTerminal");
+    expect(app).toContain("void showRawTerminal(attemptHere?.terminalId ?? null)");
+    expect(app).toContain("void showRawTerminal(restoreFailure.terminalId)");
   });
 });
 

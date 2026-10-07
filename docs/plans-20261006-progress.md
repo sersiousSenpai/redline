@@ -2,6 +2,8 @@
 
 Working branch: `feature/redline-plans-20261006` in the isolated `redline-wt/plans-20261006` checkout. Preexisting work was committed and pushed on Redline main at `9032117`. Do not run the production dev watcher from this implementation checkout.
 
+> **Structured shell removed, 2026-10-06.** The structured ("hosted") shell row below no longer describes main. It was removed on 2026-10-06: plan launches, approved builds, restores, team builds and Codex sessions all type their command into a raw xterm/PTY tab again, as they did at `9032117`, and the terminal default-view / shell-integration settings are gone. The full implementation is parked on `parked/structured-shell` for a later, different re-implementation. Every other plan in this table is unaffected.
+
 ## Scope and current evidence
 
 | Plan | Implementation | Verification so far |
