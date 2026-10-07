@@ -148,6 +148,8 @@ async fn git_raw(dir: &Path, args: &[&str], ok_codes: &[i32]) -> Result<String, 
         .arg("-C")
         .arg(dir)
         .arg("--no-optional-locks")
+        // Non-ASCII paths come through as-is instead of `"\303\251"` escapes.
+        .args(["-c", "core.quotePath=false"])
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -161,15 +163,21 @@ async fn git_raw(dir: &Path, args: &[&str], ok_codes: &[i32]) -> Result<String, 
     }
 }
 
-/// Untracked paths from `status --porcelain` (`?? ` rows), git-quoting stripped.
+/// Every untracked file, one by one (`-uall`: a new folder is listed as its
+/// files, never as `dir/`), NUL-separated so no path is ever quoted.
 async fn untracked_paths(dir: &Path) -> Result<Vec<String>, String> {
-    let out = git_raw(dir, &["status", "--porcelain"], &[]).await?;
-    Ok(out
-        .lines()
-        .filter_map(|l| l.strip_prefix("?? "))
-        .map(|p| p.trim_matches('"').to_string())
-        .filter(|p| !p.is_empty())
-        .collect())
+    let out = git_raw(dir, &["status", "--porcelain=v1", "-z", "-uall"], &[]).await?;
+    let mut paths = Vec::new();
+    let mut entries = out.split('\0');
+    while let Some(entry) = entries.next() {
+        if let Some(path) = entry.strip_prefix("?? ") {
+            paths.push(path.to_string());
+        } else if entry.starts_with('R') || entry.starts_with('C') || entry.get(1..2).is_some_and(|y| y == "R" || y == "C") {
+            // A rename/copy carries its source path as the next entry.
+            entries.next();
+        }
+    }
+    Ok(paths)
 }
 
 /// The diff of one untracked file, via a read-only `--no-index` pass against
@@ -178,10 +186,19 @@ async fn untracked_paths(dir: &Path) -> Result<Vec<String>, String> {
 async fn untracked_diff(dir: &Path, path: &str) -> Result<String, String> {
     git_raw(
         dir,
-        &["diff", "--no-index", "-U3", "--no-color", "--", "/dev/null", path],
+        &[&["diff", "--no-index"], crate::git_gui::DIFF_FLAGS, &["--", "/dev/null", path]].concat(),
         &[1],
     )
     .await
+}
+
+/// The well-known empty tree: what a root commit or unborn branch diffs against.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// `rev`'s first parent, or the empty tree for a root commit.
+async fn first_parent(dir: &Path, rev: &str) -> Result<String, String> {
+    let line = git_raw(dir, &["rev-list", "--parents", "-n", "1", rev, "--"], &[]).await?;
+    Ok(line.split_whitespace().nth(1).unwrap_or(EMPTY_TREE).to_string())
 }
 
 /// Resolve a `DiffSource` to raw unified-diff text.
@@ -191,35 +208,43 @@ async fn resolve_diff_text(
     base: Option<&str>,
     sha: Option<&str>,
 ) -> Result<String, String> {
+    // Every diff runs with fixed flags so the user's git config (noprefix,
+    // mnemonic prefixes, an external diff tool, textconv, renames off) can't
+    // change what the parser sees.
+    let diff = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec!["diff".to_string(), "-M".to_string()];
+        args.extend(crate::git_gui::DIFF_FLAGS.iter().map(|s| s.to_string()));
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args
+    };
+    let run = |args: Vec<String>| async move {
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        git_raw(dir, &argv, &[]).await
+    };
+    let has_head = git_raw(dir, &["rev-parse", "--verify", "--quiet", "HEAD"], &[]).await.is_ok();
     let mut text = match source {
-        DiffSource::Uncommitted => git_raw(dir, &["diff", "-U3", "--no-color", "HEAD"], &[]).await?,
-        DiffSource::Staged => git_raw(dir, &["diff", "-U3", "--no-color", "--cached"], &[]).await?,
-        DiffSource::UnstagedPlusUntracked => {
-            git_raw(dir, &["diff", "-U3", "--no-color"], &[]).await?
-        }
-        DiffSource::LastCommit => {
-            match git_raw(dir, &["diff", "-U3", "--no-color", "HEAD~1", "HEAD"], &[]).await {
-                Ok(t) => t,
-                // Root commit has no parent — show the commit itself instead.
-                Err(_) => git_raw(dir, &["show", "--format=", "-U3", "--no-color", "HEAD"], &[]).await?,
-            }
-        }
+        // An unborn branch has no HEAD yet: everything is new against the empty tree.
+        DiffSource::Uncommitted => run(diff(&[if has_head { "HEAD" } else { EMPTY_TREE }])).await?,
+        DiffSource::Staged => run(diff(&["--cached"])).await?,
+        DiffSource::UnstagedPlusUntracked => run(diff(&[])).await?,
+        DiffSource::LastCommit if !has_head => String::new(),
+        DiffSource::LastCommit => run(diff(&[&first_parent(dir, "HEAD").await?, "HEAD"])).await?,
         DiffSource::VsBase => {
             let b = code::safe_token(base.ok_or("vsBase requires a base ref")?)?;
             // Three-dot = diff from the merge base, i.e. PR semantics.
-            let range = format!("{b}...HEAD");
-            git_raw(dir, &["diff", "-U3", "--no-color", &range], &[]).await?
+            run(diff(&[&format!("{b}...HEAD")])).await?
         }
         DiffSource::CommitSha => {
             let s = code::safe_token(sha.ok_or("commitSha requires a sha")?)?;
-            git_raw(dir, &["show", "--format=", "-U3", "--no-color", s], &[]).await?
+            // Against the first parent: `git show` of a merge prints a combined
+            // diff the parser can't read, so a merge commit used to look empty.
+            run(diff(&[&first_parent(dir, s).await?, s])).await?
         }
         DiffSource::RunBranch => {
             let b = code::safe_token(base.ok_or("runBranch requires the run branch as base")?)?;
             // Three-dot from HEAD = merge-base(HEAD, branch) → branch tip:
             // exactly the run's committed work, wherever HEAD is by morning.
-            let range = format!("HEAD...{b}");
-            git_raw(dir, &["diff", "-U3", "--no-color", &range], &[]).await?
+            run(diff(&[&format!("HEAD...{b}")])).await?
         }
     };
     // Untracked files exist only in the working tree, so only working-tree
@@ -1939,6 +1964,77 @@ diff --git a/src/main.rs b/src/main.rs
         run(d, &["add", "a.txt"]).await;
         run(d, &["commit", "-qm", "init"]).await;
         td
+    }
+
+    #[tokio::test]
+    async fn uncommitted_lists_every_file_in_a_new_folder_and_unicode_names() {
+        let td = temp_repo().await;
+        let d = td.path();
+        tokio::fs::create_dir_all(d.join("newdir/sub")).await.unwrap();
+        tokio::fs::write(d.join("newdir/one.txt"), "1\n").await.unwrap();
+        tokio::fs::write(d.join("newdir/sub/two.txt"), "2\n").await.unwrap();
+        tokio::fs::write(d.join("sp ace é.txt"), "3\n").await.unwrap();
+        let text = resolve_diff_text(d, DiffSource::Uncommitted, None, None).await.unwrap();
+        let mut paths: Vec<_> = parse_unified_diff(&text).into_iter().map(|f| f.new_path).collect();
+        paths.sort();
+        assert_eq!(paths, ["newdir/one.txt", "newdir/sub/two.txt", "sp ace é.txt"]);
+    }
+
+    #[tokio::test]
+    async fn user_diff_config_cannot_change_what_the_parser_sees() {
+        let td = temp_repo().await;
+        let d = td.path();
+        for (key, value) in [("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true"), ("diff.renames", "false")] {
+            run(d, &["config", key, value]).await;
+        }
+        run(d, &["mv", "a.txt", "moved.txt"]).await;
+        let text = resolve_diff_text(d, DiffSource::Uncommitted, None, None).await.unwrap();
+        let files = parse_unified_diff(&text);
+        assert_eq!(files.len(), 1, "{files:#?}");
+        assert_eq!((files[0].old_path.as_str(), files[0].new_path.as_str()), ("a.txt", "moved.txt"));
+        assert_eq!(files[0].status, FileStatus::Renamed);
+    }
+
+    #[tokio::test]
+    async fn a_merge_commit_diffs_against_its_first_parent() {
+        let td = temp_repo().await;
+        let d = td.path();
+        run(d, &["checkout", "-qb", "side"]).await;
+        tokio::fs::write(d.join("side.txt"), "side\n").await.unwrap();
+        run(d, &["add", "."]).await;
+        run(d, &["commit", "-qm", "side"]).await;
+        run(d, &["checkout", "-q", "-"]).await;
+        tokio::fs::write(d.join("main.txt"), "main\n").await.unwrap();
+        run(d, &["add", "."]).await;
+        run(d, &["commit", "-qm", "main"]).await;
+        run(d, &["merge", "-q", "--no-edit", "side"]).await;
+        let merge = String::from_utf8(
+            tokio::process::Command::new("/usr/bin/git").arg("-C").arg(d).args(["rev-parse", "HEAD"]).output().await.unwrap().stdout,
+        )
+        .unwrap();
+        let text = resolve_diff_text(d, DiffSource::CommitSha, None, Some(merge.trim())).await.unwrap();
+        let files = parse_unified_diff(&text);
+        assert_eq!(files.iter().map(|f| f.new_path.as_str()).collect::<Vec<_>>(), ["side.txt"]);
+        let last = resolve_diff_text(d, DiffSource::LastCommit, None, None).await.unwrap();
+        assert_eq!(parse_unified_diff(&last).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unborn_branch_reviews_everything_as_new() {
+        let dir = std::env::temp_dir().join(format!("redline-code-review-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let td = TempRepo(dir);
+        let d = td.path();
+        run(d, &["init", "-q"]).await;
+        tokio::fs::write(d.join("staged.txt"), "s\n").await.unwrap();
+        run(d, &["add", "staged.txt"]).await;
+        tokio::fs::write(d.join("loose.txt"), "l\n").await.unwrap();
+        let text = resolve_diff_text(d, DiffSource::Uncommitted, None, None).await.unwrap();
+        let mut paths: Vec<_> = parse_unified_diff(&text).into_iter().map(|f| f.new_path).collect();
+        paths.sort();
+        assert_eq!(paths, ["loose.txt", "staged.txt"]);
+        let last = resolve_diff_text(d, DiffSource::LastCommit, None, None).await.unwrap();
+        assert!(last.is_empty());
     }
 
     #[tokio::test]

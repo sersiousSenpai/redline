@@ -33,7 +33,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_LOG: u32 = 500;
 /// Pin diff output to what `parse_unified_diff` and `git apply` expect,
 /// whatever the user's diff config says (prefixes, external tools, color).
-const DIFF_FLAGS: &[&str] = &[
+pub(crate) const DIFF_FLAGS: &[&str] = &[
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
