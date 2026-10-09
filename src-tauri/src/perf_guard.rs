@@ -282,6 +282,95 @@ mod tests {
         );
     }
 
+    /// The commands a surface polls or a click waits on, each of which reads
+    /// SQLite (the Runs canvas, the orchestration drawer, a chat's build
+    /// probe and meters, a browser chat's model pick) or the disk (an agent
+    /// transcript tail, a restore's transcript scan, the install steps, the
+    /// workspace and harness manifests). On the main thread every one of them
+    /// waits behind whatever holds the database or the disk, and the UI waits
+    /// with it.
+    #[test]
+    fn polled_and_db_commands_stay_async() {
+        let runner = include_str!("runner.rs");
+        for func in ["runner_list", "runner_get", "runner_graph_view", "runner_report", "runner_review"] {
+            assert_async_command(runner, "runner.rs", func);
+        }
+        let runwatch = include_str!("runwatch.rs");
+        assert_async_command(runwatch, "runwatch.rs", "orchestration_snapshot");
+        assert_async_command(runwatch, "runwatch.rs", "orchestration_agent_tail");
+        assert_async_command(include_str!("companion.rs"), "companion.rs", "companion_build_activity");
+        let meter = include_str!("meter.rs");
+        assert_async_command(meter, "meter.rs", "thread_meters");
+        assert_async_command(meter, "meter.rs", "plan_session_meter");
+        let browse = include_str!("browse.rs");
+        assert_async_command(browse, "browse.rs", "browse_thread_harness");
+        assert_async_command(browse, "browse.rs", "browse_thread_set_harness");
+        // Its liveness check takes each terminal's session lock, which PTY
+        // I/O can hold.
+        assert_async_command(include_str!("term_attention.rs"), "term_attention.rs", "term_attention_snapshot");
+        let userconfig = include_str!("userconfig.rs");
+        for func in ["get_workspace", "save_workspace", "list_harnesses"] {
+            assert_async_command(userconfig, "userconfig.rs", func);
+        }
+        let lib = include_str!("lib.rs");
+        for func in [
+            "get_ui_prefs",
+            "list_sessions",
+            "get_session",
+            "build_plan_snapshot",
+            "prepare_restore",
+            "memory_note_get",
+            "memory_notes_list",
+            "install_hook",
+            "install_codex_hook",
+            "install_codex_profile",
+            "install_codex_skill",
+            "install_skill",
+        ] {
+            assert_async_private_command(lib, "lib.rs", func);
+        }
+    }
+
+    /// Adding or removing a watch restarts the FSEvents stream. The commands
+    /// stay sync so a mount's watch and its unmount's unwatch keep their
+    /// order, which is why the restart itself must never be in their bodies:
+    /// it belongs to the `fs-watch` thread.
+    #[test]
+    fn fs_watch_restarts_stay_off_the_main_thread() {
+        let src = include_str!("fswatch.rs");
+        for func in ["watch_dir", "unwatch_dir"] {
+            let start = src.find(&format!("pub fn {func}(")).unwrap();
+            let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+            assert!(!body.contains(".watcher()"), "{func} must queue the stream change, not make it: {body}");
+        }
+        assert!(src.contains(".name(\"fs-watch\".into())"));
+    }
+
+    /// Run events name a run and its revision; they never carry the graph.
+    /// A graph carries every node's output, and every mounted listener
+    /// deserializes a broadcast whether it renders the run or not.
+    #[test]
+    fn run_events_carry_an_id_and_a_revision() {
+        let runner = include_str!("runner.rs");
+        assert!(runner.contains("app.emit(\"run-graph\", graph_event(g))"));
+        for (file, src) in [
+            ("runner.rs", runner),
+            ("lib.rs", include_str!("lib.rs")),
+            ("queue.rs", include_str!("queue.rs")),
+            ("self_develop.rs", include_str!("self_develop.rs")),
+        ] {
+            for event in ["\"run-graph\"", "\"runner-changed\""] {
+                for (at, _) in src.match_indices(&format!("emit({event}, ")) {
+                    let arg = &src[at + event.len() + 7..];
+                    assert!(
+                        arg[..arg.find('(').unwrap_or(0)].ends_with("graph_event"),
+                        "{file}: {event} must carry runner::graph_event, not the graph"
+                    );
+                }
+            }
+        }
+    }
+
     /// Not a perf budget but the same mechanism: a source-shape invariant that
     /// a refactor could silently undo, with real stakes.
     ///

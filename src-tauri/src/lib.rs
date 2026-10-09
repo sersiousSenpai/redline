@@ -4534,7 +4534,7 @@ async fn mission_prepare_auto(
     )?;
     if handoff["destination"] == "auto" && handoff["status"] == "delivered" && handoff["claimToken"] == claim_token {
         let graph = db.runner_get(handoff["destinationId"].as_str().ok_or("The saved auto-session receipt is incomplete")?)?;
-        let _ = app.emit("runner-changed", &graph);
+        let _ = app.emit("runner-changed", runner::graph_event(&graph));
         return Ok(graph);
     }
     if handoff["destination"] != "auto"
@@ -4564,7 +4564,7 @@ async fn mission_prepare_auto(
             },
         },
     )?;
-    let _ = app.emit("runner-changed", &graph);
+    let _ = app.emit("runner-changed", runner::graph_event(&graph));
     Ok(graph)
 }
 
@@ -6965,7 +6965,7 @@ fn bootstrap_state(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_sessions(
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
@@ -7075,7 +7075,7 @@ fn delete_session(
     Ok(removed)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<ReviewSession> {
     store.get(&id)
 }
@@ -7441,7 +7441,7 @@ fn snap_toc(sections: &[state::Section], out: &mut Vec<SnapTocNode>) {
 /// off, that data is never even assembled, so it can't leak into the encrypted
 /// fragment. The low-sensitivity enrichments (timeline / stats / TOC) always
 /// ship — they're titles and counts.
-#[tauri::command]
+#[tauri::command(async)]
 fn build_plan_snapshot(
     store: tauri::State<'_, SessionStore>,
     session_id: String,
@@ -8954,7 +8954,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
     UiPrefs {
         review_pose: settings.db.get_setting("redline.ui.reviewPose"),
@@ -9548,7 +9548,7 @@ fn prime_plan_file(plan_file: &str, session_id: &str) -> bool {
 /// transcripts on disk: where the conversation can be resumed from, whether it
 /// exists at all, and whether its plan file has been primed with the restore
 /// marker (which lets the caller ask for a one-tool-call handshake).
-#[tauri::command]
+#[tauri::command(async)]
 fn prepare_restore(
     session_id: String,
     project_path: Option<String>,
@@ -12215,7 +12215,7 @@ fn memory_note_write(
 /// The note row annotating one target, if any — the detail rail's read (the
 /// Timeline row already carries `starred`/`note`, so this serves the Catalog
 /// and any non-timeline caller).
-#[tauri::command]
+#[tauri::command(async)]
 fn memory_note_get(
     store: tauri::State<'_, SessionStore>,
     target_kind: String,
@@ -12228,7 +12228,7 @@ fn memory_note_get(
 }
 
 /// Every note row (optionally starred-only), most recently touched first.
-#[tauri::command]
+#[tauri::command(async)]
 fn memory_notes_list(
     store: tauri::State<'_, SessionStore>,
     starred_only: Option<bool>,
@@ -12411,7 +12411,7 @@ fn get_hook_status() -> HookStatus {
     hook::get_status()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_hook() -> Result<HookStatus, String> {
     let result = hook::install();
     if let Ok(status) = &result {
@@ -12438,7 +12438,7 @@ fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
     codex_hook::get_status()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
     let result = codex_hook::install();
     if let Ok(status) = &result {
@@ -12452,7 +12452,7 @@ fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
 /// the skill rather than written at launch, because `codex -p <name>` with no
 /// such file is not an error: it is a session that plans without ever having
 /// been told the revision contract. See `codex_profile`.
-#[tauri::command]
+#[tauri::command(async)]
 fn install_codex_profile() -> Result<codex_profile::CodexProfileStatus, String> {
     let result = codex_profile::install();
     if let Ok(status) = &result {
@@ -12468,7 +12468,7 @@ fn get_codex_skill_status() -> SkillStatus {
     skill::get_codex_status()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_codex_skill() -> Result<SkillStatus, String> {
     skill::install_codex()
 }
@@ -12535,7 +12535,7 @@ fn get_skill_status() -> SkillStatus {
     skill::get_status()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_skill() -> Result<SkillStatus, String> {
     let result = skill::install();
     if let Ok(status) = &result {
@@ -12759,10 +12759,9 @@ pub fn run() {
             runner::runner_apply,
             runner::runner_start,
             runner::runner_intervene,
-            runner::runner_node_status,
             runner::runner_report,
             runner::runner_review,
-            runner::runner_preview,
+            runner::runner_graph_view,
             runner::runner_node_diff,
             seat_assignment_agent,
             seat_assignment_cancel,

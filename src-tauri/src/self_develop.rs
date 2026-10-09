@@ -1669,7 +1669,7 @@ async fn decompose_against_candidate(
         &plan,
     )
     .await?;
-    let _ = app.emit("run-graph", &graph);
+    let _ = app.emit("run-graph", crate::runner::graph_event(&graph));
     Ok(graph)
 }
 

@@ -385,7 +385,7 @@ pub(crate) async fn handle_event(
 }
 
 /// Every live terminal's latest attention, for a frontend that is (re)booting.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn term_attention_snapshot(
     state: tauri::State<'_, TermAttentionState>,
     ptys: tauri::State<'_, PtyState>,

@@ -1800,7 +1800,7 @@ pub fn list_orchestrations(store: tauri::State<'_, SessionStore>) -> Vec<db::Orc
 
 /// The live snapshot when a watcher is running; otherwise a one-shot
 /// reconstruction from whatever is still on disk (History, dead runs).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn orchestration_snapshot(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -1930,7 +1930,7 @@ pub(crate) fn parse_agent_events(lines: &[String]) -> Vec<AgentEvent> {
 /// Cursor-polled tail of one agent's transcript — the drawer's stream.
 /// Polled only while a drawer is open; `cursor: None` starts at the last
 /// 128 KB.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn orchestration_agent_tail(
     store: tauri::State<'_, SessionStore>,
     plan_session_id: String,

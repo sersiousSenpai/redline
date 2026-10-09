@@ -624,7 +624,14 @@ fn canonical_repo(path: &str) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
 }
 fn emit_graph(app: &AppHandle, g: &RunGraph) {
-    let _ = app.emit("run-graph", g);
+    let _ = app.emit("run-graph", graph_event(g));
+}
+/// What a run-changed event carries: the run and its revision, never the
+/// graph. Every mounted listener deserializes a broadcast, and a graph carries
+/// each node's output; the one view that renders it fetches
+/// `runner_graph_view` instead.
+pub(crate) fn graph_event(g: &RunGraph) -> Value {
+    json!({"runId": g.run_id, "rev": g.rev})
 }
 fn sync_plan_state(app: &AppHandle, g: &RunGraph, status: &str) {
     if let (Some(sid), Some(store)) = (
@@ -1383,11 +1390,11 @@ pub async fn decompose_plan(
     Ok(g)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn runner_list(state: tauri::State<'_, RunnerState>) -> Result<Vec<RunGraph>, String> {
     state.db.runner_list()
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn runner_get(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
@@ -1677,43 +1684,61 @@ fn invalidate_descendants(g: &mut RunGraph, id: &str) -> Result<(), String> {
     }
     Ok(())
 }
-#[tauri::command]
-pub fn runner_node_status(
+/// Everything the Runs canvas renders for one run, in one round trip: the
+/// graph, a stream snapshot for each live node (its in-flight buffer while the
+/// scheduler holds one) and the nodes the scheduler would start next. The
+/// canvas used to assemble this from `runner_get`, a status call per live node
+/// and a preview call: N+2 IPC calls, each reading and parsing the graph again.
+#[derive(Serialize)]
+pub struct RunGraphView {
+    graph: RunGraph,
+    streams: HashMap<String, Value>,
+    /// `None` when the claims can't be read; the canvas keeps its last answer.
+    next: Option<Vec<String>>,
+}
+#[tauri::command(async)]
+pub fn runner_graph_view(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
-    node_id: String,
-) -> Result<Value, String> {
-    let g = state.db.runner_get(&run_id)?;
-    let n = g
+) -> Result<RunGraphView, String> {
+    let graph = state.db.runner_get(&run_id)?;
+    let streams = graph
         .nodes
         .iter()
-        .find(|n| n.id == node_id)
-        .ok_or("unknown node")?;
-    if let Some(buf) = state
-        .inner
-        .buffers
-        .lock()
-        .unwrap()
-        .get(&key(&run_id, &node_id))
-        .cloned()
-    {
-        let b = buf.lock().unwrap();
-        return Ok(
-            json!({"streaming":true,"attempt":n.attempt,"partial":b.text,"seq":b.seq,"meter":b.meter,"activity":b.activity}),
-        );
-    }
-    Ok(
-        json!({"attempt":n.attempt,"streaming":graph::live(&n.status),"partial":n.output,"seq":0,"meter":n.meter,"activity":[]}),
-    )
+        .filter(|n| graph::live(&n.status))
+        .map(|n| (n.id.clone(), state.node_stream(&run_id, n)))
+        .collect();
+    let next = state
+        .db
+        .runner_claims(&run_id)
+        .ok()
+        .map(|claims| graph::ready_nodes(&graph, &claims));
+    Ok(RunGraphView { graph, streams, next })
 }
-#[tauri::command]
+impl RunnerState {
+    fn node_stream(&self, run_id: &str, n: &RunNode) -> Value {
+        if let Some(buf) = self
+            .inner
+            .buffers
+            .lock()
+            .unwrap()
+            .get(&key(run_id, &n.id))
+            .cloned()
+        {
+            let b = buf.lock().unwrap();
+            return json!({"streaming":true,"attempt":n.attempt,"partial":b.text,"seq":b.seq,"meter":b.meter,"activity":b.activity});
+        }
+        json!({"attempt":n.attempt,"streaming":graph::live(&n.status),"partial":n.output,"seq":0,"meter":n.meter,"activity":[]})
+    }
+}
+#[tauri::command(async)]
 pub fn runner_report(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
 ) -> Result<Value, String> {
     Ok(measured_report(&state.db.runner_get(&run_id)?))
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn runner_review(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
@@ -1726,16 +1751,6 @@ pub fn runner_review(
         None,
         None,
     )
-}
-
-#[tauri::command]
-pub fn runner_preview(
-    state: tauri::State<'_, RunnerState>,
-    run_id: String,
-) -> Result<Vec<String>, String> {
-    let g = state.db.runner_get(&run_id)?;
-    let claims = state.db.runner_claims(&run_id)?;
-    Ok(graph::ready_nodes(&g, &claims))
 }
 
 #[cfg(test)]

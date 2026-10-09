@@ -789,7 +789,7 @@ async fn drive_run(app: &AppHandle, store: &SessionStore, entry: &QueueEntry) {
                 {
                     Ok(graph) => {
                         use tauri::Emitter;
-                        let _ = app.emit("run-graph", &graph);
+                        let _ = app.emit("run-graph", crate::runner::graph_event(&graph));
                         "Draft run graph created. Review it in Live and approve it for the queue."
                             .to_string()
                     }

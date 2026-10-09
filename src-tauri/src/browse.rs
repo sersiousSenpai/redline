@@ -1167,7 +1167,7 @@ pub fn get_browse_thread(
 
 /// This chat's own provider/model/effort pick (all `None`: never picked, the
 /// `browse` seat applies).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browse_thread_harness(
     browse: tauri::State<'_, BrowseState>,
     browse_id: String,
@@ -1177,7 +1177,7 @@ pub fn browse_thread_harness(
 
 /// Set this chat's pick. It takes effect on the next turn, which reads it at
 /// start, so a change mid-reply never touches the reply in flight.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browse_thread_set_harness(
     browse: tauri::State<'_, BrowseState>,
     browse_id: String,

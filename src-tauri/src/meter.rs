@@ -757,7 +757,7 @@ pub fn settle(
 /// `kind` is the `thread_table` vocabulary the whole app already shares
 /// (`browse` | `linked` | `mission` | `companion` | `memchat` | `drafter` |
 /// `voice` | `fork`), so a new surface joins by being in that map.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn thread_meters(
     store: tauri::State<'_, crate::state::SessionStore>,
     kind: String,
@@ -773,7 +773,7 @@ pub fn thread_meters(
 /// One PTY plan session's tailed meter (`plan_meter`). `None` until the
 /// tailer has seen an assistant turn — a session that has only been asked a
 /// question has spent nothing yet.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn plan_session_meter(
     store: tauri::State<'_, crate::state::SessionStore>,
     session_id: String,
