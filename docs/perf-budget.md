@@ -126,9 +126,10 @@ These are cheap regression nets, not a substitute for the rules above:
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
-- `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers and
-  the rlib-only lib in the manifest text (tests build in debug, so only a
-  source invariant can catch a profile revert).
+- `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers,
+  the rlib-only lib and the dev profile's `split-debuginfo = "off"` (the
+  `target/` leak, CONTRIBUTING.md) in the manifest text (tests build in debug,
+  so only a source invariant can catch a profile revert).
 - `src/lib/sizeGuard.test.ts` — asserts mermaid/docx stay dynamic-only imports
   and `PlanEditor` stays lazy, catching main-chunk regressions at PR time.
 - `scripts/check-size.mjs` — measures built artifacts against
@@ -233,14 +234,32 @@ under 5%, `Gradient::paint` ~0%, the commit queue absent or not waiting. The
 2026-10-09 storm read 102%, ~83% and 88% (rule 6). `--app Safari` runs the
 same recipe against any WebKit app, which is how to check the recipe itself.
 
+### Which build perf is judged on
+
+**The release build — `npm run redline` — is the only build a perf number is
+taken from, and the one to use day to day when you are not editing Redline.**
+`tauri dev` runs React's development build with StrictMode's double renders
+and unbundled modules, plus a debug binary; expect it to be roughly 2–5×
+slower than the release app on the same interaction, so a dev-build number
+measures the build rather than the app, and a lag felt only there is not yet
+a product bug.
+
+The dev profile narrows the backend half of that gap without hiding it:
+dependencies build at opt 2, and Redline's own crate at opt 1
+(`[profile.dev.package.redline]`), so its serde, database and parsing paths
+are no longer unoptimized in dev. That costs edit-loop time — a one-line
+body edit rebuilt in ~23 s at opt 1 against ~10 s at opt 0, measured
+2026-10-09; the manifest comment carries the numbers. If the loop matters
+more on a given day, delete that section locally; it changes nothing the
+release build ships.
+
 ### Baseline — release build, to be measured
 
 **Not yet measured.** The numbers have to come from the release build with a
 person at the keyboard, which the change that added the instruments could not
-do. Measure on `npm run redline`, never on `tauri dev`: the dev build runs
-React's development build with StrictMode's double renders and unbundled
-modules, so it measures the build rather than the app. Fill in the table
-with the date, the commit and the app's uptime:
+do. Measure on `npm run redline`, never on `tauri dev` (see "Which build
+perf is judged on" above), and fill in the table with the date, the commit
+and the app's uptime:
 
 1. Build and install with `npm run redline`, launch it, keep the Aurora
    theme, and quit other heavy apps. Note the uptime — the renderer's memory

@@ -88,6 +88,25 @@ fn lib_stays_rlib_only() {
     );
 }
 
+/// macOS's dev default, `split-debuginfo = "unpacked"`, keeps every
+/// codegen-unit object of every incremental rebuild in target/debug/deps
+/// forever (rust-lang/rust#161824): ~60-140 MB per rebuild of redline_lib,
+/// which once filled the disk at ~400 GB across worktrees. The machine-wide
+/// cargo config may say the same, but this line is what holds on every other
+/// machine and in CI.
+#[test]
+fn dev_profile_never_leaks_codegen_objects() {
+    let dev = MANIFEST
+        .split("\n[")
+        .find(|section| section.starts_with("profile.dev]"))
+        .expect("src-tauri/Cargo.toml lost its [profile.dev] section");
+    assert!(
+        dev.lines().any(|l| l.trim() == "split-debuginfo = \"off\""),
+        "[profile.dev] lost `split-debuginfo = \"off\"` — incremental rebuilds \
+         leak every .rcgu.o into target/debug/deps again (rust-lang/rust#161824)"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Polis Memory (docs/polis-extraction.md, Session A7). The memory crates are
 // a dependency Redline pulls in — staged by path during Program A, by git rev

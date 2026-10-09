@@ -287,10 +287,31 @@ codegen-units = 1
 # dSYM extraction runs before bundling.
 strip = "symbols"
 
+[profile.dev]
+# On macOS the dev default is "unpacked", which with incremental compilation
+# leaks every codegen-unit object into target/debug/deps forever
+# (rust-lang/rust#161824, ~60-140 MB per rebuild of redline_lib). "off" makes
+# rustc delete them after linking, with no dsymutil step; library code keeps
+# its debug info through the .rlib members. Revisit when the upstream fix
+# (rust-lang/rust#162561) ships in stable.
+split-debuginfo = "off"
+
 # Dependencies (bundled SQLite, sha2, the embedding math) build optimised even
 # in `tauri dev`: a diagnostic report of a memory-surface freeze was taken from
 # an unoptimised debug binary whose SQLite pager ran ~10x slower under the DB
-# lock. The crate's own code stays at opt 0 so incremental rebuilds stay fast;
-# the cost is a slower first dev build.
+# lock. The cost is a slower first dev build. (`"*"` never matches a workspace
+# member, so Redline's own crate is set below.)
 [profile.dev.package."*"]
 opt-level = 2
+
+# Redline's own code (its serde, DB and parsing paths) runs at opt 1 in dev
+# too, so `tauri dev` is less unlike the product — though perf is still judged
+# on the release build (docs/perf-budget.md "Which build perf is judged on").
+# The price is the edit loop, which is why this crate used to stay at opt 0.
+# Measured 2026-10-09 on the 16-core dev Mac, alternating the two levels under
+# the same (heavy, parallel) load: a touched-but-unchanged file rebuilds in
+# ~4.8 s at either level, but a one-line body edit in turn.rs takes ~23 s at
+# opt 1 against ~10 s at opt 0 (medians of 4), and rebuilding the crate from
+# scratch ~79 s. Delete this section when that loop matters more.
+[profile.dev.package.redline]
+opt-level = 1
