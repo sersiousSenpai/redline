@@ -457,7 +457,7 @@ describe("paint guard (perf rule 6)", () => {
     );
     const spring = waapi.filter((u) => u.name === "springInKeyframes");
     expect(spring.map((u) => u.rel).sort()).toEqual([
-      "components/FloatingBrowserIsland.tsx",
+      "components/MonochatIsland.tsx",
       "components/SpringSwap.tsx",
     ]);
     for (const u of spring) {
