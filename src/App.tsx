@@ -7313,11 +7313,14 @@ function App() {
   });
   // Reads every pressed chip's source at the moment something is sent — one
   // block per chip, so a caller can tell an unchanged block from a new one.
-  // A source that fails is left out rather than failing the send.
+  // A source that fails is left out rather than failing the send, and so is
+  // everything when the builders themselves can't load. Never rejects.
   const gatherContext = async (destination: LaunchDestination): Promise<ContextBlock[]> => {
     const pressed = visibleChips(contextChips, destination).filter((chip) => isChipPressed(chip, chipPresses, islandSurfaceKey));
     if (pressed.length === 0) return [];
-    const { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock } = await import("./lib/contextBlocks");
+    const builders = await import("./lib/contextBlocks").catch(() => null);
+    if (!builders) return [];
+    const { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock } = builders;
     const read = async (id: ContextBlock["id"]): Promise<ContextBlock | null> => {
       switch (id) {
         case "page": {
