@@ -70,6 +70,12 @@ export interface TileActions {
    *  fleet's only inventory, and a never-tiled terminal would otherwise show
    *  its stale spawn cwd. Called on open. */
   onRefreshCwds: () => void;
+  /** Pin or unpin a terminal: a pinned tile never parks itself. */
+  onTogglePin: (id: string) => void;
+  /** A press on a header chip that may become a drag onto another tile.
+   *  TerminalTabs owns the gesture: under its threshold it is a plain click
+   *  and nothing happens here. */
+  onDragStart: (id: string, e: React.PointerEvent<HTMLElement>) => void;
 }
 
 /** Everything high-churn the menu renders (work lines, held, unseen, repo

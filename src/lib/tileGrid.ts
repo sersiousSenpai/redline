@@ -103,9 +103,11 @@ const CELL_H = 18;
 /** Below this character grid a tile stops being a terminal at all. */
 const MIN_COLS = 40;
 const MIN_ROWS = 8;
-/** Full marks at a canonical 80×24 — past that, more chars stop mattering. */
-const TARGET_COLS = 80;
-const TARGET_ROWS = 24;
+/** Full marks at a canonical 80×24 — past that, more chars stop mattering.
+ *  Exported as the size automatic placement won't shrink a tile below
+ *  (tilePolicy's `fitsAnotherTile`). */
+export const TARGET_COLS = 80;
+export const TARGET_ROWS = 24;
 /** Preferred tile aspect (w/h). Survives only as a tiebreaker once both
  *  candidates clear the character floors — a terminal's utility is measured
  *  in characters, not proportions. */
@@ -134,6 +136,16 @@ function charCols(size: SizePx, shape: GridShape): number {
 /** Character rows a tile would get, after its header takes its strip. */
 function charRows(size: SizePx, shape: GridShape): number {
   return (size.height / shape.rows - TILE_HEADER_H) / CELL_H;
+}
+
+/** The character grid one tile gets at `shape`'s nominal tile size — the
+ *  same estimate the shape scoring below uses, for callers deciding whether
+ *  a tile is still a usable terminal. */
+export function tileCharGrid(
+  shape: GridShape,
+  size: SizePx,
+): { cols: number; rows: number } {
+  return { cols: charCols(size, shape), rows: charRows(size, shape) };
 }
 
 /** Score a candidate shape by the character grid a tile would get, or null

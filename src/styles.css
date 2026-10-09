@@ -2371,9 +2371,81 @@ p.rl-block-modified {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 80%, transparent);
 }
 
+/* The shelf (TerminalShelf): one chip per terminal that has no tile. Loud
+   chips glow — a terminal that needs you is never pulled onto the wall on
+   its own, so the glow is how it asks. */
+.rl-shelf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  max-width: 240px;
+  padding: 0 7px;
+  flex-shrink: 0;
+  border: 1px solid var(--color-rule);
+  border-radius: 9px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+.rl-shelf-chip:hover {
+  background: color-mix(in srgb, var(--color-ink) 7%, var(--color-paper));
+}
+.rl-shelf-chip[data-term-state="needs-you"] {
+  border-color: color-mix(in srgb, var(--color-warning) 70%, var(--color-rule));
+  animation: rl-shelf-glow 1.6s ease-in-out infinite;
+}
+.rl-shelf-chip[data-term-state="your-turn"] {
+  border-color: color-mix(in srgb, var(--color-info) 65%, var(--color-rule));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-info) 35%, transparent);
+}
+.rl-shelf-chip[data-fresh] {
+  border-color: var(--color-ink-muted);
+}
+@keyframes rl-shelf-glow {
+  0%, 100% {
+    box-shadow: 0 0 3px color-mix(in srgb, var(--color-warning) 30%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 9px color-mix(in srgb, var(--color-warning) 55%, transparent);
+  }
+}
+.rl-shelf-strip {
+  scrollbar-width: none;
+}
+.rl-shelf-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/* Drag-to-arrange: the label that follows the pointer. Fixed and measured
+   (never absolute inside the dock, whose overflow would clip it), and
+   pointer-events none so the hit test sees the tile under it. */
+.rl-tile-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  padding: 2px 8px;
+  border: 1px solid var(--color-info);
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  font-size: 11px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+html[data-rl-tile-drag],
+html[data-rl-tile-drag] * {
+  cursor: grabbing !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rl-term-badge--pulse,
-  .rl-term-badge--spin {
+  .rl-term-badge--spin,
+  .rl-shelf-chip[data-term-state="needs-you"] {
     animation: none;
   }
 }

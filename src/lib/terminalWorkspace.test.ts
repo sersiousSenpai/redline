@@ -46,4 +46,14 @@ describe("terminal workspace persistence", () => {
     saveTerminalWorkspace(withAcks);
     expect(readTerminalWorkspace(14)).toEqual(withAcks);
   });
+  it("reads pins with and without the field: older layouts parse unchanged, stale and duplicate pins drop", () => {
+    const older = { tabs: [{ id: "a", cwd: null }, { id: "b", cwd: "/repo" }], tiles: ["a", "b"], focusedTile: 1, zoomedId: null };
+    expect(parseTerminalWorkspace(older, 14)).toEqual(older);
+    expect(parseTerminalWorkspace({ ...older, pinned: ["b", "gone", "b", 7, null] }, 14)?.pinned).toEqual(["b"]);
+    expect(parseTerminalWorkspace({ ...older, pinned: "b" }, 14)).toEqual(older);
+    expect(parseTerminalWorkspace({ ...older, pinned: [] }, 14)).toEqual(older);
+    const withPins = { ...older, pinned: ["a"] };
+    saveTerminalWorkspace(withPins);
+    expect(readTerminalWorkspace(14)).toEqual(withPins);
+  });
 });

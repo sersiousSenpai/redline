@@ -14,7 +14,7 @@ vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
   return { enqueuePtyOp, tauriHandoffDeps: {}, focusTerminalView: () => {}, TerminalView: ({ id, visible, onUserInput, onInterrupt }: { id: string; visible: boolean; onUserInput: (id: string) => void; onInterrupt: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button><button data-esc={id} onClick={() => { onUserInput(id); onInterrupt(id); }}>Esc</button></div> };
 });
-vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""}><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
+vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, pinned, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; pinned: boolean; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void; onTogglePin: (id: string) => void; onDragStart: (id: string, e: unknown) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""} data-pinned={pinned}><button data-pin={identity.id} onClick={() => actions.onTogglePin(identity.id)}>Pin</button><span data-drag={identity.id} onPointerDown={(e) => actions.onDragStart(identity.id, e)}>Drag</span><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
 import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
 import { TERMINAL_WORKSPACE_KEY } from "../lib/terminalWorkspace";
@@ -322,5 +322,160 @@ describe("terminal state", () => {
     mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }];
     await act(async () => { vi.advanceTimersByTime(4000); });
     expect(stateOf(agent)).toBe("idle");
+  });
+});
+
+describe("the wall: shelf, placement and arrangement", () => {
+  const shelf = () => [...host.querySelectorAll<HTMLElement>("[data-shelf-id]")].map((chip) => chip.dataset.shelfId!);
+  const emit = async (payload: Record<string, unknown>) => {
+    await act(async () => mocks.listeners.get("term-attention")!({ payload }));
+  };
+  const needsYou = (terminalId: string, at: number) => ({ terminalId, sessionId: "s", at, kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission" });
+  // Tile ORDER, as the grid lays it out. (`tiled()` reads the headers in DOM
+  // order, which is creation order — the wrappers never move in the DOM.)
+  const order = () => saved().tiles as string[];
+  // jsdom lays nothing out. Give the dock a 1440×270 pane — wide enough for
+  // two 80-column tiles side by side, not three — and every tile wrapper the
+  // box its percentage style describes inside it.
+  const PANE = { width: 1440, height: 270 };
+  function layout() {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("rl-tile-wrap") && this.style.display !== "none" && this.style.left) {
+        const pct = (v: string) => parseFloat(v) / 100;
+        const left = pct(this.style.left) * PANE.width;
+        const top = pct(this.style.top) * PANE.height;
+        const width = pct(this.style.width) * PANE.width;
+        const height = pct(this.style.height) * PANE.height;
+        return { x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) } as DOMRect;
+      }
+      return { x: 0, y: 0, left: 0, top: 0, width: PANE.width, height: PANE.height, right: PANE.width, bottom: PANE.height, toJSON: () => ({}) } as DOMRect;
+    });
+  }
+  // The pane measures itself a frame after mount.
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
+  async function wall() {
+    layout();
+    await mount();
+    const first = await open();
+    const a = await open(true);
+    const b = await open(true);
+    await settle();
+    return { first, a, b };
+  }
+
+  it("shows every terminal off the wall on the shelf, loud first", async () => {
+    const { first, a, b } = await wall();
+    expect(order()).toEqual([first]);
+    expect(shelf()).toEqual([a, b]);
+    await emit(needsYou(b, 5));
+    expect(shelf()).toEqual([b, a]);
+    expect(host.querySelector<HTMLElement>(`[data-shelf-id="${b}"]`)?.dataset.termState).toBe("needs-you");
+    // A terminal that needs you is never pulled onto the wall on its own.
+    expect(order()).toEqual([first]);
+    // Every terminal is on the wall or on the shelf.
+    await click(`[data-new="${first}"]`);
+    expect(tiled()).toHaveLength(2);
+    expect(shelf()).toEqual([b, a]);
+  });
+
+  it("a shelf click adds a tile while one more fits at 80 columns, then takes the quietest unpinned, unfocused tile", async () => {
+    const { first, a, b } = await wall();
+    await click(`[data-shelf-id="${a}"]`);
+    expect(order()).toEqual([first, a]);
+    expect(focused()).toBe(a);
+    // A third tile would be 60 columns wide: b replaces the quietest tile
+    // that isn't focused — `first` — and `first` goes to the shelf.
+    await click(`[data-shelf-id="${b}"]`);
+    expect(order()).toEqual([b, a]);
+    expect(focused()).toBe(b);
+    expect(shelf()).toEqual([first]);
+  });
+
+  it("a pinned tile is never the one replaced; the focused one goes last", async () => {
+    const { first, a, b } = await wall();
+    await click(`[data-pin="${first}"]`);
+    expect(saved().pinned).toEqual([first]);
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([first, a]);
+    // first is pinned, a is focused: nothing else may give way, so a does.
+    await act(async () => handle.current!.selectTab(b));
+    expect(order()).toEqual([first, b]);
+    await click(`[data-pin="${first}"]`);
+    expect(saved().pinned).toBeUndefined();
+  });
+
+  it("App's reveal focuses a terminal already on the wall instead of moving it", async () => {
+    const { first, a } = await wall();
+    await act(async () => handle.current!.selectTab(a));
+    await click(`[data-focus="${first}"]`);
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([first, a]);
+    expect(focused()).toBe(a);
+  });
+
+  it("closing a tile pulls in only a terminal that needs you — otherwise the tile collapses", async () => {
+    const { first, a, b } = await wall();
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([first, a]);
+    await click(`[data-close="${a}"]`);
+    // b is quiet: nothing is resurrected.
+    expect(order()).toEqual([first]);
+    const c = await open(true);
+    await act(async () => handle.current!.selectTab(b));
+    await emit(needsYou(c, 9));
+    await click(`[data-close="${b}"]`);
+    expect(order()).toEqual([first, c]);
+  });
+
+  it("a new terminal at the tile cap takes the quietest tile, never the focused one", async () => {
+    layout();
+    await mount();
+    const opened = [await open()];
+    for (let i = 1; i < 14; i++) opened.push(await open());
+    expect(tiled()).toHaveLength(14);
+    await click(`[data-focus="${opened[0]}"]`);
+    // One terminal is busy, so it's not the quietest.
+    mocks.procs = [];
+    await emit({ terminalId: opened[13], sessionId: "s", at: 3, kind: "working" });
+    const next = await open();
+    expect(order()).toHaveLength(14);
+    // All but the focused and the busy one are equally idle: the later one
+    // gives way, in place.
+    expect(order()).toEqual([...opened.slice(0, 12), next, opened[13]]);
+  });
+
+  it("dragging header A onto tile B swaps them; a shelf chip dropped on a tile shelves its occupant", async () => {
+    const { first, a, b } = await wall();
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([first, a]);
+    // The click a real release produces right after pointerup must reach
+    // nobody once it ended a drag (it would open the menu, or place by rule).
+    const clicked = vi.fn();
+    window.addEventListener("click", clicked);
+    const drag = async (target: Element, from: [number, number], to: [number, number]) => {
+      await act(async () => {
+        target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: from[0], clientY: from[1] }));
+        window.dispatchEvent(new MouseEvent("pointermove", { clientX: to[0], clientY: to[1] }));
+        window.dispatchEvent(new MouseEvent("pointerup", { clientX: to[0], clientY: to[1] }));
+        target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    };
+    // Header of tile 0 dropped on tile 1 (the right half of the pane).
+    await drag(host.querySelector(`[data-drag="${first}"]`)!, [10, 10], [1100, 100]);
+    expect(order()).toEqual([a, first]);
+    expect(focused()).toBe(first);
+    expect(clicked).not.toHaveBeenCalled();
+    expect(document.documentElement.dataset.rlTileDrag).toBeUndefined();
+    expect(document.querySelector(".rl-tile-drag-ghost")).toBeNull();
+    // A press that never travels is not a drag, and its click goes through.
+    await drag(host.querySelector(`[data-drag="${a}"]`)!, [10, 10], [11, 11]);
+    expect(order()).toEqual([a, first]);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    // The shelf chip (b) dropped on tile 0: b takes it, a goes to the shelf.
+    await drag(host.querySelector(`[data-shelf-id="${b}"]`)!, [5, 5], [300, 100]);
+    expect(order()).toEqual([b, first]);
+    expect(shelf()).toEqual([a]);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    window.removeEventListener("click", clicked);
   });
 });

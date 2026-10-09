@@ -59,6 +59,8 @@ function makeActions(): TileActions {
     onFocusTile: vi.fn(),
     onHintTile: vi.fn(),
     onRefreshCwds: vi.fn(),
+    onTogglePin: vi.fn(),
+    onDragStart: vi.fn(),
   };
 }
 
@@ -75,7 +77,6 @@ function mount(
         tile: 1,
         identity,
         focused: false,
-        overflow: null,
         zoomed: false,
         actions,
         ...props,
@@ -193,15 +194,34 @@ describe("terminal tile header", () => {
     expect(head(container).querySelector("span.flex-1")).not.toBeNull();
   });
 
-  it("shows the overflow pip with its tone, on demand only", () => {
-    const none = mount({ overflow: null });
-    expect(none.container.textContent).not.toContain("●");
+  it("the pin toggles through the action cluster and marks a pinned tile beside its name", () => {
+    const { container, actions } = mount({ pinned: false });
+    const pin = container.querySelector("button[aria-label='Pin redline 2']") as HTMLButtonElement;
+    expect(pin.getAttribute("aria-pressed")).toBe("false");
+    // In the opacity-only cluster, so it never reflows the label.
+    expect(pin.closest(".rl-tile-actions")).not.toBeNull();
+    act(() => pin.click());
+    expect(actions.onTogglePin).toHaveBeenCalledWith("t1");
+    expect(container.querySelector("[title^='Pinned']")).toBeNull();
 
-    const { container } = mount({
-      focused: true,
-      overflow: { count: 3, tone: "held" },
+    const pinned = mount({ pinned: true });
+    expect(
+      pinned.container.querySelector("button[aria-label='Unpin redline 2']")?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(pinned.container.querySelector("[title^='Pinned']")).not.toBeNull();
+  });
+
+  it("a primary press on the identity chip hands the drag to the dock; other buttons don't", () => {
+    const { container, actions } = mount();
+    const chip = container.querySelector("button[aria-haspopup='menu']") as HTMLButtonElement;
+    act(() => {
+      chip.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     });
-    expect(container.textContent).toContain("●3");
+    expect(actions.onDragStart).toHaveBeenCalledWith("t1", expect.anything());
+    act(() => {
+      chip.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 2 }));
+    });
+    expect(actions.onDragStart).toHaveBeenCalledTimes(1);
   });
 
   it("double-click on the strip zooms; on a button it does not", () => {

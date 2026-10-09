@@ -70,6 +70,8 @@ function makeActions(): TileActions {
     onFocusTile: vi.fn(),
     onHintTile: vi.fn(),
     onRefreshCwds: vi.fn(),
+    onTogglePin: vi.fn(),
+    onDragStart: vi.fn(),
   };
 }
 

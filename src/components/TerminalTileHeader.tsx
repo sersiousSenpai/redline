@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { memo, useRef, useState } from "react";
+import { Pin } from "lucide-react";
 
 import { HELD_RED } from "../lib/terminalMenu";
 import { TILE_HEADER_H } from "../lib/tileGrid";
@@ -68,19 +69,10 @@ function TabIconMark({ icon }: { icon: TabIcon }) {
   return <span aria-hidden style={{ ...box, background: icon.tint }} />;
 }
 
-/** The focused header's overflow pip: terminals in no tile — otherwise
- *  invisible now the tab strip is gone. Toned held > unseen > muted. */
-export interface OverflowPip {
-  count: number;
-  tone: "held" | "unseen" | "muted";
-}
-
 interface TerminalTileHeaderProps {
   tile: number;
   identity: TerminalIdentity;
   focused: boolean;
-  /** Present on the focused header only. */
-  overflow?: OverflowPip | null;
   zoomed: boolean;
   /** What the terminal is doing (lib/termState). Drives the badge in front of
    *  the work line. */
@@ -97,6 +89,8 @@ interface TerminalTileHeaderProps {
    *  header on every OSC-title tick. */
   workText?: string | null;
   workHeld?: boolean;
+  /** Pinned tiles never park themselves (TerminalTabs' parking effect). */
+  pinned?: boolean;
   actions: TileActions;
   /** Reserved third slot in the action cluster — future chrome lands here
    *  rather than growing a second cluster. */
@@ -120,12 +114,12 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
   tile,
   identity,
   focused,
-  overflow,
   zoomed,
   state = "idle",
   port = null,
   workText = null,
   workHeld = false,
+  pinned = false,
   actions,
   extraControl,
 }: TerminalTileHeaderProps) {
@@ -136,26 +130,6 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
     "below",
     TILE_MENU_WIDTH,
   );
-
-  const pip =
-    overflow && overflow.count > 0 ? (
-      <span
-        title={`${overflow.count} ${overflow.count === 1 ? "terminal" : "terminals"} not on screen — in the ▾ menu`}
-        className="shrink-0"
-        style={{
-          fontSize: "10px",
-          fontVariantNumeric: "tabular-nums",
-          color:
-            overflow.tone === "held"
-              ? HELD_RED
-              : overflow.tone === "unseen"
-                ? "var(--color-info)"
-                : "var(--color-ink-muted)",
-        }}
-      >
-        ●{overflow.count}
-      </span>
-    ) : null;
 
   // The work line: what the terminal says it is on, else the state's own
   // words ("working", ":5173"). A loud state reads in full ink — it is the
@@ -207,6 +181,12 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
           .join(" — ")}
         aria-haspopup="menu"
         aria-expanded={open}
+        // The chip is also the drag handle: past a few pixels of travel the
+        // press becomes drag-to-arrange (TerminalTabs owns the drag and
+        // swallows the click that would otherwise open this menu).
+        onPointerDown={(e) => {
+          if (e.button === 0) actions.onDragStart(identity.id, e);
+        }}
         className="flex items-center gap-1.5 min-w-0 cursor-pointer select-none"
         style={{ fontSize: "12px", height: "18px" }}
       >
@@ -221,7 +201,6 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
         >
           {identity.label}
         </span>
-        {pip}
         <span
           aria-hidden
           style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}
@@ -229,6 +208,15 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
           ▾
         </span>
       </button>
+      {pinned && (
+        <span
+          title="Pinned — this tile never parks itself"
+          className="shrink-0 flex items-center"
+          style={{ color: "var(--color-ink-muted)" }}
+        >
+          <Pin size={10} strokeWidth={2} aria-hidden />
+        </span>
+      )}
       {/* What it is working on, in the space the spacer used to hold, behind
           the terminal's state badge: amber and pulsing when its agent is
           blocked on you, blue for your turn, a quiet spinner while it works,
@@ -282,6 +270,25 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
             there are, the stranger the old home looked. Per-tile ZOOM is
             untouched: double-click this strip, or the menu's "⤢ Zoom this
             tile" row. */}
+        <button
+          type="button"
+          onClick={() => actions.onTogglePin(identity.id)}
+          aria-pressed={pinned}
+          aria-label={pinned ? `Unpin ${identity.label}` : `Pin ${identity.label}`}
+          title={
+            pinned
+              ? "Unpin — let this tile park itself once it goes quiet"
+              : "Pin — keep this tile on the wall even when it goes quiet"
+          }
+          className="flex items-center justify-center rounded cursor-pointer"
+          style={{
+            width: "18px",
+            height: "18px",
+            color: pinned ? "var(--color-ink)" : "var(--color-ink-muted)",
+          }}
+        >
+          <Pin size={11} strokeWidth={pinned ? 2.5 : 2} aria-hidden />
+        </button>
         {zoomed && (
           <span
             title="Tile is zoomed — double-click the header to restore the grid"
