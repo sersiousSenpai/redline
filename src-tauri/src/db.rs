@@ -637,7 +637,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 6;
+    const SCHEMA_VERSION: i64 = 7;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -658,6 +658,7 @@ impl Database {
             (4, Self::migrate_v4),
             (5, Self::migrate_v5),
             (6, Self::migrate_v6),
+            (7, Self::migrate_v7),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -712,9 +713,11 @@ impl Database {
             // Except what v5 adds, which is applied first: a nullable column
             // and a new table this build owns, both idempotent. A foreign
             // lineage has never heard of either, and refusing over them would
-            // brick a database that is otherwise perfectly usable.
+            // brick a database that is otherwise perfectly usable. The same
+            // goes for v6's and v7's nullable columns.
             Self::migrate_v5(conn)?;
             Self::migrate_v6(conn)?;
+            Self::migrate_v7(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -831,7 +834,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -983,6 +986,21 @@ impl Database {
             }
         }
         crate::guided::migrate(conn)?;
+        Ok(())
+    }
+
+    /// v6 → v7: `thread_messages.mode`, the sidecar view a discussion turn was
+    /// sent from (`"chat"`; NULL is a report). Every existing row is a report,
+    /// so NULL needs no backfill. The thread load reads the column, so it is a
+    /// step of its own rather than a line in `migrate_v1`, which a database
+    /// already past v1 never runs again. Idempotent, so it is also safe on the
+    /// forward-stamp path.
+    fn migrate_v7(conn: &Connection) -> rusqlite::Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(thread_messages)")?;
+        let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.is_empty() && !columns.iter().any(|name| name == "mode") {
+            conn.execute("ALTER TABLE thread_messages ADD COLUMN mode TEXT", [])?;
+        }
         Ok(())
     }
 
@@ -5754,8 +5772,8 @@ impl Database {
         conn.execute(
             "INSERT INTO thread_messages
                 (id, session_id, comment_id, role, body, status, created_at,
-                 attachments)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 attachments, mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 msg.id,
                 msg.session_id,
@@ -5765,6 +5783,7 @@ impl Database {
                 msg.status,
                 msg.created_at,
                 attachments_to_json(&msg.attachments),
+                msg.mode,
             ],
         )?;
         Self::touch_session(&conn, &msg.session_id, msg.created_at);
@@ -5779,7 +5798,7 @@ impl Database {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, comment_id, role, body, status, created_at,
-                    attachments
+                    attachments, mode
              FROM thread_messages
              WHERE session_id = ?1 AND comment_id = ?2
              ORDER BY created_at, id",
@@ -5794,6 +5813,7 @@ impl Database {
                 status: row.get(5)?,
                 created_at: row.get(6)?,
                 attachments: attachments_from_json(row.get(7)?),
+                mode: row.get(8)?,
             })
         })?;
         rows.collect()
@@ -13887,6 +13907,7 @@ mod tests {
             status: "complete".to_string(),
             created_at: at,
             attachments: Vec::new(),
+            mode: None,
         };
         // Inserted out of order — load_thread must return them by created_at.
         db.insert_thread_message(&mk("m2", "assistant", "second", 200))
@@ -13912,6 +13933,39 @@ mod tests {
         assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
         // The scoped delete left the other comment's message intact.
         assert_eq!(db.load_thread("s1", "c-002").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn thread_message_mode_persists_and_null_reads_as_none() {
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, at: i64, mode: Option<&str>| ThreadMessage {
+            id: id.to_string(),
+            session_id: "s1".to_string(),
+            comment_id: "c-001".to_string(),
+            role: "user".to_string(),
+            body: id.to_string(),
+            status: "complete".to_string(),
+            created_at: at,
+            attachments: Vec::new(),
+            mode: mode.map(str::to_string),
+        };
+        db.insert_thread_message(&mk("report", 100, None)).unwrap();
+        db.insert_thread_message(&mk("chat", 200, Some("chat"))).unwrap();
+        // A row written by a build from before the column: no `mode` at all.
+        db.lock_conn()
+            .execute(
+                "INSERT INTO thread_messages (id, session_id, comment_id, role, body, status, created_at)
+                 VALUES ('legacy', 's1', 'c-001', 'assistant', 'old', 'complete', 300)",
+                [],
+            )
+            .unwrap();
+        let thread = db.load_thread("s1", "c-001").unwrap();
+        let modes: Vec<_> = thread.iter().map(|m| (m.id.as_str(), m.mode.as_deref())).collect();
+        assert_eq!(modes, [("report", None), ("chat", Some("chat")), ("legacy", None)]);
+        // The wire shape: a report row carries no `mode` key at all.
+        let json = serde_json::to_value(&thread).unwrap();
+        assert!(json[0].get("mode").is_none());
+        assert_eq!(json[1]["mode"], "chat");
     }
 
     #[test]
@@ -14122,6 +14176,7 @@ mod tests {
             status: "complete".to_string(),
             created_at: 100,
             attachments: Vec::new(),
+            mode: None,
         })
         .unwrap();
 
@@ -15298,6 +15353,38 @@ body.
         let _ = std::fs::remove_file(path);
     }
 
+    /// `thread_messages.mode` is read by every thread load, so a v6 database
+    /// must gain it at upgrade: the step `migrate_v1`'s own doc asks for, not
+    /// a line in it.
+    #[test]
+    fn a_v6_database_gains_the_thread_mode_column() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO thread_messages (id, session_id, comment_id, role, body, status, created_at)
+                   VALUES ('m1', 's1', 'c1', 'user', 'old', 'complete', 1);
+                 ALTER TABLE thread_messages DROP COLUMN mode;
+                 PRAGMA user_version=6;",
+            )
+            .unwrap();
+            Database::verify_schema_at(&conn, 6).unwrap();
+            assert!(Database::verify_schema_at(&conn, 7).is_err());
+        }
+        let db = Database::open(&path).expect("a v6 database must open");
+        let thread = db.load_thread("s1", "c1").expect("the thread load reads the mode column");
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].mode, None);
+        drop(db);
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let conn = Connection::open(&path).unwrap();
+        Database::verify_schema_at(&conn, 7).unwrap();
+        Database::migrate_v7(&conn).unwrap(); // replay-safe
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     #[ignore = "requires a SQLite backup, never the user's live database"]
     fn migrate_real_v5_backup_for_workbench() {
@@ -15592,6 +15679,7 @@ body.
             status: "complete".to_string(),
             created_at: later,
             attachments: Vec::new(),
+            mode: None,
         })
         .unwrap();
         let reloaded = SessionStore::new(db.clone());
