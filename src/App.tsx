@@ -4078,7 +4078,7 @@ function App() {
       void modeUnlisten.then((u) => u());
       void decisionUnlisten.then((u) => u());
     };
-  }, [activeId, selectSessions, revealPane]);
+  }, [activeId, selectSessions]);
 
   // `redline://…#RLS1…` deep links — the browser viewer's "Open in Redline"
   // link lands a shared plan here as a full native review. The handler ref is

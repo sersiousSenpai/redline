@@ -12,9 +12,9 @@ describe("panel mask wiring", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
     // Neither the side pane nor the plan's Conversation Dock: both stay however
     // the user left them, on the arrival itself and on its Review/Open toasts.
-    expect(arrival).not.toContain("revealPane()");
-    expect(arrival).not.toContain("setPaneCollapsed(false)");
-    expect(arrival).not.toContain("setDockOpenBy");
+    // Not opened, and not force-closed either, under any helper's name.
+    expect(arrival).not.toMatch(/setPaneCollapsed|revealPane|openPane|togglePane|setPanelBreaks/);
+    expect(arrival).not.toMatch(/setDockOpenBy|openDock|closeDock|toggleDock/);
     // The masked-surface branch of `arrivalFocus`'s "focus": selects, never
     // yanks the surface — its Review action does that.
     const maskedArrival = arrival.slice(arrival.indexOf('if (focus === "focus") {'), arrival.indexOf('// flash'));
