@@ -93,6 +93,17 @@ describe("reconstructWholeBlockEdit", () => {
     expect(out).toEqual({ original: block, revised: "xx foo yy bar zz" });
   });
 
+  it("keeps a hard break that sits right before the selection", () => {
+    // textContent "Alpha oneBeta two": offset 9 is both "before the break"
+    // and "start of Beta" — the splice must start after the break.
+    const block = "Alpha one\\\nBeta two";
+    const out = reconstructWholeBlockEdit(block, sel(9, "Beta"), {
+      original: "Beta",
+      revised: "Gamma",
+    });
+    expect(out).toEqual({ original: block, revised: "Alpha one\\\nGamma two" });
+  });
+
   it("returns null when the snippet is nowhere in the block", () => {
     const out = reconstructWholeBlockEdit(
       "A completely rewritten paragraph.",

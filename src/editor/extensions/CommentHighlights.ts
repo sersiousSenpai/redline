@@ -7,6 +7,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import { resolveRange, type CommentHighlightRange } from "../resolveHighlightRange";
 import { parseSidecarIdTyped } from "../markdown/sidecar";
 import { resolveWordsInUnit } from "../subBlockResolve";
+import { textOffsetToPos } from "../textOffset";
 import { findUnitNode } from "../unitResolve";
 
 // Re-exported so existing importers (PlanEditor) keep their import path. The
@@ -64,28 +65,6 @@ function pmNodeTagName(node: import("@tiptap/pm/model").Node): string {
     default:
       return "P";
   }
-}
-
-/** Locate the first textblock (paragraph or heading) descendant of `node`
- *  along with its position offset from `node`'s start. Matches the convention
- *  in `applyCommentOverridesToEditor` — comment selections live in prose
- *  paragraphs, so we descend through list-item / blockquote wrappers if any
- *  exist. */
-function firstTextblockInside(
-  node: import("@tiptap/pm/model").Node,
-): { node: import("@tiptap/pm/model").Node; offset: number } | null {
-  if (node.isTextblock) return { node, offset: 0 };
-  let found: { node: import("@tiptap/pm/model").Node; offset: number } | null =
-    null;
-  node.descendants((child, pos) => {
-    if (found) return false;
-    if (child.isTextblock) {
-      found = { node: child, offset: pos };
-      return false;
-    }
-    return true;
-  });
-  return found;
 }
 
 /** Word-style comment highlights over arbitrary character ranges inside a
@@ -156,12 +135,11 @@ export const CommentHighlights = Extension.create<
               if (!blockId) return;
               const ranges = byBlock.get(blockId);
               if (!ranges) return;
-              const target = firstTextblockInside(blockNode);
-              // First doc position INSIDE the first textblock is `blockOffset +
-              // target.offset + 1` (the `+1` steps through the opening token of
-              // the textblock node). Only needed for the legacy fallback path.
-              const legacyText = target ? target.node.textContent : "";
-              const legacyBase = target ? blockOffset + target.offset + 1 : 0;
+              // The fallback tiers resolve against the WHOLE block's text — the
+              // coordinate system capture measures `charStart`/`charEnd` in
+              // (the anchored element's flat textContent: for a list, every
+              // item end to end; for a table, every cell).
+              const blockText = blockNode.textContent;
               // Sub-block-id resolution needs the block's tag (PRE / UL /
               // BLOCKQUOTE → line axis; everything else → sentence axis).
               // The PM Node has the type name; map to the equivalent DOM
@@ -205,14 +183,21 @@ export const CommentHighlights = Extension.create<
                   }
                 }
 
-                // Legacy tiers (sub-id on the first textblock → char range →
-                // quotedText self-heal) for everything the unit path didn't
-                // claim.
-                if (from === null && target) {
-                  const resolved = resolveRange(legacyText, blockTagName, range);
+                // Block-level tiers (sub-id → char range → quotedText
+                // self-heal) for everything the unit path didn't claim. Text
+                // offsets map to doc positions by walking the block's text
+                // nodes — past item 1, list-item and paragraph tokens sit
+                // between them, so base+offset arithmetic would drift.
+                if (from === null) {
+                  const resolved = resolveRange(blockText, blockTagName, range);
                   if (resolved) {
-                    from = legacyBase + resolved.from;
-                    to = legacyBase + resolved.to;
+                    const relFrom = textOffsetToPos(blockNode, resolved.from, 1);
+                    const relTo = textOffsetToPos(blockNode, resolved.to, -1);
+                    if (relFrom !== null && relTo !== null && relTo > relFrom) {
+                      // `+1` enters the block node.
+                      from = blockOffset + 1 + relFrom;
+                      to = blockOffset + 1 + relTo;
+                    }
                   }
                 }
 
