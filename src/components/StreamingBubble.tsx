@@ -24,10 +24,25 @@
 //! streamed with `rich={false}` except the chat room, which streamed `rich` —
 //! the one place a half-written ` ```mermaid ` fence reached `MermaidView`
 //! mid-stream and flashed a "Diagram error" card. One component, one answer.
+//!
+//! The text renders in two halves (`StreamingText`), because re-parsing the
+//! whole reply on every chunk made a long answer cost the square of its
+//! length: the closed blocks go through a memoized `MarkdownView` that parses
+//! again only when another block closes, and the open block at the end is
+//! re-rendered alone. The markup is the one a single full render produces.
 
-import { lazy, Suspense, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 
-import { MarkdownView } from "./MarkdownView";
+import { MarkdownView, renderLiveMarkdown } from "./MarkdownView";
+import { splitAtClosedBlock } from "../lib/streamSplit";
 import {
   activityLabel,
   contextPressure,
@@ -99,6 +114,60 @@ function ContextChip({ meter }: { meter: TurnMeter }) {
       )}
     </span>
   );
+}
+
+/** The reply so far, split at its last closed block (`splitAtClosedBlock`).
+ *  The open tail is not a second markdown view: its nodes are appended into
+ *  the head view's own container, so they sit among the closed blocks exactly
+ *  as one full render would place them — the same first/last-child rhythm in
+ *  `.rl-md`, the same delegated copy-button and link clicks. React owns that
+ *  container's markup only through `dangerouslySetInnerHTML`, which it
+ *  re-assigns only when the head moves; the tail's nodes are ours. */
+function StreamingText({
+  text,
+  room,
+  caret,
+  onOpenLink,
+}: {
+  text: string;
+  room: boolean;
+  caret: string;
+  onOpenLink?: (url: string) => void;
+}) {
+  const host = useRef<HTMLDivElement>(null);
+  const { head, tail, openFence } = splitAtClosedBlock(text);
+  const tailHtml = useMemo(() => renderLiveMarkdown(tail, openFence), [tail, openFence]);
+  // The head's props must hold still while only the tail moves, and a call
+  // site's inline link handler is a new function every render.
+  const linkRef = useRef(onOpenLink);
+  linkRef.current = onOpenLink;
+  const linked = onOpenLink != null;
+  const onLinkClick = useMemo(
+    () => (linked ? (url: string) => linkRef.current?.(url) : undefined),
+    [linked],
+  );
+  useLiveTail(host, head, tailHtml);
+  return (
+    <div ref={host}>
+      <MarkdownView body={head} compact room={room} onLinkClick={onLinkClick} />
+      <span style={{ color: "var(--color-ink-muted)" }}>{caret}</span>
+    </div>
+  );
+}
+
+/** Keep `html` appended to the end of the markdown container (`host`'s first
+ *  child), replacing the previous tail. Re-runs when the head moves too: a
+ *  new head re-assigns the container's markup, which takes the old tail with
+ *  it. */
+function useLiveTail(host: RefObject<HTMLDivElement | null>, head: string, html: string) {
+  useLayoutEffect(() => {
+    const view = host.current?.firstElementChild;
+    if (!view || !html) return;
+    const before = view.childNodes.length;
+    view.insertAdjacentHTML("beforeend", html);
+    const added = Array.from(view.childNodes).slice(before);
+    return () => added.forEach((node) => node.remove());
+  }, [host, head, html]);
 }
 
 export interface StreamingBubbleProps {
@@ -208,12 +277,12 @@ export default function StreamingBubble({
         </div>
       )}
       {text ? (
-        <div>
-          <MarkdownView body={text} compact room={room} onLinkClick={onOpenLink} />
-          <span style={{ color: "var(--color-ink-muted)" }}>
-            {retrying ? "" : "▌"}
-          </span>
-        </div>
+        <StreamingText
+          text={text}
+          room={room}
+          caret={retrying ? "" : "▌"}
+          onOpenLink={onOpenLink}
+        />
       ) : (
         !doing && (
           <div
