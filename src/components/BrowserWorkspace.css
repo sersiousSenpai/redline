@@ -55,7 +55,7 @@
 .rb-button-primary { background:var(--color-info); border-color:transparent; color:var(--color-on-accent); }
 .rb-button-primary:hover { background:var(--color-info); filter:brightness(1.06); }
 .rb-button:disabled { opacity:.45; cursor:default; }
-.rb-icon-button:focus-visible,.rb-tab:focus-visible,.rb-button:focus-visible,.rb-chat-toggle:focus-visible { outline:2px solid var(--color-info); outline-offset:2px; }
+.rb-icon-button:focus-visible,.rb-tab:focus-visible,.rb-button:focus-visible,.rb-chat-toggle:focus-visible,.rb-harness-chip:focus-visible { outline:2px solid var(--color-info); outline-offset:2px; }
 .rb-layout-choices { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
 .rb-layout-choice { display:flex; flex-direction:column; align-items:stretch; gap:9px; padding:12px; border:1px solid var(--color-rule); border-radius:8px; background:var(--color-paper); color:var(--color-ink); cursor:pointer; font-size:13px; text-align:left; }
 .rb-layout-choice[aria-pressed="true"] { border-color:var(--color-info); box-shadow:0 0 0 1px var(--color-info); }
@@ -74,6 +74,20 @@
 .rb-thread-tools { display:flex; align-items:center; gap:6px; flex:none; padding:8px 10px; border-bottom:1px solid var(--color-rule); background:var(--color-paper); min-width:0; }
 .rb-thread-context { display:flex; gap:6px; align-items:center; color:var(--color-ink-muted); font-size:11px; min-width:0; }
 .rb-thread-context span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rb-thread-harness { display:flex; align-items:center; gap:8px; flex:none; min-width:0; padding:4px 10px; border-bottom:1px solid var(--color-rule); background:var(--color-paper); }
+.rb-thread-harness .rb-thread-context { flex:1 1 0; justify-content:flex-end; }
+.rb-thread-harness .rb-thread-context span+span::before { content:"· "; }
+.rb-harness-chip { display:inline-flex; align-items:center; gap:4px; flex:0 1 auto; min-width:0; height:24px; padding:0 8px; border:1px solid var(--color-rule); border-radius:999px; background:transparent; color:var(--color-ink-muted); font:inherit; font-size:11px; cursor:pointer; }
+.rb-harness-chip:hover,.rb-harness-chip[aria-expanded="true"] { background:var(--color-anchor-bg); color:var(--color-ink); }
+.rb-harness-chip span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rb-harness-chip svg { flex:none; }
+.rb-provider-seg { display:flex; margin:2px 7px 6px; border:1px solid var(--color-rule); border-radius:6px; overflow:hidden; }
+.rb-provider-seg button { flex:1; padding:5px 8px; border:0; background:transparent; color:var(--color-ink-muted); font:inherit; font-size:12px; cursor:pointer; }
+.rb-provider-seg button+button { border-left:1px solid var(--color-rule); }
+.rb-provider-seg button[aria-checked="true"] { background:var(--color-anchor-bg); color:var(--color-ink); font-weight:600; }
+.rb-provider-seg button:disabled { opacity:.45; cursor:default; }
+/* Inside: the segment's `overflow:hidden` would clip an outset ring. */
+.rb-provider-seg button:focus-visible { outline:2px solid var(--color-info); outline-offset:-2px; }
 .rb-chat-frame { display:flex; flex:1 1 0%; flex-direction:column; min-width:0; min-height:0; height:100%; overflow:hidden; }
 .rb-page-cover { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:24px; color:var(--color-ink-muted); background:var(--color-paper); font-size:13px; text-align:center; }
 .rb-page-cover p { max-width:360px; overflow-wrap:anywhere; }

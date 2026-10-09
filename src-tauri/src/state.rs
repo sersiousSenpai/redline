@@ -771,6 +771,19 @@ pub struct BrowseMessage {
     pub created_at: i64,
 }
 
+/// A browse chat's own provider/model/effort pick, stored beside its session
+/// id in `browse_threads`. `backend: None` means the user never picked for
+/// this chat, so the `browse` seat applies; a stored `claude-code` with no
+/// model or effort is an explicit "Default". Values are trimmed and
+/// validated by `browse_thread_set_harness` before they land.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseHarness {
+    pub backend: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
 /// A browser tab's **working list** — the punch list built while clicking
 /// around a running dev server, then handed to Claude Code or the Drafter in
 /// one piece. Keyed on the same durable per-tab `browse_id` as `BrowseMessage`,

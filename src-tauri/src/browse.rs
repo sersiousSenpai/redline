@@ -25,11 +25,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
+    bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
 };
 use crate::db::Database;
-use crate::state::{now_millis, BrowseMessage};
+use crate::state::{now_millis, BrowseHarness, BrowseMessage};
 use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
 
 /// Everything a queued browse send needs to start later. The session resume
@@ -143,6 +143,7 @@ impl BrowseState {
         })?;
 
         let prior_session = self.db.get_browse_session(&browse_id);
+        let harness = self.db.get_browse_harness(&browse_id);
 
         // Persist the check-in into the tab's OWN thread, framed so it reads as a
         // colleague's visit rather than something the user typed.
@@ -182,7 +183,7 @@ impl BrowseState {
         // the global hook, so suppress that duplicate.
         crate::ledger::register_agent_prompt(&prompt);
 
-        let args = bridge_args("browse", prompt, prior_session.as_deref());
+        let args = claude_turn_args(prompt, &harness, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
 
         let claude_bin = self.claude_bin().await?;
@@ -660,6 +661,67 @@ pub async fn browse_send(
     })
 }
 
+/// The argv for one of this chat's Claude turns: the shared bridge block, the
+/// `browse` seat's flag tail with the chat's own model/effort pick laid on top,
+/// then `--resume`. A different `--model` on `--resume` is fine on Claude, so a
+/// pick never costs the session. The turn and the consult both build here, so
+/// a pick applies to both.
+fn claude_turn_args(
+    prompt: String,
+    harness: &BrowseHarness,
+    prior_session: Option<&str>,
+) -> Vec<String> {
+    bridge_args_with_flags(
+        prompt,
+        prior_session,
+        crate::seat::flag_args_override(
+            "browse",
+            harness.model.as_deref(),
+            harness.effort.as_deref(),
+        ),
+    )
+}
+
+/// Clean and check a chat's pick before it is stored. The model is checked
+/// strictly and the effort permissively, as `fork_thread_set_model` does: a
+/// bad `--model` fails the spawn outright, a bad `--effort` only warns. Codex
+/// is refused until a browse turn can run on it — storing it would quietly
+/// run the chat on Claude. A save is always a pick, so a missing provider
+/// stores as `claude-code`: that is what keeps an explicit "Default" from
+/// reading as "never picked".
+fn validate_harness(
+    backend: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<BrowseHarness, String> {
+    let clean = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let (model, effort) = (clean(model), clean(effort));
+    match clean(backend).as_deref() {
+        None | Some("claude-code") => {}
+        Some("codex") => return Err("Codex isn't available for page chats yet".into()),
+        Some(other) => return Err(format!("unknown provider `{other}`")),
+    }
+    if let Some(model) = model.as_deref() {
+        if !crate::seat::MODEL_OPTIONS.contains(&model) {
+            return Err(format!("unknown Claude model `{model}`"));
+        }
+    }
+    if let Some(effort) = effort.as_deref() {
+        if !crate::seat::EFFORT_OPTIONS.contains(&effort) {
+            tracing::warn!(effort, "browse chat: passing through an unrecognized effort");
+        }
+    }
+    Ok(BrowseHarness {
+        backend: Some("claude-code".to_string()),
+        model,
+        effort,
+    })
+}
+
 /// Everything a turn needs after its user row is persisted: prompt framing,
 /// ledger capture, args, spawn, attach, reader. Runs on the direct send path
 /// AND on the reader's queue drain — which is why the session resume is read
@@ -687,6 +749,10 @@ fn start_browse_turn(
         let active_surface = app.state::<crate::ActiveSurface>();
 
         let prior_session = browse.db.get_browse_session(&browse_id);
+        // The chat's own model pick, read per turn like the session: a change
+        // made mid-thread (or while this turn sat queued) applies to the very
+        // next message.
+        let harness = browse.db.get_browse_harness(&browse_id);
 
         // A fresh conversation starts with its captured page and mission.
         let mission = mission_goal;
@@ -738,7 +804,11 @@ fn start_browse_turn(
                         .filter(|(pk, _)| pk == "session")
                         .map(|(_, pid)| pid),
                 }),
-                crate::seat::model_for("browse"),
+                crate::seat::model_for_override(
+                    "browse",
+                    harness.model.as_deref(),
+                    harness.effort.as_deref(),
+                ),
             );
         } else {
             crate::ledger::register_agent_prompt(&prompt);
@@ -760,17 +830,7 @@ fn start_browse_turn(
         // approval"). All three stay scoped to 127.0.0.1:7676; only quoting
         // widens. The whole block rides the canonical `BRIDGE_INVARIANT_ARGS`
         // ordering so the argv prefix stays byte-stable across surfaces.
-        let mut args: Vec<String> = vec!["-p".to_string(), prompt];
-        args.extend(
-            crate::claude_proc::BRIDGE_INVARIANT_ARGS
-                .iter()
-                .map(|s| s.to_string()),
-        );
-        args.extend(crate::seat::flag_args("browse"));
-        if let Some(sid) = &prior_session {
-            args.push("--resume".to_string());
-            args.push(sid.clone());
-        }
+        let mut args = claude_turn_args(prompt, &harness, prior_session.as_deref());
 
         // Widen the read boundary to span ALL the user's known projects, not just
         // the single active-folder `cwd`. Each `--add-dir` puts a project inside the
@@ -849,6 +909,36 @@ pub fn get_browse_thread(
         .db
         .load_browse_thread(&browse_id)
         .map_err(|e| format!("failed to load thread: {e}"))
+}
+
+/// This chat's own provider/model/effort pick (all `None`: never picked, the
+/// `browse` seat applies).
+#[tauri::command]
+pub fn browse_thread_harness(
+    browse: tauri::State<'_, BrowseState>,
+    browse_id: String,
+) -> BrowseHarness {
+    browse.db.get_browse_harness(&browse_id)
+}
+
+/// Set this chat's pick. It takes effect on the next turn, which reads it at
+/// start, so a change mid-reply never touches the reply in flight.
+#[tauri::command]
+pub fn browse_thread_set_harness(
+    browse: tauri::State<'_, BrowseState>,
+    browse_id: String,
+    backend: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<(), String> {
+    if browse_id.trim().is_empty() {
+        return Err("no chat to set the model on".to_string());
+    }
+    let harness = validate_harness(backend, model, effort)?;
+    browse
+        .db
+        .set_browse_harness(&browse_id, &harness)
+        .map_err(|e| format!("failed to set the model: {e}"))
 }
 
 /// Kill the in-flight turn for a tab, if any. `read_browse` then sees the key
@@ -1375,6 +1465,84 @@ mod tests {
         // And every variable section sits after it.
         assert!(!shared.contains("first question"));
         assert!(!shared.contains("MISSION is currently active"));
+    }
+
+    /// A chat's pick rides both spawns (turn and consult share the builder):
+    /// its own `--model`/`--effort` when it has one, the `browse` seat's flags
+    /// otherwise, always ahead of `--resume` and after the invariant block.
+    #[test]
+    fn turn_args_carry_the_chats_pick_or_else_the_seats_flags() {
+        let _guard = crate::seat::store_guard();
+        crate::seat::set_seat_for_test(
+            "browse",
+            Some(crate::seat::SeatConfig {
+                model: Some("sonnet".to_string()),
+                effort: Some("medium".to_string()),
+                fallback: Some("haiku".to_string()),
+                ..Default::default()
+            }),
+        );
+        let invariant: Vec<String> = crate::claude_proc::BRIDGE_INVARIANT_ARGS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let tail = |args: &[String]| args[2 + invariant.len()..].to_vec();
+
+        let picked = BrowseHarness {
+            backend: Some("claude-code".into()),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        let args = claude_turn_args("hi".into(), &picked, Some("sid-1"));
+        assert_eq!(&args[..2], ["-p", "hi"]);
+        assert_eq!(&args[2..2 + invariant.len()], &invariant[..]);
+        assert_eq!(
+            tail(&args),
+            ["--model", "opus", "--effort", "high", "--fallback-model", "haiku", "--resume", "sid-1"],
+            "the pick replaces model and effort; the seat's fallback still rides along"
+        );
+        assert_eq!(
+            crate::seat::model_for_override("browse", picked.model.as_deref(), picked.effort.as_deref()).as_deref(),
+            Some("opus"),
+            "the ledger files the turn under the model that ran it"
+        );
+
+        // A model-only pick keeps the seat's effort.
+        let model_only = BrowseHarness { effort: None, ..picked.clone() };
+        assert_eq!(
+            tail(&claude_turn_args("hi".into(), &model_only, None)),
+            ["--model", "opus", "--effort", "medium", "--fallback-model", "haiku"]
+        );
+
+        // No pick (or an explicit Default): exactly the seat's flags.
+        for harness in [
+            BrowseHarness::default(),
+            BrowseHarness { backend: Some("claude-code".into()), ..Default::default() },
+        ] {
+            let args = claude_turn_args("hi".into(), &harness, Some("sid-2"));
+            let mut expected = crate::seat::flag_args("browse");
+            expected.extend(["--resume".to_string(), "sid-2".to_string()]);
+            assert_eq!(tail(&args), expected);
+        }
+        crate::seat::set_seat_for_test("browse", None);
+    }
+
+    #[test]
+    fn a_pick_is_validated_before_it_is_stored() {
+        let pick = validate_harness(Some(" claude-code ".into()), Some(" opus ".into()), Some("xhigh".into())).unwrap();
+        assert_eq!(pick, BrowseHarness { backend: Some("claude-code".into()), model: Some("opus".into()), effort: Some("xhigh".into()) });
+        // Default is still a pick: the provider is stored, model and effort are not.
+        assert_eq!(
+            validate_harness(None, Some("  ".into()), None).unwrap(),
+            BrowseHarness { backend: Some("claude-code".into()), model: None, effort: None }
+        );
+        // A bad model fails the spawn, so it is refused here.
+        assert!(validate_harness(None, Some("gpt-5".into()), None).unwrap_err().contains("gpt-5"));
+        // A bad effort only warns at the CLI, so it passes through.
+        assert_eq!(validate_harness(None, None, Some("ultra".into())).unwrap().effort.as_deref(), Some("ultra"));
+        // Codex has no browse runner yet; unknown providers never land.
+        assert!(validate_harness(Some("codex".into()), None, None).unwrap_err().contains("Codex"));
+        assert!(validate_harness(Some("cursor".into()), None, None).is_err());
     }
 
     #[test]

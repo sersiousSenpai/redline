@@ -12801,6 +12801,8 @@ pub fn run() {
             browse::browse_send,
             browse::browse_turn_status,
             browse::get_browse_thread,
+            browse::browse_thread_harness,
+            browse::browse_thread_set_harness,
             browse::browse_cancel,
             browse::browse_unqueue,
             browse::browse_discard,

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
+    AttachState, BrowseHarness, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
     Comment, CommentAttachment,
     CommentKind, CommentOffer, ResearchLink,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
@@ -637,7 +637,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 6;
+    const SCHEMA_VERSION: i64 = 7;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -658,6 +658,7 @@ impl Database {
             (4, Self::migrate_v4),
             (5, Self::migrate_v5),
             (6, Self::migrate_v6),
+            (7, Self::migrate_v7),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -709,12 +710,13 @@ impl Database {
             // and carry on. Only a forward stamp whose schema is genuinely
             // missing something we need is refused.
             //
-            // Except what v5 adds, which is applied first: a nullable column
-            // and a new table this build owns, both idempotent. A foreign
-            // lineage has never heard of either, and refusing over them would
+            // Except what v5–v7 add, which is applied first: nullable columns
+            // and new tables this build owns, all idempotent. A foreign
+            // lineage has never heard of them, and refusing over them would
             // brick a database that is otherwise perfectly usable.
             Self::migrate_v5(conn)?;
             Self::migrate_v6(conn)?;
+            Self::migrate_v7(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -831,7 +833,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "browse_threads", &["backend", "model", "effort"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -983,6 +985,24 @@ impl Database {
             }
         }
         crate::guided::migrate(conn)?;
+        Ok(())
+    }
+
+    /// v6 → v7: a browse chat's own provider/model/effort pick
+    /// (`BrowseHarness`), three nullable columns beside the resumable session
+    /// id. Idempotent, so it is also safe on the forward-stamp path.
+    fn migrate_v7(conn: &Connection) -> rusqlite::Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(browse_threads)")?;
+        let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // No table at all is a foreign schema; `verify_schema` names it.
+        if columns.is_empty() {
+            return Ok(());
+        }
+        for column in ["backend", "model", "effort"] {
+            if !columns.iter().any(|name| name == column) {
+                conn.execute(&format!("ALTER TABLE browse_threads ADD COLUMN {column} TEXT"), [])?;
+            }
+        }
         Ok(())
     }
 
@@ -5985,12 +6005,47 @@ impl Database {
     /// tool-output context (page snapshots, WebFetch, code reads, git diffs) grew
     /// past the model's window and now throws on every `--resume`. Dropping the id
     /// makes the next turn start a fresh session (re-embedding a snapshot) instead
-    /// of re-sending the over-limit context forever. The visible thread is kept.
+    /// of re-sending the over-limit context forever. The visible thread is kept,
+    /// and so is the chat's model pick: only the id is nulled, never the row.
     pub fn clear_browse_session(&self, browse_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "DELETE FROM browse_threads WHERE browse_id = ?1",
+            "UPDATE browse_threads SET claude_session_id = NULL WHERE browse_id = ?1",
             params![browse_id],
+        )?;
+        Ok(())
+    }
+
+    /// This chat's own provider/model/effort pick; all `None` when it has never
+    /// had one (or has no row yet).
+    pub fn get_browse_harness(&self, browse_id: &str) -> BrowseHarness {
+        self.lock_conn()
+            .query_row(
+                "SELECT backend, model, effort FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| {
+                    Ok(BrowseHarness {
+                        backend: row.get(0)?,
+                        model: row.get(1)?,
+                        effort: row.get(2)?,
+                    })
+                },
+            )
+            .unwrap_or_default()
+    }
+
+    /// Store this chat's pick. Upserts, and never touches `claude_session_id`:
+    /// a model change resumes the same Claude session on the next turn.
+    pub fn set_browse_harness(
+        &self,
+        browse_id: &str,
+        harness: &BrowseHarness,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "INSERT INTO browse_threads (browse_id, backend, model, effort)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(browse_id) DO UPDATE SET backend = ?2, model = ?3, effort = ?4",
+            params![browse_id, harness.backend, harness.model, harness.effort],
         )?;
         Ok(())
     }
@@ -15296,6 +15351,67 @@ body.
         Database::migrate_v6(&conn).unwrap(); // replay-safe
         drop(conn);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The browse chat's model pick is a v7 step, not a `migrate_v1` edit: a
+    /// database already at v6 never runs v1 again.
+    #[test]
+    fn a_v6_database_gains_the_browse_chat_pick() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO browse_threads (browse_id, claude_session_id) VALUES ('tab', 'sid');
+                 ALTER TABLE browse_threads DROP COLUMN backend;
+                 ALTER TABLE browse_threads DROP COLUMN model;
+                 ALTER TABLE browse_threads DROP COLUMN effort;
+                 PRAGMA user_version=6;",
+            )
+            .unwrap();
+            Database::verify_schema_at(&conn, 6).unwrap();
+            assert!(Database::verify_schema_at(&conn, 7).is_err());
+        }
+        let db = Database::open(&path).expect("a v6 database must open");
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        // The existing row keeps its session and reads as "never picked".
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid"));
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+        Database::migrate_v7(&db.lock_conn()).unwrap(); // replay-safe
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_browse_chat_pick_outlives_its_session_but_not_its_thread() {
+        let db = Database::open_in_memory().unwrap();
+        let pick = BrowseHarness {
+            backend: Some("claude-code".into()),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+
+        // Either write can come first; neither clobbers the other.
+        db.set_browse_harness("tab", &pick).unwrap();
+        db.set_browse_session("tab", "sid-1").unwrap();
+        assert_eq!(db.get_browse_harness("tab"), pick);
+        let sonnet = BrowseHarness { model: Some("sonnet".into()), effort: None, ..pick.clone() };
+        db.set_browse_harness("tab", &sonnet).unwrap();
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-1"), "a model change resumes the same session");
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+
+        // A context-overflow reset forgets the session only.
+        db.clear_browse_session("tab").unwrap();
+        assert_eq!(db.get_browse_session("tab"), None);
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+        db.set_browse_session("tab", "sid-2").unwrap();
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+
+        // Clear history drops the whole row, pick included.
+        db.delete_browse_thread("tab").unwrap();
+        assert_eq!(db.get_browse_session("tab"), None);
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
     }
 
     #[test]

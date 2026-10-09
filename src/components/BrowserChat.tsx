@@ -24,6 +24,8 @@ import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
+import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
+import { backendLabel } from "../lib/backendChoice";
 
 interface BrowserChatProps {
   /** Stable per-tab id — keys the browse-agent backend + persisted thread. */
@@ -128,6 +130,9 @@ export const BrowserChat = memo(function BrowserChat({
   // keyed by browseId: switching tabs rebinds it; a turn left streaming keeps
   // running backend-side and is picked up loss-free on return.
   const lastGroundedLabel = useRef<string | null>(null);
+  // This chat's provider/model/effort, which the next turn reads at start.
+  const harness = useBrowseHarness(browseId);
+  const agent = backendLabel(harness.pick.backend);
   const {
     messages,
     liveText,
@@ -150,6 +155,8 @@ export const BrowserChat = memo(function BrowserChat({
       historyArgs: { browseId },
       sendFailPrefix: "Couldn't reach the browse agent",
       buildSendArgs: async (text): Promise<Record<string, unknown>> => {
+        // A chat showing an inherited pick stores it before its first turn.
+        await harness.commit();
         const targetLabel = label;
         const targetWorkspaceId = workspaceId;
         // The backend treats a turn as "first" until the agent session is
@@ -265,6 +272,7 @@ export const BrowserChat = memo(function BrowserChat({
   function discard() {
     void invoke("browse_discard", { browseId }).catch(() => {});
     clear();
+    harness.forget();
     setDraft("");
   }
 
@@ -294,12 +302,17 @@ export const BrowserChat = memo(function BrowserChat({
           onClick={() => setConversationPanel((panel) => panel === "menu" ? null : "menu")}><MoreHorizontal size={17} /></button>
         <button type="button" className="rb-icon-button" aria-label="Close discussion" onClick={onClose}><X size={16} /></button>
       </div>
-      {/* Only when the tab is the exception: with linked mode off every tab
-          has its own chat, and the title already says whose. */}
-      {!linked && linkedMode && <div className="rb-thread-context px-3 py-1">This tab’s own chat</div>}
-      {anchoredFromTitle && <div className="rb-thread-context shrink-0 px-3 py-1">
-        <span>{linked ? "Following" : "From"} {anchoredFromTitle}</span>
-      </div>}
+      {/* One thin row: the model picker, with the context on its right. Not in
+          the header — that row is full at the dock's ~360px. */}
+      <div className="rb-thread-harness" data-browser-chat-harness>
+        <BrowseHarnessChip harness={harness} />
+        <div className="rb-thread-context">
+          {/* Only when the tab is the exception: with linked mode off every
+              tab has its own chat, and the title already says whose. */}
+          {!linked && linkedMode && <span>This tab’s own chat</span>}
+          {anchoredFromTitle && <span>{linked ? "Following" : "From"} {anchoredFromTitle}</span>}
+        </div>
+      </div>
       {conversationPanel === "menu" && <BrowserPopover anchor={moreRef} title="Conversation actions" onClose={() => setConversationPanel(null)}>
         <BrowserMenuItem onClick={() => { setConversationPanel(null); onResearch?.(); }}>Start a research mission</BrowserMenuItem>
         <div className="rb-menu-item" role="group" aria-label="Text size"><span className="rb-menu-label">Text size</span>
@@ -328,6 +341,7 @@ export const BrowserChat = memo(function BrowserChat({
             <MessageBubble
               key={m.id}
               msg={m}
+              agent={agent}
               meter={meters[m.id]}
               contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
@@ -354,7 +368,7 @@ export const BrowserChat = memo(function BrowserChat({
                 fills the wait a blank ticker used to. */}
             <StreamingBubble
               text={liveText}
-              agent="Claude"
+              agent={agent}
               inspect={{ surface: "browse", key: browseId }}
               meter={meter}
               activity={activity}
@@ -394,6 +408,7 @@ export const BrowserChat = memo(function BrowserChat({
 
 function MessageBubble({
   msg,
+  agent,
   onOpenLink,
   onSendToRedline,
   onSendToDrafter,
@@ -405,6 +420,8 @@ function MessageBubble({
   contextReset,
 }: {
   msg: BrowseMessage;
+  /** The provider's name over an assistant reply. */
+  agent: string;
   onOpenLink?: (url: string) => void;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
@@ -437,7 +454,7 @@ function MessageBubble({
           color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
         }}
       >
-        {isUser ? "You" : "Claude"}
+        {isUser ? "You" : agent}
       </span>
       {isError ? (
         <div
