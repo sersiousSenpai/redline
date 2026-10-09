@@ -32,10 +32,15 @@ pub fn classify_line(v: &Value) -> StreamLine {
     }
 }
 
+/// Session markers a Redline process must not inherit. Besides Claude's own,
+/// a Redline started from a dock terminal (self-develop, `tauri dev`) would
+/// otherwise lend that terminal's `REDLINE_TERMINAL_ID` to every headless
+/// agent it spawns, and their hooks would report on the outer terminal.
 pub fn is_inherited_session_var(name: &str) -> bool {
     matches!(name, "CLAUDECODE" | "CLAUDE_CODE_CHILD_SESSION" | "CLAUDE_CODE_ENTRYPOINT"
         | "CLAUDE_CODE_EXECPATH" | "CLAUDE_CODE_SESSION_ID" | "CLAUDE_CODE_SSE_PORT"
         | "CLAUDE_EFFORT" | "CLAUDE_PID")
+        || name == crate::term_attention::ENV_TERMINAL_ID
         || name.starts_with("CLAUDE_CODE_SESSION_") || name.starts_with("CLAUDE_CODE_MESSAGING_")
 }
 
@@ -44,17 +49,22 @@ pub fn scrub_inherited_session_env() {
     let removed: Vec<_> = std::env::vars_os().map(|(name, _)| name)
         .filter(|name| name.to_str().is_some_and(is_inherited_session_var)).collect();
     for name in &removed { std::env::remove_var(name); }
-    if !removed.is_empty() { eprintln!("Redline cleared inherited Claude session variables: {}", removed.iter().map(|name| name.to_string_lossy()).collect::<Vec<_>>().join(", ")); }
+    if !removed.is_empty() { eprintln!("Redline cleared inherited session variables: {}", removed.iter().map(|name| name.to_string_lossy()).collect::<Vec<_>>().join(", ")); }
 }
 
 pub(crate) fn is_plain_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Claude Code's config directory: `CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub(crate) fn claude_config_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from)
+        .or_else(|| crate::fsbrowse::home_dir().map(|home| std::path::PathBuf::from(home).join(".claude")))
+}
+
 pub(crate) fn find_transcript(session_id: &str) -> Option<std::path::PathBuf> {
     if !is_plain_session_id(session_id) { return None; }
-    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from)
-        .or_else(|| crate::fsbrowse::home_dir().map(|home| std::path::PathBuf::from(home).join(".claude")))?;
+    let config = claude_config_dir()?;
     let file = format!("{session_id}.jsonl");
     for entry in std::fs::read_dir(config.join("projects")).ok()?.flatten() {
         let candidate = entry.path().join(&file);
@@ -706,7 +716,7 @@ mod tests {
 
     #[test]
     fn inherited_session_denylist_preserves_user_configuration() {
-        for name in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT", "CLAUDE_EFFORT", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"] {
+        for name in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT", "CLAUDE_EFFORT", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "REDLINE_TERMINAL_ID"] {
             assert!(is_inherited_session_var(name), "must scrub {name}");
         }
         for name in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_DISABLE_WORKFLOWS", "HOME", "PATH", "CLAUDE_MODEL", "REDLINE_AGENT_SEAT"] {

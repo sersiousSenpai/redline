@@ -369,6 +369,11 @@ impl PtyState {
             .collect()
     }
 
+    /// Whether `id` names a terminal whose shell is still running.
+    pub fn is_live(&self, id: &str) -> bool {
+        session_of(self, id).is_some_and(|session| lock_ok(&session).alive.load(Ordering::Acquire))
+    }
+
     fn entries(&self) -> Vec<PtyInfo> {
         // Snapshot first: never wait on session I/O while holding the registry.
         let sessions: Vec<_> = lock_ok(&self.0)
@@ -461,6 +466,9 @@ pub fn pty_spawn(
     // protected /v1 routes with this per-boot token. Truly external
     // terminals never see it — that asymmetry IS the auth model.
     cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
+    // Names this terminal to the attention hooks an agent in it fires, with
+    // no process walk. External terminals don't carry it and are ignored.
+    cmd.env(crate::term_attention::ENV_TERMINAL_ID, &id);
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         // The terminal is the app's busiest surface and emitted NOTHING into
@@ -783,7 +791,7 @@ pub fn pty_detach(state: tauri::State<'_, PtyState>, id: String, attachment_id: 
 /// Registry membership — the handoff's spawn probe.
 #[tauri::command]
 pub fn pty_is_live(state: tauri::State<'_, PtyState>, id: String) -> bool {
-    session_of(&state, &id).is_some_and(|session| lock_ok(&session).alive.load(Ordering::Acquire))
+    state.is_live(&id)
 }
 
 #[tauri::command(async)]
@@ -1005,6 +1013,151 @@ fn parse_lsof_cwds(output: &str) -> HashMap<u32, String> {
         }
     }
     out
+}
+
+/// What a terminal is running right now, for the tile wall's state badges
+/// (terminal-wall Phase 1). Read for every terminal, tiled or not, so a
+/// hidden tile whose OSC title never updates still reports its program.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TermProc {
+    id: String,
+    /// The foreground job's leader by executable name (`claude`, `node`,
+    /// `zsh`), login dash stripped. `None` when the tty or the process table
+    /// could not be read.
+    fg_comm: Option<String>,
+    /// The shell itself holds the foreground: nothing is running in it.
+    fg_is_shell: bool,
+    /// TCP ports that a process descended from this terminal's shell is
+    /// listening on, ascending.
+    ports: Vec<u16>,
+}
+
+/// One row per live terminal from two subprocesses for the whole fleet — one
+/// `ps` process table and one `lsof` of listening sockets — never one per
+/// terminal (perf-budget rule 5). The process table also serves the
+/// listener → shell ancestry walk, which would otherwise fork a `ps` per hop.
+#[tauri::command(async)]
+pub fn pty_procs(state: tauri::State<'_, PtyState>) -> Vec<TermProc> {
+    let terminals = foreground_snapshot(&state);
+    if terminals.is_empty() {
+        return Vec::new();
+    }
+    let table = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+        .map(|o| parse_ps_table(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    // Don't gate on exit status: lsof exits non-zero when it can't inspect
+    // some process, while still printing the ones it could.
+    let listeners = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"])
+        .output()
+        .map(|o| parse_lsof_listeners(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    term_procs(&terminals, &table, &listeners)
+}
+
+/// `(id, shell pid, foreground process group)` for every live terminal.
+fn foreground_snapshot(state: &PtyState) -> Vec<(String, Option<u32>, Option<u32>)> {
+    // Snapshot the Arcs first: never lock a session while holding the registry.
+    let sessions: Vec<_> = lock_ok(&state.0)
+        .iter()
+        .map(|(id, session)| (id.clone(), session.clone()))
+        .collect();
+    sessions
+        .into_iter()
+        .filter_map(|(id, session)| {
+            let session = lock_ok(&session);
+            if !session.alive.load(Ordering::Acquire) {
+                return None;
+            }
+            #[cfg(unix)]
+            let foreground = session
+                .master
+                .process_group_leader()
+                .and_then(|pgid| u32::try_from(pgid).ok());
+            #[cfg(not(unix))]
+            let foreground = None;
+            Some((id, session.pid, foreground))
+        })
+        .collect()
+}
+
+/// `ps -A -o pid=,ppid=,comm=` → pid → (ppid, comm). The command name is the
+/// last column and may contain spaces (an app bundle's executable path).
+fn parse_ps_table(output: &str) -> HashMap<u32, (u32, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let rest = rest.trim_start();
+            let (ppid, comm) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            Some((pid.parse().ok()?, (ppid.parse().ok()?, comm.trim().to_string())))
+        })
+        .collect()
+}
+
+/// The program's name as a person would say it: `/usr/local/bin/node` →
+/// `node`, a login shell's `-zsh` → `zsh`. `comm` rather than the process
+/// title, because claude retitles itself to its version number.
+fn comm_name(comm: &str) -> Option<String> {
+    let name = comm.rsplit('/').next()?.trim_start_matches('-').trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Demultiplex `lsof -Fpn` listening sockets into pid → ports. Names arrive
+/// as `*:5173`, `127.0.0.1:7676` or `[::1]:5173`; the port follows the last
+/// colon. Scoped by the `p` field exactly like `parse_lsof_cwds`.
+fn parse_lsof_listeners(output: &str) -> HashMap<u32, Vec<u16>> {
+    let mut out: HashMap<u32, Vec<u16>> = HashMap::new();
+    let mut current_pid: Option<u32> = None;
+    for line in output.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current_pid = pid.trim().parse().ok();
+        } else if let Some(name) = line.strip_prefix('n') {
+            let port = name.rsplit_once(':').and_then(|(_, port)| port.parse::<u16>().ok());
+            if let (Some(pid), Some(port)) = (current_pid, port) {
+                out.entry(pid).or_default().push(port);
+            }
+        }
+    }
+    out
+}
+
+fn term_procs(
+    terminals: &[(String, Option<u32>, Option<u32>)],
+    table: &HashMap<u32, (u32, String)>,
+    listeners: &HashMap<u32, Vec<u16>>,
+) -> Vec<TermProc> {
+    let shells: HashMap<u32, String> = terminals
+        .iter()
+        .filter_map(|(id, shell, _)| shell.map(|pid| (pid, id.clone())))
+        .collect();
+    let mut ports: HashMap<String, Vec<u16>> = HashMap::new();
+    for (pid, listening) in listeners {
+        if let Some(id) = walk_to_terminal(*pid, &shells, |p| table.get(&p).map(|(ppid, _)| *ppid)) {
+            ports.entry(id).or_default().extend(listening);
+        }
+    }
+    let mut rows: Vec<TermProc> = terminals
+        .iter()
+        .map(|(id, shell, foreground)| {
+            let mut ports = ports.remove(id).unwrap_or_default();
+            ports.sort_unstable();
+            ports.dedup();
+            TermProc {
+                id: id.clone(),
+                fg_comm: foreground
+                    .and_then(|pgid| table.get(&pgid))
+                    .and_then(|(_, comm)| comm_name(comm)),
+                fg_is_shell: foreground.is_some() && foreground == shell,
+                ports,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows
 }
 
 #[cfg(test)]
@@ -1541,6 +1694,90 @@ mod tests {
         let map = parse_lsof_cwds("pXYZ\nn/never/attributed\np400\nn/real\n");
         assert_eq!(map.len(), 1);
         assert_eq!(map.get(&400).map(String::as_str), Some("/real"));
+    }
+
+    #[test]
+    fn ps_table_parses_paths_with_spaces_and_skips_garbage() {
+        let table = parse_ps_table(
+            "    1     0 /sbin/launchd\n  412     1 /Applications/Foo Bar.app/Contents/MacOS/Foo Bar\n\
+             64166 64165 -zsh\nnot a row\n  77   1\n",
+        );
+        assert_eq!(table.get(&1), Some(&(0, "/sbin/launchd".to_string())));
+        assert_eq!(table.get(&412).map(|r| r.1.as_str()), Some("/Applications/Foo Bar.app/Contents/MacOS/Foo Bar"));
+        assert_eq!(table.get(&64166), Some(&(64165, "-zsh".to_string())));
+        assert_eq!(table.get(&77), Some(&(1, String::new())), "a missing name is empty, not a misparse");
+        assert_eq!(table.len(), 4);
+    }
+
+    #[test]
+    fn comm_names_drop_the_path_and_the_login_dash() {
+        assert_eq!(comm_name("/usr/local/bin/node").as_deref(), Some("node"));
+        assert_eq!(comm_name("-zsh").as_deref(), Some("zsh"));
+        assert_eq!(comm_name("claude").as_deref(), Some("claude"));
+        assert_eq!(comm_name("/Applications/Foo Bar.app/Contents/MacOS/Foo Bar").as_deref(), Some("Foo Bar"));
+        assert_eq!(comm_name(""), None);
+        assert_eq!(comm_name("/bin/"), None);
+    }
+
+    #[test]
+    fn lsof_listeners_read_the_port_after_the_last_colon() {
+        let listeners = parse_lsof_listeners("p100\nf20\nn*:5173\nf21\nn[::1]:5173\np200\nf3\nn127.0.0.1:7676\nn*:*\nnbogus\np300\n");
+        assert_eq!(listeners.get(&100), Some(&vec![5173, 5173]));
+        assert_eq!(listeners.get(&200), Some(&vec![7676]));
+        assert_eq!(listeners.get(&300), None);
+        assert!(parse_lsof_listeners("n*:80\n").is_empty(), "a name before any p is dropped");
+    }
+
+    /// A dev server two levels under one terminal's shell, an agent in the
+    /// foreground of another, and a listener no terminal owns.
+    #[test]
+    fn term_procs_attribute_ports_by_ancestry_and_name_the_foreground() {
+        let table = parse_ps_table(
+            "10 1 -zsh\n11 10 npm\n12 11 /usr/local/bin/node\n20 1 -zsh\n21 20 claude\n30 1 /usr/sbin/sshd\n",
+        );
+        let listeners = HashMap::from([(12, vec![5173, 24678]), (30, vec![22])]);
+        let terminals = vec![
+            ("b".to_string(), Some(20), Some(21)),
+            ("a".to_string(), Some(10), Some(11)),
+            ("c".to_string(), Some(40), Some(40)),
+            ("d".to_string(), None, None),
+        ];
+        let rows = term_procs(&terminals, &table, &listeners);
+        let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap().clone();
+        assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c", "d"]);
+        assert_eq!(row("a"), TermProc { id: "a".into(), fg_comm: Some("npm".into()), fg_is_shell: false, ports: vec![5173, 24678] });
+        assert_eq!(row("b"), TermProc { id: "b".into(), fg_comm: Some("claude".into()), fg_is_shell: false, ports: vec![] });
+        assert!(row("c").fg_is_shell, "the shell holds its own foreground");
+        assert_eq!(row("c").fg_comm, None, "a pid missing from the table has no name");
+        assert_eq!(row("d"), TermProc { id: "d".into(), fg_comm: None, fg_is_shell: false, ports: vec![] });
+        assert!(rows.iter().all(|r| !r.ports.contains(&22)), "a listener outside every terminal is nobody's");
+    }
+
+    /// The real tty and the real process table: the test shell execs `cat`,
+    /// which then leads the terminal's foreground process group.
+    #[test]
+    fn foreground_of_a_real_pty_is_read_from_its_tty() {
+        let terminal = TestPty::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let snapshot = foreground_snapshot(&terminal.state);
+            let table = std::process::Command::new("ps")
+                .args(["-A", "-o", "pid=,ppid=,comm="])
+                .output()
+                .map(|o| parse_ps_table(&String::from_utf8_lossy(&o.stdout)))
+                .unwrap();
+            let rows = term_procs(&snapshot, &table, &HashMap::new());
+            assert_eq!(rows.len(), 1);
+            if rows[0].fg_comm.as_deref() == Some("cat") {
+                assert!(rows[0].fg_is_shell, "cat replaced the shell process itself");
+                assert_eq!(snapshot[0].2, terminal.child.process_id());
+                break;
+            }
+            assert!(Instant::now() < deadline, "foreground never became cat: {rows:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        terminal.output.close();
+        assert!(foreground_snapshot(&terminal.state).is_empty(), "a dead terminal is not reported");
     }
 
     #[test]

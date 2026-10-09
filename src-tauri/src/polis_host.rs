@@ -312,6 +312,15 @@ impl IngestObserver for RedlineIngest {
     /// trigger never reaches the lake, and the reviewer's own next prompt in
     /// that same terminal is captured byte-for-byte as it always was.
     fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        // A prompt from a dock terminal (the Codex prompt hook names it):
+        // that terminal's agent is working now.
+        if let Some(terminal_id) = cx
+            .headers
+            .get(crate::term_attention::HEADER)
+            .filter(|id| crate::claude_proc::is_plain_session_id(id))
+        {
+            crate::term_attention::observe_prompt(&self.app, terminal_id, cx.session_id);
+        }
         // Capture runs before the first plan creates a ReviewSession. Bind its
         // unique launch token now; handle_plan_core consumes the chosen fields
         // after creating the session. Ambiguous legacy body hashes never bind.

@@ -75,13 +75,29 @@ mod tests {
 
     /// The cwd polls fork `lsof` — per call for `pty_cwd`, once for the whole
     /// fleet for `pty_cwds` (the batched twin the tile grid polls every tick).
-    /// A subprocess fork on the WebView main thread is exactly perf-budget
-    /// rule 4.
+    /// `pty_procs` (the wall's foreground program and ports) forks one `ps`
+    /// and one `lsof` for the whole fleet. A subprocess fork on the WebView
+    /// main thread is exactly perf-budget rule 4.
     #[test]
     fn heavy_pty_cwd_commands_stay_async() {
         let src = include_str!("pty.rs");
         assert_async_command(src, "pty.rs", "pty_cwd");
         assert_async_command(src, "pty.rs", "pty_cwds");
+        assert_async_command(src, "pty.rs", "pty_procs");
+    }
+
+    /// Rule 5: what the wall polls scales per call, never per terminal. One
+    /// `ps` table and one `lsof` for every terminal, and the ancestry walk
+    /// reads that table instead of forking `ps` per hop (`ppid_of`).
+    #[test]
+    fn pty_procs_forks_twice_for_the_whole_fleet() {
+        let src = include_str!("pty.rs");
+        let start = src.find("pub fn pty_procs(").unwrap();
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        assert_eq!(body.matches("Command::new(").count(), 2, "{body}");
+        assert!(!body.contains("ppid_of"), "the walk must read the snapshot, not fork per hop");
+        let assemble = &src[src.find("fn term_procs(").unwrap()..];
+        assert!(!assemble[..assemble.find("\n}\n").unwrap()].contains("Command::new("));
     }
 
     /// The Localhost dashboard's scan forks three subprocesses and reads
