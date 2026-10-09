@@ -774,7 +774,6 @@ export const TerminalTabs = memo(
     onTileCountChange?.(tiles.length, shape.rows);
   }, [tiles.length, shape.rows, onTileCountChange]);
 
-
   // A tile's view is genuinely seen once it's shown and the dock is open.
   useEffect(() => {
     if (collapsed) return;
@@ -1418,6 +1417,9 @@ export const TerminalTabs = memo(
   // to the shelf. The click that ends a drag is swallowed, so the chip's own
   // click (open the menu, place by rule) never fires on top of the drop.
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  // A drag in flight (past the threshold) — parking holds still for it. A
+  // press that never travels doesn't count.
+  const draggingRef = useRef(false);
   const dropTerminal = (id: string, target: number) => {
     if (!tabsRef.current.some((t) => t.id === id)) return;
     if (tilesRef.current[target] === undefined) return;
@@ -1451,6 +1453,7 @@ export const TerminalTabs = memo(
     });
     const start = () => {
       active = true;
+      draggingRef.current = true;
       try {
         handle.setPointerCapture(pointerId);
       } catch {
@@ -1464,6 +1467,7 @@ export const TerminalTabs = memo(
       });
       ghost = document.createElement("div");
       ghost.className = "rl-tile-drag-ghost";
+      ghost.setAttribute("aria-hidden", "true");
       ghost.textContent = label;
       document.body.appendChild(ghost);
       document.documentElement.dataset.rlTileDrag = "";
@@ -1485,6 +1489,7 @@ export const TerminalTabs = memo(
       follow.cancel();
       dragCleanupRef.current = null;
       if (!active) return;
+      draggingRef.current = false;
       hintTileRef.current(null);
       ghost?.remove();
       delete document.documentElement.dataset.rlTileDrag;
@@ -1537,7 +1542,7 @@ export const TerminalTabs = memo(
   parkRef.current = parkTile;
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (hoverRef.current || isResizing() || dragCleanupRef.current) return;
+      if (hoverRef.current || isResizing() || draggingRef.current) return;
       const index = parkCandidate({
         tiles: tilesRef.current,
         states: statesRef.current,
