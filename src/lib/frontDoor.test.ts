@@ -312,6 +312,33 @@ describe("chat context wiring", () => {
   });
 });
 
+// Responsiveness, Phase 2: typing touches only the component being typed in.
+// The sentence was App-level persisted state with no debounce, so every
+// keystroke re-rendered the whole shell and wrote localStorage synchronously.
+// It is the composer's shared draft now; App may read and write it at the
+// moments something is sent or handed back, and never subscribe to it.
+describe("the composer's sentence stays out of App", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("App holds no state for it and never subscribes to it", () => {
+    expect(app).not.toContain('"redline.frontDoor.text"');
+    expect(app).not.toMatch(/const \[frontDoorText\b/);
+    expect(app).not.toMatch(/\buseSharedDraft\(/);
+    const stateKeys = [...app.matchAll(/\buse(?:PersistedState|State)(?:<[^()]*?>)?\(\s*([^,)]*)/g)].map((m) => m[1].trim());
+    expect(stateKeys).not.toContain("FRONT_DOOR_TEXT_KEY");
+  });
+
+  it("hands neither composer a copy of it", () => {
+    const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
+    expect(door).toContain("<FrontDoor");
+    expect(door).not.toMatch(/\btext=\{/);
+    expect(door).not.toContain("onTextChange");
+    // The room is told where the sentence lives instead.
+    const room = app.slice(app.indexOf("<ChatRoom"), app.indexOf("harness={", app.indexOf("<ChatRoom")));
+    expect(room).toContain("composer={{ draftKey: FRONT_DOOR_TEXT_KEY,");
+  });
+});
+
 // The card's caret (island plan + floating-monochat): only a hover peek opens
 // without reaching for the composer, and nothing deliberate inherits that.
 describe("the card's quiet open", () => {

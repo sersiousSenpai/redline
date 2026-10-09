@@ -12,6 +12,12 @@
 // shared property. The composer keybindings and chip templater below are not,
 // and stay.
 
+/** Where the composer's sentence lives: a shared draft (hooks/useSharedDraft)
+ *  that the composer subscribes to and App only reads when something is sent,
+ *  so a keystroke re-renders the composer and never the shell around it. The
+ *  key predates the move, so a half-typed prompt survives the upgrade too. */
+export const FRONT_DOOR_TEXT_KEY = "redline.frontDoor.text";
+
 /** Where the composer sends its text. A sticky setting, not a one-off: you
  *  pick it in `Plan ▾` and it stays picked, so a session spent shaping long
  *  briefs doesn't mean reaching for a modifier on every one.

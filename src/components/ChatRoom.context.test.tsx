@@ -27,6 +27,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("./MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div>{body}</div> }));
 vi.mock("./StreamingBubble", () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
 import { ChatRoom, type ChatRoomProps, type ChatWorkbenchComposer } from "./ChatRoom";
+import { writeSharedDraft } from "../hooks/useSharedDraft";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
@@ -48,9 +49,10 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 const PLAN = "## Context — This plan (v3, Warm chat)\n\nPlan session: s-7\n\n# Warm chat";
 
 async function render(props: Partial<ChatRoomProps> = {}, typed = "is this sound?") {
+  writeSharedDraft("test.chatComposer", typed);
   await act(async () => root.render(<ChatRoom companionId="chat-1" cwd="/Users/me/redline" onSelectChat={() => {}} onEmpty={() => {}}
     dictationEnabled={false} onClose={() => {}}
-    composer={{ text: typed, onTextChange: () => {}, render: (_actions, wb) => { workbench = wb; return null; } }}
+    composer={{ draftKey: "test.chatComposer", render: (_actions, wb) => { workbench = wb; return null; } }}
     {...props} />));
 }
 const lastSend = () => turn.send.mock.calls[turn.send.mock.calls.length - 1];

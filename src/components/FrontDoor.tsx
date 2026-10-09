@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -20,7 +21,9 @@ import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
 import { useDictation } from "../lib/useDictation";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
+  FRONT_DOOR_TEXT_KEY,
   fallbackDestination,
   frontDoorSuggestions,
   projectNameFromPrompt,
@@ -32,6 +35,7 @@ import {
   attemptLaunch as gateLaunch,
   attemptRun as gateRun,
   MIN_COMBINE,
+  resolveLaunchProject,
   type ProjectChoice,
 } from "../lib/launch";
 import type { CombineSource } from "../types";
@@ -64,6 +68,9 @@ import { runSupported } from "../lib/planLaunchCommand";
 // plan, an unapproved `/hooks` never delivers), so ⏎ is refused with the fix
 // rendered inside the island itself. See lib/readiness.ts for the derivation.
 
+/** The composer can size itself to its text in CSS (see `.rl-fd-input`). */
+const FIELD_SIZING = !!globalThis.CSS?.supports("field-sizing", "content");
+
 function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || path;
@@ -93,13 +100,17 @@ export interface FrontDoorProps {
    *  `bootSettled && !loading`, which made a decorative 750 ms plate animation
    *  into a hard floor on when the composer would accept a keystroke. */
   visible: boolean;
-  text: string;
-  onTextChange: (next: string | ((prev: string) => string)) => void;
   choice: ProjectChoice;
   onChoiceChange: (next: ProjectChoice) => void;
   projectOptions: ProjectOption[];
-  /** Where ⏎ would launch right now — App runs `resolveLaunchProject`. */
-  resolvedProject: string | null;
+  /** The rest of what `resolveLaunchProject` reads: the folder open in the
+   *  sidebar and the last repo a launch shipped into. */
+  openFolder: string | null;
+  lastLaunchProject: string | null;
+  /** Where ⏎ would launch, whenever that changes. The composer resolves it,
+   *  because the sentence is the composer's; App needs it for the readiness
+   *  it hands back. */
+  onResolvedProjectChange: (project: string | null) => void;
   attachments: string[];
   onAttachmentsChange: (next: string[]) => void;
   /** Plan sessions handed over by the sidebar's Combine picker. While these
@@ -213,12 +224,12 @@ export function FrontDoor(props: FrontDoorProps) {
     autoFocusOnShow = true,
     chatPending = false,
     accessories,
-    text,
-    onTextChange,
     choice,
     onChoiceChange,
     projectOptions,
-    resolvedProject,
+    openFolder,
+    lastLaunchProject,
+    onResolvedProjectChange,
     attachments,
     onAttachmentsChange,
     combine = [],
@@ -256,6 +267,20 @@ export function FrontDoor(props: FrontDoorProps) {
     chats = [],
     onOpenChat,
   } = props;
+
+  // The sentence is the composer's own, so a keystroke re-renders this door
+  // and nothing around it. App reads it only when something is sent.
+  const [text, setText] = useSharedDraft(FRONT_DOOR_TEXT_KEY);
+  // Where ⏎ would launch. The guess regex-scans the sentence once per known
+  // project, so it runs on the deferred text and the keystroke paints first.
+  const deferredText = useDeferredValue(text);
+  const resolvedProject = useMemo(
+    () => resolveLaunchProject(deferredText, choice, { projectOptions, openFolder, lastLaunchProject }),
+    [deferredText, choice, projectOptions, openFolder, lastLaunchProject],
+  );
+  useEffect(() => {
+    onResolvedProjectChange(resolvedProject);
+  }, [resolvedProject, onResolvedProjectChange]);
 
   const [entered, setEntered] = useState(false);
   useEffect(() => {
@@ -387,11 +412,20 @@ export function FrontDoor(props: FrontDoorProps) {
   // text instead of scrolling inside a fixed frame — up to the cap, after
   // which it scrolls. That inner scroller is the one on this surface that is
   // intentional and it stays.
-  useLayoutEffect(() => {
-    const el = taRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
+  //
+  // Where WebKit has `field-sizing: content` the stylesheet does all of it
+  // (`.rl-fd-input`, under the same `--rl-fd-input-max` cap) and a keystroke
+  // reads no layout at all. Elsewhere it is one measure per frame, ahead of
+  // that frame's paint, instead of a forced reflow inside every keystroke.
+  useEffect(() => {
+    if (FIELD_SIZING) return;
+    const frame = requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [text, inputCap, width]);
 
   // Type-to-start handoff. A LAYOUT effect, not a passive one: it must focus
@@ -403,8 +437,8 @@ export function FrontDoor(props: FrontDoorProps) {
     lastNonce.current = focusNonce;
     taRef.current?.focus();
     const seed = consumeSeed();
-    if (seed) onTextChange((prev) => prev + seed);
-  }, [focusNonce, consumeSeed, onTextChange]);
+    if (seed) setText((prev) => prev + seed);
+  }, [focusNonce, consumeSeed, setText]);
 
   // Autofocus when the door is the resting state — the whole point is that
   // you can start typing without aiming at anything.
@@ -422,7 +456,7 @@ export function FrontDoor(props: FrontDoorProps) {
   const dictation = useDictation({
     enabled: dictationEnabled,
     onFinal: (spoken) =>
-      onTextChange((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
+      setText((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
   });
 
   // The island's growth into the document editor. Declared here, above the
@@ -623,7 +657,7 @@ export function FrontDoor(props: FrontDoorProps) {
     onChoiceChange({ path });
     setOffer(null);
     // Launch into the fresh folder directly: the chip's state change hasn't
-    // reached App's `resolvedProject` yet, and this launch is that folder's
+    // reached `resolvedProject` yet, and this launch is that folder's
     // whole reason to exist.
     if (launchAfter) (offer.run ? onRun : onLaunch)(path);
   };
@@ -830,7 +864,7 @@ export function FrontDoor(props: FrontDoorProps) {
             spellCheck
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            onChange={(e) => onTextChange(e.target.value)}
+            onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
           />
           {dictation.listening && (
@@ -1050,7 +1084,7 @@ export function FrontDoor(props: FrontDoorProps) {
               className="rl-fd-suggestion"
               tabIndex={suggestionsHidden ? -1 : 0}
               onClick={() => {
-                onTextChange(s.text);
+                setText(s.text);
                 taRef.current?.focus();
               }}
             >

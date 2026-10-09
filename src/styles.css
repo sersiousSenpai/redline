@@ -3934,6 +3934,11 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   max-height: var(--rl-fd-input-max, 300px);
   overflow-y: auto;
 }
+/* Grows with its text without a script measuring it per keystroke; where this
+   is missing, FrontDoor.tsx measures once a frame instead. */
+@supports (field-sizing: content) {
+  .rl-fd-input { field-sizing: content; }
+}
 .rl-fd-input::placeholder {
   color: color-mix(in srgb, var(--color-ink-muted) 78%, transparent);
 }

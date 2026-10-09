@@ -51,7 +51,8 @@ import {
   seedStep,
   type LandingPhase,
 } from "./lib/landing";
-import { type LaunchDestination } from "./lib/frontDoor";
+import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
+import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
 import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
@@ -714,6 +715,12 @@ const surfaceFallback =
     </div>
   );
 
+// The Front Door's sentence, read and written WITHOUT subscribing to it: the
+// composer owns it, and App touches it only when something is sent, cleared
+// or handed back.
+const getFrontDoorText = () => readSharedDraft(FRONT_DOOR_TEXT_KEY);
+const setFrontDoorText = (text: string) => writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
+
 function App() {
   // Every launch opens the Redline card, on every surface — boot lands on it
   // with the caret in its composer, which also makes it stay. There is no
@@ -1370,15 +1377,16 @@ function App() {
   }, []);
 
   // ── The floating launch composer (existing preference keys are retained) ──────────────────────────────────────────────────────
-  // All three of these are PERSISTED, not plain useState. A half-typed prompt
-  // has to survive a surface switch, a pane toggle and a reload — a front door
+  // All of these are PERSISTED, not plain useState. A half-typed prompt has
+  // to survive a surface switch, a pane toggle and a reload — a front door
   // that eats your sentence is exactly the small betrayal this whole surface
   // exists to remove. The pending launch itself deliberately does NOT
   // persist: a stale "Planning…" card must not outlive a restart.
-  const [frontDoorText, setFrontDoorText] = usePersistedState(
-    "redline.frontDoor.text",
-    "",
-  );
+  //
+  // The sentence itself is not held here at all. It is the composer's shared
+  // draft (FRONT_DOOR_TEXT_KEY, persisted on a debounce and on pagehide), so a
+  // keystroke re-renders the composer instead of this whole shell; App reads
+  // it through `getFrontDoorText` at the moment something is sent.
   const [frontDoorProject, setFrontDoorProject] =
     usePersistedState<ProjectChoice>("redline.frontDoor.project", null);
   const [frontDoorAttachments, setFrontDoorAttachments] = usePersistedState<
@@ -1398,8 +1406,6 @@ function App() {
   // Read by `repayPending`, which runs long after the render that armed the
   // launch — it must see what the composer holds NOW, not at launch time, or
   // giving a sentence back would clobber whatever was typed since.
-  const frontDoorTextRef = useRef(frontDoorText);
-  frontDoorTextRef.current = frontDoorText;
   const frontDoorAttachmentsRef = useRef(frontDoorAttachments);
   frontDoorAttachmentsRef.current = frontDoorAttachments;
   const frontDoorCombineRef = useRef(frontDoorCombineRaw);
@@ -5996,7 +6002,7 @@ function App() {
     if (p.restore.kind === "composer") {
       const next = restoreInto(
         {
-          text: frontDoorTextRef.current,
+          text: getFrontDoorText(),
           attachments: frontDoorAttachmentsRef.current,
           combine: frontDoorCombineRef.current,
         },
@@ -7048,21 +7054,17 @@ function App() {
     return () => clearInterval(t);
   }, [pendingLaunch]);
 
-  const frontDoorResolvedProject = useMemo(
-    () =>
-      resolveLaunchProject(frontDoorText, frontDoorProject, {
-        projectOptions,
-        openFolder: sidebarTab.kind === "folder" ? sidebarTab.id : null,
-        lastLaunchProject,
-      }),
-    [
-      frontDoorText,
-      frontDoorProject,
+  // Where ⏎ would launch, as the composer last reported it: the composer
+  // resolves it from its own sentence, so this changes when the target does
+  // and never per keystroke. A launch resolves afresh from the text it sends.
+  const [frontDoorResolvedProject, setFrontDoorResolvedProject] = useState<string | null>(null);
+  const frontDoorOpenFolder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
+  const resolveFrontDoorProject = (text: string) =>
+    resolveLaunchProject(text, frontDoorProject, {
       projectOptions,
-      sidebarTab,
+      openFolder: frontDoorOpenFolder,
       lastLaunchProject,
-    ],
-  );
+    });
 
   // ── Integration health ────────────────────────────────────────────────────
   //
@@ -7291,7 +7293,8 @@ function App() {
   const launchCombine = async (projectOverride?: string) => {
     const pills = frontDoorCombine;
     if (pills.length === 0) return;
-    const instruction = frontDoorText.trim();
+    const text = getFrontDoorText();
+    const instruction = text.trim();
     const sessionIds = pills.map((c) => c.sessionId);
     let composed: CombineBrief;
     try {
@@ -7310,7 +7313,7 @@ function App() {
       }));
       return;
     }
-    const project = projectOverride ?? frontDoorResolvedProject;
+    const project = projectOverride ?? resolveFrontDoorProject(text);
     const r = await launchPlan({
       origin: "combine",
       prompt: composed.brief,
@@ -7321,7 +7324,7 @@ function App() {
       chatId: null,
       restore: {
         kind: "composer",
-        text: frontDoorText,
+        text,
         attachments: frontDoorAttachments,
         combine: pills,
       },
@@ -7414,13 +7417,13 @@ function App() {
       await launchCombine(projectOverride);
       return;
     }
-    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    const text = getFrontDoorText(), attachments = frontDoorAttachments;
+    const prompt = composePrompt(text, attachments);
     if (!prompt || frontDoorLaunchingRef.current) return;
     // From the browser the session starts in the background: the page stays
     // up, and the door's flight pill is how you go and watch it.
     const browser = mainSurface === "browser";
-    const project = projectOverride ?? frontDoorResolvedProject;
-    const text = frontDoorText, attachments = frontDoorAttachments;
+    const project = projectOverride ?? resolveFrontDoorProject(text);
     frontDoorLaunchingRef.current = true;
     setFrontDoorLaunching(true);
     try {
@@ -7478,7 +7481,7 @@ function App() {
   // The attached context lands in the document below a rule, so it reads as
   // what the draft is about rather than as part of what you wrote.
   const drafterFromFrontDoor = () => {
-    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    const prompt = composePrompt(getFrontDoorText(), frontDoorAttachments);
     if (!prompt || frontDoorLaunchingRef.current) return;
     // Measured HERE, synchronously, while the island is still on screen — one
     // render later it is gone. This is the box the Drafter springs out of.
@@ -7533,7 +7536,8 @@ function App() {
 
   const chatFromFrontDoor = async () => {
     if (chatOpening || frontDoorLaunchingRef.current || (chatSeed && chatSeed.autoSend !== false)) return;
-    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    const text = getFrontDoorText();
+    const prompt = composePrompt(text, frontDoorAttachments);
     if (!prompt) return;
     frontDoorLaunchingRef.current = true;
     setChatOpening(true);
@@ -7549,7 +7553,7 @@ function App() {
       // user renames it themselves first. The chips are read alongside the
       // mint, as the sentence leaves the composer.
       const [chat, blocks] = await Promise.all([
-        invoke<Companion>("companion_create", { title: frontDoorText.trim() }),
+        invoke<Companion>("companion_create", { title: text.trim() }),
         gatherContext("chat"),
       ]);
       const context = await chatAttachment(chat.companionId, blocks);
@@ -8053,12 +8057,12 @@ function App() {
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 workbench={workbench}
-                text={frontDoorText}
-                onTextChange={setFrontDoorText}
                 choice={frontDoorProject}
                 onChoiceChange={setFrontDoorProject}
                 projectOptions={projectOptions}
-                resolvedProject={frontDoorResolvedProject}
+                openFolder={frontDoorOpenFolder}
+                lastLaunchProject={lastLaunchProject}
+                onResolvedProjectChange={setFrontDoorResolvedProject}
                 attachments={frontDoorAttachments}
                 onAttachmentsChange={setFrontDoorAttachments}
                 combine={frontDoorCombine}
@@ -10574,7 +10578,7 @@ function App() {
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
-              composer={{ text: frontDoorText, onTextChange: setFrontDoorText, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer(actions, false, workbench) }}
+              composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer(actions, false, workbench) }}
               harness={frontDoorBackend}
               modelCatalogs={modelCatalogs}
               onHarnessChange={setFrontDoorBackend}
@@ -10585,10 +10589,10 @@ function App() {
               modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
               onActivityChange={setMonochatBusy}
               onSent={() => setFrontDoorOpen(true)}
-              // Keyed by the thread: the composer draft is stored
-              // per chat and `usePersistedState` reads its key
-              // once, so switching conversations is a REMOUNT by
-              // design rather than one chat's half-typed thought
+              // Keyed by the thread: the room's mode and harness
+              // are stored per chat and `usePersistedState` reads
+              // its key once, so switching conversations is a
+              // REMOUNT by design rather than one chat's settings
               // carried into another.
               key={chatId}
               companionId={chatId}
