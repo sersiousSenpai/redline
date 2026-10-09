@@ -44,7 +44,8 @@ export interface StreamSplit {
 
 /** Split `text` at its last closed block boundary. `head + tail === text`,
  *  and rendering the two separately gives the markup of rendering the
- *  whole. Only ever moves forward as `text` grows by appending. */
+ *  whole, short of a misread fence (above). Only ever moves forward as
+ *  `text` grows by appending. */
 export function splitAtClosedBlock(text: string): StreamSplit {
   if (REFERENCE.test(text) || text.includes("\r")) {
     return { head: "", tail: text, openFence: -1 };
