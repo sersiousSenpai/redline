@@ -6,6 +6,7 @@ import type { DiffFile, ReviewAnnotation, ReviewQuestion } from "../types";
 import {
   CONTEXT_BLOCK_MAX,
   capBlock,
+  forgetSent,
   isChipPressed,
   renderContextBlocks,
   surfaceChips,
@@ -15,8 +16,9 @@ import {
   withContext,
   type ChipSources,
   type ContextChip,
+  type SentContext,
 } from "./surfaceContext";
-import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment, type SentContext } from "./contextBlocks";
+import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment } from "./contextBlocks";
 
 const surface = (kind: SurfaceInfo["kind"], over: Partial<SurfaceInfo> = {}): SurfaceInfo => ({
   kind, id: null, label: null, detail: null, projectPath: null, updatedAt: 0, ...over,
@@ -229,8 +231,8 @@ describe("unsentAttachment — a chat's attachments, once per version", () => {
     unsentAttachment(sent, "chat-1", "claude-code", [plan(3)]);
     // Another conversation has never seen it.
     expect(unsentAttachment(sent, "chat-2", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
-    // What App does on onContextLost: the next send carries everything again.
-    sent.delete("chat-1");
+    // A send that never arrived: the next one carries everything again.
+    forgetSent(sent, "chat-1", "unsent");
     expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
   });
 
@@ -242,6 +244,34 @@ describe("unsentAttachment — a chat's attachments, once per version", () => {
     expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
     expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
     expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+  });
+
+  it("a fresh session forgets what it never saw — unless the send that started it handed over everything", () => {
+    const sent = new Map<string, SentContext>();
+    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    // A provider switch: this send hands everything to the session it starts,
+    // so the backend's whole-brief signal for it loses nothing.
+    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+    forgetSent(sent, "chat-1", "fresh-session");
+    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
+    // A rotation: the turn that starts the fresh session carried nothing new,
+    // so the next one hands everything again.
+    forgetSent(sent, "chat-1", "fresh-session");
+    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+  });
+
+  it("a turn with nothing pressed still counts, and a send that never arrived is always forgotten", () => {
+    const sent = new Map<string, SentContext>();
+    unsentAttachment(sent, "chat-1", "claude-code", [plan(3)]);
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toBeNull();
+    forgetSent(sent, "chat-1", "fresh-session");
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    forgetSent(sent, "chat-1", "unsent");
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    // Forgetting a chat that was never handed anything is harmless.
+    forgetSent(sent, "chat-9", "fresh-session");
+    expect(sent.has("chat-9")).toBe(false);
   });
 
   it("attaches nothing for no blocks or only empty ones", () => {

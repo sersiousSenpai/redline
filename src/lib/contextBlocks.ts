@@ -5,7 +5,7 @@
 // agent can act on. Loaded when something is sent, never at boot — see
 // surfaceContext.ts for which chips exist and how blocks join a prompt.
 
-import { renderContextBlocks, type BrowserIslandPage, type ContextBlock } from "./surfaceContext";
+import { renderContextBlocks, type BrowserIslandPage, type ContextBlock, type SentContext } from "./surfaceContext";
 import { fnv1a32Hex } from "./thumbs";
 import type {
   DiffFile,
@@ -114,22 +114,17 @@ export function diffBlock(review: {
 /** What a chat hasn't been handed yet, as one attachment, remembered as
  *  handed. Keyed per chat on each block's content: an unchanged plan rides one
  *  turn rather than every turn, and a revised one goes again. Null when there
- *  is nothing new. */
+ *  is nothing new. Call it for every send, blocks or not: each one decides
+ *  whether `handedAll` is still true. */
 export function unsentAttachment(sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]): string | null {
   const previous = sent.get(chatId);
-  const record = previous?.provider === provider ? previous : { provider, keys: new Set<string>() };
+  const record: SentContext = previous?.provider === provider
+    ? { ...previous, handedAll: false }
+    : { provider, keys: new Set<string>(), handedAll: true };
   sent.set(chatId, record);
   const fresh = blocks.filter((b) => !record.keys.has(blockKey(b)));
   for (const b of fresh) record.keys.add(blockKey(b));
   return renderContextBlocks(fresh) || null;
-}
-
-/** What one chat has been handed, and on which provider. A provider switch is
- *  a fresh CLI session that saw none of it (companion.rs's handoff), so the
- *  record starts over — switching back included. */
-export interface SentContext {
-  provider: string;
-  keys: Set<string>;
 }
 
 /** The chip, the length, and a hash of what it says. */

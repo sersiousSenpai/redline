@@ -108,10 +108,10 @@ export interface ChatRoomProps {
    *  carries it and the bubble shows only what was typed. Null attaches
    *  nothing. */
   contextFor?: () => Promise<string | null>;
-  /** An attachment may never have reached the agent — its send failed or was
-   *  pulled back, or the conversation started a fresh CLI session — so the
-   *  next send should carry everything again. */
-  onContextLost?: () => void;
+  /** An attachment may never have reached the agent: its send failed or was
+   *  pulled back (`unsent`), or the conversation started a fresh CLI session
+   *  (`fresh-session`). The owner decides what the next send carries again. */
+  onContextLost?: (why: import("../lib/surfaceContext").ContextLoss) => void;
   /** Working directory for the spawn (the agent's read-only file tools). */
   cwd: string | null;
   /** False while the Voice panel owns the mic — one capture at a time. */
@@ -249,7 +249,7 @@ export function ChatRoom({
     historyCmd: "companion_get_thread",
     historyArgs: { companionId },
     sendFailPrefix: "Couldn't reach the chat agent",
-    onSendFailed: (text) => { setDraft(current => current.trim() ? `${current}\n\n${text}` : text); onContextLost?.(); },
+    onSendFailed: (text) => { setDraft(current => current.trim() ? `${current}\n\n${text}` : text); onContextLost?.("unsent"); },
     buildSendArgs: async (text, extra) => {
       const opts = extra as { mode?: ChatMode; target?: typeof target; context?: string | null } | undefined;
       return {
@@ -354,7 +354,7 @@ export function ChatRoom({
       .catch(() => {});
     const un = listen<ChatContext>("companion-context", (e) => {
       if (e.payload.companionId !== companionId) return;
-      if (e.payload.delivery === "full" && replied.current) contextLost.current?.();
+      if (e.payload.delivery === "full" && replied.current) contextLost.current?.("fresh-session");
       if (e.payload.brief) setContext(e.payload);
     });
     return () => {
@@ -446,7 +446,7 @@ export function ChatRoom({
     let text: string | null = null;
     if (id === "armed-plan") { text = armedInstruction; setArmedPlan(null); onCancelQueuedPlan?.(); }
     else if (id === "armed-run") { text = armedRun?.instruction ?? null; setArmedRun(null); }
-    else { text = await unqueue(id); if (text !== null) onContextLost?.(); }
+    else { text = await unqueue(id); if (text !== null) onContextLost?.("unsent"); }
     if (edit && text) setDraft(previous => previous.trim() ? `${text}\n\n${previous}` : text);
   };
   const picker = <ChatModePicker mode={mode} onModeChange={setMode} assignee={assignee} onAssigneeChange={setAssignee} harness={selectedHarness} onHarnessChange={changeHarness} catalogs={modelCatalogs} onOpen={onNeedModels} warning={buildConflict ? "Another agent is building here" : null} />;

@@ -167,6 +167,31 @@ export function withContext(prompt: string, blocks: ContextBlock[], opts: { rule
   return [text, opts.rule ? "---" : "", context].filter(Boolean).join("\n\n");
 }
 
+// ---- A chat's record --------------------------------------------------------
+
+/** What one chat has been handed (`unsentAttachment` in contextBlocks.ts), and
+ *  on which provider: a provider switch is a fresh CLI session that saw none
+ *  of it (companion.rs's handoff), so the record starts over, switching back
+ *  included. `handedAll` says the latest send carried everything on record. */
+export interface SentContext {
+  provider: string;
+  keys: Set<string>;
+  handedAll: boolean;
+}
+
+/** Why a chat's attachments may not have reached its agent: the send never
+ *  arrived, or the backend started a fresh CLI session (rotation, handoff). */
+export type ContextLoss = "unsent" | "fresh-session";
+
+/** Forget what a chat was handed, so its next send carries everything again —
+ *  except a fresh session that the latest send started having handed it
+ *  everything already. */
+export function forgetSent(sent: Map<string, SentContext>, chatId: string, why: ContextLoss): void {
+  const record = sent.get(chatId);
+  if (why === "fresh-session" && record?.handedAll) record.handedAll = false;
+  else sent.delete(chatId);
+}
+
 function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || path;

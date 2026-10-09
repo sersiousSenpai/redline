@@ -339,6 +339,7 @@ import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { MonochatIsland, type IslandSize, type SummonVia } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
+  forgetSent,
   isChipPressed,
   surfaceChips,
   surfaceContextLabel,
@@ -348,6 +349,7 @@ import {
   type BrowserIslandPage,
   type ChipPresses,
   type ContextBlock,
+  type SentContext,
 } from "./lib/surfaceContext";
 import { doorRecents, loadDoorTabs, type DoorRecent, type DoorTab } from "./lib/doorRecents";
 import { MonochatContext } from "./components/MonochatContext";
@@ -7478,10 +7480,10 @@ function App() {
   // typed, and once per version: what each chat has already been handed is
   // remembered by block, and only a new or changed block goes again. The room
   // runs on the door's harness, so a provider switch there is the fresh CLI
-  // session that has to be handed everything again.
-  const chatContextSent = useRef(new Map<string, import("./lib/contextBlocks").SentContext>());
+  // session that has to be handed everything again. Every send is recorded,
+  // blocks or not — see `forgetSent`.
+  const chatContextSent = useRef(new Map<string, SentContext>());
   const chatAttachment = async (companionId: string, blocks: ContextBlock[]): Promise<string | null> => {
-    if (blocks.length === 0) return null;
     const builders = await import("./lib/contextBlocks").catch(() => null);
     return builders ? builders.unsentAttachment(chatContextSent.current, companionId, frontDoorBackend.backend, blocks) : null;
   };
@@ -10576,7 +10578,7 @@ function App() {
               // The card's pressed chips, read per send. Out of band: the
               // prompt carries them, the bubble only what was typed.
               contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}
-              onContextLost={() => chatContextSent.current.delete(chatId)}
+              onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
       {browserMounted && createPortal(

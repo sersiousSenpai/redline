@@ -296,7 +296,7 @@ describe("chat context wiring", () => {
     expect(app.indexOf("<ChatRoom", start + 1)).toBe(-1);
     const mount = app.slice(start, app.indexOf("/>", app.indexOf("onSeedConsumed=", start)));
     expect(mount).toContain('contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}');
-    expect(mount).toContain("onContextLost={() => chatContextSent.current.delete(chatId)}");
+    expect(mount).toContain("onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}");
     expect(mount).toContain("seedContext={chatSeed?.companionId === chatId ? chatSeed.context : null}");
   });
 

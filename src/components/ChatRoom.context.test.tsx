@@ -112,6 +112,7 @@ describe("chat context, out of band", () => {
     // A send that failed before reaching the agent.
     act(() => cfg.current!.onSendFailed?.("is this sound?", new Error("busy")));
     expect(onContextLost).toHaveBeenCalledTimes(1);
+    expect(onContextLost).toHaveBeenLastCalledWith("unsent");
 
     // A queued send pulled back out; one that already advanced is not lost.
     turn.queue = [{ id: "m-queued", body: "and now?" }];
@@ -121,6 +122,7 @@ describe("chat context, out of band", () => {
     await act(async () => remove().click());
     expect(turn.unqueue).toHaveBeenCalledWith("m-queued");
     expect(onContextLost).toHaveBeenCalledTimes(2);
+    expect(onContextLost).toHaveBeenLastCalledWith("unsent");
     await act(async () => remove().click());
     expect(turn.unqueue).toHaveBeenCalledTimes(2);
     expect(onContextLost).toHaveBeenCalledTimes(2);
@@ -148,5 +150,6 @@ describe("chat context, out of band", () => {
     // A rotation or a provider handoff starts the session over.
     emit("chat-1", "full");
     expect(onContextLost).toHaveBeenCalledTimes(1);
+    expect(onContextLost).toHaveBeenLastCalledWith("fresh-session");
   });
 });
