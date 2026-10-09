@@ -295,6 +295,29 @@ describe("send", () => {
     ctl.detach();
   });
 
+  it("keeps the mode makeMessage stamps on the optimistic row unless the send names one", async () => {
+    const { io, invokeImpl } = fakeIo();
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    invokeImpl.set("browse_send", () => ({ started: true, queued: false, messageId: "u-db" }));
+    const ctl = new AgentTurnController<TurnMessage>(
+      () =>
+        makeCfg({
+          // The sidecar's chat rows stamp their own mode.
+          makeMessage: ({ id, role, body, status }) => ({ id, role, body, status, createdAt: 999, mode: "chat" }),
+        }),
+      io,
+    );
+    await ctl.attach();
+    await flush();
+    ctl.send("quick one");
+    expect(ctl.getState().messages[0]?.mode).toBe("chat");
+    ctl.clear();
+    ctl.send("build it", { mode: "build" });
+    expect(ctl.getState().messages[0]?.mode).toBe("build");
+    ctl.detach();
+  });
+
   it("a send while streaming is type-ahead: it dispatches, queues the bubble, and leaves the stream alone", async () => {
     const { io, emit, invokeImpl } = fakeIo();
     invokeImpl.set("get_browse_thread", () => []);

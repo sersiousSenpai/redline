@@ -87,9 +87,17 @@ try {
   }
   await cdp.evaluate("document.querySelector('main').scrollTo(0,0)");await settle();
   check("Reply box needs no click",!!(await bounds('[data-qa=wide] textarea'))?.visible&&!(await cdp.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent==='Reply…')")));
-  await click('[data-qa=wide] .rl-discuss-mode button:first-child');
-  check("Report switch offers explicit write-up",!!(await bounds('.rl-write-report')));
-  await screenshot('sidecar-report-switch');
+  check("The report folds the chat into one chip, with Write it up after it",await cdp.evaluate("(()=>{const r=document.querySelector('[data-qa=wide] .rl-chatted-row');return !!r&&r.textContent.includes('Chatted · 2 messages')&&!!r.querySelector('.rl-write-report')&&!document.querySelector('[data-qa=wide] .rl-chat-user');})()"));
+  await cdp.evaluate("document.querySelector('[data-qa=wide] .rl-chatted-row').scrollIntoView({block:'center'})");await settle();
+  await screenshot('sidecar-report-chip');
+  await click('[data-qa=wide] .rl-chatted-chip');
+  const chat=await cdp.evaluate(`(()=>{const root=document.querySelector('[data-qa=wide]');const list=root.querySelector('.rl-chat-list').getBoundingClientRect();const u=root.querySelector('.rl-chat-user'),a=root.querySelector('.rl-chat-agent');const ur=u.getBoundingClientRect(),ar=a.getBoundingClientRect();const as=getComputedStyle(a);return {userRight:Math.abs(ur.right-list.right)<2,userTinted:getComputedStyle(u).backgroundColor!=='rgba(0, 0, 0, 0)',agentLeft:Math.abs(ar.left-list.left)<2,agentBorderless:as.borderTopWidth==='0px'&&as.backgroundColor==='rgba(0, 0, 0, 0)',bylines:[...root.querySelectorAll('.rl-chat-list span')].filter(e=>getComputedStyle(e).textTransform==='uppercase').length,toggle:root.querySelector('.rl-chat-toggle').textContent,placeholder:root.querySelector('textarea').placeholder,report:root.textContent.includes('One bucket per seat')};})()`);
+  check("Chat view: the reviewer's bubble right and tinted, the agent's left and borderless, no bylines, no report",chat.userRight&&chat.userTinted&&chat.agentLeft&&chat.agentBorderless&&chat.bylines===0&&chat.toggle==='← Report'&&chat.placeholder==='Ask anything…'&&!chat.report,chat);
+  await cdp.evaluate("document.querySelector('[data-qa=wide] .rl-chat-list').scrollIntoView({block:'center'})");await settle();
+  await screenshot('sidecar-chat');
+  await cdp.evaluate("document.querySelector('[data-qa=wide] .rl-thread-heading').scrollIntoView({block:'center'})");await settle();
+  await click('[data-qa=wide] .rl-chat-toggle');
+  check("← Report returns to the report",await cdp.evaluate("!!document.querySelector('[data-qa=wide] .rl-chatted-chip')&&!document.querySelector('[data-qa=wide] .rl-chat-list')"));
   await click('[aria-label="Change plan state"]');
   check("Plan state menu is within viewport",(await bounds('[aria-label="Plan state"]'))?.within);
   await screenshot('plan-state-menu');

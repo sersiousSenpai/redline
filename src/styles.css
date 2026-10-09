@@ -5397,17 +5397,33 @@ html[data-rl-resizing] [data-rl-pane] {
 }
 
 /* Comment discussion threads. */
-.rl-discuss-mode { display: inline-flex; flex-shrink: 0; padding: 2px; border: 1px solid var(--color-rule); border-radius: 999px; background: var(--color-paper); font-size: 10px; }
-.rl-discuss-mode button { padding: 3px 7px; border-radius: 999px; color: var(--color-ink-muted); }
-.rl-discuss-mode button[aria-pressed="true"] { background: var(--color-bg-elevated); color: var(--color-ink); box-shadow: 0 1px 3px #0002; }
-.rl-discuss-mode button:disabled { opacity: .5; }
 /* Under the always-open composer: escalation left, Discard right. */
 .rl-discussion-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .rl-discard-thread { margin-left: auto; }
-.rl-write-report { align-self: flex-start; border: 1px solid var(--color-rule); padding: 4px 10px; border-radius: 999px; color: var(--color-info); font-size: 11px; }
+/* Chat beside the report: the heading's Chat / ← Report switch, plain
+   bubbles (the reviewer's right-aligned and tinted, the agent's borderless),
+   and the report's one-line stand-in for a run of chat turns. */
+.rl-chat-toggle { flex-shrink: 0; padding: 1px 7px; border: 1px solid var(--color-rule); border-radius: 999px; color: var(--color-info); font-size: 10.5px; line-height: 1.5; }
+.rl-chat-toggle:hover { background: var(--color-bg-elevated); }
+.rl-chat-user { align-self: flex-end; max-width: 85%; padding: 9px 12px; border-radius: 10px; background: color-mix(in srgb, var(--color-info) 18%, var(--color-paper)); }
+.rl-chat-agent { align-self: flex-start; max-width: 100%; }
+.rl-chat-empty { color: var(--color-ink-muted); font-size: 11px; }
+.rl-chatted-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rl-chatted-chip { padding: 3px 10px; border-radius: 999px; background: var(--color-bg-elevated); color: var(--color-ink-muted); font-size: 11px; }
+.rl-chatted-chip:hover { color: var(--color-ink); }
+.rl-write-report { border: 1px solid var(--color-rule); padding: 3px 10px; border-radius: 999px; color: var(--color-info); font-size: 11px; }
 /* The model chip is a control beside A−/A+, not the loudest thing in the
    thread: it inherited the card's body size and dominated the heading. */
 .rl-thread-heading .rl-fd-model-chip,
 .rl-thread-entry .rl-fd-model-chip { font-size: 10.5px; color: var(--color-ink-muted); }
 .rl-thread-heading .rl-fd-model-chip:hover:not(:disabled),
 .rl-thread-entry .rl-fd-model-chip:hover:not(:disabled) { color: var(--color-ink); }
+/* One heading row in the 320px comment pane: the controls claim only their
+   fixed part (150px) when the row breaks, then grow into the rest, and the
+   model chip ellipsizes before anything wraps. A label long enough to leave
+   less than that (a rider flag) still drops them to a second row, where the
+   chip has room again. */
+.rl-thread-heading-tools { flex: 1 1 150px; min-width: 150px; flex-wrap: nowrap; }
+.rl-thread-heading .rl-fd-model-chip-wrap { min-width: 0; }
+.rl-thread-heading .rl-fd-model-chip { display: inline-flex; min-width: 0; white-space: nowrap; }
+.rl-thread-heading .rl-fd-model-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

@@ -36,8 +36,10 @@ export function DiscussModelChip({ sessionId, commentId, backend, disabled = fal
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
-  return <span style={{ display: "inline-flex", marginLeft: 6 }}>
-    <button type="button" ref={anchor} disabled={disabled || busy} className="rl-fd-model-chip" title="Applies to the next message" aria-label="Discussion model and effort" aria-expanded={popover.open} onClick={popover.toggle}>{label} ▾</button>
+  // The label is its own span so a tight thread heading can ellipsize it and
+  // keep the ▾; the title carries it in full.
+  return <span className="rl-fd-model-chip-wrap" style={{ display: "inline-flex", marginLeft: 6 }}>
+    <button type="button" ref={anchor} disabled={disabled || busy} className="rl-fd-model-chip" title={`${label} — applies to the next message`} aria-label="Discussion model and effort" aria-expanded={popover.open} onClick={popover.toggle}><span className="rl-fd-model-chip-label">{label}</span> ▾</button>
     {popover.open && <Panel {...popover.panelProps} label="Discussion model and effort">
       <div className="rl-fd-menu-scroll" style={{ padding: 12 }}>
         <button type="button" className="rl-fd-menu-option" disabled={busy} onClick={() => void save({ backend: harness, model: null, effort: null })}>Default ({defaultLabel})</button>

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
 import type { Comment, CommentAttachment, ThreadMessage } from "../types";
@@ -20,7 +20,8 @@ import type { TurnMeter } from "../lib/turnMeter";
 import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMonochat } from "./MonochatContext";
-import { useDiscussMode, type DiscussMode } from "../hooks/useDiscussMode";
+import { useSidecarView, type SidecarView } from "../hooks/useSidecarView";
+import { askedMode, isChatRow, reportItems } from "../lib/sidecarRows";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 
 interface CommentThreadProps {
@@ -44,6 +45,25 @@ interface CommentThreadProps {
   onAutoDiscussConsumed?: () => void;
   onHasDiscussion?: (value: boolean) => void;
 }
+
+/** What "Write it up →" asks for once a chat has run past the last report. */
+const WRITE_UP =
+  "Write this up — the full answer to my original comment given everything we've discussed, including our chat.";
+
+/** What a send carries to `buildSendArgs`: the files dropped into it and the
+ *  view it was sent from. */
+interface SendExtra {
+  attachments: CommentAttachment[];
+  mode: SidecarView;
+}
+
+/** The entry row's two ways in — "💬 Discuss" and "Chat" — share one look. */
+const ENTRY_BUTTON: CSSProperties = {
+  background: "var(--color-bg-elevated)",
+  border: "1px solid var(--color-rule)",
+  color: "var(--color-info)",
+  fontSize: "11px",
+};
 
 /** Comments whose Send-started discussion has already fired, app-wide. The
  *  parent's flag clears the moment the seed goes out, but a remount racing
@@ -84,8 +104,9 @@ export const CommentThread = memo(function CommentThread({
 }: CommentThreadProps) {
   const monochat = useMonochat();
   const commentId = comment.id;
-  const [mode, setMode] = useDiscussMode(sessionId, commentId);
-  const [reportAfter, setReportAfter] = useState<number | null>(null);
+  // Report (the structured answer) or Chat (quick turns with the same fork).
+  // Persisted per comment; a remount or relaunch comes back to the same view.
+  const [view, setView] = useSidecarView(sessionId, commentId);
   // Derived ONCE and threaded through every label below: the entry button, the
   // bubbles, the collapsed summary, the sidecar status copy and the escalated
   // transcript must all name the same agent, because they describe one process.
@@ -102,10 +123,16 @@ export const CommentThread = memo(function CommentThread({
   // The reviewer can still collapse to compact via the ⤡ button.
   const [enlarged, setEnlarged] = useState(true);
   const [draft, setDraft] = useSharedDraft(`redline.sidecarDraft.${sessionId}.${commentId}`);
-  // Attachments ride the optimistic user row. `makeMessage` reads this the
-  // instant `turn.send` mints that row — synchronously — and `send` clears it
-  // immediately after, so it can never leak into a later turn.
+  // Attachments and the view ride the optimistic user row. `makeMessage`
+  // reads these the instant `turn.send` mints that row — synchronously — and
+  // `send` clears them immediately after, so they never leak into a later turn.
   const pendingAttachments = useRef<CommentAttachment[] | undefined>(undefined);
+  const pendingChat = useRef(false);
+  // The rows as of the last render, for `makeMessage` to file a reply under
+  // its question's view when the done event lands.
+  const rowsRef = useRef<ThreadMessage[]>([]);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusComposer = useRef(false);
 
   // The shared streaming lifecycle (T3.2). Everything this thread used to
   // hand-roll is now the machine the five chat surfaces already use — and it
@@ -138,7 +165,7 @@ export const CommentThread = memo(function CommentThread({
     sendFailPrefix: "Couldn't reach the discussion fork",
     onSendFailed: text => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
     buildSendArgs: (text, extra) => {
-      const attachments = (extra as CommentAttachment[] | undefined) ?? [];
+      const { attachments, mode } = extra as SendExtra;
       return {
         sessionId,
         commentId,
@@ -159,18 +186,18 @@ export const CommentThread = memo(function CommentThread({
       status,
       createdAt: Date.now(),
       attachments: role === "user" ? pendingAttachments.current : undefined,
+      // A question files under the view it was asked in; a reply (or its
+      // failure) under its question's. The backend stamps the persisted
+      // twins the same way, so a reload never moves a row.
+      mode: role === "user" ? (pendingChat.current ? "chat" : undefined) : askedMode(rowsRef.current),
     }),
   });
   const { messages, liveText, loaded, retrying } = turn;
+  rowsRef.current = messages;
   const seed = discussSeed(comment);
   const visible = messages.filter((m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed));
   const hasDiscussion = visible.length > 0 || !!liveText;
   useEffect(() => { if (loaded) onHasDiscussion?.(hasDiscussion); }, [loaded, hasDiscussion, onHasDiscussion]);
-  const switchMode = (next: DiscussMode) => {
-    if (next === mode) return;
-    setMode(next);
-    setReportAfter(next === "report" && visible.some(m => m.role === "assistant") ? messages.length : null);
-  };
   useEffect(() => { if (loaded) monochat?.reportActivity?.(`${sessionId}:${commentId}`, turn.status === "streaming"); }, [loaded, sessionId, commentId, turn.status, monochat?.reportActivity]);
   const status: ThreadStatus = turn.status;
   // When the current wait began — drives the WorkingIndicator's elapsed
@@ -200,7 +227,7 @@ export const CommentThread = memo(function CommentThread({
     const key = `${sessionId}:${commentId}`;
     if (!autoDiscussed.has(key) && messages.length === 0 && status === "idle") {
       autoDiscussed.add(key);
-      send(discussSeed(comment));
+      discuss();
     }
     onAutoDiscussConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -214,7 +241,47 @@ export const CommentThread = memo(function CommentThread({
     if (liveText && !userCollapsedRef.current) setExpanded(true);
   }, [liveText]);
 
-  function send(text: string, attachments: CommentAttachment[] = []) {
+  // The view's rows. Chat shows only its own turns; the report folds each
+  // run of them into a chip (`reportItems`). Escalation and the collapsed
+  // summary use every row — decisions often happen in the chat.
+  const chatRows = visible.filter(isChatRow);
+  // Which view the in-flight reply belongs to: it streams there, and only
+  // there.
+  const chatInFlight = status === "streaming" && askedMode(messages) === "chat";
+  const hostRef = useRef<HTMLDivElement>(null);
+  const chatListRef = useRef<HTMLDivElement>(null);
+
+  // Focus the reply box once it is on screen, when "Chat" asked for it.
+  useEffect(() => {
+    if (!focusComposer.current || !composerRef.current) return;
+    focusComposer.current = false;
+    composerRef.current.focus();
+  });
+
+  // Chat is rapid-fire: when a reply settles, the next question is a
+  // keystroke away — unless the reviewer has moved elsewhere in the app.
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    const was = wasStreaming.current;
+    wasStreaming.current = status === "streaming";
+    if (!was || status === "streaming" || view !== "chat" || !expanded) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !hostRef.current?.contains(active)) return;
+    composerRef.current?.focus();
+  }, [status, view, expanded]);
+
+  // The chat reads bottom-up: keep its newest line in view as rows land and
+  // the reply streams, and the reply box with it while the reviewer is here.
+  useLayoutEffect(() => {
+    if (view !== "chat" || !expanded) return;
+    const list = chatListRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+    if (hostRef.current?.contains(document.activeElement)) {
+      composerRef.current?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [view, expanded, chatRows.length, liveText]);
+
+  function send(text: string, mode: SidecarView, attachments: CommentAttachment[] = []) {
     const trimmed = text.trim();
     // The fork registry rejects-when-busy; the hook drops a mid-turn send too,
     // but bail here so the auto-expand below doesn't fire for a no-op.
@@ -224,18 +291,38 @@ export const CommentThread = memo(function CommentThread({
     userCollapsedRef.current = false;
     setExpanded(true);
     pendingAttachments.current = attachments.length > 0 ? attachments : undefined;
-    turn.send(trimmed, { extra: attachments });
+    pendingChat.current = mode === "chat";
+    const extra: SendExtra = { attachments, mode };
+    turn.send(trimmed, { extra });
     pendingAttachments.current = undefined;
+    pendingChat.current = false;
+  }
+
+  /** "💬 Discuss": the report, opened on the comment itself. */
+  function discuss() {
+    setView("report");
+    send(discussSeed(comment), "report");
+  }
+
+  /** Into the chat view with the reply box focused. Nothing is sent: the
+   *  reviewer asks the first question. */
+  function openChat() {
+    setView("chat");
+    userCollapsedRef.current = false;
+    setExpanded(true);
+    focusComposer.current = true;
   }
 
   const cancel = turn.cancel;
 
-  /** Re-send the question an error row is the failed answer to. Offered on the
-   *  thread's LAST row only: an error further up has already been answered by
-   *  whatever came after it, and re-asking would duplicate the exchange. */
+  /** Re-send the question an error row is the failed answer to, in the view
+   *  it was asked in. Offered on the thread's LAST row only: an error further
+   *  up has already been answered by whatever came after it, and re-asking
+   *  would duplicate the exchange. */
   const retryAt = (list: ThreadMessage[], i: number): (() => void) | undefined => {
     const body = priorUserBody(list, i);
-    return body ? () => send(body) : undefined;
+    const mode = isChatRow(list[i]) ? "chat" : "report";
+    return body ? () => send(body, mode) : undefined;
   };
 
   // Route a read-only discussion into the main revise loop: attach the
@@ -332,7 +419,7 @@ export const CommentThread = memo(function CommentThread({
   // already its final height, so nothing jumps when "💬 Discuss" appears (or
   // when the loaded thread replaces it), and the button never flashes on a
   // thread that turns out to exist.
-  if (!loaded || (visible.length === 0 && status === "idle")) {
+  if (!loaded || (visible.length === 0 && status === "idle" && !(view === "chat" && expanded))) {
     return (
       <div
         className="rl-thread-entry mt-3 pt-3 border-t"
@@ -345,18 +432,21 @@ export const CommentThread = memo(function CommentThread({
       >
         <button
           type="button"
-          onClick={() => send(discussSeed(comment))}
+          onClick={discuss}
           className="rounded px-2 py-1 font-medium"
-          style={{
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-rule)",
-            color: "var(--color-info)",
-            fontSize: "11px",
-          }}
+          style={ENTRY_BUTTON}
         >
           💬 Discuss with {agent}
         </button>
-        <ModeToggle mode={mode} onChange={switchMode} disabled={false} />
+        <button
+          type="button"
+          onClick={openChat}
+          title={`Quick questions, short answers — the same ${agent}`}
+          className="rounded px-2 py-1 font-medium ml-1.5"
+          style={ENTRY_BUTTON}
+        >
+          Chat
+        </button>
         <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
         {sidecar && <p style={{ color: "var(--color-ink-muted)", fontSize: "10px", marginTop: 5 }}>A separate read-only discussion seeded with this {author} plan.</p>}
       </div>
@@ -364,6 +454,7 @@ export const CommentThread = memo(function CommentThread({
   }
 
   const last = visible[visible.length - 1];
+  const resend = (m: ThreadMessage) => () => send(m.body, isChatRow(m) ? "chat" : "report");
   const summary = last
     ? `${last.role === "user" ? "You" : agent}: ${last.body
         .replace(/\s+/g, " ")
@@ -373,13 +464,15 @@ export const CommentThread = memo(function CommentThread({
 
   return (
     <div
+      ref={hostRef}
       className="mt-3 pt-3 border-t flex flex-col gap-2"
       style={{ borderColor: "var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      {/* One row, label left and controls right. The controls drop to a
-          second row only when the pane is too narrow to hold both, and wrap
-          among themselves rather than overflow the card. */}
+      {/* One row, label left and controls right. In a narrow pane the model
+          chip gives up width first; the controls drop to a second row only
+          when even their fixed part can't sit beside the label (a long rider
+          flag), and never overflow the card. */}
       <div className="rl-thread-heading flex flex-wrap items-center gap-x-1.5 gap-y-1">
         <button
           type="button"
@@ -437,8 +530,19 @@ export const CommentThread = memo(function CommentThread({
             open. Siblings of the collapse button (buttons can't nest); each
             stops propagation so it never toggles collapse. */}
         {expanded && (
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1 ml-auto">
-            <ModeToggle mode={mode} onChange={switchMode} disabled={status === "streaming"} />
+          <div className="rl-thread-heading-tools flex items-center justify-end gap-1 ml-auto">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (view === "chat") setView("report");
+                else openChat();
+              }}
+              title={view === "chat" ? "Back to the report" : `Quick questions, short answers — the same ${agent}`}
+              className="rl-chat-toggle"
+            >
+              {view === "chat" ? "← Report" : "Chat"}
+            </button>
             <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
             <button
               type="button"
@@ -492,60 +596,129 @@ export const CommentThread = memo(function CommentThread({
 
       {expanded && (
         <>
-          <div
-            className={`flex flex-col gap-2.5 rl-thin-scroll-y ${
-              enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
-            }`}
-          >
-            {visible.map((m, i) => (
-              <MessageBubble
-                key={m.id}
-                msg={m}
-                meter={turn.meters[m.id]}
-                agent={agent}
-                onRetry={
-                  m.status === "error" && i === visible.length - 1
-                    ? retryAt(visible, i)
-                    : undefined
-                }
-                onResend={
-                  m.status === "unsent" ? () => send(m.body) : undefined
-                }
-              />
-            ))}
-            {status === "streaming" && (
-              <>
-                {/* The badge and the activity line fill the wait the blank
-                    ticker used to — so the bubble renders from the first line
-                    of the stream, not the first token. */}
-                <StreamingBubble
-                  text={liveText}
-                  agent={agent}
-                  inspect={{ surface: "fork", key: commentId }}
-                  retrying={retrying}
-                  meter={turn.meter}
-                  activity={turn.activity}
+          {view === "chat" ? (
+            <div
+              ref={chatListRef}
+              className={`rl-chat-list flex flex-col gap-1.5 rl-thin-scroll-y ${
+                enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
+              }`}
+            >
+              {chatRows.length === 0 && !chatInFlight && (
+                <p className="rl-chat-empty">
+                  Quick questions, short answers. ← Report keeps the write-up.
+                </p>
+              )}
+              {chatRows.map((m, i) => (
+                <ChatBubble
+                  key={m.id}
+                  msg={m}
+                  onRetry={
+                    m.status === "error" && m === last
+                      ? retryAt(chatRows, i)
+                      : undefined
+                  }
+                  onResend={m.status === "unsent" ? resend(m) : undefined}
                 />
-                {!liveText && !retrying && (
-                  <WorkingIndicator startedAt={workStartedAt ?? undefined} />
-                )}
-              </>
-            )}
-          </div>
-
-          {mode === "report" && settled && reportAfter !== null && messages.length === reportAfter && (
-            <button type="button" className="rl-write-report" onClick={() => {
-              setReportAfter(null);
-              send("Write this up — the full answer to my original comment given everything we've discussed.");
-            }}>Write it up →</button>
+              ))}
+              {chatInFlight &&
+                (liveText ? (
+                  <div className="rl-chat-agent">
+                    <MarkdownView body={liveText} compact />
+                    <span aria-hidden style={{ color: "var(--color-ink-muted)" }}>
+                      {retrying ? "" : "▌"}
+                    </span>
+                  </div>
+                ) : (
+                  <WorkingIndicator
+                    label={retrying ? "Retrying" : "Thinking"}
+                    startedAt={workStartedAt ?? undefined}
+                  />
+                ))}
+              {/* A write-up streams in the report, not here. */}
+              {status === "streaming" && !chatInFlight && (
+                <WorkingIndicator compact label="Writing it up" />
+              )}
+            </div>
+          ) : (
+            <div
+              className={`flex flex-col gap-2.5 rl-thin-scroll-y ${
+                enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
+              }`}
+            >
+              {reportItems(visible).map((item) =>
+                item.kind === "row" ? (
+                  <MessageBubble
+                    key={item.msg.id}
+                    msg={item.msg}
+                    meter={turn.meters[item.msg.id]}
+                    agent={agent}
+                    onRetry={
+                      item.msg.status === "error" && item.msg === last
+                        ? retryAt(visible, visible.length - 1)
+                        : undefined
+                    }
+                    onResend={
+                      item.msg.status === "unsent" ? resend(item.msg) : undefined
+                    }
+                  />
+                ) : (
+                  <div key={item.key} className="rl-chatted-row">
+                    <button
+                      type="button"
+                      className="rl-chatted-chip"
+                      onClick={() => setView("chat")}
+                      title="Open the chat"
+                    >
+                      💬 Chatted · {item.count} {item.count === 1 ? "message" : "messages"}
+                    </button>
+                    {item.last && chatInFlight && (
+                      <WorkingIndicator compact label="Replying" />
+                    )}
+                    {/* The chat has run past the last write-up: fold it into
+                        a fresh report on request. Derived from the rows, so
+                        it survives a remount. */}
+                    {item.last && settled && (
+                      <button
+                        type="button"
+                        className="rl-write-report"
+                        onClick={() => send(WRITE_UP, "report")}
+                      >
+                        Write it up →
+                      </button>
+                    )}
+                  </div>
+                ),
+              )}
+              {status === "streaming" && !chatInFlight && (
+                <>
+                  {/* The badge and the activity line fill the wait the blank
+                      ticker used to — so the bubble renders from the first line
+                      of the stream, not the first token. */}
+                  <StreamingBubble
+                    text={liveText}
+                    agent={agent}
+                    inspect={{ surface: "fork", key: commentId }}
+                    retrying={retrying}
+                    meter={turn.meter}
+                    activity={turn.activity}
+                  />
+                  {!liveText && !retrying && (
+                    <WorkingIndicator startedAt={workStartedAt ?? undefined} />
+                  )}
+                </>
+              )}
+            </div>
           )}
+
           <Composer
             sessionId={sessionId}
+            inputRef={composerRef}
             draft={draft}
             setDraft={setDraft}
             streaming={status === "streaming"}
+            placeholder={view === "chat" ? "Ask anything…" : "Ask a follow-up…"}
             onSend={(attachments) => {
-              send(draft, attachments);
+              send(draft, view, attachments);
               setDraft("");
             }}
             onStop={cancel}
@@ -710,19 +883,64 @@ function MessageBubble({
   );
 }
 
+/** One chat turn: plain bubbles, no bylines — the reviewer's right-aligned
+ *  and tinted, the agent's left and borderless. Never `rich`, so a quick
+ *  answer can't sprout a diagram. */
+function ChatBubble({
+  msg,
+  onRetry,
+  onResend,
+}: {
+  msg: ThreadMessage;
+  /** Present only on the thread's last row when it failed. */
+  onRetry?: () => void;
+  /** Present only on a user row whose send never became a turn. */
+  onResend?: () => void;
+}) {
+  const isError = msg.status === "error";
+  return (
+    <div className={msg.role === "user" ? "rl-chat-user" : "rl-chat-agent"}>
+      {isError ? (
+        <div
+          style={{
+            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            color: "var(--color-warning)",
+          }}
+        >
+          {msg.body}
+        </div>
+      ) : (
+        <MarkdownView body={msg.body} compact />
+      )}
+      {isError && onRetry && <RetryNote onRetry={onRetry} />}
+      {msg.status === "unsent" && <UnsentNote onResend={onResend} />}
+      {msg.attachments && msg.attachments.length > 0 && (
+        <AttachmentChips attachments={msg.attachments} />
+      )}
+    </div>
+  );
+}
+
 function Composer({
   sessionId,
+  inputRef,
   draft,
   setDraft,
   streaming,
+  placeholder,
   onSend,
   onStop,
 }: {
   /** Scopes where a dropped/pasted file is copied. */
   sessionId: string;
+  /** The textarea, so the thread can focus it (Chat, a settled chat reply). */
+  inputRef: RefObject<HTMLTextAreaElement | null>;
   draft: string;
   setDraft: (s: string) => void;
   streaming: boolean;
+  placeholder: string;
   /** Receives whatever files were captured for this turn; the parent clears
    *  the draft and this clears its own chips. */
   onSend: (attachments: CommentAttachment[]) => void;
@@ -736,7 +954,7 @@ function Composer({
   // Auto-grow to fit content — no cap, no scrollbar. Recomputed on input and
   // whenever `draft` changes — the latter catches the parent's clear-on-send so
   // the box snaps back to its 2-row baseline.
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const taRef = inputRef;
   const autosize = () => {
     const el = taRef.current;
     if (!el) return;
@@ -774,7 +992,7 @@ function Composer({
             if (!streaming) submit();
           }
         }}
-        placeholder={files.dragOver ? "Drop to attach…" : "Ask a follow-up…"}
+        placeholder={files.dragOver ? "Drop to attach…" : placeholder}
         rows={2}
         className="flex-1 rounded px-2 py-1"
         style={{
@@ -821,10 +1039,4 @@ function Composer({
       </div>
     </div>
   );
-}
-
-function ModeToggle({ mode, onChange, disabled }: { mode: DiscussMode; onChange: (mode: DiscussMode) => void; disabled: boolean }) {
-  return <span className="rl-discuss-mode" role="group" aria-label="Reply mode">
-    {(["report", "conversation"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} disabled={disabled} onClick={() => onChange(value)}>{value === "report" ? "Report" : "Conversation"}</button>)}
-  </span>;
 }

@@ -297,35 +297,159 @@ describe("one-press Send starts the discussion", () => {
 });
 
 
-describe("discussion modes", () => {
-  it("defaults to conversation and sends the mode without changing the user text", async () => {
-    await mount("codex");
-    expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe("Conversation");
-    await act(async () => clickWith("Discuss with"));
-    const send = invokeMock.mock.calls.find(([cmd]) => cmd === "fork_thread_send");
-    expect(send?.[1]).toMatchObject({ mode: "conversation", text: comment.body });
+describe("report and chat views", () => {
+  const sends = () => invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_send");
+  const chat = (id: string, role: "user" | "assistant", body: string, createdAt: number): ThreadMessage => ({
+    ...seed,
+    id,
+    role,
+    body,
+    createdAt,
+    mode: "chat",
   });
-  it("persists the toggle and writes a report only on an explicit click", async () => {
-    history = [seed, reply];
+  const asked = chat("m-c1", "user", "Even on reload?", 10);
+  const answered = chat("m-c2", "assistant", "Yes, on every reload.", 11);
+  const VIEW_KEY = `redline.sidecarView.${SESSION}.${ITEM}`;
+
+  /** Capture the fork's event listeners so a test can play the backend. */
+  const handlers: Record<string, (e: { payload: unknown }) => void> = {};
+  beforeEach(() => {
+    listenMock.mockImplementation((name: string, handler: (e: { payload: unknown }) => void) => {
+      handlers[name] = handler;
+      return Promise.resolve(() => {});
+    });
+  });
+
+  it("defaults to the report and sends it as a report", async () => {
+    await mount("codex");
+    expect(text()).not.toContain("Conversation");
+    await act(async () => clickWith("Discuss with"));
+    expect(sends()[0]?.[1]).toMatchObject({ mode: "report", text: comment.body });
+  });
+
+  it("opens the chat on Chat without sending, focuses the reply box and sends as chat", async () => {
+    await mount(null);
+    await act(async () => clickWith("Chat"));
+    await flush();
+    const ta = host.querySelector("textarea")!;
+    expect(ta, "Chat expands the thread straight into its reply box").not.toBeNull();
+    expect(document.activeElement).toBe(ta);
+    expect(ta.placeholder).toBe("Ask anything…");
+    expect(sends()).toHaveLength(0);
+    expect(text()).toContain("← Report");
+    expect(localStorage.getItem(VIEW_KEY)).toBe("chat");
+
+    await act(async () => type(ta, "Why there?"));
+    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(sends()[0]?.[1]).toMatchObject({ mode: "chat", text: "Why there?" });
+    // The question shows as a chat bubble straight away, before any reload.
+    expect(host.querySelector(".rl-chat-user")?.textContent).toContain("Why there?");
+  });
+
+  it("files a streamed reply under its question's view and gives the reply box back", async () => {
+    await mount(null);
+    await act(async () => clickWith("Chat"));
+    await flush();
+    const ta = host.querySelector("textarea")!;
+    await act(async () => type(ta, "Why there?"));
+    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    ta.blur();
+    await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-r", body: "Because it re-renders." } }));
+    expect(host.querySelector(".rl-chat-agent")?.textContent).toContain("Because it re-renders.");
+    expect(document.activeElement).toBe(host.querySelector("textarea"));
+    // The report keeps the whole exchange behind one chip.
+    await act(async () => clickWith("← Report"));
+    expect(text()).not.toContain("Because it re-renders.");
+    expect(text()).toContain("💬 Chatted · 2 messages");
+  });
+
+  it("folds chat turns into a chip in the report, with Write it up after the latest", async () => {
+    history = [seed, reply, asked, answered];
     await mount(null);
     await act(async () => clickWith("Discussion"));
-    expect(text()).not.toContain("Write it up");
-    await act(async () => clickWith("Report"));
-    expect(localStorage.getItem(`redline.sidecarMode.${SESSION}.${ITEM}`)).toBe("report");
-    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_send")).toHaveLength(0);
+    expect(text()).toContain(reply.body);
+    expect(text()).not.toContain(asked.body);
+    expect(text()).not.toContain(answered.body);
+    expect(text()).toContain("💬 Chatted · 2 messages");
     expect(text()).toContain("Write it up →");
+
     await act(async () => clickWith("Write it up"));
-    expect(invokeMock.mock.calls.find(([cmd]) => cmd === "fork_thread_send")?.[1]).toMatchObject({ mode: "report", text: "Write this up — the full answer to my original comment given everything we've discussed." });
-    expect(text()).not.toContain("Write it up →");
+    expect(sends()[0]?.[1]).toMatchObject({
+      mode: "report",
+      text: "Write this up — the full answer to my original comment given everything we've discussed, including our chat.",
+    });
   });
-  it("reports visible discussion and promotes questions with their transcript", async () => {
-    history = [seed, reply];
+
+  it("shows only the chat in the chat view, opened from the chip", async () => {
+    history = [seed, reply, asked, answered];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    await act(async () => clickWith("Chatted"));
+    expect(text()).toContain(asked.body);
+    expect(text()).toContain(answered.body);
+    expect(text()).not.toContain(reply.body);
+    expect(host.querySelector(".rl-chat-user")?.textContent).toContain(asked.body);
+    expect(host.querySelector(".rl-chat-agent")?.textContent).toContain(answered.body);
+    // Plain chat: no bylines.
+    expect(bylines()).toEqual([]);
+    expect(text()).toContain("← Report");
+  });
+
+  it("offers no write-up once the report has caught up with the chat", async () => {
+    const followUp: ThreadMessage = { ...seed, id: "m-4", body: "So what now?", createdAt: 12 };
+    const later: ThreadMessage = { ...reply, id: "m-5", body: "Pin the anchor.", createdAt: 13 };
+    history = [seed, reply, asked, answered, followUp, later];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(text()).toContain("💬 Chatted · 2 messages");
+    expect(text()).toContain("Pin the anchor.");
+    expect(text()).not.toContain("Write it up");
+  });
+
+  it("remembers the view per comment, and reads a stored conversation as the report", async () => {
+    history = [seed, reply, asked, answered];
+    localStorage.setItem(VIEW_KEY, "chat");
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(text()).toContain(answered.body);
+    expect(text()).not.toContain(reply.body);
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    localStorage.setItem(VIEW_KEY, "conversation");
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(text()).toContain(reply.body);
+    expect(text()).toContain("Chatted");
+  });
+
+  it("collapses to the last row of either view", async () => {
+    history = [seed, reply, asked, answered];
+    await mount(null);
+    expect(text()).toContain("Claude: Yes, on every reload.");
+  });
+
+  it("escalates the chat with the report: decisions happen in the chat", async () => {
+    history = [seed, reply, asked, answered];
     const onHasDiscussion = vi.fn();
     await act(async () => root.render(createElement(CommentThread, { sessionId: SESSION, comment: { ...comment, type: "question" }, autoOpen: true, onHasDiscussion })));
     await flush();
     expect(onHasDiscussion).toHaveBeenCalledWith(true);
     await act(async () => clickWith("Make this a change"));
-    expect(invokeMock.mock.calls.find(([cmd]) => cmd === "attach_discussion")?.[1]).toMatchObject({ asChange: true });
+    const attach = invokeMock.mock.calls.find(([cmd]) => cmd === "attach_discussion")?.[1] as { note: string; asChange: boolean };
+    expect(attach).toMatchObject({ asChange: true });
+    expect(attach.note).toContain("Claude: Because the parser needs it first.");
+    expect(attach.note).toContain("Reviewer: Even on reload?");
+    expect(attach.note).toContain("Claude: Yes, on every reload.");
+  });
+
+  it("goes back to the entry row from an empty chat", async () => {
+    await mount(null);
+    await act(async () => clickWith("Chat"));
+    await flush();
+    await act(async () => clickWith("← Report"));
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(text()).toContain("Discuss with Claude");
   });
 });
 
