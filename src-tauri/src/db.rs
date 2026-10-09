@@ -6069,6 +6069,23 @@ impl Database {
         Ok(())
     }
 
+    /// Move the stored Codex thread's usage total, and nothing else: a turn
+    /// that resumed it but never answered still advanced the thread's totals.
+    /// A no-op once that thread is no longer the stored one (reset, or the
+    /// whole row dropped by "Clear history").
+    pub fn set_browse_codex_usage(
+        &self,
+        browse_id: &str,
+        thread_id: &str,
+        usage: &str,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "UPDATE browse_threads SET codex_usage = ?3 WHERE browse_id = ?1 AND codex_thread_id = ?2",
+            params![browse_id, thread_id, usage],
+        )?;
+        Ok(())
+    }
+
     /// Forget the Codex thread (and its baseline) — `clear_browse_session`'s
     /// Codex counterpart. The Claude session, the pick and the visible thread
     /// all stay.

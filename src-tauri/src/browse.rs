@@ -947,17 +947,18 @@ fn ledger_model(provider: Provider, harness: &BrowseHarness) -> Option<String> {
 /// resuming, and the next one re-sends its snapshot (the frontend's
 /// first-turn rule relies on exactly this). A resumed Codex thread also takes
 /// its new usage total on any ending, so the next meter counts only its own
-/// tokens.
+/// tokens — but only while that thread is still the stored one: a turn
+/// killed by "Clear history" ends after its row is gone, and must not bring
+/// the thread back for the cleared chat to resume.
 fn keep_session(db: &Database, browse_id: &str, provider: Provider, outcome: &StreamOutcome, resumed: bool) {
     let Some(session) = &outcome.session else { return };
     let answered = outcome.errored.is_none()
         && outcome.final_text.as_ref().is_some_and(|text| !text.trim().is_empty());
+    let usage = || outcome.usage.clone().unwrap_or_default().to_string();
     let kept = match provider {
         Provider::Claude if answered => db.set_browse_session(browse_id, session),
-        Provider::Codex if answered || resumed => {
-            let usage = outcome.usage.clone().unwrap_or_default();
-            db.set_browse_codex_thread(browse_id, session, &usage.to_string())
-        }
+        Provider::Codex if answered => db.set_browse_codex_thread(browse_id, session, &usage()),
+        Provider::Codex if resumed => db.set_browse_codex_usage(browse_id, session, &usage()),
         _ => Ok(()),
     };
     if let Err(e) = kept {
@@ -2304,6 +2305,18 @@ mod tests {
         keep_session(&db, "tab", Provider::Claude, &ended("s1", Some("ok"), None, 0), false);
         assert_eq!(db.get_browse_session("tab").as_deref(), Some("s1"));
         assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("t1"));
+        // A resumed turn killed by "Clear history" ends after the row is
+        // gone: it moves no baseline, and never brings its thread back for
+        // the cleared chat to resume.
+        db.delete_browse_thread("tab").unwrap();
+        keep_session(&db, "tab", Provider::Codex, &ended("t1", None, Some("Codex ended before completing the response"), 40), true);
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.get_browse_codex_usage("tab"), None);
+        // Nor does one that outlived its thread's reset.
+        db.set_browse_codex_thread("tab", "t2", r#"{"inputTokens":5}"#).unwrap();
+        keep_session(&db, "tab", Provider::Codex, &ended("t1", None, Some("rate limit"), 50), true);
+        assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("t2"));
+        assert_eq!(db.get_browse_codex_usage("tab").as_deref(), Some(r#"{"inputTokens":5}"#));
     }
 
     #[test]
