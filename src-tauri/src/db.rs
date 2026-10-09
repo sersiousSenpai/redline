@@ -833,7 +833,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "browse_threads", &["backend", "model", "effort"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (7, "browse_messages", &["backend"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -989,18 +989,24 @@ impl Database {
     }
 
     /// v6 → v7: a browse chat's own provider/model/effort pick
-    /// (`BrowseHarness`), three nullable columns beside the resumable session
-    /// id. Idempotent, so it is also safe on the forward-stamp path.
+    /// (`BrowseHarness`) beside its resumable session id, the Codex thread a
+    /// Codex pick resumes (with its usage total, the next turn's meter
+    /// baseline), and which provider wrote each reply. All nullable columns.
+    /// Idempotent, so it is also safe on the forward-stamp path.
     fn migrate_v7(conn: &Connection) -> rusqlite::Result<()> {
-        let mut stmt = conn.prepare("PRAGMA table_info(browse_threads)")?;
-        let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        // No table at all is a foreign schema; `verify_schema` names it.
-        if columns.is_empty() {
-            return Ok(());
-        }
-        for column in ["backend", "model", "effort"] {
-            if !columns.iter().any(|name| name == column) {
-                conn.execute(&format!("ALTER TABLE browse_threads ADD COLUMN {column} TEXT"), [])?;
+        for (table, column) in [
+            ("browse_threads", "backend"),
+            ("browse_threads", "model"),
+            ("browse_threads", "effort"),
+            ("browse_threads", "codex_thread_id"),
+            ("browse_threads", "codex_usage"),
+            ("browse_messages", "backend"),
+        ] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            // No table at all is a foreign schema; `verify_schema` names it.
+            if !columns.is_empty() && !columns.iter().any(|name| name == column) {
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
             }
         }
         Ok(())
@@ -5925,8 +5931,8 @@ impl Database {
         let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_messages
-                (id, browse_id, role, body, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (id, browse_id, role, body, status, created_at, backend)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 msg.id,
                 msg.browse_id,
@@ -5934,6 +5940,7 @@ impl Database {
                 msg.body,
                 msg.status,
                 msg.created_at,
+                msg.backend,
             ],
         )?;
         Ok(())
@@ -5942,7 +5949,7 @@ impl Database {
     pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, browse_id, role, body, status, created_at
+            "SELECT id, browse_id, role, body, status, created_at, backend
              FROM browse_messages
              WHERE browse_id = ?1
              ORDER BY created_at, id",
@@ -5955,6 +5962,7 @@ impl Database {
                 body: row.get(3)?,
                 status: row.get(4)?,
                 created_at: row.get(5)?,
+                backend: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -6016,6 +6024,62 @@ impl Database {
         Ok(())
     }
 
+    /// The Codex thread a Codex pick resumes. Its own column, never
+    /// `claude_session_id`: neither CLI rejects the other's id, so each
+    /// provider keeps (and resumes) only its own — the `comments.fork_backend`
+    /// rule, per page chat.
+    pub fn get_browse_codex_thread(&self, browse_id: &str) -> Option<String> {
+        self.lock_conn()
+            .query_row(
+                "SELECT codex_thread_id FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// The Codex thread's running usage total (JSON) as of its last turn. The
+    /// app-server reports thread totals, so this is the next turn's baseline.
+    pub fn get_browse_codex_usage(&self, browse_id: &str) -> Option<String> {
+        self.lock_conn()
+            .query_row(
+                "SELECT codex_usage FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Store the Codex thread and its usage total. Upserts, and never touches
+    /// the Claude session or the pick.
+    pub fn set_browse_codex_thread(
+        &self,
+        browse_id: &str,
+        thread_id: &str,
+        usage: &str,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "INSERT INTO browse_threads (browse_id, codex_thread_id, codex_usage)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(browse_id) DO UPDATE SET codex_thread_id = ?2, codex_usage = ?3",
+            params![browse_id, thread_id, usage],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the Codex thread (and its baseline) — `clear_browse_session`'s
+    /// Codex counterpart. The Claude session, the pick and the visible thread
+    /// all stay.
+    pub fn clear_browse_codex_thread(&self, browse_id: &str) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "UPDATE browse_threads SET codex_thread_id = NULL, codex_usage = NULL WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        Ok(())
+    }
+
     /// This chat's own provider/model/effort pick; all `None` when it has never
     /// had one (or has no row yet).
     pub fn get_browse_harness(&self, browse_id: &str) -> BrowseHarness {
@@ -6034,8 +6098,8 @@ impl Database {
             .unwrap_or_default()
     }
 
-    /// Store this chat's pick. Upserts, and never touches `claude_session_id`:
-    /// a model change resumes the same Claude session on the next turn.
+    /// Store this chat's pick. Upserts, and never touches either resumable id:
+    /// a model change resumes the same session on the next turn.
     pub fn set_browse_harness(
         &self,
         browse_id: &str,
@@ -11467,6 +11531,7 @@ mod tests {
             body: "hello".into(),
             status: "complete".into(),
             created_at: 10,
+            backend: None,
         })
         .unwrap();
         db.insert_browse_message(&BrowseMessage {
@@ -11476,6 +11541,7 @@ mod tests {
             body: "hi".into(),
             status: "complete".into(),
             created_at: 20,
+            backend: None,
         })
         .unwrap();
         let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
@@ -11503,6 +11569,7 @@ mod tests {
             body: body.into(),
             status: status.into(),
             created_at: at,
+            backend: None,
         };
         db.insert_browse_message(&msg("b1", "user", "hello", "complete", 10)).unwrap();
         db.insert_browse_message(&msg("b2", "assistant", "error_during_execution", "error", 20))
@@ -15363,9 +15430,14 @@ body.
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "INSERT INTO browse_threads (browse_id, claude_session_id) VALUES ('tab', 'sid');
+                 INSERT INTO browse_messages (id, browse_id, role, body, status, created_at)
+                     VALUES ('reply', 'tab', 'assistant', 'hi', 'complete', 1);
                  ALTER TABLE browse_threads DROP COLUMN backend;
                  ALTER TABLE browse_threads DROP COLUMN model;
                  ALTER TABLE browse_threads DROP COLUMN effort;
+                 ALTER TABLE browse_threads DROP COLUMN codex_thread_id;
+                 ALTER TABLE browse_threads DROP COLUMN codex_usage;
+                 ALTER TABLE browse_messages DROP COLUMN backend;
                  PRAGMA user_version=6;",
             )
             .unwrap();
@@ -15374,9 +15446,12 @@ body.
         }
         let db = Database::open(&path).expect("a v6 database must open");
         assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
-        // The existing row keeps its session and reads as "never picked".
+        // The existing row keeps its session and reads as "never picked", with
+        // no Codex thread; its old reply has no provider (it was Claude's).
         assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid"));
         assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.load_browse_thread("tab").unwrap()[0].backend, None);
         Database::migrate_v7(&db.lock_conn()).unwrap(); // replay-safe
         drop(db);
         let _ = std::fs::remove_file(path);
@@ -15412,6 +15487,51 @@ body.
         db.delete_browse_thread("tab").unwrap();
         assert_eq!(db.get_browse_session("tab"), None);
         assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+    }
+
+    /// Each provider keeps its own resumable id: storing or forgetting the
+    /// Codex thread never touches the Claude session or the pick, and the
+    /// reverse. Clear history drops both.
+    #[test]
+    fn a_browse_chat_keeps_one_resumable_id_per_provider() {
+        let db = Database::open_in_memory().unwrap();
+        let pick = BrowseHarness { backend: Some("codex".into()), model: Some("gpt-5.5".into()), effort: None };
+        db.set_browse_harness("tab", &pick).unwrap();
+        db.set_browse_codex_thread("tab", "thread-1", r#"{"inputTokens":10}"#).unwrap();
+        db.set_browse_session("tab", "sid-1").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("thread-1"));
+        assert_eq!(db.get_browse_codex_usage("tab").as_deref(), Some(r#"{"inputTokens":10}"#));
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-1"));
+        assert_eq!(db.get_browse_harness("tab"), pick);
+
+        // A Claude context reset leaves the Codex thread; a lost Codex thread
+        // leaves the Claude session.
+        db.clear_browse_session("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("thread-1"));
+        db.set_browse_session("tab", "sid-2").unwrap();
+        db.clear_browse_codex_thread("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.get_browse_codex_usage("tab"), None);
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-2"));
+        assert_eq!(db.get_browse_harness("tab"), pick);
+
+        // A reply remembers which provider wrote it.
+        db.insert_browse_message(&BrowseMessage {
+            id: "a1".into(),
+            browse_id: "tab".into(),
+            role: "assistant".into(),
+            body: "hi".into(),
+            status: "complete".into(),
+            created_at: 1,
+            backend: Some("codex".into()),
+        })
+        .unwrap();
+        assert_eq!(db.load_browse_thread("tab").unwrap()[0].backend.as_deref(), Some("codex"));
+
+        db.set_browse_codex_thread("tab", "thread-2", "{}").unwrap();
+        db.delete_browse_thread("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.get_browse_session("tab"), None);
     }
 
     #[test]
@@ -15763,6 +15883,7 @@ body.
             body: "queued browse".to_string(),
             status: "queued".to_string(),
             created_at: 10,
+            backend: None,
         })
         .unwrap();
         db.insert_linked_message(&crate::state::LinkedMessage {
@@ -15846,6 +15967,7 @@ body.
             body: "landed".to_string(),
             status: "complete".to_string(),
             created_at: 20,
+            backend: None,
         })
         .unwrap();
         assert_eq!(db.sweep_queued_to_unsent().unwrap(), 4);
@@ -15875,6 +15997,7 @@ body.
                 body: id.to_string(),
                 status: status.to_string(),
                 created_at: ts,
+                backend: None,
             })
             .unwrap();
         }

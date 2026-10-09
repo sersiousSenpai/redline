@@ -830,3 +830,45 @@ On this CLI version, `thread/resume.developerInstructions` and a context-only se
 ### Shell integration and bounded delivery
 
 `scripts/test-shell-integration.py` passed real disposable zsh and bash PTY checks for user startup files, custom ZDOTDIR, dynamic prompts, exit status and interactive reads. One existing TerminalView remains mounted while plain-shell blocks/raw views change; completed output is serialized lazily, while the live xterm keeps the existing WebGL allocation budget. The scanner tests cover split OSC frames, replay, alternate-screen applications and literal Claude promotion. The native backend batches every 16 ms over a per-tab Channel, caps replay at 2 MB/4,096 events, enforces 256-event acknowledgement credit, and reconstructs unanswered permission cards from its registry on reattach.
+
+## Codex page chats: localhost bridge and token delivery — October 9, 2026
+
+A browser tab chat can now run on Codex (`browse.rs`, through `codex_conversation::NativeTurn` on a `codex app-server` thread). Its agent drives the tab with the same curl bridge as the Claude agent: `GET 127.0.0.1:7676/v1/browser/snapshot` for reads, bearer-token POSTs for writes. Two things had to be measured before building on that:
+
+1. Can the shell of a NativeTurn turn (a read-only sandbox with `networkAccess: true`) curl a 127.0.0.1 listener? The `exec -s read-only` path is known to block localhost.
+2. Does `REDLINE_DAEMON_TOKEN`, set on the app-server process, reach that shell? Codex's `shell_environment_policy` is documented to drop `*KEY*` / `*SECRET*` / `*TOKEN*` names by default.
+
+**Setup.** codex-cli 0.160.1 at `/opt/homebrew/bin/codex`, signed in with ChatGPT (`codex login status`). This is the binary `resolve_codex_bin` picks on this machine: the newest capable candidate, ahead of the ChatGPT app's bundled 0.155.0-alpha.9.2. The user's `~/.codex/config.toml` sets no `shell_environment_policy`. It does set `sandbox_mode = "danger-full-access"`, which NativeTurn's per-thread and per-turn sandbox overrides replace. Redline's daemon was not running.
+
+**Method.** A throwaway Python script in a scratch directory (not committed):
+
+- A listener on an ephemeral 127.0.0.1 port recorded each request's method, path, `Authorization` header and a control header. Port 7676 itself was left alone, because the user's live Codex sessions run Redline's global hooks, which POST there.
+- A driver spoke stdio JSONL to a fresh `codex app-server` per turn, in NativeTurn's exact order: `initialize`; then `initialized` plus `thread/start` (`cwd` = `$HOME`, `approvalPolicy: never`, `sandbox: read-only`, NativeTurn's `developerInstructions`); then `turn/start` with `sandboxPolicy: {type: readOnly, networkAccess: true}`, `approvalPolicy: never` and `effort: low`.
+- The app-server's environment carried `REDLINE_DAEMON_TOKEN=<random>` and a control `REDLINE_PROBE_PLAIN=<random>`, whose name contains no KEY, SECRET or TOKEN.
+- Each turn asked the model to run one command verbatim, and it did (through `/bin/zsh -lc`). The command was a `GET …/v1/browser/snapshot` and a `POST …/v1/browser/action`, each importing both variables the bridge's own way (`--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}"`, and the same for `X-Plain`). Then came a `curl -v` to the unbound 127.0.0.1:7676, to tell a sandbox denial apart from a refused connection.
+
+**Results.** Six tiny turns on the user's default model (gpt-6-astra) at low effort:
+
+| Turn | `networkAccess` | Env-policy override | Listener saw | `Authorization` | Control var | `curl -v` to :7676 |
+|---|---|---|---|---|---|---|
+| control | false | none | nothing | — | — | `Immediate connect fail for 127.0.0.1: Operation not permitted` |
+| default | true | none | GET and POST | `Bearer <token>` | present | `Connection refused` |
+| CLI override | true | `-c shell_environment_policy.ignore_default_excludes=true` | GET and POST | `Bearer <token>` | present | `Connection refused` |
+| thread override | true | `thread/start` `config: {"shell_environment_policy.ignore_default_excludes": true}` | GET and POST | `Bearer <token>` | present | `Connection refused` |
+| resumed | true | the CLI override, `thread/resume` in a new process | GET and POST | `Bearer <token>` | present | `Connection refused` |
+| excludes on | true | `-c shell_environment_policy.ignore_default_excludes=false` | GET and POST | `Bearer ` (empty) | present | `Connection refused` |
+
+**Findings.**
+
+1. **Localhost works from NativeTurn's sandbox, for GET and POST.** The `networkAccess: false` control shows the probe can see a sandbox denial (EPERM, nothing reaches the listener). Under `networkAccess: true`, port 7676 answers "Connection refused", not EPERM, so no port is singled out.
+2. **An environment variable on the app-server reaches the sandboxed shell.** On 0.160.1 the default policy keeps `*TOKEN*` names: the default excludes are off. Turning them on (`ignore_default_excludes=false`) strips exactly the token, while the control variable still passes. The value also survives `thread/resume` in a fresh process.
+
+**Decision: Codex page chats ship with full read/write authority.** `codex_conversation::bridge_command` sets the token and the agent seat on the app-server's environment, the way `claude_proc::claude_command` does for `claude`. No `-c` override rides along. Forcing the token through would also undo a user's own `ignore_default_excludes = false` for every other secret. A user with that setting keeps the read routes, and write routes answer with the bridge's own 401 message for the agent to report.
+
+Also observed:
+
+- Redline's Codex Stop and UserPromptSubmit hooks live in the global `~/.codex/hooks.json`, so they apply to these app-server turns as well. This was not observed directly, since port 7676 stayed unbound. With the daemon up, `/v1/codex/stop` holds only a reply carrying a complete `<proposed_plan>` block, which NativeTurn's instructions forbid, and the hooks' `X-Redline-Agent` header comes from the `REDLINE_AGENT_SEAT=browse` the spawn sets.
+- The user's MCP servers start for each turn. NativeTurn's chat mode doesn't disable them, and on this machine they logged OAuth-refresh errors on stderr.
+- The Companion's Codex chat (`companion.rs`) still spawns its app-server without the token, so its browser-dock writes cannot authenticate. `bridge_command` is the fix there too; it was left out of this change.
+
+Not covered here: the real daemon's routes (the listener stood in for them), and a live tab. Both are part of the GUI walk.

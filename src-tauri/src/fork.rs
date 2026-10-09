@@ -373,16 +373,19 @@ fn attachments_block(attachments: &[CommentAttachment]) -> String {
 ///
 /// Only completed, non-error turns: an error row is Redline's own failure text,
 /// never something the previous agent said.
-fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
+///
+/// Generic over the row type, so a browser page chat that switches provider
+/// (`browse.rs`) carries its history the same way.
+pub(crate) fn continuity_block<M: ContinuityTurn>(messages: &[M]) -> Option<String> {
     /// Turns carried forward, newest-last.
     const MAX_TURNS: usize = 8;
     /// Per-turn character ceiling — a pasted stack trace must not crowd out
     /// the turns around it.
     const MAX_CHARS: usize = 1_200;
 
-    let usable: Vec<&ThreadMessage> = messages
+    let usable: Vec<&M> = messages
         .iter()
-        .filter(|m| m.status == "complete" && !m.body.trim().is_empty())
+        .filter(|m| m.status() == "complete" && !m.body().trim().is_empty())
         .collect();
     if usable.is_empty() {
         return None;
@@ -394,8 +397,8 @@ fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
          you are not being asked to repeat or defend them:\n",
     );
     for m in recent {
-        let who = if m.role == "user" { "Reviewer" } else { "Assistant" };
-        let body = m.body.trim();
+        let who = if m.role() == "user" { M::USER } else { "Assistant" };
+        let body = m.body().trim();
         let truncated: String = body.chars().take(MAX_CHARS).collect();
         out.push_str(&format!("\n{who}: {truncated}"));
         if truncated.len() < body.len() {
@@ -404,6 +407,29 @@ fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
         out.push('\n');
     }
     Some(out)
+}
+
+/// A visible thread row `continuity_block` can carry, and what to call the
+/// person who wrote the user turns.
+pub(crate) trait ContinuityTurn {
+    const USER: &'static str;
+    fn role(&self) -> &str;
+    fn body(&self) -> &str;
+    fn status(&self) -> &str;
+}
+
+impl ContinuityTurn for ThreadMessage {
+    const USER: &'static str = "Reviewer";
+    fn role(&self) -> &str { &self.role }
+    fn body(&self) -> &str { &self.body }
+    fn status(&self) -> &str { &self.status }
+}
+
+impl ContinuityTurn for crate::state::BrowseMessage {
+    const USER: &'static str = "User";
+    fn role(&self) -> &str { &self.role }
+    fn body(&self) -> &str { &self.body }
+    fn status(&self) -> &str { &self.status }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3136,7 +3162,7 @@ mod tests {
             "Why?",
             None,
             &[],
-            continuity_block(&[]).as_deref(),
+            continuity_block::<ThreadMessage>(&[]).as_deref(),
         );
         assert_eq!(plain, empty, "no usable history must change nothing");
         assert!(plain.contains("Their comment:"));

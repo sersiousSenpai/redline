@@ -6,6 +6,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { Panel, useClickPopover } from "./popover";
 import { MODEL_OPTIONS } from "../lib/seatAssign";
 import { useModelCatalogs } from "../hooks/useModelCatalogs";
+import { integrationHealth } from "../lib/integrationHealth";
+import type { CodexProbe } from "../lib/readiness";
 import {
   backendLabel,
   choiceLabel,
@@ -26,18 +28,41 @@ export const LAST_HARNESS_KEY = "redline.browse.lastHarness";
 /** The providers a page chat offers, in the order the row shows them. */
 const PROVIDERS: readonly Backend[] = ["claude-code", "codex"];
 
-/** Why a provider can't run a page chat, or null when it can. Codex has no
- *  browse turn yet, so it is offered but disabled, with this as its reason. */
-function providerBlocker(backend: Backend): string | null {
-  return backend === "codex" ? "Codex for page chats is coming next" : null;
+/** Why Codex can't run a page chat on this machine, or null when it can: the
+ *  preflight probe found it, it is new enough for Redline's app-server turns,
+ *  and it is not known to be signed out. An unverified sign-in never blocks,
+ *  the same rule `readiness.ts` applies to a Codex launch. */
+export function codexBlocker(probe: CodexProbe | null | undefined): string | null {
+  if (!probe) return "Couldn't check Codex on this machine";
+  if (!probe.found) return "Codex isn't installed — install the ChatGPT desktop app, or point Redline at codex";
+  if (!probe.usable) return `This codex${probe.version ? ` (${probe.version})` : ""} is too old for Redline — update Codex`;
+  if (!probe.signedIn && probe.authState !== "unknown") return "Codex isn't signed in — run `codex login` in a terminal";
+  return null;
+}
+
+/** Codex's readiness, probed while the picker is open (the probe is shared
+ *  and cached by `integrationHealth`). `blocker` is undefined until it
+ *  answers; `model` is Codex's own configured default. */
+function useCodexReadiness(open: boolean): { blocker: string | null | undefined; model: string | null } {
+  const [state, setState] = useState<{ blocker: string | null | undefined; model: string | null }>({ blocker: undefined, model: null });
+  useEffect(() => {
+    if (!open) return;
+    let current = true;
+    integrationHealth.ensure({ backend: "codex", extension: false }).then(health => {
+      const probe = health.preflight.codex;
+      if (current) setState({ blocker: codexBlocker(probe), model: probe?.configuredModel ?? null });
+    }, () => {
+      if (current) setState({ blocker: codexBlocker(null), model: null });
+    });
+    return () => { current = false; };
+  }, [open]);
+  return state;
 }
 
 function readLastHarness(): BackendChoice | null {
   try {
     const raw = localStorage.getItem(LAST_HARNESS_KEY);
-    if (!raw) return null;
-    const choice = parseChoice(JSON.parse(raw));
-    return providerBlocker(choice.backend) ? null : choice;
+    return raw ? parseChoice(JSON.parse(raw)) : null;
   } catch {
     return null;
   }
@@ -156,18 +181,28 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
 /** `[Default (sonnet · medium) ⌄]` — this page chat's provider, model and
  *  effort. Modelled on the plan discussions' `DiscussModelChip`, plus a
  *  Provider row. Never disabled while a reply streams: the pick applies to the
- *  next message, the way the Companion's does. */
+ *  next message, the way the Companion's does. Codex is offered only when
+ *  this machine can run it; otherwise its option says why not. */
 export function BrowseHarnessChip({ harness }: { harness: BrowseHarness }) {
   const { pick, seat, saving, error, save } = harness;
   const anchor = useRef<HTMLButtonElement>(null);
   const popover = useClickPopover(anchor, "left");
   const { catalogs, errors, request } = useModelCatalogs();
+  const codexReadiness = useCodexReadiness(popover.open);
   useEffect(() => { if (popover.open) request(pick.backend, pick.backend); }, [popover.open, pick.backend, request]);
+  const codex = pick.backend === "codex";
+  // "Default" is the browse seat on Claude, and Codex's own settings on Codex.
   const seatLabel = [seat.model, seat.effort].filter(Boolean).join(" · ") || "CLI default";
+  const defaultLabel = codex ? `Default${codexReadiness.model ? ` (${codexReadiness.model})` : ""}` : `Default (${seatLabel})`;
   const isDefault = !pick.model && !pick.effort;
-  const label = isDefault ? `Default (${seatLabel})` : choiceLabel(pick, catalogs).split(" · ").slice(1).join(" · ");
+  // Claude is the quiet case; a Codex chat always says so.
+  const label = codex
+    ? (isDefault ? "Codex · Default" : choiceLabel(pick, catalogs))
+    : (isDefault ? defaultLabel : choiceLabel(pick, catalogs).split(" · ").slice(1).join(" · "));
   const models = modelsFor(pick.backend, catalogs).filter(model => pick.backend !== "claude-code" || (MODEL_OPTIONS as readonly string[]).includes(model.value));
   const efforts = effortsFor(pick.backend, pick.model, catalogs);
+  const providerBlocker = (backend: Backend) =>
+    backend !== "codex" ? null : codexReadiness.blocker === undefined ? "Checking Codex…" : codexReadiness.blocker;
   return <>
     <button type="button" ref={anchor} className="rb-harness-chip" title="Applies to the next message" aria-label="Chat model and effort" aria-haspopup="menu" aria-expanded={popover.open} onClick={popover.toggle}>
       <span>{label}</span><ChevronDown size={12} aria-hidden/>
@@ -186,10 +221,10 @@ export function BrowseHarnessChip({ harness }: { harness: BrowseHarness }) {
           })}
         </div>
         <button type="button" role="menuitemradio" aria-checked={isDefault} className="rl-fd-menu-row" disabled={saving} onClick={() => void save({ backend: pick.backend, model: null, effort: null })}>
-          <span className="rl-fd-menu-name"><Check size={12} className="rl-fd-menu-tick" style={{ opacity: isDefault ? 1 : 0 }}/>Default ({seatLabel})</span>
+          <span className="rl-fd-menu-name"><Check size={12} className="rl-fd-menu-tick" style={{ opacity: isDefault ? 1 : 0 }}/>{defaultLabel}</span>
         </button>
         <label className="rl-fd-model-field"><span className="rl-fd-menu-label">Model</span><select aria-label="Chat model" disabled={saving} value={pick.model ?? ""} onChange={e => void save(normalizeChoice({ ...pick, model: e.target.value || null }, catalogs))}>
-          <option value="">{seat.model ? `Default (${seat.model})` : "Default"}</option>
+          <option value="">{codex ? defaultLabel : seat.model ? `Default (${seat.model})` : "Default"}</option>
           {models.map(model => <option key={model.value} value={model.value}>{model.label}</option>)}
           {pick.model && !models.some(model => model.value === pick.model) && <option value={pick.model}>{pick.model}</option>}
         </select></label>

@@ -769,6 +769,11 @@ pub struct BrowseMessage {
     /// "complete" | "error".
     pub status: String,
     pub created_at: i64,
+    /// The provider that wrote a completed reply (`claude-code` | `codex`).
+    /// `None` on user and error rows, and on every reply written before a
+    /// page chat could run on Codex — those were all Claude.
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 /// A browse chat's own provider/model/effort pick, stored beside its session

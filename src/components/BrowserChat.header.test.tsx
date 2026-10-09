@@ -4,7 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
 const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
-  config: { current: null as null | { buildSendArgs: (text: string) => Promise<Record<string, unknown>> } },
+  config: { current: null as null | {
+    buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
+    makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
+  } },
   captureMock: vi.fn(async (label: string) => `snapshot:${label}`),
   invokeMock: vi.fn(async () => []),
   turn: { messages: [] as BrowseMessage[], liveText: "", status: "idle", startedAt: null, loaded: true,
@@ -133,6 +136,49 @@ describe("page conversation header", () => {
     await click("Conversation actions"); await click("Clear history");
     await act(async () => { await config.current!.buildSendArgs("After clearing"); });
     expect(sets()).toHaveLength(2);
+  });
+
+  it("captures the page again while the provider differs from the last reply's", async () => {
+    const msg = (id: string, role: string, body: string, backend?: string | null): BrowseMessage => ({ id, browseId: "thread", role, body, status: "complete", createdAt: 1, backend });
+    // The last reply came from Codex; the chat is back on Claude (its default).
+    turn.messages = [msg("q", "user", "Question"), msg("a", "assistant", "Codex's answer", "codex")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("First on Claude")).toMatchObject({ snapshot: "snapshot:browser-a" });
+    expect(await config.current!.buildSendArgs("Sent again before a reply")).toMatchObject({ snapshot: "snapshot:browser-a" });
+    // Once Claude has answered, a follow-up is just a follow-up.
+    turn.messages = [...turn.messages, msg("b", "assistant", "Claude's answer", "claude-code")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("Follow-up")).toMatchObject({ snapshot: undefined });
+    // A reply from before Codex page chats was Claude's.
+    turn.messages = [msg("old", "assistant", "An old answer")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("Follow-up")).toMatchObject({ snapshot: undefined });
+    expect(captureMock).toHaveBeenCalledTimes(2);
+
+    // A chat now on Codex after Claude's replies: Codex needs the page too.
+    await act(async () => root.unmount());
+    localStorage.setItem("redline.browse.lastHarness", JSON.stringify({ backend: "codex", model: null, effort: null }));
+    root = createRoot(host);
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    await act(async () => { await config.current!.buildSendArgs("Prime the label"); });
+    expect(await config.current!.buildSendArgs("First on Codex")).toMatchObject({ snapshot: "snapshot:browser-a" });
+  });
+
+  it("signs each reply with the provider that wrote it", async () => {
+    localStorage.setItem("redline.browse.lastHarness", JSON.stringify({ backend: "codex", model: null, effort: null }));
+    turn.messages = [
+      { id: "a1", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 1, backend: "claude-code" },
+      { id: "a2", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 2, backend: "codex" },
+      { id: "a3", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 3 },
+      { id: "e1", browseId: "thread", role: "assistant", body: "codex ended without producing a reply", status: "error", createdAt: 4 },
+    ];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    const bylines = [...host.querySelectorAll("[data-browser-chat-messages] > div > span:first-child")].map(span => span.textContent);
+    // An error row is Redline's note about this chat's current turn.
+    expect(bylines).toEqual(["Claude", "Codex", "Claude", "Codex"]);
+    // A reply settling live keeps the provider its done event named.
+    expect(config.current!.makeMessage({ id: "live", role: "assistant", body: "Done", status: "complete", backend: "codex" })).toMatchObject({ backend: "codex" });
+    expect(config.current!.makeMessage({ id: "mine", role: "user", body: "Hi", status: "complete" })).toMatchObject({ backend: null });
   });
 
   it("bounds a long composer without moving it into the scrolling transcript", async () => {

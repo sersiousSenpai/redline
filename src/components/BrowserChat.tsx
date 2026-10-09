@@ -25,7 +25,7 @@ import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
-import { backendLabel } from "../lib/backendChoice";
+import { agentLabelFor, backendLabel } from "../lib/backendChoice";
 
 interface BrowserChatProps {
   /** Stable per-tab id — keys the browse-agent backend + persisted thread. */
@@ -89,6 +89,16 @@ const clampZoom = (z: number) => Math.min(1.6, Math.max(0.8, z));
 function loadZoom(): number {
   const raw = Number(localStorage.getItem(ZOOM_KEY));
   return Number.isFinite(raw) && raw > 0 ? clampZoom(raw) : 1;
+}
+
+/** The provider that wrote the chat's latest completed reply, or null when
+ *  nothing has answered yet. Replies older than Codex page chats were Claude's. */
+function lastReplyBackend(messages: readonly BrowseMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant" && m.status === "complete") return m.backend ?? "claude-code";
+  }
+  return null;
 }
 
 /** A discussion with a browse agent that can see and drive the active browser
@@ -162,10 +172,10 @@ export const BrowserChat = memo(function BrowserChat({
         // The backend treats a turn as "first" until the agent session is
         // saved, which only happens on a *successful* reply — so keep sending
         // a snapshot until then (e.g. if the opening turn errored), matching
-        // that contract.
-        const firstTurn = !messages.some(
-          (m: BrowseMessage) => m.role === "assistant" && m.status === "complete",
-        );
+        // that contract. A provider switch since the last reply counts too:
+        // the other side either starts fresh or resumes a session that has not
+        // seen the page since.
+        const firstTurn = lastReplyBackend(messages) !== harness.pick.backend;
         // First turn embeds a live DOM snapshot so the agent is grounded
         // without a mandatory round-trip; follow-ups rely on its /snapshot
         // tool. Live snapshot if the tab is up; otherwise the cached one (a
@@ -184,13 +194,14 @@ export const BrowserChat = memo(function BrowserChat({
           followingTabs: linked,
         };
       },
-      makeMessage: ({ id, role, body, status }) => ({
+      makeMessage: ({ id, role, body, status, backend }) => ({
         id,
         browseId,
         role,
         body,
         status,
         createdAt: Date.now(),
+        backend: backend ?? null,
       }),
     });
 
@@ -341,7 +352,9 @@ export const BrowserChat = memo(function BrowserChat({
             <MessageBubble
               key={m.id}
               msg={m}
-              agent={agent}
+              // A reply is signed by the provider that wrote it; an error row
+              // is Redline's own note about this chat's current turn.
+              agent={m.status === "complete" ? agentLabelFor(m.backend) : agent}
               meter={meters[m.id]}
               contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}

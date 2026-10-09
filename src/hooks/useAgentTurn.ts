@@ -120,6 +120,9 @@ export interface AgentTurnConfig<M extends TurnMessage> {
     role: "user" | "assistant";
     body: string;
     status: "complete" | "error";
+    /** The provider that wrote a reply, when the surface's done event says
+     *  (browse). */
+    backend?: string;
   }) => M;
 }
 
@@ -182,7 +185,7 @@ let tmpSeq = 0;
 const tmpId = (surface: string) => `${surface}-tmp-${++tmpSeq}`;
 
 type DeltaPayload = { text: string; seq: number };
-type DonePayload = { messageId: string; body: string };
+type DonePayload = { messageId: string; body: string; backend?: string };
 type ErrorPayload = { error: string };
 type QueueAdvancedPayload = { messageId: string };
 type RetryPayload = { attempt: number };
@@ -275,6 +278,7 @@ export class AgentTurnController<M extends TurnMessage> {
             role: "assistant",
             body: p.body,
             status: "complete",
+            backend: p.backend,
           }),
         }),
       ),
