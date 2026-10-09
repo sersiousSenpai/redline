@@ -286,6 +286,17 @@ describe("StreamingBubble", () => {
     expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
   });
 
+  it("keeps the open block through a re-render that only restyles the reply", async () => {
+    // The chat room going from docked to plate scale mid-stream: the closed
+    // blocks' view re-renders with a new class, and React must not re-assign
+    // its markup (which would take the open block's nodes with it).
+    const text = "Closed.\n\nStill open";
+    await bubble({ text });
+    await bubble({ text, room: true });
+    expect(view().className).toBe("rl-md rl-md-room");
+    expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
+  });
+
   it("keeps the room scale, the caret, and the lead paragraph's place", async () => {
     await bubble({ text: "Lead.\n\nNext", room: true });
     expect(view().className).toBe("rl-md rl-md-room");
