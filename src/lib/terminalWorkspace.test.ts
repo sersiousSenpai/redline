@@ -3,7 +3,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseTerminalWorkspace, readTerminalWorkspace, saveTerminalWorkspace, TERMINAL_WORKSPACE_KEY } from "./terminalWorkspace";
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+});
 describe("terminal workspace persistence", () => {
   it("round-trips visible and background tabs, focus, zoom and placeholder state", () => {
     const workspace = { tabs: [{ id: "a", cwd: null, placeholder: true }, { id: "b", cwd: "/repo" }, { id: "hidden", cwd: "/work" }], tiles: ["b", "a"], focusedTile: 1, zoomedId: "b" };
@@ -15,10 +18,23 @@ describe("terminal workspace persistence", () => {
     expect(parseTerminalWorkspace({ tabs: [{ id: "a", cwd: null }], tiles: [] }, 14)?.tiles).toEqual(["a"]);
   });
   it("falls back cleanly when storage is corrupt or unavailable", () => {
-    localStorage.setItem(TERMINAL_WORKSPACE_KEY, "{");
+    sessionStorage.setItem(TERMINAL_WORKSPACE_KEY, "{");
     expect(readTerminalWorkspace(14)).toBeNull();
     const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("storage disabled"); });
     expect(readTerminalWorkspace(14)).toBeNull();
     get.mockRestore();
+  });
+  it("lives in sessionStorage so a relaunch, unlike a reload, starts empty", () => {
+    const workspace = { tabs: [{ id: "a", cwd: "/repo" }], tiles: ["a"], focusedTile: 0, zoomedId: null };
+    saveTerminalWorkspace(workspace);
+    expect(sessionStorage.getItem(TERMINAL_WORKSPACE_KEY)).not.toBeNull();
+    expect(localStorage.getItem(TERMINAL_WORKSPACE_KEY)).toBeNull();
+    sessionStorage.clear();
+    expect(readTerminalWorkspace(14)).toBeNull();
+  });
+  it("ignores and removes a legacy localStorage workspace", () => {
+    localStorage.setItem(TERMINAL_WORKSPACE_KEY, JSON.stringify({ tabs: [{ id: "dead", cwd: "/repo" }], tiles: ["dead"], focusedTile: 0, zoomedId: null }));
+    expect(readTerminalWorkspace(14)).toBeNull();
+    expect(localStorage.getItem(TERMINAL_WORKSPACE_KEY)).toBeNull();
   });
 });

@@ -26,7 +26,7 @@ let handle = createRef<TerminalTabsHandle>();
 const ids = () => [...host.querySelectorAll<HTMLElement>("[data-terminal-id]")].map((node) => node.dataset.terminalId!);
 const tiled = () => [...host.querySelectorAll<HTMLElement>("[data-header-id]")].map((node) => node.dataset.headerId!);
 const focused = () => host.querySelector<HTMLElement>('[data-focused="true"]')?.dataset.headerId;
-const saved = () => JSON.parse(localStorage.getItem(TERMINAL_WORKSPACE_KEY)!);
+const saved = () => JSON.parse(sessionStorage.getItem(TERMINAL_WORKSPACE_KEY)!);
 const click = async (selector: string) => {
   const button = host.querySelector<HTMLButtonElement>(selector);
   expect(button).not.toBeNull();
@@ -42,6 +42,7 @@ async function open(background = false) {
 }
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   mocks.inventory = [];
   mocks.cwd = null;
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
@@ -151,6 +152,23 @@ describe("terminal workspace recovery", () => {
     expect(host.querySelector<HTMLElement>('[data-zoomed="true"]')?.dataset.headerId).toBe(first);
     expect(saved()).toEqual(before);
     expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
+  });
+
+  it("a relaunch opens one fresh convenience shell instead of respawning the dead fleet", async () => {
+    await mount();
+    const before = [ids()[0], await open(), await open(), await open()];
+    await act(async () => root.render(null));
+    // Process death: every PTY is gone and so is the launch's sessionStorage.
+    sessionStorage.clear();
+    mocks.invoke.mockClear();
+    await mount();
+    expect(ids()).toHaveLength(1);
+    const [fresh] = ids();
+    expect(before).not.toContain(fresh);
+    expect(tiled()).toEqual([fresh]);
+    expect(saved().tabs).toEqual([{ id: fresh, cwd: null, placeholder: true }]);
+    const touched = mocks.invoke.mock.calls.flatMap(([, args]) => Object.values(args ?? {}).flat());
+    expect(touched.some((value) => before.includes(value as string))).toBe(false);
   });
 
   it("offers live orphaned PTYs and reattaches their original ids in place of a blank shell", async () => {
