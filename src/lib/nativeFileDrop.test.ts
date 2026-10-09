@@ -106,6 +106,18 @@ describe("native file drop router", () => {
     expect(terminal.onDrop).not.toHaveBeenCalled();
   });
 
+  it("never lets a drop through the dimmed cover behind a modal", async () => {
+    const terminal = target("terminal");
+    const cover = document.body.appendChild(document.createElement("div"));
+    const dialog = cover.appendChild(document.createElement("form"));
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    await settle();
+    stack = [cover, terminal.el, document.body];
+    native({ type: "drop", paths: ["/tmp/x"], position: at });
+    expect(terminal.onDrop).not.toHaveBeenCalled();
+  });
+
   it("still delivers to a target inside a modal dialog", async () => {
     const dialog = document.body.appendChild(document.createElement("div"));
     dialog.setAttribute("aria-modal", "true");
@@ -188,6 +200,24 @@ describe("native file drop router", () => {
     unregister.splice(0).forEach((un) => un());
     await settle();
     expect(subscriptions()).toBe(0);
+  });
+
+  it("subscribes once however often one element registers", async () => {
+    const el = document.body.appendChild(document.createElement("div"));
+    const first = vi.fn();
+    const second = vi.fn();
+    const unFirst = registerFileDropTarget(el, first);
+    await settle();
+    unregister.push(registerFileDropTarget(el, second));
+    await settle();
+    expect(subscriptions()).toBe(2);
+    stack = [el];
+    native({ type: "drop", paths: ["/tmp/x"], position: at });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+    // The replaced registration's unregister no longer owns the element.
+    unFirst();
+    expect(subscriptions()).toBe(2);
   });
 
   it("keeps the newer handlers when the same element registers twice", async () => {

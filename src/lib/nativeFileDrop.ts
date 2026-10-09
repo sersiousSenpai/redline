@@ -14,8 +14,8 @@
 // The rule now lives here, once: the topmost REGISTERED target under the
 // pointer wins. Non-target overlays are looked through, so a composer that
 // really is on top still wins and the notch never eats a drop. The one thing
-// not looked through is a modal dialog: a drop onto one goes nowhere rather
-// than into whatever it covers.
+// not looked through is a modal dialog (or the cover behind it): a drop onto
+// one goes nowhere rather than into whatever it covers.
 //
 // Positions are logical AppKit points, which are already CSS pixels: wry
 // reports them unscaled (Tauri labels them "physical") and the webview's
@@ -59,8 +59,10 @@ export function registerFileDropTarget(
   onHover?: (over: boolean) => void,
 ): () => void {
   const target: DropTarget = { onDrop, onHover };
+  // Subscribe on the first target only: an element registering again while
+  // it is still registered must not add a second subscription.
+  if (targets.size === 0) install();
   targets.set(el, target);
-  if (targets.size === 1) install();
   return () => {
     // A later registration of the same element owns it now.
     if (targets.get(el) !== target) return;
@@ -73,6 +75,8 @@ export function registerFileDropTarget(
   };
 }
 
+const MODAL = '[aria-modal="true"]';
+
 /** The registered target a drop at (x, y) belongs to, if any. */
 export function fileDropTargetAt(x: number, y: number): HTMLElement | null {
   // Every layer under the point, topmost first.
@@ -81,7 +85,8 @@ export function fileDropTargetAt(x: number, y: number): HTMLElement | null {
     for (let n: Element | null = hit; n; n = n.parentElement) {
       if (targets.has(n as HTMLElement) && n.isConnected) return n as HTMLElement;
     }
-    if (hit.closest('[aria-modal="true"]')) return null;
+    // A modal, or the dimmed cover it sits on, ends the search.
+    if (hit.closest(MODAL) || [...hit.children].some((child) => child.matches(MODAL))) return null;
   }
   return null;
 }

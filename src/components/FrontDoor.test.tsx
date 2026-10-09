@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, createElement, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -55,8 +55,11 @@ const flush = () =>
 
 let host: HTMLDivElement;
 let root: Root;
+let quiet: MockInstance;
 
 beforeEach(() => {
+  // The drop router's dev breadcrumbs.
+  quiet = vi.spyOn(console, "debug").mockImplementation(() => {});
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -67,6 +70,7 @@ afterEach(() => {
   host.remove();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  quiet.mockRestore();
 });
 
 const PENDING = { prompt: "Ship the auth rewrite", startedAt: Date.now() - 3000 };
@@ -158,6 +162,7 @@ it("ignores native drops that miss the island or land on a dialog covering it", 
   const dialog = document.body.appendChild(document.createElement("div"));
   dialog.setAttribute("aria-modal", "true");
   try {
+    expect(dropListeners.size).toBe(1);
     document.elementsFromPoint = () => [document.body];
     act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
     document.elementsFromPoint = () => [dialog, composer()!];

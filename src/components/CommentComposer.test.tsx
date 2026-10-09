@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -22,8 +22,11 @@ import type { CommentType } from "../types";
 
 let host: HTMLDivElement;
 let root: Root;
+let quiet: MockInstance;
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  // The drop router's dev breadcrumbs.
+  quiet = vi.spyOn(console, "debug").mockImplementation(() => {});
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -32,6 +35,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   vi.unstubAllGlobals();
+  quiet.mockRestore();
 });
 
 async function mount(type: CommentType, onSubmit = vi.fn((_req: unknown, _opts: { discuss: boolean }) => Promise.resolve())) {
@@ -123,6 +127,7 @@ describe("CommentComposer — native file drops", () => {
   it("ignores a drop that lands elsewhere", async () => {
     vi.mocked(invoke).mockClear();
     await mount("feedback");
+    expect(drops.size).toBe(1);
     document.elementsFromPoint = () => [document.body];
     await drag({ type: "drop", paths: ["/Users/me/Desktop/shot.png"], position: { x: 900, y: 900 } });
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_attachment")).toBe(false);

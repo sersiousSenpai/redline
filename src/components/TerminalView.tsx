@@ -54,6 +54,12 @@ function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
+// No quoting holds a control character: typed at the prompt, a newline in a
+// file name is Enter. A name like that (one another app chose for a file it
+// promised) is never typed.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
+
 // Per-id ordering covers spawn/attach/detach/kill. Unmount releases the view,
 // preserving the shell for StrictMode, HMR and full webview reloads; only an
 // explicit close kills it. A new view always rebinds the output channel.
@@ -641,8 +647,9 @@ export const TerminalView = memo(function TerminalView({
     // OS file drops never reach xterm as HTML5 events; the drop router hands
     // us real absolute paths instead. Type them quoted at the prompt (no
     // Enter, so they're editable).
-    const unregisterDrop = registerFileDropTarget(host, (paths) => {
-      if (!visibleRef.current) return;
+    const unregisterDrop = registerFileDropTarget(host, (dropped) => {
+      const paths = dropped.filter((p) => !CONTROL_CHAR.test(p));
+      if (!visibleRef.current || paths.length === 0) return;
       const text = paths.map(shellQuote).join(" ") + " ";
       onUserInputRef.current?.(id);
       void invoke("pty_write", { id, data: text }).catch(() => {});

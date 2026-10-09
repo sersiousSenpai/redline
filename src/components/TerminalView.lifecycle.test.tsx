@@ -241,6 +241,16 @@ describe("terminal view lifecycle", () => {
     expect(touched).toHaveBeenCalledWith(id);
   });
 
+  it("never types a dropped file name that holds a control character", async () => {
+    const touched = await mount();
+    layersAtPointer([terminalHost()]);
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/x\rrm -rf ~\r"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_write")).toBe(false);
+    expect(touched).not.toHaveBeenCalled();
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/bad\nname", "/tmp/ok.png"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "'/tmp/ok.png' " });
+  });
+
   it("ignores a drop onto a hidden terminal", async () => {
     await mount(false);
     layersAtPointer([terminalHost()]);
