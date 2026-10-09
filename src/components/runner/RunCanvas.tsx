@@ -48,10 +48,13 @@ function Canvas({ graph, streams, nextIds, selectedId, onSelect, onMove, onConne
       data: { node, stream: streams[node.id], next, onOpenPlanBlock }, selected: node.id === selectedId,
       draggable: editable && !ghost, selectable: !ghost, className: ghost ? "rl-run-ghost" : undefined };
   });
+  // An edge into a running node takes that node's accent. Never React Flow's
+  // `animated` dash: it marches stroke-dashoffset, a repaint every frame for
+  // as long as the run lives (docs/perf-budget.md rule 6).
   const edges: Edge[] = graph.edges.map((edge) => ({ id: edge.id, source: edge.from, target: edge.to,
     label: edge.type === "parent-child" ? "contains" : undefined, markerEnd: { type: MarkerType.ArrowClosed },
-    animated: graph.nodes.some((n) => n.id === edge.to && n.status === "running"),
-    style: { stroke: "var(--color-rule-strong, #7d858d)", strokeDasharray: edge.type === "parent-child" ? "5 5" : undefined } }));
+    style: { stroke: graph.nodes.some((n) => n.id === edge.to && n.status === "running") ? "var(--color-info)" : "var(--color-rule-strong, #7d858d)",
+      strokeDasharray: edge.type === "parent-child" ? "5 5" : undefined } }));
   useEffect(() => { if (!humanCamera.current) void fitView({ duration: 250, padding: 0.18 }); }, [graph.nodes.length, fitView]);
   const changes = (updates: NodeChange<FlowNode>[]) => setDrag((previous) => {
     let next = previous;

@@ -48,7 +48,10 @@ export function WorkingIndicator({
       {showLogo && (
         <PulseLogo state="thinking" size={compact ? 12 : 16} title={label} />
       )}
-      <span className="rl-working-label">{label}</span>
+      <span className="rl-working-label">
+        {label}
+        <span className="rl-working-glint" data-label={label} aria-hidden />
+      </span>
       <span className="rl-working-dots" aria-hidden>
         <span>.</span>
         <span>.</span>

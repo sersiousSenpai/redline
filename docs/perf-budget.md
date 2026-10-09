@@ -76,6 +76,36 @@ it, that's the discussion to have before merging.
    to sit above the tile cap and never fire — so the fallback path is now a
    routine one rather than a backstop.
 
+6. **Paint is a budget too.** No `infinite` animation, and no animation longer
+   than 300 ms, may animate anything but `transform` or `opacity` (or the
+   individual `translate` / `rotate` / `scale` properties). Those are the only
+   properties WebKit's compositor moves without repainting. Everything else —
+   `background-position`, `box-shadow`, `background`, a registered custom
+   property driving a gradient, even `visibility` — repaints its layer every
+   frame in the GPU process, and every keystroke's layer commit queues behind
+   that backlog. `filter` is not on the list: WebKit composites some filters
+   and repaints others, so it is never a safe default. Large surfaces (body,
+   plates, pane backgrounds) stay static. To make something drift, pulse,
+   sweep or glow, paint it once on a pseudo-element and move that: a crossfade
+   between two static layers (the Aurora edge light), a scaled halo (the live
+   dot), a translated window (the working shimmer). The rule covers every way
+   an animation starts: a stylesheet, an inline style, `el.animate(…)`, and a
+   package's own CSS that a prop switches on — React Flow's `animated` edge
+   marches its dash forever, so the Runs canvas tints a live edge instead.
+
+   > **What it cost before it was a rule (2026-10-09).** The default Aurora
+   > theme animated `background-position` on a 280%-size gradient behind a
+   > mask, forever, on all four plates. With the app idle, the
+   > `com.apple.WebKit.GPU` process sat at 102% CPU, one
+   > `RemoteRenderingBackend` thread spent ~83% of its samples in
+   > `WebCore::Gradient::paint`, and the renderer's
+   > `RemoteLayerTreeDrawingArea.CommitQueue` spent 88% of its samples waiting
+   > in `flushAndCollectHandles` — so typing, dragging and every other input
+   > felt late. The ring it drew sat on the plates' 1px border, which their own
+   > `overflow: hidden` clips: all that paint bought a few antialiased pixels
+   > at the corners. `scripts/perf-idle.sh` ("Responsiveness" below) is that
+   > diagnosis as a recipe.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:
@@ -86,15 +116,26 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
+- `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
+  `src/**/*.css`, every inline `animation:` in a component and every
+  `el.animate(…)` call to the properties it animates, and fails when an
+  infinite or >300 ms animation touches anything but `transform` /
+  `opacity`. Its `ALLOWLIST` admits finite one-shots only (a focus flash, a
+  tile hail, the snap-back ring, the spring swap's corners), each with a
+  written reason and a duration ceiling; an infinite paint animation cannot
+  be allowlisted. The package stylesheets src imports are scanned too: each
+  endless paint animation in one is listed in `PACKAGE_SWITCHES` with the
+  switch that starts it, which nothing using the package may set.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
   shells out. It is a digest signal, not a test, so it never fails a build: the
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
-- `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers and
-  the rlib-only lib in the manifest text (tests build in debug, so only a
-  source invariant can catch a profile revert).
+- `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers,
+  the rlib-only lib and the dev profile's `split-debuginfo = "off"` (the
+  `target/` leak, CONTRIBUTING.md) in the manifest text (tests build in debug,
+  so only a source invariant can catch a profile revert).
 - `src/lib/sizeGuard.test.ts` — asserts mermaid/docx stay dynamic-only imports
   and `PlanEditor` stays lazy, catching main-chunk regressions at PR time.
 - `scripts/check-size.mjs` — measures built artifacts against
@@ -128,6 +169,132 @@ npm run build
 If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may
 not be.
+
+## Responsiveness
+
+The rules above keep the main thread free; this section measures whether it
+is. The bar is the one set by the editors people compare Redline to:
+
+| Goal | Target |
+|---|---|
+| Input latency (INP), p95 | under 50 ms |
+| Frame gaps at idle | none longer than one refresh interval |
+| WebKit GPU process at idle | near 0% CPU (under 5%) |
+| Renderer memory | flat over days of uptime |
+
+### Instruments
+
+**The probe** — `src/lib/perfProbe.ts`. Rolling over the last two minutes:
+
+- `input` — per interaction (a keystroke, a click, the down and up of a
+  drag), its slowest event's time from input to the next paint, from the
+  Event Timing API, split into `keyboard` and `pointer`. The engine reports
+  only events of 16 ms or more and rounds to 8 ms, so the probe also counts
+  every keydown and pointerdown and files the unreported ones at the 16 ms
+  floor: **a value of 16 means "at most 16"** (`floorMs`). Without Event
+  Timing it falls back to input-to-next-frame timing and says
+  `source: "approximate"`.
+- `frames` — gaps between `requestAnimationFrame` callbacks while the page is
+  visible: p50/p95/max and a histogram. A healthy 60 Hz gap is ~16.7 ms;
+  anything in the 34 ms bucket or above is a frame the main thread dropped.
+  Pointer *moves* are not interactions to Event Timing, so **pane-drag
+  smoothness is read here**, not from `input`.
+- `longTasks` / `longAnimationFrames` — where the engine has them. WebKit has
+  neither (2026-10), and the snapshot says `null` rather than reporting a
+  clean zero; `supported` lists what was live.
+
+It runs by default in a dev build. On a release build it is off until
+switched on: **⌘K → "Start the performance probe"** (the choice persists;
+"Stop the performance probe" turns it off in either build — do that before
+an idle `sample`, because its frame sampler wakes the renderer every frame).
+
+Two ways to read it:
+
+```bash
+# Any build, from a terminal — the daemon evaluates window.__rlPerf in the
+# main webview. windowMs: 1000–120000 (default 60000).
+curl -s 'http://127.0.0.1:7676/v1/perf?windowMs=20000' | jq
+```
+
+```js
+// A dev build's Web Inspector console.
+__rlPerf.snapshot(20000)   // __rlPerf.reset() starts a scenario clean
+```
+
+**The idle recipe** — `scripts/perf-idle.sh`. With the app open on the
+default Aurora theme, the probe off and hands off the keyboard:
+
+```bash
+scripts/perf-idle.sh             # 3 s; --seconds N, --keep for the raw reports
+```
+
+It finds the app's WebKit helpers through LaunchServices ("Redline Graphics
+and Media", "Redline Web Content"; the app's own renderer is the oldest — the
+others are browser tabs), runs `sample` on the GPU process and the renderer
+concurrently, and prints each one's CPU over the window, its physical
+footprint, the share of the GPU's rendering threads spent in
+`WebCore::Gradient::paint`, the share of the renderer's
+`RemoteLayerTreeDrawingArea.CommitQueue` spent waiting in
+`flushAndCollectHandles`, and `/v1/perf` if the probe is on. Healthy: GPU
+under 5%, `Gradient::paint` ~0%, the commit queue absent or not waiting. The
+2026-10-09 storm read 102%, ~83% and 88% (rule 6). `--app Safari` runs the
+same recipe against any WebKit app, which is how to check the recipe itself.
+
+### Which build perf is judged on
+
+**The release build — `npm run redline` — is the only build a perf number is
+taken from, and the one to use day to day when you are not editing Redline.**
+`tauri dev` runs React's development build with StrictMode's double renders
+and unbundled modules, plus a debug binary; expect it to be roughly 2–5×
+slower than the release app on the same interaction, so a dev-build number
+measures the build rather than the app, and a lag felt only there is not yet
+a product bug.
+
+The dev profile narrows the backend half of that gap without hiding it:
+dependencies build at opt 2, and Redline's own crate at opt 1
+(`[profile.dev.package.redline]`), so its serde, database and parsing paths
+are no longer unoptimized in dev. That costs edit-loop time — a one-line
+body edit rebuilt in ~23 s at opt 1 against ~10 s at opt 0, measured
+2026-10-09; the manifest comment carries the numbers. If the loop matters
+more on a given day, delete that section locally; it changes nothing the
+release build ships.
+
+### Baseline — release build, to be measured
+
+**Not yet measured.** The numbers have to come from the release build with a
+person at the keyboard, which the change that added the instruments could not
+do. Measure on `npm run redline`, never on `tauri dev` (see "Which build
+perf is judged on" above), and fill in the table with the date, the commit
+and the app's uptime:
+
+1. Build and install with `npm run redline`, launch it, keep the Aurora
+   theme, and quit other heavy apps. Note the uptime — the renderer's memory
+   is the one number that depends on it.
+2. **Idle.** Probe off (⌘K → "Stop the performance probe" if it is on), hands
+   off for 10 s, then `scripts/perf-idle.sh`. Record GPU CPU and both
+   footprints.
+3. ⌘K → "Start the performance probe".
+4. Each scenario below for 20 s, then **immediately**
+   `curl -s 'http://127.0.0.1:7676/v1/perf?windowMs=20000' | jq .snapshot`,
+   then 20 s hands off before the next, so no window spans two scenarios:
+   - **Front Door typing** — type continuously into the Front Door composer.
+   - **Comment typing** — type into a plan comment's reply composer.
+   - **Typing during a streaming reply** — send a chat question, then type
+     into the composer while the reply streams.
+   - **Pane drag** — drag the sidebar divider back and forth.
+   - **Idle frames** — hands off, probe on.
+
+| Measure | Scenario → field | Goal | Release value |
+|---|---|---|---|
+| INP p95, Front Door typing | Front Door → `input.keyboard.p95` | < 50 ms | to be measured |
+| INP p95, comment typing | Comment → `input.keyboard.p95` | < 50 ms | to be measured |
+| INP p95, typing while a reply streams | Streaming → `input.keyboard.p95` | < 50 ms | to be measured |
+| Frame gap p95 / max, reply streaming | Streaming → `frames.p95`, `frames.max` | ≤ 17.5 ms p95 | to be measured |
+| Frame gap p95 / max, pane drag | Pane drag → `frames.p95`, `frames.max` | ≤ 17.5 ms p95 | to be measured |
+| INP p95, pane drag down/up | Pane drag → `input.pointer.p95` | < 50 ms | to be measured |
+| Frame gap max at idle | Idle frames → `frames.max` | one refresh interval | to be measured |
+| GPU process CPU at idle | `perf-idle.sh` | < 5% | to be measured |
+| Renderer footprint (and uptime) | `perf-idle.sh` | flat over days | to be measured |
 
 ## Boot budget
 

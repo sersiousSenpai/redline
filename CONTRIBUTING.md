@@ -40,6 +40,25 @@ Other useful commands:
 | `npm run tauri build` | Build the production desktop bundle |
 | `cargo build --manifest-path src-tauri/Cargo.toml` | Build the Rust backend |
 
+Perf is judged on the release build (`npm run redline`), not `tauri dev` —
+see "Which build perf is judged on" in [docs/perf-budget.md](docs/perf-budget.md).
+
+### Keeping `target/` from filling the disk
+
+Rust build output is never collected on its own, and Redline's once reached
+~400 GB across worktrees. The dev profile now sets `split-debuginfo = "off"`
+(macOS otherwise keeps every object of every incremental rebuild —
+rust-lang/rust#161824), and a guard in `src-tauri/tests/size_guard.rs` keeps
+it there. What remains is habit:
+
+- **Delete a worktree's `src-tauri/target/` when its branch merges** (or
+  remove the worktree). Each worktree builds its own, tens of GB cold.
+- **Run `cargo clean --manifest-path src-tauri/Cargo.toml` after a Rust
+  toolchain upgrade.** Nothing built by the old compiler is reused.
+- Each new build configuration still adds about 0.5 GB (an rlib plus a test
+  executable); that is bounded, but it is why an old `target/` is worth
+  clearing now and then.
+
 ## The review-protocol skill
 
 `skills/redline/SKILL.md` is the canonical Redline review-protocol skill — the

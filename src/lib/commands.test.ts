@@ -306,3 +306,32 @@ describe("buildCommands: conversations", () => {
     expect(bare.filter((c) => c.group === "Conversations")).toEqual([]);
   });
 });
+
+describe("buildCommands: performance probe", () => {
+  const probeDeps = (perfProbe: boolean) =>
+    deps({ perfProbe, actions: { ...deps().actions, togglePerfProbe: vi.fn() } });
+
+  it("offers the switch that matches the probe's state", () => {
+    const off = buildCommands(probeDeps(false)).find((c) => c.id === "perf-probe")!;
+    expect(off.title).toBe("Start the performance probe");
+    expect(off.group).toBe("Help");
+    const on = buildCommands(probeDeps(true)).find((c) => c.id === "perf-probe")!;
+    expect(on.title).toBe("Stop the performance probe");
+  });
+
+  it("runs the toggle", () => {
+    const d = probeDeps(false);
+    buildCommands(d).find((c) => c.id === "perf-probe")!.run();
+    expect(d.actions.togglePerfProbe).toHaveBeenCalledOnce();
+  });
+
+  it("a build with no probe wiring offers no switch", () => {
+    expect(buildCommands(deps()).some((c) => c.id === "perf-probe")).toBe(false);
+  });
+
+  it("App wires the switch through perfProbeSwitch", () => {
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app).toContain("togglePerfProbe:");
+    expect(app).toMatch(/from "\.\/lib\/perfProbeSwitch"/);
+  });
+});

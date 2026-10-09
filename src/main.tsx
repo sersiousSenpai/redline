@@ -20,11 +20,16 @@ import {
   shouldArm,
 } from "./lib/boot";
 import { mark } from "./lib/bootMarks";
+import { perfProbeOn, syncPerfProbe } from "./lib/perfProbeSwitch";
 
 // The zero point for every frontend boot milestone (docs/perf-budget.md "Boot
 // budget"). First statement in the entry module, so the measurements start
 // where the JS does.
 mark("rl:entry");
+
+// Input latency + frame pacing (docs/perf-budget.md "Responsiveness"): on in
+// a dev build, ⌘K "Start the performance probe" on a release one.
+if (perfProbeOn()) void syncPerfProbe(true);
 
 // Apply the persisted theme + font + lint before first paint to avoid a flash
 // of the default theme/typeface on launch.

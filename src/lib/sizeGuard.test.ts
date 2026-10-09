@@ -192,6 +192,17 @@ describe("size guard", () => {
     expect(call![0]).toContain("build-analysis/");
   });
 
+  it("the responsiveness probe is fetched only when switched on", () => {
+    // main.tsx and App reach it through perfProbeSwitch's dynamic import, so a
+    // release build that never opts in never loads it.
+    const offenders = files
+      .filter(({ rel, text }) => !/\.test\.tsx?$/.test(rel) && /from\s+["'][^"']*\/perfProbe["']/.test(text))
+      .map(({ rel }) => rel);
+    expect(offenders).toEqual([]);
+    const sw = files.find(({ rel }) => rel === "lib/perfProbeSwitch.ts")!.text;
+    expect(sw).toMatch(/import\(["']\.\/perfProbe["']\)/);
+  });
+
   it("App.tsx reaches the section projections via sectionMaps, not docModel", () => {
     const app = files.find(({ rel }) => rel === "App.tsx");
     expect(app).toBeDefined();
