@@ -25,8 +25,8 @@ pub struct CodexHookStatus {
     /// Both hooks are there in a shape that does the job (current, or one in
     /// `PREVIOUS_*_COMMANDS`).
     pub installed: bool,
-    /// At least one is an earlier, still-working shape: an update is
-    /// available, and nothing waits on it.
+    /// Installed, with at least one hook in an earlier, still-working shape:
+    /// an update is available, and nothing waits on it.
     pub outdated: bool,
     pub hooks_path: String,
     pub stop_found: bool,
@@ -136,10 +136,13 @@ fn get_status_at(path: &Path) -> CodexHookStatus {
     let [stop_shapes, capture_shapes] = hook_shapes();
     let stop = shape("Stop", &stop_shapes, false);
     let capture = shape("UserPromptSubmit", &capture_shapes, true);
+    let installed = stop != Shape::Missing && capture != Shape::Missing;
     CodexHookStatus {
         available: crate::codex_app_server::codex_available(),
-        installed: stop != Shape::Missing && capture != Shape::Missing,
-        outdated: stop == Shape::Previous || capture == Shape::Previous,
+        installed,
+        // Only an install that works can be merely outdated: half of one is
+        // missing, and says so.
+        outdated: installed && (stop == Shape::Previous || capture == Shape::Previous),
         hooks_path: path.to_string_lossy().into_owned(),
         stop_found: stop != Shape::Missing,
         prompt_capture_found: capture != Shape::Missing,
@@ -363,6 +366,7 @@ mod tests {
         assert_eq!(status(&before_socket, &capture), (false, false));
         assert_eq!(status(&format!("/usr/bin/curl {STOP_URL}"), &capture), (false, false));
         assert_eq!(status(&stop, &format!("{capture} ")), (false, false));
+        assert_eq!(status(old_stop, "echo capture"), (false, false), "half an old install is missing, not outdated");
         fs::write(&path, "not json").unwrap();
         assert!(!get_status_at(&path).installed);
 
