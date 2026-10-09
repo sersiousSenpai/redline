@@ -15,10 +15,10 @@
 //! still handed to wry first (its empty `drop` ends every hover), and then:
 //!
 //! - its promises are received into `<cache>/drops/<millis>/`, and once every
-//!   promised file has landed (or `PROMISE_TIMEOUT` passes) the paths go to
-//!   the frontend as `PROMISED_DROP_EVENT`, positioned where the drop
-//!   happened, so the drop router (src/lib/nativeFileDrop.ts) treats them like
-//!   any other drop;
+//!   promised file has landed (or `PROMISE_TIMEOUT` passes with at least one
+//!   in) the paths go to the frontend as `PROMISED_DROP_EVENT`, positioned
+//!   where the drop happened, so the drop router (src/lib/nativeFileDrop.ts)
+//!   treats them like any other drop;
 //! - with no promise, PNG or TIFF image data is written there as a PNG.
 //!
 //! Everything else (browser tabs, ordinary file drops, drags that start
@@ -74,6 +74,9 @@ struct Arrivals {
     expected: Option<usize>,
     settled: usize,
     paths: Vec<PathBuf>,
+    /// The deadline passed before anything landed: the first file that does
+    /// is delivered on its own rather than waiting for the rest.
+    overdue: bool,
     delivered: bool,
 }
 
@@ -93,12 +96,21 @@ impl Arrivals {
         }
         self.settled += 1;
         self.paths.extend(path);
+        if self.overdue && !self.paths.is_empty() {
+            return self.deliver();
+        }
         self.complete()
     }
 
     /// The deadline passed: deliver whatever arrived, unless that happened.
+    /// A slow source that has landed nothing yet (a photo still coming down
+    /// from iCloud) is not given up on: its first file goes out when it lands.
     fn expire(&mut self) -> Option<Vec<PathBuf>> {
         if self.delivered {
+            return None;
+        }
+        if self.paths.is_empty() {
+            self.overdue = true;
             return None;
         }
         self.deliver()
@@ -656,9 +668,26 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_with_nothing_landed_delivers_nothing() {
+    fn a_drop_with_nothing_landed_by_the_deadline_delivers_its_first_file_when_it_lands() {
+        let mut arrivals = Arrivals::default();
+        arrivals.expect(3);
+        assert_eq!(arrivals.expire(), None);
+        // A failure is still nothing to deliver.
+        assert_eq!(arrivals.settle(None), None);
+        assert_eq!(
+            arrivals.settle(Some("/d/a.png".into())),
+            Some(vec!["/d/a.png".into()])
+        );
+        assert_eq!(arrivals.settle(Some("/d/b.png".into())), None);
+        assert_eq!(arrivals.expire(), None);
+    }
+
+    #[test]
+    fn a_drop_that_fails_after_the_deadline_delivers_nothing() {
         let mut arrivals = Arrivals::default();
         arrivals.expect(1);
+        assert_eq!(arrivals.expire(), None);
+        assert_eq!(arrivals.settle(None), None);
         assert_eq!(arrivals.expire(), None);
     }
 
