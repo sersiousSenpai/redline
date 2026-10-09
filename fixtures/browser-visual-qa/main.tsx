@@ -3,11 +3,10 @@ import { createRoot } from "react-dom/client";
 import { createPortal, flushSync } from "react-dom";
 import BrowserTabRail from "../../src/components/BrowserTabRail";
 import BrowserHomePage from "../../src/components/BrowserHomePage";
-import FloatingBrowserIsland from "../../src/components/FloatingBrowserIsland";
+import { MonochatIsland } from "../../src/components/MonochatIsland";
 import { FrontDoor } from "../../src/components/FrontDoor";
 import { fallbackGroups } from "../../src/lib/tabGroups";
 import type { LaunchDestination } from "../../src/lib/launch";
-import "../../src/components/MonochatIsland.css";
 import { BrowserChrome } from "../../src/components/BrowserChrome";
 import { BrowserDialog } from "../../src/components/BrowserSurfaces";
 import { BrowserLayoutDialog, BrowserBookmarksDialog, BrowserPreferencesDialog } from "../../src/components/BrowserPagePanels";
@@ -85,10 +84,10 @@ function Fixture() {
         </div>
       </div> : surface === "room" ? <div className="qa-room"><PersistentPortalSlot host={host} name="chat-room"/></div> : <div className="qa-other"><h1>Surface switched</h1><p>The chat portal is detached and retains its mounted conversation.</p></div>}
     </main>
-    {surface === "browser" && <FloatingBrowserIsland busy={false} open={islandOpen} onOpenChange={setIslandOpen}>
-      <div className="rl-browser-context-chips"><button aria-pressed="true">This page</button><button aria-pressed="false">Task list</button></div>
-      <FrontDoor visible={islandOpen} floating text={draft} onTextChange={setDraft} choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} resolvedProject="/tmp/qa-redline" attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={()=>setDraft("")} refusal={null} onDrafter={noop} onRun={()=>setDraft("")} onChat={noop} chatEnabled={false} allowedDestinations={["plan","run"]} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onHowItWorks={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""} dictationEnabled={false}/>
-    </FloatingBrowserIsland>}
+    {surface === "browser" && <MonochatIsland busy={false} open={islandOpen} onOpenChange={setIslandOpen} surfaceKey={surface} context={tabs.find(tab => tab.id === activeId)?.title ?? null}
+      chips={<div className="rl-context-chips" role="group" aria-label="Attach context"><button aria-pressed="true">This page</button><button aria-pressed="false">Task list</button></div>}>
+      <FrontDoor visible={islandOpen} floating text={draft} onTextChange={setDraft} choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} resolvedProject="/tmp/qa-redline" attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={()=>setDraft("")} refusal={null} onDrafter={noop} onRun={()=>setDraft("")} onChat={noop} chatEnabled={false} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""} dictationEnabled={false}/>
+    </MonochatIsland>}
     {createPortal(conversation, host)}
     {dialog === "layout" && <BrowserLayoutDialog layout={layout} available={tabs.length} tabs={tabs} activeBrowseId={pages[0]?.browseId} onChoose={(preset) => setLayout((old) => ({ ...old, preset, maximized: null }))} onSaveDefault={noop} onClose={() => setDialog("")}/>}
     {dialog === "bookmarks" && <BrowserBookmarksDialog bookmarks={Array.from({ length: 28 }, (_, i) => ({ title: `Saved source ${i + 1}: context and evidence for this investigation`, url: `https://example.test/long-source-path/${i}` }))} title={tabs[0].title} url={tabs[0].url} onSave={noop} onRemove={noop} onOpen={noop} onClose={() => setDialog("")}/>}
