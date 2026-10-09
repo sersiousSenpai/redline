@@ -11,9 +11,10 @@
 // resolved against the revision it was captured on (the coordinate system its
 // charStart/charEnd were measured in), with the same Tiptap schema and
 // `CommentHighlights` plugin the plan editor mounts. A comment counts as
-// painted when the decorated text equals its quote, newlines aside —
-// `Selection.toString()` puts them between list items / paragraphs, while the
-// document's text joins textblocks with nothing.
+// painted when the decorated text equals its quote as the block spells it:
+// verbatim where it appears (a code block keeps real newlines), otherwise with
+// newlines dropped — `Selection.toString()` puts them between list items /
+// paragraphs, while the document's text joins textblocks with nothing.
 import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,14 +24,16 @@ if (!dbArg) {
   console.error("usage: replay-comment-highlights.ts <copy-of-redline.db>");
   process.exit(2);
 }
-const dbPath = realpathSync(dbArg);
+// `.native` also canonicalizes letter case, so a differently-cased spelling
+// of the live path on a case-insensitive volume can't slip past the guard.
+const dbPath = realpathSync.native(dbArg);
 const liveDir = path.join(
   os.homedir(),
   "Library/Application Support/com.redline.app",
 );
 let liveReal = liveDir;
 try {
-  liveReal = realpathSync(liveDir);
+  liveReal = realpathSync.native(liveDir);
 } catch {
   // No app data on this machine — nothing to protect.
 }
@@ -65,6 +68,7 @@ const { CommentHighlights, commentHighlightsKey } = await import(
 );
 const { planMarkdownToDoc } = await import("../src/editor/markdown");
 type Range = import("../src/editor/resolveHighlightRange").CommentHighlightRange;
+type DecorationSet = import("@tiptap/pm/view").DecorationSet;
 
 interface Row {
   sessionId: string;
@@ -136,9 +140,9 @@ for (const group of byRevision.values()) {
 
   const { state } = editor;
   const plugin = commentHighlightsKey.get(state)!;
-  const decorations = plugin.props.decorations!.call(plugin, state);
+  const decorations = plugin.props.decorations!.call(plugin, state) as DecorationSet;
   const painted = new Map<string, string>();
-  for (const deco of decorations?.find() ?? []) {
+  for (const deco of decorations.find()) {
     // Inline decorations keep their attrs on the (internal) `type`.
     const attrs = (deco as unknown as { type: { attrs: Record<string, string> } })
       .type.attrs;
@@ -154,7 +158,9 @@ for (const group of byRevision.values()) {
   for (const row of group) {
     const text = painted.get(row.commentId);
     const block = blocks.get(row.blockId);
-    const quote = row.quotedText.replace(/\n+/g, "");
+    const quote = block?.text.includes(row.quotedText)
+      ? row.quotedText
+      : row.quotedText.replace(/\n+/g, "");
     let outcome: Outcome;
     if (text === quote) outcome = "painted";
     else if (!block || !block.text.includes(quote)) outcome = "drifted";
