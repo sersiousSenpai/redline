@@ -337,6 +337,18 @@ import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { MonochatIsland, type IslandSize, type SummonVia } from "./components/MonochatIsland";
+import { SurfaceChips } from "./components/SurfaceChips";
+import {
+  isChipPressed,
+  surfaceChips,
+  surfaceContextLabel,
+  toggleChip,
+  visibleChips,
+  withContext,
+  type BrowserIslandPage,
+  type ChipPresses,
+  type ContextBlock,
+} from "./lib/surfaceContext";
 import { doorRecents, loadDoorTabs, type DoorRecent, type DoorTab } from "./lib/doorRecents";
 import { MonochatContext } from "./components/MonochatContext";
 // The dock's body is fetched with its mount, not with the shell — see
@@ -710,9 +722,9 @@ function App() {
   const [frontDoorLaunching, setFrontDoorLaunching] = useState(false);
   const frontDoorLaunchingRef = useRef(false);
   // The browser tab the card would quote, as the pane reports it.
-  const [browserIslandPage, setBrowserIslandPage] = useState<import("./lib/browserIsland").BrowserIslandPage | null>(null);
-  const [browserIslandAttachPage, setBrowserIslandAttachPage] = useState(true);
-  const [browserIslandAttachTasks, setBrowserIslandAttachTasks] = useState(false);
+  const [browserIslandPage, setBrowserIslandPage] = useState<BrowserIslandPage | null>(null);
+  // The context chips the user flipped, for the surface they flipped them on.
+  const [chipPresses, setChipPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
   // The chat pose's ⤢. Not persisted: it is how roomy THIS conversation
   // should be, not a layout to restore.
   const [islandSize, setIslandSize] = useState<IslandSize>("regular");
@@ -7284,24 +7296,70 @@ function App() {
     setCombinePreview(null);
   };
 
-  // The key the card closes on. The draft id only names a place while the
-  // Drafter is showing. Off it, the id still changes — a first launch mints one
-  // in an effect — and that must not read as navigation and close the boot card.
+  // ── What the card attaches ─────────────────────────────────────────────
+  // The key the card closes on, and the one chip presses reset on. The draft
+  // id only names a place while the Drafter is showing. Off it, the id still
+  // changes — a first launch mints one in an effect — and that must not read
+  // as navigation and close the boot card.
   const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
-  // The browser's This page / Task list, quoted below the sentence.
-  const withBrowserContext = async (prompt: string) => {
-    const capturedPage = browserIslandAttachPage ? browserIslandPage : null;
-    const [{ browserIslandPrompt }, taskMarkdown, selection] = await Promise.all([
-      import("./lib/browserIsland"),
-      browserIslandAttachTasks ? Promise.all([invoke<import("./types").BrowseListView | null>("browse_list_get", { browseId: browserDock.cartId }), import("./lib/browseList")]).then(([view, module]) => view ? module.renderListMarkdown(view.list, view.items) : "").catch(() => "") : Promise.resolve(""),
-      capturedPage ? invoke<string>("browser_snapshot", { label: capturedPage.label }).then(raw => { const value = JSON.parse(raw); return typeof value.selection === "string" ? value.selection : ""; }).catch(() => "") : Promise.resolve(""),
-    ]);
-    return browserIslandPrompt(prompt, capturedPage ? { ...capturedPage, selection } : null, taskMarkdown);
+  const viewedPlan = sessionReady && activeId ? viewedRevision ?? null : null;
+  const contextChips = surfaceChips(activeSurface, {
+    page: browserIslandPage,
+    tasks: !!browserDock.cartId,
+    plan: viewedPlan ? { version: viewedPlan.versionNumber, title: activePlanTitle } : null,
+    file: plateMode === "file" ? activeFile : null,
+    draft: !!drafterDraftId,
+    diff: codeReview.repo && codeReview.diff ? { repo: codeReview.repo } : null,
+  });
+  // Reads every pressed chip's source at the moment something is sent — one
+  // block per chip, so a caller can tell an unchanged block from a new one.
+  // A source that fails is left out rather than failing the send.
+  const gatherContext = async (destination: LaunchDestination): Promise<ContextBlock[]> => {
+    const pressed = visibleChips(contextChips, destination).filter((chip) => isChipPressed(chip, chipPresses, islandSurfaceKey));
+    if (pressed.length === 0) return [];
+    const { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock } = await import("./lib/contextBlocks");
+    const read = async (id: ContextBlock["id"]): Promise<ContextBlock | null> => {
+      switch (id) {
+        case "page": {
+          const page = browserIslandPage;
+          if (!page) return null;
+          const selection = await invoke<string>("browser_snapshot", { label: page.label })
+            .then((raw) => { const value = JSON.parse(raw); return typeof value.selection === "string" ? value.selection : ""; })
+            .catch(() => "");
+          return pageBlock({ ...page, selection });
+        }
+        case "tasks": {
+          const [view, { renderListMarkdown }] = await Promise.all([
+            invoke<import("./types").BrowseListView | null>("browse_list_get", { browseId: browserDock.cartId }),
+            import("./lib/browseList"),
+          ]);
+          return view ? taskListBlock(renderListMarkdown(view.list, view.items)) : null;
+        }
+        case "plan":
+          return viewedPlan && activeId
+            ? planBlock({ sessionId: activeId, version: viewedPlan.versionNumber, title: activePlanTitle, markdown: viewedPlan.rawPlanMarkdown })
+            : null;
+        case "file":
+          return activeFile ? fileBlock(activeFile) : null;
+        case "draft": {
+          // Live first: the mirror is debounce-lagged, the database more so.
+          const markdown = getDrafterLiveMarkdown() || drafterMarkdown || (drafterDraftId ? (await loadDraftDoc(drafterDraftId)).docMarkdown : "");
+          return markdown.trim() ? draftBlock(markdown) : null;
+        }
+        case "diff":
+          return codeReview.repo && codeReview.diff
+            ? diffBlock({ repo: codeReview.repo, source: codeReview.source, base: codeReview.base, sha: codeReview.sha, files: codeReview.diff, annotations: codeReview.annotations, questions: codeReview.questions })
+            : null;
+      }
+    };
+    const blocks = await Promise.all(pressed.map((chip) => read(chip.id).catch(() => null)));
+    return blocks.filter((block): block is ContextBlock => block !== null);
   };
 
   const launchFromFrontDoor = async (projectOverride?: string, mode: "plan" | "run" = "plan") => {
     // Plans pilled → this is a combination, and the composer's text is context
-    // on top of them rather than the thing being launched.
+    // on top of them rather than the thing being launched. The plans are its
+    // context, so the chips sit this one out.
     if (mode === "plan" && frontDoorCombine.length > 0) {
       await launchCombine(projectOverride);
       return;
@@ -7320,13 +7378,13 @@ function App() {
         mode,
         origin: browser ? "browser-island" : mode === "run" ? "front-door-run" : "front-door",
         background: browser,
-        prompt: browser ? await withBrowserContext(prompt) : prompt,
+        prompt: withContext(prompt, await gatherContext(mode)),
         projectPath: project,
         // The front door has no document, and inheriting the active Drafter's id
         // would file this plan under an unrelated draft.
         draftId: null,
         // It owes the sentence back: the composer clears because the text MOVED
-        // into the card.
+        // into the card. The sentence alone — the chips are still pressed.
         restore: { kind: "composer", text, attachments },
       });
       if (!r.ok) {
@@ -7366,23 +7424,28 @@ function App() {
   //
   // Now: measure the island, switch on the same frame, and let one slab travel
   // from the island's box to the page's box while the mint happens behind it.
+  //
+  // The attached context lands in the document below a rule, so it reads as
+  // what the draft is about rather than as part of what you wrote.
   const drafterFromFrontDoor = () => {
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
-    if (!prompt) return;
+    if (!prompt || frontDoorLaunchingRef.current) return;
     // Measured HERE, synchronously, while the island is still on screen — one
     // render later it is gone. This is the box the Drafter springs out of.
     const island = document.querySelector(".rl-fd-island");
     const r = island?.getBoundingClientRect();
-    setSwapFrom(
-      r && r.width > 0
-        ? { left: r.left, top: r.top, width: r.width, height: r.height }
-        : null,
-    );
-    setQuietOpen(true);
-    void openDrafterWithMarkdown(prompt);
-    setFrontDoorOpen(false);
-    setFrontDoorText("");
-    setFrontDoorAttachments([]);
+    const from = r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
+    frontDoorLaunchingRef.current = true;
+    // Everything else lands in ONE batch once the context is read, so the
+    // card never shows a cleared composer while the Drafter is on its way.
+    void gatherContext("drafter").then((blocks) => {
+      setSwapFrom(from);
+      setQuietOpen(true);
+      void openDrafterWithMarkdown(withContext(prompt, blocks, { rule: true }));
+      setFrontDoorOpen(false);
+      setFrontDoorText("");
+      setFrontDoorAttachments([]);
+    }).finally(() => { frontDoorLaunchingRef.current = false; });
   };
 
   // The Front Door's composer opening into a CHAT, inside the same card: the
@@ -10429,12 +10492,13 @@ function App() {
         size={islandSize}
         onSizeChange={setIslandSize}
         onNewChat={() => { setChatId(null); setChatSeed(null); refreshChats(); }}
-        context={chatId ? chatTitle ?? "Chat" : activeSurface.label ?? browserIslandPage?.title ?? null}
+        context={chatId ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title)}
         busy={frontDoorLaunching || monochatBusy || monochatForks.size > 0}
-        chips={mainSurface === "browser" && <div className="rl-context-chips" role="group" aria-label="Attach context">
-          <button type="button" aria-pressed={browserIslandAttachPage} title={browserIslandPage?.url ?? "Current page"} onClick={() => setBrowserIslandAttachPage(value => !value)}>This page</button>
-          <button type="button" aria-pressed={browserIslandAttachTasks} onClick={() => setBrowserIslandAttachTasks(value => !value)}>Task list</button>
-        </div>}
+        chips={<SurfaceChips
+          chips={visibleChips(contextChips, chatId ? "chat" : frontDoorDest)}
+          pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
+          onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
+        />}
       >
         <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
         {!chatId && renderMonochatComposer(undefined, true)}
