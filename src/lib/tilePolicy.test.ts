@@ -46,6 +46,17 @@ describe("placeTarget", () => {
     expect(placeTarget(["only"], states({ only: "idle" }), none, 4, false)).toEqual({ kind: "replace", index: 0 });
   });
 
+  it("never breaks a pin while the wall can still grow: a pinned focused tile adds one past the fit rule", () => {
+    const tiles = ["pin", "f"];
+    const s = states({ pin: "idle", f: "idle" });
+    const both = new Set(["pin", "f"]);
+    expect(placeTarget(tiles, s, both, 1, false, true)).toEqual({ kind: "add" });
+    // At the cap something has to give, and it is still the focused tile.
+    expect(placeTarget(tiles, s, both, 1, false, false)).toEqual({ kind: "replace", index: 1 });
+    // An unpinned focused tile is the plan's last resort, room or not.
+    expect(placeTarget(tiles, s, new Set(["pin"]), 1, false, true)).toEqual({ kind: "replace", index: 1 });
+  });
+
   it("breaks a tie toward the later tile", () => {
     const tiles = ["f", "x", "y"];
     expect(placeTarget(tiles, states({ f: "idle", x: "idle", y: "idle" }), none, 0, false)).toEqual({ kind: "replace", index: 2 });

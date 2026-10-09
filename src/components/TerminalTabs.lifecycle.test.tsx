@@ -425,8 +425,30 @@ describe("the wall: shelf, placement and arrangement", () => {
     // first is pinned, a is focused: nothing else may give way, so a does.
     await act(async () => handle.current!.selectTab(b));
     expect(order()).toEqual([first, b]);
+    // With the focused tile pinned too, no tile may give way at all: the
+    // wall grows past the 80-column fit rather than break a pin.
+    await click(`[data-pin="${b}"]`);
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([first, b, a]);
     await click(`[data-pin="${first}"]`);
+    await click(`[data-pin="${b}"]`);
     expect(saved().pinned).toBeUndefined();
+  });
+
+  it("App's reveal into a collapsed dock never grows the wall — App would pop the dock open for a new tile", async () => {
+    const { first, a, b } = await wall();
+    const counts: number[] = [];
+    // Linked navigation (a folder-tab click) selects the folder's terminal
+    // without opening the dock.
+    await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed onTileCountChange={(n) => counts.push(n)} /></StrictMode>));
+    await act(async () => handle.current!.selectTab(a));
+    expect(order()).toEqual([a]);
+    expect(Math.max(...counts)).toBe(1);
+    // Open, the same reveal adds a tile while one more still fits.
+    await mount();
+    await act(async () => handle.current!.selectTab(b));
+    expect(order()).toEqual([a, b]);
+    expect(shelf()).toEqual([first]);
   });
 
   it("App's reveal focuses a terminal already on the wall instead of moving it", async () => {
@@ -634,6 +656,27 @@ describe("reach and notify", () => {
     // And round again.
     await act(async () => { handle.current!.jumpToNeedsYou(); });
     expect(focused()).toBe(c);
+  });
+
+  it("⌘⇧J and App's reveal end a zoom on another tile, so the terminal they land on is on screen", async () => {
+    await mount();
+    const a = await open();
+    const b = await open();
+    await click(`[data-zoom="${a}"]`);
+    const visible = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)?.dataset.visible;
+    expect(visible(b)).toBe("false");
+    await emit(needsYou(b, 5));
+    await act(async () => { handle.current!.jumpToNeedsYou(); });
+    expect(focused()).toBe(b);
+    expect(visible(b)).toBe("true");
+    expect(host.querySelector('[data-zoomed="true"]')).toBeNull();
+    // A zoom on the terminal itself stays: it is already what you see.
+    await click(`[data-zoom="${b}"]`);
+    await act(async () => handle.current!.selectTab(b));
+    expect(host.querySelector<HTMLElement>('[data-zoomed="true"]')?.dataset.headerId).toBe(b);
+    await click(`[data-zoom="${a}"]`);
+    await act(async () => handle.current!.selectTab(b));
+    expect(visible(b)).toBe("true");
   });
 
   it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {

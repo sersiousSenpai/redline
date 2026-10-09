@@ -46,13 +46,17 @@ function evictionRank(state: TermState | undefined): number {
  *  the terminal gets its own. Otherwise it replaces the QUIETEST tile that is
  *  unpinned, unfocused and not loud; ties go to the later tile (the newest
  *  arrival, rather than the head of the grid the eye reads first). The
- *  focused tile is replaced only when nothing else may be. */
+ *  focused tile is replaced only when nothing else may be — and a pin is the
+ *  user's own "keep this on the wall", so while the wall is under its tile
+ *  cap (`underCap`) a pinned focused tile makes it grow past the fit rule
+ *  instead. */
 export function placeTarget(
   tiles: readonly string[],
   states: ReadonlyMap<string, TermState>,
   pinned: ReadonlySet<string>,
   focusIdx: number,
   shapeFits: boolean,
+  underCap = false,
 ): PlaceTarget {
   if (shapeFits || tiles.length === 0) return { kind: "add" };
   const focus = Math.max(0, Math.min(focusIdx, tiles.length - 1));
@@ -68,7 +72,9 @@ export function placeTarget(
       bestRank = rank;
     }
   }
-  return { kind: "replace", index: best === -1 ? focus : best };
+  if (best !== -1) return { kind: "replace", index: best };
+  if (underCap && pinned.has(tiles[focus])) return { kind: "add" };
+  return { kind: "replace", index: focus };
 }
 
 /** Whether one more tile still fits as a real terminal: the shape

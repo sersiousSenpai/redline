@@ -376,7 +376,7 @@ export const TerminalTabs = memo(
     [],
   );
   // Terminals pinned to the wall: parking never takes their tile, and
-  // automatic placement never replaces it.
+  // automatic placement replaces it only once the wall is at its tile cap.
   const [pinned, setPinned] = useState<ReadonlySet<string>>(
     () => new Set(initialWorkspace.pinned ?? []),
   );
@@ -448,6 +448,8 @@ export const TerminalTabs = memo(
   const zoomed = zoomedId !== null && tiles.includes(zoomedId) ? zoomedId : null;
   const zoomedRef = useRef(zoomed);
   zoomedRef.current = zoomed;
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
 
   const paneContainerRef = useRef<HTMLDivElement | null>(null);
   // Tile wrappers keyed by terminal ID, not index — the live drag path and the
@@ -1157,8 +1159,13 @@ export const TerminalTabs = memo(
   // Put an untiled terminal on the wall by the ONE placement rule
   // (tilePolicy's `placeTarget`): its own tile while `shapeFits`, else the
   // quietest tile that may give way, the focused one only as a last resort.
-  // Returns the tile it landed in. A zoom would hide the result, so it ends.
-  const placeOnWall = (id: string, shapeFits: boolean): number => {
+  // `mayGrow` false never adds a tile, not even to spare a pin. Returns the
+  // tile it landed in. A zoom would hide the result, so it ends.
+  const placeOnWall = (
+    id: string,
+    shapeFits: boolean,
+    mayGrow = true,
+  ): number => {
     const prev = tilesRef.current;
     const target = placeTarget(
       prev,
@@ -1166,6 +1173,7 @@ export const TerminalTabs = memo(
       pinnedRef.current,
       focusIdxRef.current,
       shapeFits,
+      mayGrow && prev.length < MAX_TILES,
     );
     setZoomedId(null);
     if (target.kind === "add") {
@@ -1192,17 +1200,27 @@ export const TerminalTabs = memo(
 
   // The REVEAL rule (App's "show me X", a shelf click, ⌘⇧J): a terminal
   // already on the wall just takes focus; otherwise it is placed — in a new
-  // tile only while one more still fits as a real terminal (80×24).
+  // tile only while one more still fits as a real terminal (80×24). Either
+  // way it must end up on screen, so a zoom on another tile ends.
   const revealTerminal = (id: string): number => {
     const i = tilesRef.current.indexOf(id);
     if (i !== -1) {
+      if (zoomedRef.current !== null && zoomedRef.current !== id) {
+        setZoomedId(null);
+      }
       setFocusedTile(i);
       clearUnseen(id);
       return i;
     }
+    // A collapsed dock doesn't grow: a new tile is what makes App open the
+    // dock (its tile-driven growth), and a linked folder click selects the
+    // folder's terminal without asking for the dock.
+    const grow = !collapsedRef.current;
     return placeOnWall(
       id,
-      fitsAnotherTile(tilesRef.current.length, lastSizeRef.current, MAX_TILES),
+      grow &&
+        fitsAnotherTile(tilesRef.current.length, lastSizeRef.current, MAX_TILES),
+      grow,
     );
   };
 
