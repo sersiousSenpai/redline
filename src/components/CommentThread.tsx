@@ -294,9 +294,6 @@ export const CommentThread = memo(function CommentThread({
     setDraft("");
   }
 
-  // Avoid a flash of the "Discuss" button before get_thread resolves.
-  if (!loaded) return null;
-
   // The opening user turn is the comment's own text (see `discussSeed`), which
   // the CommentCard already renders as the comment body — so don't echo it as a
   // visible bubble. We still send it to the fork (the agent needs the question);
@@ -330,12 +327,20 @@ export const CommentThread = memo(function CommentThread({
   const riderStale =
     riderAttached && transcriptNote(visible, agent) !== comment.reopenNote;
 
-  // No thread yet (or only the suppressed seed) — the entry point.
-  if (visible.length === 0 && status === "idle") {
+  // No thread yet (or only the suppressed seed) — the entry point. Until
+  // get_thread resolves the same row holds its place invisibly: the card is
+  // already its final height, so nothing jumps when "💬 Discuss" appears (or
+  // when the loaded thread replaces it), and the button never flashes on a
+  // thread that turns out to exist.
+  if (!loaded || (visible.length === 0 && status === "idle")) {
     return (
       <div
-        className="mt-3 pt-3 border-t"
-        style={{ borderColor: "var(--color-rule)" }}
+        className="rl-thread-entry mt-3 pt-3 border-t"
+        style={{
+          borderColor: "var(--color-rule)",
+          visibility: loaded ? undefined : "hidden",
+        }}
+        aria-hidden={loaded ? undefined : true}
         onClick={(e) => e.stopPropagation()}
       >
         <button

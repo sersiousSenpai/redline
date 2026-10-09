@@ -327,3 +327,27 @@ describe("discussion modes and compact composer", () => {
     expect(invokeMock.mock.calls.find(([cmd]) => cmd === "attach_discussion")?.[1]).toMatchObject({ asChange: true });
   });
 });
+
+describe("the thread loads without a jump", () => {
+  it("holds the entry row's place, invisibly, until the thread has loaded", async () => {
+    let release: (rows: ThreadMessage[]) => void = () => {};
+    const pending = new Promise<ThreadMessage[]>((resolve) => {
+      release = resolve;
+    });
+    const base = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: { backend?: string }) =>
+      cmd === "get_thread" ? pending : base(cmd, args),
+    );
+    await mount(null);
+    const row = host.querySelector<HTMLElement>(".rl-thread-entry");
+    expect(row, "the row renders before get_thread resolves").not.toBeNull();
+    expect(row!.style.visibility).toBe("hidden");
+    expect(row!.getAttribute("aria-hidden")).toBe("true");
+    await act(async () => release([]));
+    await flush();
+    const loaded = host.querySelector<HTMLElement>(".rl-thread-entry")!;
+    expect(loaded.style.visibility).toBe("");
+    expect(loaded.hasAttribute("aria-hidden")).toBe(false);
+    expect(text()).toContain("Discuss with Claude");
+  });
+});

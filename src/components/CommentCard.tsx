@@ -44,8 +44,9 @@ interface CommentCardProps {
   onDelete: (id: string) => void;
   /** Edit a still-draft comment's text before it rides a Submit. Only the
    *  body (and, for edit-kind, the revised text) can change — the anchor
-   *  (selection/blockId) is fixed by the original selection. */
-  onUpdate?: (id: string, update: UpdateCommentRequest) => void;
+   *  (selection/blockId) is fixed by the original selection. Resolving false
+   *  means the update did not land. */
+  onUpdate?: (id: string, update: UpdateCommentRequest) => void | Promise<boolean>;
   onAccept: (id: string) => void;
   /** M4: accept a still-draft agent suggestion in place — the editor settles
    *  the marks, the backend records agentState. Reject reuses onDelete. */
@@ -179,22 +180,33 @@ export const CommentCard = memo(function CommentCard({
   const [editOpen, setEditOpen] = useState(false);
   const [bodyDraft, setBodyDraft] = useState("");
   const [revisedDraft, setRevisedDraft] = useState("");
+  // The text just saved here, shown until the `comment` prop catches up: the
+  // comments-changed reload lands a beat after Save, and the old text used to
+  // flash back in between. Any change to the prop's text clears it (by value —
+  // every reload hands over a fresh `edit` object), and so does a failed save.
+  const [pendingEdit, setPendingEdit] = useState<UpdateCommentRequest | null>(null);
+  useEffect(() => {
+    setPendingEdit(null);
+  }, [comment.body, comment.edit?.original, comment.edit?.revised]);
+  const body = pendingEdit?.body ?? comment.body;
+  const edit = pendingEdit?.edit ?? comment.edit;
   const openEdit = () => {
-    setBodyDraft(comment.body === "(edit)" ? "" : comment.body);
-    setRevisedDraft(comment.edit?.revised ?? "");
+    setBodyDraft(body === "(edit)" ? "" : body);
+    setRevisedDraft(edit?.revised ?? "");
     setCollapsed(false);
     setEditOpen(true);
   };
   const confirmEdit = () => {
-    onUpdate?.(
-      comment.id,
-      buildDraftCommentUpdate(
-        comment,
-        bodyDraft,
-        comment.edit ? revisedDraft : undefined,
-      ),
+    const update = buildDraftCommentUpdate(
+      { ...comment, body, edit },
+      bodyDraft,
+      comment.edit ? revisedDraft : undefined,
     );
+    setPendingEdit(update);
     setEditOpen(false);
+    void Promise.resolve(onUpdate?.(comment.id, update)).then((landed) => {
+      if (landed === false) setPendingEdit(null);
+    });
   };
   // Edit-kind: the revised text is the payload, the note is optional.
   // Everything else: the body is the payload.
@@ -239,10 +251,10 @@ export const CommentCard = memo(function CommentCard({
   // flooding the pane.
   const [showFullEdit, setShowFullEdit] = useState(false);
   const bodyPreview = (() => {
-    const text = (comment.body ?? "").replace(/\s+/g, " ").trim();
+    const text = (body ?? "").replace(/\s+/g, " ").trim();
     if (text && text !== "(edit)") return text.slice(0, 90);
-    if (comment.edit) {
-      return `"${comment.edit.original}" → "${comment.edit.revised}"`.slice(0, 90);
+    if (edit) {
+      return `"${edit.original}" → "${edit.revised}"`.slice(0, 90);
     }
     return "";
   })();
@@ -530,7 +542,7 @@ export const CommentCard = memo(function CommentCard({
         </div>
       )}
 
-      {!collapsed && !editOpen && comment.edit && (
+      {!collapsed && !editOpen && edit && (
         <div className="mb-2 font-serif" style={{ fontSize: "13px" }}>
           {showFullEdit ? (
             <>
@@ -538,10 +550,10 @@ export const CommentCard = memo(function CommentCard({
                 className="line-through"
                 style={{ color: "var(--color-ink-muted)" }}
               >
-                {comment.edit.original}
+                {edit.original}
               </div>
               <div style={{ color: "var(--color-info)" }}>
-                {comment.edit.revised}
+                {edit.revised}
               </div>
             </>
           ) : (
@@ -558,10 +570,7 @@ export const CommentCard = memo(function CommentCard({
               >
                 Edited
               </span>
-              {compactEditPreview(
-                comment.edit.original,
-                comment.edit.revised,
-              ).map((part, i) =>
+              {compactEditPreview(edit.original, edit.revised).map((part, i) =>
                 part.kind === "delete" ? (
                   <span
                     key={i}
@@ -623,9 +632,9 @@ export const CommentCard = memo(function CommentCard({
           )}
         </div>
       )}
-      {!collapsed && !editOpen && comment.body && comment.body.trim() !== "(edit)" && (
+      {!collapsed && !editOpen && body && body.trim() !== "(edit)" && (
         <div className="rl-comment-body-scroll">
-          <MarkdownView body={comment.body} />
+          <MarkdownView body={body} />
         </div>
       )}
 
