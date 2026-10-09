@@ -44,10 +44,12 @@ import {
 import {
   addTile as addTileSlot,
   reconcileTiles,
+  removeTileAt,
   setTile as setTileSlot,
 } from "../lib/tileSlots";
 import {
   fitsAnotherTile,
+  parkCandidate,
   placeTarget,
   shelfOrder,
   tileAtPoint,
@@ -161,6 +163,15 @@ const MAX_UNTILED_MRU = 32;
 /** Pointer travel before a press on a header or shelf chip becomes a drag —
  *  under it, the press is the chip's ordinary click. */
 const DRAG_THRESHOLD_PX = 4;
+
+/** How often the wall considers parking a quiet tile. At most one tile parks
+ *  per tick, so a wall of settled tiles empties out one at a time rather
+ *  than reshaping all at once. */
+const PARK_TICK_MS = 2000;
+
+/** How long a just-parked terminal leads the shelf, outlined, so the eye can
+ *  follow it off the wall. */
+const FRESH_PARKED_MS = 4000;
 
 /** How often `pty_procs` samples every terminal's foreground program and
  *  ports (one `ps` + one `lsof` for the whole fleet, perf-budget rule 5).
@@ -416,6 +427,8 @@ export const TerminalTabs = memo(
   const focusIdx = Math.min(focusedTile, tiles.length - 1);
   const focusedId = tiles[focusIdx];
   const zoomed = zoomedId !== null && tiles.includes(zoomedId) ? zoomedId : null;
+  const zoomedRef = useRef(zoomed);
+  zoomedRef.current = zoomed;
 
   const paneContainerRef = useRef<HTMLDivElement | null>(null);
   // Tile wrappers keyed by terminal ID, not index — the live drag path and the
@@ -669,7 +682,13 @@ export const TerminalTabs = memo(
     [setAcks],
   );
 
+  // When each terminal was last typed in, placed, or focused away from — any
+  // sign the user was just there, which restarts its parking clock.
+  const touchedRef = useRef(new Map<string, number>());
+  const touch = (id: string) => touchedRef.current.set(id, Date.now());
+
   const handleUserInput = useCallback((id: string) => {
+    touchedRef.current.set(id, Date.now());
     ackInput(id, false);
     if (!tabsRef.current.some((tab) => tab.id === id && tab.placeholder)) return;
     setTabs((prev) => prev.map((tab) => tab.id === id ? { ...tab, placeholder: false } : tab));
@@ -930,6 +949,49 @@ export const TerminalTabs = memo(
     return () => window.clearTimeout(timer);
   }, [focusedId, focusedAt, focusedState, focusedOnScreen, windowFocused, setAcks]);
 
+  // ── Parking (park-only automation) ───────────────────────────────────────
+  //
+  // A tile whose terminal has gone quiet takes itself off the wall once it
+  // has stayed quiet and untouched for its settle window (tilePolicy's
+  // PARK_SETTLE_MS): 15 s for a server, a held plan or a dead shell, two
+  // minutes for an idle one. Never the focused, zoomed, pinned or last tile,
+  // and nothing is ever pulled ONTO the wall automatically — a terminal that
+  // needs you glows on the shelf instead. To keep the grid steady, parking
+  // waits while the pointer is over the dock or a gutter is being dragged,
+  // and reshapes at most once per tick.
+  const sinceRef = useRef(new Map<string, number>());
+  const lastStateRef = useRef(new Map<string, TermState>());
+  useEffect(() => {
+    const now = Date.now();
+    const last = lastStateRef.current;
+    for (const [id, state] of termStates) {
+      if (last.get(id) === state) continue;
+      last.set(id, state);
+      sinceRef.current.set(id, now);
+    }
+    for (const id of [...last.keys()]) {
+      if (termStates.has(id)) continue;
+      last.delete(id);
+      sinceRef.current.delete(id);
+      touchedRef.current.delete(id);
+    }
+  }, [termStates]);
+  // Looking at a tile and moving on is a touch too: a server you just
+  // checked must not vanish the moment you click away from it.
+  const prevFocusedRef = useRef(focusedId);
+  useEffect(() => {
+    const prev = prevFocusedRef.current;
+    if (prev && prev !== focusedId) touchedRef.current.set(prev, Date.now());
+    prevFocusedRef.current = focusedId;
+  }, [focusedId]);
+  const hoverRef = useRef(false);
+  const [freshParked, setFreshParked] = useState<string | null>(null);
+  useEffect(() => {
+    if (freshParked === null) return;
+    const timer = window.setTimeout(() => setFreshParked(null), FRESH_PARKED_MS);
+    return () => window.clearTimeout(timer);
+  }, [freshParked]);
+
   // Everything high-churn (work lines, held, unseen, repo counts), served
   // through context and consumed only by an OPEN menu — an OSC title or a
   // 2.5s cwd tick then re-renders one component, usually zero. A terminal
@@ -988,7 +1050,7 @@ export const TerminalTabs = memo(
   // `shelfOrder`). Nothing the wall isn't showing is out of sight.
   const shelfChips = useMemo<ShelfChip[]>(() => {
     const untiled = tabs.filter((t) => !tiles.includes(t.id)).map((t) => t.id);
-    return shelfOrder(untiled, termStates, untiledMru, null).map((id) => {
+    return shelfOrder(untiled, termStates, untiledMru, freshParked).map((id) => {
       const ident = identity.byId.get(id);
       const line = workLine(id, ident?.dir ?? null);
       return {
@@ -997,11 +1059,11 @@ export const TerminalTabs = memo(
         state: line.state,
         text: line.text,
         port: line.state === "serving" ? servingPort(id) : null,
-        fresh: false,
+        fresh: id === freshParked,
       };
     });
     // `workLine` and `servingPort` read attention, procs and the titles.
-  }, [tabs, tiles, termStates, untiledMru, identity, attention, procs, heldPlanTitles, termTitles]);
+  }, [tabs, tiles, termStates, untiledMru, freshParked, identity, attention, procs, heldPlanTitles, termTitles]);
 
   // ── Tile + terminal operations (side effects live HERE, never in a
   //    setState updater — StrictMode double-invokes updaters and previously
@@ -1033,6 +1095,10 @@ export const TerminalTabs = memo(
       recordEvictions(prev, next);
       setTiles(next);
     }
+    // Both ends of a swap were just arranged by hand; neither should park
+    // out from under the arrangement.
+    touch(id);
+    if (prev[index] !== undefined && next.includes(prev[index])) touch(prev[index]);
     setFocusedTile(Math.min(index, next.length - 1));
     clearUnseen(id);
   };
@@ -1054,6 +1120,7 @@ export const TerminalTabs = memo(
     if (target.kind === "add") {
       const next = addTileSlot(prev, id, MAX_TILES);
       if (next !== prev) {
+        touch(id);
         setTiles(next);
         setFocusedTile(next.length - 1);
         clearUnseen(id);
@@ -1411,6 +1478,38 @@ export const TerminalTabs = memo(
     dragCleanupRef.current = () => finish(null);
   };
   useEffect(() => () => dragCleanupRef.current?.(), []);
+
+  const parkTile = (index: number) => {
+    const prev = tilesRef.current;
+    const id = prev[index];
+    const next = removeTileAt(prev, index);
+    if (next === prev) return;
+    recordEvictions(prev, next);
+    setTiles(next);
+    // Keep focus on the same terminal when the parked tile sat before it.
+    const focus = focusIdxRef.current;
+    if (index < focus) setFocusedTile(focus - 1);
+    setFreshParked(id);
+  };
+  const parkRef = useRef(parkTile);
+  parkRef.current = parkTile;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (hoverRef.current || isResizing() || dragCleanupRef.current) return;
+      const index = parkCandidate({
+        tiles: tilesRef.current,
+        states: statesRef.current,
+        pinned: pinnedRef.current,
+        focusIdx: focusIdxRef.current,
+        zoomedId: zoomedRef.current,
+        since: sinceRef.current,
+        touched: touchedRef.current,
+        now: Date.now(),
+      });
+      if (index !== null) parkRef.current(index);
+    }, PARK_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
   const hintTileRef = useRef(hintTile);
   hintTileRef.current = hintTile;
 
@@ -1633,7 +1732,18 @@ export const TerminalTabs = memo(
   };
 
   return (
-    <div data-tour="terminal" className="flex flex-col h-full">
+    <div
+      data-tour="terminal"
+      className="flex flex-col h-full"
+      // Parking holds still while the pointer is over the dock: a tile must
+      // never leave from under a hand reaching for it.
+      onPointerEnter={() => {
+        hoverRef.current = true;
+      }}
+      onPointerLeave={() => {
+        hoverRef.current = false;
+      }}
+    >
       {(detached.some((pty) => !tabs.some((tab) => tab.id === pty.id)) || recoveryError) && (
         <div className="flex items-center gap-2 px-2 py-1 text-xs" role="status">
           {recoveryError && <span>{recoveryError}</span>}
