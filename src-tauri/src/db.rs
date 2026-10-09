@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -475,7 +475,12 @@ const READY_WORK_WHERE: &str = "w.status = 'open'
 pub struct Database {
     /// Shared with the attached `PolisStore` — ONE connection, one lock, so
     /// the memory tables and the app's own live in one transaction domain.
+    /// Every write goes through it.
     conn: Arc<Mutex<Connection>>,
+    /// Read-only connections on the same file, for `read_conn`. `None` for an
+    /// in-memory database (a second connection can't see it) and for a file
+    /// not in WAL mode (its readers would block the writer).
+    readers: Option<Readers>,
     /// Polis Memory's store, attached to the same connection (Session A2 of
     /// the Polis extraction, docs/polis-extraction.md). Reached through
     /// `Deref`, so `db.<store method>()` reads as it always has once the
@@ -499,6 +504,89 @@ fn store_err(e: polis_store::StoreError) -> rusqlite::Error {
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
             Some(other.to_string()),
         ),
+    }
+}
+
+/// How many read connections a file database keeps. Reads are short; a few
+/// cover the UI, the daemon and the keeper reading at once, and each one
+/// costs a page cache.
+const READERS: usize = 3;
+
+/// The read connections. WAL lets each read a committed snapshot while the
+/// writer holds `conn`, so a poll, a bridge route or a keeper pass no longer
+/// queues behind a write, a canary or an embedding tick. Each slot opens on
+/// the first read that lands on it.
+struct Readers {
+    path: std::path::PathBuf,
+    slots: [Mutex<Option<Connection>>; READERS],
+    next: AtomicUsize,
+}
+
+impl Readers {
+    /// A free slot if there is one, else wait for the next in turn. `None`
+    /// only when its connection can't be opened.
+    fn take(&self) -> Option<MutexGuard<'_, Option<Connection>>> {
+        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut slot = (0..READERS)
+            .find_map(|i| self.slots[(start + i) % READERS].try_lock().ok())
+            // A panic mid-read leaves nothing half-done on a read-only
+            // connection, so a poisoned slot is still a good one.
+            .unwrap_or_else(|| self.slots[start % READERS].lock().unwrap_or_else(|e| e.into_inner()));
+        if slot.is_none() {
+            match Self::open(&self.path) {
+                Ok(conn) => *slot = Some(conn),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not open a read connection; reading on the writer");
+                    return None;
+                }
+            }
+        }
+        Some(slot)
+    }
+
+    fn open(path: &Path) -> rusqlite::Result<Connection> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.execute_batch(
+            "PRAGMA query_only = ON; PRAGMA busy_timeout = 5000;
+             PRAGMA cache_size = -16000; PRAGMA mmap_size = 268435456;",
+        )?;
+        Ok(conn)
+    }
+}
+
+/// A connection for one read, from `Database::read_conn`. A write through it
+/// fails, whichever connection it is.
+///
+/// On a reader the read runs in its own transaction, so a read of several
+/// statements sees one committed snapshot, as it did holding the writer's
+/// lock; dropping the guard ends it, so the next read sees every write that
+/// has returned. Without readers it is the writer, made read-only for the
+/// length of the read.
+pub(crate) enum ReadConn<'a> {
+    Reader(MutexGuard<'a, Option<Connection>>),
+    Writer(MutexGuard<'a, Connection>),
+}
+
+impl std::ops::Deref for ReadConn<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        match self {
+            Self::Reader(slot) => slot.as_ref().expect("a reader slot is opened before it is lent"),
+            Self::Writer(conn) => conn,
+        }
+    }
+}
+
+impl Drop for ReadConn<'_> {
+    fn drop(&mut self) {
+        let end = match self {
+            Self::Reader(_) => "ROLLBACK",
+            Self::Writer(_) => "PRAGMA query_only = OFF",
+        };
+        let _ = self.execute_batch(end);
     }
 }
 
@@ -565,6 +653,21 @@ impl Database {
         }
     }
 
+    /// A connection for a read: one of the read connections when the file
+    /// has them, the writer otherwise. Route a path here only when nothing it
+    /// runs writes — a write through it fails — and never while holding
+    /// `lock_conn`'s guard (without readers this IS that lock).
+    pub(crate) fn read_conn(&self) -> ReadConn<'_> {
+        if let Some(slot) = self.readers.as_ref().and_then(Readers::take) {
+            let read = ReadConn::Reader(slot);
+            let _ = read.execute_batch("BEGIN");
+            return read;
+        }
+        let read = ReadConn::Writer(self.lock_conn());
+        let _ = read.execute_batch("PRAGMA query_only = ON");
+        read
+    }
+
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -588,6 +691,9 @@ impl Database {
             let _ = conn.execute_batch(pragma);
         }
         Self::migrate(&conn)?;
+        let wal = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+            .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"));
         let conn = Arc::new(Mutex::new(conn));
         // The host's own schema first, then the memory store attaches to the
         // same connection and brings its tables current under its OWN version
@@ -598,7 +704,12 @@ impl Database {
             AttachOptions::redline().with_author(crate::ledger::local_author()),
         )
             .map_err(store_err)?;
-        let db = Self { conn, polis: Arc::new(polis) };
+        let readers = wal.then(|| Readers {
+            path: path.to_path_buf(),
+            slots: Default::default(),
+            next: AtomicUsize::new(0),
+        });
+        let db = Self { conn, readers, polis: Arc::new(polis) };
         // The send queues are in-memory: any row still `queued` now belongs
         // to a previous run and will never fire.
         db.sweep_queued_to_unsent()?;
@@ -617,7 +728,7 @@ impl Database {
             AttachOptions::redline().with_author(crate::ledger::local_author()),
         )
             .map_err(store_err)?;
-        Ok(Self { conn, polis: Arc::new(polis) })
+        Ok(Self { conn, readers: None, polis: Arc::new(polis) })
     }
 
     /// The planner's chosen strategy for a statement, joined into one line —
@@ -2366,7 +2477,7 @@ impl Database {
     }
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT value FROM app_settings WHERE key = ?1",
             params![key],
@@ -2471,7 +2582,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let marks = vec!["?"; seqs.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT seq, shot_key FROM surface_shots WHERE seq IN ({marks})"
@@ -2524,7 +2635,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let marks = vec!["?"; seqs.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT seq, shot_key, theme FROM surface_shots WHERE seq IN ({marks})"
@@ -2567,7 +2678,7 @@ impl Database {
     /// it self-reports a planner regression — which is the only way a retrieval
     /// change shows up as anything other than "Ask feels slower again".
     pub fn prefetch_hit_rate(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT COALESCE(SUM(CASE WHEN label = 'hit' THEN 1 ELSE 0 END), 0), COUNT(*)
              FROM context_journal WHERE kind = 'memchat_prefetch'",
@@ -2626,7 +2737,7 @@ impl Database {
         since_id: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<JournalRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, ts, kind, surface_kind, surface_id, label, detail
              FROM context_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
@@ -2671,7 +2782,7 @@ impl Database {
     /// when the app went down cannot still be held, so it reads as Launching
     /// (the lead's next Workflow call brings a fresh one).
     pub fn get_scaled_run(&self, run_id: &str) -> rusqlite::Result<Option<crate::scaled::RunCtl>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let row = conn
             .query_row(
                 "SELECT plan_session_id, config_json, limits_json, phase_json, started_at FROM scaled_runs WHERE run_id = ?1",
@@ -2694,7 +2805,7 @@ impl Database {
     }
 
     pub fn latest_scaled_run_id(&self, plan_session_id: &str) -> rusqlite::Result<Option<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT run_id FROM scaled_runs WHERE plan_session_id = ?1 ORDER BY created_at DESC LIMIT 1",
             params![plan_session_id],
@@ -2706,7 +2817,7 @@ impl Database {
     /// The newest journal rows of one kind, newest first. The chat room's
     /// workspace brief reads its "recently browsed" list from the `nav` rows.
     pub fn list_recent_journal_kind(&self, kind: &str, limit: i64) -> rusqlite::Result<Vec<JournalRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, ts, kind, surface_kind, surface_id, label, detail
              FROM context_journal WHERE kind = ?1 ORDER BY id DESC LIMIT ?2",
@@ -2730,7 +2841,7 @@ impl Database {
     /// when the event references one. Deliberately lighter than
     /// `decision_event_context`, which reads each session's whole plan.
     pub fn recent_decisions(&self, limit: i64) -> rusqlite::Result<Vec<DecisionRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             // A subquery, not a join: a comment id repeats across the
             // revisions it was carried into, and a join would repeat the event.
@@ -2748,7 +2859,7 @@ impl Database {
     /// The newest journal row id (0 when empty) — the seq a reader can resume
     /// its delta from.
     pub fn journal_head(&self) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM context_journal",
             [],
@@ -2781,7 +2892,7 @@ impl Database {
 
     /// All companion sessions, most recently active first.
     pub fn list_companions(&self) -> rusqlite::Result<Vec<crate::state::Companion>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT companion_id, title, status, created_at, updated_at, model, effort,
                     title_is_user_set
@@ -2803,7 +2914,7 @@ impl Database {
     }
 
     pub fn companion_project(&self, id: &str) -> Option<String> {
-        self.lock_conn().query_row("SELECT project_path FROM companion_sessions WHERE companion_id=?1", [id], |r| r.get(0)).optional().ok().flatten().flatten()
+        self.read_conn().query_row("SELECT project_path FROM companion_sessions WHERE companion_id=?1", [id], |r| r.get(0)).optional().ok().flatten().flatten()
     }
 
     pub fn set_companion_project(&self, id: &str, path: Option<&str>) -> rusqlite::Result<bool> {
@@ -2816,7 +2927,7 @@ impl Database {
     }
 
     pub fn companion_meta(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare("SELECT id,meta FROM companion_messages WHERE companion_id=?1 AND meta IS NOT NULL ORDER BY created_at,id")?;
         let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
         rows
@@ -2831,7 +2942,7 @@ impl Database {
     /// `None` means "use the `companion` seat's own flags" — the override is
     /// additive, never a second source of truth for the seat.
     pub fn get_companion_seat(&self, companion_id: &str) -> (Option<String>, Option<String>) {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT model, effort FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -2878,7 +2989,7 @@ impl Database {
 
     /// Completed assistant turns as of this chat's last CLI-session rotation.
     pub fn get_companion_rotated_at(&self, companion_id: &str) -> i64 {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT rotated_at_turns FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -2916,7 +3027,7 @@ impl Database {
     }
 
     pub fn get_companion_session(&self, companion_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -2951,7 +3062,7 @@ impl Database {
 
     /// The journal high-water mark this companion has already absorbed.
     pub fn get_companion_journal_seq(&self, companion_id: &str) -> i64 {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT last_journal_seq FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -3046,7 +3157,7 @@ impl Database {
         &self,
         companion_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::CompanionMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, companion_id, role, body, status, surface_kind, surface_id,
                     surface_label, created_at
@@ -3111,7 +3222,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Option<(Option<String>, Option<String>, String, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT title, project_path, doc_markdown, updated_at
              FROM drafts WHERE draft_id = ?1",
@@ -3128,7 +3239,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Option<(Option<String>, String, Option<String>)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT doc_json, doc_markdown, project_path FROM drafts WHERE draft_id = ?1",
             params![draft_id],
@@ -3141,7 +3252,7 @@ impl Database {
 
     /// Every shelf document, most-recently-updated first.
     pub fn list_drafts(&self) -> rusqlite::Result<Vec<BookshelfDraft>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT d.draft_id, d.title, d.project_path, d.folder_id, d.created_at, d.updated_at,
                     (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
@@ -3249,7 +3360,7 @@ impl Database {
 
     /// What deleting this document destroys — for the confirm dialog.
     pub fn draft_delete_impact(&self, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         Self::draft_impact_locked(&conn, draft_id)
     }
 
@@ -3297,7 +3408,7 @@ impl Database {
     /// Every folder, parent-then-name ordered (the tree is built client-side by
     /// the same `buildTree` pattern the memory and review trees use).
     pub fn list_folders(&self) -> rusqlite::Result<Vec<BookshelfFolder>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT folder_id, parent_id, name, created_at FROM bookshelf_folders
              ORDER BY parent_id IS NOT NULL, parent_id, name COLLATE NOCASE",
@@ -3370,7 +3481,7 @@ impl Database {
 
     /// What deleting this folder destroys, counting its whole subtree.
     pub fn folder_delete_impact(&self, folder_id: &str) -> rusqlite::Result<DeleteImpact> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let edges = Self::folder_edges_locked(&conn)?;
         let subtree = folder_subtree(&edges, folder_id);
         let mut impact = DeleteImpact {
@@ -3448,7 +3559,7 @@ impl Database {
     }
 
     pub fn list_draft_sources(&self, draft_id: &str) -> rusqlite::Result<Vec<DraftSource>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at
              FROM draft_sources WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -3534,7 +3645,7 @@ impl Database {
     /// Friction kinds inside `window_ms`, most-frequent first.
     pub fn friction_summary(&self, window_ms: i64) -> rusqlite::Result<Vec<FrictionCount>> {
         let cutoff = crate::ledger::now_millis() - window_ms.max(0);
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT kind, COUNT(*), MAX(ts),
                     (SELECT detail FROM friction_events f2
@@ -3602,7 +3713,7 @@ impl Database {
         &self,
         include_dismissed: bool,
     ) -> rusqlite::Result<Vec<ShipwrightFinding>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let sql = if include_dismissed {
             "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
                     status, dismissed, draft_id, created_at, resolved_at
@@ -3662,7 +3773,7 @@ impl Database {
     /// input to shipped-**detection**. The caller compares each `files` entry
     /// against the paths a later commit touched; nothing here is self-declared.
     pub fn shipwright_unshipped(&self) -> rusqlite::Result<Vec<(String, String)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(files, '[]') FROM shipwright_findings
              WHERE status = 'accepted'",
@@ -3673,7 +3784,7 @@ impl Database {
 
     /// Accept/dismiss/ship rates per category — the agent's own track record.
     pub fn shipwright_scores(&self) -> rusqlite::Result<Vec<CategoryScore>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT category, COUNT(*),
                     SUM(status IN ('accepted','shipped')),
@@ -3712,7 +3823,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, i64, String, Option<String>)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT c.session_id, c.reopen_history, c.body, c.reopen_note
              FROM comments c JOIN sessions s ON s.session_id = c.session_id
@@ -3751,7 +3862,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT c.session_id, c.edit_original, c.edit_revised
              FROM comments c JOIN sessions s ON s.session_id = c.session_id
@@ -3773,7 +3884,7 @@ impl Database {
         repo_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, i64, String)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT review_id, round, source FROM review_sessions
              WHERE repo_path = ?1 AND round > 1
@@ -3788,7 +3899,7 @@ impl Database {
     /// Re-anchoring success on returned review requests for this repo:
     /// `(placed, orphans)` summed across every return.
     pub fn share_anchoring_for_repo(&self, project_path: &str) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT COALESCE(SUM(r.placed), 0), COALESCE(SUM(r.orphans), 0)
              FROM share_returns r JOIN sessions s ON s.session_id = r.session_id
@@ -3804,7 +3915,7 @@ impl Database {
         &self,
         project_path: &str,
     ) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT g.op, COUNT(*) FROM draft_suggestions g
              JOIN drafts d ON d.draft_id = g.draft_id
@@ -3823,7 +3934,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at
              FROM sessions s
@@ -3867,7 +3978,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftChatMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, role, body, status, created_at
              FROM draft_chat_messages WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -3887,7 +3998,7 @@ impl Database {
 
     /// The draft chat's resumable claude session id, if any.
     pub fn get_draft_chat_session(&self, draft_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM draft_chat_threads WHERE draft_id = ?1",
             params![draft_id],
@@ -3925,7 +4036,7 @@ impl Database {
     /// The doc hash the draft's agent last saw (drives the "the draft has
     /// changed — re-read it" follow-up header).
     pub fn get_draft_chat_doc_hash(&self, draft_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT last_doc_hash FROM draft_chat_threads WHERE draft_id = ?1",
             params![draft_id],
@@ -3973,7 +4084,7 @@ impl Database {
         &self,
         thread_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::MemChatMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, thread_id, role, body, status, created_at
              FROM mem_chat_messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -3992,7 +4103,7 @@ impl Database {
     }
 
     pub fn get_mem_chat_session(&self, thread_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM mem_chat_threads WHERE thread_id = ?1",
             params![thread_id],
@@ -4025,7 +4136,7 @@ impl Database {
     /// The ledger high-water mark the Ask agent last saw (its follow-up header
     /// says whether the record grew since). `None` before the first turn.
     pub fn get_mem_chat_last_seq(&self, thread_id: &str) -> Option<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT last_seq FROM mem_chat_threads WHERE thread_id = ?1",
             params![thread_id],
@@ -4091,7 +4202,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftComment>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
                     body, author, created_at, fork_session_id
@@ -4119,7 +4230,7 @@ impl Database {
         &self,
         id: &str,
     ) -> rusqlite::Result<Option<crate::state::DraftComment>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
                     body, author, created_at, fork_session_id
@@ -4156,7 +4267,7 @@ impl Database {
 
     /// The draft comment's resumable discussion-fork session id.
     pub fn get_draft_comment_fork_session(&self, id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT fork_session_id FROM draft_comments WHERE id = ?1",
             params![id],
@@ -4223,7 +4334,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftSuggestion>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at
              FROM draft_suggestions
@@ -4278,7 +4389,7 @@ impl Database {
     /// builder — a crash or a closed window skipped the discard. Swept at the
     /// start of every new preview.
     pub fn list_stale_preview_drafts(&self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT draft_id FROM drafts
              WHERE draft_id LIKE 'preview-%' AND updated_at < ?1",
@@ -4312,7 +4423,7 @@ impl Database {
     }
 
     pub fn get_harness_agent(&self, agent_id: &str) -> rusqlite::Result<Option<HarnessAgent>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
                     last_run_at, run_count
@@ -4325,7 +4436,7 @@ impl Database {
 
     /// Every shelf agent, most-recently-updated first (the drafts ordering).
     pub fn list_harness_agents(&self) -> rusqlite::Result<Vec<HarnessAgent>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
                     last_run_at, run_count
@@ -4526,7 +4637,7 @@ impl Database {
         let Some((table, key, _, _)) = Self::thread_table(kind) else {
             return Vec::new();
         };
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT id, meter_json FROM {table}
              WHERE {key} = ?1 AND meter_json IS NOT NULL"
@@ -4563,7 +4674,7 @@ impl Database {
     }
 
     pub fn session_meter(&self, sid: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT meter_json FROM sessions WHERE session_id = ?1",
             params![sid],
@@ -4577,7 +4688,7 @@ impl Database {
     /// tailer's work list. Bounded: an old, settled session's transcript stops
     /// growing, so re-walking the whole history buys nothing.
     pub fn plan_transcripts(&self, limit: i64) -> Vec<(String, String)> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let Ok(mut stmt) = conn.prepare(
             "SELECT session_id, transcript_path FROM sessions
              WHERE transcript_path IS NOT NULL AND transcript_path <> ''
@@ -4642,7 +4753,7 @@ impl Database {
         let Some((table, key, body, status)) = Self::thread_table(kind) else {
             return Ok(None);
         };
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         // Appended only where there IS a status column — `voice_messages` has
         // none, and a bare filter would 500 that route instead of answering it.
         let drop_errors = status
@@ -4673,7 +4784,7 @@ impl Database {
         let Some((table, key, _, _)) = Self::thread_table(kind) else {
             return Ok((0, None));
         };
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let sql = format!("SELECT COUNT(*), MAX(created_at) FROM {table} WHERE {key} = ?1");
         conn.query_row(&sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))
     }
@@ -4710,7 +4821,7 @@ impl Database {
             ),
             _ => return None,
         };
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(sql, params![key], |r| r.get::<_, Option<String>>(0))
             .ok()
             .flatten()
@@ -4728,7 +4839,7 @@ impl Database {
         session_id: &str,
         version_number: i64,
     ) -> rusqlite::Result<Option<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT raw_plan_markdown FROM revisions WHERE session_id = ?1 AND version_number = ?2",
             params![session_id, version_number],
@@ -4794,7 +4905,7 @@ impl Database {
             ),
             ("classifier", "class_runs", "started_at", "1", ""),
         ];
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         SOURCES
             .iter()
             .map(|(seat, from, ts, pred, distinct_on)| {
@@ -4844,7 +4955,7 @@ impl Database {
     /// Librarian's deferred F6 "un-exported approved plan" friction, now real.
     /// Returns `(session_id, project_name, approved_at)`, oldest first.
     pub fn un_exported_approved_sessions(&self) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at
              FROM sessions s
@@ -4959,7 +5070,7 @@ impl Database {
     /// comment as friction — which is most of them, and it drowned every
     /// downstream ranking (Librarian, Shipwright, `build_digest`) in noise.
     pub fn in_review_friction(&self) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at,
                 (SELECT COUNT(*) FROM comments c
@@ -4990,7 +5101,7 @@ impl Database {
     /// annotation, and/or the session's plan heading when available; a decision
     /// whose referents were deleted still yields its ledger facts.
     pub fn decision_event_context(&self, seq: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let row: Option<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT kind, ts, session_id, ref_kind, ref_id
@@ -5253,7 +5364,7 @@ impl Database {
     }
 
     pub fn list_shares(&self, session_id: &str) -> rusqlite::Result<Vec<ShareRecord>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT request_id, session_id, reviewer_name, note, base_version, created_at
              FROM shares WHERE session_id = ?1 ORDER BY created_at DESC",
@@ -5299,7 +5410,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> rusqlite::Result<Vec<ShareReturnRecord>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, request_id, session_id, reviewer_name, imported_at,
                     landed_version, placed, orphans, comment_ids
@@ -5384,7 +5495,7 @@ impl Database {
     /// A session's current run state (orchestrated runs only; `None` for a
     /// plain Approve or an unknown session).
     pub fn get_run_state(&self, session_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT run_state FROM sessions WHERE session_id = ?1",
             params![session_id],
@@ -5446,7 +5557,7 @@ impl Database {
     }
 
     pub fn get_plan_run(&self, plan_session_id: &str) -> Option<PlanRunRow> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT plan_session_id, report_json, script_path, workflow_ran,
                     resolution, resolution_note, resolved_at, created_at
@@ -5534,7 +5645,7 @@ impl Database {
     }
 
     pub fn get_orchestration(&self, plan_session_id: &str) -> Option<OrchestrationRow> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
                     o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
@@ -5551,7 +5662,7 @@ impl Database {
     /// Every anchored run, newest launch first, with the live run-state joined
     /// in (the History tab's data source and the rehydration sweep's input).
     pub fn list_orchestrations(&self) -> rusqlite::Result<Vec<OrchestrationRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
                     o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
@@ -5578,7 +5689,7 @@ impl Database {
     /// plan one subtask at a time. Rendered neutrally (or not at all) it is
     /// indistinguishable from the multi-agent run the user asked for.
     pub fn run_modes(&self) -> std::collections::HashMap<String, String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut out = std::collections::HashMap::new();
         let Ok(mut stmt) = conn.prepare(
             "SELECT plan_session_id, mode FROM orchestrations WHERE mode IS NOT NULL",
@@ -5825,7 +5936,7 @@ impl Database {
         session_id: &str,
         comment_id: &str,
     ) -> rusqlite::Result<Vec<ThreadMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, comment_id, role, body, status, created_at,
                     attachments, mode
@@ -5871,7 +5982,7 @@ impl Database {
         session_id: &str,
         comment_id: &str,
     ) -> Option<(String, String)> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let row: Option<(Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT fork_session_id, fork_backend FROM comments
@@ -5889,7 +6000,7 @@ impl Database {
     }
 
     pub fn get_comment_fork_seat(&self, session_id: &str, comment_id: &str) -> (Option<String>, Option<String>) {
-        self.lock_conn().query_row("SELECT fork_model, fork_effort FROM comments WHERE session_id = ?1 AND id = ?2", params![session_id, comment_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or_default()
+        self.read_conn().query_row("SELECT fork_model, fork_effort FROM comments WHERE session_id = ?1 AND id = ?2", params![session_id, comment_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or_default()
     }
 
     pub fn set_comment_fork_seat(&self, session_id: &str, comment_id: &str, model: Option<&str>, effort: Option<&str>) -> rusqlite::Result<()> {
@@ -5934,7 +6045,7 @@ impl Database {
     /// agent — used by `handle_plan` to ignore stray `ExitPlanMode` POSTs from a
     /// fork agent.
     pub fn is_known_fork_session(&self, session_id: &str) -> bool {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT 1 FROM comments WHERE fork_session_id = ?1
              UNION ALL
@@ -5971,7 +6082,7 @@ impl Database {
     }
 
     pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, role, body, status, created_at, backend
              FROM browse_messages
@@ -6007,7 +6118,7 @@ impl Database {
     }
 
     pub fn get_browse_session(&self, browse_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM browse_threads WHERE browse_id = ?1",
             params![browse_id],
@@ -6053,7 +6164,7 @@ impl Database {
     /// provider keeps (and resumes) only its own — the `comments.fork_backend`
     /// rule, per page chat.
     pub fn get_browse_codex_thread(&self, browse_id: &str) -> Option<String> {
-        self.lock_conn()
+        self.read_conn()
             .query_row(
                 "SELECT codex_thread_id FROM browse_threads WHERE browse_id = ?1",
                 params![browse_id],
@@ -6066,7 +6177,7 @@ impl Database {
     /// The Codex thread's running usage total (JSON) as of its last turn. The
     /// app-server reports thread totals, so this is the next turn's baseline.
     pub fn get_browse_codex_usage(&self, browse_id: &str) -> Option<String> {
-        self.lock_conn()
+        self.read_conn()
             .query_row(
                 "SELECT codex_usage FROM browse_threads WHERE browse_id = ?1",
                 params![browse_id],
@@ -6124,7 +6235,7 @@ impl Database {
     /// This chat's own provider/model/effort pick; all `None` when it has never
     /// had one (or has no row yet).
     pub fn get_browse_harness(&self, browse_id: &str) -> BrowseHarness {
-        self.lock_conn()
+        self.read_conn()
             .query_row(
                 "SELECT backend, model, effort FROM browse_threads WHERE browse_id = ?1",
                 params![browse_id],
@@ -6163,7 +6274,7 @@ impl Database {
     // See browse_list.rs.
 
     pub fn get_browse_list(&self, browse_id: &str) -> rusqlite::Result<Option<BrowseList>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT browse_id, template, title, created_at, updated_at
              FROM browse_lists WHERE browse_id = ?1",
@@ -6200,7 +6311,7 @@ impl Database {
         &self,
         browse_id: &str,
     ) -> rusqlite::Result<Vec<BrowseListItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, kind, body, done, sort_idx,
                     page_url, page_title, locator, created_at, updated_at
@@ -6240,7 +6351,7 @@ impl Database {
     /// lands after everything the user can see — including after a reorder that
     /// rewrote the indices.
     pub fn next_browse_list_sort(&self, browse_id: &str) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let max: Option<i64> = conn.query_row(
             "SELECT MAX(sort_idx) FROM browse_list_items WHERE browse_id = ?1",
             params![browse_id],
@@ -6250,7 +6361,7 @@ impl Database {
     }
 
     pub fn get_browse_list_item(&self, id: &str) -> rusqlite::Result<Option<BrowseListItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT id, browse_id, kind, body, done, sort_idx,
                     page_url, page_title, locator, created_at, updated_at
@@ -6366,7 +6477,7 @@ impl Database {
     }
 
     pub fn get_mission(&self, mission_id: &str) -> rusqlite::Result<Option<Mission>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT mission_id, title, goal, status, created_at, updated_at
              FROM missions WHERE mission_id = ?1",
@@ -6388,7 +6499,7 @@ impl Database {
     /// Missions newest-first (active before archived, then by recency), for the
     /// start/switch/resume menu.
     pub fn list_missions(&self) -> rusqlite::Result<Vec<Mission>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT mission_id, title, goal, status, created_at, updated_at
              FROM missions
@@ -6425,7 +6536,7 @@ impl Database {
     }
 
     pub fn get_mission_session(&self, mission_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM missions WHERE mission_id = ?1",
             params![mission_id],
@@ -6472,7 +6583,7 @@ impl Database {
     }
 
     pub fn get_mission_tabs(&self, mission_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT tabs_json FROM missions WHERE mission_id = ?1",
             params![mission_id],
@@ -6523,7 +6634,7 @@ impl Database {
     }
 
     pub fn list_findings(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionFinding>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, mission_id, browse_id, source_url, source_title, body, note, created_at
              FROM mission_findings
@@ -6587,7 +6698,7 @@ impl Database {
     /// All verdicts recorded on a tab's thread, so the sources strip can restore
     /// its up/down state after a reload.
     pub fn get_source_feedback(&self, browse_id: &str) -> rusqlite::Result<Vec<SourceFeedback>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at
              FROM source_feedback
@@ -6613,7 +6724,7 @@ impl Database {
     /// first. Feeds the learned "preferred / avoided sources" line injected into
     /// the tandem agent prompt.
     pub fn domain_feedback_summary(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT domain, SUM(verdict) AS score
              FROM source_feedback
@@ -6640,7 +6751,7 @@ impl Database {
     }
 
     pub fn load_mission_thread(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, mission_id, role, body, status, created_at
              FROM mission_messages
@@ -6679,7 +6790,7 @@ impl Database {
     /// Linked discussions newest-first (active before archived, then recency),
     /// for the start/switch/resume menu.
     pub fn list_linked(&self) -> rusqlite::Result<Vec<Linked>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT linked_id, title, status, created_at, updated_at
              FROM linked_sessions
@@ -6698,7 +6809,7 @@ impl Database {
     }
 
     pub fn get_linked_session(&self, linked_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT claude_session_id FROM linked_sessions WHERE linked_id = ?1",
             params![linked_id],
@@ -6772,7 +6883,7 @@ impl Database {
     /// NULL), so a failed first turn re-forks and an established chat never
     /// re-forks.
     pub fn get_linked_fork_from(&self, linked_id: &str) -> Option<(String, Option<String>)> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT fork_from_session_id, converted_origin FROM linked_sessions
               WHERE linked_id = ?1 AND claude_session_id IS NULL",
@@ -6799,7 +6910,7 @@ impl Database {
     }
 
     pub fn get_linked_tabs(&self, linked_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT tabs_json FROM linked_sessions WHERE linked_id = ?1",
             params![linked_id],
@@ -6848,7 +6959,7 @@ impl Database {
     }
 
     pub fn load_linked_thread(&self, linked_id: &str) -> rusqlite::Result<Vec<LinkedMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at
              FROM linked_messages
@@ -6879,7 +6990,7 @@ impl Database {
     /// Paths are returned verbatim (may no longer exist on disk — the caller
     /// filters).
     pub fn list_project_paths(&self) -> rusqlite::Result<Vec<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT path FROM (
                  SELECT project_path AS path, MAX(created_at) AS seen FROM sessions
@@ -6943,7 +7054,7 @@ impl Database {
     /// verbatim — the caller filters out the ones that are live right now and
     /// the ones whose project directory has since disappeared.
     pub fn list_dev_servers(&self, limit: i64) -> rusqlite::Result<Vec<DevServerRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, project_path, project_name, port, url, stack, run_command,
                     last_seen_at, thumb_path
@@ -6985,7 +7096,7 @@ impl Database {
     /// worth a test, so tests can read it directly.
     #[cfg(test)]
     pub fn dev_server_first_seen(&self, id: i64) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT first_seen_at FROM dev_servers WHERE id = ?1",
             params![id],
@@ -7060,7 +7171,7 @@ impl Database {
     }
 
     pub fn get_code_review(&self, review_id: &str) -> Option<CodeReviewSession> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_sessions WHERE review_id = ?1",
@@ -7073,7 +7184,7 @@ impl Database {
     }
 
     pub fn list_code_reviews(&self) -> rusqlite::Result<Vec<CodeReviewSession>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_sessions ORDER BY created_at DESC",
             Self::REVIEW_SESSION_COLS
@@ -7086,7 +7197,7 @@ impl Database {
     /// `/redline-code-review` in the same repo continues the SAME review (next
     /// round) instead of minting a parallel one.
     pub fn latest_code_review_for_repo(&self, repo_path: &str) -> Option<CodeReviewSession> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_sessions WHERE repo_path = ?1
@@ -7165,7 +7276,7 @@ impl Database {
     /// The newest push recorded for a review — the one the feedback payload
     /// reports.
     pub fn latest_push_for_review(&self, review_id: &str) -> Option<PushRecord> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_pushes WHERE review_id = ?1
@@ -7285,7 +7396,7 @@ impl Database {
         &self,
         review_id: &str,
     ) -> rusqlite::Result<Vec<ReviewAnnotation>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_annotations WHERE review_id = ?1
              ORDER BY file_path, start_line, created_at",
@@ -7303,7 +7414,7 @@ impl Database {
         review_id: &str,
         id: &str,
     ) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT fork_session_id FROM review_annotations
              WHERE review_id = ?1 AND id = ?2",
@@ -7369,7 +7480,7 @@ impl Database {
     }
 
     pub fn list_review_viewed(&self, review_id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT file_path FROM review_viewed WHERE review_id = ?1 ORDER BY file_path",
         )?;
@@ -7433,7 +7544,7 @@ impl Database {
     }
 
     pub fn list_review_questions(&self, review_id: &str) -> rusqlite::Result<Vec<ReviewQuestion>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_questions WHERE review_id = ?1
              ORDER BY file_path, start_line, created_at",
@@ -7459,7 +7570,7 @@ impl Database {
         review_id: &str,
         id: &str,
     ) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT fork_session_id FROM review_questions WHERE review_id = ?1 AND id = ?2",
             params![review_id, id],
@@ -7505,7 +7616,7 @@ impl Database {
     // process is disposable (`voice.rs`); this row is the memory.
 
     pub fn get_voice_fork_session(&self, session_id: &str) -> Option<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT fork_session_id FROM voice_sessions WHERE session_id = ?1",
             params![session_id],
@@ -7557,7 +7668,7 @@ impl Database {
     /// and the marker that follows it can land in the same millisecond, and a
     /// uuid tiebreak would invert them.
     pub fn list_voice_messages(&self, session_key: &str) -> rusqlite::Result<Vec<VoiceMessage>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_key, role, text, created_at
              FROM voice_messages
@@ -7632,7 +7743,7 @@ impl Database {
     }
 
     pub fn get_comment_offer(&self, id: &str) -> rusqlite::Result<Option<CommentOffer>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
              FROM comment_offers WHERE id = ?1",
@@ -7645,7 +7756,7 @@ impl Database {
     /// tiebreak as `list_voice_messages`: two offers staged in one turn can land
     /// in the same millisecond, and a uuid tiebreak would invert them.
     pub fn list_open_comment_offers(&self, session_id: &str) -> rusqlite::Result<Vec<CommentOffer>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
              FROM comment_offers
@@ -7681,7 +7792,7 @@ impl Database {
     /// How many offers this turn has already staged — the server-side cap. Same
     /// `"you"`-line floor as `bind_comment_offers`.
     pub fn count_open_offers_this_turn(&self, session_id: &str) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM comment_offers
               WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
@@ -7741,7 +7852,7 @@ impl Database {
     /// Durable history totals for diagnostics; query failure is never an
     /// empty-history result. One lock and one read cover all three tables.
     pub fn plan_history_counts(&self) -> rusqlite::Result<(i64, i64, i64)> {
-        self.lock_conn().query_row(
+        self.read_conn().query_row(
             "SELECT (SELECT COUNT(*) FROM sessions),
                     (SELECT COUNT(*) FROM revisions),
                     (SELECT COUNT(*) FROM comments)",
@@ -7769,7 +7880,7 @@ impl Database {
     /// an optional `session_id` narrowing on each, so the two readers cannot
     /// drift in what they reconstruct.
     fn load_sessions(&self, only: Option<&str>) -> rusqlite::Result<HashMap<String, ReviewSession>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
         let binds: Vec<String> = only.map(str::to_string).into_iter().collect();
         let refs = || -> Vec<&dyn rusqlite::ToSql> {
@@ -8032,7 +8143,7 @@ impl Database {
     }
 
     pub fn get_work_item(&self, id: &str) -> Option<crate::work::WorkItem> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM work_items WHERE id = ?1",
@@ -8054,7 +8165,7 @@ impl Database {
         project: Option<&str>,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM work_items
              WHERE (?1 IS NULL OR status = ?1)
@@ -8078,7 +8189,7 @@ impl Database {
         &self,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM work_items
              WHERE status != 'closed'
@@ -8114,7 +8225,7 @@ impl Database {
         now: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&format!(
             "{READY_WORK_CTE}
              SELECT {} FROM work_items w
@@ -8135,7 +8246,7 @@ impl Database {
     /// pulling the whole work graph (~1.5 MB of JSON) every 60s just to take
     /// `readyIds.length`.
     pub fn count_ready_work_items(&self, project: Option<&str>, now: i64) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             &format!("{READY_WORK_CTE} SELECT COUNT(*) FROM work_items w WHERE {READY_WORK_WHERE}"),
             params![project, now],
@@ -8277,7 +8388,7 @@ impl Database {
         &self,
         id: &str,
     ) -> rusqlite::Result<Vec<crate::work::WorkEdge>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT from_id, to_id, type, created_by, created_at FROM work_edges
              WHERE from_id = ?1 OR to_id = ?1
@@ -8308,7 +8419,7 @@ impl Database {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let ph = (1..=ids.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -8339,7 +8450,7 @@ impl Database {
     /// Direct child ids of a hierarchical item id (`<parent>.N` — one more
     /// dotted level only, not grandchildren). Feeds child-ordinal minting.
     pub fn work_child_ids(&self, parent: &str) -> Vec<String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let Ok(mut stmt) = conn.prepare(
             "SELECT id FROM work_items
              WHERE id LIKE ?1 || '.%' AND id NOT LIKE ?1 || '.%.%'",
@@ -8379,7 +8490,7 @@ impl Database {
 
     #[cfg(test)]
     pub fn get_seat_stat(&self, seat: &str) -> Option<SeatStatRow> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         conn.query_row(
             "SELECT seat, last_run_at, items_filed, updated_at
              FROM seat_stats WHERE seat = ?1",
@@ -8397,7 +8508,7 @@ impl Database {
     }
 
     pub fn list_seat_stats(&self) -> rusqlite::Result<Vec<SeatStatRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT seat, last_run_at, items_filed, updated_at
              FROM seat_stats ORDER BY seat",
@@ -8455,7 +8566,7 @@ impl Database {
 
     /// Per-seat totals across all days (`day` = None in the rollup rows).
     pub fn seat_burn_totals_by_seat(&self) -> rusqlite::Result<Vec<SeatBurnRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT seat, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
@@ -8479,7 +8590,7 @@ impl Database {
     /// bounded by `limit`.
     #[cfg(test)]
     pub fn seat_burn_totals_by_day(&self, limit: i64) -> rusqlite::Result<Vec<SeatBurnRow>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT day, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
@@ -8507,7 +8618,7 @@ impl Database {
     /// queued run that parks lands in `awaiting_review`, so nothing re-queues).
     /// Oldest first (FIFO); returns `(session_id, project_path, project_name)`.
     pub fn list_queue_ready_sessions(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT session_id, project_path, project_name FROM sessions
              WHERE status = 'approved' AND run_state IS NULL
@@ -8541,7 +8652,7 @@ impl Database {
         origin_id: Option<&str>,
         title: Option<&str>,
     ) -> rusqlite::Result<Option<crate::work::WorkItem>> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         match conn.query_row(
             &format!(
                 "SELECT {} FROM work_items
@@ -13143,6 +13254,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A fresh WAL database file in its own directory, removed on drop.
+    struct FileDb(std::path::PathBuf, Option<Arc<Database>>);
+    impl FileDb {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("redline-readers-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = Database::open(&dir.join("live.db")).unwrap();
+            assert!(db.readers.is_some(), "a WAL file reads on its own connections");
+            Self(dir, Some(Arc::new(db)))
+        }
+        fn db(&self) -> Arc<Database> {
+            self.1.clone().unwrap()
+        }
+    }
+    impl Drop for FileDb {
+        fn drop(&mut self) {
+            self.1.take();
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The point of the readers: a poll's read finishes while another thread
+    /// holds the writer for as long as it likes. Before them, every sync
+    /// command reading a setting or a session list waited out a canary, an
+    /// embedding tick or a keeper pass on the shared lock.
+    #[test]
+    fn reads_finish_while_the_writer_is_held() {
+        let file = FileDb::new();
+        let db = file.db();
+        let store = SessionStore::new(db.clone());
+        store.upsert_plan("s", "/tmp/s", "# Plan\n\nBody.\n".into(), Vec::new(), true, false);
+        db.set_setting("redline.ui.theme", "aurora").unwrap();
+        let held = db.lock_conn();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = db.clone();
+        std::thread::spawn(move || {
+            let read = (reader.get_setting("redline.ui.theme"), reader.load_all().map(|all| all.len()));
+            tx.send(read).unwrap();
+        });
+        let (theme, sessions) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a read must not wait on the writer's lock");
+        drop(held);
+        assert_eq!(theme.as_deref(), Some("aurora"));
+        assert_eq!(sessions.unwrap(), 1);
+    }
+
+    /// Read-your-writes, the contract the single lock gave for free: a read
+    /// that starts after a write returned sees it — on the same thread, and on
+    /// another thread told about the write — even on a reader that was open
+    /// before the write.
+    #[test]
+    fn a_read_sees_every_write_that_returned() {
+        let file = FileDb::new();
+        let db = file.db();
+        // Open every reader first, so each one predates the writes below.
+        let warm: Vec<_> = (0..READERS).map(|_| db.read_conn()).collect();
+        drop(warm);
+        for n in 0..20 {
+            db.set_setting("n", &n.to_string()).unwrap();
+            assert_eq!(db.get_setting("n"), Some(n.to_string()));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = db.clone();
+        let writes = std::thread::spawn(move || {
+            for n in 20..200 {
+                writer.set_setting("n", &n.to_string()).unwrap();
+                tx.send(n).unwrap();
+            }
+        });
+        for written in rx {
+            let seen: i64 = db.get_setting("n").unwrap().parse().unwrap();
+            assert!(seen >= written, "read {seen} after write {written} returned");
+        }
+        writes.join().unwrap();
+    }
+
+    /// One read is one snapshot (a read of several statements can't see a
+    /// write land between them, as it couldn't holding the writer's lock),
+    /// and releasing it is what lets the next read see that write.
+    #[test]
+    fn one_read_is_one_snapshot_and_the_next_is_fresh() {
+        let file = FileDb::new();
+        let db = file.db();
+        db.set_setting("k", "1").unwrap();
+        let value = |conn: &Connection| -> String {
+            conn.query_row("SELECT value FROM app_settings WHERE key = 'k'", [], |r| r.get(0)).unwrap()
+        };
+        let read = db.read_conn();
+        assert_eq!(value(&read), "1");
+        db.set_setting("k", "2").unwrap();
+        assert_eq!(value(&read), "1", "a write never lands in the middle of a read");
+        drop(read);
+        assert_eq!(db.get_setting("k").as_deref(), Some("2"));
+    }
+
+    /// A write routed through `read_conn` fails on either kind of database,
+    /// so a read path that starts writing is caught by its own tests — and a
+    /// read on the writer (in-memory, no readers) hands it back writable.
+    #[test]
+    fn a_read_connection_refuses_writes_and_leaves_the_writer_writable() {
+        let file = FileDb::new();
+        let memory = Arc::new(Database::open_in_memory().unwrap());
+        assert!(memory.readers.is_none(), "an in-memory database reads on the writer");
+        for db in [file.db(), memory] {
+            let attempt = db
+                .read_conn()
+                .execute("INSERT INTO app_settings (key, value) VALUES ('x', 'y')", []);
+            assert!(attempt.is_err(), "a read connection must refuse a write");
+            assert_eq!(db.get_setting("x"), None);
+            db.set_setting("x", "y").unwrap();
+            assert_eq!(db.get_setting("x").as_deref(), Some("y"));
+        }
+    }
+
+    /// The routed read paths run on a reader, inside its snapshot, as they do
+    /// on the writer: one of each family, against real rows.
+    #[test]
+    fn routed_reads_work_on_the_readers() {
+        let file = FileDb::new();
+        let db = file.db();
+        let store = SessionStore::new(db.clone());
+        store.upsert_plan("s", "/tmp/s", "# Plan\n\nBody.\n".into(), Vec::new(), true, false);
+        store.upsert_plan("s", "/tmp/s", "# Plan\n\nBody, again.\n".into(), Vec::new(), false, false);
+        let reloaded = db.load_session("s").unwrap().expect("session");
+        assert_eq!(reloaded.revisions.len(), 2);
+        assert_eq!(db.revision_markdown("s", 2).unwrap().as_deref(), Some("# Plan\n\nBody, again.\n"));
+        assert!(db.list_drafts().unwrap().is_empty());
+        assert!(db.list_companions().unwrap().is_empty());
+        assert!(db.list_missions().unwrap().is_empty());
+        assert!(db.list_orchestrations().unwrap().is_empty());
+        assert!(db.runner_list().unwrap().is_empty());
+        assert!(db.friction_summary(i64::MAX).is_ok());
+        assert!(db.seat_activity(0).iter().all(|seat| seat.turns_total >= seat.turns_window));
+    }
+
     #[test]
     fn code_review_session_and_annotations_round_trip() {
         let db = Database::open_in_memory().unwrap();
@@ -17083,10 +17330,10 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())
     }
     pub fn runner_get(&self, run_id: &str) -> Result<crate::runner_graph::RunGraph, String> {
-        Self::runner_read(&self.lock_conn(), run_id)
+        Self::runner_read(&self.read_conn(), run_id)
     }
     pub fn runner_list(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let mut stmt = conn
             .prepare("SELECT doc_json FROM run_graphs ORDER BY updated_at DESC LIMIT 100")
             .map_err(|e| e.to_string())?;
@@ -17159,7 +17406,7 @@ impl Database {
          bundle_path,manifest_json,capture_json,probe_json,failure,step,created_at,updated_at";
 
     pub fn release_get(&self, release_id: &str) -> Result<Option<crate::self_develop::Release>, String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let sql = format!("SELECT {} FROM releases WHERE release_id=?1", Self::RELEASE_COLUMNS);
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut rows = stmt.query_map([release_id], Self::release_row).map_err(|e| e.to_string())?;
@@ -17170,7 +17417,7 @@ impl Database {
     }
 
     pub fn release_list(&self, limit: usize) -> Result<Vec<crate::self_develop::Release>, String> {
-        let conn = self.lock_conn();
+        let conn = self.read_conn();
         let sql = format!(
             "SELECT {} FROM releases ORDER BY updated_at DESC LIMIT ?1",
             Self::RELEASE_COLUMNS
@@ -17205,7 +17452,7 @@ impl Database {
         &self,
         run_id: &str,
     ) -> Result<Vec<crate::runner_graph::RunClaim>, String> {
-        Self::runner_claim_rows(&self.lock_conn(), run_id)
+        Self::runner_claim_rows(&self.read_conn(), run_id)
     }
     /// Check, mutate, normalize, and release terminal claims under one DB lock.
     pub fn runner_update(
@@ -17295,7 +17542,7 @@ impl Database {
     /// held until the human explicitly retries or skips their interrupted node.
     pub fn runner_recover(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
         let candidates = {
-            let conn = self.lock_conn();
+            let conn = self.read_conn();
             let mut stmt=conn.prepare("SELECT doc_json FROM run_graphs WHERE status='running' OR run_id IN (SELECT run_id FROM run_nodes WHERE status IN ('running','verifying'))").map_err(|e|e.to_string())?;
             let rows = stmt
                 .query_map([], |r| r.get::<_, String>(0))

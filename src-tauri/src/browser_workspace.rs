@@ -46,14 +46,14 @@ fn initialize(db: &Database) -> Result<(), String> {
 }
 pub fn read(db: &Database, id: &str) -> Result<Option<Value>, String> {
     initialize(db)?;
-    let row: Option<(String, i64)> = db.lock_conn().query_row("SELECT body,revision FROM browser_workspaces WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
+    let row: Option<(String, i64)> = db.read_conn().query_row("SELECT body,revision FROM browser_workspaces WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
     row.map(|(body, revision)| { let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?; value["revision"] = revision.into(); Ok(value) }).transpose()
 }
 pub fn tabs(db: &Database, workspace: &str) -> Result<Vec<Value>, String> {
     let saved = read(db, workspace)?;
     if let Some(array) = saved.as_ref().and_then(|value| value["tabs"].as_array()) { return Ok(array.clone()); }
     if workspace == "regular" { return Ok(vec![]); }
-    let connection = db.lock_conn();
+    let connection = db.read_conn();
     let raw: Option<String> = connection.query_row("SELECT tabs_json FROM missions WHERE mission_id=?1", [workspace], |r| r.get(0)).optional().map_err(|e| e.to_string())?.flatten();
     raw.map(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string())).transpose().map(Option::unwrap_or_default)
 }
@@ -61,7 +61,7 @@ pub fn find_tab(db: &Database, label: &str) -> Result<Option<Value>, String> {
     initialize(db)?;
     let id = label.strip_prefix("browser-").ok_or("Invalid browser label")?;
     let bodies = {
-        let connection = db.lock_conn();
+        let connection = db.read_conn();
         let mut query = connection.prepare("SELECT body FROM browser_workspaces UNION ALL SELECT json_object('tabs',json(tabs_json)) FROM missions WHERE tabs_json IS NOT NULL").map_err(|e| e.to_string())?;
         let results = query.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
         results
@@ -135,7 +135,7 @@ pub fn list(db: &Database, prefix: &str) -> Result<Vec<Value>, String> {
     initialize(db)?;
     if prefix.is_empty() || prefix.len() > 160 { return Err("Invalid workspace prefix".into()); }
     let rows = {
-        let connection = db.lock_conn();
+        let connection = db.read_conn();
         let mut query = connection.prepare("SELECT id,body,updated_at FROM browser_workspaces WHERE substr(id,1,length(?1))=?1 ORDER BY updated_at DESC").map_err(|e| e.to_string())?;
         let rows = query.query_map([prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))).map_err(|e| e.to_string())?.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
         rows

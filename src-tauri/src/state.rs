@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -1226,6 +1226,15 @@ pub struct SessionStore {
     /// refcount bump. Evicted when a session is deleted or re-keyed — the only
     /// two ways a (session, version) pair stops meaning what it meant.
     sections: Arc<Mutex<HashMap<(SessionId, u32), Arc<Vec<Section>>>>>,
+    /// The store's turn at the database. A method that edits `inner` and then
+    /// writes the edit holds it from before the edit until after the write
+    /// (`lock_to_write`), so the writes land in the order the edits were made
+    /// even when one of them runs after the map lock is gone — as
+    /// `upsert_plan`, `update_comment` and `delete_comment` do, so the polls
+    /// reading the map never wait on SQLite. A writer waiting its turn holds
+    /// nothing a reader needs. Lock order: this, then `inner`; never the
+    /// reverse.
+    persist: Arc<Mutex<()>>,
 }
 
 pub struct UpsertResult {
@@ -1262,7 +1271,18 @@ impl SessionStore {
             db,
             pending_restores: Arc::new(Mutex::new(HashSet::new())),
             sections: Arc::new(Mutex::new(HashMap::new())),
+            persist: Arc::new(Mutex::new(())),
         })
+    }
+
+    /// The map, for a method that edits it and then writes the edit to the
+    /// database, plus the store's turn at the database (`persist`). Hold the
+    /// turn until the last write; drop the map as soon as the edit is made.
+    #[allow(clippy::type_complexity)]
+    fn lock_to_write(&self) -> (MutexGuard<'_, HashMap<SessionId, ReviewSession>>, MutexGuard<'_, ()>) {
+        // Poison carries no state here: the guarded value is `()`.
+        let turn = self.persist.lock().unwrap_or_else(|e| e.into_inner());
+        (self.inner.lock().unwrap(), turn)
     }
 
     // ── Lazy sections ────────────────────────────────────────────────────
@@ -1366,7 +1386,7 @@ impl SessionStore {
     /// and on disk. Callable with just a session id so the detach drop-guard
     /// can persist without cloning a session.
     pub fn set_attach_state(&self, session_id: &str, state: AttachState) {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return;
         };
@@ -1383,7 +1403,7 @@ impl SessionStore {
     /// Correct project attribution in memory and on disk under the same lock.
     /// Roll memory back if persistence fails so a later upsert cannot undo it.
     pub fn set_project(&self, session_id: &str, project_path: &str) -> Result<(), String> {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let session = map.get_mut(session_id).ok_or("no such session")?;
         let before = (session.project_path.clone(), session.project_name.clone(), session.updated_at);
         session.project_path = project_path.to_string();
@@ -1441,7 +1461,8 @@ impl SessionStore {
     ) -> UpsertResult {
         let now = now_millis();
         let project_name = derive_project_name(project_path);
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
+        let mut created = None;
         let session = map.entry(session_id.to_string()).or_insert_with(|| {
             let s = ReviewSession {
                 session_id: session_id.to_string(),
@@ -1457,9 +1478,7 @@ impl SessionStore {
                 model: None,
                 effort: None,
             };
-            if let Err(e) = self.db.upsert_session(&s) {
-                tracing::error!(error = %e, "failed to persist session");
-            }
+            created = Some(s.clone());
             s
         });
         let is_new_session = session.revisions.is_empty();
@@ -1478,6 +1497,21 @@ impl SessionStore {
             thread_start,
             restored,
         };
+        session.revisions.push(revision.clone());
+        session.updated_at = session.updated_at.max(now);
+        let carried = if restored {
+            Self::carry_open_comments_forward(session)
+        } else {
+            Vec::new()
+        };
+        // The edit is made. The writes below hold the store's turn but not the
+        // map, so a poll reading the store never waits on SQLite for them.
+        drop(map);
+        if let Some(created) = created {
+            if let Err(e) = self.db.upsert_session(&created) {
+                tracing::error!(error = %e, "failed to persist session");
+            }
+        }
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist revision");
         }
@@ -1499,11 +1533,7 @@ impl SessionStore {
             None,
             Some(&format!("v{version_number}")),
         );
-        session.revisions.push(revision);
-        session.updated_at = session.updated_at.max(now);
-        if restored {
-            self.carry_open_comments_forward(session, session_id, version_number);
-        }
+        self.persist_carried(session_id, version_number, &carried);
         UpsertResult {
             version_number,
             is_new_session,
@@ -1519,7 +1549,7 @@ impl SessionStore {
     /// and the open-comment carry-forward is correct by construction. Returns
     /// `None` if the session has no revisions to restore.
     pub fn restore_latest(&self, session_id: &str) -> Option<UpsertResult> {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let session = map.get_mut(session_id)?;
         let latest = session.revisions.last()?;
         let version_number = (session.revisions.len() as u32) + 1;
@@ -1542,7 +1572,8 @@ impl SessionStore {
         }
         session.updated_at = session.updated_at.max(revision.received_at);
         session.revisions.push(revision);
-        self.carry_open_comments_forward(session, session_id, version_number);
+        let carried = Self::carry_open_comments_forward(session);
+        self.persist_carried(session_id, version_number, &carried);
         Some(UpsertResult {
             version_number,
             is_new_session: false,
@@ -1554,13 +1585,9 @@ impl SessionStore {
     /// doesn't hide it. A restored revision re-presents the identical body, so
     /// every anchor/block id resolves the same. Settled comments stay put for
     /// the history views; drafts/reopens were already included in submits via
-    /// the all-revisions flat-map, this makes them *visible* again.
-    fn carry_open_comments_forward(
-        &self,
-        session: &mut ReviewSession,
-        session_id: &str,
-        version_number: u32,
-    ) {
+    /// the all-revisions flat-map, this makes them *visible* again. Moves them
+    /// in memory and returns their ids for `persist_carried`.
+    fn carry_open_comments_forward(session: &mut ReviewSession) -> Vec<String> {
         let mut carried: Vec<Comment> = Vec::new();
         let last_idx = session.revisions.len() - 1;
         for revision in &mut session.revisions[..last_idx] {
@@ -1574,15 +1601,19 @@ impl SessionStore {
             }
             revision.comments = kept;
         }
-        for c in &carried {
-            if let Err(e) = self
-                .db
-                .set_comment_revision(session_id, &c.id, version_number)
-            {
+        let ids = carried.iter().map(|c| c.id.clone()).collect();
+        session.revisions[last_idx].comments.extend(carried);
+        ids
+    }
+
+    /// The database half of `carry_open_comments_forward`: re-home the carried
+    /// comments' rows on the new revision.
+    fn persist_carried(&self, session_id: &str, version_number: u32, carried: &[String]) {
+        for id in carried {
+            if let Err(e) = self.db.set_comment_revision(session_id, id, version_number) {
                 note_comment_persist_failure(session_id, "carried-forward comment", &e);
             }
         }
-        session.revisions[last_idx].comments.extend(carried);
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {
@@ -1663,7 +1694,7 @@ impl SessionStore {
         if backend.is_none() && model.is_none() {
             return;
         }
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return;
         };
@@ -1686,7 +1717,7 @@ impl SessionStore {
         let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) else {
             return;
         };
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return;
         };
@@ -1732,7 +1763,7 @@ impl SessionStore {
         session_id: &str,
         request: NewCommentRequest,
     ) -> Result<Comment, String> {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let session = map
             .get_mut(session_id)
             .ok_or_else(|| format!("no session found for id {session_id}"))?;
@@ -1876,57 +1907,62 @@ impl SessionStore {
         comment_id: &str,
         update: UpdateCommentRequest,
     ) -> Option<Comment> {
-        let mut map = self.inner.lock().unwrap();
-        let session = map.get_mut(session_id)?;
-        for revision in session.revisions.iter_mut() {
-            if let Some(comment) = revision.comments.iter_mut().find(|c| c.id == comment_id) {
-                if let Some(body) = update.body {
-                    comment.body = body;
-                }
-                if update.block_id.is_some() {
-                    comment.block_id = update.block_id;
-                }
-                if update.structural.is_some() && comment.kind.is_structural() {
-                    comment.structural = update.structural;
-                }
-                if matches!(comment.kind, CommentKind::Feedback) {
-                    if let Some(scope) = update.scope {
-                        comment.scope = Some(scope);
-                    }
-                }
-                if matches!(comment.kind, CommentKind::Edit) {
-                    if let Some(edit) = update.edit {
-                        comment.edit = Some(edit);
-                    }
-                }
-                if let Some(selection) = update.selection {
-                    comment.selection = Some(selection);
-                }
-                if let Err(e) = self.db.update_comment(session_id, comment) {
-                    note_comment_persist_failure(session_id, "comment update", &e);
-                }
-                return Some(comment.clone());
+        let (mut map, _turn) = self.lock_to_write();
+        let comment = map
+            .get_mut(session_id)?
+            .revisions
+            .iter_mut()
+            .find_map(|revision| revision.comments.iter_mut().find(|c| c.id == comment_id))?;
+        if let Some(body) = update.body {
+            comment.body = body;
+        }
+        if update.block_id.is_some() {
+            comment.block_id = update.block_id;
+        }
+        if update.structural.is_some() && comment.kind.is_structural() {
+            comment.structural = update.structural;
+        }
+        if matches!(comment.kind, CommentKind::Feedback) {
+            if let Some(scope) = update.scope {
+                comment.scope = Some(scope);
             }
         }
-        None
+        if matches!(comment.kind, CommentKind::Edit) {
+            if let Some(edit) = update.edit {
+                comment.edit = Some(edit);
+            }
+        }
+        if let Some(selection) = update.selection {
+            comment.selection = Some(selection);
+        }
+        let updated = comment.clone();
+        // Written on the store's turn, after the map is released.
+        drop(map);
+        if let Err(e) = self.db.update_comment(session_id, &updated) {
+            note_comment_persist_failure(session_id, "comment update", &e);
+        }
+        Some(updated)
     }
 
     pub fn delete_comment(&self, session_id: &str, comment_id: &str) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return false;
         };
-        for revision in session.revisions.iter_mut() {
+        let removed = session.revisions.iter_mut().any(|revision| {
             let before = revision.comments.len();
             revision.comments.retain(|c| c.id != comment_id);
-            if revision.comments.len() != before {
-                if let Err(e) = self.db.delete_comment(session_id, comment_id) {
-                    tracing::error!(error = %e, "failed to delete comment from db");
-                }
-                return true;
-            }
+            revision.comments.len() != before
+        });
+        if !removed {
+            return false;
         }
-        false
+        // Written on the store's turn, after the map is released.
+        drop(map);
+        if let Err(e) = self.db.delete_comment(session_id, comment_id) {
+            tracing::error!(error = %e, "failed to delete comment from db");
+        }
+        true
     }
 
     pub fn has_session(&self, session_id: &str) -> bool {
@@ -1943,7 +1979,7 @@ impl SessionStore {
     /// revisions / open comments / attach-state ride along unchanged, and the
     /// DB rows follow via `db.rekey_session`.
     pub fn rekey_session(&self, old_id: &str, new_id: &str) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         if old_id == new_id || map.contains_key(new_id) {
             return false;
         }
@@ -1979,7 +2015,7 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, session_id: &str) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         if map.remove(session_id).is_none() {
             return false;
         }
@@ -2021,7 +2057,7 @@ impl SessionStore {
         appeared_in_version: u32,
     ) -> ResolutionAttachReport {
         let mut report = ResolutionAttachReport::default();
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             report.session_missing = true;
             return report;
@@ -2116,7 +2152,7 @@ impl SessionStore {
     pub fn link_research_answer(&self, browse_id: &str, answer: &str) -> Vec<String> {
         let hash = crate::ledger::body_hash(answer);
         let excerpt = clip_utf8(answer, RESEARCH_EXCERPT_MAX);
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let mut changed = Vec::new();
         for (session_id, session) in map.iter_mut() {
             for revision in session.revisions.iter_mut() {
@@ -2140,7 +2176,7 @@ impl SessionStore {
     }
 
     pub fn mark_submitted(&self, session_id: &str) -> Vec<String> {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return Vec::new();
         };
@@ -2164,7 +2200,7 @@ impl SessionStore {
     /// (A reopened-then-submitted comment also returns to Draft — its content is
     /// preserved and it stays editable, which is all the rollback needs.)
     pub fn unmark_submitted(&self, session_id: &str, ids: &[String]) {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return;
         };
@@ -2181,7 +2217,7 @@ impl SessionStore {
     }
 
     pub fn set_status(&self, session_id: &str, status: SessionStatus) {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         if let Some(session) = map.get_mut(session_id) {
             if session.status == status {
                 return;
@@ -2367,7 +2403,7 @@ impl SessionStore {
 
     pub fn accept_resolution(&self, session_id: &str, comment_id: &str) -> bool {
         let now = now_millis();
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return false;
         };
@@ -2425,7 +2461,7 @@ impl SessionStore {
         comment_id: &str,
         state: Option<String>,
     ) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return false;
         };
@@ -2458,7 +2494,7 @@ impl SessionStore {
         note: Option<&str>,
         as_change: bool,
     ) -> bool {
-        let mut map = self.inner.lock().unwrap();
+        let (mut map, _turn) = self.lock_to_write();
         let Some(session) = map.get_mut(session_id) else {
             return false;
         };
@@ -2539,7 +2575,7 @@ impl SessionStore {
         match status {
             CommentStatus::Draft => {
                 let note = note.map(str::trim).filter(|s| !s.is_empty());
-                let mut map = self.inner.lock().unwrap();
+                let (mut map, _turn) = self.lock_to_write();
                 let session = map
                     .get_mut(session_id)
                     .ok_or_else(|| format!("session not found: {session_id}"))?;
@@ -3198,6 +3234,147 @@ mod tests {
         let all = db.list_work_items(None, None, 100).unwrap();
         assert!(all.len() > v1_count, "the new version filed its own items");
         assert!(all.iter().any(|i| i.title.starts_with("Plan v2 approved:")));
+    }
+
+    // --- lock discipline: edits under the map, writes on the store's turn ----
+
+    fn feedback(id: Option<&str>, body: &str) -> NewCommentRequest {
+        NewCommentRequest {
+            id: id.map(str::to_string),
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: None,
+            structural: None,
+            body: body.to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+            reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
+            research: None,
+        }
+    }
+
+    fn edit_body(body: &str) -> UpdateCommentRequest {
+        UpdateCommentRequest {
+            body: Some(body.to_string()),
+            scope: None,
+            block_id: None,
+            edit: None,
+            structural: None,
+            selection: None,
+        }
+    }
+
+    /// Polls `check` against the store from another thread until it holds.
+    /// `get` reads only the map, so this returns while a write is stuck on
+    /// the database — and times out if the write kept the map locked.
+    fn wait_for_store(store: &SessionStore, check: impl Fn(Option<ReviewSession>) -> bool + Send + 'static) {
+        let (reader, (tx, rx)) = (store.clone(), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            while !check(reader.get("sess-appr")) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading the store must not wait for a write stuck on the database");
+    }
+
+    fn body_of(session: &Option<ReviewSession>, id: &str) -> Option<String> {
+        session.as_ref()?.revisions.iter().flat_map(|r| &r.comments).find(|c| c.id == id).map(|c| c.body.clone())
+    }
+
+    /// A plan arriving, a comment edit and a comment delete each make their
+    /// edit and release the map before writing: while another thread holds
+    /// the database, the store still reads, and shows the edit.
+    #[test]
+    fn reading_the_store_never_waits_on_its_writes() {
+        let store = store_with_plan(PLAN_MD);
+        let id = store.add_comment("sess-appr", feedback(None, "first")).unwrap().id;
+        let db = store.database();
+
+        let held = db.lock_conn();
+        let writer = store.clone();
+        let arrival = std::thread::spawn(move || {
+            writer.upsert_plan("sess-appr", "/tmp/proj", format!("{PLAN_MD}\nMore.\n"), Vec::new(), false, false)
+        });
+        wait_for_store(&store, |s| s.is_some_and(|s| s.revisions.len() == 2));
+        drop(held);
+        assert_eq!(arrival.join().unwrap().version_number, 2);
+
+        let held = db.lock_conn();
+        let (writer, comment) = (store.clone(), id.clone());
+        let edit = std::thread::spawn(move || writer.update_comment("sess-appr", &comment, edit_body("edited")));
+        let comment = id.clone();
+        wait_for_store(&store, move |s| body_of(&s, &comment).as_deref() == Some("edited"));
+        drop(held);
+        assert_eq!(edit.join().unwrap().unwrap().body, "edited");
+
+        let held = db.lock_conn();
+        let (writer, comment) = (store.clone(), id.clone());
+        let delete = std::thread::spawn(move || writer.delete_comment("sess-appr", &comment));
+        let comment = id.clone();
+        wait_for_store(&store, move |s| s.is_some() && body_of(&s, &comment).is_none());
+        drop(held);
+        assert!(delete.join().unwrap());
+
+        // Everything landed.
+        let saved = db.load_session("sess-appr").unwrap().unwrap();
+        assert_eq!(saved.revisions.len(), 2);
+        assert!(body_of(&Some(saved), &id).is_none());
+    }
+
+    /// Writes leave the map lock but not the order: while one write is stuck
+    /// on the database, a later edit to the same comment, or a re-add of a
+    /// deleted id, waits its turn before it is made — so it lands on disk
+    /// after the stuck write, and the store keeps reading meanwhile. Edited
+    /// first and written in whatever order the database frees up, the
+    /// loser's edit is what survives on disk while memory shows the
+    /// winner's.
+    #[test]
+    fn writes_land_in_the_order_their_edits_were_made() {
+        let store = store_with_plan(PLAN_MD);
+        let id = store.add_comment("sess-appr", feedback(Some("c-race"), "first")).unwrap().id;
+        let db = store.database();
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let held = db.lock_conn();
+        let (writer, comment) = (store.clone(), id.clone());
+        let early = std::thread::spawn(move || writer.update_comment("sess-appr", &comment, edit_body("early")));
+        let comment = id.clone();
+        wait_for_store(&store, move |s| body_of(&s, &comment).as_deref() == Some("early"));
+        let (writer, comment) = (store.clone(), id.clone());
+        let late = std::thread::spawn(move || writer.update_comment("sess-appr", &comment, edit_body("late")));
+        settle();
+        let comment = id.clone();
+        wait_for_store(&store, move |s| body_of(&s, &comment).as_deref() == Some("early"));
+        drop(held);
+        early.join().unwrap();
+        late.join().unwrap();
+        let saved = db.load_session("sess-appr").unwrap();
+        assert_eq!(body_of(&saved, &id).as_deref(), Some("late"));
+        assert_eq!(body_of(&store.get("sess-appr"), &id).as_deref(), Some("late"));
+
+        let held = db.lock_conn();
+        let (writer, comment) = (store.clone(), id.clone());
+        let delete = std::thread::spawn(move || writer.delete_comment("sess-appr", &comment));
+        let comment = id.clone();
+        wait_for_store(&store, move |s| s.is_some() && body_of(&s, &comment).is_none());
+        let writer = store.clone();
+        let readd = std::thread::spawn(move || writer.add_comment("sess-appr", feedback(Some("c-race"), "again")));
+        settle();
+        let comment = id.clone();
+        wait_for_store(&store, move |s| s.is_some() && body_of(&s, &comment).is_none());
+        drop(held);
+        assert!(delete.join().unwrap());
+        readd.join().unwrap().unwrap();
+        let saved = db.load_session("sess-appr").unwrap();
+        assert_eq!(body_of(&saved, &id).as_deref(), Some("again"), "the re-add lands after the delete");
+        assert_eq!(body_of(&store.get("sess-appr"), &id).as_deref(), Some("again"));
     }
 }
 
