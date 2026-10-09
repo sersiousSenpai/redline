@@ -12,7 +12,9 @@
 // `animation` in src/ to the properties its @keyframes touch, and fails when
 // an infinite animation, or one running longer than 300 ms, animates anything
 // the compositor can't: only transform and opacity (and the individual
-// transform properties) move without a repaint.
+// transform properties) move without a repaint. Web Animations calls
+// (`el.animate(…)`) are read the same way, and so are the package stylesheets
+// src imports — whose endless animations must stay switched off.
 //
 // A finite one-shot may exceed the 300 ms line only through ALLOWLIST, with a
 // reason and a ceiling. An infinite paint animation has no allowlist: a
@@ -47,10 +49,35 @@ const ALLOWLIST: Record<string, { maxMs: number; reason: string }> = {
     reason:
       "one 320 ms ring on each plate acknowledging the deliberate snap-back gesture; the only plate-sized paint animation, and it ends",
   },
+  springInKeyframes: {
+    maxMs: 620,
+    reason:
+      "the island-to-surface spring (SpringSwap, the floating browser island): once per swap, the corners ease 18 → 24 → 14 px while the transform carries the motion",
+  },
+};
+
+/** Package stylesheets' endless paint animations, by @keyframes name: the
+ *  rule isn't ours to edit, so it passes only while no file using the package
+ *  sets the switch that starts it. */
+const PACKAGE_SWITCHES: Record<string, { pkg: string; on: RegExp; reason: string }> = {
+  dashdraw: {
+    pkg: "@xyflow/react",
+    on: /\banimated\b/,
+    reason:
+      "React Flow's `animated` edge marches its dash (stroke-dashoffset) forever; the Runs canvas tints a live edge instead",
+  },
+};
+
+/** `.animate(` calls that are not the Web Animations API. */
+const NOT_WAAPI: Record<string, string> = {
+  "components/memory-cosmos/scene.ts":
+    "Planet.animate(t) steps a WebGL mesh by the scene clock; no element animates",
 };
 
 /** Properties that may appear in a keyframe without being animated. */
 const KEYFRAME_META = new Set(["animation-timing-function", "animation-composition"]);
+/** The same, for a Web Animations keyframe object. */
+const WAAPI_META = new Set(["offset", "easing", "composite"]);
 
 const SHORTHAND_KEYWORDS = new Set([
   "none", "infinite", "normal", "reverse", "alternate", "alternate-reverse",
@@ -73,6 +100,9 @@ interface Usage {
    *  `animation-name` longhand) — treated as long-running. */
   ms: number | null;
   infinite: boolean;
+  /** A Web Animations call's own keyframe properties, or null when its
+   *  keyframes can't be read; absent for a CSS animation (see `name`). */
+  props?: Set<string> | null;
 }
 
 /** Blank out comments without moving any offset, so line numbers stay true. */
@@ -80,28 +110,33 @@ function stripComments(text: string): string {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
 }
 
+/** The same, plus `//` line comments — scripts only, where they exist. */
+function stripScriptComments(text: string): string {
+  return stripComments(text).replace(/(^|\s)\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, " "));
+}
+
 function lineOf(text: string, index: number): number {
   return text.slice(0, index).split("\n").length;
 }
 
-/** Index of the `}` closing the block whose `{` is at `open`. */
-function blockEnd(text: string, open: number): number {
+/** Index just past the bracket that closes the one at `open`. */
+function closeOf(text: string, open: number): number {
   let depth = 0;
   for (let i = open; i < text.length; i++) {
-    if (text[i] === "{") depth++;
-    else if (text[i] === "}" && --depth === 0) return i;
+    if ("([{".includes(text[i])) depth++;
+    else if (")]}".includes(text[i]) && --depth === 0) return i + 1;
   }
   return text.length;
 }
 
-/** Split on commas (or whitespace) that are not inside parentheses. */
+/** Split on commas (or whitespace) that are not inside any bracket. */
 function splitTop(value: string, sep: "," | " "): string[] {
   const out: string[] = [];
   let depth = 0;
   let cur = "";
   for (const ch of value) {
-    if (ch === "(") depth++;
-    else if (ch === ")") depth--;
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
     const isSep = sep === "," ? ch === "," : /\s/.test(ch);
     if (isSep && depth === 0) {
       if (cur.trim()) out.push(cur.trim());
@@ -120,7 +155,7 @@ function parseKeyframes(sources: Source[]): Map<string, Set<string>> {
     const css = stripComments(text);
     for (const m of css.matchAll(/@keyframes\s+([\w-]+)\s*\{/g)) {
       const open = m.index! + m[0].length - 1;
-      const body = css.slice(open + 1, blockEnd(css, open));
+      const body = css.slice(open + 1, closeOf(css, open) - 1);
       const props = out.get(m[1]) ?? new Set<string>();
       for (const frame of body.matchAll(/\{([^{}]*)\}/g)) {
         for (const decl of frame[1].split(";")) {
@@ -152,16 +187,78 @@ function parseShorthand(entry: string, known: Map<string, Set<string>>) {
       !t.includes("(") &&
       !/^-?[\d.]+(m?s)?$/.test(t),
   );
-  const name = names.find((n) => known.has(n)) ?? names[0] ?? "none";
-  return { name, ms: times.length ? toMs(times[0]) : 0, infinite: tokens.includes("infinite") };
+  const vars = tokens.filter((t) => t.startsWith("var("));
+  const name = names.find((n) => known.has(n)) ?? names[0] ?? vars[0] ?? "none";
+  // A duration behind var() is unknown, so it counts as long.
+  const ms = times.length ? toMs(times[0]) : vars.length ? null : 0;
+  return { name, ms, infinite: tokens.includes("infinite") };
 }
 
-/** Every animation applied in a stylesheet or an inline style. */
+/** Every Web Animations call, `el.animate(keyframes, options)`, read for what
+ *  its keyframes animate. The keyframes must be an array literal or a call to
+ *  a `function …(): Keyframe[]` in src; anything else can't be read, which
+ *  fails rather than passing unseen. */
+function parseScriptAnimations(sources: Source[]): Usage[] {
+  const scripts = sources
+    .filter((s) => !s.rel.endsWith(".css"))
+    .map((s) => ({ rel: s.rel, code: stripScriptComments(s.text) }));
+  const find = (pattern: RegExp) => {
+    for (const { code } of scripts) {
+      const m = pattern.exec(code);
+      if (m) return { code, m };
+    }
+    return null;
+  };
+  const builder = (name: string) => {
+    const hit = find(new RegExp(`function ${name}\\([^)]*\\)\\s*:\\s*Keyframe\\[\\]\\s*\\{`));
+    if (!hit) return null;
+    const open = hit.m.index + hit.m[0].length - 1;
+    return hit.code.slice(open, closeOf(hit.code, open));
+  };
+  // A number, or a `const NAME = <number>;` anywhere in src; else unknown.
+  const durationMs = (options: string): number | null => {
+    const value = /^[\d.]+$/.test(options)
+      ? options
+      : (/\bduration\s*:\s*([^,}]+)/.exec(options)?.[1].trim() ?? "0");
+    if (/^[\d.]+$/.test(value)) return Number(value);
+    const constant = /^\w+$/.test(value) ? find(new RegExp(`\\bconst ${value}\\s*=\\s*([\\d.]+)\\s*;`)) : null;
+    return constant ? Number(constant.m[1]) : null;
+  };
+  const out: Usage[] = [];
+  for (const { rel, code } of scripts) {
+    if (rel in NOT_WAAPI) continue;
+    for (const m of code.matchAll(/\.animate\(/g)) {
+      const open = m.index! + m[0].length - 1;
+      const [frames = "", options = ""] = splitTop(code.slice(open + 1, closeOf(code, open) - 1), ",");
+      const call = /^(\w+)\(/.exec(frames)?.[1];
+      const body = frames.startsWith("[") ? frames : call ? builder(call) : null;
+      out.push({
+        rel,
+        line: lineOf(code, m.index!),
+        where: "element.animate()",
+        name: call ?? (body ? "keyframes literal" : frames),
+        ms: durationMs(options),
+        infinite: /\biterations\s*:\s*Infinity\b/.test(options),
+        props:
+          body === null
+            ? null
+            : new Set(
+                [...body.matchAll(/[{,]\s*(\w+)\s*:/g)]
+                  .map((k) => k[1].replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`))
+                  .filter((p) => !WAAPI_META.has(p)),
+              ),
+      });
+    }
+  }
+  return out;
+}
+
+/** Every animation applied in a stylesheet, an inline style or a script. */
 function parseUsages(sources: Source[], known: Map<string, Set<string>>): Usage[] {
   const out: Usage[] = [];
   for (const { rel, text } of sources) {
-    const code = stripComments(text);
     if (rel.endsWith(".css")) {
+      const code = stripComments(text);
       for (const m of code.matchAll(/(^|[\s;{])animation(-name)?\s*:\s*([^;{}]+)/g)) {
         const at = m.index! + m[1].length;
         const open = code.lastIndexOf("{", at);
@@ -177,6 +274,7 @@ function parseUsages(sources: Source[], known: Map<string, Set<string>>): Usage[
     } else {
       // Inline styles: `style={{ animation: "redline-flash 0.9s …" }}` and
       // CSS written in template literals.
+      const code = stripScriptComments(text);
       for (const m of code.matchAll(/\banimation\s*:\s*(["'`])([^"'`]+)\1/g)) {
         for (const entry of splitTop(m[2], ",")) {
           const parsed = parseShorthand(entry, known);
@@ -187,7 +285,7 @@ function parseUsages(sources: Source[], known: Map<string, Set<string>>): Usage[
       }
     }
   }
-  return out;
+  return [...out, ...parseScriptAnimations(sources)];
 }
 
 function violations(sources: Source[]): string[] {
@@ -195,9 +293,17 @@ function violations(sources: Source[]): string[] {
   const out: string[] = [];
   for (const u of parseUsages(sources, keyframes)) {
     const at = `${u.rel}:${u.line} (${u.where}) → ${u.name}`;
-    const props = keyframes.get(u.name);
+    if (u.props === null) {
+      out.push(`${at}: can't read what it animates — pass an array literal or a function returning Keyframe[]`);
+      continue;
+    }
+    const props = u.props ?? keyframes.get(u.name);
     if (!props) {
-      out.push(`${at}: no @keyframes ${u.name} in src/`);
+      out.push(
+        u.name.startsWith("var(")
+          ? `${at}: an animation named through var() can't be checked — name its @keyframes`
+          : `${at}: no @keyframes ${u.name} in src/`,
+      );
       continue;
     }
     const paint = [...props].filter((p) => !COMPOSITOR.has(p));
@@ -224,6 +330,21 @@ function sourceFiles(dir: string): Source[] {
   return out;
 }
 
+/** The package stylesheets src imports (`import "pkg/….css"`). */
+function packageSheets(sources: Source[]): Source[] {
+  const specs = new Set<string>();
+  for (const { rel, text } of sources) {
+    if (rel.endsWith(".css")) continue;
+    for (const m of stripScriptComments(text).matchAll(/\bimport\s+["']([^"'.][^"']*\.css)["']/g)) {
+      specs.add(m[1]);
+    }
+  }
+  return [...specs].map((spec) => ({
+    rel: spec,
+    text: readFileSync(join(process.cwd(), "node_modules", spec), "utf8"),
+  }));
+}
+
 const sources = sourceFiles(SRC_ROOT);
 
 describe("paint guard (perf rule 6)", () => {
@@ -245,10 +366,11 @@ describe("paint guard (perf rule 6)", () => {
     const usages = parseUsages(sources, keyframes);
     for (const [name, { maxMs, reason }] of Object.entries(ALLOWLIST)) {
       expect(reason.length, `${name} needs a written reason`).toBeGreaterThan(40);
-      const paints = [...(keyframes.get(name) ?? [])].some((p) => !COMPOSITOR.has(p));
-      expect(paints, `${name} no longer paints — drop it from the allowlist`).toBe(true);
       const uses = usages.filter((u) => u.name === name);
       expect(uses.length, `${name} is no longer used — drop it from the allowlist`).toBeGreaterThan(0);
+      const props = uses[0].props ?? keyframes.get(name) ?? [];
+      const paints = [...props].some((p) => !COMPOSITOR.has(p));
+      expect(paints, `${name} no longer paints — drop it from the allowlist`).toBe(true);
       expect(
         uses.some((u) => u.ms !== null && u.ms > PAINT_MS),
         `${name} runs under ${PAINT_MS} ms everywhere — it needs no allowlist entry`,
@@ -313,6 +435,9 @@ describe("paint guard (perf rule 6)", () => {
     expect(violations(css("animation-name: tint;"))).toHaveLength(1);
     // A typo can't pass by resolving to nothing.
     expect(violations(css("animation: fdae 2s infinite;"))[0]).toContain("no @keyframes fdae");
+    // Nor can a name or a duration hide behind var().
+    expect(violations(css("animation: var(--rl-anim);"))[0]).toContain("named through var()");
+    expect(violations(css("animation: tint var(--rl-ms);"))[0]).toContain("an unstated duration");
     expect(violations(css("animation: none;"))).toEqual([]);
   });
 
@@ -324,5 +449,70 @@ describe("paint guard (perf rule 6)", () => {
     expect(violations(sources)).toEqual([
       "C.tsx:1 (inline style) → pulse: infinite animation repaints box-shadow",
     ]);
+  });
+
+  it("reads Web Animations calls, through their keyframe builders", () => {
+    const waapi = parseUsages(sources, parseKeyframes(sources)).filter(
+      (u) => u.where === "element.animate()",
+    );
+    const spring = waapi.filter((u) => u.name === "springInKeyframes");
+    expect(spring.map((u) => u.rel).sort()).toEqual([
+      "components/FloatingBrowserIsland.tsx",
+      "components/SpringSwap.tsx",
+    ]);
+    for (const u of spring) {
+      expect(u.props).toEqual(new Set(["transform", "opacity", "border-radius"]));
+      expect(u.ms).toBe(620);
+    }
+    expect(waapi.find((u) => u.rel === "lib/browserTabDrag.ts")).toMatchObject({
+      name: "keyframes literal",
+      ms: 160,
+      props: new Set(["transform"]),
+    });
+    // An exemption outlives its reason only until the call it excused is gone.
+    for (const rel of Object.keys(NOT_WAAPI)) {
+      expect(sources.find((s) => s.rel === rel)?.text, `${rel} no longer calls .animate(`).toContain(".animate(");
+    }
+  });
+
+  it("fails a Web Animations call that repaints, or that it can't read", () => {
+    const script = (call: string) => [
+      {
+        rel: "W.ts",
+        text: `const SLOW = 900;
+          function grow(): Keyframe[] { return [{ width: "0px" }, { width: "9px", offset: 1 }]; }
+          ${call}`,
+      },
+    ];
+    expect(violations(script("el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SLOW });"))).toEqual([]);
+    expect(violations(script('el.animate([{ backgroundColor: "red" }], 200);'))).toEqual([]);
+    expect(violations(script("el.animate(grow(), { duration: SLOW });"))).toEqual([
+      "W.ts:3 (element.animate()) → grow: 900 ms animation repaints width",
+    ]);
+    expect(
+      violations(script('el.animate([{ boxShadow: "0 0 4px red" }], { duration: 90, iterations: Infinity });')),
+    ).toEqual(["W.ts:3 (element.animate()) → keyframes literal: infinite animation repaints box-shadow"]);
+    // Commented out is not applied.
+    expect(violations(script("// el.animate(grow(), 900);"))).toEqual([]);
+    expect(violations(script("el.animate(frames, 400);"))[0]).toContain("can't read what it animates");
+  });
+
+  it("a package stylesheet's endless paint animation stays switched off", () => {
+    const sheets = packageSheets(sources);
+    const keyframes = parseKeyframes(sheets);
+    const endless = parseUsages(sheets, keyframes).filter(
+      (u) => u.infinite && [...(keyframes.get(u.name) ?? [])].some((p) => !COMPOSITOR.has(p)),
+    );
+    // React Flow's marching edge dash: proof the package scan sees anything.
+    expect(endless.map((u) => u.name)).toContain("dashdraw");
+    for (const { rel, name } of endless) {
+      const sw = PACKAGE_SWITCHES[name];
+      expect(sw, `${rel} animates ${name} forever — list the switch that starts it`).toBeDefined();
+      expect(sw.reason.length).toBeGreaterThan(40);
+      const flipped = sources.filter(
+        (s) => s.text.includes(`from "${sw.pkg}"`) && sw.on.test(stripScriptComments(s.text)),
+      );
+      expect(flipped.map((s) => s.rel), `${name}: ${sw.reason}`).toEqual([]);
+    }
   });
 });

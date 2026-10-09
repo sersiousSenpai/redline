@@ -88,7 +88,10 @@ it, that's the discussion to have before merging.
    plates, pane backgrounds) stay static. To make something drift, pulse,
    sweep or glow, paint it once on a pseudo-element and move that: a crossfade
    between two static layers (the Aurora edge light), a scaled halo (the live
-   dot), a translated window (the working shimmer).
+   dot), a translated window (the working shimmer). The rule covers every way
+   an animation starts: a stylesheet, an inline style, `el.animate(…)`, and a
+   package's own CSS that a prop switches on — React Flow's `animated` edge
+   marches its dash forever, so the Runs canvas tints a live edge instead.
 
    > **What it cost before it was a rule (2026-10-09).** The default Aurora
    > theme animated `background-position` on a 280%-size gradient behind a
@@ -114,12 +117,15 @@ These are cheap regression nets, not a substitute for the rules above:
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
 - `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
-  `src/**/*.css` and every inline `animation:` in a component to the
-  properties its `@keyframes` touch, and fails when an infinite or >300 ms
-  animation touches anything but `transform` / `opacity`. Its `ALLOWLIST`
-  admits finite one-shots only (a focus flash, a tile hail, the snap-back
-  ring), each with a written reason and a duration ceiling; an infinite
-  paint animation cannot be allowlisted.
+  `src/**/*.css`, every inline `animation:` in a component and every
+  `el.animate(…)` call to the properties it animates, and fails when an
+  infinite or >300 ms animation touches anything but `transform` /
+  `opacity`. Its `ALLOWLIST` admits finite one-shots only (a focus flash, a
+  tile hail, the snap-back ring, the spring swap's corners), each with a
+  written reason and a duration ceiling; an infinite paint animation cannot
+  be allowlisted. The package stylesheets src imports are scanned too: each
+  endless paint animation in one is listed in `PACKAGE_SWITCHES` with the
+  switch that starts it, which nothing using the package may set.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
   shells out. It is a digest signal, not a test, so it never fails a build: the
