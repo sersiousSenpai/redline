@@ -48,7 +48,7 @@ async function measureLayout(label, browserChat = false) {
 }
 try {
   await mkdir(output, { recursive: true });
-  for (const name of ["BrowserTabRail", "BrowserHomePage", "FloatingBrowserIsland", "FrontDoor", "BrowserChrome", "BrowserSurfaces", "BrowserPagePanels", "BrowserTileStage", "MosaicDialogs", "PersistentPortalSlot", "ChatRoom", "BrowserChat"]) {
+  for (const name of ["BrowserTabRail", "BrowserHomePage", "MonochatIsland", "FrontDoor", "BrowserChrome", "BrowserSurfaces", "BrowserPagePanels", "BrowserTileStage", "MosaicDialogs", "PersistentPortalSlot", "ChatRoom", "BrowserChat"]) {
     const file = `src/components/${name}.tsx`; report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   }
   for (const file of ["src/lib/browserTabDrag.ts", "src/components/BrowserWorkspace.css"]) {
@@ -122,8 +122,8 @@ try {
     const savedHomeLayout = await cdp.evaluate("window.__qa.getState().layout");
     await cdp.evaluate("window.__qa.setChatOpen(false);window.__qa.setShowHome(true)"); await settle();
     check(`${size}: homepage presents resumable work and recent pages`, await cdp.evaluate("!!document.querySelector('.rb-home [aria-label=\"Pick back up\"]') && !!document.querySelector('.rb-home [aria-label=Recent]')")); await screenshot(`${size}-homepage`);
-    await click('[aria-label="Open browser prompter"]'); const island = await bounds('.rl-monochat-float');
-    check(`${size}: floating island bounded to 640x320 over mounted page`, island?.within && island.width <= 641 && island.height <= 321 && await cdp.evaluate("!!document.querySelector('.rb-home') && !document.querySelector('[inert]')"), island);
+    await click('.rl-monochat-notch'); const island = await bounds('.rl-monochat-card');
+    check(`${size}: Redline card bounded to 640 wide over the mounted page`, island?.within && island.width <= 641 && island.height <= Math.min(560, height - 120) + 1 && await cdp.evaluate("!!document.querySelector('.rb-home') && !document.querySelector('[inert]:not(.rl-monochat-card)')"), island);
     await screenshot(`${size}-floating-island`); await key("Escape", "Escape", 27);
     await cdp.evaluate("window.__qa.setShowHome(false);window.__qa.setChatOpen(true)"); await settle();
     if (width === 1600) {

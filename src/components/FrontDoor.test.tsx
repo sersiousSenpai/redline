@@ -93,7 +93,6 @@ function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
     onNeedModels: () => {},
     onCancelPending: () => {},
     onRevealPending: () => {},
-    onHowItWorks: () => {},
     onCreateProject: () => Promise.resolve(null),
     focusNonce: 0,
     consumeSeed: () => "",
@@ -392,17 +391,18 @@ describe("the floating replacement composer", () => {
     expect(composer()?.value).toBe("The next thought");
     expect(host.textContent).toContain("Your message is saved");
   });
-  it("keeps plan launch and its readiness fix in one input without the landing hero", async () => {
+  it("keeps plan launch and its readiness fix in one input with no hero", async () => {
     const onLaunch = vi.fn();
-    await mount({ floating: true, onLaunch, text: "Build the next release" });
+    await mount({ floating: true, welcome: true, onLaunch, text: "Build the next release" });
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
-    expect(host.querySelector("h1")).toBeNull();
+    expect(host.querySelector("h1, h2")).toBeNull();
+    expect(host.textContent).not.toContain("Every build starts as a draft.");
     expect(host.querySelector("[data-chat-composer] textarea")).toBe(composer());
     await pressEnter();
     expect(onLaunch).toHaveBeenCalledOnce();
   });
 
-  it("wears the headline and the way back into recent work", async () => {
+  it("wears the way back into recent work above the composer, with no headline", async () => {
     await mount({
       floating: true,
       welcome: true,
@@ -413,7 +413,11 @@ describe("the floating replacement composer", () => {
         { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "LiDAR-GS", url: "https://github.com/x/lidar-gs" },
       ],
     });
-    expect(host.querySelector("h1")?.textContent).toBe("Every build starts as a draft.");
+    expect(host.querySelector("h1")).toBeNull();
+    // In flow ABOVE the box: the card grows upward from the footer, so the
+    // composer stays put while the recents come and go.
+    const group = host.querySelector('[role="group"][aria-label="Jump back in"]')!;
+    expect(group.compareDocumentPosition(host.querySelector(".rl-fd-island")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const pills = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-recent"));
     expect(pills.map((b) => [b.dataset.kind, b.textContent])).toEqual([
       ["plan", "Auth rewrite"],
@@ -432,33 +436,10 @@ describe("the floating replacement composer", () => {
     expect(host.textContent).not.toContain("Your harnesses");
   });
 
-  it("lays out only as many pages as fit below the composer — never a scroll", async () => {
+  it("caps the page list at 4 rows — never a scroll, never a measurement", async () => {
     const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
-    // A 300px layer whose composer ends at 100px: room for a few rows only.
-    const layer = document.createElement("div");
-    layer.className = "rl-frontdoor-focus";
-    document.body.appendChild(layer);
-    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
-    vi.spyOn(layer, "getBoundingClientRect").mockReturnValue(rect(0, 300) as DOMRect);
-    const proto = HTMLElement.prototype.getBoundingClientRect;
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      if (this === layer) return rect(0, 300) as DOMRect;
-      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
-      // The page list starts under the chip rows.
-      if (this.classList.contains("rl-fd-browse-list")) return rect(120, 120) as DOMRect;
-      return proto.call(this);
-    });
-    try {
-      layer.appendChild(host);
-      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
-      const shown = host.querySelectorAll(".rl-fd-browse").length;
-      // (300 − 120 list top − 72 breathing room) / 36 per row → 3.
-      expect(shown).toBe(3);
-    } finally {
-      vi.restoreAllMocks();
-      document.body.appendChild(host);
-      layer.remove();
-    }
+    await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+    expect(Array.from(host.querySelectorAll(".rl-fd-browse")).map((b) => b.textContent)).toEqual(["Page 0", "Page 1", "Page 2", "Page 3"]);
   });
 
   it("a recent pill opens that place and never launches or steals focus", async () => {
@@ -475,12 +456,24 @@ describe("the floating replacement composer", () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 
-  it("fades the welcome only once the composer is engaged", async () => {
-    await mount({ floating: true, welcome: true, autoFocusOnShow: false });
-    const root = host.querySelector(".rl-frontdoor")!;
-    expect(root.classList.contains("is-engaged")).toBe(false);
+  it("shows the recents while the composer is empty — focused or not — and drops them once there is text", async () => {
+    const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
+    await mount({ floating: true, welcome: true, autoFocusOnShow: false, onOpenRecent: () => {}, recents });
+    const shown = () => host.querySelector('[aria-label="Jump back in"]');
+    expect(shown()).not.toBeNull();
+    // A key-summoned card is for typing; its recents stay until you do.
     await act(async () => composer()!.focus());
-    expect(root.classList.contains("is-engaged")).toBe(true);
+    expect(shown()).not.toBeNull();
+    await type("Build");
+    expect(shown()).toBeNull();
+    await type("");
+    expect(shown()).not.toBeNull();
+  });
+
+  it("keeps the recents to the card's composer, never a chat's", async () => {
+    const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
+    await mount({ floating: true, welcome: false, onOpenRecent: () => {}, recents });
+    expect(host.querySelector('[aria-label="Jump back in"]')).toBeNull();
   });
 
   it("portals the destination picker, supports keyboard choice, and never sends on selection", async () => {

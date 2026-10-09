@@ -129,7 +129,9 @@ const STEPS: TourStep[] = [
   {
     id: "landing",
     anchor: "landing",
-    placement: "bottom",
+    // The composer lives in the Redline card, which floats up from the
+    // footer — so the coachmark sits above it, never on top of it.
+    placement: "top",
     title: "Type what you want to build",
     lead: (
       <>

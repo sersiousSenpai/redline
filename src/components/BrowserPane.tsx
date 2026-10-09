@@ -202,7 +202,7 @@ interface Bookmark {
 }
 
 interface BrowserPaneProps {
-  onPageContext?: (page: import("../lib/browserIsland").BrowserIslandPage | null) => void;
+  onPageContext?: (page: import("../lib/surfaceContext").BrowserIslandPage | null) => void;
   /** Close the browser (toggle it off). */
   onClose: () => void;
   onOpenDraft?: (draftId: string) => void;

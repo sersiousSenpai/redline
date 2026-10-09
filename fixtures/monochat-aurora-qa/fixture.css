@@ -11,3 +11,6 @@ body { font-family:-apple-system,BlinkMacSystemFont,sans-serif; }
 @media(max-width:650px) { .qa-nav { padding:0 18px; gap:10px; }.qa-nav strong span { display:none; }.qa-document { margin:16px; padding:26px; }.qa-document h1 { font-size:34px; } }
 
 .qa-discussion { position:absolute; right:20px; top:100px; bottom:170px; width:min(340px,80vw); padding:22px; background:var(--color-bg-elevated); border:1px solid var(--color-rule); border-radius:16px; overflow:auto; }
+.qa-empty-plate { flex:1; min-height:0; }
+.qa-browser-page { flex:1; min-height:0; margin:0; padding:60px 8vw; background:linear-gradient(160deg,#20304a,#0d1726); color:#dfe8ff; }
+.qa-browser-page h1 { font-size:40px; margin:0 0 12px; }

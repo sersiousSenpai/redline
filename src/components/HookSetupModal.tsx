@@ -21,8 +21,6 @@ interface HookSetupModalProps {
   onInstall: () => void;
   /** Dismisses the post-install explainer. */
   onDismiss: () => void;
-  /** Opens the "How Redline works" explainer (shown on the done screen). */
-  onShowHowItWorks?: () => void;
   /** Install failure detail, rendered inline above the button. */
   error?: string | null;
 }
@@ -123,7 +121,6 @@ export function HookSetupModal({
   codexSkillStatus,
   onInstall,
   onDismiss,
-  onShowHowItWorks,
   error,
   onReviewHookConflicts,
   hookConflictHealth,
@@ -303,26 +300,7 @@ export function HookSetupModal({
               inside Claude Code once to approve the hook (a one-time security
               check).
             </p>
-            <div className="flex items-center justify-between">
-              {onShowHowItWorks ? (
-                <button
-                  type="button"
-                  onClick={onShowHowItWorks}
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--color-info)",
-                    background: "transparent",
-                    border: "none",
-                    padding: 0,
-                    cursor: "pointer",
-                    textDecoration: "underline",
-                  }}
-                >
-                  How does this work?
-                </button>
-              ) : (
-                <span />
-              )}
+            <div className="flex items-center justify-end">
               <button
                 type="button"
                 onClick={onDismiss}

@@ -264,7 +264,7 @@ describe("front door clear-on-send wiring", () => {
     // the now-empty composer, which is the bug reported as "the prompt comes
     // back and I have to delete it".
     const start = app.indexOf("onCancelPending={");
-    const end = app.indexOf("onHowItWorks=", start);
+    const end = app.indexOf("onCreateProject=", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const wiring = app.slice(start, end);
@@ -282,6 +282,49 @@ describe("front door clear-on-send wiring", () => {
     expect(fn).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(fn);
     expect(app.slice(fn, end)).not.toContain("repayPending(");
+  });
+});
+
+// The card's chips reach a chat out of band (island plan step 6): read per
+// send, deduped per conversation, never folded into the bubble's text.
+describe("chat context wiring", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("the room reads the pressed chips per send, and forgets a chat whose attachment was lost", () => {
+    const start = app.indexOf("<ChatRoom");
+    expect(start).toBeGreaterThan(-1);
+    expect(app.indexOf("<ChatRoom", start + 1)).toBe(-1);
+    const mount = app.slice(start, app.indexOf("/>", app.indexOf("onSeedConsumed=", start)));
+    expect(mount).toContain('contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}');
+    expect(mount).toContain("onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}");
+    expect(mount).toContain("seedContext={chatSeed?.companionId === chatId ? chatSeed.context : null}");
+  });
+
+  it("a chat started from the composer seeds what was attached as the sentence left", () => {
+    const fn = app.indexOf("const chatFromFrontDoor");
+    expect(fn).toBeGreaterThan(-1);
+    const body = app.slice(fn, app.indexOf("const openChat", fn));
+    expect(body).toContain('gatherContext("chat")');
+    expect(body).toContain("chatAttachment(chat.companionId, blocks)");
+    expect(body).toMatch(/setChatSeed\(\{[^}]*\bcontext \}\)/);
+    // Out of band: the sentence the room sends is the one that was typed.
+    expect(body).not.toContain("withContext(");
+  });
+});
+
+// The card's caret (island plan + floating-monochat): only a hover peek opens
+// without reaching for the composer, and nothing deliberate inherits that.
+describe("the card's quiet open", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("only a hover is quiet, and the bit never outlives the card or a New", () => {
+    const change = app.slice(app.indexOf("const onDoorOpenChange"), app.indexOf("const renderMonochatComposer"));
+    expect(change).toContain('if (open) setDoorSummonedQuiet(via === "hover");');
+    expect(change).toMatch(/if \(!frontDoorOpen\) setDoorSummonedQuiet\(false\);/);
+    expect(app).toMatch(/autoFocusOnShow=\{frontDoorOpen && !doorSummonedQuiet\}/);
+    // New is a click: the blank composer it brings back takes the caret.
+    const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
+    expect(island).toMatch(/onNewChat=\{\(\) => \{[^}]*setDoorSummonedQuiet\(false\)/);
   });
 });
 

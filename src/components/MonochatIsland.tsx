@@ -1,130 +1,191 @@
 // SPDX-License-Identifier: Apache-2.0
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type MouseEvent as ReactMouseEvent } from "react";
-import { ChevronDown } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import { isFrontDoorKey } from "../lib/keymap";
-import { SHELL_EDGE } from "../lib/paneLayout";
-import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
+import { springInKeyframes, SWAP_MS, SWAP_SPRING } from "../lib/springSwap";
 import "./MonochatIsland.css";
 
-export type SummonVia = "pointer" | "key";
-export type LandingFit = "full" | "pills" | "bare" | "none";
+// One Redline island on every surface: a pill centred in the footer that
+// springs into a floating card above it. The card is a region, not a modal —
+// the workspace under it stays live, and on the browser surface it is cut out
+// of the native webview rather than hiding the page.
+//
+// How it closes depends on how it was opened. A hover is a PEEK: it never
+// takes focus and it leaves when the pointer does. Anything deliberate — a
+// click, Shift+Enter, a summon, or a press or focus inside the card — ENGAGES
+// it, and an engaged card (or any card holding a chat) stays put until it is
+// closed on purpose: ⌄, Esc, the chord again, ⌘J, or going somewhere else.
+// A click on the page, the terminal or the sidebar is work, not a dismissal.
 
-/** What a resting door can show in `height` px of free plate: headline +
- *  composer + pills, composer + pills, the composer alone, or nothing. */
-export function landingFit(height: number): LandingFit {
-  // The pills are up to three labelled rows hung below the composer, and
-  // the composer is centred, so each threshold pays for the taller side twice.
-  // The page list sizes itself to whatever is left below (FrontDoor's
-  // `browseRoom`), so these only budget for the headline and the chip rows.
-  if (height >= 480) return "full";
-  if (height >= 360) return "pills";
-  if (height >= 170) return "bare";
-  return "none";
-}
+/** How the owner was asked to open the card. Only a hover leaves the caret
+ *  where it was. */
+export type SummonVia = "hover" | "click" | "key";
+/** `compose` is the Front Door's composer; `chat` grows to hold a thread. */
+export type IslandPose = "compose" | "chat";
+export type IslandSize = "regular" | "tall";
 
-/** Below this much plate width the resting door does not land at all. */
-const MIN_LANDING_WIDTH = 360;
+/** A deliberate hover, not a pointer passing through the footer. */
+const HOVER_OPEN_MS = 120;
+const LEAVE_CLOSE_MS = 400;
+/** The pill's box plus the breath between it and the card. */
+const CARD_OFFSET = 44;
+/** The card's distance from the footer's top edge, when the row is taller
+ *  than the pill and would otherwise reach under it. */
+const FOOTER_GAP = 8;
 
-/** A quiet entrance, not the host for surface discussions. The hit target and
- * native browser geometry stay still while only the inner membrane responds. */
-function FullMonochatIsland({ open, onOpenChange, context, busy, children, landing = false, surfaceKey = "", onVisibilityChange, clearanceKey = "" }: {
-  /** `via` is set only when the door is SUMMONED from elsewhere (footer pill or
-   *  shortcut) — the owner resets it to its home. "pointer" opens on the full
-   *  welcome without reaching for the composer; "key" puts the caret in it. */
-  open: boolean; onOpenChange: (open: boolean, via?: SummonVia) => void;
-  context: string; busy: boolean; children: ReactNode;
-  landing?: boolean; surfaceKey?: string; clearanceKey?: string; onVisibilityChange?: (visible: boolean) => void;
+/** A menu, picker or dialog layered over the card owns the pointer and Esc. */
+const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"], dialog[open]');
+/** The composer a summon puts the caret in — the chat's own in the chat pose. */
+const composerIn = (box: HTMLElement | null) =>
+  box?.querySelector<HTMLElement>("[data-chat-composer] textarea") ?? box?.querySelector<HTMLElement>("textarea") ?? null;
+
+export function MonochatIsland({ open, onOpenChange, pose = "compose", size = "regular", onSizeChange, onNewChat, context, busy, surfaceKey = "", clearanceKey = "", chips, children }: {
+  open: boolean;
+  onOpenChange: (open: boolean, via?: SummonVia) => void;
+  pose?: IslandPose;
+  /** The chat pose's ⤢ toggle. Compose always sizes to its content. */
+  size?: IslandSize;
+  onSizeChange?: (size: IslandSize) => void;
+  /** The heading's New: back to a blank composer, the chat kept in History. */
+  onNewChat?: () => void;
+  /** "Redline · {context}" — where the card is. */
+  context: string | null;
+  busy: boolean;
+  /** A change means the user went somewhere: the card closes behind them. */
+  surfaceKey?: string;
+  /** Anything that moves the footer: the pill re-measures its row. */
+  clearanceKey?: string;
+  /** The surface's context chips, above everything the card sends. */
+  chips?: ReactNode;
+  children: ReactNode;
 }) {
   const [reduced, setReduced] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
-  const launcher = useRef<HTMLButtonElement>(null);
+  const [springing, setSpringing] = useState(false);
+  const [resizing, setResizing] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
   const dock = useRef<HTMLDivElement>(null);
+  const pill = useRef<HTMLButtonElement>(null);
   const membrane = useRef<HTMLSpanElement>(null);
-  const layer = useRef<HTMLDivElement>(null);
-  const body = useRef<HTMLDivElement>(null);
-  const room = useRef<HTMLDivElement>(null);
-  const conversation = useRef<HTMLDivElement>(null);
-  const backdropPress = useRef(false);
+  const card = useRef<HTMLDivElement>(null);
+  const change = useRef(onOpenChange); change.current = onOpenChange;
+  const busyRef = useRef(busy); busyRef.current = busy;
+  // True only while the card is a hover peek nobody has touched.
+  const peek = useRef(false);
+  const focusOnOpen = useRef(false);
   const returnFocus = useRef<HTMLElement | null>(null);
-  const previousSurface = useRef(surfaceKey);
+  // Closed by navigation: the new surface owns focus.
+  const navigated = useRef(false);
   const previousOpen = useRef(false);
-  const close = useRef(onOpenChange); close.current = onOpenChange;
-  const summonVia = useRef<SummonVia | null>(null);
-  // How much of the door the plate's free area can hold at rest. The door
-  // lands in the space BETWEEN the header and the terminal dock — never on top
-  // of the terminals — and sheds its furniture rather than overflow: headline
-  // first, then the starters, and below a bare composer it does not land at
-  // all (the notch in the footer is still the way in).
-  const [fit, setFit] = useState<LandingFit>("full");
-  const landed = landing && fit !== "none";
-  const visible = open || landed;
-  useNativeOverlayRegion(launcher, !visible);
+  const previousSurface = useRef(surfaceKey);
+  const enterTimer = useRef(0), leaveTimer = useRef(0);
+  useNativeOverlayRegion(pill, !open);
+  // The hole in the native webview tracks the spring and every size change.
+  useNativeOverlayRegion(card, open, springing || resizing);
+
+  const clearTimers = () => { window.clearTimeout(enterTimer.current); window.clearTimeout(leaveTimer.current); };
+  const sticky = () => busyRef.current
+    || !!card.current?.querySelector<HTMLTextAreaElement>("textarea")?.value.trim()
+    || !!card.current?.contains(document.activeElement)
+    || hasChildOverlay();
+  const summon = (via: "click" | "key") => {
+    clearTimers();
+    peek.current = false;
+    if (open) composerIn(card.current)?.focus({ preventScroll: true });
+    else focusOnOpen.current = true;
+    change.current(true, via);
+  };
+  const collapse = () => { clearTimers(); change.current(false); };
 
   useEffect(() => {
-    const summon = () => { summonVia.current = "key"; close.current(true, "key"); };
-    const onKey = (event: KeyboardEvent) => {
-      // Capture before editors/xterm can consume the chord. Once the front
-      // door is open, Shift+Enter remains a newline in its composer.
-      if (open || event.isComposing || event.keyCode === 229 || !isFrontDoorKey(event)) return;
+    const onChord = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229 || !isFrontDoorKey(event)) return;
+      // Captured before editors and xterm can consume it. Open, the chord is
+      // a newline in the card's composer and belongs to anything over it.
+      if (open && ((event.target instanceof Node && card.current?.contains(event.target)) || hasChildOverlay())) return;
       event.preventDefault(); event.stopImmediatePropagation();
-      if (!event.repeat) summon();
+      if (event.repeat) return;
+      // A peek is only showing you the card; the summon key takes you in.
+      if (open && !peek.current) collapse(); else summon("key");
     };
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("redline:open-front-door", summon);
+    // After child handlers, so a menu or dialog closes itself first. Only from
+    // inside the card or from nowhere in particular: Esc in the terminal or
+    // the editor is theirs.
+    const onEscape = (event: KeyboardEvent) => {
+      if (!open || event.key !== "Escape" || event.defaultPrevented || event.isComposing || hasChildOverlay()) return;
+      const target = event.target;
+      const loose = !(target instanceof Element) || target === document.body || target === document.documentElement;
+      if (!loose && !card.current?.contains(target)) return;
+      event.preventDefault(); event.stopPropagation();
+      collapse();
+    };
+    // Opens; never toggles an open card shut.
+    const onSummon = () => summon("key");
+    window.addEventListener("keydown", onChord, true);
+    window.addEventListener("keydown", onEscape);
+    window.addEventListener("redline:open-front-door", onSummon);
     return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("redline:open-front-door", summon);
+      window.removeEventListener("keydown", onChord, true);
+      window.removeEventListener("keydown", onEscape);
+      window.removeEventListener("redline:open-front-door", onSummon);
     };
+    // Everything else these read is a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Native listeners, not React's: a chat is App's portal into the card, so
+  // its events never pass through this component's React ancestry.
+  useEffect(() => {
+    const island = root.current, box = card.current;
+    if (!island || !box) return;
+    const over = (event: PointerEvent) => {
+      window.clearTimeout(leaveTimer.current);
+      if (open || event.pointerType === "touch" || !(event.target instanceof Node) || !pill.current?.contains(event.target)) return;
+      window.clearTimeout(enterTimer.current);
+      enterTimer.current = window.setTimeout(() => { peek.current = true; change.current(true, "hover"); }, HOVER_OPEN_MS);
+    };
+    const out = (event: PointerEvent) => {
+      if (event.relatedTarget instanceof Node && island.contains(event.relatedTarget)) return;
+      window.clearTimeout(enterTimer.current);
+      if (!open || !peek.current || pose === "chat") return;
+      window.clearTimeout(leaveTimer.current);
+      leaveTimer.current = window.setTimeout(() => { if (peek.current && !sticky()) change.current(false); }, LEAVE_CLOSE_MS);
+    };
+    const engage = () => { peek.current = false; window.clearTimeout(leaveTimer.current); };
+    island.addEventListener("pointerover", over);
+    island.addEventListener("pointerout", out);
+    box.addEventListener("pointerdown", engage, true);
+    box.addEventListener("focusin", engage);
+    return () => {
+      island.removeEventListener("pointerover", over);
+      island.removeEventListener("pointerout", out);
+      box.removeEventListener("pointerdown", engage, true);
+      box.removeEventListener("focusin", engage);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, pose]);
+  useEffect(() => () => clearTimers(), []);
 
   useLayoutEffect(() => {
     const footer = document.querySelector<HTMLElement>(".rl-app-footer");
-    const header = document.querySelector<HTMLElement>(".rl-app-header");
-    const termDock = document.querySelector<HTMLElement>(".rl-term-dock");
-    // The plate's column. Its horizontal edges bound the resting door the way
-    // the header and dock bound it vertically — without them the layer spans
-    // the whole window and the composer lands across the sessions sidebar.
-    const plate = document.querySelector<HTMLElement>(".rl-doc-column");
     const position = () => {
       const rect = footer?.getBoundingClientRect();
-      // Center within the existing footer row. This fixed overlay contributes
-      // no height and never moves the footer or the main viewport.
+      // Centred on the existing footer row. Both layers are fixed: they add no
+      // height and never move the footer or the main viewport.
       const clearance = rect && rect.height >= 32
         ? window.innerHeight - (rect.top + rect.height / 2) - 20
         : 8;
       if (dock.current) dock.current.style.bottom = `${clearance}px`;
-      layer.current?.style.setProperty("--portal-return-bottom", `${clearance + 4}px`);
-      // Keep the existing title-bar reach without covering conversation
-      // content. Only transparent hit regions use this measurement.
-      const top = Math.max(SHELL_EDGE, Math.min(header?.getBoundingClientRect().bottom || 28, room.current?.getBoundingClientRect().top || 28));
-      layer.current?.style.setProperty("--portal-drag-top", `${top}px`);
-      // The plate's free area: header bottom down to the dock's top (or the
-      // footer's, with the dock folded). Published as insets the resting
-      // pose applies; engaged, the layer lets go of them and fills the window.
-      const dockRect = termDock?.getBoundingClientRect();
-      const areaTop = header?.getBoundingClientRect().bottom ?? 0;
-      const areaBottom = dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
-      layer.current?.style.setProperty("--fd-rest-top", `${Math.max(0, areaTop)}px`);
-      layer.current?.style.setProperty("--fd-rest-bottom", `${Math.max(0, window.innerHeight - areaBottom)}px`);
-      const plateRect = plate?.getBoundingClientRect();
-      const areaLeft = plateRect && plateRect.width > 0 ? plateRect.left : 0;
-      const areaRight = plateRect && plateRect.width > 0 ? plateRect.right : window.innerWidth;
-      layer.current?.style.setProperty("--fd-rest-left", `${Math.max(0, areaLeft)}px`);
-      layer.current?.style.setProperty("--fd-rest-right", `${Math.max(0, window.innerWidth - areaRight)}px`);
-      // Too narrow for even a bare composer: don't land (the notch remains).
-      setFit(areaRight - areaLeft < MIN_LANDING_WIDTH ? "none" : landingFit(areaBottom - areaTop));
+      const footerTop = rect && rect.height > 0 ? window.innerHeight - rect.top : 0;
+      if (card.current) card.current.style.bottom = `${Math.max(clearance + CARD_OFFSET, footerTop + FOOTER_GAP)}px`;
     };
     position();
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
     if (footer) observer?.observe(footer);
-    if (header) observer?.observe(header);
-    if (termDock) observer?.observe(termDock);
-    if (plate) observer?.observe(plate);
     window.addEventListener("resize", position);
     return () => { observer?.disconnect(); window.removeEventListener("resize", position); };
-  }, [surfaceKey, clearanceKey, open]);
+  }, [surfaceKey, clearanceKey]);
 
-  useEffect(() => { onVisibilityChange?.(visible); }, [visible, onVisibilityChange]);
   useEffect(() => {
     const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const update = () => setReduced(media?.matches ?? false);
@@ -134,61 +195,66 @@ function FullMonochatIsland({ open, onOpenChange, context, busy, children, landi
   useLayoutEffect(() => {
     if (previousSurface.current === surfaceKey) return;
     previousSurface.current = surfaceKey;
-    // Navigation owns the new focus; closing must not pull it back.
-    returnFocus.current = null;
-    close.current(false);
-  }, [surfaceKey]);
+    // An owner that closes the card on its way somewhere (a recent) is going
+    // somewhere all the same: it runs before the close below, which reads it.
+    if (!open && !previousOpen.current) return;
+    navigated.current = true;
+    if (open) change.current(false);
+  }, [surfaceKey, open]);
 
   useLayoutEffect(() => {
-    if (!open) return;
-    // Keep the workspace mounted (including native browser state), but make
-    // its controls unavailable while the opaque front door owns the screen.
-    const restored: Array<[HTMLElement, boolean]> = [];
-    let branch: HTMLElement | null = layer.current;
-    while (branch && branch !== document.body) {
-      for (const sibling of Array.from(branch.parentElement?.children ?? [])) {
-        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog')) {
-          restored.push([sibling, sibling.inert]); sibling.inert = true;
-        }
-      }
-      branch = branch.parentElement;
-    }
-    return () => { for (const [element, inert] of restored) element.inert = inert; };
-  }, [open]);
-  useLayoutEffect(() => {
-    if (!open || landed || reduced || !room.current?.animate) return;
-    // The home composer is already in place: focusing it only fades the
-    // backdrop. A tucked-away chat enters gently without squashing its text
-    // down to the dimensions of the footer pill or measuring layout.
-    const animation = room.current.animate([
-      { transform: "translate3d(0, 16px, 0) scale(.985)", opacity: 0 },
-      { transform: "none", opacity: 1 },
-    ], { duration: 260, easing: "cubic-bezier(.2,.8,.2,1)" });
-    return () => animation.cancel();
-  }, [open, landed, reduced]);
-  useEffect(() => {
     if (open && !previousOpen.current) {
+      // However it opened, a hover still counting down would only re-label
+      // it a peek.
+      window.clearTimeout(enterTimer.current);
       const active = document.activeElement;
-      if (!returnFocus.current && active instanceof HTMLElement && active !== document.body && !layer.current?.contains(active)) returnFocus.current = active;
-      // Summoned by pointer, the door arrives on its welcome: focus the room,
-      // not the composer, so the headline and pills stay until you click in.
-      const quiet = summonVia.current === "pointer";
-      ((quiet ? null : body.current?.querySelector<HTMLElement>("textarea")) ?? body.current)?.focus({ preventScroll: true });
+      if (active instanceof HTMLElement && active !== document.body && active !== pill.current && !card.current?.contains(active)) returnFocus.current = active;
+      if (focusOnOpen.current) composerIn(card.current)?.focus({ preventScroll: true });
     } else if (!open && previousOpen.current) {
-      if (layer.current?.contains(document.activeElement)) {
-        const target = returnFocus.current?.isConnected ? returnFocus.current : launcher.current;
-        if (landed && target === launcher.current) (document.activeElement as HTMLElement)?.blur();
-        else target?.focus({ preventScroll: true });
+      clearTimers();
+      // A hidden card must not keep the caret: keystrokes would land in it.
+      if (card.current?.contains(document.activeElement)) {
+        const back = returnFocus.current?.isConnected ? returnFocus.current : pill.current;
+        if (navigated.current || !back) (document.activeElement as HTMLElement | null)?.blur();
+        else back.focus({ preventScroll: true });
       }
       returnFocus.current = null;
+      navigated.current = false;
+      peek.current = false;
     }
     previousOpen.current = open;
-    summonVia.current = null;
+    focusOnOpen.current = false;
   }, [open]);
 
+  // The card springs out of the pill's own box.
+  useLayoutEffect(() => {
+    const box = card.current, from = membrane.current?.getBoundingClientRect();
+    if (!open || reduced || !box?.animate || !from) return;
+    setSpringing(true);
+    const animation = box.animate(springInKeyframes(from, box.getBoundingClientRect()), { duration: SWAP_MS, easing: SWAP_SPRING });
+    animation.onfinish = () => setSpringing(false);
+    return () => { animation.cancel(); setSpringing(false); };
+    // Only an opening springs; motion settings changing mid-flight do not replay it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Pose and size changes are CSS transitions; count them so the native
+  // cut-out follows every frame until the last one lands.
   useEffect(() => {
-    const button = launcher.current, skin = membrane.current;
-    if (!button || !skin || open || landed || reduced) return;
+    const box = card.current;
+    if (!box) return;
+    let running = 0;
+    const start = (event: TransitionEvent) => { if (event.target === box) { running++; setResizing(true); } };
+    const end = (event: TransitionEvent) => { if (event.target === box && --running <= 0) { running = 0; setResizing(false); } };
+    box.addEventListener("transitionrun", start);
+    box.addEventListener("transitionend", end);
+    box.addEventListener("transitioncancel", end);
+    return () => { box.removeEventListener("transitionrun", start); box.removeEventListener("transitionend", end); box.removeEventListener("transitioncancel", end); };
+  }, []);
+
+  useEffect(() => {
+    const button = pill.current, skin = membrane.current;
+    if (!button || !skin || open || reduced) return;
     let rect = button.getBoundingClientRect(), frame = 0;
     let point: { x: number; y: number } | null = null;
     let last = "";
@@ -232,94 +298,35 @@ function FullMonochatIsland({ open, onOpenChange, context, busy, children, landi
       window.removeEventListener("resize", measure);
       skin.style.removeProperty("--portal-x"); skin.style.removeProperty("--portal-y"); skin.style.removeProperty("--portal-pull");
     };
-  }, [open, landed, reduced, surfaceKey, clearanceKey]);
+  }, [open, reduced, surfaceKey, clearanceKey]);
 
-  const engage = (via?: SummonVia) => {
-    const active = document.activeElement;
-    if (!returnFocus.current && active instanceof HTMLElement && active !== document.body && !layer.current?.contains(active)) returnFocus.current = active;
-    summonVia.current = via ?? null;
-    onOpenChange(true, via);
-  };
-  const isBackdrop = (target: EventTarget) =>
-    target === layer.current || target === room.current || target === body.current || target === conversation.current;
-  const dragWindow = (event: ReactMouseEvent) => {
-    if (event.button !== 0) return;
-    event.preventDefault(); // Moving the window must not blur the composer.
-    beginWindowDrag(event);
-  };
-  const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]');
-  useEffect(() => {
-    if (!open) return;
-    const start = (event: PointerEvent) => {
-      // Observe the DOM capture phase because the selected chat can be a
-      // React portal owned by App, outside this component's event ancestry.
-      backdropPress.current = event.button === 0 && !!event.target && isBackdrop(event.target) && !hasChildOverlay();
-    };
-    document.addEventListener("pointerdown", start, true);
-    return () => { document.removeEventListener("pointerdown", start, true); backdropPress.current = false; };
-  }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      // Saved chats are App-owned portals. Follow DOM containment after
-      // child handlers have run, rather than relying on React ancestry.
-      if (!(event.target instanceof Node) || !layer.current?.contains(event.target) || event.defaultPrevented || event.isComposing || hasChildOverlay()) return;
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close.current(false); }
-      if (event.key === "Tab") {
-        const focusable = Array.from(layer.current.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex="0"]')).filter(element => element.getClientRects().length && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
-        const first = focusable[0], last = focusable[focusable.length - 1];
-        if (event.shiftKey && (document.activeElement === first || document.activeElement === body.current)) { event.preventDefault(); last?.focus(); }
-        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === body.current)) { event.preventDefault(); first?.focus(); }
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
-  const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible} data-busy={busy} data-reduced={reduced}
-    tabIndex={visible ? -1 : 0} aria-hidden={visible}
-    aria-label={`Open front door${busy ? ", working" : ""}`}
-    title="Open front door (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
-    aria-expanded={open} aria-controls="rl-monochat-content"
-    onFocus={event => { if (event.relatedTarget instanceof HTMLElement && !layer.current?.contains(event.relatedTarget)) returnFocus.current = event.relatedTarget; }}
-    onClick={() => engage("pointer")}>
-    <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span></span>
-  </button>;
-
-  return <>
-    <div ref={dock} className="rl-frontdoor-dock">{entrance}</div>
-    <div ref={layer} className="rl-frontdoor-focus" data-open={open} data-visible={visible} data-reduced={reduced}
-      data-rest={landed && !open ? fit : undefined}
-      role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label={open ? "Front door" : undefined}
-      inert={!visible} aria-hidden={!visible}
-      onClickCapture={event => {
-        // Preserve text-selection drags and let menus handle their own dismissal.
-        const dismiss = backdropPress.current && isBackdrop(event.target);
-        backdropPress.current = false;
-        if (!open || !dismiss || hasChildOverlay()) return;
-        event.preventDefault(); event.stopPropagation(); onOpenChange(false);
-      }}>
-        {open && <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 3 }}>
-          {/* Match the shell's edges using invisible hit regions. These do
-              not participate in layout or change the front door's paint. */}
-          <div data-window-drag-edge="top" onMouseDown={dragWindow} onDoubleClick={toggleWindowMaximize} style={{ position: "absolute", top: 0, left: 0, right: 0, height: "var(--portal-drag-top, 28px)", pointerEvents: "auto" }}/>
-          <div data-window-drag-edge="left" onMouseDown={dragWindow} style={{ position: "absolute", top: "var(--portal-drag-top, 28px)", bottom: SHELL_EDGE, left: 0, width: SHELL_EDGE, pointerEvents: "auto" }}/>
-          <div data-window-drag-edge="right" onMouseDown={dragWindow} style={{ position: "absolute", top: "var(--portal-drag-top, 28px)", bottom: SHELL_EDGE, right: 0, width: SHELL_EDGE, pointerEvents: "auto" }}/>
-          <div data-window-drag-edge="bottom" onMouseDown={dragWindow} style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: SHELL_EDGE, pointerEvents: "auto" }}/>
-        </div>}
-        {open && <button className="rl-frontdoor-return" type="button" onClick={() => onOpenChange(false)} aria-label="Return to workspace" title="Return to workspace (Esc)"><ChevronDown size={18}/></button>}
-      <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced}>
-        <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} onFocusCapture={() => { if (landed && !open) engage(); }}>
-          <div ref={conversation} className="rl-monochat-conversation">{children}</div>
-        </div>
-      </div>
+  return <div ref={root} className="rl-monochat-island">
+    <div ref={dock} className="rl-frontdoor-dock">
+      <button ref={pill} type="button" className="rl-monochat-notch" data-hidden={open} data-busy={busy} data-reduced={reduced}
+        tabIndex={open ? -1 : 0} aria-hidden={open}
+        aria-label={`Open Redline${busy ? ", working" : ""}`}
+        title="Redline (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
+        aria-expanded={open} aria-controls="rl-monochat-card"
+        onFocus={event => { if (event.relatedTarget instanceof HTMLElement && !card.current?.contains(event.relatedTarget)) returnFocus.current = event.relatedTarget; }}
+        onClick={() => summon("click")}>
+        <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span></span>
+      </button>
     </div>
-  </>;
-}
-
-const FloatingBrowserIsland = lazy(() => import("./FloatingBrowserIsland"));
-export function MonochatIsland(props: Parameters<typeof FullMonochatIsland>[0] & {
-  floating?: boolean; floatingContent?: ReactNode;
-  floatingOpen?: boolean; onFloatingOpenChange?: (open: boolean) => void;
-}) {
-  return props.floating ? <Suspense fallback={null}><FloatingBrowserIsland busy={props.busy} open={props.floatingOpen} onOpenChange={props.onFloatingOpenChange}>{props.floatingContent ?? props.children}</FloatingBrowserIsland></Suspense> : <FullMonochatIsland {...props}/>;
+    <div ref={card} id="rl-monochat-card" className="rl-monochat-card" role="region" aria-label="Redline"
+      data-pose={pose} data-size={pose === "chat" ? size : undefined} data-reduced={reduced}
+      hidden={!open} inert={!open}>
+      <div className="rl-monochat-heading">
+        <span className="rl-monochat-title">Redline{context && <span className="rl-monochat-context"> · {context}</span>}</span>
+        {pose === "chat" && <button type="button" className="rl-monochat-new" onClick={onNewChat} title="A blank composer; this conversation stays in History">New</button>}
+        {pose === "chat" && <button type="button" aria-pressed={size === "tall"}
+          aria-label={size === "tall" ? "Shrink the card" : "Enlarge the card"} title={size === "tall" ? "Shrink" : "Enlarge"}
+          onClick={() => onSizeChange?.(size === "tall" ? "regular" : "tall")}>
+          {size === "tall" ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}
+        </button>}
+        <button type="button" aria-label="Collapse Redline" title="Collapse (Esc)" onClick={collapse}><ChevronDown size={16}/></button>
+      </div>
+      {chips}
+      <div className="rl-monochat-body">{children}</div>
+    </div>
+  </div>;
 }

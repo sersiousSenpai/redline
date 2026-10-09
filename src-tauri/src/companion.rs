@@ -81,6 +81,9 @@ pub struct QueuedCompanionSend {
     /// Never re-resolve the target when a queued turn starts: a workspace or
     /// tab switch must not redirect an already-authorized page action.
     browser_target: Option<CompanionBrowserTarget>,
+    /// What the user attached from the Redline card's chips when they typed
+    /// it. It rides the prompt only, never the stored message.
+    context: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +165,7 @@ mod browser_dock_tests {
                 Some("browser-first".into()),
                 Some("mission-first".into()),
             ),
+            context: None,
         };
         assert!(matches!(
             turns.begin_or_enqueue(
@@ -603,6 +607,48 @@ fn surface_line(surface: &SurfaceInfo, self_id: &str) -> String {
     line
 }
 
+/// What the user attached from the Redline card's chips (the plan, the page,
+/// the draft, the diff), set right under where they are. Out of band: the
+/// stored message, and so the bubble, is only what they typed. Fenced, so the
+/// attachment ends where the turn's own grounding begins.
+fn attached_context(surface: &SurfaceInfo, context: Option<&str>) -> String {
+    let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    format!(
+        "Context the user attached from {}:\n\n<attached-context>\n{context}\n</attached-context>\n\n",
+        describe_surface(surface)
+    )
+}
+
+/// A steered send skips the turn framing, so its attachment rides with the
+/// text itself.
+fn steer_text(payload: &QueuedCompanionSend) -> String {
+    let attached = attached_context(&payload.surface, payload.context.as_deref());
+    if attached.is_empty() {
+        payload.text.clone()
+    } else {
+        format!("{}\n\n{}", payload.text, attached.trim_end())
+    }
+}
+
+/// The user's row: what they typed, tagged with where they were WHEN THEY
+/// TYPED IT, which is the fact the bubble and the prompt both report. Never
+/// the attached context, which is the prompt's alone.
+fn user_message(companion_id: &str, payload: &QueuedCompanionSend) -> CompanionMessage {
+    CompanionMessage {
+        id: payload.message_id.clone(),
+        companion_id: companion_id.to_string(),
+        role: "user".to_string(),
+        body: payload.text.clone(),
+        status: "complete".to_string(),
+        surface_kind: Some(payload.surface.kind.clone()),
+        surface_id: payload.surface.id.clone(),
+        surface_label: payload.surface.label.clone(),
+        created_at: now_millis(),
+    }
+}
+
 /// Completed assistant turns on a thread — the unit the rotation budget counts
 /// in (a queued, unsent or errored row is not a turn the CLI will replay).
 fn completed_assistant_turns(thread: &[CompanionMessage]) -> i64 {
@@ -698,6 +744,9 @@ pub struct FirstTurnGround<'a> {
     pub mission: Option<(&'a str, &'a str)>,
     /// The workspace brief (`workspace_brief::render`), before the catalog.
     pub brief: Option<&'a str>,
+    /// What the user attached from the card's chips, right under the surface
+    /// line it came from.
+    pub attached: Option<&'a str>,
 }
 
 /// The room's whole invariant contract: persona, the map + consult + staged
@@ -735,10 +784,10 @@ pub fn system_prompt() -> &'static str {
     })
 }
 
-/// First turn: where the user is, the journal delta, mission inheritance, the
-/// workspace brief, the user's record (catalog + prefetched evidence), and
-/// their message. The invariant contract is NOT here: it is the
-/// `system_prompt()`.
+/// First turn: where the user is and what they attached from there, the
+/// journal delta, mission inheritance, the workspace brief, the user's record
+/// (catalog + prefetched evidence), and their message. The invariant contract
+/// is NOT here: it is the `system_prompt()`.
 pub fn build_first_turn_prompt(
     surface: &SurfaceInfo,
     self_id: &str,
@@ -752,6 +801,7 @@ pub fn build_first_turn_prompt(
         "The user is currently on {}.\n\n",
         surface_line(surface, self_id)
     ));
+    p.push_str(&attached_context(surface, ground.attached));
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
         p.push_str(
@@ -800,17 +850,20 @@ pub fn build_first_turn_prompt(
     p
 }
 
-/// Follow-up: re-ground on the current surface, the journal delta since the
-/// last turn, and the workspace changes, if any. The session already carries
-/// the contract (the system prompt), so none of it is re-sent.
+/// Follow-up: re-ground on the current surface and whatever the user attached
+/// from it this turn, the journal delta since the last turn, and the workspace
+/// changes, if any. The session already carries the contract (the system
+/// prompt), so none of it is re-sent.
 pub fn build_followup_prompt(
     surface: &SurfaceInfo,
     self_id: &str,
+    attached: Option<&str>,
     journal_delta: &str,
     brief_delta: Option<&str>,
     user_text: &str,
 ) -> String {
     let mut p = format!("The user is now on {}.\n\n", surface_line(surface, self_id));
+    p.push_str(&attached_context(surface, attached));
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
         p.push_str("\n\n");
@@ -1187,10 +1240,11 @@ fn drain_stderr_task(stderr: ChildStderr) -> tokio::task::JoinHandle<String> {
 /// advances the chat's journal high-water mark. Streaming happens via
 /// `companion-*` events; this returns once the child is spawned, or with
 /// `queued: true` when the send opted in (`queue`) and landed behind an
-/// in-flight turn.
-// Eight arguments: two managed cells, the app handle, and the send's own five.
-// The same shape (and, elsewhere, the same tolerated warning) as every other
-// surface's send.
+/// in-flight turn. `context` is what the user attached from the card's chips:
+/// it reaches the prompt, never the stored message.
+// Eleven arguments: two managed cells, the app handle, and the send's own
+// eight. The same shape (and, elsewhere, the same tolerated warning) as every
+// other surface's send.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn companion_send(
@@ -1204,6 +1258,7 @@ pub async fn companion_send(
     harness: Option<ConversationHarness>,
     target: Option<SurfaceInfo>,
     mode: Option<TurnMode>,
+    context: Option<String>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
@@ -1232,17 +1287,18 @@ pub async fn companion_send(
         surface: surface.clone(),
         harness,
         browser_target,
+        context: context.filter(|c| !c.trim().is_empty()),
     };
-    // The user row is tagged with where they were WHEN THEY TYPED IT, which is
-    // the fact the bubble and the prompt both report. A queued send must not
-    // follow a later tab or surface switch.
+    // Built now, from the payload: a queued send must not follow a later tab
+    // or surface switch.
+    let user_msg = user_message(&companion_id, &payload);
 
     // Atomic reservation; early `?` returns release it via the guard's Drop.
     // Only opted-in sends queue — the busy error stays for everything else.
     let (slot, payload) = if queue.unwrap_or(false) {
         let turn = QueuedTurn {
             message_id: message_id.clone(),
-            text: text.clone(),
+            text,
             queued_at: now_millis(),
         };
         match companion
@@ -1254,15 +1310,8 @@ pub async fn companion_send(
                 // Persist the queued user row so a remount restores the
                 // bubble; the reader's drain flips it to `complete`.
                 let user_msg = CompanionMessage {
-                    id: message_id.clone(),
-                    companion_id,
-                    role: "user".to_string(),
-                    body: text,
                     status: "queued".to_string(),
-                    surface_kind: Some(surface.kind.clone()),
-                    surface_id: surface.id.clone(),
-                    surface_label: surface.label.clone(),
-                    created_at: now_millis(),
+                    ..user_msg
                 };
                 companion
                     .db
@@ -1286,17 +1335,6 @@ pub async fn companion_send(
         (slot, payload)
     };
 
-    let user_msg = CompanionMessage {
-        id: message_id.clone(),
-        companion_id: companion_id.clone(),
-        role: "user".to_string(),
-        body: text,
-        status: "complete".to_string(),
-        surface_kind: Some(surface.kind.clone()),
-        surface_id: surface.id.clone(),
-        surface_label: surface.label.clone(),
-        created_at: now_millis(),
-    };
     companion
         .db
         .insert_companion_message(&user_msg)
@@ -1344,6 +1382,7 @@ fn start_companion_turn(
             surface,
             harness,
             browser_target,
+            context: attached,
         } = payload;
         let _ = companion.db.set_setting(&runtime_key(&companion_id, "activeMode"), if mode == TurnMode::Build { "build" } else { "chat" });
         let intent = crate::monochat::classify(&text, &surface);
@@ -1560,6 +1599,7 @@ fn start_companion_turn(
                     prefetch: prefetch_block.as_deref(),
                     mission: mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
                     brief: brief_full.as_deref(),
+                    attached: attached.as_deref(),
                 },
             );
             // Codex has no system-prompt flag: its first turn carries the
@@ -1569,7 +1609,7 @@ fn start_companion_turn(
             // A follow-up whose conversation never saw a brief (it predates
             // them) gets the whole one, once.
             let delta = brief_delta.as_deref().or(brief_full.as_deref());
-            let mut p = build_followup_prompt(&surface, &companion_id, &journal_delta, delta, &text);
+            let mut p = build_followup_prompt(&surface, &companion_id, attached.as_deref(), &journal_delta, delta, &text);
             if let Some(block) = prefetch_block.as_deref() {
                 p.push_str(block);
             }
@@ -1829,7 +1869,7 @@ pub async fn companion_steer(companion: tauri::State<'_, CompanionState>, app: A
 fn persist_steer(app: &AppHandle, companion: &CompanionState, id: &str, buf: &Arc<Mutex<PartialBuf>>, payload: &QueuedCompanionSend) -> Result<(), String> {
     if companion.turns.unqueue(id, &payload.message_id).is_none() { return Err("Queued instruction already advanced".into()); }
     let (assistant_id,body,seq)=persist_steer_segment(&companion.db,id,buf,payload)?;
-    crate::ledger::record_agent_prompt(&companion.db, crate::ledger::PromptSource::RustFirstTurn, "companion", &payload.text, Some(&payload.text), None, None, None, Some(crate::ledger::ThreadRef { thread_kind:"companion", thread_id:id.into(), parent_session_id:None }), crate::seat::model_for_override("companion", payload.harness.model.as_deref(), payload.harness.effort.as_deref()));
+    crate::ledger::record_agent_prompt(&companion.db, crate::ledger::PromptSource::RustFirstTurn, "companion", &steer_text(payload), Some(&payload.text), None, None, None, Some(crate::ledger::ThreadRef { thread_kind:"companion", thread_id:id.into(), parent_session_id:None }), crate::seat::model_for_override("companion", payload.harness.model.as_deref(), payload.harness.effort.as_deref()));
     let _ = app.emit("companion-steered", serde_json::json!({"companionId":id,"messageId":payload.message_id,"text":payload.text,"mode":"inject","assistantId":assistant_id,"body":body,"seq":seq}));
     Ok(())
 }
@@ -1948,12 +1988,12 @@ async fn read_companion(
                 if payload.mode != mode { let _ = ack.send(false); continue; }
                 if let Some(native) = &native {
                     steer_seq += 1;
-                    if let (Some(request), Some(pipe)) = (native.steer(&payload.text, steer_seq), stdin.as_mut()) {
+                    if let (Some(request), Some(pipe)) = (native.steer(&steer_text(&payload), steer_seq), stdin.as_mut()) {
                         if write_native(pipe, &request).await.is_ok() { pending_steer = Some((payload, ack, steer_seq)); continue; }
                     }
                     let _ = ack.send(false);
                 } else if let Some((pipe, _, _)) = warm.as_mut() {
-                    let frame = companion_warm::user_turn_line(&payload.text);
+                    let frame = companion_warm::user_turn_line(&steer_text(&payload));
                     let written = tokio::time::timeout(std::time::Duration::from_secs(10), async { pipe.write_all(frame.as_bytes()).await?; pipe.flush().await }).await;
                     if matches!(written, Ok(Ok(()))) {
                         injected = true;
@@ -2925,10 +2965,13 @@ mod tests {
                 prefetch: Some("PREFETCHED EVIDENCE\n- searched: beta\n"),
                 mission: None,
                 brief: Some("WORKSPACE BRIEF: read by Redline\nRepos (recently worked in):\n- redline · main · clean · /r\n"),
+                attached: Some("## Context — This draft\n\nShip the beta\n"),
             },
         );
+        let attached = p.find("Context the user attached").expect("attachment");
         let brief = p.find("WORKSPACE BRIEF").expect("brief block");
         let catalog = p.find("THEIR CATALOG").expect("catalog block");
+        assert!(attached < brief, "what they attached sits with where they are");
         assert!(brief < catalog, "the workspace brief leads the record");
         let recap = p.find("CONVERSATION SO FAR").expect("recap block");
         let evidence = p
@@ -2981,6 +3024,7 @@ mod tests {
         let followup = build_followup_prompt(
             &surface("chat", None, None),
             SELF_ID,
+            None,
             "",
             None,
             "Why is history empty?",
@@ -3031,10 +3075,10 @@ mod tests {
     #[test]
     fn followup_regrounds_on_surface_without_reembedding_the_role() {
         let s = surface("drafter", None, None);
-        let p = build_followup_prompt(&s, SELF_ID, "", None, "and now?");
+        let p = build_followup_prompt(&s, SELF_ID, None, "", None, "and now?");
         assert!(p.contains("the Prompt Drafter"));
         assert!(!p.contains("WORKSPACE CHANGES"), "an unchanged workspace adds nothing");
-        let changed = build_followup_prompt(&s, SELF_ID, "", Some("WORKSPACE CHANGES since the last brief\n- x\n"), "and now?");
+        let changed = build_followup_prompt(&s, SELF_ID, None, "", Some("WORKSPACE CHANGES since the last brief\n- x\n"), "and now?");
         assert!(changed.find("WORKSPACE CHANGES").unwrap() < changed.find("The user says:").unwrap());
         // The surface id rides every turn — follow-up writes need it too.
         assert!(p.contains("[surface id: x-1]"));
@@ -3044,6 +3088,102 @@ mod tests {
             "routes are not re-embedded"
         );
         assert!(p.ends_with("> and now?\n"));
+    }
+
+    // --- Attached context ----------------------------------------------------
+
+    const PLAN_BLOCK: &str = "## Context — This plan (v3, Warm chat)\n\nPlan session: s-7\n\n# Warm chat\n- keep a child per room";
+
+    /// What the user attached from the card rides the prompt right under the
+    /// surface line it came from, on a first turn and a follow-up alike.
+    #[test]
+    fn attached_context_sits_under_the_surface_line_in_both_prompts() {
+        let s = surface("plan", Some("Warm chat"), None);
+        let first = build_first_turn_prompt(
+            &s,
+            SELF_ID,
+            "WHILE YOU WERE AWAY — what the user did since your last turn:\n- browsed to X\n",
+            "is this sound?",
+            &FirstTurnGround {
+                brief: Some("WORKSPACE BRIEF: read by Redline\n"),
+                attached: Some(PLAN_BLOCK),
+                ..Default::default()
+            },
+        );
+        let followup = build_followup_prompt(
+            &s,
+            SELF_ID,
+            Some(PLAN_BLOCK),
+            "WHILE YOU WERE AWAY — what the user did since your last turn:\n- browsed to X\n",
+            Some("WORKSPACE CHANGES since the last brief\n- x\n"),
+            "and now?",
+        );
+        for p in [&first, &followup] {
+            let header = p
+                .find("Context the user attached from the plan review — Warm chat:")
+                .expect("the attachment names where it came from");
+            assert!(p.find("[surface id: x-1]").unwrap() < header, "after the surface line");
+            assert!(header < p.find("Plan session: s-7").unwrap());
+            assert!(p.find("</attached-context>").unwrap() < p.find("WHILE YOU WERE AWAY").unwrap());
+            assert!(p.find("WHILE YOU WERE AWAY").unwrap() < p.find("The user says:").unwrap());
+        }
+        assert!(first.find("</attached-context>").unwrap() < first.find("WORKSPACE BRIEF").unwrap());
+
+        // Nothing attached, or only whitespace, adds nothing.
+        for attached in [None, Some("  \n")] {
+            let plain = build_followup_prompt(&s, SELF_ID, attached, "", None, "and now?");
+            assert!(!plain.contains("attached"), "{plain}");
+            let plain = build_first_turn_prompt(
+                &s,
+                SELF_ID,
+                "",
+                "and now?",
+                &FirstTurnGround { attached, ..Default::default() },
+            );
+            assert!(!plain.contains("attached"), "{plain}");
+        }
+    }
+
+    /// The attachment is the prompt's alone: the stored row — and so the bubble
+    /// a remount restores — is exactly what the user typed, queued or not.
+    #[test]
+    fn attached_context_never_reaches_the_stored_message() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_companion(&chat("c1")).unwrap();
+        let payload = QueuedCompanionSend {
+            mode: TurnMode::Chat,
+            message_id: "m1".into(),
+            text: "is this sound?".into(),
+            cwd: None,
+            surface: surface("plan", Some("Warm chat"), None),
+            harness: ConversationHarness::default(),
+            browser_target: None,
+            context: Some(PLAN_BLOCK.into()),
+        };
+        let row = user_message("c1", &payload);
+        db.insert_companion_message(&row).unwrap();
+        db.insert_companion_message(&CompanionMessage {
+            id: "m2".into(),
+            status: "queued".into(),
+            ..user_message("c1", &payload)
+        })
+        .unwrap();
+        let thread = db.load_companion_thread("c1").unwrap();
+        assert_eq!(thread.len(), 2);
+        for stored in &thread {
+            assert_eq!(stored.body, "is this sound?");
+            assert_eq!(stored.surface_kind.as_deref(), Some("plan"));
+        }
+        // The recap a rotated session carries is built from those rows, so it
+        // can't smuggle the attachment back in as something the user said.
+        assert!(!build_recap(&thread).contains("Plan session"));
+
+        // A steered send has no turn framing, so it carries its own.
+        let steered = steer_text(&payload);
+        assert!(steered.starts_with("is this sound?\n\nContext the user attached from the plan review"));
+        assert!(steered.contains("Plan session: s-7"));
+        let bare = QueuedCompanionSend { context: None, ..payload };
+        assert_eq!(steer_text(&bare), "is this sound?");
     }
 
     // --- Rotation ------------------------------------------------------------
@@ -3239,6 +3379,7 @@ mod tests {
             cwd: None,
             message_id: "m2".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
             browser_target: None,
+            context: None,
         };
         match turns.begin_or_enqueue("c1", queued_turn, payload) {
             SendSlot::Enqueued => {}
@@ -3290,6 +3431,7 @@ mod tests {
                 cwd: None,
                 message_id: "m3".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
                 browser_target: None,
+                context: None,
             },
         );
         let mut row3 = msg("m3", "c1", "user", "wait, scratch that", 3);
@@ -3520,7 +3662,7 @@ mod tests {
     fn scripted_steer_reader_persists_assistant_user_assistant_order() {
         let db=Database::open_in_memory().unwrap();db.insert_companion(&chat("steer")).unwrap();
         let mut user=msg("queued","steer","user","Use the new direction",1);user.status="queued".into();db.insert_companion_message(&user).unwrap();
-        let payload=QueuedCompanionSend{mode:TurnMode::Chat,message_id:user.id.clone(),text:user.body.clone(),cwd:None,surface:SurfaceInfo::default(),harness:ConversationHarness::default(),browser_target:None};
+        let payload=QueuedCompanionSend{mode:TurnMode::Chat,message_id:user.id.clone(),text:user.body.clone(),cwd:None,surface:SurfaceInfo::default(),harness:ConversationHarness::default(),browser_target:None,context:None};
         let buf=Arc::new(Mutex::new(PartialBuf::new()));let mut results=0;
         for line in include_str!("../../scripts/fixtures/chat-steer.jsonl").lines(){let event:Value=serde_json::from_str(line).unwrap();match event["type"].as_str().unwrap(){
             "stream_event"=>{turn::push_delta(&buf,event["event"]["delta"]["text"].as_str().unwrap());},
