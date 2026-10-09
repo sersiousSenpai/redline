@@ -33,7 +33,7 @@ interface CommentComposerProps {
   presetRevised?: string;
   onCancel: () => void;
   /** `discuss`: the comment was SENT — save it and start its discussion in
-   *  the same press. False for "Save only" and for every edit. */
+   *  the same press. False for the quiet "Save" (⌥⌘⏎) and for every edit. */
   onSubmit: (request: NewCommentRequest, opts: { discuss: boolean }) => Promise<void>;
 }
 
@@ -202,6 +202,9 @@ export function CommentComposer({
           onClick={onCancel}
           className="text-xs opacity-60 hover:opacity-100"
           style={{ color: "var(--color-ink-muted)" }}
+          title="Cancel (Esc)"
+          aria-label="Cancel"
+          aria-keyshortcuts="Escape"
         >
           ✕
         </button>
@@ -305,8 +308,9 @@ export function CommentComposer({
       )}
 
       {/* Attachments. The chips only appear once something is captured, so an
-          ordinary text comment looks exactly as it always did; the hint line
-          replaces them while empty so the affordance is still discoverable. */}
+          ordinary text comment looks exactly as it always did; while empty, the
+          "Drop to attach" overlay shows the gesture at the moment it matters
+          (⌘V paste needs no hint). */}
       {files.attachments.length > 0 ? (
         <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
       ) : (
@@ -348,40 +352,50 @@ export function CommentComposer({
         </div>
       )}
 
-      <div
-        className="flex items-center justify-between mt-2"
-        style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
-      >
-        <span>
-          {sends ? "⌘+Enter to send · ⌥⌘+Enter to save only" : "⌘+Enter to save"} · Esc to cancel · drop or ⌘V a file
-        </span>
-        <span className="flex items-center gap-2">
+      {/* Just the buttons: each shortcut lives on the control it triggers (the
+          glyph on the primary, ⌥⌘⏎ in Save's tooltip, Esc on the ✕), so the
+          footer stays one line in the narrow sidebar. */}
+      <div className="flex items-center justify-end gap-2 mt-2">
         {sends && (
           <button
             type="button"
             onClick={() => void submit(false)}
             disabled={!canSubmit || saving}
-            className="disabled:opacity-40"
+            className="whitespace-nowrap text-ink-muted enabled:hover:text-ink disabled:opacity-40"
             title="Save it for the next Revise without starting a discussion (⌥⌘⏎)"
-            style={{ color: "var(--color-ink-muted)", fontSize: "11px", textDecoration: "underline", textUnderlineOffset: 3 }}
+            aria-keyshortcuts="Alt+Meta+Enter"
+            style={{ fontSize: "11px" }}
           >
-            Save only
+            Save
           </button>
         )}
         <button
           type="button"
           onClick={() => void submit()}
           disabled={!canSubmit || saving}
-          className="rounded px-3 py-1 font-medium disabled:opacity-40"
+          className="whitespace-nowrap rounded px-3 py-1 font-medium disabled:opacity-40"
+          aria-keyshortcuts="Meta+Enter"
           style={{
             background: TYPE_COLORS[type],
             color: "var(--color-on-accent)",
             fontSize: "12px",
           }}
         >
-          {saving ? (sends ? "Sending…" : "Saving…") : sends ? "Send" : "Save"}
+          {saving ? (
+            sends ? "Sending…" : "Saving…"
+          ) : (
+            <>
+              {sends ? "Send" : "Save"}
+              <span
+                aria-hidden="true"
+                className="ml-1.5"
+                style={{ fontSize: "10px", opacity: 0.6 }}
+              >
+                ⌘⏎
+              </span>
+            </>
+          )}
         </button>
-        </span>
       </div>
     </div>
   );

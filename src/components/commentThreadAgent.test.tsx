@@ -276,7 +276,7 @@ describe("one-press Send starts the discussion", () => {
     expect(sends()).toHaveLength(0);
   });
 
-  it("does nothing without the flag — Save only stays a plain save", async () => {
+  it("does nothing without the flag — the quiet Save stays a plain save", async () => {
     await render({}, { ...comment, id: "c-send-3" });
     await flush();
     expect(sends()).toHaveLength(0);
