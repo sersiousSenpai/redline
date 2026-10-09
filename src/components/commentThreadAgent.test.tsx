@@ -451,6 +451,34 @@ describe("report and chat views", () => {
     expect(host.querySelector("textarea")).toBeNull();
     expect(text()).toContain("Discuss with Claude");
   });
+
+  it("follows the chat's newest line only while the reviewer is parked there", async () => {
+    history = [seed, reply, asked, answered];
+    localStorage.setItem(VIEW_KEY, "chat");
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    // Compact: the chat scrolls inside its own 320px box.
+    await act(async () => clickWith("⤡"));
+    const list = host.querySelector<HTMLElement>(".rl-chat-list")!;
+    let top = 0;
+    Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => 1000 });
+    Object.defineProperty(list, "clientHeight", { configurable: true, get: () => 300 });
+    Object.defineProperty(list, "scrollTop", { configurable: true, get: () => top, set: (v: number) => { top = v; } });
+    const land = (id: string) =>
+      act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: id, body: `Reply ${id}.` } }));
+
+    // Scrolled back up to re-read: a landing reply leaves the reader where they are.
+    top = 100;
+    await act(async () => list.dispatchEvent(new Event("scroll")));
+    await land("m-r1");
+    expect(top).toBe(100);
+
+    // Back at the bottom: the next one is followed.
+    top = 700;
+    await act(async () => list.dispatchEvent(new Event("scroll")));
+    await land("m-r2");
+    expect(top).toBe(1000);
+  });
 });
 
 describe("the discussion reads like a discussion", () => {

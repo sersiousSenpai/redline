@@ -21,6 +21,7 @@ import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMonochat } from "./MonochatContext";
 import { useSidecarView, type SidecarView } from "../hooks/useSidecarView";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { askedMode, isChatRow, reportItems } from "../lib/sidecarRows";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 
@@ -249,7 +250,6 @@ export const CommentThread = memo(function CommentThread({
   // there.
   const chatInFlight = status === "streaming" && askedMode(messages) === "chat";
   const hostRef = useRef<HTMLDivElement>(null);
-  const chatListRef = useRef<HTMLDivElement>(null);
 
   // Focus the reply box once it is on screen, when "Chat" asked for it.
   useEffect(() => {
@@ -270,16 +270,23 @@ export const CommentThread = memo(function CommentThread({
     composerRef.current?.focus();
   }, [status, view, expanded]);
 
-  // The chat reads bottom-up: keep its newest line in view as rows land and
-  // the reply streams, and the reply box with it while the reviewer is here.
+  // The chat reads bottom-up: follow its newest line as rows land and the
+  // reply streams — while the reviewer is parked there. Scrolling back up to
+  // re-read isn't fought by every token: the rule every chat surface shares.
+  const chatScroll = useStickToBottom<HTMLDivElement>([view, expanded, chatRows.length, liveText]);
+  // And keep the reply box in view with it, while the reviewer is here.
   useLayoutEffect(() => {
     if (view !== "chat" || !expanded) return;
-    const list = chatListRef.current;
-    if (list) list.scrollTop = list.scrollHeight;
     if (hostRef.current?.contains(document.activeElement)) {
       composerRef.current?.scrollIntoView?.({ block: "nearest" });
     }
   }, [view, expanded, chatRows.length, liveText]);
+
+  /** Into the chat view, at its newest line. */
+  function showChat() {
+    chatScroll.stick();
+    setView("chat");
+  }
 
   function send(text: string, mode: SidecarView, attachments: CommentAttachment[] = []) {
     const trimmed = text.trim();
@@ -290,6 +297,7 @@ export const CommentThread = memo(function CommentThread({
     // just asked something, so they want to see the reply unfold.
     userCollapsedRef.current = false;
     setExpanded(true);
+    chatScroll.stick();
     pendingAttachments.current = attachments.length > 0 ? attachments : undefined;
     pendingChat.current = mode === "chat";
     const extra: SendExtra = { attachments, mode };
@@ -307,7 +315,7 @@ export const CommentThread = memo(function CommentThread({
   /** Into the chat view with the reply box focused. Nothing is sent: the
    *  reviewer asks the first question. */
   function openChat() {
-    setView("chat");
+    showChat();
     userCollapsedRef.current = false;
     setExpanded(true);
     focusComposer.current = true;
@@ -598,7 +606,8 @@ export const CommentThread = memo(function CommentThread({
         <>
           {view === "chat" ? (
             <div
-              ref={chatListRef}
+              ref={chatScroll.ref}
+              onScroll={chatScroll.onScroll}
               className={`rl-chat-list flex flex-col gap-1.5 rl-thin-scroll-y ${
                 enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
               }`}
@@ -666,7 +675,7 @@ export const CommentThread = memo(function CommentThread({
                     <button
                       type="button"
                       className="rl-chatted-chip"
-                      onClick={() => setView("chat")}
+                      onClick={showChat}
                       title="Open the chat"
                     >
                       💬 Chatted · {item.count} {item.count === 1 ? "message" : "messages"}
