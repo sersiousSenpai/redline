@@ -725,8 +725,8 @@ function App() {
   const [browserIslandPage, setBrowserIslandPage] = useState<BrowserIslandPage | null>(null);
   // The context chips the user flipped, for the surface they flipped them on.
   const [chipPresses, setChipPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  // The chat pose's ⤢. Not persisted: it is how roomy THIS conversation
-  // should be, not a layout to restore.
+  // The chat pose's ⤢. Not persisted: it is how roomy the card should be for
+  // now, not a layout to restore on the next launch.
   const [islandSize, setIslandSize] = useState<IslandSize>("regular");
   const [monochatBusy, setMonochatBusy] = useState(false);
   const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
@@ -10501,11 +10501,12 @@ function App() {
         open={frontDoorOpen}
         onOpenChange={onDoorOpenChange}
         // The chat lives in the same card: it grows to hold the thread, and
-        // a New in its heading goes back to a blank composer.
+        // a New in its heading goes back to a blank composer — with the caret
+        // in it, even in a card a hover opened: New is a click, not a glance.
         pose={chatId ? "chat" : "compose"}
         size={islandSize}
         onSizeChange={setIslandSize}
-        onNewChat={() => { setChatId(null); setChatSeed(null); refreshChats(); }}
+        onNewChat={() => { setChatId(null); setChatSeed(null); setDoorSummonedQuiet(false); refreshChats(); }}
         context={chatId ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title)}
         busy={frontDoorLaunching || monochatBusy || monochatForks.size > 0}
         chips={<SurfaceChips

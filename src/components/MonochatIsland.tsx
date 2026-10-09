@@ -194,13 +194,18 @@ export function MonochatIsland({ open, onOpenChange, pose = "compose", size = "r
   useLayoutEffect(() => {
     if (previousSurface.current === surfaceKey) return;
     previousSurface.current = surfaceKey;
-    if (!open) return;
+    // An owner that closes the card on its way somewhere (a recent) is going
+    // somewhere all the same: it runs before the close below, which reads it.
+    if (!open && !previousOpen.current) return;
     navigated.current = true;
-    change.current(false);
+    if (open) change.current(false);
   }, [surfaceKey, open]);
 
   useLayoutEffect(() => {
     if (open && !previousOpen.current) {
+      // However it opened, a hover still counting down would only re-label
+      // it a peek.
+      window.clearTimeout(enterTimer.current);
       const active = document.activeElement;
       if (active instanceof HTMLElement && active !== document.body && active !== pill.current && !card.current?.contains(active)) returnFocus.current = active;
       if (focusOnOpen.current) composerIn(card.current)?.focus({ preventScroll: true });

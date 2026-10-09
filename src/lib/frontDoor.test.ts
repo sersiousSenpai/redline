@@ -312,6 +312,22 @@ describe("chat context wiring", () => {
   });
 });
 
+// The card's caret (island plan + floating-monochat): only a hover peek opens
+// without reaching for the composer, and nothing deliberate inherits that.
+describe("the card's quiet open", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("only a hover is quiet, and the bit never outlives the card or a New", () => {
+    const change = app.slice(app.indexOf("const onDoorOpenChange"), app.indexOf("const renderMonochatComposer"));
+    expect(change).toContain('if (open) setDoorSummonedQuiet(via === "hover");');
+    expect(change).toMatch(/if \(!frontDoorOpen\) setDoorSummonedQuiet\(false\);/);
+    expect(app).toMatch(/autoFocusOnShow=\{frontDoorOpen && !doorSummonedQuiet\}/);
+    // New is a click: the blank composer it brings back takes the caret.
+    const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
+    expect(island).toMatch(/onNewChat=\{\(\) => \{[^}]*setDoorSummonedQuiet\(false\)/);
+  });
+});
+
 describe("chat composer submission", () => {
   const enter = { key: "Enter", metaKey: false, shiftKey: false };
   it("uses a one-shot mode and Cmd-Enter plans directly", () => {

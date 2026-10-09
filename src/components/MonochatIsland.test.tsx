@@ -24,7 +24,11 @@ function Harness({ pose = "compose", busy = false, onChange, onNewChat, chips, c
   const [surface, setSurface] = useState("document");
   const [size, setSize] = useState<IslandSize>("regular");
   return <>
-    <article><button id="document-focus">Document</button><button id="navigate" onClick={() => setSurface("browser")}>Browser</button></article>
+    <article><button id="document-focus">Document</button><button id="navigate" onClick={() => setSurface("browser")}>Browser</button>
+      {/* ⌘J: the owner flips the card itself, never through the island. */}
+      <button id="owner-toggle" onClick={() => setOpen(value => !value)}>Toggle</button>
+      {/* A recent: the owner closes the card and goes there in one batch. */}
+      <button id="open-recent" onClick={() => { setOpen(false); setSurface("plan"); }}>Recent</button></article>
     <MonochatIsland surfaceKey={surface} open={open} onOpenChange={(next, via) => { onChange?.(next, via); setOpen(next); }}
       pose={pose} size={size} onSizeChange={setSize} onNewChat={onNewChat} context="Auth rewrite" busy={busy} chips={chips}>
       {children ?? <textarea aria-label="Main reply" defaultValue=""/>}
@@ -129,6 +133,30 @@ describe("an engaged card stays until it is closed on purpose", () => {
     expect(isOpen()).toBe(true);
     await key(document.body, { key: "Escape" });
     expect(isOpen()).toBe(false);
+  });
+
+  it("a press inside a peek engages it even when nothing takes focus", async () => {
+    // WebKit never focuses a clicked button, so pressing a chip is a
+    // pointer-down and nothing else.
+    const chips = <div className="rl-context-chips"><button id="chip" aria-pressed="true">This page</button></div>;
+    await render(<Harness chips={chips}/>); await hoverOpen();
+    await pointer(host.querySelector("#chip")!, "pointerdown");
+    expect(card().contains(document.activeElement)).toBe(false);
+    await leave(); await advance(800);
+    expect(isOpen()).toBe(true);
+  });
+
+  it("opened by the owner (⌘J) mid-hover, it is engaged, not a peek", async () => {
+    const onChange = vi.fn();
+    await render(<Harness onChange={onChange}/>);
+    await pointer(pill(), "pointerover"); await advance(60);
+    await click("#owner-toggle");
+    expect(isOpen()).toBe(true);
+    // The hover that was about to open it is moot, and must not re-label it.
+    await advance(200);
+    expect(onChange).not.toHaveBeenCalled();
+    await leave(); await advance(800);
+    expect(isOpen()).toBe(true);
   });
 
   it("a pointer-down outside does not collapse an engaged card or the chat pose", async () => {
@@ -280,6 +308,16 @@ describe("the card", () => {
     expect(document.activeElement).toBe(draft());
     // A recent in the card navigates without moving focus out of it first.
     await act(async () => host.querySelector<HTMLButtonElement>("#navigate")!.click());
+    expect(isOpen()).toBe(false);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("an owner that closes the card and navigates in one go is navigation too", async () => {
+    await render();
+    await click(".rl-monochat-notch");
+    expect(document.activeElement).toBe(draft());
+    // The recents swallow mousedown, so the caret is still in the composer.
+    await click("#open-recent");
     expect(isOpen()).toBe(false);
     expect(document.activeElement).toBe(document.body);
   });
