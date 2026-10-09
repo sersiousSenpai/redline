@@ -122,17 +122,23 @@ function ContextChip({ meter }: { meter: TurnMeter }) {
  *  as one full render would place them — the same first/last-child rhythm in
  *  `.rl-md`, the same delegated copy-button and link clicks. React owns that
  *  container's markup only through `dangerouslySetInnerHTML`, which it
- *  re-assigns only when the head moves; the tail's nodes are ours. */
-function StreamingText({
+ *  re-assigns only when the head moves; the tail's nodes are ours.
+ *
+ *  Exported for the streams that render without the bubble's byline — a plan
+ *  comment's chat and a review thread — so no live reply re-parses whole. */
+export function StreamingText({
   text,
-  room,
+  room = false,
   caret,
   onOpenLink,
+  className,
 }: {
   text: string;
-  room: boolean;
-  caret: string;
+  room?: boolean;
+  /** Trails the text; omit for none. */
+  caret?: string;
   onOpenLink?: (url: string) => void;
+  className?: string;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const { head, tail, openFence } = useClosedBlockSplit(text);
@@ -148,9 +154,13 @@ function StreamingText({
   );
   useLiveTail(host, head, tailHtml);
   return (
-    <div ref={host}>
+    <div ref={host} className={className}>
       <MarkdownView body={head} compact room={room} onLinkClick={onLinkClick} />
-      <span style={{ color: "var(--color-ink-muted)" }}>{caret}</span>
+      {caret != null && (
+        <span aria-hidden style={{ color: "var(--color-ink-muted)" }}>
+          {caret}
+        </span>
+      )}
     </div>
   );
 }

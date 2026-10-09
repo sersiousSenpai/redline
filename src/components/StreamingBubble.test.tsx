@@ -22,7 +22,7 @@ vi.mock("./MarkdownView", async (importOriginal) => {
   return { ...actual, MarkdownView: Counted };
 });
 
-import StreamingBubble from "./StreamingBubble";
+import StreamingBubble, { StreamingText } from "./StreamingBubble";
 import { MarkdownView, renderLiveMarkdown, splitsCleanly } from "./MarkdownView";
 import { splitAtClosedBlock } from "../lib/streamSplit";
 
@@ -306,5 +306,19 @@ describe("StreamingBubble", () => {
     expect(host.textContent).toMatch(/Next\s*▌$/);
     await bubble({ text: "Lead.\n\nNext", room: true, retrying: true });
     expect(host.textContent).not.toContain("▌");
+  });
+});
+
+describe("StreamingText", () => {
+  it("streams the same split render without the bubble around it", async () => {
+    // The plan comment's chat and the review thread: a class on the
+    // container, and no caret unless one is given.
+    const text = "Closed.\n\nStill open";
+    await act(async () => root.render(<StreamingText text={text} className="rl-chat-agent" />));
+    const container = host.firstElementChild as HTMLElement;
+    expect(container.className).toBe("rl-chat-agent");
+    expect(Array.from(container.children)).toEqual([view()]);
+    expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
+    expect(renders).toEqual(["Closed.\n\n"]);
   });
 });

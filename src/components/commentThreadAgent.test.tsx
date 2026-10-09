@@ -354,6 +354,15 @@ describe("report and chat views", () => {
     await act(async () => type(ta, "Why there?"));
     await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     ta.blur();
+    // Streaming, the reply renders in the chat's own bubble — its closed
+    // paragraph and its open one in one markdown view, the caret after.
+    await act(async () => {
+      handlers["fork-delta"]({ payload: { sessionId: SESSION, commentId: ITEM, text: "Because\n\nit re-", seq: 1 } });
+      await new Promise((r) => requestAnimationFrame(r));
+    });
+    const live = host.querySelector(".rl-chat-agent");
+    expect(live?.querySelector(".rl-md")?.innerHTML).toBe("<p>Because</p>\n<p>it re-</p>\n");
+    expect(live?.textContent).toMatch(/it re-\s*▌$/);
     await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-r", body: "Because it re-renders." } }));
     expect(host.querySelector(".rl-chat-agent")?.textContent).toContain("Because it re-renders.");
     expect(document.activeElement).toBe(host.querySelector("textarea"));
