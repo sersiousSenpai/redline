@@ -361,7 +361,7 @@ export function CommentComposer({
             type="button"
             onClick={() => void submit(false)}
             disabled={!canSubmit || saving}
-            className="whitespace-nowrap text-ink-muted enabled:hover:text-ink disabled:opacity-40"
+            className="rl-composer-save whitespace-nowrap disabled:opacity-40"
             title="Save it for the next Revise without starting a discussion (⌥⌘⏎)"
             aria-keyshortcuts="Alt+Meta+Enter"
             style={{ fontSize: "11px" }}

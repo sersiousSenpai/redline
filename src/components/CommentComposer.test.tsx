@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -25,6 +26,8 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 import { CommentComposer } from "./CommentComposer";
 import type { CommentType } from "../types";
+
+const css = readFileSync("src/styles.css", "utf8");
 
 let host: HTMLDivElement;
 let root: Root;
@@ -187,9 +190,12 @@ describe("CommentComposer — shortcuts live on their controls", () => {
     expect(save.title).toBe("Save it for the next Revise without starting a discussion (⌥⌘⏎)");
     expect(save.getAttribute("aria-keyshortcuts")).toBe("Alt+Meta+Enter");
     expect(save.className).toContain("whitespace-nowrap");
-    // Muted ink that turns to full ink on hover, never underlined.
-    expect(save.className).toContain("text-ink-muted");
-    expect(save.className).toContain("hover:text-ink");
+    // Muted ink that turns to full ink on hover (only while enabled), never
+    // underlined, and no inline color that would beat the hover rule.
+    expect(save.className).toContain("rl-composer-save");
+    expect(css).toMatch(/\.rl-composer-save \{\s*color: var\(--color-ink-muted\);\s*\}/);
+    expect(css).toMatch(/\.rl-composer-save:hover:not\(:disabled\) \{\s*color: var\(--color-ink\);\s*\}/);
+    expect(save.style.color).toBe("");
     expect(save.style.textDecoration).toBe("");
     expect(buttons().some((b) => b.textContent === "Save only")).toBe(false);
   });

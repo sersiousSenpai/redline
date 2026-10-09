@@ -2247,6 +2247,14 @@ p.rl-block-modified {
 .rl-voice-tile:not([aria-pressed="true"]):hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
 }
+/* The comment composer's quiet Save (⌥⌘⏎): muted text that inks up on hover,
+   only while it can act. */
+.rl-composer-save {
+  color: var(--color-ink-muted);
+}
+.rl-composer-save:hover:not(:disabled) {
+  color: var(--color-ink);
+}
 
 /* Enrolled-tab aura: while a research mission is active, every open browser tab
    gets a soft theme-accent glow in the strip — an ambient signal of which tabs
