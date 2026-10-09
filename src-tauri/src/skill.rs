@@ -28,8 +28,10 @@ struct EmbeddedSkill {
 ///
 /// - `redline`: the plan-revision protocol contract.
 /// - `sidecar`: how to structure read-only discussion-thread replies.
-/// - `conversation`: the collaborator persona + cadence for a discussion thread
-///   the reviewer has toggled into conversation mode.
+/// - `conversation`: the collaborator persona + cadence for a plan discussion's
+///   Chat view, the quick back-and-forth beside its report. No prompt names
+///   it: a chat turn is told not to load `sidecar`, and this description is
+///   what fits it.
 /// - `browse`: how the embedded-browser page-discussion agent picks tools
 ///   (browser bridge vs WebSearch vs WebFetch), drives the tab, and formats.
 /// - `mission`: how the browser mission orchestrator holds a goal, gathers
@@ -65,7 +67,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "conversation",
-        version: 4,
+        version: 5,
         content: include_str!("../../skills/conversation/SKILL.md"),
     },
     EmbeddedSkill {
@@ -419,6 +421,18 @@ mod tests {
         // guardrail must survive the persona swap.
         assert!(convo.content.contains("ExitPlanMode"));
         assert!(convo.content.contains("read-only"));
+    }
+
+    /// The discussion's conversation toggle is gone; the Chat view replaced
+    /// it. The description is all that brings a chat turn to this skill, so
+    /// it names the view that exists.
+    #[test]
+    fn conversation_skill_describes_the_chat_view() {
+        let convo = SKILLS.iter().find(|s| s.name == "conversation").unwrap();
+        let description = &convo.content[..convo.content.find("\nversion:").unwrap()];
+        assert!(description.contains("Chat view of a plan discussion"), "{description}");
+        assert!(!description.contains("toggled"), "{description}");
+        assert!(!convo.content.contains("conversation mode**"));
     }
 
     #[test]
