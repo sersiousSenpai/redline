@@ -36,9 +36,17 @@ export interface CommentHighlightRange {
  *     anchor we have.
  *  2. **Stored char range** — fast path when the byte slice still equals
  *     `quotedText` (no edits inside the block since capture).
- *  3. **`quotedText` self-heal** — `indexOf` lookup; rescues the highlight
- *     when offsets drifted but the quoted substring still appears somewhere
- *     in the block.
+ *  3. **`quotedText` self-heal** — rescues the highlight when offsets drifted
+ *     but the quoted substring still appears in the block, picking the
+ *     occurrence nearest the captured `charStart` so a repeated snippet
+ *     doesn't jump to its first appearance.
+ *
+ *  When tiers 2–3 miss and the quote contains newlines, they are retried with
+ *  the newlines dropped: `Selection.toString()` puts them between list items
+ *  and paragraphs, but the block text (`textContent`) joins textblocks with
+ *  nothing, so a selection spanning two items or two paragraphs of one item
+ *  never matches verbatim. Code blocks (`PRE`) are exempt — their newlines
+ *  are real text.
  *
  *  `blockTagName` is the DOM tag (or ProseMirror-mapped equivalent) used to
  *  pick the addressing axis — `PRE`/`UL`/`OL`/`LI`/`BLOCKQUOTE` → line axis,
@@ -74,6 +82,27 @@ export function resolveRange(
     }
   }
   const { charStart, charEnd, quotedText } = range;
+  const found = locateQuote(blockText, charStart, charEnd, quotedText);
+  // A code block's newlines are its own text and copy out verbatim, so a
+  // collapsed spelling could only match characters nobody selected.
+  if (found || !quotedText.includes("\n") || blockTagName === "PRE") {
+    return found;
+  }
+  return locateQuote(
+    blockText,
+    charStart,
+    charEnd,
+    quotedText.replace(/\n+/g, ""),
+  );
+}
+
+/** Tiers 2–3 of {@link resolveRange} for one spelling of the quote. */
+function locateQuote(
+  blockText: string,
+  charStart: number,
+  charEnd: number,
+  quotedText: string,
+): { from: number; to: number } | null {
   if (
     charStart >= 0 &&
     charEnd <= blockText.length &&
@@ -82,7 +111,16 @@ export function resolveRange(
     return { from: charStart, to: charEnd };
   }
   if (quotedText.length === 0) return null;
-  const idx = blockText.indexOf(quotedText);
-  if (idx === -1) return null;
-  return { from: idx, to: idx + quotedText.length };
+  let best = -1;
+  for (
+    let idx = blockText.indexOf(quotedText);
+    idx !== -1;
+    idx = blockText.indexOf(quotedText, idx + 1)
+  ) {
+    if (best === -1 || Math.abs(idx - charStart) < Math.abs(best - charStart)) {
+      best = idx;
+    }
+  }
+  if (best === -1) return null;
+  return { from: best, to: best + quotedText.length };
 }

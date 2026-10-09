@@ -10,6 +10,7 @@ import type {
 } from "../types";
 import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
 import { resolveRange } from "./resolveHighlightRange";
+import { textOffsetToPos } from "./textOffset";
 
 /**
  * Whole-block reconstruction of selection-scoped edits.
@@ -57,55 +58,6 @@ function blockTagName(node: PMNode): string {
   }
 }
 
-/** Locate the selection inside `blockText` via the shared three-tier
- *  resolver, hardened for repeated snippets: when the stored char range no
- *  longer matches (tier-3 `indexOf` self-heal returns the FIRST occurrence),
- *  prefer the occurrence nearest the originally captured `charStart`. */
-function locateSnippet(
-  blockText: string,
-  tagName: string,
-  selection: CommentSelection,
-): { from: number; to: number } | null {
-  const r = resolveRange(blockText, tagName, selection);
-  if (!r) return null;
-  const { charStart, quotedText } = selection;
-  // Exact stored range (or validated sub-block range) — trust it.
-  if (r.from === charStart || selection.subBlockId) return r;
-  // Tier-3 self-heal picked the first occurrence; if the snippet repeats,
-  // choose the occurrence nearest where the reviewer actually selected.
-  let best = r.from;
-  for (
-    let idx = blockText.indexOf(quotedText);
-    idx !== -1;
-    idx = blockText.indexOf(quotedText, idx + 1)
-  ) {
-    if (Math.abs(idx - charStart) < Math.abs(best - charStart)) best = idx;
-  }
-  return { from: best, to: best + quotedText.length };
-}
-
-/** Map a plaintext offset (in `textContent` units — text nodes only, leaf
- *  nodes like hardBreak contribute nothing) to a ProseMirror position in
- *  `doc`. Plain base+offset arithmetic is not enough precisely because
- *  zero-width leaves still occupy positions. */
-function plainOffsetToPos(doc: PMNode, offset: number): number | null {
-  let acc = 0;
-  let result: number | null = null;
-  doc.descendants((node, pos) => {
-    if (result !== null) return false;
-    if (node.isText) {
-      const len = node.text?.length ?? 0;
-      if (offset <= acc + len) {
-        result = pos + (offset - acc);
-        return false;
-      }
-      acc += len;
-    }
-    return true;
-  });
-  return result;
-}
-
 /**
  * Rebuild a whole-block `{original, revised}` from a selection-scoped edit.
  *
@@ -125,11 +77,11 @@ export function reconstructWholeBlockEdit(
   // Same domain as the viewer's capture (`textBetween` without leaf text).
   const blockText = block.textContent;
 
-  const range = locateSnippet(blockText, blockTagName(block), selection);
+  const range = resolveRange(blockText, blockTagName(block), selection);
   if (!range) return null;
 
-  const pmFrom = plainOffsetToPos(doc, range.from);
-  const pmTo = plainOffsetToPos(doc, range.to);
+  const pmFrom = textOffsetToPos(doc, range.from, 1);
+  const pmTo = textOffsetToPos(doc, range.to, -1);
   if (pmFrom === null || pmTo === null || pmTo < pmFrom) return null;
   if (doc.textBetween(pmFrom, pmTo) !== selection.quotedText) return null;
 
