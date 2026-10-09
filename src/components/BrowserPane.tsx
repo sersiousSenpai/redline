@@ -234,7 +234,9 @@ interface BrowserPaneProps {
     url: string;
     nonce: number;
     /** Seed (and, with `autoSend`, send) the opened tab's chat — Search from
-     *  the plan hands its research ask over this way. */
+     *  the plan hands its research ask over this way. A chat request always
+     *  opens a fresh tab, and its chat is that tab's own, never the shared
+     *  one, whichever way linked mode leans. */
     chat?: { text: string; autoSend?: boolean };
     /** Prefer an existing tab by its thread (a research comment's "View
      *  result"); falls back to opening `url` when that tab is gone. */
@@ -534,7 +536,9 @@ function BrowserPaneBase({
   const flipped = !!discussionBrowseId && flipFor === discussionBrowseId;
   const ownChat = !!discussionBrowseId && (linkedMode ? flipped : !flipped);
   // Mode wins on a switch. Rendering already ignores a flip made on another
-  // tab; this only stops it coming back when you return to that tab.
+  // tab; this only stops it coming back when you return to that tab. Declared
+  // above the open-request effect: when both run in one commit (a Search
+  // landing with the restored pages), its update must queue first.
   useEffect(() => { setFlipFor(f => f === discussionBrowseId ? f : null); }, [discussionBrowseId, workspaceKey]);
   const linkedConversation = ownChat ? null : linkedByWorkspace[workspaceKey] ?? null;
   useEffect(() => {
@@ -802,6 +806,13 @@ function BrowserPaneBase({
   if (missionRestorePendingRef.current === null) {
     missionRestorePendingRef.current = true;
   }
+  // The same fact as state, for the one reader that must WAIT for the restore
+  // rather than skip while it is pending: an open request that arrives with
+  // the first mount (a plan Search, "View result") would open its tab into the
+  // set the restore is about to replace, and the tab would vanish with its
+  // chat's research turn still waiting to send into whatever chat was left.
+  const [workspaceRestored, setWorkspaceRestored] = useState(false);
+  const endRestore = () => { missionRestorePendingRef.current = false; setWorkspaceRestored(true); };
   // Debounce timer for saving the active mission's tab workspace.
   const missionTabsTimerRef = useRef<number | null>(null);
   // Tab drag-to-reorder. `tabDragging` hides the native webview during a drag
@@ -1698,7 +1709,7 @@ function BrowserPaneBase({
   /** Returns the browse ID of the tab opened or foregrounded. */
   const openTab = (
     url: string = HOME,
-    opts: { anchorDiscussion?: boolean } = {},
+    opts: { anchorDiscussion?: boolean; fresh?: boolean } = {},
   ): string | null => {
     // Opening an already-open URL foregrounds that tab instead of stacking a
     // duplicate — "Open" on a Localhost card (and any replayed request) would
@@ -1706,8 +1717,9 @@ function BrowserPaneBase({
     // rewrites `t.url` to the webview's canonical URL, so a tab opened at
     // `http://localhost:3000` is holding `http://localhost:3000/dashboard` by
     // the time you click the card again. Blank tabs are exempt: "+" on HOME is
-    // an intentional second empty tab.
-    if (url !== HOME && url !== NEWTAB) {
+    // an intentional second empty tab. So is a `fresh` open: a plan Search
+    // wants a tab (and a chat) of its own even when the same page is open.
+    if (url !== HOME && url !== NEWTAB && !opts.fresh) {
       const existing = tabsRef.current.find((t) => sameTabUrl(t.url, url));
       if (existing) {
         ensureLive(existing.id);
@@ -1855,7 +1867,7 @@ function BrowserPaneBase({
       throw error;
     }
     swappingRef.current = true;
-    missionRestorePendingRef.current = false;
+    endRestore();
     if (missionTabsTimerRef.current) { window.clearTimeout(missionTabsTimerRef.current); missionTabsTimerRef.current = null; }
     teardownLiveWebviews();
     setLayouts((prev) => ({ ...prev, [destinationId]: destinationLayout }));
@@ -2050,12 +2062,12 @@ function BrowserPaneBase({
       void swapWorkspace({ kind: "mosaic", id: startup })
         .then(() => { if (pendingId) mosaicReturnRef.current = pendingId; })
         .catch(() => swapWorkspace({ kind: "regular" }))
-        .catch(() => { missionRestorePendingRef.current = false; });
+        .catch(endRestore);
       return;
     }
     if (!pendingId) {
       initDoneRef.current = true;
-      void swapWorkspace({ kind: "regular" }).catch(() => { missionRestorePendingRef.current = false; });
+      void swapWorkspace({ kind: "regular" }).catch(endRestore);
       return;
     }
     if (mission.activeMission) {
@@ -2063,14 +2075,14 @@ function BrowserPaneBase({
       // Keep regular pages out of mission persistence until the loaded
       // workspace commits. On failure, retain regular browsing and report it.
       void swapWorkspace({ kind: "mission", id: pendingId }).catch(() => {
-        missionRestorePendingRef.current = false; mission.closeMission();
+        endRestore(); mission.closeMission();
       });
     } else if (mission.missionsLoaded) {
       // The persisted mission no longer exists — resolve to regular browsing
       // rather than wedging the gate (which would silence persistence and
       // the daemon mirror forever).
       initDoneRef.current = true;
-      missionRestorePendingRef.current = false;
+      endRestore();
       mission.closeMission();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2183,8 +2195,11 @@ function BrowserPaneBase({
   const lastOpenNonceRef = useRef(0);
   const onOpenRequestConsumedRef = useRef(onOpenRequestConsumed);
   onOpenRequestConsumedRef.current = onOpenRequestConsumed;
+  const linkedModeRef = useRef(linkedMode);
+  linkedModeRef.current = linkedMode;
   useEffect(() => {
-    if (!openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
+    // Held until the mount-time restore has swapped its tabs in.
+    if (!workspaceRestored || !openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
     lastOpenNonceRef.current = openRequest.nonce;
     const existing = openRequest.focusBrowseId
       ? tabsRef.current.find((t) => t.browseId === openRequest.focusBrowseId)
@@ -2194,9 +2209,13 @@ function BrowserPaneBase({
       selectTabRef.current(existing.id);
       browseId = existing.browseId;
     } else {
-      browseId = openTabRef.current(openRequest.url, {});
+      browseId = openTabRef.current(openRequest.url, { fresh: !!openRequest.chat });
     }
     if (browseId && (openRequest.chat || (openRequest.focusBrowseId && !openRequest.quiet))) {
+      // The tab's OWN thread, in either mode: that is where a search's turn
+      // goes and where "View result" finds it. The mode-wins effect keeps it,
+      // since it names the tab this same batch brings to the front.
+      setFlipFor(linkedModeRef.current ? browseId : null);
       if (openRequest.chat) {
         seedPageChat({ text: openRequest.chat.text, nonce: openRequest.nonce, autoSend: openRequest.chat.autoSend });
       }
@@ -2206,7 +2225,7 @@ function BrowserPaneBase({
     }
     onOpenRequestConsumedRef.current?.(browseId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openRequest]);
+  }, [openRequest, workspaceRestored]);
 
   // The browse agent switches the user into an existing tab by emitting
   // `browse-focus-tab`. selectTab foregrounds it AND moves the discussion into

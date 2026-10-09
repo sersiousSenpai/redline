@@ -46,4 +46,16 @@ describe("Search from the plan", () => {
     const consumed = app.slice(app.indexOf("const onBrowserOpenConsumed ="), app.indexOf("const openUrlInBrowser ="));
     expect(consumed).toContain("research: { ...pending.request.research!, browseId }");
   });
+
+  it("opens every search in a fresh tab whose chat is that tab's own", () => {
+    const pane = readFileSync(join(process.cwd(), "src/components/BrowserPane.tsx"), "utf8");
+    const effect = pane.slice(pane.indexOf("const lastOpenNonceRef = useRef(0);"), pane.indexOf("const selectTabRef = useRef(selectTab);"));
+    expect(effect).toContain("openTabRef.current(openRequest.url, { fresh: !!openRequest.chat })");
+    // Linked mode on means "shared unless flipped", so the new tab is flipped
+    // to its own chat; off, it already is its own.
+    expect(effect).toContain("setFlipFor(linkedModeRef.current ? browseId : null)");
+    expect(effect).not.toContain("setOwnChatsByWorkspace");
+    // The mode-wins effect must queue its update first when both run at once.
+    expect(pane.indexOf("setFlipFor(f => f === discussionBrowseId ? f : null)")).toBeLessThan(pane.indexOf("const lastOpenNonceRef = useRef(0);"));
+  });
 });

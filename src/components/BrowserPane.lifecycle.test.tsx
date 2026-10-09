@@ -242,6 +242,51 @@ describe("linked mode decides tab chat vs shared chat", () => {
   });
 });
 
+describe("plan Search", () => {
+  const url = "https://search.test/?q=token+bucket";
+  const search = (nonce: number) => ({ url, nonce, chat: { text: "Research token buckets", autoSend: true } });
+  const tabCount = () => host.querySelectorAll('[role="tab"]').length;
+  it.each([true, false])("opens a fresh tab with its own thread every time (linked mode %s)", async (linked) => {
+    if (linked) linkedModeOn();
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed });
+    const before = conversation();
+    await mount({ onOpenRequestConsumed, openRequest: search(1) });
+    const first = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect(first).not.toBe(before);
+    expect(tabCount()).toBe(3);
+    // The research turn is seeded into the new tab's own thread — the one the
+    // research comment links to.
+    expect(conversation()).toBe(first);
+    expect(dock.querySelector(`[data-conversation="${first}"]`)!.getAttribute("data-seed")).toBe("Research token buckets");
+    await mount({ onOpenRequestConsumed, openRequest: search(2) });
+    const second = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect(second).not.toBe(first);
+    expect(tabCount()).toBe(4);
+    expect(conversation()).toBe(second);
+    // "View result" brings the first search's own thread back, not the shared one.
+    await mount({ onOpenRequestConsumed, openRequest: { url, nonce: 3, focusBrowseId: first } });
+    expect(conversation()).toBe(first);
+    expect(tabCount()).toBe(4);
+    // The Front Door's quiet reopen leaves the choice to linked mode.
+    await mount({ onOpenRequestConsumed, openRequest: { url, nonce: 4, focusBrowseId: second, quiet: true } });
+    expect(conversation()).toBe(linked ? sharedThread() : second);
+  });
+  it("waits for the restored pages when the search is what first opens the browser", async () => {
+    // The pane mounts with the request, and the saved workspace swaps in
+    // after it — the search's tab must land in that set, not before it.
+    linkedModeOn();
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed, openRequest: search(1) });
+    const browseId = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect([...host.querySelectorAll('[role="tab"]')].map((tab) => tab.getAttribute("aria-label"))).toEqual(["one", "two", "search.test"]);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe(url);
+    expect(conversation()).toBe(browseId);
+    expect(dock.querySelector("[data-seed]")!.getAttribute("data-seed")).toBe("Research token buckets");
+    expect(onOpenRequestConsumed).toHaveBeenCalledOnce();
+  });
+});
+
 it("shows the same native bounds again after an overlay hides both tiles", async () => {
   await mount();
   const views = [...mocks.views.values()];
