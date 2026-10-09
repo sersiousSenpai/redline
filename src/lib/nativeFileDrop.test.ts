@@ -128,6 +128,22 @@ describe("native file drop router", () => {
     expect(door.onDrop).toHaveBeenCalledWith(["/tmp/x"]);
   });
 
+  it("never lets a drop through a marked cover, but delivers to a target on it", async () => {
+    const terminal = target("terminal");
+    const card = document.body.appendChild(document.createElement("div"));
+    card.setAttribute("data-drop-cover", "");
+    const heading = card.appendChild(document.createElement("button"));
+    const door = target("door", card);
+    await settle();
+    stack = [heading, card, terminal.el, document.body];
+    native({ type: "drop", paths: ["/tmp/x"], position: at });
+    expect(terminal.onDrop).not.toHaveBeenCalled();
+    stack = [door.el, card, terminal.el, document.body];
+    native({ type: "drop", paths: ["/tmp/y"], position: at });
+    expect(door.onDrop).toHaveBeenCalledWith(["/tmp/y"]);
+    expect(terminal.onDrop).not.toHaveBeenCalled();
+  });
+
   it("skips a registered target that has left the document", async () => {
     const stale = target("stale");
     const live = target("live");

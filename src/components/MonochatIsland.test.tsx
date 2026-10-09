@@ -61,6 +61,9 @@ describe("the hover peek", () => {
     expect(host.querySelector("article")!.hasAttribute("inert")).toBe(false);
     expect(card().getAttribute("role")).toBe("region");
     expect(card().hasAttribute("aria-modal")).toBe(false);
+    // Not modal, but a file dropped on its chrome must not fall through to
+    // the terminal under it (lib/nativeFileDrop).
+    expect(card().hasAttribute("data-drop-cover")).toBe(true);
     await leave(); await advance(399);
     expect(isOpen()).toBe(true);
     await advance(1);

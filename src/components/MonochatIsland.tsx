@@ -312,7 +312,7 @@ export function MonochatIsland({ open, onOpenChange, pose = "compose", size = "r
         <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span></span>
       </button>
     </div>
-    <div ref={card} id="rl-monochat-card" className="rl-monochat-card" role="region" aria-label="Redline"
+    <div ref={card} id="rl-monochat-card" className="rl-monochat-card" role="region" aria-label="Redline" data-drop-cover
       data-pose={pose} data-size={pose === "chat" ? size : undefined} data-reduced={reduced}
       hidden={!open} inert={!open}>
       <div className="rl-monochat-heading">

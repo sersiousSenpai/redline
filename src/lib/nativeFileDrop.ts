@@ -13,9 +13,10 @@
 //
 // The rule now lives here, once: the topmost REGISTERED target under the
 // pointer wins. Non-target overlays are looked through, so a composer that
-// really is on top still wins and the notch never eats a drop. The one thing
-// not looked through is a modal dialog (or the cover behind it): a drop onto
-// one goes nowhere rather than into whatever it covers.
+// really is on top still wins and the notch never eats a drop. Not looked
+// through: a modal dialog (or the cover behind it), and a floating surface
+// marked `data-drop-cover` (the Redline card). A drop onto one goes nowhere
+// rather than into whatever it covers; its own targets still take theirs.
 //
 // Positions are logical AppKit points, which are already CSS pixels: wry
 // reports them unscaled (Tauri labels them "physical") and the webview's
@@ -76,6 +77,8 @@ export function registerFileDropTarget(
 }
 
 const MODAL = '[aria-modal="true"]';
+/** A surface that isn't modal but still hides what is under it. */
+const COVER = "[data-drop-cover]";
 
 /** The registered target a drop at (x, y) belongs to, if any. */
 export function fileDropTargetAt(x: number, y: number): HTMLElement | null {
@@ -85,8 +88,8 @@ export function fileDropTargetAt(x: number, y: number): HTMLElement | null {
     for (let n: Element | null = hit; n; n = n.parentElement) {
       if (targets.has(n as HTMLElement) && n.isConnected) return n as HTMLElement;
     }
-    // A modal, or the dimmed cover it sits on, ends the search.
-    if (hit.closest(MODAL) || [...hit.children].some((child) => child.matches(MODAL))) return null;
+    // A modal, the dimmed cover it sits on, or a marked cover ends the search.
+    if (hit.closest(`${MODAL}, ${COVER}`) || [...hit.children].some((child) => child.matches(MODAL))) return null;
   }
   return null;
 }
