@@ -63,20 +63,31 @@ try {
 
   await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1050, height: 900, deviceScaleFactor: 1, mobile: false });
   await cdp.call("Page.navigate", {url:report.fixtureUrl});
-  for(let i=0;i<200 && !(await cdp.evaluate("document.querySelectorAll('.rl-mermaid--ready').length===2"));i++) await delay(100);
-  check("Both real Mermaid diagrams render",await cdp.evaluate("document.querySelectorAll('.rl-mermaid--ready').length===2"));
+  for(let i=0;i<200 && !(await cdp.evaluate("document.querySelectorAll('.rl-mermaid--ready').length===3"));i++) await delay(100);
+  check("All three real Mermaid diagrams render",await cdp.evaluate("document.querySelectorAll('.rl-mermaid--ready').length===3"));
   for(const theme of ["studio","basic","ocean"]){
     await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`);await settle();
     await screenshot(`sidecar-${theme}`);
-    const ink=await cdp.evaluate("(()=>{const e=document.querySelector('.rl-mermaid--ink');return {bg:getComputedStyle(e).backgroundColor,emphasis:!!e.querySelector('.rl-emph'),width:e.scrollWidth,client:e.clientWidth};})()");
-    check(`${theme}: ink figure is transparent with one emphasized outcome`,ink.bg==='rgba(0, 0, 0, 0)'&&ink.emphasis,ink);
+    const plate=await cdp.evaluate("(()=>{const e=document.querySelector('[data-qa=wide] .rl-mermaid--ready');return {bg:getComputedStyle(e).backgroundColor,frames:document.querySelectorAll('.rl-reply-card,.rl-mermaid--ink').length};})()");
+    check(`${theme}: the reply's figure sits on the light plate, with no card frame`,plate.bg!=='rgba(0, 0, 0, 0)'&&plate.frames===0,plate);
   }
-  check("Reply initially collapsed", !(await bounds('textarea')));
-  await click('.rl-reply-pill');
-  check("Reply focuses composer",await cdp.evaluate("document.activeElement?.tagName==='TEXTAREA'"));
-  await key('Escape','Escape',27);
-  check("Escape collapses empty reply",!(await bounds('textarea')));
-  await click('.rl-discuss-mode button:first-child');
+  check("Every bubble carries a byline",await cdp.evaluate("[...document.querySelectorAll('[data-qa=wide] span')].some(e=>getComputedStyle(e).textTransform==='uppercase'&&e.textContent==='Claude')"));
+  for(const pane of ["wide","pane"]){
+    await cdp.evaluate(`document.querySelector('[data-qa=${pane}] .rl-thread-heading').scrollIntoView({block:'start'})`);await settle();
+    await screenshot(`sidecar-heading-${pane}`);
+    // "Wraps only when it must": the controls share the label's row whenever
+    // the two fit side by side, and never spill past the card.
+    const heading=await cdp.evaluate(`(()=>{const h=document.querySelector('[data-qa=${pane}] .rl-thread-heading');const [label,tools]=h.children;const l=label.getBoundingClientRect(),t=tools.getBoundingClientRect(),hr=h.getBoundingClientRect();const gap=parseFloat(getComputedStyle(h).columnGap)||0;return {label:label.textContent,labelFont:getComputedStyle(label).fontFamily,chip:getComputedStyle(h.querySelector('.rl-fd-model-chip')).fontSize,fits:l.width+gap+[...tools.children].reduce((w,c)=>{const cs=getComputedStyle(c);return w+c.getBoundingClientRect().width+parseFloat(cs.marginLeft)+parseFloat(cs.marginRight)+(parseFloat(getComputedStyle(tools).columnGap)||0);},0)-(parseFloat(getComputedStyle(tools).columnGap)||0)<=hr.width,widths:{heading:hr.width,label:l.width,tools:[...tools.children].map(c=>Math.round(c.getBoundingClientRect().width))},sameRow:Math.abs(l.top-t.top)<6,overflow:Math.max(t.right,...[...tools.querySelectorAll('button')].map(b=>b.getBoundingClientRect().right))-hr.right};})()`);
+    check(`${pane}: heading reads "Discussion" in the UI face with a compact chip`,heading.label==='▾Discussion'&&!/mono/i.test(heading.labelFont)&&heading.chip==='10.5px',heading);
+    check(`${pane}: heading controls wrap only when they must, and never overflow`,(heading.sameRow||!heading.fits)&&heading.overflow<=1,heading);
+    await cdp.evaluate(`document.querySelector('[data-qa=${pane}] textarea').scrollIntoView({block:'center'})`);await settle();
+    await screenshot(`sidecar-footer-${pane}`);
+    const footer=await cdp.evaluate(`(()=>{const root=document.querySelector('[data-qa=${pane}]');const ta=root.querySelector('textarea').getBoundingClientRect();const f=root.querySelector('.rl-discussion-footer');const fr=f.getBoundingClientRect();const d=root.querySelector('.rl-discard-thread').getBoundingClientRect();const first=f.firstElementChild.getBoundingClientRect();return {composerAbove:ta.bottom<=fr.top+1,fits:first.width+8+d.width<=fr.width,oneRow:Math.abs(first.top-d.top)<6,discardRight:Math.abs(d.right-fr.right)<2};})()`);
+    check(`${pane}: the reply box is open above one action row, Discard on the right`,footer.composerAbove&&(footer.oneRow||!footer.fits)&&footer.discardRight,footer);
+  }
+  await cdp.evaluate("document.querySelector('main').scrollTo(0,0)");await settle();
+  check("Reply box needs no click",!!(await bounds('[data-qa=wide] textarea'))?.visible&&!(await cdp.evaluate("[...document.querySelectorAll('button')].some(b=>b.textContent==='Reply…')")));
+  await click('[data-qa=wide] .rl-discuss-mode button:first-child');
   check("Report switch offers explicit write-up",!!(await bounds('.rl-write-report')));
   await screenshot('sidecar-report-switch');
   await click('[aria-label="Change plan state"]');

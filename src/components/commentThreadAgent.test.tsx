@@ -83,6 +83,18 @@ const flush = () =>
 
 const text = () => host.textContent ?? "";
 
+/** The small uppercase speaker labels above each bubble. */
+const bylines = () =>
+  [...host.querySelectorAll("span")]
+    .filter((el) => el.style.textTransform === "uppercase")
+    .map((el) => el.textContent);
+
+/** Types into a React-controlled textarea the way a keystroke would. */
+const type = (ta: HTMLTextAreaElement, value: string) => {
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(ta, value);
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+};
+
 const clickWith = (needle: string) => {
   const btn = [...host.querySelectorAll("button")].find((b) =>
     (b.textContent ?? "").includes(needle),
@@ -147,7 +159,7 @@ describe("CommentThread names the agent that will actually answer", () => {
     history = [seed, reply];
     await mount("antigravity");
     expect(text()).toContain("Claude sidecar: Because the parser needs it first.");
-    await act(async () => clickWith("read-only"));
+    await act(async () => clickWith("Discussion"));
     await flush();
     await act(async () => clickWith("Attach to next submit"));
     await flush();
@@ -189,10 +201,10 @@ describe("CommentThread names the agent that will actually answer", () => {
     expect(text()).toContain("Codex: Because the parser needs it first.");
 
     // Expanded: the bubble's own speaker label.
-    await act(async () => clickWith("read-only"));
+    await act(async () => clickWith("Discussion"));
     await flush();
     expect(text()).toContain(reply.body);
-    expect(host.querySelector(".rl-reply-card")).not.toBeNull();
+    expect(bylines()).toEqual(["Codex"]);
     expect(text()).not.toContain("Claude");
   });
 
@@ -210,7 +222,7 @@ describe("CommentThread names the agent that will actually answer", () => {
   it("escalates a transcript attributed to the agent that wrote it", async () => {
     history = [seed, reply];
     await mount("codex");
-    await act(async () => clickWith("read-only"));
+    await act(async () => clickWith("Discussion"));
     await flush();
     await act(async () => clickWith("Attach to next submit"));
     await flush();
@@ -285,7 +297,7 @@ describe("one-press Send starts the discussion", () => {
 });
 
 
-describe("discussion modes and compact composer", () => {
+describe("discussion modes", () => {
   it("defaults to conversation and sends the mode without changing the user text", async () => {
     await mount("codex");
     expect(host.querySelector('button[aria-pressed="true"]')?.textContent).toBe("Conversation");
@@ -296,7 +308,7 @@ describe("discussion modes and compact composer", () => {
   it("persists the toggle and writes a report only on an explicit click", async () => {
     history = [seed, reply];
     await mount(null);
-    await act(async () => clickWith("read-only"));
+    await act(async () => clickWith("Discussion"));
     expect(text()).not.toContain("Write it up");
     await act(async () => clickWith("Report"));
     expect(localStorage.getItem(`redline.sidecarMode.${SESSION}.${ITEM}`)).toBe("report");
@@ -306,17 +318,6 @@ describe("discussion modes and compact composer", () => {
     expect(invokeMock.mock.calls.find(([cmd]) => cmd === "fork_thread_send")?.[1]).toMatchObject({ mode: "report", text: "Write this up — the full answer to my original comment given everything we've discussed." });
     expect(text()).not.toContain("Write it up →");
   });
-  it("focuses Reply and collapses an empty composer on Escape", async () => {
-    history = [seed, reply];
-    await mount(null);
-    await act(async () => clickWith("read-only"));
-    expect(host.querySelector("textarea")).toBeNull();
-    await act(async () => clickWith("Reply…"));
-    const ta = host.querySelector("textarea")!;
-    expect(document.activeElement).toBe(ta);
-    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
-    expect(host.querySelector("textarea")).toBeNull();
-  });
   it("reports visible discussion and promotes questions with their transcript", async () => {
     history = [seed, reply];
     const onHasDiscussion = vi.fn();
@@ -325,6 +326,69 @@ describe("discussion modes and compact composer", () => {
     expect(onHasDiscussion).toHaveBeenCalledWith(true);
     await act(async () => clickWith("Make this a change"));
     expect(invokeMock.mock.calls.find(([cmd]) => cmd === "attach_discussion")?.[1]).toMatchObject({ asChange: true });
+  });
+});
+
+describe("the discussion reads like a discussion", () => {
+  const sends = () => invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_send");
+
+  it("heads the thread \"Discussion\" with no mechanism copy or message count", async () => {
+    history = [seed, reply];
+    await mount(null);
+    const label = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Discussion"))!;
+    expect(label.textContent).toBe("▸Discussion");
+    expect(label.title).toBe("");
+    expect(text()).not.toMatch(/forked|read-only|· 1/);
+  });
+
+  it("keeps the controls in the heading row, beside the label", async () => {
+    history = [seed, reply];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    const heading = host.querySelector(".rl-thread-heading")!;
+    expect(heading.querySelector('[aria-label="Discussion model and effort"]')).not.toBeNull();
+    expect([...heading.querySelectorAll("button")].map((b) => b.textContent)).toEqual(
+      expect.arrayContaining(["▾Discussion", "A−", "A+", "⤡"]),
+    );
+  });
+
+  it.each(["cursor", "antigravity"])("says a %s thread is a separate read-only sidecar on hover only", async (backend) => {
+    history = [seed, reply];
+    await mount(backend);
+    const label = [...host.querySelectorAll("button")].find((b) => b.textContent?.includes("Discussion"))!;
+    expect(label.title).toMatch(/separate read-only sidecar/i);
+    expect(text()).not.toContain("read-only");
+  });
+
+  it("bylines every bubble: You, then the agent", async () => {
+    const followUp: ThreadMessage = { ...seed, id: "m-3", body: "And the reader?", createdAt: 4 };
+    history = [seed, reply, followUp];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(bylines()).toEqual(["Claude", "You"]);
+  });
+
+  it("shows the reply box without a click", async () => {
+    history = [seed, reply];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(host.querySelector("textarea")).not.toBeNull();
+    expect(text()).not.toContain("Reply…");
+  });
+
+  it("lets the reviewer type ahead while a reply streams; only Send waits", async () => {
+    history = [seed, reply];
+    statusReply = { ...idle, streaming: true, startedAt: 500, partial: "Well,", seq: 1 };
+    await mount(null);
+    await flush();
+    const ta = host.querySelector("textarea")!;
+    expect(ta.disabled).toBe(false);
+    await act(async () => type(ta, "Next question"));
+    expect(ta.value).toBe("Next question");
+    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(sends()).toHaveLength(0);
+    expect(ta.value).toBe("Next question");
+    expect(text()).toContain("Stop");
   });
 });
 

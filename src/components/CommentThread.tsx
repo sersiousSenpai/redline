@@ -377,7 +377,10 @@ export const CommentThread = memo(function CommentThread({
       style={{ borderColor: "var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="rl-thread-heading flex flex-wrap items-center gap-1.5">
+      {/* One row, label left and controls right. The controls drop to a
+          second row only when the pane is too narrow to hold both, and wrap
+          among themselves rather than overflow the card. */}
+      <div className="rl-thread-heading flex flex-wrap items-center gap-x-1.5 gap-y-1">
         <button
           type="button"
           onClick={() =>
@@ -388,23 +391,19 @@ export const CommentThread = memo(function CommentThread({
               return !x;
             })
           }
-          className="rl-thread-heading-label flex items-center gap-1.5 text-left"
+          // How the thread runs (a read-only fork) is mechanism, not meaning,
+          // so the label doesn't say it. A sidecar — a different process from
+          // the plan's author — is worth knowing about, so it says so on hover.
+          title={sidecar ? `Separate read-only sidecar for this ${author} plan` : undefined}
+          className="flex min-w-0 items-center gap-1.5 text-left"
           style={{
-            fontSize: "10px",
+            fontSize: "11px",
             fontWeight: 600,
-            fontFamily: "var(--font-mono)",
-            letterSpacing: "0.06em",
-            color: "var(--color-ink-muted)",
+            color: "var(--color-ink)",
           }}
         >
           <span aria-hidden>{expanded ? "▾" : "▸"}</span>
-          <span>{sidecar ? "separate sidecar" : "forked from the plan session"} · read-only</span>
-          <span
-            className="font-mono normal-case"
-            style={{ color: "var(--color-ink-muted)" }}
-          >
-            · {visible.length}
-          </span>
+          <span>Discussion</span>
           {/* Collapsed only — an expanded thread shows the body spinner
               (with the elapsed counter) instead, never both at once. */}
           {status === "streaming" && !expanded && (
@@ -438,7 +437,7 @@ export const CommentThread = memo(function CommentThread({
             open. Siblings of the collapse button (buttons can't nest); each
             stops propagation so it never toggles collapse. */}
         {expanded && (
-          <div className="rl-thread-heading-tools flex items-center gap-1 ml-auto">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1 ml-auto">
             <ModeToggle mode={mode} onChange={switchMode} disabled={status === "streaming"} />
             <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
             <button
@@ -520,7 +519,6 @@ export const CommentThread = memo(function CommentThread({
                     ticker used to — so the bubble renders from the first line
                     of the stream, not the first token. */}
                 <StreamingBubble
-                  card
                   text={liveText}
                   agent={agent}
                   inspect={{ surface: "fork", key: commentId }}
@@ -541,7 +539,6 @@ export const CommentThread = memo(function CommentThread({
               send("Write this up — the full answer to my original comment given everything we've discussed.");
             }}>Write it up →</button>
           )}
-          <div className="rl-discussion-footer">
           <Composer
             sessionId={sessionId}
             draft={draft}
@@ -554,6 +551,9 @@ export const CommentThread = memo(function CommentThread({
             onStop={cancel}
           />
 
+          {/* One action row under the composer: escalation on the left,
+              Discard on the right. */}
+          <div className="rl-discussion-footer">
           {/* Once the exchange has settled, let the reviewer route what they
               just worked out back into the revise loop — the fork itself
               can't change the plan. Available pre-submit (the rider bundles
@@ -647,6 +647,7 @@ export const CommentThread = memo(function CommentThread({
 
 function MessageBubble({
   msg,
+  agent,
   onRetry,
   onResend,
   meter,
@@ -664,8 +665,8 @@ function MessageBubble({
   const isError = msg.status === "error";
   const isUnsent = msg.status === "unsent";
   return (
-    <div className={`flex flex-col gap-0.5 ${isUser ? "rl-thread-user" : "rl-reply-card"}`}>
-      {isError && <span
+    <div className="flex flex-col gap-0.5">
+      <span
         style={{
           fontSize: "9px",
           fontWeight: 600,
@@ -681,8 +682,8 @@ function MessageBubble({
         {/* Redline wrote the error sentence, not the model. Bylining it
             `agent` is what made a raw machine token read as something Claude
             had said. */}
-        Redline
-      </span>}
+        {isUser ? "You" : isError ? "Redline" : agent}
+      </span>
       {isError ? (
         <div
           style={{
@@ -695,7 +696,7 @@ function MessageBubble({
           {msg.body}
         </div>
       ) : (
-        <MarkdownView body={msg.body} compact rich figure={isUser ? "plate" : "ink"} />
+        <MarkdownView body={msg.body} compact rich />
       )}
       {isError && onRetry && <RetryNote onRetry={onRetry} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
@@ -728,10 +729,6 @@ function Composer({
   onStop: () => void;
 }) {
   const files = useAttachmentCapture(sessionId);
-  const [open, setOpen] = useState(false);
-  const expanded = open || !!draft || streaming || files.attachments.length > 0 || files.dragOver;
-  const focusReply = useRef(false);
-  useEffect(() => { if (streaming) setOpen(false); }, [streaming]);
   const submit = () => {
     onSend(files.attachments);
     files.clear();
@@ -746,12 +743,9 @@ function Composer({
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
   };
-  useEffect(autosize, [draft, expanded]);
-  useEffect(() => { if (open && focusReply.current) { focusReply.current = false; taRef.current?.focus(); } }, [open]);
+  useEffect(autosize, [draft]);
   return (
-    <div ref={files.hostRef} className={expanded ? "rl-thread-composer is-open" : "rl-thread-composer"}>
-      {!expanded ? <button type="button" className="rl-reply-pill" onClick={() => { focusReply.current = true; setOpen(true); }}>Reply…</button> : <>
-
+    <div ref={files.hostRef}>
       {/* Same capture as the main composer: Tauri swallows HTML5 drops, so the
           webview-level event does the work and each host hit-tests itself. */}
       <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
@@ -772,22 +766,16 @@ function Composer({
           autosize();
         }}
         onPaste={files.onPaste}
-        onFocus={() => setOpen(true)}
-        onBlur={(e) => {
-          if (!draft.trim() && files.attachments.length === 0 && !e.currentTarget.parentElement?.contains(e.relatedTarget)) setOpen(false);
-        }}
         onKeyDown={(e) => {
-          if (e.key === "Escape" && !draft.trim() && files.attachments.length === 0) {
-            e.preventDefault(); setOpen(false); taRef.current?.blur();
-          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
+            // The fork rejects a send while it is busy — only Send waits.
+            // Typing the next question ahead of the reply never does.
             if (!streaming) submit();
           }
         }}
         placeholder={files.dragOver ? "Drop to attach…" : "Ask a follow-up…"}
         rows={2}
-        disabled={streaming}
         className="flex-1 rounded px-2 py-1"
         style={{
           fontSize: "calc(12px * var(--rl-discussion-zoom, 1))",
@@ -831,7 +819,6 @@ function Composer({
         </button>
       )}
       </div>
-      </>}
     </div>
   );
 }
