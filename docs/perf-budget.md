@@ -62,6 +62,15 @@ it, that's the discussion to have before merging.
    its own `std::thread` (the PTY pump) is also fine — the gotcha is *only*
    synchronous work inside the command body.
 
+   SQLite is heavy whatever the query's size. Every write waits on the one
+   writer connection (`Database::lock_conn`), which a backup, the canary or an
+   embedding tick can hold for seconds. A read goes through
+   `Database::read_conn`, one of a few read-only WAL connections that never
+   wait for the writer and always see every write that has returned; the
+   writer is for writes. State that is edited in memory and then persisted
+   releases its own lock before the write, so a poll reading it never waits on
+   SQLite either (`SessionStore::lock_to_write`).
+
 5. **The number of *visible* terminals is a budget dimension.** The tile grid
    puts up to fourteen live xterms on screen at once, all sharing the one main
    thread — a variable the user controls directly. Each stream is individually
@@ -112,9 +121,10 @@ it, that's the discussion to have before merging.
 
 These are cheap regression nets, not a substitute for the rules above:
 
-- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`
-  and that PTY output stays batched over a Channel (no `pty-output` per-read
-  emit). Fails the Rust test suite if either regresses.
+- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`,
+  that PTY output stays batched over a Channel (no `pty-output` per-read
+  emit), and that run events carry a run id and revision rather than the
+  graph. Fails the Rust test suite if any of them regresses.
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
@@ -129,8 +139,9 @@ These are cheap regression nets, not a substitute for the rules above:
   endless paint animation in one is listed in `PACKAGE_SWITCHES` with the
   switch that starts it, which nothing using the package may set.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
-  `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
-  shells out. It is a digest signal, not a test, so it never fails a build: the
+  `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
+  shells out, or reaches SQLite (`.database()`, a store's `db.` handle,
+  `lock_conn`, `read_conn`). It is a digest signal, not a test, so it never fails a build: the
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.

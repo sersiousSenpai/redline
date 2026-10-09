@@ -317,12 +317,19 @@ const HEAVY_MARKERS: &[&str] = &[
     "base64",
     "fs::read",
     "std::process::Command",
-    // The shared DB lock. Every SQLite read waits on ONE `Mutex<Connection>`
+    // The shared DB lock. Every SQLite write waits on ONE `Mutex<Connection>`
     // that a backup, the canary, or an embedding tick can hold for seconds; a
     // sync command waiting on it waits on the main thread (the 2026-09-29
-    // memory beach ball was exactly this, in `get_work_graph`).
+    // memory beach ball was exactly this, in `get_work_graph`). A command
+    // reaches the database through a store handle as often as through
+    // `.database()`, and a read connection is still disk I/O.
     ".database()",
     "polis_handle()",
+    "state.db.",
+    "settings.db.",
+    "companion.db.",
+    "lock_conn",
+    "read_conn",
 ];
 
 /// A **sync** `#[tauri::command]` whose body does real work runs on the WebView
@@ -339,9 +346,14 @@ pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
         // The body runs from the signature to the next top-level `}` at the
         // same indent — approximated by the next `\n}` or `\n    }`, which is
         // enough to catch a heavy call without parsing Rust.
-        let name = bytes
+        let signature = bytes
             .get(i + 1..i + 4)
-            .and_then(|w| w.iter().find(|l| l.contains("fn ")))
+            .and_then(|w| w.iter().find(|l| l.contains("fn ")));
+        // An `async fn` command already runs off the main thread.
+        if signature.is_some_and(|l| l.contains("async fn ")) {
+            continue;
+        }
+        let name = signature
             .and_then(|l| l.split("fn ").nth(1))
             .and_then(|l| l.split(['(', '<']).next())
             .unwrap_or("")
@@ -1135,13 +1147,39 @@ mod tests {
                    #[tauri::command]\n\
                    fn locks(store: State<'_, SessionStore>) -> i64 {\n\
                    \x20   store.database().max_ledger_seq().unwrap()\n\
+                   }\n\
+                   #[tauri::command]\n\
+                   pub async fn waits(state: State<'_, RunnerState>) -> Result<(), String> {\n\
+                   \x20   state.db.runner_list().map(|_| ())\n\
                    }\n";
         let found = probe_command_hygiene("x.rs", src);
+        // `waits` is an `async fn`: already off the main thread, not a finding.
         assert_eq!(found.len(), 2, "the sync+heavy one and the sync DB-lock one: {found:?}");
         assert!(found[0].detail.contains("heavy"));
         assert!(found[0].detail.contains("read_to_string"));
         assert!(found[1].detail.contains("`locks`"));
         assert!(found[1].detail.contains(".database()"));
+    }
+
+    /// Every way a sync command reaches SQLite is flagged: a store's own
+    /// handle (`state.db.`, `settings.db.`, `companion.db.`) and the
+    /// connection itself, writer or reader.
+    #[test]
+    fn command_hygiene_flags_every_way_a_sync_command_reaches_sqlite() {
+        for (handle, body) in [
+            ("state.db.", "state.db.runner_list()"),
+            ("settings.db.", "settings.db.get_setting(\"k\")"),
+            ("companion.db.", "companion.db.list_companions()"),
+            ("lock_conn", "mission.db.lock_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
+            ("read_conn", "mission.db.read_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
+        ] {
+            let src = format!("#[tauri::command]\npub fn reads(x: u32) -> u32 {{\n    let _ = {body};\n    x\n}}\n");
+            let found = probe_command_hygiene("x.rs", &src);
+            assert_eq!(found.len(), 1, "{handle}: {found:?}");
+            assert!(found[0].detail.contains(handle), "{handle}: {}", found[0].detail);
+            let off_main = src.replace("#[tauri::command]", "#[tauri::command(async)]");
+            assert!(probe_command_hygiene("x.rs", &off_main).is_empty(), "{handle}");
+        }
     }
 
     #[test]

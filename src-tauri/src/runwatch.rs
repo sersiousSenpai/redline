@@ -1793,7 +1793,7 @@ fn scan_once(db: &db::Database, ctx: &mut WatchCtx, one_shot: bool, live: bool) 
 
 /// Every anchored run, newest first, run_state joined — the History tab's
 /// list and the App's "is anything running" probe.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_orchestrations(store: tauri::State<'_, SessionStore>) -> Vec<db::OrchestrationRow> {
     store.database().list_orchestrations().unwrap_or_default()
 }

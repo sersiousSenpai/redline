@@ -296,6 +296,8 @@ mod tests {
             assert_async_command(runner, "runner.rs", func);
         }
         let runwatch = include_str!("runwatch.rs");
+        // The Runs list re-reads on every `orchestration-live` event.
+        assert_async_command(runwatch, "runwatch.rs", "list_orchestrations");
         assert_async_command(runwatch, "runwatch.rs", "orchestration_snapshot");
         assert_async_command(runwatch, "runwatch.rs", "orchestration_agent_tail");
         assert_async_command(include_str!("companion.rs"), "companion.rs", "companion_build_activity");
