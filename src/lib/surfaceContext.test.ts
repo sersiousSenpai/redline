@@ -16,7 +16,7 @@ import {
   type ChipSources,
   type ContextChip,
 } from "./surfaceContext";
-import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment } from "./contextBlocks";
+import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment, type SentContext } from "./contextBlocks";
 
 const surface = (kind: SurfaceInfo["kind"], over: Partial<SurfaceInfo> = {}): SurfaceInfo => ({
   kind, id: null, label: null, detail: null, projectPath: null, updatedAt: 0, ...over,
@@ -210,33 +210,43 @@ describe("unsentAttachment — a chat's attachments, once per version", () => {
   const page = pageBlock({ label: "browser-1", title: "Docs", url: "https://docs.test" });
 
   it("hands a chat each block once, and nothing when nothing changed", () => {
-    const sent = new Map<string, Set<string>>();
-    const first = unsentAttachment(sent, "chat-1", [plan(3), page]);
+    const sent = new Map<string, SentContext>();
+    const first = unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
     expect(first).toBe(renderContextBlocks([plan(3), page]));
-    expect(unsentAttachment(sent, "chat-1", [plan(3), page])).toBeNull();
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
   });
 
   it("sends only the block that changed — a revision, or an edit at the same version", () => {
-    const sent = new Map<string, Set<string>>();
-    unsentAttachment(sent, "chat-1", [plan(3), page]);
-    expect(unsentAttachment(sent, "chat-1", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
+    const sent = new Map<string, SentContext>();
+    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
     const edited = plan(4, "# Auth rewrite\n- step one\n- step two");
-    expect(unsentAttachment(sent, "chat-1", [edited, page])).toBe(renderContextBlocks([edited]));
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [edited, page])).toBe(renderContextBlocks([edited]));
   });
 
   it("remembers per chat, and forgets a chat whose attachment was lost", () => {
-    const sent = new Map<string, Set<string>>();
-    unsentAttachment(sent, "chat-1", [plan(3)]);
+    const sent = new Map<string, SentContext>();
+    unsentAttachment(sent, "chat-1", "claude-code", [plan(3)]);
     // Another conversation has never seen it.
-    expect(unsentAttachment(sent, "chat-2", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(unsentAttachment(sent, "chat-2", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
     // What App does on onContextLost: the next send carries everything again.
     sent.delete("chat-1");
-    expect(unsentAttachment(sent, "chat-1", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+  });
+
+  it("starts over when the chat moves to another provider, and again when it moves back", () => {
+    // A provider switch is a fresh CLI session either way (companion.rs's
+    // handoff), so the first turn on the new provider carries everything.
+    const sent = new Map<string, SentContext>();
+    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
+    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
   });
 
   it("attaches nothing for no blocks or only empty ones", () => {
-    const sent = new Map<string, Set<string>>();
-    expect(unsentAttachment(sent, "chat-1", [])).toBeNull();
-    expect(unsentAttachment(sent, "chat-1", [draftBlock("   ")])).toBeNull();
+    const sent = new Map<string, SentContext>();
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toBeNull();
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [draftBlock("   ")])).toBeNull();
   });
 });

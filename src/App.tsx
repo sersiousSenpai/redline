@@ -7476,12 +7476,14 @@ function App() {
 
   // A chat's attachments travel out of band, so the bubble shows only what was
   // typed, and once per version: what each chat has already been handed is
-  // remembered by block, and only a new or changed block goes again.
-  const chatContextSent = useRef(new Map<string, Set<string>>());
+  // remembered by block, and only a new or changed block goes again. The room
+  // runs on the door's harness, so a provider switch there is the fresh CLI
+  // session that has to be handed everything again.
+  const chatContextSent = useRef(new Map<string, import("./lib/contextBlocks").SentContext>());
   const chatAttachment = async (companionId: string, blocks: ContextBlock[]): Promise<string | null> => {
     if (blocks.length === 0) return null;
     const builders = await import("./lib/contextBlocks").catch(() => null);
-    return builders ? builders.unsentAttachment(chatContextSent.current, companionId, blocks) : null;
+    return builders ? builders.unsentAttachment(chatContextSent.current, companionId, frontDoorBackend.backend, blocks) : null;
   };
 
   const chatFromFrontDoor = async () => {

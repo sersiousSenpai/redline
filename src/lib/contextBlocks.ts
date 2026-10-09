@@ -115,12 +115,21 @@ export function diffBlock(review: {
  *  handed. Keyed per chat on each block's content: an unchanged plan rides one
  *  turn rather than every turn, and a revised one goes again. Null when there
  *  is nothing new. */
-export function unsentAttachment(sent: Map<string, Set<string>>, chatId: string, blocks: ContextBlock[]): string | null {
-  const seen = sent.get(chatId) ?? new Set<string>();
-  sent.set(chatId, seen);
-  const fresh = blocks.filter((b) => !seen.has(blockKey(b)));
-  for (const b of fresh) seen.add(blockKey(b));
+export function unsentAttachment(sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]): string | null {
+  const previous = sent.get(chatId);
+  const record = previous?.provider === provider ? previous : { provider, keys: new Set<string>() };
+  sent.set(chatId, record);
+  const fresh = blocks.filter((b) => !record.keys.has(blockKey(b)));
+  for (const b of fresh) record.keys.add(blockKey(b));
   return renderContextBlocks(fresh) || null;
+}
+
+/** What one chat has been handed, and on which provider. A provider switch is
+ *  a fresh CLI session that saw none of it (companion.rs's handoff), so the
+ *  record starts over — switching back included. */
+export interface SentContext {
+  provider: string;
+  keys: Set<string>;
 }
 
 /** The chip, the length, and a hash of what it says. */
