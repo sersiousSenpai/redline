@@ -8,20 +8,22 @@ describe("panel mask wiring", () => {
     const body = app.slice(app.indexOf(`const ${name} =`)).split("}, [")[0];
     expect(body).not.toContain("setPanelBreaks");
   });
-  it("a plan arrival opens the preference only when selecting the intercepted plan", () => {
+  it("a plan arrival never opens the discussion", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
-    const focus = arrival.slice(arrival.indexOf('const focusIntercepted ='), arrival.indexOf('if (graduated &&'));
+    // Neither the side pane nor the plan's Conversation Dock: both stay however
+    // the user left them, on the arrival itself and on its Review/Open toasts.
+    // Not opened, and not force-closed either, under any helper's name.
+    expect(arrival).not.toMatch(/setPaneCollapsed|revealPane|openPane|togglePane|setPanelBreaks/);
+    expect(arrival).not.toMatch(/setDockOpenBy|openDock|closeDock|toggleDock/);
     // The masked-surface branch of `arrivalFocus`'s "focus": selects, never
-    // yanks the surface or opens the pane — its Review action does that.
+    // yanks the surface — its Review action does that.
     const maskedArrival = arrival.slice(arrival.indexOf('if (focus === "focus") {'), arrival.indexOf('// flash'));
     expect(maskedArrival.length).toBeGreaterThan(0);
-    expect(arrival).not.toContain("revealPane()");
     expect(arrival).toContain("paneMaskedRef.current");
     expect(arrival).toContain('selectSurfaceRef.current("document")');
-    expect(arrival.match(/openPanePref\(\)/g)).toHaveLength(1);
-    expect(focus).toContain("openPanePref()");
-    expect(maskedArrival).not.toContain("openPanePref()");
     expect(maskedArrival).toContain("focusIntercepted()");
+    // The arrival-only opener is gone, so it cannot come back under its name.
+    expect(app).not.toContain("openPanePref");
   });
   it("a plan-less plate hides the pane without deferring intercepts or showing a surface hint", () => {
     expect(app).toContain('mainSurface === "document" && plateMode !== "plan" && !conversationExpanded && !panelBreaks.pane');
@@ -37,7 +39,8 @@ describe("panel mask wiring", () => {
   });
   it("voice comments focus their card without opening the pane", () => {
     const voice = app.slice(app.indexOf('// When a voice-authored comment'), app.indexOf('// Own-era diff'));
-    expect(voice).not.toContain('openPanePref');
+    expect(voice).not.toContain('setPaneCollapsed(false)');
+    expect(voice).not.toContain('revealPane()');
     expect(voice).toContain('setAutoOpenCommentId(fresh.id)');
     expect(voice).toContain('setFocusedCommentId(fresh.id)');
   });
