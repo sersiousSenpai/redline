@@ -265,6 +265,13 @@ describe("paint guard (perf rule 6)", () => {
     );
     expect(plate.map((u) => u.name).sort()).toEqual(["rl-aurora-dawn", "rl-aurora-dusk"]);
     for (const u of plate) expect(keyframes.get(u.name)).toEqual(new Set(["opacity"]));
+    // Focus brightens the rings through their own custom property. Set on the
+    // plate, the same toggle would restyle the plate's whole subtree.
+    const edgeRules = [...stripComments(styles).matchAll(/([^{}]+)\{[^{}]*--rl-aurora-edge\s*:/g)];
+    expect(edgeRules.length).toBeGreaterThanOrEqual(2);
+    for (const [, selector] of edgeRules) {
+      for (const part of selector.split(",")) expect(part.trim()).toMatch(/::(before|after)$/);
+    }
   });
 
   it("would have caught the original Aurora plate border", () => {
