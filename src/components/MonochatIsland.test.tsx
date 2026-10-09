@@ -208,6 +208,24 @@ describe("keys", () => {
     expect(isOpen()).toBe(false);
   });
 
+  it("Shift+Enter over a hover peek takes you into it rather than shutting it", async () => {
+    const onChange = vi.fn();
+    await render(<Harness onChange={onChange}/>);
+    const page = host.querySelector<HTMLButtonElement>("#document-focus")!; page.focus();
+    await hoverOpen();
+    expect(document.activeElement).toBe(page);
+    await key(page, { key: "Enter", shiftKey: true });
+    expect(isOpen()).toBe(true);
+    expect(document.activeElement).toBe(draft());
+    expect(onChange).toHaveBeenLastCalledWith(true, "key");
+    // Engaged now: leaving no longer closes it, and the chord does.
+    await act(async () => page.focus());
+    await leave(); await advance(800);
+    expect(isOpen()).toBe(true);
+    await key(page, { key: "Enter", shiftKey: true });
+    expect(isOpen()).toBe(false);
+  });
+
   it("does not summon during text composition or on key repeat", async () => {
     await render();
     for (const extra of [{ isComposing: true }, { keyCode: 229 }, { repeat: true }]) {

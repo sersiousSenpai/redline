@@ -105,7 +105,8 @@ export function MonochatIsland({ open, onOpenChange, pose = "compose", size = "r
       if (open && ((event.target instanceof Node && card.current?.contains(event.target)) || hasChildOverlay())) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (event.repeat) return;
-      if (open) collapse(); else summon("key");
+      // A peek is only showing you the card; the summon key takes you in.
+      if (open && !peek.current) collapse(); else summon("key");
     };
     // After child handlers, so a menu or dialog closes itself first. Only from
     // inside the card or from nowhere in particular: Esc in the terminal or
