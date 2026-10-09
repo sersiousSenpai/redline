@@ -207,6 +207,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "POST",
+        path: "/v1/term/event",
+        class: RouteClass::HookContract,
+        purpose: "Terminal attention: an agent in a dock terminal is working, needs you, or finished its turn (async Notification/Stop/UserPromptSubmit hooks)",
+        request: "Claude Code hook payload {hook_event_name, notification_type?, message?, last_assistant_message?, ...}; X-Redline-Terminal names the dock terminal",
+        response: "{} (ignored without a live terminal id)",
+    },
+    RouteSpec {
+        method: "POST",
         path: "/v1/scaled/:run/preflight",
         class: RouteClass::HookContract,
         purpose: "Scaled build pre-flight: the run's PreToolUse(Workflow) hook POSTs the generated script and blocks until the user presses Run, Edit or Cancel",

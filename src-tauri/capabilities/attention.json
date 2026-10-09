@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "attention",
+  "description": "Terminal attention: OS notifications from the app's own webview only, never the embedded browser's pages",
+  "webviews": ["main"],
+  "permissions": ["notification:default"]
+}

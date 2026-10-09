@@ -26,6 +26,7 @@ function health(tag: string): IntegrationHealth {
       settingsPath: "/s.json",
       matcherFound: true,
       conflictingUrl: null,
+      attentionInstalled: true,
     },
     skill: { installed: true, skillPath: "/k.md", outdated: false, version: 8 },
     codexHook: null,

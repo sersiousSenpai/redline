@@ -34,3 +34,10 @@ export function terminalInputOrigin(term: unknown, onUserInput: () => void) {
     dispose() { subscription?.dispose(); },
   };
 }
+
+/** Esc or Ctrl-C on its own — an interrupt. An agent stopped that way fires
+ *  no hook at all, so the host has to notice it from the keystroke. (Arrow
+ *  keys and Alt-chords also start with ESC, but never arrive as a bare one.) */
+export function isInterruptInput(data: string): boolean {
+  return data === "\x1b" || data === "\x03";
+}

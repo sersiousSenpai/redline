@@ -59,6 +59,8 @@ function makeActions(): TileActions {
     onFocusTile: vi.fn(),
     onHintTile: vi.fn(),
     onRefreshCwds: vi.fn(),
+    onTogglePin: vi.fn(),
+    onDragStart: vi.fn(),
   };
 }
 
@@ -75,7 +77,6 @@ function mount(
         tile: 1,
         identity,
         focused: false,
-        overflow: null,
         zoomed: false,
         actions,
         ...props,
@@ -159,6 +160,33 @@ describe("terminal tile header", () => {
     expect(heldLine.style.color).toBe(hexToRgb(HELD_RED));
   });
 
+  it("puts the terminal's state in front of its work line", () => {
+    const needs = mount({ state: "needs-you", workText: "Claude needs your permission" });
+    const line = needs.container.querySelector("[data-term-state='needs-you']") as HTMLElement;
+    expect(line.textContent).toContain("Claude needs your permission");
+    // Loud: the agent is speaking to you, so the line is in full ink, and the
+    // badge pulses (styles.css stops it under reduced motion).
+    expect(line.style.color).toBe("var(--color-ink)");
+    expect(line.querySelector(".rl-term-badge--pulse")).not.toBeNull();
+    expect(line.title).toBe("needs you — Claude needs your permission");
+
+    // No words from the agent: the state names itself.
+    const turn = mount({ state: "your-turn" });
+    expect(turn.container.querySelector("[data-term-state='your-turn']")?.textContent).toBe("your turn");
+
+    const busy = mount({ state: "working" });
+    expect(busy.container.querySelector(".rl-term-badge--spin")).not.toBeNull();
+
+    // A server is named by its port — beside its title when it has one.
+    const bare = mount({ state: "serving", port: 5173 });
+    expect(bare.container.querySelector("[data-term-state='serving']")?.textContent).toBe(":5173");
+    const titled = mount({ state: "serving", port: 5173, workText: "vite" });
+    expect(titled.container.querySelector("[data-term-state='serving']")?.textContent).toBe("vite:5173");
+
+    const quiet = mount({ state: "running", workText: "npm test" });
+    expect((quiet.container.querySelector("[data-term-state='running']") as HTMLElement).style.color).toBe("var(--color-ink-muted)");
+  });
+
   it("falls back to a bare spacer when the terminal has volunteered nothing", () => {
     // Absent, not padded with a guess — the header must not invent work.
     const { container } = mount({ workText: null });
@@ -166,15 +194,34 @@ describe("terminal tile header", () => {
     expect(head(container).querySelector("span.flex-1")).not.toBeNull();
   });
 
-  it("shows the overflow pip with its tone, on demand only", () => {
-    const none = mount({ overflow: null });
-    expect(none.container.textContent).not.toContain("●");
+  it("the pin toggles through the action cluster and marks a pinned tile beside its name", () => {
+    const { container, actions } = mount({ pinned: false });
+    const pin = container.querySelector("button[aria-label='Pin redline 2']") as HTMLButtonElement;
+    expect(pin.getAttribute("aria-pressed")).toBe("false");
+    // In the opacity-only cluster, so it never reflows the label.
+    expect(pin.closest(".rl-tile-actions")).not.toBeNull();
+    act(() => pin.click());
+    expect(actions.onTogglePin).toHaveBeenCalledWith("t1");
+    expect(container.querySelector("[title^='Pinned']")).toBeNull();
 
-    const { container } = mount({
-      focused: true,
-      overflow: { count: 3, tone: "held" },
+    const pinned = mount({ pinned: true });
+    expect(
+      pinned.container.querySelector("button[aria-label='Unpin redline 2']")?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(pinned.container.querySelector("[title^='Pinned']")).not.toBeNull();
+  });
+
+  it("a primary press on the identity chip hands the drag to the dock; other buttons don't", () => {
+    const { container, actions } = mount();
+    const chip = container.querySelector("button[aria-haspopup='menu']") as HTMLButtonElement;
+    act(() => {
+      chip.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     });
-    expect(container.textContent).toContain("●3");
+    expect(actions.onDragStart).toHaveBeenCalledWith("t1", expect.anything());
+    act(() => {
+      chip.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 2 }));
+    });
+    expect(actions.onDragStart).toHaveBeenCalledTimes(1);
   });
 
   it("double-click on the strip zooms; on a button it does not", () => {

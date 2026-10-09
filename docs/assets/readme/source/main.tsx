@@ -6,7 +6,7 @@ import './preview.css';
 // This origin is dedicated to the disposable documentation preview.
 for(const key of Object.keys(localStorage))if(key.startsWith('redline.'))localStorage.removeItem(key);
 localStorage.setItem('redline.tocOpen','false');
-localStorage.setItem('redline.terminalWorkspace.v1',JSON.stringify({tabs:[{id:'readme-terminal',cwd:null}],tiles:['readme-terminal'],focusedTile:0,zoomedId:null}));
+sessionStorage.setItem('redline.terminalWorkspace.v1',JSON.stringify({tabs:[{id:'readme-terminal',cwd:null}],tiles:['readme-terminal'],focusedTile:0,zoomedId:null}));
 // Keep the full sample plan above the app's floating margin controls.
 const keys={'redline.onboardingDone':true,'redline.sidebar.collapsed':false,'redline.commentPane.collapsed':false,'redline.terminalPane.collapsed':false,'redline.terminalPane.height':128,'redline.sidebar.width':215,'redline.commentPane.width':430};
 for(const [key,value]of Object.entries(keys))localStorage.setItem(key,JSON.stringify(value));

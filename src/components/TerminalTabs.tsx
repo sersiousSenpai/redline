@@ -12,6 +12,7 @@ import {
   type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
@@ -43,22 +44,55 @@ import {
 import {
   addTile as addTileSlot,
   reconcileTiles,
+  removeTileAt,
   setTile as setTileSlot,
 } from "../lib/tileSlots";
+import {
+  fitsAnotherTile,
+  parkCandidate,
+  placeTarget,
+  shelfOrder,
+  tileAtPoint,
+  type TileBox,
+} from "../lib/tilePolicy";
 import { rafCoalesce } from "../lib/raf";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
 import { workSignal } from "../lib/termTitle";
+import {
+  ackForInput,
+  attentionText,
+  deriveTermState,
+  effectiveAttention,
+  isLoud,
+  loudOldestFirst,
+  mergeAttention,
+  mergeProcs,
+  nextNeedsYou,
+  putAck,
+  SEEN_AFTER_MS,
+  staleAcks,
+  type AttentionAck,
+  type TermState,
+} from "../lib/termState";
+import type { TermAttention, TermProc } from "../types";
 import { iconFor } from "../lib/repoIcon";
 import { useRepoIcons } from "../hooks/useRepoIcons";
+import { useAttentionAlerts } from "../hooks/useAttentionAlerts";
+import type { LoudTerminal } from "../lib/attentionAlerts";
 import type { ProjectOption } from "./ProjectPicker";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { TerminalView, enqueuePtyOp, tauriHandoffDeps } from "./TerminalView";
+import {
+  TerminalView,
+  enqueuePtyOp,
+  focusTerminalView,
+  tauriHandoffDeps,
+} from "./TerminalView";
 import { deliverToTerminal } from "../lib/terminalHandoff";
 import {
   TerminalTileHeader,
-  type OverflowPip,
   type TerminalIdentity,
 } from "./TerminalTileHeader";
+import { TerminalShelf, type ShelfChip } from "./TerminalShelf";
 import {
   TerminalMenuDataContext,
   type TerminalMenuData,
@@ -95,7 +129,9 @@ interface TerminalTabsProps {
    *  Distinct from onTabsChange — tab count ≠ tile count, and 9 tabs / 2
    *  tiles is normal. App grows the dock from this. */
   onTileCountChange?: (count: number, rows: number) => void;
-  onActivityChange: (hasUnseen: boolean) => void;
+  /** How many terminals need you (needs-you, or an unread your-turn) —
+   *  the footer's "N need you" chip and the ⌘⇧J gate. */
+  onNeedsYouChange?: (count: number) => void;
   /** Dock is fully collapsed (no tile is really visible). */
   collapsed: boolean;
   /** Notified whenever the focused terminal changes. The host (App) uses this
@@ -133,6 +169,25 @@ const MAX_MENU_REPOS = 12;
 
 /** How many evictions the menu's "put that back" ordering remembers. */
 const MAX_UNTILED_MRU = 32;
+
+/** Pointer travel before a press on a header or shelf chip becomes a drag —
+ *  under it, the press is the chip's ordinary click. */
+const DRAG_THRESHOLD_PX = 4;
+
+/** How often the wall considers parking a quiet tile. At most one tile parks
+ *  per tick, so a wall of settled tiles empties out one at a time rather
+ *  than reshaping all at once. */
+const PARK_TICK_MS = 2000;
+
+/** How long a just-parked terminal leads the shelf, outlined, so the eye can
+ *  follow it off the wall. */
+const FRESH_PARKED_MS = 4000;
+
+/** How often `pty_procs` samples every terminal's foreground program and
+ *  ports (one `ps` + one `lsof` for the whole fleet, perf-budget rule 5).
+ *  Slower than the cwd poll: a state badge a few seconds late costs nothing,
+ *  and the settle windows that act on it are fifteen seconds and up. */
+const PROCS_POLL_MS = 4000;
 
 /** The intercept strip. Text can't be injected into the held PTY, so this fakes
  *  one line of terminal output: terminal bg + mono font + matching padding so
@@ -192,6 +247,11 @@ export interface TerminalTabsHandle {
     cwd: string | null,
     opts?: { background?: boolean },
   ) => string;
+  /** ⌘⇧J: put the next terminal that needs you — oldest transition first,
+   *  walking on from the focused one — on the wall by the placement rule,
+   *  hail it and hand it the caret. False when nothing needs you. The host
+   *  reveals the dock. */
+  jumpToNeedsYou: () => boolean;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -240,9 +300,13 @@ const pct = (v: number) => `${v * 100}%`;
 // after its live cwd's basename, numbered per project in creation order
 // ("redline 1, redline 2, zsh 1") — $HOME and / fall back to "zsh".
 //
-// Every tile carries its own 26px header (repo mark + label + ▾ menu); the
-// menu is the fleet's single inventory — the old tab strip, repo-bubble strip
-// and action cluster all folded into it.
+// Every tile carries its own 26px header (state badge, repo mark, label, ▾
+// menu); the menu is the fleet's single inventory — the old tab strip,
+// repo-bubble strip and action cluster all folded into it. Every terminal
+// without a tile also sits on the shelf above the grid, so nothing open is
+// ever out of sight. Each terminal has a derived state (lib/termState) that
+// decides where it goes (lib/tilePolicy): quiet tiles park themselves on the
+// shelf, and a terminal that needs you glows there until you bring it back.
 //
 // Memoized: a dock drag's one release commit (and any unrelated App state
 // change) must not walk the whole terminal fleet's tree.
@@ -254,7 +318,7 @@ export const TerminalTabs = memo(
       onTabsChange,
       onTabIdsChange,
       onTileCountChange,
-      onActivityChange,
+      onNeedsYouChange,
       collapsed,
       onActiveTabChange,
       heldTerminalIds,
@@ -291,11 +355,45 @@ export const TerminalTabs = memo(
   // double-click). Stored as the terminal id and DERIVED against `tiles`, so
   // a closed terminal can never leave the dock stuck zoomed.
   const [zoomedId, setZoomedId] = useState<string | null>(initialWorkspace.zoomedId);
+  // Local answers to the agents' attention transitions (lib/termState):
+  // typed into, interrupted, read. Persisted with the layout so a reload
+  // doesn't relight every your-turn already read.
+  const [acks, setAcksState] = useState<ReadonlyMap<string, AttentionAck>>(
+    () => new Map(Object.entries(initialWorkspace.acks ?? {})),
+  );
+  const acksRef = useRef(acks);
+  const setAcks = useCallback(
+    (
+      next: (
+        prev: ReadonlyMap<string, AttentionAck>,
+      ) => ReadonlyMap<string, AttentionAck>,
+    ) => {
+      const value = next(acksRef.current);
+      if (value === acksRef.current) return;
+      acksRef.current = value;
+      setAcksState(value);
+    },
+    [],
+  );
+  // Terminals pinned to the wall: parking never takes their tile, and
+  // automatic placement replaces it only once the wall is at its tile cap.
+  const [pinned, setPinned] = useState<ReadonlySet<string>>(
+    () => new Set(initialWorkspace.pinned ?? []),
+  );
+  const pinnedRef = useRef(pinned);
+  pinnedRef.current = pinned;
   const workspaceRef = useRef<TerminalWorkspace>(initialWorkspace);
-  workspaceRef.current = { tabs, tiles, focusedTile, zoomedId };
+  workspaceRef.current = {
+    tabs,
+    tiles,
+    focusedTile,
+    zoomedId,
+    ...(pinned.size ? { pinned: [...pinned] } : {}),
+    ...(acks.size ? { acks: Object.fromEntries(acks) } : {}),
+  };
   useEffect(() => {
     saveTerminalWorkspace(workspaceRef.current);
-  }, [tabs, tiles, focusedTile, zoomedId]);
+  }, [tabs, tiles, focusedTile, zoomedId, pinned, acks]);
   useEffect(() => {
     const save = () => saveTerminalWorkspace({
       ...workspaceRef.current,
@@ -348,6 +446,10 @@ export const TerminalTabs = memo(
   const focusIdx = Math.min(focusedTile, tiles.length - 1);
   const focusedId = tiles[focusIdx];
   const zoomed = zoomedId !== null && tiles.includes(zoomedId) ? zoomedId : null;
+  const zoomedRef = useRef(zoomed);
+  zoomedRef.current = zoomed;
+  const collapsedRef = useRef(collapsed);
+  collapsedRef.current = collapsed;
 
   const paneContainerRef = useRef<HTMLDivElement | null>(null);
   // Tile wrappers keyed by terminal ID, not index — the live drag path and the
@@ -388,6 +490,14 @@ export const TerminalTabs = memo(
       off();
     };
   }, []);
+
+  // The last size the grid really had. A collapsed dock measures 0 tall, and
+  // "would one more tile still fit?" must be asked of the dock the user will
+  // see when it opens, not of the fold.
+  const lastSizeRef = useRef<SizePx | null>(null);
+  if (containerSize.width > 0 && containerSize.height > 0) {
+    lastSizeRef.current = containerSize;
+  }
 
   // The current shape, with hysteresis against its own previous value so a
   // 2px container change can't flip the arrangement.
@@ -501,15 +611,126 @@ export const TerminalTabs = memo(
     [tiles, collapsed],
   );
 
-  const handleExit = useCallback((_id: string) => {
-    // Keep the terminal around so the user sees "[process exited]"; they
-    // close it from its tile or the menu.
+  // ── Terminal state (lib/termState) ───────────────────────────────────────
+
+  // The agents' own word on each terminal: the latest `term-attention` per
+  // terminal, seeded from the daemon's snapshot so a reload (or a dock that
+  // mounted late) starts from the truth. Listener first, snapshot second —
+  // `mergeAttention` keeps the newer `at` whichever lands last.
+  const [attention, setAttention] = useState<ReadonlyMap<string, TermAttention>>(
+    () => new Map(),
+  );
+  const [attentionReady, setAttentionReady] = useState(false);
+  const attentionRef = useRef(attention);
+  attentionRef.current = attention;
+  useEffect(() => {
+    let gone = false;
+    let unlisten: (() => void) | undefined;
+    void listen<TermAttention>("term-attention", (e) => {
+      setAttention((prev) => mergeAttention(prev, [e.payload]));
+    })
+      .then((u) => {
+        if (gone) u();
+        else unlisten = u;
+      })
+      .catch(() => {});
+    void invoke<TermAttention[]>("term_attention_snapshot")
+      .then((rows) => {
+        if (!gone && Array.isArray(rows)) {
+          setAttention((prev) => mergeAttention(prev, rows));
+        }
+      })
+      .catch(() => {})
+      // Alerts wait for the snapshot: what it holds happened before this
+      // dock existed and was never news here (useAttentionAlerts).
+      .finally(() => {
+        if (!gone) setAttentionReady(true);
+      });
+    return () => {
+      gone = true;
+      unlisten?.();
+    };
   }, []);
 
+  // What each terminal is running and serving, for hidden terminals too (an
+  // untiled terminal's OSC title never updates — its bytes aren't parsed).
+  // A sample that finds the shell back in the foreground also retires a
+  // working or needs-you older than it: the agent that reported it has
+  // exited. One sample at a time: on a loaded machine a slow `lsof` must not
+  // stack a second fleet-wide scan behind it.
+  const [procs, setProcs] = useState<ReadonlyMap<string, TermProc>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      const sampledAt = Date.now();
+      try {
+        const rows = await invoke<TermProc[]>("pty_procs");
+        if (cancelled || !Array.isArray(rows)) return;
+        setProcs((prev) => mergeProcs(prev, rows));
+        const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
+        if (stale.length) {
+          setAcks((prev) =>
+            stale.reduce((next, [id, ack]) => putAck(next, id, ack), prev),
+          );
+        }
+      } catch {
+        /* keep the last sample */
+      } finally {
+        inFlight = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), PROCS_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [setAcks]);
+
+  // Terminals whose process has exited. They stay on the wall showing
+  // "[process exited]" until closed; the state lets them park.
+  const [exited, setExited] = useState<ReadonlySet<string>>(() => new Set());
+  const handleExit = useCallback((id: string) => {
+    // Keep the terminal around so the user sees "[process exited]"; they
+    // close it from its tile or the menu.
+    setExited((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+
+  // Typing answers a needs-you and reads a your-turn (`ackForInput`); Esc or
+  // Ctrl-C interrupts the agent, which no hook will ever report.
+  const ackInput = useCallback(
+    (id: string, interrupt: boolean) => {
+      const entry = attentionRef.current.get(id);
+      if (!entry) return;
+      setAcks((prev) => {
+        const ack = ackForInput(entry, prev.get(id), interrupt);
+        return ack ? putAck(prev, id, ack) : prev;
+      });
+    },
+    [setAcks],
+  );
+
+  // When each terminal was last typed in, placed, or focused away from — any
+  // sign the user was just there, which restarts its parking clock.
+  const touchedRef = useRef(new Map<string, number>());
+  const touch = (id: string) => touchedRef.current.set(id, Date.now());
+
   const handleUserInput = useCallback((id: string) => {
+    touchedRef.current.set(id, Date.now());
+    ackInput(id, false);
     if (!tabsRef.current.some((tab) => tab.id === id && tab.placeholder)) return;
     setTabs((prev) => prev.map((tab) => tab.id === id ? { ...tab, placeholder: false } : tab));
-  }, [setTabs]);
+  }, [setTabs, ackInput]);
+
+  const handleInterrupt = useCallback(
+    (id: string) => ackInput(id, true),
+    [ackInput],
+  );
 
   // Last window title each terminal announced (OSC 0/2) — "what is running in
   // here", for the tile menu. Stable identity, and it bails when the title
@@ -535,6 +756,20 @@ export const TerminalTabs = memo(
     if (i !== -1) setFocusedTile(i);
   }, []);
 
+  // Whether this window holds the user's attention at all — a your-turn can
+  // only be READ while it does.
+  const [windowFocused, setWindowFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const on = () => setWindowFocused(true);
+    const off = () => setWindowFocused(false);
+    window.addEventListener("focus", on);
+    window.addEventListener("blur", off);
+    return () => {
+      window.removeEventListener("focus", on);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
+
   useEffect(() => {
     onTabsChange(tabs.length);
   }, [tabs.length, onTabsChange]);
@@ -550,10 +785,6 @@ export const TerminalTabs = memo(
   useEffect(() => {
     onTileCountChange?.(tiles.length, shape.rows);
   }, [tiles.length, shape.rows, onTileCountChange]);
-
-  useEffect(() => {
-    onActivityChange(unseen.size > 0);
-  }, [unseen, onActivityChange]);
 
   // A tile's view is genuinely seen once it's shown and the dock is open.
   useEffect(() => {
@@ -683,6 +914,137 @@ export const TerminalTabs = memo(
     return { list, byId: new Map(list.map((x) => [x.id, x])) };
   }, [tabs, tabDirs, repoIcons, liveCwds, homePath]);
 
+  // What every terminal is doing — one derivation (lib/termState) that the
+  // headers, the menu and the footer all read, so no two surfaces can
+  // disagree about a terminal.
+  const termStates = useMemo(() => {
+    const out = new Map<string, TermState>();
+    for (const t of tabs) {
+      const { kind, seen } = effectiveAttention(attention.get(t.id), acks.get(t.id));
+      const proc = procs.get(t.id);
+      out.set(
+        t.id,
+        deriveTermState({
+          attention: kind,
+          seen,
+          held: heldTerminalIds?.has(t.id) ?? false,
+          exited: exited.has(t.id),
+          fgComm: proc?.fgComm ?? null,
+          fgIsShell: proc?.fgIsShell ?? false,
+          ports: proc?.ports ?? [],
+          placeholder: !!t.placeholder,
+        }),
+      );
+    }
+    return out;
+  }, [tabs, attention, acks, procs, heldTerminalIds, exited]);
+  const statesRef = useRef(termStates);
+  statesRef.current = termStates;
+
+  // A terminal's work line: a loud state carries the agent's own words (the
+  // needs-you message, the your-turn excerpt); anything else keeps what it
+  // was already working on — a held plan's title, else its laundered OSC
+  // window title.
+  const workLine = (id: string, dir: string | null) => {
+    const state = termStates.get(id) ?? "idle";
+    if (isLoud(state)) {
+      return { state, text: attentionText(attention.get(id)), held: false };
+    }
+    const work = workSignal(heldPlanTitles?.get(id), termTitles.get(id), dir);
+    return { state, text: work?.text ?? null, held: work?.held ?? false };
+  };
+  const servingPort = (id: string) => procs.get(id)?.ports[0] ?? null;
+
+  // Every terminal that needs you, oldest transition first: the footer's
+  // count, ⌘⇧J's walk, the Dock badge and the OS notifications.
+  const loudTerminals = useMemo<LoudTerminal[]>(
+    () =>
+      loudOldestFirst(
+        tabs.map((t) => t.id),
+        termStates,
+        attention,
+      ).map((id) => ({
+        id,
+        state: termStates.get(id) === "needs-you" ? "needs-you" : "your-turn",
+        at: attention.get(id)?.at ?? 0,
+        label: identity.byId.get(id)?.label ?? "terminal",
+        text: attentionText(attention.get(id)),
+      })),
+    [tabs, termStates, attention, identity],
+  );
+  const loudRef = useRef(loudTerminals);
+  loudRef.current = loudTerminals;
+  useEffect(() => {
+    onNeedsYouChange?.(loudTerminals.length);
+  }, [loudTerminals.length, onNeedsYouChange]);
+  useAttentionAlerts(loudTerminals, collapsed, attentionReady);
+
+  // A your-turn is READ once its tile has been on screen and focused, in a
+  // focused window, for SEEN_AFTER_MS. Keyed on the transition's `at`, so the
+  // excerpt filling in (same `at`) doesn't restart the clock and a new turn
+  // (new `at`) does.
+  const focusedAt = focusedId ? attention.get(focusedId)?.at : undefined;
+  const focusedState = focusedId ? termStates.get(focusedId) : undefined;
+  const focusedOnScreen = !collapsed && (zoomed === null || zoomed === focusedId);
+  useEffect(() => {
+    if (
+      !focusedId ||
+      focusedAt === undefined ||
+      focusedState !== "your-turn" ||
+      !focusedOnScreen ||
+      !windowFocused
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setAcks((prev) => putAck(prev, focusedId, { at: focusedAt, as: "seen" }));
+    }, SEEN_AFTER_MS);
+    return () => window.clearTimeout(timer);
+  }, [focusedId, focusedAt, focusedState, focusedOnScreen, windowFocused, setAcks]);
+
+  // ── Parking (park-only automation) ───────────────────────────────────────
+  //
+  // A tile whose terminal has gone quiet takes itself off the wall once it
+  // has stayed quiet and untouched for its settle window (tilePolicy's
+  // PARK_SETTLE_MS): 15 s for a server, a held plan or a dead shell, two
+  // minutes for an idle one. Never the focused, zoomed, pinned or last tile,
+  // and nothing is ever pulled ONTO the wall automatically — a terminal that
+  // needs you glows on the shelf instead. To keep the grid steady, parking
+  // waits while the pointer is over the dock or a gutter is being dragged,
+  // and reshapes at most once per tick.
+  const sinceRef = useRef(new Map<string, number>());
+  const lastStateRef = useRef(new Map<string, TermState>());
+  useEffect(() => {
+    const now = Date.now();
+    const last = lastStateRef.current;
+    for (const [id, state] of termStates) {
+      if (last.get(id) === state) continue;
+      last.set(id, state);
+      sinceRef.current.set(id, now);
+    }
+    for (const id of [...last.keys()]) {
+      if (termStates.has(id)) continue;
+      last.delete(id);
+      sinceRef.current.delete(id);
+      touchedRef.current.delete(id);
+    }
+  }, [termStates]);
+  // Looking at a tile and moving on is a touch too: a server you just
+  // checked must not vanish the moment you click away from it.
+  const prevFocusedRef = useRef(focusedId);
+  useEffect(() => {
+    const prev = prevFocusedRef.current;
+    if (prev && prev !== focusedId) touchedRef.current.set(prev, Date.now());
+    prevFocusedRef.current = focusedId;
+  }, [focusedId]);
+  const hoverRef = useRef(false);
+  const [freshParked, setFreshParked] = useState<string | null>(null);
+  useEffect(() => {
+    if (freshParked === null) return;
+    const timer = window.setTimeout(() => setFreshParked(null), FRESH_PARKED_MS);
+    return () => window.clearTimeout(timer);
+  }, [freshParked]);
+
   // Everything high-churn (work lines, held, unseen, repo counts), served
   // through context and consumed only by an OPEN menu — an OSC title or a
   // 2.5s cwd tick then re-renders one component, usually zero. A terminal
@@ -690,16 +1052,18 @@ export const TerminalTabs = memo(
   const menuData = useMemo<TerminalMenuData>(() => {
     const terminalRefs: TerminalRef[] = identity.list.map((x) => {
       const tileIndex = tiles.indexOf(x.id);
+      const line = workLine(x.id, x.dir);
       return {
         id: x.id,
         dir: x.dir,
         label: x.label,
-        // What this one is *working on*: the plan it's holding for review,
-        // else whatever it announced as its window title — minus the cwd
-        // echoes every shell writes, which the row's location already says.
-        work:
-          workSignal(heldPlanTitles?.get(x.id), termTitles.get(x.id), x.dir)
-            ?.text ?? null,
+        // What this one is *working on*: what its agent just said to you, else
+        // the plan it's holding for review, else whatever it announced as its
+        // window title — minus the cwd echoes every shell writes, which the
+        // row's location already says.
+        work: line.text,
+        state: line.state,
+        port: line.state === "serving" ? servingPort(x.id) : null,
         held: heldTerminalIds?.has(x.id) ?? false,
         unseen: unseen.has(x.id),
         // Same "really visible" test as the held strip: with the dock
@@ -730,22 +1094,29 @@ export const TerminalTabs = memo(
     recentDirs,
     homePath,
     untiledMru,
+    termStates,
+    attention,
+    procs,
   ]);
 
-  // The focused header's pip: terminals in no tile are otherwise invisible
-  // now the tab strip is gone. Toned held > unseen > muted.
-  const overflow = useMemo<OverflowPip | null>(() => {
-    const untiled = tabs.filter((t) => !tiles.includes(t.id));
-    if (untiled.length === 0) return null;
-    return {
-      count: untiled.length,
-      tone: untiled.some((t) => heldTerminalIds?.has(t.id))
-        ? "held"
-        : untiled.some((t) => unseen.has(t.id))
-          ? "unseen"
-          : "muted",
-    };
-  }, [tabs, tiles, heldTerminalIds, unseen]);
+  // The shelf: every terminal with no tile, loud first (tilePolicy's
+  // `shelfOrder`). Nothing the wall isn't showing is out of sight.
+  const shelfChips = useMemo<ShelfChip[]>(() => {
+    const untiled = tabs.filter((t) => !tiles.includes(t.id)).map((t) => t.id);
+    return shelfOrder(untiled, termStates, untiledMru, freshParked).map((id) => {
+      const ident = identity.byId.get(id);
+      const line = workLine(id, ident?.dir ?? null);
+      return {
+        id,
+        label: ident?.label ?? "terminal",
+        state: line.state,
+        text: line.text,
+        port: line.state === "serving" ? servingPort(id) : null,
+        fresh: id === freshParked,
+      };
+    });
+    // `workLine` and `servingPort` read attention, procs and the titles.
+  }, [tabs, tiles, termStates, untiledMru, freshParked, identity, attention, procs, heldPlanTitles, termTitles]);
 
   // ── Tile + terminal operations (side effects live HERE, never in a
   //    setState updater — StrictMode double-invokes updaters and previously
@@ -777,30 +1148,87 @@ export const TerminalTabs = memo(
       recordEvictions(prev, next);
       setTiles(next);
     }
+    // Both ends of a swap were just arranged by hand; neither should park
+    // out from under the arrangement.
+    touch(id);
+    if (prev[index] !== undefined && next.includes(prev[index])) touch(prev[index]);
     setFocusedTile(Math.min(index, next.length - 1));
     clearUnseen(id);
   };
 
-  // Prefer a FRESH tile while the grid has room — with several tiles,
-  // silently evicting the focused one is surprising; past MAX_TILES the
-  // fallback tile's occupant is replaced.
-  const openTerminalTile = (id: string, fallbackTile: number) => {
+  // Put an untiled terminal on the wall by the ONE placement rule
+  // (tilePolicy's `placeTarget`): its own tile while `shapeFits`, else the
+  // quietest tile that may give way, the focused one only as a last resort.
+  // `mayGrow` false never adds a tile, not even to spare a pin. Returns the
+  // tile it landed in. A zoom would hide the result, so it ends.
+  const placeOnWall = (
+    id: string,
+    shapeFits: boolean,
+    mayGrow = true,
+  ): number => {
     const prev = tilesRef.current;
-    const next = addTileSlot(prev, id, MAX_TILES);
-    if (next !== prev) {
-      setTiles(next);
-      setFocusedTile(next.length - 1);
-      clearUnseen(id);
-    } else {
-      showInTile(fallbackTile, id);
+    const target = placeTarget(
+      prev,
+      statesRef.current,
+      pinnedRef.current,
+      focusIdxRef.current,
+      shapeFits,
+      mayGrow && prev.length < MAX_TILES,
+    );
+    setZoomedId(null);
+    if (target.kind === "add") {
+      const next = addTileSlot(prev, id, MAX_TILES);
+      if (next !== prev) {
+        touch(id);
+        setTiles(next);
+        setFocusedTile(next.length - 1);
+        clearUnseen(id);
+        return next.length - 1;
+      }
     }
+    const index = target.kind === "replace" ? target.index : focusIdxRef.current;
+    showInTile(index, id);
+    return index;
+  };
+
+  // A NEW terminal gets a fresh tile while the wall is under its cap — the
+  // wall of agents is the point — and only at the cap does it take a tile,
+  // the one the placement rule picks rather than whichever is focused.
+  const openTerminalTile = (id: string) => {
+    placeOnWall(id, tilesRef.current.length < MAX_TILES);
+  };
+
+  // The REVEAL rule (App's "show me X", a shelf click, ⌘⇧J): a terminal
+  // already on the wall just takes focus; otherwise it is placed — in a new
+  // tile only while one more still fits as a real terminal (80×24). Either
+  // way it must end up on screen, so a zoom on another tile ends.
+  const revealTerminal = (id: string): number => {
+    const i = tilesRef.current.indexOf(id);
+    if (i !== -1) {
+      if (zoomedRef.current !== null && zoomedRef.current !== id) {
+        setZoomedId(null);
+      }
+      setFocusedTile(i);
+      clearUnseen(id);
+      return i;
+    }
+    // A collapsed dock doesn't grow: a new tile is what makes App open the
+    // dock (its tile-driven growth), and a linked folder click selects the
+    // folder's terminal without asking for the dock.
+    const grow = !collapsedRef.current;
+    return placeOnWall(
+      id,
+      grow &&
+        fitsAnotherTile(tilesRef.current.length, lastSizeRef.current, MAX_TILES),
+      grow,
+    );
   };
 
   // cwd null → backend resolves to $HOME ("root").
-  const addTab = (cwd: string | null, fallbackTile?: number) => {
+  const addTab = (cwd: string | null) => {
     const id = crypto.randomUUID();
     setTabs((prev) => [...prev, { id, cwd }]);
-    openTerminalTile(id, fallbackTile ?? focusIdxRef.current);
+    openTerminalTile(id);
     return id;
   };
 
@@ -815,7 +1243,7 @@ export const TerminalTabs = memo(
       } catch {
         /* fall back to home */
       }
-      addTab(dir, tile);
+      addTab(dir);
     })();
   };
 
@@ -835,9 +1263,9 @@ export const TerminalTabs = memo(
   // the OPEN section is for), lands `claude` in it, and bumps the repo to the
   // front of the menu. The point is the whole errand — "work on that repo" —
   // not a bare shell you then have to launch from.
-  const openRepoTerminal = (tile: number, path: string) => {
+  const openRepoTerminal = (path: string) => {
     setRecentDirs((prev) => bumpMru(prev, path, MAX_MENU_REPOS));
-    const id = addTab(path, tile);
+    const id = addTab(path);
     void typeClaudeInto(id);
   };
 
@@ -854,7 +1282,25 @@ export const TerminalTabs = memo(
     setUntiledMru((m) => (m.includes(id) ? m.filter((x) => x !== id) : m));
     setZoomedId((prev) => prev === id ? null : prev);
     setDetached((prev) => prev.filter((pty) => pty.id !== id));
-  }, []);
+    setExited((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    setAcks((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Map(prev);
+      next.delete(id);
+      return next;
+    });
+    setPinned((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, [setAcks]);
 
   const closeTab = (id: string) => {
     const current = tabsRef.current;
@@ -870,35 +1316,47 @@ export const TerminalTabs = memo(
       return;
     }
 
-    const idx = current.findIndex((t) => t.id === id);
     const next = current.filter((t) => t.id !== id);
     setTabs(next);
 
-    // Refill every tile that showed it (left neighbour, then right, skipping
-    // already-tiled ids), dropping the tile when nothing is left.
+    // The tile it leaves pulls in a terminal that NEEDS YOU, oldest first —
+    // and otherwise collapses, rather than resurrecting a quiet neighbour
+    // the user (or parking) had already put away. Only a grid that would
+    // otherwise be empty takes the shelf's first terminal.
+    const untiled = next
+      .map((t) => t.id)
+      .filter((tid) => !tilesRef.current.includes(tid));
     const rec = reconcileTiles(
       tilesRef.current,
       focusIdxRef.current,
       id,
-      idx,
-      next.map((t) => t.id),
+      loudOldestFirst(untiled, statesRef.current, attentionRef.current),
+      shelfOrder(untiled, statesRef.current, untiledMru, null),
     );
     if (rec.tiles !== tilesRef.current) setTiles(rec.tiles);
     setFocusedTile(rec.focus);
   };
 
-  // The REVEAL rule, kept deliberately different from showInTile's placement
-  // rule: App is saying "show me X" — if X is already tiled, focus that tile;
-  // else load it into the focused tile. (The menu's picking rule swaps
-  // instead, because there the user aimed at a specific tile.)
+  // App is saying "show me X": the reveal rule, kept deliberately different
+  // from showInTile's — the menu's pick swaps, because there the user aimed
+  // at a specific tile.
   const selectTab = (id: string) => {
-    const i = tilesRef.current.indexOf(id);
-    if (i !== -1) {
-      setFocusedTile(i);
-      clearUnseen(id);
-      return;
-    }
-    showInTile(focusIdxRef.current, id);
+    revealTerminal(id);
+  };
+
+  // A shelf chip, clicked: on the wall by the same rule, glowing once so the
+  // eye finds where it landed.
+  const placeFromShelf = (id: string) => {
+    revealTerminal(id);
+    requestAnimationFrame(() => hailTileRef.current(id));
+  };
+
+  const togglePin = (id: string) => {
+    setPinned((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   };
 
   const zoomTile = (tile: number) => {
@@ -974,6 +1432,182 @@ export const TerminalTabs = memo(
     [],
   );
 
+  // ── Drag to arrange ───────────────────────────────────────────────────────
+  //
+  // Pointer events, never HTML5 drag-and-drop: xterm owns the pointer inside
+  // a tile and the webview intercepts native drags for its file drop. A press
+  // on a header chip or a shelf chip becomes a drag past DRAG_THRESHOLD_PX;
+  // the tiles' boxes are measured ONCE at that moment (per-move reads would
+  // force layout above frame rate, the gutter's lesson), the tile under the
+  // pointer is outlined with `hintTile`, and a label follows the pointer as a
+  // fixed-position ghost. Dropping a header on a tile SWAPS the two
+  // (`setTile`); dropping a shelf chip PLACES it there and sends the occupant
+  // to the shelf. The click that ends a drag is swallowed, so the chip's own
+  // click (open the menu, place by rule) never fires on top of the drop.
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  // A drag in flight (past the threshold) — parking holds still for it. A
+  // press that never travels doesn't count.
+  const draggingRef = useRef(false);
+  const dropTerminal = (id: string, target: number) => {
+    if (!tabsRef.current.some((t) => t.id === id)) return;
+    if (tilesRef.current[target] === undefined) return;
+    if (zoomed !== null) setZoomedId(null);
+    showInTile(target, id);
+  };
+  const dropRef = useRef(dropTerminal);
+  dropRef.current = dropTerminal;
+  const beginDrag = (id: string, e: React.PointerEvent<HTMLElement>) => {
+    if (dragCleanupRef.current) return;
+    const handle = e.currentTarget;
+    const { pointerId } = e;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const label = identity.byId.get(id)?.label ?? "terminal";
+    let active = false;
+    let boxes: TileBox[] = [];
+    let target: number | null = null;
+    let ghost: HTMLDivElement | null = null;
+
+    const follow = rafCoalesce((x: number, y: number) => {
+      if (ghost) {
+        ghost.style.left = `${x + 12}px`;
+        ghost.style.top = `${y + 12}px`;
+      }
+      const next = tileAtPoint(boxes, x, y);
+      if (next !== target) {
+        target = next;
+        hintTileRef.current(next);
+      }
+    });
+    const start = () => {
+      active = true;
+      draggingRef.current = true;
+      try {
+        handle.setPointerCapture(pointerId);
+      } catch {
+        /* the handle left the DOM; window listeners still carry the drag */
+      }
+      boxes = tilesRef.current.map((tid, index) => {
+        const r = tileElsRef.current.get(tid)?.getBoundingClientRect();
+        return r
+          ? { index, left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+          : { index, left: 0, top: 0, right: 0, bottom: 0 };
+      });
+      ghost = document.createElement("div");
+      ghost.className = "rl-tile-drag-ghost";
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.textContent = label;
+      document.body.appendChild(ghost);
+      document.documentElement.dataset.rlTileDrag = "";
+    };
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      if (!active) {
+        const moved = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+        if (moved < DRAG_THRESHOLD_PX) return;
+        start();
+      }
+      follow(ev.clientX, ev.clientY);
+    };
+    const finish = (drop: number | null) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
+      follow.cancel();
+      dragCleanupRef.current = null;
+      if (!active) return;
+      draggingRef.current = false;
+      hintTileRef.current(null);
+      ghost?.remove();
+      delete document.documentElement.dataset.rlTileDrag;
+      // The click this release is about to produce belongs to the drop.
+      const swallow = (ev: MouseEvent) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+      };
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      window.setTimeout(
+        () => window.removeEventListener("click", swallow, { capture: true }),
+        0,
+      );
+      if (drop !== null) dropRef.current(id, drop);
+    };
+    const onUp = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      finish(active ? tileAtPoint(boxes, ev.clientX, ev.clientY) : null);
+    };
+    const onCancel = (ev: PointerEvent) => {
+      if (ev.pointerId === pointerId) finish(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape" || !active) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
+    dragCleanupRef.current = () => finish(null);
+  };
+  useEffect(() => () => dragCleanupRef.current?.(), []);
+
+  const parkTile = (index: number) => {
+    const prev = tilesRef.current;
+    const id = prev[index];
+    const next = removeTileAt(prev, index);
+    if (next === prev) return;
+    recordEvictions(prev, next);
+    setTiles(next);
+    // Keep focus on the same terminal when the parked tile sat before it.
+    const focus = focusIdxRef.current;
+    if (index < focus) setFocusedTile(focus - 1);
+    setFreshParked(id);
+  };
+  const parkRef = useRef(parkTile);
+  parkRef.current = parkTile;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (hoverRef.current || isResizing() || draggingRef.current) return;
+      const index = parkCandidate({
+        tiles: tilesRef.current,
+        states: statesRef.current,
+        pinned: pinnedRef.current,
+        focusIdx: focusIdxRef.current,
+        zoomedId: zoomedRef.current,
+        since: sinceRef.current,
+        touched: touchedRef.current,
+        now: Date.now(),
+      });
+      if (index !== null) parkRef.current(index);
+    }, PARK_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+  const hintTileRef = useRef(hintTile);
+  hintTileRef.current = hintTile;
+
+  // ⌘⇧J and the footer chip. The tile it lands in is hailed (on a wall of
+  // fourteen the focus ring alone doesn't catch the eye) and its terminal
+  // takes the caret a frame later, once the placement has painted — a jump
+  // to a tile already on screen has no reveal transition to focus it.
+  const jumpToNeedsYou = (): boolean => {
+    const target = nextNeedsYou(
+      loudRef.current.map((t) => t.id),
+      tilesRef.current[focusIdxRef.current],
+    );
+    if (!target) return false;
+    revealTerminal(target);
+    requestAnimationFrame(() => {
+      hailTileRef.current(target);
+      focusTerminalView(target);
+    });
+    return true;
+  };
+  const jumpRef = useRef(jumpToNeedsYou);
+  jumpRef.current = jumpToNeedsYou;
+
   // Expose selection to the host. Handlers are recreated each render, so the
   // handle reads them through refs and guards against a stale id (a terminal
   // closed since the folder→terminal mapping was recorded).
@@ -992,7 +1626,7 @@ export const TerminalTabs = memo(
       setTiles(tilesRef.current.map((id) => id === victim ? tab.id : id));
       forgetTab(victim);
     } else if (!background) {
-      openTileRef.current(tab.id, focusIdxRef.current);
+      openTileRef.current(tab.id);
     }
   }, [setTabs, setTiles, forgetTab]);
   const recoverDetached = async () => {
@@ -1034,6 +1668,7 @@ export const TerminalTabs = memo(
         addSessionTab({ id, cwd }, opts?.background);
         return id;
       },
+      jumpToNeedsYou: () => jumpRef.current(),
     }),
     [addSessionTab],
   );
@@ -1114,6 +1749,9 @@ export const TerminalTabs = memo(
     focusTile,
     hintTile,
     refreshAllCwds,
+    togglePin,
+    beginDrag,
+    placeFromShelf,
   });
   handlersRef.current = {
     showInTile,
@@ -1125,20 +1763,35 @@ export const TerminalTabs = memo(
     focusTile,
     hintTile,
     refreshAllCwds,
+    togglePin,
+    beginDrag,
+    placeFromShelf,
   };
   const tileActions = useMemo<TileActions>(
     () => ({
       onPick: (tile, id) => handlersRef.current.showInTile(tile, id),
       onCloseTerminal: (id) => handlersRef.current.closeTab(id),
       onNewHere: (tile) => handlersRef.current.newHere(tile),
-      onNewHome: (tile) => handlersRef.current.addTab(null, tile),
-      onNewRepo: (tile, path) =>
-        handlersRef.current.openRepoTerminal(tile, path),
+      // New terminals land by the placement rule, not in the menu's tile.
+      onNewHome: () => handlersRef.current.addTab(null),
+      onNewRepo: (_tile, path) => handlersRef.current.openRepoTerminal(path),
       onZoomTile: (tile) => handlersRef.current.zoomTile(tile),
       onFocusTile: (tile) => handlersRef.current.focusTile(tile),
       onHintTile: (tile) => handlersRef.current.hintTile(tile),
       onRefreshCwds: () => handlersRef.current.refreshAllCwds(),
+      onTogglePin: (id) => handlersRef.current.togglePin(id),
+      onDragStart: (id, e) => handlersRef.current.beginDrag(id, e),
     }),
+    [],
+  );
+  // The shelf's two verbs, stable for its memo the same way.
+  const placeShelfChip = useCallback(
+    (id: string) => handlersRef.current.placeFromShelf(id),
+    [],
+  );
+  const dragShelfChip = useCallback(
+    (id: string, e: React.PointerEvent<HTMLElement>) =>
+      handlersRef.current.beginDrag(id, e),
     [],
   );
 
@@ -1175,7 +1828,18 @@ export const TerminalTabs = memo(
   };
 
   return (
-    <div data-tour="terminal" className="flex flex-col h-full">
+    <div
+      data-tour="terminal"
+      className="flex flex-col h-full"
+      // Parking holds still while the pointer is over the dock: a tile must
+      // never leave from under a hand reaching for it.
+      onPointerEnter={() => {
+        hoverRef.current = true;
+      }}
+      onPointerLeave={() => {
+        hoverRef.current = false;
+      }}
+    >
       {(detached.some((pty) => !tabs.some((tab) => tab.id === pty.id)) || recoveryError) && (
         <div className="flex items-center gap-2 px-2 py-1 text-xs" role="status">
           {recoveryError && <span>{recoveryError}</span>}
@@ -1184,6 +1848,11 @@ export const TerminalTabs = memo(
           </button>
         </div>
       )}
+      <TerminalShelf
+        chips={shelfChips}
+        onPlace={placeShelfChip}
+        onDragStart={dragShelfChip}
+      />
       <TerminalMenuDataContext.Provider value={menuData}>
       <div ref={paneContainerRef} className="flex-1 relative">
         {tabs.map((t) => {
@@ -1194,24 +1863,18 @@ export const TerminalTabs = memo(
           const hiddenByZoom = zoomed !== null && !isZoomed;
           const visible = tiled && !collapsed && !hiddenByZoom;
           const ident = identity.byId.get(t.id);
-          // What this terminal is on, beside its name. Same derivation the
-          // tile menu uses — a held plan's title, else the shell's laundered
-          // OSC 0/2 window title — just no longer confined to the ▾ dropdown.
+          // What this terminal is doing and on, beside its name. Same
+          // derivation the tile menu uses (`workLine`) — just no longer
+          // confined to the ▾ dropdown.
           //
           // Passed as PRIMITIVES, deliberately. TerminalTileHeader is memo'd
           // with the default shallow compare, so a fresh `{text, held}` object
           // per render would re-render all fourteen headers on every OSC-title
-          // tick; two scalars re-render only the tile whose title actually
-          // changed. For the same reason this stays OUT of the `identity`
-          // memo — that memo's stability is what keeps the headers cheap, and
-          // `menuData` depends on it.
-          const work = ident
-            ? workSignal(
-                heldPlanTitles?.get(t.id),
-                termTitles.get(t.id),
-                ident.dir,
-              )
-            : null;
+          // tick; scalars re-render only the tile whose line actually changed.
+          // For the same reason this stays OUT of the `identity` memo — that
+          // memo's stability is what keeps the headers cheap, and `menuData`
+          // depends on it.
+          const line = workLine(t.id, ident?.dir ?? null);
           return (
             <div
               key={t.id}
@@ -1222,6 +1885,9 @@ export const TerminalTabs = memo(
               // A stable hook for the hail keyframe. The wrapper was
               // style-only; `hailTile` adds `is-hailed` to this same node.
               className="rl-tile-wrap"
+              // Frames the tile in amber while its agent is blocked on you
+              // (styles.css), on the wall and in a zoom alike.
+              data-term-state={tiled ? line.state : undefined}
               style={wrapperStyle(rect, isZoomed, hiddenByZoom)}
             >
               {tiled && ident && (
@@ -1234,10 +1900,12 @@ export const TerminalTabs = memo(
                     tile={tileIndex}
                     identity={ident}
                     focused={tileIndex === focusIdx}
-                    overflow={tileIndex === focusIdx ? overflow : null}
                     zoomed={isZoomed}
-                    workText={work?.text ?? null}
-                    workHeld={work?.held ?? false}
+                    pinned={pinned.has(t.id)}
+                    state={line.state}
+                    port={line.state === "serving" ? servingPort(t.id) : null}
+                    workText={line.text}
+                    workHeld={line.held}
                     actions={tileActions}
                   />
                 </ErrorBoundary>
@@ -1261,6 +1929,7 @@ export const TerminalTabs = memo(
                   onTitle={handleTitle}
                   onPaneFocus={handlePaneFocus}
                   onUserInput={handleUserInput}
+                  onInterrupt={handleInterrupt}
                 />
               </div>
               {visible && heldTerminalIds?.has(t.id) && <InterceptStrip />}

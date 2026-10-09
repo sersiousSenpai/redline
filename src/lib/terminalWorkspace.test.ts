@@ -3,7 +3,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { parseTerminalWorkspace, readTerminalWorkspace, saveTerminalWorkspace, TERMINAL_WORKSPACE_KEY } from "./terminalWorkspace";
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  sessionStorage.clear();
+});
 describe("terminal workspace persistence", () => {
   it("round-trips visible and background tabs, focus, zoom and placeholder state", () => {
     const workspace = { tabs: [{ id: "a", cwd: null, placeholder: true }, { id: "b", cwd: "/repo" }, { id: "hidden", cwd: "/work" }], tiles: ["b", "a"], focusedTile: 1, zoomedId: "b" };
@@ -15,10 +18,42 @@ describe("terminal workspace persistence", () => {
     expect(parseTerminalWorkspace({ tabs: [{ id: "a", cwd: null }], tiles: [] }, 14)?.tiles).toEqual(["a"]);
   });
   it("falls back cleanly when storage is corrupt or unavailable", () => {
-    localStorage.setItem(TERMINAL_WORKSPACE_KEY, "{");
+    sessionStorage.setItem(TERMINAL_WORKSPACE_KEY, "{");
     expect(readTerminalWorkspace(14)).toBeNull();
     const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("storage disabled"); });
     expect(readTerminalWorkspace(14)).toBeNull();
     get.mockRestore();
+  });
+  it("lives in sessionStorage so a relaunch, unlike a reload, starts empty", () => {
+    const workspace = { tabs: [{ id: "a", cwd: "/repo" }], tiles: ["a"], focusedTile: 0, zoomedId: null };
+    saveTerminalWorkspace(workspace);
+    expect(sessionStorage.getItem(TERMINAL_WORKSPACE_KEY)).not.toBeNull();
+    expect(localStorage.getItem(TERMINAL_WORKSPACE_KEY)).toBeNull();
+    sessionStorage.clear();
+    expect(readTerminalWorkspace(14)).toBeNull();
+  });
+  it("ignores and removes a legacy localStorage workspace", () => {
+    localStorage.setItem(TERMINAL_WORKSPACE_KEY, JSON.stringify({ tabs: [{ id: "dead", cwd: "/repo" }], tiles: ["dead"], focusedTile: 0, zoomedId: null }));
+    expect(readTerminalWorkspace(14)).toBeNull();
+    expect(localStorage.getItem(TERMINAL_WORKSPACE_KEY)).toBeNull();
+  });
+  it("keeps attention acknowledgements for live tabs only, and tolerates layouts without them", () => {
+    const base = { tabs: [{ id: "a", cwd: null }, { id: "b", cwd: null }], tiles: ["a"], focusedTile: 0, zoomedId: null };
+    expect(parseTerminalWorkspace(base, 14)).toEqual(base);
+    expect(parseTerminalWorkspace({ ...base, acks: { a: { at: 5, as: "seen" }, b: { at: 6, as: "bogus" }, gone: { at: 1, as: "seen" }, c: null } }, 14)?.acks).toEqual({ a: { at: 5, as: "seen" } });
+    expect(parseTerminalWorkspace({ ...base, acks: "nope" }, 14)).toEqual(base);
+    const withAcks = { ...base, acks: { b: { at: 9, as: "cleared" as const } } };
+    saveTerminalWorkspace(withAcks);
+    expect(readTerminalWorkspace(14)).toEqual(withAcks);
+  });
+  it("reads pins with and without the field: older layouts parse unchanged, stale and duplicate pins drop", () => {
+    const older = { tabs: [{ id: "a", cwd: null }, { id: "b", cwd: "/repo" }], tiles: ["a", "b"], focusedTile: 1, zoomedId: null };
+    expect(parseTerminalWorkspace(older, 14)).toEqual(older);
+    expect(parseTerminalWorkspace({ ...older, pinned: ["b", "gone", "b", 7, null] }, 14)?.pinned).toEqual(["b"]);
+    expect(parseTerminalWorkspace({ ...older, pinned: "b" }, 14)).toEqual(older);
+    expect(parseTerminalWorkspace({ ...older, pinned: [] }, 14)).toEqual(older);
+    const withPins = { ...older, pinned: ["a"] };
+    saveTerminalWorkspace(withPins);
+    expect(readTerminalWorkspace(14)).toEqual(withPins);
   });
 });

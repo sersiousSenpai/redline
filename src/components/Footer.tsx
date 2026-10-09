@@ -54,7 +54,10 @@ interface FooterProps {
   /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
   termCollapsed: boolean;
   termTabCount: number;
-  termHasUnseen: boolean;
+  /** Dock terminals that need you (lib/termState's loud states). */
+  termNeedYou?: number;
+  /** ⌘⇧J's action: reveal the dock on the next terminal that needs you. */
+  onJumpToNeedsYou?: () => void;
   onExpandTerminal: () => void;
   /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
@@ -78,7 +81,8 @@ export function Footer({
   onReopen,
   termCollapsed,
   termTabCount,
-  termHasUnseen,
+  termNeedYou = 0,
+  onJumpToNeedsYou,
   onExpandTerminal,
   backend,
 }: FooterProps) {
@@ -220,19 +224,43 @@ export function Footer({
                 cursor: "pointer",
               }}
             >
-              {termHasUnseen && (
-                <span
-                  aria-label="new terminal output"
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 9999,
-                    background: "var(--color-info)",
-                    display: "inline-block",
-                  }}
-                />
-              )}
               {termTabCount} terminal{termTabCount === 1 ? "" : "s"}
+            </button>
+          </>
+        )}
+        {/* The way to a blocked agent when the dock is out of sight — and a
+            standing hint at ⌘⇧J when it isn't. Present only while something
+            needs you; never a permanent control. */}
+        {termNeedYou > 0 && onJumpToNeedsYou && (
+          <>
+            <span style={{ color: "var(--color-rule)" }}>·</span>
+            <button
+              type="button"
+              onClick={onJumpToNeedsYou}
+              title="Jump to the terminal that needs you (⌘⇧J)"
+              className="flex items-center gap-1.5"
+              style={{
+                height: 18,
+                padding: "0 8px",
+                borderRadius: 9999,
+                border: "1px solid color-mix(in srgb, var(--color-warning) 60%, var(--color-rule))",
+                color: "var(--color-ink)",
+                fontSize: "var(--rl-text-xs)",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              <span
+                aria-hidden
+                className="rl-term-badge rl-term-badge--pulse"
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 9999,
+                  background: "var(--color-warning)",
+                }}
+              />
+              {termNeedYou} {termNeedYou === 1 ? "needs" : "need"} you
             </button>
           </>
         )}

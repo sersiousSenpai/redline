@@ -44,6 +44,9 @@ pub struct HookStatus {
     pub settings_path: String,
     pub matcher_found: bool,
     pub conflicting_url: Option<String>,
+    /// The terminal-attention hooks are installed exactly as this build
+    /// writes them (`attention_current_at`).
+    pub attention_installed: bool,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -58,65 +61,41 @@ pub fn get_status() -> HookStatus {
 }
 
 pub fn get_status_at(path: &std::path::Path) -> HookStatus {
-    let path_str = path.to_string_lossy().to_string();
-
-    let Ok(content) = fs::read_to_string(path) else {
-        return HookStatus {
-            installed: false,
-            settings_path: path_str,
-            matcher_found: false,
-            conflicting_url: None,
-        };
+    let mut status = HookStatus {
+        installed: false,
+        settings_path: path.to_string_lossy().to_string(),
+        matcher_found: false,
+        conflicting_url: None,
+        attention_installed: attention_current_at(path),
+    };
+    let json = read_json(path);
+    let Some(entries) = json
+        .as_ref()
+        .and_then(|json| json.pointer("/hooks/PreToolUse"))
+        .and_then(|v| v.as_array())
+    else {
+        return status;
     };
 
-    let Ok(json) = serde_json::from_str::<Value>(&content) else {
-        return HookStatus {
-            installed: false,
-            settings_path: path_str,
-            matcher_found: false,
-            conflicting_url: None,
-        };
-    };
-
-    let Some(entries) = json.pointer("/hooks/PreToolUse").and_then(|v| v.as_array()) else {
-        return HookStatus {
-            installed: false,
-            settings_path: path_str,
-            matcher_found: false,
-            conflicting_url: None,
-        };
-    };
-
-    let mut matcher_found = false;
-    let mut conflicting_url = None;
     for entry in entries {
         if !crate::hook_conflicts::matcher_covers_plan(entry) {
             continue;
         }
-        matcher_found = true;
+        status.matcher_found = true;
         let Some(hooks) = entry.get("hooks").and_then(|v| v.as_array()) else {
             continue;
         };
         for h in hooks {
             let url = h.get("url").and_then(|v| v.as_str()).unwrap_or("");
             if url == HOOK_URL && h.get("type").and_then(Value::as_str) == Some("http") {
-                return HookStatus {
-                    installed: true,
-                    settings_path: path_str,
-                    matcher_found: true,
-                    conflicting_url: None,
-                };
+                status.installed = true;
+                status.conflicting_url = None;
+                return status;
             }
-            if conflicting_url.is_none() && !url.is_empty() { conflicting_url = Some(url.to_string()); }
+            if status.conflicting_url.is_none() && !url.is_empty() { status.conflicting_url = Some(url.to_string()); }
         }
     }
-
-    HookStatus {
-        installed: false,
-        settings_path: path_str,
-        matcher_found,
-        conflicting_url,
-    }
+    status
 }
 
 pub fn install() -> Result<HookStatus, String> {
@@ -805,6 +784,153 @@ fn edit_capture_at(path: &std::path::Path, install: bool) -> Result<bool, String
     Ok(capture_installed_at(path))
 }
 
+// ===========================================================================
+// Terminal attention hooks (terminal-wall Phase 1)
+// ===========================================================================
+//
+// Three async command hooks, `Notification`, `Stop` and `UserPromptSubmit`,
+// that tell the daemon what a dock terminal's agent needs (`term_attention`).
+// Installed with the plan hook, refreshed at boot when stale, removed with it.
+//
+// Measured on claude 2.1.295 (docs/protocol-verification.md, experiment (l)):
+// a hook command inherits the agent's environment, so the dock PTY's
+// `REDLINE_TERMINAL_ID` reaches curl; `async: true` never holds the turn; and
+// every payload carries what the daemon needs (Stop has
+// `last_assistant_message`), so each hook is one POST of its stdin.
+
+const TERM_EVENT_URL: &str = "http://127.0.0.1:7676/v1/term/event";
+
+/// The Claude Code events the attention hooks listen on.
+pub const ATTENTION_EVENTS: [&str; 3] = ["Notification", "Stop", "UserPromptSubmit"];
+
+/// Redirects the response away and keeps any failure silent.
+const ATTENTION_TAIL: &str = " >/dev/null 2>&1 || true";
+
+/// Skips the POST outright for a session outside the dock, which has no
+/// terminal to name.
+fn attention_guard() -> String {
+    format!("[ -n \"${{{}:-}}\" ] && ", crate::term_attention::ENV_TERMINAL_ID)
+}
+
+/// The command each attention hook runs. The header comes from the
+/// environment the way the capture hook's do (`capture_spec`): double-quoted,
+/// so the shell expands the id at fire time. Unlike the capture command,
+/// nothing is echoed: an async hook's JSON output reaches the model on its
+/// next turn, and attention has nothing to tell the model. `--max-time 1` and
+/// `|| true` keep a closed or slow daemon silent.
+fn attention_command() -> String {
+    format!(
+        "{guard}curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
+         -H \"{header}: ${{{env}}}\" --data-binary @- {TERM_EVENT_URL}{ATTENTION_TAIL}",
+        guard = attention_guard(),
+        header = crate::term_attention::HEADER,
+        env = crate::term_attention::ENV_TERMINAL_ID,
+    )
+}
+
+/// One attention handler, as written under each of `ATTENTION_EVENTS`.
+/// `async` is the contract, not a tuning: the hook must never hold a turn.
+fn attention_handler() -> Value {
+    json!({ "type": "command", "command": attention_command(), "async": true, "timeout": 5 })
+}
+
+/// Is this handler ours, of any vintage? Ownership is the curl invocation
+/// itself (`hook_conflicts::targets_url`, which never claims a command that
+/// merely mentions the URL), once our guard and tail are peeled off.
+fn is_attention_handler(handler: &Value) -> bool {
+    handler.get("type").and_then(Value::as_str) == Some("command")
+        && handler.get("command").and_then(Value::as_str).is_some_and(|command| {
+            let guard = attention_guard();
+            let invocation = command.strip_prefix(guard.as_str()).unwrap_or(command);
+            let invocation = invocation.strip_suffix(ATTENTION_TAIL).unwrap_or(invocation);
+            crate::hook_conflicts::targets_url(invocation, TERM_EVENT_URL)
+        })
+}
+
+/// Are all three attention hooks installed exactly as this build writes
+/// them? Compared byte for byte like `capture_current`: an older install (a
+/// different command, or one that is not async) is rewritten, not trusted.
+pub fn attention_current() -> bool {
+    attention_current_at(&settings_path())
+}
+
+pub fn attention_current_at(path: &std::path::Path) -> bool {
+    let Some(root) = read_json(path) else { return false };
+    let want = attention_handler();
+    ATTENTION_EVENTS.iter().all(|event| {
+        root.pointer(&format!("/hooks/{event}"))
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("hooks").and_then(Value::as_array))
+                    .flatten()
+                    .any(|handler| handler == &want)
+            })
+    })
+}
+
+/// Install (or refresh) the attention hooks. Idempotent: ours are rewritten in
+/// place, duplicates dropped, and every other hook under those events is kept.
+pub fn install_attention() -> Result<bool, String> {
+    install_attention_at(&settings_path())
+}
+
+pub fn install_attention_at(path: &std::path::Path) -> Result<bool, String> {
+    edit_attention_at(path, true)?;
+    Ok(attention_current_at(path))
+}
+
+/// Remove only Redline's attention handlers, dropping containers they leave
+/// empty. Returns whether the hooks are still (currently) installed.
+pub fn uninstall_attention() -> Result<bool, String> {
+    uninstall_attention_at(&settings_path())
+}
+
+pub fn uninstall_attention_at(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    edit_attention_at(path, false)?;
+    Ok(attention_current_at(path))
+}
+
+fn edit_attention_at(path: &std::path::Path, install: bool) -> Result<(), String> {
+    let _guard = crate::hook_config::lock();
+    let original = crate::hook_config::read(path)?;
+    let mut root: Value = match &original {
+        Some(bytes) => serde_json::from_slice(bytes).map_err(|e| format!("invalid settings JSON: {e}"))?,
+        None => json!({}),
+    };
+    let object = root.as_object_mut().ok_or("settings root is not a JSON object")?;
+    if !install && !object.contains_key("hooks") { return Ok(()); }
+    let hooks = object.entry("hooks").or_insert_with(|| json!({})).as_object_mut().ok_or("hooks is not an object")?;
+    for event in ATTENTION_EVENTS {
+        if !install && !hooks.contains_key(event) { continue; }
+        let entries = hooks.entry(event).or_insert_with(|| json!([])).as_array_mut()
+            .ok_or_else(|| format!("hooks.{event} is not an array"))?;
+        let mut found = false;
+        for entry in entries.iter_mut() {
+            // A malformed foreign entry is not ours to fix or to fail on.
+            let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) else { continue };
+            handlers.retain_mut(|handler| {
+                if !is_attention_handler(handler) { return true; }
+                if !install || found { return false; }
+                *handler = attention_handler();
+                found = true;
+                true
+            });
+        }
+        if install && !found { entries.push(json!({ "hooks": [attention_handler()] })); }
+        entries.retain(|entry| !entry["hooks"].as_array().is_some_and(Vec::is_empty)
+            || entry.as_object().is_some_and(|o| o.keys().any(|k| k != "matcher" && k != "hooks")));
+        if entries.is_empty() { hooks.remove(event); }
+    }
+    if hooks.is_empty() { root.as_object_mut().expect("checked above").remove("hooks"); }
+    crate::hook_config::replace(path, original.as_deref(), &root)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,6 +1232,91 @@ mod tests {
         let arr = json["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["hooks"][0]["command"], "echo other");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The attention command, byte for byte. A changed byte makes
+    /// `attention_current` report every install stale and rewrite it at boot,
+    /// so a change here must be deliberate.
+    #[test]
+    fn attention_command_is_pinned() {
+        assert_eq!(
+            attention_command(),
+            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && curl -s --max-time 1 -X POST \
+             -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
+             --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1 || true"
+        );
+        let handler = attention_handler();
+        assert_eq!(handler["async"], true, "an attention hook must never hold a turn");
+        assert_eq!(handler["type"], "command");
+        assert!(is_attention_handler(&handler));
+    }
+
+    /// Ownership is the curl invocation, never a mention of the URL.
+    #[test]
+    fn attention_ownership_ignores_commands_that_only_mention_the_route() {
+        let command = |c: &str| json!({ "type": "command", "command": c });
+        assert!(is_attention_handler(&command(&format!("curl -s --data-binary @- {TERM_EVENT_URL}"))), "an older vintage is still ours");
+        assert!(!is_attention_handler(&command(&format!("echo {TERM_EVENT_URL}"))));
+        assert!(!is_attention_handler(&command("curl -s http://127.0.0.1:7676/v1/prompts/ingest")));
+        assert!(!is_attention_handler(&json!({ "type": "http", "url": TERM_EVENT_URL })));
+    }
+
+    #[test]
+    fn attention_install_refreshes_stale_handlers_and_uninstall_keeps_neighbours() {
+        let path = tmppath();
+        assert!(!attention_current_at(&path));
+        let stale = json!({ "type": "command", "command": format!("curl -s --data-binary @- {TERM_EVENT_URL}") });
+        std::fs::write(&path, serde_json::to_string_pretty(&json!({
+            "hooks": {
+                "Stop": [
+                    { "hooks": [{ "type": "command", "command": "say done" }, stale.clone()] },
+                    { "hooks": [stale.clone()] }
+                ],
+                "Notification": [{ "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "notify-me" }] }]
+            }
+        })).unwrap()).unwrap();
+        assert!(!attention_current_at(&path), "a stale vintage is not current");
+
+        assert!(install_attention_at(&path).unwrap());
+        assert!(install_attention_at(&path).unwrap(), "idempotent");
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let stop = json["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1, "the duplicate's emptied entry is dropped: {stop:?}");
+        assert_eq!(stop[0]["hooks"], json!([{ "type": "command", "command": "say done" }, attention_handler()]), "refreshed in place");
+        let notification = json["hooks"]["Notification"].as_array().unwrap();
+        assert_eq!(notification.len(), 2, "a new entry beside the user's matcher");
+        assert_eq!(notification[1]["hooks"], json!([attention_handler()]));
+        assert!(notification[1].get("matcher").is_none(), "every notification type, not one");
+        assert_eq!(json["hooks"]["UserPromptSubmit"][0]["hooks"], json!([attention_handler()]));
+        assert!(get_status_at(&path).attention_installed);
+
+        assert!(!uninstall_attention_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"]["Stop"], json!([{ "hooks": [{ "type": "command", "command": "say done" }] }]));
+        assert_eq!(json["hooks"]["Notification"], json!([{ "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "notify-me" }] }]));
+        assert!(json["hooks"].get("UserPromptSubmit").is_none(), "an emptied event is dropped");
+        assert!(!get_status_at(&path).attention_installed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The attention hook shares UserPromptSubmit with the capture hook; each
+    /// installer must leave the other's entry alone.
+    #[test]
+    fn attention_and_capture_hooks_coexist_under_user_prompt_submit() {
+        let path = tmppath();
+        install_capture_at(&path).unwrap();
+        install_attention_at(&path).unwrap();
+        install_capture_at(&path).unwrap();
+        assert!(capture_current_at(&path) && attention_current_at(&path));
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 2);
+        uninstall_capture_at(&path).unwrap();
+        assert!(attention_current_at(&path), "removing capture keeps attention");
+        install_capture_at(&path).unwrap();
+        uninstall_attention_at(&path).unwrap();
+        assert!(capture_current_at(&path), "removing attention keeps capture");
+        assert!(!uninstall_attention_at(&tmppath()).unwrap(), "no settings file is a no-op");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -65,43 +65,48 @@ describe("moveTile", () => {
 describe("reconcileTiles", () => {
   it("no-ops with the SAME identities when the closed id was never tiled", () => {
     const tiles = ["a", "b"];
-    const out = reconcileTiles(tiles, 1, "z", 2, ["a", "b", "c"]);
+    const out = reconcileTiles(tiles, 1, "z", ["c"], ["c"]);
     expect(out.tiles).toBe(tiles);
     expect(out.focus).toBe(1);
   });
 
-  it("refills from the closed tab's LEFT neighbour first, then right", () => {
-    // Tabs were [a, b, c]; b (index 1) closes while alone on screen.
-    expect(reconcileTiles(["b"], 0, "b", 1, ["a", "c"]).tiles).toEqual(["a"]);
-    // Tabs were [b, c]; b (index 0) closes — no left neighbour, right wins.
-    expect(reconcileTiles(["b"], 0, "b", 0, ["c"]).tiles).toEqual(["c"]);
+  it("refills only from the candidates it is handed, in order", () => {
+    // The caller passes the untiled terminals that need you, oldest first.
+    expect(reconcileTiles(["a", "b"], 0, "b", ["d", "c"], ["c", "d"]).tiles).toEqual(["a", "d"]);
   });
 
-  it("skips ids already shown in another tile — two tiles never show one shell", () => {
-    // Tabs [a, b, c]; tiles show a and b; closing b must refill with c, not a.
-    expect(reconcileTiles(["a", "b"], 0, "b", 1, ["a", "c"]).tiles).toEqual([
-      "a",
-      "c",
-    ]);
+  it("with no candidate the tile COLLAPSES — no arbitrary neighbour is pulled back", () => {
+    const out = reconcileTiles(["a", "b", "c"], 2, "b", [], ["x", "y"]);
+    expect(out.tiles).toEqual(["a", "c"]);
+    // Focus follows its tile across the drop.
+    expect(out.focus).toBe(1);
   });
 
-  it("drops the tile when every survivor is already tiled, and focus follows its tile", () => {
-    // Tabs [a, b]; both tiled; closing b leaves nothing untiled → tile drops.
-    const out = reconcileTiles(["a", "b"], 1, "b", 1, ["a"]);
+  it("skips candidates already shown in another tile — two tiles never show one shell", () => {
+    expect(reconcileTiles(["a", "b"], 0, "b", ["a", "b", "c"], []).tiles).toEqual(["a", "c"]);
+  });
+
+  it("takes the fallback only when the grid would otherwise be empty", () => {
+    expect(reconcileTiles(["b"], 0, "b", [], ["c", "a"]).tiles).toEqual(["c"]);
+    expect(reconcileTiles(["b"], 0, "b", ["a"], ["c"]).tiles).toEqual(["a"]);
+    // Never the closed terminal itself, whatever the caller passed.
+    expect(reconcileTiles(["b"], 0, "b", ["b"], ["b", "c"]).tiles).toEqual(["c"]);
+  });
+
+  it("drops the tile when every candidate is already tiled, and focus follows its tile", () => {
+    const out = reconcileTiles(["a", "b"], 1, "b", ["a"], ["a"]);
     expect(out.tiles).toEqual(["a"]);
     expect(out.focus).toBe(0);
     // A drop BEFORE the focused tile shifts focus left so it keeps pointing
     // at the same terminal.
-    const shifted = reconcileTiles(["x", "a", "y"], 2, "x", 0, ["a", "y"]);
+    const shifted = reconcileTiles(["x", "a", "y"], 2, "x", [], []);
     expect(shifted.tiles).toEqual(["a", "y"]);
     expect(shifted.focus).toBe(1);
   });
 
   it("resolves by id against the current array, never a captured index", () => {
-    // The closed tab's index is stale relative to the tiles — resolution must
-    // key on the id. Closing c (which sits in tile 0 despite index 2 in the
-    // tab list) must refill tile 0, not tile 2.
-    const out = reconcileTiles(["c", "a"], 0, "c", 2, ["a", "b"]);
+    // Closing c (tile 0) must refill tile 0, not wherever c sat in the tab list.
+    const out = reconcileTiles(["c", "a"], 0, "c", ["b"], ["b"]);
     expect(out.tiles).toEqual(["b", "a"]);
   });
 });

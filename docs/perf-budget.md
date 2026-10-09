@@ -69,8 +69,10 @@ it, that's the discussion to have before merging.
    busy terminal falls behind) rather than freezing the app, but anything that
    scales *per visible terminal* must be batched or bounded: the cwd poll is
    one `pty_cwds` subprocess per tick for the whole fleet (never one `lsof`
-   per pane), and WebGL renderers are visibility-scoped and capped at
-   `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's
+   per pane), `pty_procs` (each terminal's foreground program and listening
+   ports, for the wall's state badges) is one `ps` and one `lsof` per call
+   whatever the terminal count, and WebGL renderers are visibility-scoped
+   and capped at `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's
    process-wide context cap can never silently evict the oldest terminal's
    context. At fourteen tiles that ceiling binds for the first time — it used
    to sit above the tile cap and never fire — so the fallback path is now a

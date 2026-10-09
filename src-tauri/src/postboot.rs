@@ -187,14 +187,23 @@ fn external_repairs() {
     // silently delivering none of it, so the check is "is it the
     // command we'd write today", and `install_capture` rewrites in
     // place when it isn't.
-    if crate::hook::get_status().installed
-        && !(crate::hook::capture_installed() && crate::hook::capture_current())
-    {
+    let plan_hook = crate::hook::get_status().installed;
+    if plan_hook && !(crate::hook::capture_installed() && crate::hook::capture_current()) {
         match crate::hook::install_capture() {
             Ok(_) => tracing::info!("installed/refreshed Polis prompt-capture hook"),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to install prompt-capture hook")
             }
+        }
+    }
+
+    // The terminal-attention hooks travel with the plan hook the same way,
+    // and are refreshed the same way: byte-compared, rewritten when an
+    // older build wrote them.
+    if plan_hook && !crate::hook::attention_current() {
+        match crate::hook::install_attention() {
+            Ok(_) => tracing::info!("installed/refreshed terminal-attention hooks"),
+            Err(e) => tracing::warn!(error = %e, "failed to install terminal-attention hooks"),
         }
     }
     boot_trace::mark(boot_trace::HOOK_MAINTENANCE);

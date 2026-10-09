@@ -566,6 +566,45 @@ export interface HookStatus {
   settingsPath: string;
   matcherFound: boolean;
   conflictingUrl: string | null;
+  /** The terminal-attention hooks (Notification / Stop / UserPromptSubmit)
+   *  are installed as this build writes them. Boot refreshes stale ones. */
+  attentionInstalled: boolean;
+}
+
+/** What a dock terminal's agent needs, from the agent's own hooks
+ *  (`term_attention.rs`). Arrives as the `term-attention` event on every
+ *  change; `term_attention_snapshot` returns the latest per live terminal.
+ *  A new `at` is a new transition even when `kind` repeats. */
+export type TermAttention = {
+  terminalId: string;
+  sessionId: string | null;
+  /** Unix ms the event arrived. */
+  at: number;
+} & (
+  | { kind: "working" }
+  /** `reason` is Claude Code's `notification_type`: `permission_prompt`
+   *  (tool approvals and AskUserQuestion), `elicitation_dialog`,
+   *  `elicitation_url_dialog`, `agent_needs_input`, `quota_auto_resume_stale`. */
+  | { kind: "needs-you"; reason: string; message: string | null }
+  /** The turn ended. `excerpt` is the reply's last paragraph, one line, at
+   *  most 240 chars; it can arrive in a second event for the same `at`. */
+  | { kind: "your-turn"; excerpt: string | null }
+  /** A `working` whose Stop was lost, cleared by the CLI's idle reminder.
+   *  An Esc interrupt fires no hook at all, so the frontend clears `working`
+   *  itself when the user presses Esc in that terminal. */
+  | { kind: "idle" }
+);
+
+/** `pty_procs`: what each live terminal is running, read for tiled and
+ *  untiled terminals alike. */
+export interface TermProc {
+  id: string;
+  /** Foreground job leader by executable name (`claude`, `node`, `zsh`). */
+  fgComm: string | null;
+  /** The shell itself holds the foreground: nothing is running. */
+  fgIsShell: boolean;
+  /** TCP ports a process under this terminal listens on, ascending. */
+  ports: number[];
 }
 
 /** How far the daemon's bind of 127.0.0.1:7676 has got.

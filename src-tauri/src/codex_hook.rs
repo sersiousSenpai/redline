@@ -4,7 +4,9 @@
 //!
 //! Codex exposes command hooks rather than Claude Code's native HTTP hook, so
 //! curl is the deliberately tiny adapter. The Stop hook is held while the plan
-//! is reviewed; prompt capture is asynchronous and always fail-open.
+//! is reviewed; prompt capture is asynchronous and always fail-open. Both
+//! forward the dock terminal they run in (`X-Redline-Terminal`), which is how
+//! a Codex agent's turns reach the terminal wall (`term_attention`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,15 +34,27 @@ pub fn hooks_path() -> PathBuf {
     crate::codex_profile::codex_home().join("hooks.json")
 }
 
+/// `-H "X-Redline-Terminal: ${REDLINE_TERMINAL_ID:-}"`: double-quoted so the
+/// shell expands it at fire time, empty for a session outside the dock.
+fn terminal_header() -> String {
+    format!(
+        "-H \"{}: ${{{}:-}}\"",
+        crate::term_attention::HEADER,
+        crate::term_attention::ENV_TERMINAL_ID
+    )
+}
+
 fn stop_command() -> String {
     format!(
-        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" -H \"X-Redline-Codex-Socket: ${{REDLINE_CODEX_SOCKET:-}}\" --data-binary @- {STOP_URL}"
+        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" -H \"X-Redline-Codex-Socket: ${{REDLINE_CODEX_SOCKET:-}}\" {terminal} --data-binary @- {STOP_URL}",
+        terminal = terminal_header(),
     )
 }
 
 fn capture_command() -> String {
     format!(
-        "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" --data-binary @- {INGEST_URL} >/dev/null 2>&1; exit 0"
+        "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" {terminal} --data-binary @- {INGEST_URL} >/dev/null 2>&1; exit 0",
+        terminal = terminal_header(),
     )
 }
 
@@ -200,6 +214,18 @@ mod tests {
         let unchanged = entries.clone();
         upsert_command(&mut entries, STOP_URL, current);
         assert_eq!(entries, unchanged);
+    }
+
+    /// Both Codex hooks name their dock terminal, through a shell expansion
+    /// (single quotes would ship the literal variable name), and an older
+    /// install without the header is not current.
+    #[test]
+    fn both_hooks_forward_the_dock_terminal() {
+        for command in [stop_command(), capture_command()] {
+            assert!(command.contains("-H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID:-}\""), "{command}");
+        }
+        let stale = json!({"hooks":[{"type":"command","command":stop_command().replace(&format!("{} ", terminal_header()), ""),"timeout":HOOK_TIMEOUT_SECS}]});
+        assert!(!entry_has_command(&stale, &stop_command(), false), "a pre-attention install is refreshed");
     }
 
     #[test]

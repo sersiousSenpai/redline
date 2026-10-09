@@ -138,6 +138,7 @@ mod shipwright;
 mod shots;
 mod skill;
 mod state;
+mod term_attention;
 mod thumbs;
 mod tts;
 mod turn;
@@ -1894,6 +1895,10 @@ async fn handle_codex_stop(
         .and_then(Value::as_str)
         .and_then(extract_codex_proposed_plan)
     else {
+        // An ordinary turn ended: in a dock terminal, that is "your turn".
+        if let Some(terminal_id) = term_attention::terminal_header(&headers) {
+            term_attention::observe_codex_stop(&app_state.app_handle, &terminal_id, &payload);
+        }
         return Json(json!({}));
     };
     let normalized = json!({
@@ -3355,6 +3360,9 @@ async fn run_server(state: AppState) {
         .route("/viewer/*path", get(handle_viewer_asset))
         .route("/assets/*path", get(handle_root_asset))
         .route("/v1/plan", post(handle_plan))
+        // Terminal attention (terminal-wall Phase 1): the async Notification /
+        // Stop / UserPromptSubmit hooks of an agent in a dock terminal.
+        .route("/v1/term/event", post(term_attention::handle_event))
         .route("/v1/codex/stop", post(handle_codex_stop))
         .route("/v1/cursor/prompt", post(handle_cursor_prompt))
         .route("/v1/cursor/response", post(handle_cursor_response))
@@ -12412,8 +12420,13 @@ fn install_hook() -> Result<HookStatus, String> {
         if let Err(e) = hook::install_capture() {
             tracing::warn!(error = %e, "failed to install prompt-capture hook");
         }
+        // And the terminal-attention hooks (needs-you / your-turn / working).
+        if let Err(e) = hook::install_attention() {
+            tracing::warn!(error = %e, "failed to install terminal-attention hooks");
+        }
     }
-    result
+    // Re-read: the status above was taken before the attention hooks landed.
+    result.map(|_| hook::get_status())
 }
 
 /// `(async)` — `available` runs the codex capability probe, which can spawn
@@ -12494,6 +12507,7 @@ fn remove_hook_via_menu(app: &AppHandle) {
             }
             let app = app_for_confirm;
             let _ = hook::uninstall_capture();
+            let _ = hook::uninstall_attention();
             match hook::uninstall() {
                 Ok(status) => {
                     tracing::info!(path = %status.settings_path, "removed redline hook");
@@ -12617,6 +12631,9 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // OS notifications for a terminal that needs you while Redline is in
+        // the background. The frontend decides when; it alone knows "seen".
+        .plugin(tauri_plugin_notification::init())
         // `redline://` deep links — the viewer's "Open in Redline" link lands a
         // shared plan as a full native review. Handled in the frontend via the
         // JS plugin's onOpenUrl (both cold-start and running-instance).
@@ -12805,6 +12822,9 @@ pub fn run() {
             pty::pty_kill_all,
             pty::pty_cwd,
             pty::pty_cwds,
+            pty::pty_procs,
+            term_attention::term_attention_snapshot,
+            term_attention::set_attention_badge,
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
@@ -13281,6 +13301,7 @@ pub fn run() {
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
+            app.manage(term_attention::TermAttentionState::default());
             app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());
             app.manage(self_develop::SelfDevelopState::new());

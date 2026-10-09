@@ -79,37 +79,33 @@ export function moveTile(
   return next;
 }
 
-/** After terminal `closedId` (formerly at `closedIndex` in the tab list)
- *  closes: refill every tile showing it from `remainingIds` (the tab list
- *  with it removed) — preferring its left neighbour, then its right, then any
- *  survivor, skipping ids already tiled — and drop the tile when nothing is
- *  left. `focus` tracks the focused tile across the shuffle: it follows its
- *  tile's new position and clamps when that tile is dropped. Same identities
- *  when the closed id was never tiled. */
+/** After terminal `closedId` closes: refill every tile showing it from
+ *  `refill` — the terminals allowed to step in, in order, skipping ids
+ *  already tiled — and drop the tile when none is left. The wall no longer
+ *  pulls back an arbitrary neighbour: the caller passes only the untiled
+ *  terminals that need you, so a closed tile otherwise just collapses.
+ *  `fallback` is consulted only when the grid would be left EMPTY (the dock
+ *  always shows a terminal). `focus` tracks the focused tile across the
+ *  shuffle: it follows its tile's new position and clamps when that tile is
+ *  dropped. Same identities when the closed id was never tiled. */
 export function reconcileTiles(
   tiles: readonly string[],
   focus: number,
   closedId: string,
-  closedIndex: number,
-  remainingIds: readonly string[],
+  refill: readonly string[],
+  fallback: readonly string[],
 ): { tiles: readonly string[]; focus: number } {
   if (!tiles.includes(closedId)) return { tiles, focus };
 
   const taken = new Set(tiles.filter((id) => id !== closedId));
-  const preferred = [
-    remainingIds[closedIndex - 1],
-    remainingIds[closedIndex],
-    ...remainingIds,
-  ].filter((id): id is string => id != null);
-
   const next: string[] = [];
   let nextFocus = focus;
   for (let i = 0; i < tiles.length; i++) {
     let id: string | null = tiles[i];
     if (id === closedId) {
       id = null;
-      for (const candidate of preferred) {
-        if (!taken.has(candidate)) {
+      for (const candidate of refill) {
+        if (candidate !== closedId && !taken.has(candidate)) {
           id = candidate;
           taken.add(candidate);
           break;
@@ -124,7 +120,10 @@ export function reconcileTiles(
     }
   }
   // Never empty (the dock always shows a terminal) and focus always in range.
-  const tilesOut = next.length > 0 ? next : remainingIds.slice(0, 1);
+  const tilesOut =
+    next.length > 0
+      ? next
+      : fallback.filter((id) => id !== closedId).slice(0, 1);
   return {
     tiles: tilesOut,
     focus: Math.max(0, Math.min(nextFocus, tilesOut.length - 1)),

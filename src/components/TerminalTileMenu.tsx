@@ -16,6 +16,11 @@ import {
   type RepoChoice,
 } from "../lib/terminalMenu";
 import { Panel, PanelHeader, type PanelProps } from "./popover";
+import {
+  TERM_STATE_COLOR,
+  TermStateBadge,
+  termStateWords,
+} from "./TermStateBadge";
 
 // The tile dropdown — the single place that answers "what's running, switch
 // me to it, or start me a new one", which is what let the tab strip, the repo
@@ -65,6 +70,12 @@ export interface TileActions {
    *  fleet's only inventory, and a never-tiled terminal would otherwise show
    *  its stale spawn cwd. Called on open. */
   onRefreshCwds: () => void;
+  /** Pin or unpin a terminal: a pinned tile never parks itself. */
+  onTogglePin: (id: string) => void;
+  /** A press on a header chip that may become a drag onto another tile.
+   *  TerminalTabs owns the gesture: under its threshold it is a plain click
+   *  and nothing happens here. */
+  onDragStart: (id: string, e: React.PointerEvent<HTMLElement>) => void;
 }
 
 /** Everything high-churn the menu renders (work lines, held, unseen, repo
@@ -184,9 +195,9 @@ export function TerminalTileMenu({
   const activeIdx = Math.min(active, items.length - 1);
   const activeKey = items[activeIdx]?.key;
 
-  // The menu is now the only way to reach an untiled terminal, so it earns
-  // real keyboard reach: focus lands in the filter (or the list), arrows
-  // rove, Enter activates. Escape rides useDismiss.
+  // The menu is the keyboard's way to an untiled terminal (the shelf is the
+  // pointer's), so it earns real keyboard reach: focus lands in the filter
+  // (or the list), arrows rove, Enter activates. Escape rides useDismiss.
   useEffect(() => {
     (filterRef.current ?? listRef.current)?.focus();
   }, []);
@@ -362,6 +373,11 @@ function OpenRow({
 }) {
   const isThisTile = row.tile === menuTile;
   const tiled = row.tile !== null;
+  // What the terminal is doing, in words: "needs you", "working", ":5173".
+  // Idle says nothing — "new output" (below) is the only news an idle
+  // terminal has.
+  const state = row.state;
+  const chip = state ? termStateWords(state, row.port ?? null) : null;
   // State-dot grammar (DocumentsMenu's): filled info = this tile, filled
   // muted = another tile, hollow ring = alive but untiled.
   const dot: CSSProperties = {
@@ -411,12 +427,20 @@ function OpenRow({
             {row.label}
           </span>
           <span className="flex items-center gap-2 ml-auto shrink-0">
-            {row.held && (
+            {state && chip ? (
+              <span
+                className="flex items-center gap-1"
+                style={{ color: TERM_STATE_COLOR[state], fontSize: "10px" }}
+              >
+                <TermStateBadge state={state} size={5} />
+                {chip}
+              </span>
+            ) : row.held && !state ? (
               <span style={{ color: HELD_RED, fontSize: "10px" }}>
                 plan held
               </span>
-            )}
-            {row.unseen && !row.held && (
+            ) : null}
+            {!chip && row.unseen && !row.held && (
               <span
                 className="flex items-center gap-1"
                 style={{ color: "var(--color-info)", fontSize: "10px" }}

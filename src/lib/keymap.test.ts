@@ -8,6 +8,7 @@ import {
   globalShortcutGroups,
   isDockKey,
   isFrontDoorKey,
+  isNeedsYouKey,
   isNewPlanKey,
   isPaletteKey,
   isSnapBackKey,
@@ -113,6 +114,22 @@ describe("isDockKey", () => {
   });
 });
 
+describe("isNeedsYouKey", () => {
+  it("matches ⌘⇧J and Ctrl+⇧J via e.code (Shift rewrites e.key)", () => {
+    expect(isNeedsYouKey(combo({ key: "J", code: "KeyJ", metaKey: true, shiftKey: true }))).toBe(true);
+    expect(isNeedsYouKey(combo({ key: "J", code: "KeyJ", ctrlKey: true, shiftKey: true }))).toBe(true);
+  });
+  it("leaves ⌘J (the front door), ⌥⌘⇧J and a bare ⇧J alone — and never both with ⌘J", () => {
+    const plain = combo({ key: "j", code: "KeyJ", metaKey: true });
+    expect(isNeedsYouKey(plain)).toBe(false);
+    expect(isDockKey(plain)).toBe(true);
+    const shifted = combo({ key: "J", code: "KeyJ", metaKey: true, shiftKey: true });
+    expect(isDockKey(shifted)).toBe(false);
+    expect(isNeedsYouKey(combo({ key: "J", code: "KeyJ", metaKey: true, shiftKey: true, altKey: true }))).toBe(false);
+    expect(isNeedsYouKey(combo({ key: "J", code: "KeyJ", shiftKey: true }))).toBe(false);
+  });
+});
+
 describe("isFrontDoorKey", () => {
   it("matches Shift+Enter while leaving Enter and modified sends alone", () => {
     expect(isFrontDoorKey(combo({ key: "Enter", shiftKey: true }))).toBe(true);
@@ -130,7 +147,7 @@ describe("the registry", () => {
   it("wires exactly the globals this module dispatches — the rest is documentation", () => {
     expect(
       GLOBAL_KEYMAP.filter((b) => b.wired).map((b) => b.id).sort(),
-    ).toEqual(["dock", "front-door", "new-plan", "palette", "snap-back"]);
+    ).toEqual(["dock", "front-door", "needs-you", "new-plan", "palette", "snap-back"]);
   });
   it("every binding renders: non-empty caps and label", () => {
     for (const b of GLOBAL_KEYMAP) {

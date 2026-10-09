@@ -370,7 +370,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isDockKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { isDockKey, isNeedsYouKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
 import {
   TOC_RAIL_W,
@@ -2562,7 +2562,11 @@ function App() {
     },
     [],
   );
-  const [termHasUnseen, setTermHasUnseen] = useState(false);
+  // How many dock terminals need you (TerminalTabs owns which): the footer
+  // chip, and whether ⌘⇧J has anywhere to go.
+  const [termNeedYou, setTermNeedYou] = useState(0);
+  const termNeedYouRef = useRef(termNeedYou);
+  termNeedYouRef.current = termNeedYou;
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
   // Onboarding tour reveal/restore: the spotlight needs its target on-screen, so
@@ -2734,6 +2738,28 @@ function App() {
   useEffect(() => {
     if (terminalMounted) markOnce("rl:terminal-ready");
   }, [terminalMounted]);
+
+  // ⌘⇧J and the footer's "N need you": reveal the dock (out from under the
+  // front door, like any "show me the terminal") and let it land on the next
+  // terminal that needs you. Nothing happens when nothing does.
+  const jumpToNeedsYou = useCallback(() => {
+    if (termNeedYouRef.current === 0) return;
+    setFrontDoorOpen(false);
+    revealTerm();
+    void ensureTerminalReady().then((dock) => dock?.jumpToNeedsYou());
+  }, [revealTerm, ensureTerminalReady]);
+  // Capture phase, like the Shift+arrow pane keys below: xterm's handler sits
+  // on its helper textarea, so this runs first and the shell never sees it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isNeedsYouKey(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      jumpToNeedsYou();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [jumpToNeedsYou]);
 
 
   // Switch the sidebar to a folder and reopen the file last viewed there. The
@@ -10196,7 +10222,7 @@ function App() {
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}
-            onActivityChange={setTermHasUnseen}
+            onNeedsYouChange={setTermNeedYou}
             collapsed={termFullscreen ? false : termCollapsed}
             onActiveTabChange={setActiveTermId}
             heldTerminalIds={heldTermIds}
@@ -10260,7 +10286,8 @@ function App() {
         onReopen={() => void reopenApproved()}
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
-        termHasUnseen={termHasUnseen}
+        termNeedYou={termNeedYou}
+        onJumpToNeedsYou={jumpToNeedsYou}
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
