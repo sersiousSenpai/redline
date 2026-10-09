@@ -738,23 +738,28 @@ fn reply_backend(message: &BrowseMessage) -> &str {
 }
 
 /// The turns `provider`'s session has not seen, as a continuity block for the
-/// variable part of the prompt. A fresh session has seen nothing before
-/// `current` (the user row being answered); a resumed one has seen everything
-/// up to its own last reply. They are carried only when another provider
-/// wrote some of them, so a chat that never switched — a fresh Claude session
-/// after a context reset included — reads exactly as before.
+/// variable part of the prompt. A fresh session has seen none of the thread
+/// but `current` (the user row being answered); a resumed one has seen
+/// everything up to its own last reply. They are carried only when another
+/// provider wrote some of them, so a chat that never switched — a fresh Claude
+/// session after a context reset included — reads exactly as before.
+///
+/// Every row but `current`, not just the ones stored before it: a message
+/// typed while a reply streams is stored when it is queued, so the reply it
+/// follows sits after it. Rows still queued behind it are not `complete`, and
+/// `continuity_block` skips them.
 fn carried_history(thread: &[BrowseMessage], current: &str, provider: Provider, resumed: bool) -> String {
-    let prior = &thread[..thread.iter().position(|m| m.id == current).unwrap_or(thread.len())];
+    let others: Vec<&BrowseMessage> = thread.iter().filter(|m| m.id != current).collect();
     let replied = |m: &BrowseMessage| m.role == "assistant" && m.status == "complete";
     let seen = if resumed {
-        prior
+        others
             .iter()
             .rposition(|m| replied(m) && reply_backend(m) == provider.backend())
             .map_or(0, |last| last + 1)
     } else {
         0
     };
-    let unseen = &prior[seen..];
+    let unseen = &others[seen..];
     if !unseen.iter().any(|m| replied(m) && reply_backend(m) != provider.backend()) {
         return String::new();
     }
@@ -2224,6 +2229,38 @@ mod tests {
         assert!(!back.contains("A pricing page."), "the resumed session has its own turns");
         // Codex, resumed with nothing new from Claude, is handed nothing.
         assert_eq!(carried_history(&thread, "u4", Provider::Codex, true), "");
+    }
+
+    /// A message typed while a reply streams is stored when it is queued, so
+    /// the reply it follows lands AFTER it in the thread. Switching provider
+    /// in that gap must still hand the new side that reply.
+    #[test]
+    fn a_message_queued_behind_a_reply_is_handed_that_reply() {
+        let thread = vec![
+            row("u1", "user", "What is this page?", "complete", None),
+            row("a1", "assistant", "A pricing page.", "complete", Some("claude-code")),
+            row("u2", "user", "Compare the tiers", "complete", None),
+            // Queued (and since flipped to complete by the drain) while u2's
+            // reply was still streaming on Codex.
+            row("q3", "user", "Now on Claude: which tier fits me?", "complete", None),
+            row("a2", "assistant", "Pro costs twice Basic.", "complete", Some("codex")),
+        ];
+        let back = carried_history(&thread, "q3", Provider::Claude, true);
+        assert!(back.contains("User: Compare the tiers"), "{back}");
+        assert!(back.contains("Assistant: Pro costs twice Basic."), "{back}");
+        assert!(!back.contains("which tier fits me"), "the message being answered is not history");
+        assert!(!back.contains("A pricing page."), "the resumed session has its own turns");
+
+        // Fresh on Codex behind a Claude reply: the whole conversation.
+        let thread = vec![
+            row("u1", "user", "What is this page?", "complete", None),
+            row("q2", "user", "Now on Codex: summarize it", "complete", None),
+            row("a1", "assistant", "A pricing page.", "complete", Some("claude-code")),
+        ];
+        let codex = carried_history(&thread, "q2", Provider::Codex, false);
+        assert!(codex.contains("Assistant: A pricing page."), "{codex}");
+        // Without a switch the reply ahead is the session's own: nothing.
+        assert_eq!(carried_history(&thread, "q2", Provider::Claude, true), "");
     }
 
     #[test]

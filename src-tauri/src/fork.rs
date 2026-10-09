@@ -432,6 +432,14 @@ impl ContinuityTurn for crate::state::BrowseMessage {
     fn status(&self) -> &str { &self.status }
 }
 
+/// A picked-out subset of a thread carries without copying its rows.
+impl<M: ContinuityTurn> ContinuityTurn for &M {
+    const USER: &'static str = M::USER;
+    fn role(&self) -> &str { (**self).role() }
+    fn body(&self) -> &str { (**self).body() }
+    fn status(&self) -> &str { (**self).status() }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiscussMode { Report, Conversation }
 const REPORT_VOICE: &str = "Follow the `sidecar` skill for how to structure this reply: lead with the answer, then add a table, mermaid diagram, or callout only when it adds signal. Respond directly and concisely in markdown — no raw HTML.";
