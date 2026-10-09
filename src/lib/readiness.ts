@@ -79,6 +79,9 @@ export interface PreflightStatus {
     trustDetail?: string | null;
     available: boolean;
     installed: boolean;
+    /** Installed in an earlier shape that still works (`codex_hook.rs`
+     *  `PREVIOUS_*_COMMANDS`): an update is available, nothing waits on it. */
+    outdated?: boolean;
     hooksPath: string;
     stopFound: boolean;
     promptCaptureFound: boolean;
@@ -104,6 +107,7 @@ export type ReadinessId =
   | "no-project"
   | "hook-missing"
   | "codex-hook-missing"
+  | "codex-hook-stale"
   | "skill-stale"
   | "curl-old"
   | "ext-toolchain";
@@ -192,6 +196,7 @@ const ID_ORDER: ReadinessId[] = [
   "no-project",
   "hook-missing",
   "codex-hook-missing",
+  "codex-hook-stale",
   "skill-stale",
   "curl-old",
   "ext-toolchain",
@@ -378,6 +383,23 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         "Stop hook into ~/.codex/hooks.json — Codex then asks you once to " +
         "trust the new hook, from inside Codex itself.",
       fix: { label: "Install integration", kind: "install-integration" },
+    });
+  }
+
+  // An earlier hook that still works: plans come back, so it never blocks —
+  // not here, not at dispatch, and never a restore (it is not in
+  // CODEX_RESTORE_IDS). Updating it costs a trip to Codex's /hooks, which is
+  // the reviewer's call to make.
+  if (backend === "codex" && !input.hookModalActive && pf?.codexHook?.installed && pf.codexHook.outdated) {
+    items.push({
+      id: "codex-hook-stale",
+      state: "warn",
+      label: "Redline's Codex hooks have an update",
+      detail:
+        "Plans still come back for review. The update lets the terminal wall " +
+        "show when a Codex agent needs you; Codex then asks you once to trust " +
+        "the changed hooks, from inside Codex itself.",
+      fix: { label: "Update hooks", kind: "install-integration" },
     });
   }
 

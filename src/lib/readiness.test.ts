@@ -421,6 +421,24 @@ describe("the codex routes", () => {
     expect(items[0].detail).toContain("trust");
   });
 
+  it("offers, never requires, an update for an earlier hook that still works", () => {
+    // An install from before the terminal header still returns every plan.
+    // Reading it as missing blocked every Codex restore until the reviewer
+    // reinstalled and re-trusted; now it is a quiet offer.
+    const pf = healthyPreflight();
+    pf.codexHook = { available: true, installed: true, outdated: true, hooksPath: "/h", stopFound: true, promptCaptureFound: true };
+    pf.codexSkill = { installed: true, outdated: false };
+    for (const requireIntegration of [false, true]) {
+      const items = deriveReadiness(onCodex({ preflight: pf, requireIntegration }));
+      expect(items.map((i) => i.id)).toEqual(["codex-hook-stale"]);
+      expect(items[0].state).toBe("warn");
+      expect(items[0].fix).toMatchObject({ kind: "install-integration", backend: "codex" });
+    }
+    expect(deriveReadiness(healthy({ preflight: pf }))).toEqual([]);
+    pf.codexHook.outdated = false;
+    expect(deriveReadiness(onCodex({ preflight: pf }))).toEqual([]);
+  });
+
   it("withholds the hook warning while the probe is unanswered", () => {
     expect(deriveReadiness(healthy({ targetIsCodex: true }))).toEqual([]);
   });
@@ -526,6 +544,13 @@ describe("the codex RESTORE gate", () => {
 
     // Unprobed is not "missing" — withheld, like every other null answer.
     expect(restore(() => {}, undefined)).toEqual([]);
+  });
+
+  it("restores through an earlier hook that still works", () => {
+    const items = restore((pf) => {
+      pf.codexHook = { available: true, installed: true, outdated: true, hooksPath: "/h", stopFound: true, promptCaptureFound: true };
+    });
+    expect(items).toEqual([]);
   });
 
   it("ignores faults that have nothing to do with a restore", () => {

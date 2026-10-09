@@ -639,7 +639,10 @@ export interface CodexHookStatus {
   trust?: "trusted" | "needs-review" | "unknown";
   trustDetail?: string | null;
   available: boolean;
+  /** Both hooks are there in a shape that still works, current or earlier. */
   installed: boolean;
+  /** An earlier, still-working shape: an update is available, not required. */
+  outdated?: boolean;
   hooksPath: string;
   stopFound: boolean;
   promptCaptureFound: boolean;
