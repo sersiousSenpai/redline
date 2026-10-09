@@ -341,14 +341,17 @@ export class AgentTurnController<M extends TurnMessage> {
     // send would come back an error and the optimistic row would be a lie.
     if (cfg.queueing === false && this.state.phase === "streaming") return;
     const id = tmpId(cfg.surface);
+    const row = cfg.makeMessage({
+      id,
+      role: "user",
+      body: opts?.localBody ?? trimmed,
+      status: "complete",
+    });
+    // A surface whose rows carry their own mode (the sidecar's chat) stamps
+    // it in `makeMessage`; an explicit send mode still wins.
     this.dispatch({
       type: "send-optimistic",
-      message: { ...cfg.makeMessage({
-        id,
-        role: "user",
-        body: opts?.localBody ?? trimmed,
-        status: "complete",
-      }), mode: opts?.mode },
+      message: { ...row, mode: opts?.mode ?? row.mode },
     });
     void this.dispatchSend(id, trimmed, opts?.extra, opts?.steer);
   }

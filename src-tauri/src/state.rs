@@ -624,6 +624,11 @@ pub struct ThreadMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CommentAttachment>,
     pub created_at: i64,
+    /// The sidecar view the turn was sent from: `"chat"` for the quick
+    /// back-and-forth, `None` for a report — which is also every row written
+    /// before the column existed. A reply carries its question's mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 /// One **code-review** session: the diff-review analog of a plan session.

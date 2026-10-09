@@ -21,7 +21,7 @@ function Fixture() {
  return <main style={{height:"100vh",overflow:"auto",padding:24,background:"var(--color-paper)",color:"var(--color-ink)"}}>
  <h1 style={{fontSize:20,marginBottom:16}}>Redline · Plan discussion</h1>
  <div style={{display:"flex",gap:24,alignItems:"start",flexWrap:"wrap"}}>
- <article style={{width:430,border:"1px solid var(--color-rule)",padding:16,borderRadius:12}}>
+ <article data-qa="wide" style={{width:430,border:"1px solid var(--color-rule)",padding:16,borderRadius:12}}>
  <p>How should we scope this?</p>
  <CommentThread sessionId="qa-sidecar" comment={{id:"qa-c",body:"How should we scope this?",type:"question",status:"resolved",createdAt:1,anchorId:"A.1"}} autoOpen/>
  </article>
@@ -29,7 +29,13 @@ function Fixture() {
  {sidebar}
  <div style={{padding:16}}><PlanStateMenu session={{status:"approved",runState:null}} onState={()=>{}} onMove={()=>setMove(true)}>Approved · not built</PlanStateMenu></div>
  <p>The plan editor keeps its light figure plate:</p><MarkdownView rich body={'```mermaid\nflowchart LR\n  review[review] --> build[build]\n```'}/>
- </aside></div>
+ </aside>
+ {/* The comment pane's default width (320px), card padding included. */}
+ <article data-qa="pane" style={{width:296,border:"1px solid var(--color-rule)",padding:12,borderRadius:6}}>
+ <p>Scope this per seat.</p>
+ <CommentThread sessionId="qa-sidecar" comment={{id:"qa-d",body:"Scope this per seat.",type:"feedback",status:"draft",createdAt:1,anchorId:"A.2"}} autoOpen/>
+ </article>
+ </div>
  {move&&<MoveToRepoDialog markdown="# Redline work" currentProject="/code/redline" options={[{path:"/code/redline",name:"redline",source:"folder"}]} onConfirm={async()=>{}} onCancel={()=>setMove(false)}/>}
  </main>;
 }

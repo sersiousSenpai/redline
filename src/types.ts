@@ -670,6 +670,10 @@ export interface ThreadMessage {
   /** Files the reviewer dropped into this follow-up. Always absent on
    *  assistant turns. */
   attachments?: CommentAttachment[];
+  /** The sidecar view the turn was sent from: `"chat"`, or absent for a
+   *  report (every row from before the Chat view included). A reply carries
+   *  its question's. */
+  mode?: "chat";
 }
 
 // --- Shared turn contract (mirrors src-tauri/src/turn.rs) --------------------

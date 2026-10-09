@@ -54,6 +54,8 @@ import {
 import { type LaunchDestination } from "./lib/frontDoor";
 import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
+import { withOptimisticComment } from "./lib/optimisticComment";
+import { warmableChunk } from "./lib/warmableChunk";
 import {
   attemptLaunch,
   attemptRun,
@@ -548,10 +550,13 @@ import {
 // a keystroke, a surface tab), the BODY is fetched on first use.
 
 /** The comment pane's card. Rendered only when a plan session is open and has
- *  comments — and it is the root of the markdown chain. */
-const CommentCard = lazy(() =>
+ *  comments — and it is the root of the markdown chain. Warmed when the
+ *  composer opens, so the first card a launch shows lands in the same frame
+ *  the composer closes (see `warmableChunk`). */
+const commentCardChunk = warmableChunk(() =>
   import("./components/CommentCard").then((m) => ({ default: m.CommentCard })),
 );
+const CommentCard = lazy(commentCardChunk.load);
 /** The code-review surface's whole body, including DiffView and the push
  *  dialog. Reached by opening a review, never on boot. */
 const ReviewPanel = lazy(() => import("./components/ReviewPanel"));
@@ -5158,6 +5163,8 @@ function App() {
     // The composer lives in the comment pane — make sure it's open, or the
     // action appears to do nothing when the pane is collapsed (or masked).
     revealPane();
+    // Saving it renders a card; fetch the card's chunk while the user types.
+    commentCardChunk.warm();
     setComposing({
       type,
       anchorId: selection.anchorId,
@@ -5229,9 +5236,10 @@ function App() {
 
   const submitComment = async (req: NewCommentRequest, opts: { discuss: boolean } = { discuss: false }) => {
     if (!session) return;
+    const sessionId = session.sessionId;
     try {
       const saved = await invoke<Comment>("add_comment", {
-        sessionId: session.sessionId,
+        sessionId,
         // Resolve the stable blockId from the comment's anchor so the in-doc
         // highlight decoration (keyed by blockId) paints — without it the
         // highlight never renders and the highlight↔card focus bridge is dead.
@@ -5240,6 +5248,13 @@ function App() {
           blockId: req.blockId ?? blockIdByAnchor.get(req.anchorId),
         },
       });
+      // `add_comment` already returned the saved comment, so put it on the
+      // session now rather than after the comments-changed → get_session round
+      // trip: React batches this with closing the composer, and the two swap
+      // in one frame (no gap, no empty-state flash on a fresh revision).
+      if (saved?.id) {
+        setSession((prev) => withOptimisticComment(prev, sessionId, saved));
+      }
       setComposing(null);
       // Send = save + discuss: the new card starts its own discussion once.
       if (opts.discuss && saved?.id) {
@@ -5259,19 +5274,23 @@ function App() {
     });
   };
 
+  /** Resolves false when the update did not land — a card showing the edit
+   *  ahead of the reload puts the saved text back. */
   const updateComment = async (
     commentId: string,
     update: import("./types").UpdateCommentRequest,
-  ) => {
-    if (!session) return;
+  ): Promise<boolean> => {
+    if (!session) return false;
     try {
       await invoke<Comment>("update_comment", {
         sessionId: session.sessionId,
         commentId,
         update,
       });
+      return true;
     } catch (err) {
       console.error("failed to update comment", err);
+      return false;
     }
   };
 

@@ -395,6 +395,9 @@ fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
     );
     for m in recent {
         let who = if m.role == "user" { "Reviewer" } else { "Assistant" };
+        // A chat aside reads as one, so the new fork can tell it from a
+        // write-up.
+        let who = if is_chat(m) { format!("{who} (chat)") } else { who.to_string() };
         let body = m.body.trim();
         let truncated: String = body.chars().take(MAX_CHARS).collect();
         out.push_str(&format!("\n{who}: {truncated}"));
@@ -406,24 +409,164 @@ fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
     Some(out)
 }
 
+/// The sidecar view a plan-comment turn was sent from. A report is the
+/// structured answer the thread exists for; a chat is a quick back-and-forth
+/// with the same fork, kept out of the report view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DiscussMode { Report, Conversation }
-const REPORT_VOICE: &str = "Follow the `sidecar` skill for how to structure this reply: lead with the answer, then add a table, mermaid diagram, or callout only when it adds signal. Respond directly and concisely in markdown — no raw HTML.";
-const CONVERSATION_VOICE: &str = "Follow the `conversation` skill: reply like a colleague, a few sentences, your take first, prose over structure, end on the live question.";
-fn mode_directive(mode: DiscussMode, first_turn: bool) -> &'static str {
-    match (mode, first_turn) {
-        (DiscussMode::Report, true) => REPORT_VOICE,
-        (DiscussMode::Conversation, true) => CONVERSATION_VOICE,
-        (DiscussMode::Report, false) => "(Reply mode: report — lead with the answer, then a diagram or table if it earns it; follow the sidecar skill where available.)",
-        (DiscussMode::Conversation, false) => "(Reply mode: conversation — short prose, your take first, like a colleague; follow the conversation skill where available.)",
+enum TurnMode {
+    Report,
+    Chat,
+}
+
+impl TurnMode {
+    /// The frontend's `mode`. Absent (an older frontend) is a report, and so
+    /// is the retired "conversation" view, for one release, in case a
+    /// frontend from before Chat is mid-flight. Anything else is refused
+    /// rather than guessed.
+    fn parse(mode: Option<&str>) -> Result<Self, String> {
+        match mode {
+            None | Some("report") | Some("conversation") => Ok(Self::Report),
+            Some("chat") => Ok(Self::Chat),
+            Some(other) => Err(format!("unknown discussion mode `{other}`")),
+        }
+    }
+
+    /// The `thread_messages.mode` stamp. A report is NULL, like every row
+    /// written before the column existed, so it has one spelling.
+    fn stamp(self) -> Option<String> {
+        match self {
+            Self::Report => None,
+            Self::Chat => Some("chat".to_string()),
+        }
     }
 }
-fn discuss_mode_prompt(prompt: String, mode: Option<DiscussMode>, first_turn: bool) -> String {
+
+fn is_chat(m: &ThreadMessage) -> bool {
+    m.mode.as_deref() == Some("chat")
+}
+
+/// How a report is told to answer. `build_first_turn_prompt` writes it, and a
+/// thread that opens in chat swaps it for `CHAT_VOICE`.
+const REPORT_VOICE: &str = "Follow the `sidecar` skill for how to structure this reply: lead with the answer, then add a table, mermaid diagram, or callout only when it adds signal. Respond directly and concisely in markdown — no raw HTML.";
+/// `REPORT_VOICE`'s stand-in on a thread that opens in chat. The read-only
+/// and no-ExitPlanMode sentences after it are untouched.
+const CHAT_VOICE: &str = "This is a quick chat, not a write-up: answer in a few sentences of plain prose, your take first, like a colleague.";
+/// Ends every chat turn — after the monochat recap, so the recap can't bury it.
+const CHAT_DIRECTIVE: &str = "(Chat — quick back-and-forth. Answer in 1–4 sentences of plain prose; no headings, tables or diagrams unless asked. Don't load the sidecar skill.)";
+/// Opens a report turn that follows chat turns. The resumed fork already
+/// holds the chat in its own history, so this only says to use it.
+const REPORT_AFTER_CHAT: &str = "(You've been chatting with the reviewer since your last write-up — fold anything relevant from that chat into this answer.)";
+
+/// Shape a turn's prompt for the view it was sent from:
+///
+/// * a chat that opens the thread answers in `CHAT_VOICE`, not the report
+///   voice;
+/// * a report follow-up after chat turns is told to fold the chat in, and
+///   gets the report voice back, which the chat directives set aside;
+/// * everything else — every report thread that never chatted — passes
+///   through byte-identical.
+///
+/// The chat directive is not added here: it goes last (`finish_turn_prompt`).
+fn mode_prompt(prompt: String, mode: TurnMode, first_turn: bool, chatted: bool) -> String {
     match mode {
-        None => prompt,
-        Some(mode) if first_turn => prompt.replace(REPORT_VOICE, mode_directive(mode, true)),
-        Some(mode) => format!("{prompt}\n\n{}", mode_directive(mode, false)),
+        TurnMode::Chat if first_turn => prompt.replace(REPORT_VOICE, CHAT_VOICE),
+        TurnMode::Report if !first_turn && chatted => {
+            format!("{REPORT_AFTER_CHAT} {REPORT_VOICE}\n\n{prompt}")
+        }
+        _ => prompt,
     }
+}
+
+/// Whether the reviewer has chatted since the fork last wrote something up:
+/// a chat row after the last completed report reply, or anywhere when there
+/// is none yet. A failed report turn is not a write-up.
+fn chatted_since_write_up(history: &[ThreadMessage]) -> bool {
+    history
+        .iter()
+        .rev()
+        .take_while(|m| is_chat(m) || m.role != "assistant" || m.status != "complete")
+        .any(is_chat)
+}
+
+/// What "💬 Discuss" opens a thread with: the comment's own text, or a
+/// stand-in when its body isn't prose. Mirrors `discussSeed` in
+/// `CommentThread.tsx`.
+fn discuss_seed(comment: &crate::state::Comment) -> String {
+    let body = comment.body.trim();
+    if !body.is_empty() && body != "(edit)" {
+        return body.to_string();
+    }
+    match &comment.edit {
+        Some(edit) => format!("Why change \"{}\" to \"{}\"?", edit.original, edit.revised),
+        None => "Let's talk through this part of the plan.".to_string(),
+    }
+}
+
+/// `text` as a markdown quote, one `> ` per line.
+fn quoted(text: &str) -> String {
+    let mut p = String::new();
+    for line in text.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    p
+}
+
+/// What a first turn sent when it isn't the comment itself: a chat that opens
+/// the thread on the reviewer's question, or a report asked for after chat
+/// turns whose fork never came to be (the opening chat failed, or was
+/// stopped, before a reply landed — "Write it up →" then opens the fork). The
+/// prompt quotes the comment where the opening goes, and this follows it.
+fn sent_after_comment_block(mode: TurnMode, text: &str) -> String {
+    let lead = match mode {
+        TurnMode::Chat => "They opened a quick chat about it. Their question:",
+        TurnMode::Report => "Their latest message:",
+    };
+    format!("\n\n{lead}\n{}", quoted(text))
+}
+
+/// Turn one's prompt, before the mode, sidecar and recap passes. It always
+/// opens on the comment. Usually the turn IS the comment — "💬 Discuss" sends
+/// its seed — and this is the prompt every discussion has always had;
+/// otherwise the seed takes the opening's place and what was sent follows
+/// (`sent_after_comment_block`). `carried` is the history a re-fork inherits
+/// (`continuity_block`); a thread that opened in chat never sent the comment
+/// as a turn, so it is quoted ahead of that history.
+fn opening_turn_prompt(
+    comment: &crate::state::Comment,
+    text: &str,
+    mode: TurnMode,
+    carried: &[ThreadMessage],
+    attachments: &[CommentAttachment],
+    research: &str,
+) -> String {
+    let seed = discuss_seed(comment);
+    // Empty for a genuine first turn, so that prompt is unchanged; populated
+    // only when replacing a wrong-harness fork.
+    let continuity = continuity_block(carried).map(|history| {
+        let opened_on_comment = carried
+            .iter()
+            .find(|m| m.role == "user" && m.status == "complete" && !m.body.trim().is_empty())
+            .is_some_and(|m| m.body.trim() == seed);
+        if opened_on_comment {
+            history
+        } else {
+            format!("Their comment:\n{}\n{history}", quoted(&seed))
+        }
+    });
+    let sent_after = (continuity.is_none() && text.trim() != seed)
+        .then(|| sent_after_comment_block(mode, text));
+    build_first_turn_prompt(
+        matches!(comment.kind, CommentKind::Question),
+        &comment.anchor_id,
+        comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
+        if sent_after.is_some() { &seed } else { text },
+        comment.resolution.as_ref().map(|r| r.body.as_str()),
+        attachments,
+        continuity.as_deref(),
+    ) + research
+        + &sent_after.unwrap_or_default()
 }
 
 fn build_first_turn_prompt(
@@ -489,11 +632,10 @@ fn build_first_turn_prompt(
         }
     }
     p.push_str(&attachments_block(attachments));
+    p.push('\n');
+    p.push_str(REPORT_VOICE);
     p.push_str(
-        "\nFollow the `sidecar` skill for how to structure this reply: lead with \
-         the answer, then add a table, mermaid diagram, or callout only when it \
-         adds signal. Respond directly and concisely in markdown — no raw HTML. \
-         This is a read-only discussion thread — do not edit files, do not \
+        " This is a read-only discussion thread — do not edit files, do not \
          produce a new plan, and do not call ExitPlanMode. You may read files, \
          search the code, and fetch web pages or search the web to ground your \
          answer.",
@@ -697,16 +839,22 @@ fn context_sidecar_prompt(author_backend: &str, plan: &str, prompt: &str) -> Str
     context_sidecar_prompt_with(author_backend, plan, prompt, true)
 }
 
-fn context_sidecar_prompt_with(author_backend: &str, plan: &str, prompt: &str, restricted: bool) -> String {
-    let author = match author_backend.trim().to_ascii_lowercase().as_str() {
-        "cursor" => "Cursor", "codex" => "Codex", "claude-code" => "Claude Code", _ => "Antigravity",
-    };
-    let prompt = prompt.replace(
+/// Re-word turn text written for the plan's own fork for a separate sidecar,
+/// which did not write the plan and is not pointed at Redline's skills.
+fn sidecar_rewrite(prompt: &str) -> String {
+    prompt.replace(
         "You are discussing a plan you produced earlier in this session with the person reviewing it in Redline.",
         "You are discussing the supplied plan with the person reviewing it in Redline.",
     ).replace("You previously resolved this comment with:", "The plan author previously resolved this comment with:")
     .replace("Follow the `sidecar` skill for how to structure this reply: lead with ", "For this reply, lead with ")
-    .replace("Follow the `conversation` skill: reply like a colleague", "Reply like a colleague");
+    .replace(" Don't load the sidecar skill.", "")
+}
+
+fn context_sidecar_prompt_with(author_backend: &str, plan: &str, prompt: &str, restricted: bool) -> String {
+    let author = match author_backend.trim().to_ascii_lowercase().as_str() {
+        "cursor" => "Cursor", "codex" => "Codex", "claude-code" => "Claude Code", _ => "Antigravity",
+    };
+    let prompt = sidecar_rewrite(prompt);
     let tools = if restricted {
         "Your tools are Read, Grep, Glob, WebFetch, and WebSearch only. Shell commands and Skill are unavailable; you cannot curl Redline's memory bridge. Use the supplied plan context and do not claim to have retrieved memory."
     } else {
@@ -747,7 +895,7 @@ anything. Reading the repo, searching it and searching the web are all fine.
 - Answer the reviewer directly, in Markdown, leading with the answer. Add a \
 table, a mermaid diagram or a short code block only where it adds signal. No \
 raw HTML.
-- The turn prompt may mention a `sidecar` or `conversation` skill, or `ExitPlanMode`; these are \
+- The turn prompt may mention a `sidecar` skill or `ExitPlanMode`; both are \
 Claude-side and do not apply to you. Ignore them and answer directly.";
 
 /// Spawn args for one Codex discussion-fork turn.
@@ -832,6 +980,33 @@ fn monochat_ground(db: &Database, scope: &str, item: &str, conversation: Option<
     prompt.push_str(&crate::companion::shared_context(db, conversation));
     if let Some(id) = conversation { let _ = crate::ledger::record_session_link(db, "fork", item, "companion", id); let _ = db.set_setting(&format!("monochat.fork.{scope}.{item}.conversation"), id); }
     prompt
+}
+
+/// What every plan-comment turn's prompt ends with, in order: the separate
+/// sidecar's wrapper when the thread runs on one (`sidecar` is the author
+/// backend, the plan and whether its tools are restricted), the monochat
+/// recap, and on a chat turn the chat directive. The directive goes LAST so
+/// the recap can't bury it, and a sidecar gets it through the same rewrite as
+/// the rest of its prompt.
+fn finish_turn_prompt(
+    db: &Database,
+    session_id: &str,
+    comment_id: &str,
+    conversation: Option<&str>,
+    mode: TurnMode,
+    sidecar: Option<(&str, &str, bool)>,
+    prompt: String,
+) -> String {
+    let prompt = match sidecar {
+        Some((author, plan, restricted)) => context_sidecar_prompt_with(author, plan, &prompt, restricted),
+        None => prompt,
+    };
+    let prompt = monochat_ground(db, session_id, comment_id, conversation, false, prompt);
+    match (mode, sidecar) {
+        (TurnMode::Report, _) => prompt,
+        (TurnMode::Chat, None) => format!("{prompt}\n\n{CHAT_DIRECTIVE}"),
+        (TurnMode::Chat, Some(_)) => format!("{prompt}\n\n{}", sidecar_rewrite(CHAT_DIRECTIVE)),
+    }
 }
 
 /// One classified line of `codex exec --json` output.
@@ -939,12 +1114,7 @@ pub async fn fork_thread_send(
     conversation_id: Option<String>,
     mode: Option<String>,
 ) -> Result<(), String> {
-    let mode = match mode.as_deref() {
-        None => None,
-        Some("report") => Some(DiscussMode::Report),
-        Some("conversation") => Some(DiscussMode::Conversation),
-        _ => return Err("Unknown discussion mode".into()),
-    };
+    let mode = TurnMode::parse(mode.as_deref())?;
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
@@ -1002,15 +1172,19 @@ pub async fn fork_thread_send(
     };
     let seeded = backend == ForkBackend::Claude && !context_sidecar && prior_fork.is_none()
         && crate::claude_proc::find_transcript(&session_id).is_none();
-    // The turns already on screen, needed only when re-forking — reading them
-    // otherwise would be a query per follow-up for nothing.
-    let carried = if mismatched || ((context_sidecar || seeded) && prior_fork.is_none()) {
+    // The turns already on screen: a re-fork carries them across, and a report
+    // follow-up checks them for chat since the last write-up. Any other turn
+    // skips the query.
+    let refork = mismatched || ((context_sidecar || seeded) && prior_fork.is_none());
+    let history = if refork || (mode == TurnMode::Report && prior_fork.is_some()) {
         fork.db
             .load_thread(&session_id, &comment_id)
             .unwrap_or_default()
     } else {
         Vec::new()
     };
+    let carried: &[ThreadMessage] = if refork { &history } else { &[] };
+    let chatted = prior_fork.is_some() && chatted_since_write_up(&history);
 
     // Persist the user turn (a terminal row).
     let user_msg = ThreadMessage {
@@ -1022,6 +1196,7 @@ pub async fn fork_thread_send(
         status: "complete".to_string(),
         created_at: now_millis(),
         attachments: turn_attachments.clone(),
+        mode: mode.stamp(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -1030,40 +1205,37 @@ pub async fn fork_thread_send(
     // in-memory store's activity stamp in step so the sidebar reorders.
     store.touch(&session_id);
 
-    // Build the turn prompt — wrapped on the first turn, verbatim after. The
-    // first turn uses `text` (the frontend's seed) so the persisted user row
-    // and the prompt stay identical.
+    // Build the turn prompt — wrapped on the first turn, verbatim after. A
+    // first turn that is the frontend's seed quotes `text` as the comment, so
+    // the persisted user row and the prompt stay identical.
     let prompt = match &prior_fork {
         None => {
             // Turn one sees everything already attached to the comment as well
             // as anything dropped into this opening message.
             let mut all = comment.attachments.clone();
             all.extend(turn_attachments.iter().cloned());
-            build_first_turn_prompt(
-                matches!(comment.kind, CommentKind::Question),
-                &comment.anchor_id,
-                comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
-                &text,
-                comment.resolution.as_ref().map(|r| r.body.as_str()),
-                &all,
-                // Empty for a genuine first turn, so that prompt is unchanged;
-                // populated only when replacing a wrong-harness fork.
-                continuity_block(&carried).as_deref(),
-            ) + &research_block(
+            let research = research_block(
                 session.revisions.iter().flat_map(|r| r.comments.iter()),
                 comment,
             )
-            .unwrap_or_default()
+            .unwrap_or_default();
+            opening_turn_prompt(comment, &text, mode, carried, &all, &research)
         }
         // Follow-ups go verbatim, so a file dropped into one has to announce
         // itself — otherwise the fork never learns the path exists.
         Some(_) => format!("{text}{}", attachments_block(&turn_attachments)),
     };
-    let prompt = discuss_mode_prompt(prompt, mode, prior_fork.is_none());
-    let prompt = if context_sidecar || seeded {
-        context_sidecar_prompt_with(&author_backend, session.revisions.last().map(|revision| revision.raw_plan_markdown.as_str()).unwrap_or_default(), &prompt, context_sidecar)
-    } else { prompt };
-    let prompt = monochat_ground(&fork.db, &session_id, &comment_id, conversation_id.as_deref(), false, prompt);
+    let prompt = mode_prompt(prompt, mode, prior_fork.is_none(), chatted);
+    let plan = session.revisions.last().map(|revision| revision.raw_plan_markdown.as_str()).unwrap_or_default();
+    let prompt = finish_turn_prompt(
+        &fork.db,
+        &session_id,
+        &comment_id,
+        conversation_id.as_deref(),
+        mode,
+        (context_sidecar || seeded).then_some((author_backend.as_str(), plan, context_sidecar)),
+        prompt,
+    );
 
     // Polis ledger: record the first-turn discussion prompt with its true
     // surface + thread provenance (the parent is this comment's plan session —
@@ -1166,6 +1338,7 @@ pub async fn fork_thread_send(
         session_id,
         comment_id,
         ThreadTarget::PlanComment,
+        mode.stamp(),
         spawn,
         stdout,
         stderr,
@@ -1293,6 +1466,7 @@ pub async fn review_thread_send(
         status: "complete".to_string(),
         created_at: now_millis(),
         attachments: Vec::new(),
+        mode: None,
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -1362,6 +1536,7 @@ pub async fn review_thread_send(
         review_id,
         annotation_id,
         ThreadTarget::ReviewAnnotation,
+        None,
         spawn,
         stdout,
         stderr,
@@ -1456,6 +1631,7 @@ pub async fn review_question_send(
         status: "complete".to_string(),
         created_at: now_millis(),
         attachments: Vec::new(),
+        mode: None,
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -1525,6 +1701,7 @@ pub async fn review_question_send(
         review_id,
         question_id,
         ThreadTarget::ReviewQuestion,
+        None,
         spawn,
         stdout,
         stderr,
@@ -1675,6 +1852,7 @@ pub async fn draft_thread_send(
         status: "complete".to_string(),
         created_at: now_millis(),
         attachments: Vec::new(),
+        mode: None,
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -1742,6 +1920,7 @@ pub async fn draft_thread_send(
         draft_id,
         comment_id,
         ThreadTarget::DraftComment,
+        None,
         spawn,
         stdout,
         stderr,
@@ -2129,6 +2308,10 @@ async fn read_fork(
     session_id: String,
     comment_id: String,
     target: ThreadTarget,
+    // The turn's `thread_messages.mode` (a plan comment's chat), stamped on
+    // the reply or error row so it files under the view its question was
+    // asked in. `None` for a report and for every other thread family.
+    mode: Option<String>,
     // The recipe that produced the running child, kept so a transient failure
     // can be retried on an identical one.
     spawn: ForkSpawn,
@@ -2260,7 +2443,7 @@ async fn read_fork(
         // `thread_messages.body` under an assistant role, where the reviewer
         // reads it as Claude's reply and peer agents read it as context.
         let why = describe_fork_error(&db, target, &session_id, &comment_id, &err);
-        let row = finish_error(&app, &db, &session_id, &comment_id, &why);
+        let row = finish_error(&app, &db, &session_id, &comment_id, mode.as_deref(), &why);
         crate::meter::attach(&db, "fork", &row, &settled);
         break 'terminal;
     }
@@ -2271,6 +2454,7 @@ async fn read_fork(
                 &db,
                 &session_id,
                 &comment_id,
+                mode.as_deref(),
                 &format!("{cli} produced an empty reply"),
             );
             crate::meter::attach(&db, "fork", &row, &settled);
@@ -2311,6 +2495,7 @@ async fn read_fork(
             status: "complete".to_string(),
             created_at: now_millis(),
             attachments: Vec::new(),
+            mode: mode.clone(),
         };
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
@@ -2347,7 +2532,7 @@ async fn read_fork(
     } else {
         format!("{cli} ended without producing a reply")
     };
-    let row = finish_error(&app, &db, &session_id, &comment_id, &why);
+    let row = finish_error(&app, &db, &session_id, &comment_id, mode.as_deref(), &why);
     crate::meter::attach(&db, "fork", &row, &settled);
     }
 }
@@ -2405,6 +2590,8 @@ fn finish_error(
     db: &Database,
     session_id: &str,
     comment_id: &str,
+    // The failed turn's mode, so a chat's failure shows (and retries) in chat.
+    mode: Option<&str>,
     error: &str,
 ) -> String {
     let msg = ThreadMessage {
@@ -2416,6 +2603,7 @@ fn finish_error(
         status: "error".to_string(),
         created_at: now_millis(),
         attachments: Vec::new(),
+        mode: mode.map(str::to_string),
     };
     if let Err(e) = db.insert_thread_message(&msg) {
         tracing::warn!(error = %e, "failed to persist error thread message");
@@ -2483,17 +2671,196 @@ mod tests {
         c
     }
 
+    // --- Sidecar views: report and chat ------------------------------------
+
+    fn chat_msg(role: &str, body: &str) -> ThreadMessage {
+        ThreadMessage { mode: Some("chat".into()), ..thread_msg(role, body, "complete") }
+    }
+
     #[test]
-    fn discussion_voice_switch_preserves_legacy_report_and_read_only_boundary() {
-        let original = build_first_turn_prompt(true, "2", None, "Why?", None, &[], None);
-        assert_eq!(discuss_mode_prompt(original.clone(), None, true), original);
-        assert_eq!(discuss_mode_prompt(original.clone(), Some(DiscussMode::Report), true), original);
-        let conversation = discuss_mode_prompt(original, Some(DiscussMode::Conversation), true);
-        assert!(conversation.contains("Follow the `conversation` skill"));
-        assert!(conversation.contains("do not call ExitPlanMode"));
-        assert!(!context_sidecar_prompt_with("cursor", "plan", &conversation, true).contains("Follow the `conversation` skill"));
-        assert_eq!(discuss_mode_prompt("follow up".into(), None, false), "follow up");
-        assert!(discuss_mode_prompt("follow up".into(), Some(DiscussMode::Report), false).contains("Reply mode: report"));
+    fn turn_mode_reads_report_chat_and_the_retired_conversation_view() {
+        assert_eq!(TurnMode::parse(None), Ok(TurnMode::Report));
+        assert_eq!(TurnMode::parse(Some("report")), Ok(TurnMode::Report));
+        assert_eq!(TurnMode::parse(Some("chat")), Ok(TurnMode::Chat));
+        // A frontend from before Chat may still be mid-flight for a release.
+        assert_eq!(TurnMode::parse(Some("conversation")), Ok(TurnMode::Report));
+        for unknown in ["Chat", "", "summary"] {
+            let err = TurnMode::parse(Some(unknown)).expect_err("an unknown mode is refused, not guessed");
+            assert!(err.contains("unknown discussion mode"), "{err}");
+        }
+        // One spelling of a report: NULL, like every row from before the column.
+        assert_eq!(TurnMode::Report.stamp(), None);
+        assert_eq!(TurnMode::Chat.stamp().as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn a_report_thread_that_never_chatted_keeps_the_legacy_prompt() {
+        let first = build_first_turn_prompt(true, "2", None, "Why?", None, &[], None);
+        assert!(first.contains(&format!("\n{REPORT_VOICE} This is a read-only discussion thread")));
+        assert_eq!(mode_prompt(first.clone(), TurnMode::Report, true, false), first);
+        assert_eq!(mode_prompt("follow up".into(), TurnMode::Report, false, false), "follow up");
+    }
+
+    #[test]
+    fn a_chat_that_opens_the_thread_keeps_the_read_only_and_no_exit_plan_mode_lines() {
+        let first = build_first_turn_prompt(true, "2", Some("quoted"), "This anchor drifts.", None, &[], None);
+        let chat = mode_prompt(first, TurnMode::Chat, true, false);
+        assert!(chat.contains(CHAT_VOICE));
+        assert!(!chat.contains("`sidecar` skill"));
+        for line in ["This is a read-only discussion thread", "do not edit files", "do not call ExitPlanMode"] {
+            assert!(chat.contains(line), "lost `{line}`");
+        }
+        let sidecar = context_sidecar_prompt_with("cursor", "# Plan", &chat, true);
+        assert!(sidecar.contains(CHAT_VOICE) && sidecar.contains("do not call ExitPlanMode"));
+        // Follow-ups pass through; their directive is added last, elsewhere.
+        assert_eq!(mode_prompt("quick?".into(), TurnMode::Chat, false, false), "quick?");
+    }
+
+    #[test]
+    fn a_chat_that_opens_the_thread_still_quotes_the_comment_it_is_about() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "  This anchor drifts. ".into();
+        assert_eq!(discuss_seed(&comment), "This anchor drifts.");
+        comment.body = "(edit)".into();
+        comment.edit = Some(crate::state::EditPayload { original: "a".into(), revised: "b".into() });
+        assert_eq!(discuss_seed(&comment), "Why change \"a\" to \"b\"?");
+        comment.edit = None;
+        assert_eq!(discuss_seed(&comment), "Let's talk through this part of the plan.");
+
+        comment.body = "This anchor drifts.".into();
+        let chat = opening_turn_prompt(&comment, "Why does it drift?\nAnd when?", TurnMode::Chat, &[], &[], "");
+        assert!(chat.contains("Their comment:\n> This anchor drifts.\n"), "{chat}");
+        assert!(
+            chat.ends_with("\n\nThey opened a quick chat about it. Their question:\n> Why does it drift?\n> And when?\n"),
+            "{chat}"
+        );
+    }
+
+    #[test]
+    fn a_discuss_opening_keeps_the_prompt_every_discussion_has_had() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+        let legacy = build_first_turn_prompt(true, "A.1", None, "This anchor drifts.", None, &[], None);
+        assert_eq!(
+            opening_turn_prompt(&comment, "This anchor drifts.", TurnMode::Report, &[], &[], "\n\nresearch"),
+            format!("{legacy}\n\nresearch"),
+        );
+    }
+
+    /// "Write it up →" after an opening chat that never got a reply: no fork
+    /// exists yet, so the write-up IS turn one. Quoting the request as "their
+    /// comment" would leave the fork answering a comment it was never shown.
+    #[test]
+    fn a_write_up_that_opens_the_fork_still_quotes_the_comment() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+        let write_up = "Write this up — the full answer to my original comment given everything we've discussed, including our chat.";
+        let prompt = opening_turn_prompt(&comment, write_up, TurnMode::Report, &[], &[], "");
+        assert!(prompt.contains("Their comment:\n> This anchor drifts.\n"), "{prompt}");
+        assert!(prompt.ends_with(&format!("\n\nTheir latest message:\n> {write_up}\n")), "{prompt}");
+        assert!(prompt.contains(REPORT_VOICE));
+    }
+
+    /// A re-fork carries the thread's turns. One opened by "💬 Discuss" starts
+    /// on the comment; one opened in chat never sent it, so it goes in front.
+    #[test]
+    fn a_reforked_chat_thread_still_quotes_the_comment() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+
+        let chat_first = [chat_msg("user", "Even on reload?"), chat_msg("assistant", "Yes, on every reload.")];
+        let prompt = opening_turn_prompt(&comment, "And on save?", TurnMode::Chat, &chat_first, &[], "");
+        let quoted_at = prompt.find("Their comment:\n> This anchor drifts.\n").expect("the comment is quoted");
+        assert!(quoted_at < prompt.find("This discussion already has history").unwrap());
+        assert!(prompt.contains("\nReviewer (chat): Even on reload?"));
+        assert!(prompt.contains("Their latest message:\n> And on save?\n"));
+        assert!(!prompt.contains("They opened a quick chat"), "the history already says so");
+
+        let discussed = [
+            thread_msg("user", "This anchor drifts.", "complete"),
+            thread_msg("assistant", "## Why it drifts", "complete"),
+        ];
+        let prompt = opening_turn_prompt(&comment, "And on save?", TurnMode::Report, &discussed, &[], "");
+        assert!(!prompt.contains("Their comment:"), "{prompt}");
+        assert!(prompt.contains("\nReviewer: This anchor drifts."));
+    }
+
+    #[test]
+    fn the_chat_directive_goes_last_after_the_monochat_recap() {
+        let db = Database::open_in_memory().unwrap();
+        for (id, role, body) in [("u", "user", "Plan the cache."), ("a", "assistant", "Cache at the edge.")] {
+            db.insert_companion_message(&crate::state::CompanionMessage {
+                id: id.into(),
+                companion_id: "conv-1".into(),
+                role: role.into(),
+                body: body.into(),
+                status: "complete".into(),
+                surface_kind: None,
+                surface_id: None,
+                surface_label: None,
+                created_at: 1,
+            })
+            .unwrap();
+        }
+        let recap_end = |p: &str| p.find("</monochat-context>").expect("the recap is in the prompt");
+
+        let chat = finish_turn_prompt(&db, "s-1", "c-1", Some("conv-1"), TurnMode::Chat, None, "Why there?".into());
+        assert!(chat.ends_with(&format!("\n\n{CHAT_DIRECTIVE}")), "{chat}");
+        assert!(recap_end(&chat) < chat.rfind(CHAT_DIRECTIVE).unwrap());
+        assert!(chat.starts_with("Why there?"));
+
+        // A report turn gets no directive at all.
+        let report = finish_turn_prompt(&db, "s-1", "c-1", Some("conv-1"), TurnMode::Report, None, "Why there?".into());
+        assert!(!report.contains("(Chat —"));
+        assert!(report.trim_end().ends_with("</monochat-context>"));
+
+        // A separate sidecar gets the same sentence through its rewrite: no
+        // skill to load, still last.
+        let sidecar = finish_turn_prompt(&db, "s-1", "c-1", Some("conv-1"), TurnMode::Chat, Some(("cursor", "# Plan", true)), "Why there?".into());
+        assert!(sidecar.ends_with("\n\n(Chat — quick back-and-forth. Answer in 1–4 sentences of plain prose; no headings, tables or diagrams unless asked.)"), "{sidecar}");
+        assert!(!sidecar.contains("sidecar skill"));
+        assert!(sidecar.find("<current-plan-context>").unwrap() < recap_end(&sidecar));
+        assert!(recap_end(&sidecar) < sidecar.rfind("(Chat —").unwrap());
+    }
+
+    #[test]
+    fn a_report_after_chat_folds_the_chat_in() {
+        let seed = thread_msg("user", "This anchor drifts.", "complete");
+        let write_up = thread_msg("assistant", "## Why it drifts", "complete");
+        let asked = chat_msg("user", "Even on reload?");
+        let answered = chat_msg("assistant", "Yes, on every reload.");
+        let failed = thread_msg("assistant", "Claude stopped early.", "error");
+
+        assert!(!chatted_since_write_up(&[seed.clone(), write_up.clone()]));
+        assert!(chatted_since_write_up(&[seed.clone(), write_up.clone(), asked.clone(), answered.clone()]));
+        // A thread that opened in chat has no write-up yet.
+        assert!(chatted_since_write_up(&[asked.clone(), answered.clone()]));
+        // Written up since: the chat is already folded in.
+        assert!(!chatted_since_write_up(&[asked.clone(), answered.clone(), seed.clone(), write_up.clone()]));
+        // A failed report turn is not a write-up.
+        assert!(chatted_since_write_up(&[asked, answered, seed, failed]));
+
+        let prompt = mode_prompt("Write this up.".into(), TurnMode::Report, false, true);
+        assert_eq!(prompt, format!("{REPORT_AFTER_CHAT} {REPORT_VOICE}\n\nWrite this up."));
+        let sidecar = context_sidecar_prompt_with("antigravity", "# Plan", &prompt, true);
+        assert!(sidecar.contains(REPORT_AFTER_CHAT));
+        assert!(sidecar.contains("For this reply, lead with the answer"));
+        assert!(!sidecar.contains("`sidecar` skill"));
+    }
+
+    #[test]
+    fn a_reforked_thread_carries_its_chat_labelled_as_chat() {
+        let block = continuity_block(&[
+            thread_msg("user", "This anchor drifts.", "complete"),
+            thread_msg("assistant", "## Why it drifts", "complete"),
+            chat_msg("user", "Even on reload?"),
+            chat_msg("assistant", "Yes, on every reload."),
+        ])
+        .unwrap();
+        assert!(block.contains("\nReviewer: This anchor drifts."));
+        assert!(block.contains("\nAssistant: ## Why it drifts"));
+        assert!(block.contains("\nReviewer (chat): Even on reload?"));
+        assert!(block.contains("\nAssistant (chat): Yes, on every reload."));
     }
 
     #[test]
@@ -2844,6 +3211,7 @@ mod tests {
             status: status.to_string(),
             created_at: 0,
             attachments: Vec::new(),
+            mode: None,
         }
     }
 
