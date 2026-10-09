@@ -117,6 +117,18 @@ describe("resolveRange — quotedText self-heal", () => {
     ).toEqual({ from: 3, to: 6 });
   });
 
+  it("never collapses a code block's newlines, which are its own text", () => {
+    // The quoted lines were since joined; "ab" elsewhere in the code is not
+    // what the reviewer selected.
+    expect(
+      resolveRange(
+        "x = ab;\ny = 1;",
+        "PRE",
+        range({ charStart: 4, charEnd: 7, quotedText: "a\nb" }),
+      ),
+    ).toBeNull();
+  });
+
   it("returns null when even the collapsed quote is absent", () => {
     expect(
       resolveRange(
@@ -273,6 +285,43 @@ describe("CommentHighlights — paints in whole-block coordinates", () => {
     expect(paintedText(editor, "c-2")).toBe("Bob");
     const cells = editor.view.dom.querySelectorAll("td, th");
     expect(cells[3].contains(spans(editor, "c-1")[0])).toBe(true);
+  });
+
+  it("paints both paragraphs of a blockquote at the exact characters", () => {
+    // The first paragraph used to paint one character early: the old base
+    // skipped only one of the two opening tokens before nested text.
+    const markdown = [
+      "<!-- rl:blk-q1 -->",
+      "> First quoted line.",
+      ">",
+      "> Second quoted line.",
+      "",
+    ].join("\n");
+    const text = "First quoted line.Second quoted line.";
+    const editor = paint(markdown, [
+      at("c-1", "blk-q1", text, "First quoted"),
+      at("c-2", "blk-q1", text, "Second quoted"),
+    ]);
+    expect(paintedText(editor, "c-1")).toBe("First quoted");
+    expect(paintedText(editor, "c-2")).toBe("Second quoted");
+  });
+
+  it("paints inside a nested list", () => {
+    const markdown = [
+      "<!-- rl:blk-n1 -->",
+      "- Top one",
+      "  - Nested alpha",
+      "  - Nested beta",
+      "- Top two",
+      "",
+    ].join("\n");
+    const text = "Top oneNested alphaNested betaTop two";
+    const editor = paint(markdown, [
+      at("c-1", "blk-n1", text, "Nested beta"),
+      at("c-2", "blk-n1", text, "Top two"),
+    ]);
+    expect(paintedText(editor, "c-1")).toBe("Nested beta");
+    expect(paintedText(editor, "c-2")).toBe("Top two");
   });
 
   it("still resolves a clean `.lN.wM` id through the unit tier", () => {

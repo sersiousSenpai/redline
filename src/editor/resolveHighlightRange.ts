@@ -45,7 +45,8 @@ export interface CommentHighlightRange {
  *  the newlines dropped: `Selection.toString()` puts them between list items
  *  and paragraphs, but the block text (`textContent`) joins textblocks with
  *  nothing, so a selection spanning two items or two paragraphs of one item
- *  never matches verbatim.
+ *  never matches verbatim. Code blocks (`PRE`) are exempt — their newlines
+ *  are real text.
  *
  *  `blockTagName` is the DOM tag (or ProseMirror-mapped equivalent) used to
  *  pick the addressing axis — `PRE`/`UL`/`OL`/`LI`/`BLOCKQUOTE` → line axis,
@@ -82,7 +83,11 @@ export function resolveRange(
   }
   const { charStart, charEnd, quotedText } = range;
   const found = locateQuote(blockText, charStart, charEnd, quotedText);
-  if (found || !quotedText.includes("\n")) return found;
+  // A code block's newlines are its own text and copy out verbatim, so a
+  // collapsed spelling could only match characters nobody selected.
+  if (found || !quotedText.includes("\n") || blockTagName === "PRE") {
+    return found;
+  }
   return locateQuote(
     blockText,
     charStart,
