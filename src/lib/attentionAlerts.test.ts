@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  forgetQuieted,
   newTransitions,
   notificationFor,
   transitionKey,
@@ -24,6 +25,14 @@ describe("attention alerts", () => {
     expect(newTransitions([loud("a", 1), loud("b", 2)], handled).map((t) => t.id)).toEqual(["b"]);
     // A new card on the same terminal is a new transition.
     expect(newTransitions([loud("a", 3)], handled)).toHaveLength(1);
+  });
+
+  it("forgets a handled transition once it is no longer loud, and keeps the loud ones", () => {
+    const handled = new Set([transitionKey(loud("a", 1)), transitionKey(loud("b", 2)), transitionKey(loud("c", 3))]);
+    forgetQuieted(handled, [loud("b", 2), loud("c", 4)]);
+    expect([...handled]).toEqual([transitionKey(loud("b", 2))]);
+    // c's new card is still news.
+    expect(newTransitions([loud("b", 2), loud("c", 4)], handled).map((t) => t.at)).toEqual([4]);
   });
 
   it("titles the terminal by its own label and says what its agent said", () => {

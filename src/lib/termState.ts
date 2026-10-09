@@ -18,8 +18,9 @@
 //    docs/protocol-verification.md experiment (l)) → cleared;
 //  * a your-turn whose tile has been on screen and focused for SEEN_AFTER_MS
 //    has been read → seen;
-//  * a process sample taken after the transition that shows the shell back in
-//    the foreground means the agent that reported it is gone → cleared.
+//  * a process sample taken after a working or needs-you that shows the shell
+//    back in the foreground means the agent that reported it is gone →
+//    cleared (a your-turn outlives its agent until it is read).
 
 import type { TermAttention, TermProc } from "../types";
 
@@ -164,10 +165,13 @@ export function ackForInput(
 }
 
 /** A process sample taken at `sampledAt` that shows the shell back in the
- *  foreground outlives every transition before it: the agent that reported
- *  it has exited. Returns the acknowledgements to add (empty when none) —
- *  only for transitions older than the sample, so a hook that fires between
- *  the sample's request and its answer is never cleared by it. */
+ *  foreground means the agent that reported the transitions before it has
+ *  exited — so it can no longer be working, or blocked on you. Returns the
+ *  acknowledgements to add (empty when none) — only for transitions older
+ *  than the sample, so a hook that fires between the sample's request and
+ *  its answer is never cleared by it. A your-turn stays until it is read: a
+ *  one-shot run (`claude -p`, `codex exec`) exits right after its Stop, and
+ *  its answer is still on screen waiting for you. */
 export function staleAcks(
   attention: ReadonlyMap<string, TermAttention>,
   acks: ReadonlyMap<string, AttentionAck>,
@@ -179,7 +183,8 @@ export function staleAcks(
     if (!proc.fgIsShell) continue;
     const entry = attention.get(proc.id);
     if (!entry || entry.at >= sampledAt) continue;
-    if (effectiveAttention(entry, acks.get(proc.id)).kind === null) continue;
+    const { kind } = effectiveAttention(entry, acks.get(proc.id));
+    if (kind !== "working" && kind !== "needs-you") continue;
     out.push([proc.id, { at: entry.at, as: "cleared" }]);
   }
   return out;

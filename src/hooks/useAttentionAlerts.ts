@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import {
+  forgetQuieted,
   newTransitions,
   notificationFor,
   transitionKey,
@@ -66,6 +67,7 @@ export function useAttentionAlerts(
       return;
     }
     const handled = handledRef.current;
+    forgetQuieted(handled, loud);
     const away = () => !document.hasFocus() || collapsedRef.current;
     for (const t of newTransitions(loud, handled)) {
       handled.add(transitionKey(t));

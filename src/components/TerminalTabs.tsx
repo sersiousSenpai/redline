@@ -652,15 +652,19 @@ export const TerminalTabs = memo(
 
   // What each terminal is running and serving, for hidden terminals too (an
   // untiled terminal's OSC title never updates — its bytes aren't parsed).
-  // A sample that finds the shell back in the foreground also retires any
-  // attention older than it: the agent that reported it has exited.
+  // A sample that finds the shell back in the foreground also retires a
+  // working or needs-you older than it: the agent that reported it has
+  // exited. One sample at a time: on a loaded machine a slow `lsof` must not
+  // stack a second fleet-wide scan behind it.
   const [procs, setProcs] = useState<ReadonlyMap<string, TermProc>>(
     () => new Map(),
   );
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const poll = async () => {
-      if (document.visibilityState === "hidden") return;
+      if (inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
       const sampledAt = Date.now();
       try {
         const rows = await invoke<TermProc[]>("pty_procs");
@@ -674,6 +678,8 @@ export const TerminalTabs = memo(
         }
       } catch {
         /* keep the last sample */
+      } finally {
+        inFlight = false;
       }
     };
     void poll();

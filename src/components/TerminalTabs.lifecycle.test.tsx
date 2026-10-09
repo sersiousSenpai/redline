@@ -305,25 +305,48 @@ describe("terminal state", () => {
     expect(stateOf(id)).toBe("your-turn");
   });
 
-  it("process samples: a server reads serving with its port; the shell back in front retires an older turn", async () => {
+  it("process samples: a server reads serving with its port; the shell back in front retires a working agent, never an unread turn", async () => {
     vi.useFakeTimers();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     await mount();
     const server = await open();
     const agent = await open();
+    const oneShot = await open();
     mocks.procs = [
       { id: server, fgComm: "node", fgIsShell: false, ports: [5173, 24678] },
       { id: agent, fgComm: "claude", fgIsShell: false, ports: [] },
+      { id: oneShot, fgComm: "claude", fgIsShell: false, ports: [] },
     ];
-    await emit(yourTurn(agent, Date.now() - 1000));
+    await emit({ terminalId: agent, sessionId: "s", at: Date.now() - 1000, kind: "working" });
+    await emit(yourTurn(oneShot, Date.now() - 1000));
     await act(async () => { vi.advanceTimersByTime(4000); });
     expect(stateOf(server)).toBe("serving");
     expect(host.querySelector<HTMLElement>(`[data-header-id="${server}"]`)?.dataset.port).toBe("5173");
-    expect(stateOf(agent)).toBe("your-turn");
-    // The agent exits: its shell holds the foreground in the next sample.
-    mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }];
+    expect(stateOf(agent)).toBe("working");
+    expect(stateOf(oneShot)).toBe("your-turn");
+    // Both agents exit (one killed mid-turn, one a `claude -p` that ended
+    // after its Stop): their shells hold the foreground in the next sample.
+    mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }, { id: oneShot, fgComm: "zsh", fgIsShell: true, ports: [] }];
     await act(async () => { vi.advanceTimersByTime(4000); });
     expect(stateOf(agent)).toBe("idle");
+    expect(stateOf(oneShot)).toBe("your-turn");
+  });
+
+  it("samples one at a time: a slow scan never stacks another behind it", async () => {
+    vi.useFakeTimers();
+    let release: (rows: unknown[]) => void = () => {};
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) =>
+      command === "pty_procs" ? new Promise((resolve) => { release = resolve; }) : base(command, args));
+    await mount();
+    const scans = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_procs").length;
+    // StrictMode mounts the effect twice; each mount starts its own poll.
+    const first = scans();
+    await act(async () => { vi.advanceTimersByTime(12_000); });
+    expect(scans()).toBe(first);
+    await act(async () => { release([]); });
+    await act(async () => { vi.advanceTimersByTime(4000); });
+    expect(scans()).toBe(first + 1);
   });
 });
 

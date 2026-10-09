@@ -41,6 +41,18 @@ export function newTransitions(
   return loud.filter((t) => !handled.has(transitionKey(t)));
 }
 
+/** Drop the handled transitions that are no longer loud, in place. One that
+ *  stopped being loud (read, answered, replaced, closed) never comes back
+ *  with the same `at`, so only the loud ones can still be news — and the set
+ *  stays the size of the wall rather than growing for the whole session. */
+export function forgetQuieted(
+  handled: Set<string>,
+  loud: readonly LoudTerminal[],
+): void {
+  const live = new Set(loud.map(transitionKey));
+  for (const key of handled) if (!live.has(key)) handled.delete(key);
+}
+
 /** "redline 2 · needs you" over the agent's own words. */
 export function notificationFor(t: LoudTerminal): { title: string; body: string } {
   return {

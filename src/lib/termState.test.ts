@@ -143,24 +143,39 @@ describe("clearing rules", () => {
     expect(effectiveAttention(undefined, undefined)).toEqual({ kind: null, seen: false });
   });
 
-  it("a process sample showing the shell back in front retires OLDER transitions only", () => {
+  it("a process sample showing the shell back in front retires an OLDER working or needs-you only", () => {
     const attention = new Map([
-      ["gone", turn("gone", 100)],
+      ["gone", working("gone", 100)],
+      ["blocked", needs("blocked", 100)],
+      ["answered", needs("answered", 100)],
       ["fresh", needs("fresh", 205)],
       ["busy", working("busy", 100)],
-      ["read", turn("read", 100)],
+      ["cleared", working("cleared", 100)],
+      // A one-shot run (`claude -p`) exits right after its Stop: its answer
+      // is still waiting to be read.
+      ["one-shot", turn("one-shot", 100)],
     ]);
-    const acks = new Map<string, AttentionAck>([["read", { at: 100, as: "cleared" }]]);
+    const acks = new Map<string, AttentionAck>([
+      ["answered", { at: 100, as: "working" }],
+      ["cleared", { at: 100, as: "cleared" }],
+    ]);
     const rows = [
       proc("gone"),
+      proc("blocked"),
+      proc("answered"),
       // The hook fired after the sample was requested: the sample can't know.
       proc("fresh"),
       // The agent is still in front.
       proc("busy", { fgComm: "claude", fgIsShell: false }),
-      proc("read"),
+      proc("cleared"),
+      proc("one-shot"),
       proc("unknown"),
     ];
-    expect(staleAcks(attention, acks, rows, 200)).toEqual([["gone", { at: 100, as: "cleared" }]]);
+    expect(staleAcks(attention, acks, rows, 200)).toEqual([
+      ["gone", { at: 100, as: "cleared" }],
+      ["blocked", { at: 100, as: "cleared" }],
+      ["answered", { at: 100, as: "cleared" }],
+    ]);
   });
 });
 
