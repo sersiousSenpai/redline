@@ -33,7 +33,7 @@ function Fixture() {
   const [address, setAddress] = useState(initialTabs[0].url);
   const [menuOpen, setMenuOpen] = useState(false), [dialog, setDialog] = useState("");
   const [surface, setSurface] = useState("browser"), [chatKind, setChatKind] = useState("room"), [chatOpen, setChatOpen] = useState(true);
-  const [followingTabs, setFollowingTabs] = useState(true);
+  const [followingTabs, setFollowingTabs] = useState(true), [linkedMode, setLinkedMode] = useState(true);
   const [organized, setOrganized] = useState(false), [showHome, setShowHome] = useState(false);
   const [islandOpen, setIslandOpen] = useState(false), [draft, setDraft] = useState("");
   const [destination, setDestination] = useState<LaunchDestination>("plan");
@@ -61,7 +61,7 @@ function Fixture() {
   function select(id: string) { setActiveId(id); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
   const conversation = chatKind === "room" ? <ChatRoom companionId="qa-carried" cwd={null} dictationEnabled={false} onSelectChat={noop} onEmpty={noop} onClose={noop} presentation={surface === "room" ? "room" : "browser"}/> : <BrowserChat
     browseId="qa-browse" label="qa-native-absent" workspaceId="regular" onClose={noop}
-    title="Research sources and evidence" ownChat={!followingTabs} linked={followingTabs} onToggleLinked={() => setFollowingTabs(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
+    title="Research sources and evidence" linked={followingTabs} onToggleTabChat={() => setFollowingTabs(value => !value)} linkedMode={linkedMode} onToggleLinkedMode={() => setLinkedMode(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
     onResearch={noop}/>;
   return <div className="qa-shell">
     <div className="qa-shell-heading"><strong>Redline</strong><span>Browser workspace · isolated visual fixture</span><small>Native pages are synthetic images</small></div>

@@ -334,7 +334,11 @@ function BrowserPaneBase({
   const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
   const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {}, { debounceMs: 120 });
   const [linkedByWorkspace, setLinkedByWorkspace] = usePersistedState<Record<string, LinkedConversation | null>>("redline.browser.followByWorkspace", {});
-  const [ownChatsByWorkspace, setOwnChatsByWorkspace] = usePersistedState<Record<string, string[]>>("redline.browser.ownChatTabs", {});
+  // Linked mode decides which chat a tab lands in: on, the workspace's shared
+  // chat; off, the tab's own. A global preference, unlike `flipFor` — the one
+  // tab showing the other kind right now, which is never persisted.
+  const [linkedMode, setLinkedMode] = usePersistedState<boolean>("redline.browser.linkedMode", false);
+  const [flipFor, setFlipFor] = useState<string | null>(null);
   const [groupsByWorkspace, setGroupsByWorkspace] = usePersistedState<Record<string, TabGroup[]>>("redline.browser.groups", {});
   const [organizedByWorkspace, setOrganizedByWorkspace] = usePersistedState<Record<string, boolean>>("redline.browser.organized", {});
   const [organizing, setOrganizing] = useState(false);
@@ -523,7 +527,15 @@ function BrowserPaneBase({
   // agent opens a tab on the current conversation's behalf.
   const activeBrowseId =
     (tabs.find((t) => t.id === activeId) ?? tabs[0])?.browseId ?? null;
-  const ownChat = !!activeBrowseId && (ownChatsByWorkspace[workspaceKey] ?? []).includes(activeBrowseId);
+  // A flip belongs to the conversation on screen: the active tab's, except
+  // while an agent-opened tab keeps the conversation anchored to its origin —
+  // keying on the active tab there would yank a shared chat mid-reply.
+  const discussionBrowseId = tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseId;
+  const flipped = !!discussionBrowseId && flipFor === discussionBrowseId;
+  const ownChat = !!discussionBrowseId && (linkedMode ? flipped : !flipped);
+  // Mode wins on a switch. Rendering already ignores a flip made on another
+  // tab; this only stops it coming back when you return to that tab.
+  useEffect(() => { setFlipFor(f => f === discussionBrowseId ? f : null); }, [discussionBrowseId, workspaceKey]);
   const linkedConversation = ownChat ? null : linkedByWorkspace[workspaceKey] ?? null;
   useEffect(() => {
     if (dockPill !== "page" || ownChat || linkedByWorkspace[workspaceKey]) return;
@@ -967,14 +979,14 @@ function BrowserPaneBase({
 
   useEffect(() => {
     if (missionRestorePendingRef.current || swappingRef.current) return;
-    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url, favicon: tab.favicon })), layout: tileLayout, groups, organized, ownChatTabs: ownChatsByWorkspace[workspaceKey] ?? [] } };
+    const pending = { workspaceId: workspaceKey, value: { tabs: tabs.map((tab) => ({ id: tab.id, browseId: tab.browseId, title: tab.title, url: tab.url, favicon: tab.favicon })), layout: tileLayout, groups, organized } };
     pendingWorkspaceSaveRef.current = pending;
     const timer = window.setTimeout(() => {
       if (pendingWorkspaceSaveRef.current === pending) pendingWorkspaceSaveRef.current = null;
       void saveBrowserWorkspace(pending.workspaceId, pending.value).catch((error) => setWorkspaceError(`Workspace save failed: ${String(error)}`));
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [tabs, workspaceKey, layoutSnapshotKey, groupMembership, groupsByWorkspace, organized, ownChatsByWorkspace]);
+  }, [tabs, workspaceKey, layoutSnapshotKey, groupMembership, groupsByWorkspace, organized]);
   useEffect(() => () => {
     const pending = pendingWorkspaceSaveRef.current;
     pendingWorkspaceSaveRef.current = null;
@@ -1784,7 +1796,7 @@ function BrowserPaneBase({
   const saveCurrentWorkspace = async () => {
     const descs = tabsRef.current.map(descriptorOf);
     const mid = activeMissionIdRef.current;
-    await saveBrowserWorkspace(workspaceKeyRef.current, { tabs: descs, layout: tileLayout, groups, organized, ownChatTabs: ownChatsByWorkspace[workspaceKey] ?? [] });
+    await saveBrowserWorkspace(workspaceKeyRef.current, { tabs: descs, layout: tileLayout, groups, organized });
     if (mid) {
       await mission.setMissionTabs(mid, descs);
     } else if (workspaceKeyRef.current === "regular") {
@@ -1822,7 +1834,6 @@ function BrowserPaneBase({
       if (epoch !== workspaceSwapEpoch.current) throw new Error("A newer workspace switch replaced this request");
       if (savedWorkspace?.groups) setGroupsByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.groups! }));
       if (savedWorkspace?.organized !== undefined) setOrganizedByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.organized! }));
-      if (savedWorkspace?.ownChatTabs) setOwnChatsByWorkspace(prev => ({ ...prev, [destinationId]: savedWorkspace.ownChatTabs! }));
       if (target.kind === "mosaic") {
         // A mosaic opens from its definition: every cell at its saved address.
         definition = mosaicFromWorkspace(destinationId, savedWorkspace);
@@ -1927,8 +1938,17 @@ function BrowserPaneBase({
     await swapWorkspace({ kind: "regular" });
   };
 
-  const toggleLinked = () => {
-    if (activeBrowseId) setOwnChatsByWorkspace(prev => ({ ...prev, [workspaceKey]: ownChat ? (prev[workspaceKey] ?? []).filter(id => id !== activeBrowseId) : [...(prev[workspaceKey] ?? []), activeBrowseId] }));
+  // The header's "Tab chat" / "Shared chat": show the other kind of chat on
+  // the tab you're looking at, until you switch away. Relative to what is on
+  // screen rather than to the old flip, which may belong to an anchored origin.
+  const toggleTabChat = () => {
+    setFlipFor(ownChat === linkedMode ? null : activeBrowseId);
+    setDiscussionId(activeId);
+    setChatHere({ open: true, pill: "page" });
+  };
+  const toggleLinkedMode = () => {
+    setLinkedMode(m => !m);
+    setFlipFor(null);
     setDiscussionId(activeId);
     setChatHere({ open: true, pill: "page" });
   };
@@ -1939,8 +1959,10 @@ function BrowserPaneBase({
     if (!detail?.conversationId || !/^[a-zA-Z0-9_-]+$/.test(detail.conversationId)) return;
     if (detail.conversationKind === "browse") {
       const tab = tabsRef.current.find(item => item.browseId === detail.conversationId);
-      setOwnChatsByWorkspace(prev => ({ ...prev, [workspaceKey]: [...new Set([...(prev[workspaceKey] ?? []), detail.conversationId!])] }));
-      if (tab) selectTabRef.current(tab.id);
+      // Back to that exact thread, whichever way linked mode leans: a tab's
+      // own chat is a flip under linked mode, the shared chat one without it.
+      if (tab) { selectTabRef.current(tab.id); setFlipFor(linkedMode ? tab.browseId : null); }
+      else if (detail.conversationId === linkedByWorkspace[workspaceKey]?.browseId) { setDiscussionId(activeId); setFlipFor(linkedMode ? null : activeBrowseId); }
       else setWorkspaceError("This page conversation's tab is no longer open.");
       setChatHere({ open: true, pill: "page" });
     }
@@ -2403,7 +2425,8 @@ function BrowserPaneBase({
                   title={dockTitle ?? "Page chat"}
                   key={dockBrowseId}
                   {...pageChatIdentity(discussionTab, activeId, linkedConversation)}
-                  linked={!ownChat} ownChat={ownChat} onToggleLinked={toggleLinked}
+                  linked={!ownChat} onToggleTabChat={toggleTabChat}
+                  linkedMode={linkedMode} onToggleLinkedMode={toggleLinkedMode}
                   workspaceId={workspaceKey}
                   projectDir={projectDir}
                   anchoredFromTitle={

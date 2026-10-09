@@ -42,13 +42,14 @@ describe("page conversation header", () => {
     expect(await config.current!.buildSendArgs("Compare this page")).toMatchObject({ targetLabel: "browser-b", snapshot: "snapshot:browser-b" });
     expect(captureMock.mock.calls.map(([label]) => label)).toEqual(["browser-a", "browser-b"]);
   });
-  it("shows the title, linked toggle, three menu rows and an empty-state mission link", async () => {
-    const research = vi.fn(), close = vi.fn(), linked = vi.fn();
-    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onClose={close} onToggleLinked={linked} onResearch={research}/>));
+  it("shows the title, chat toggle, three menu rows and an empty-state mission link", async () => {
+    const research = vi.fn(), close = vi.fn(), toggle = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onClose={close} onToggleTabChat={toggle} onResearch={research}/>));
     expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Source page");
     expect(host.querySelector("[data-browser-chat-header]")?.querySelectorAll("button")).toHaveLength(3);
-    expect(button("New chat for this tab")).toBeDefined();
-    await click("New chat for this tab"); expect(linked).toHaveBeenCalledOnce();
+    // A tab's own chat offers the way to the shared one.
+    await click("Shared chat"); expect(toggle).toHaveBeenCalledOnce();
+    expect(host.textContent).not.toContain("This tab’s own chat");
     const composer = host.querySelector("textarea");
     await click("Conversation actions");
     expect([...document.querySelector('[role="menu"]')!.children].map(row => row.textContent)).toEqual(["Start a research mission", "Text sizeA−A+", "Clear history"]);
@@ -62,9 +63,30 @@ describe("page conversation header", () => {
   });
 
   it("names the linked origin", async () => {
-    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked anchoredFromTitle="Origin" onClose={() => {}}/>));
-    expect(button("New chat for this tab")).toBeDefined();
+    const toggle = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked anchoredFromTitle="Origin" onToggleTabChat={toggle} onClose={() => {}}/>));
+    expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Browser chat");
+    await click("Tab chat"); expect(toggle).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("Following Origin");
+  });
+
+  it("switches linked mode from the header and marks a tab chat only when it is the exception", async () => {
+    const mode = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Linked mode").getAttribute("aria-pressed")).toBe("false");
+    expect(button("Linked mode").textContent).toBe("⛓️‍💥");
+    expect(button("Linked mode").title).toContain("each tab opens its own chat");
+    await click("Linked mode"); expect(mode).toHaveBeenCalledOnce();
+    expect(host.textContent).not.toContain("This tab’s own chat");
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" linkedMode onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Linked mode").getAttribute("aria-pressed")).toBe("true");
+    expect(button("Linked mode").textContent).toBe("🔗");
+    expect(button("Linked mode").title).toContain("stay in the shared chat");
+    expect(button("Shared chat")).toBeDefined();
+    expect(host.textContent).toContain("This tab’s own chat");
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked linkedMode onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Tab chat")).toBeDefined();
+    expect(host.textContent).not.toContain("This tab’s own chat");
   });
 
   it("clears only this thread through the existing backend action", async () => {

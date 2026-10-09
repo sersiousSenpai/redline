@@ -70,9 +70,14 @@ interface BrowserChatProps {
   seed?: { text: string; nonce: number; autoSend?: boolean } | null;
   onSeedConsumed?: () => void;
   title?: string;
+  /** Showing the workspace's shared chat rather than this tab's own. */
   linked?: boolean;
-  ownChat?: boolean;
-  onToggleLinked?: () => void;
+  /** Swap to the other kind of chat on this tab, until it is switched away. */
+  onToggleTabChat?: () => void;
+  /** On: new tabs and tab switches stay in the shared chat. Off: each tab
+   *  opens its own. */
+  linkedMode?: boolean;
+  onToggleLinkedMode?: () => void;
   onResearch?: () => void;
 }
 
@@ -103,8 +108,9 @@ export const BrowserChat = memo(function BrowserChat({
   onSeedConsumed,
   title = "Page chat",
   linked = false,
-  ownChat = false,
-  onToggleLinked,
+  onToggleTabChat,
+  linkedMode = false,
+  onToggleLinkedMode,
   onResearch,
 }: BrowserChatProps) {
   // Composer draft survives tab switches and app restarts (the component is
@@ -279,12 +285,18 @@ export const BrowserChat = memo(function BrowserChat({
         <div className="min-w-0 flex-1">
           <span className="block truncate" style={{ fontSize: 13, fontWeight: 600 }}>{linked ? "Browser chat" : title}</span>
         </div>
-        <button type="button" className="rb-button" onClick={onToggleLinked}>{ownChat ? "Back to shared chat" : "New chat for this tab"}</button>
+        <button type="button" className="rb-button" onClick={onToggleTabChat}>{linked ? "Tab chat" : "Shared chat"}</button>
+        {onToggleLinkedMode && <button type="button" className="rb-icon-button" aria-label="Linked mode" aria-pressed={linkedMode} onClick={onToggleLinkedMode}
+          title={linkedMode
+            ? "Linked mode on — new tabs and tab switches stay in the shared chat. Click to give each tab its own chat."
+            : "Linked mode off — each tab opens its own chat. Click to share one chat across tabs."}>{linkedMode ? "🔗" : "⛓️‍💥"}</button>}
         <button ref={moreRef} type="button" className="rb-icon-button" aria-label="Conversation actions" aria-haspopup="menu" aria-expanded={conversationPanel === "menu"}
           onClick={() => setConversationPanel((panel) => panel === "menu" ? null : "menu")}><MoreHorizontal size={17} /></button>
         <button type="button" className="rb-icon-button" aria-label="Close discussion" onClick={onClose}><X size={16} /></button>
       </div>
-      {ownChat && <div className="rb-thread-context px-3 py-1">This tab’s own chat</div>}
+      {/* Only when the tab is the exception: with linked mode off every tab
+          has its own chat, and the title already says whose. */}
+      {!linked && linkedMode && <div className="rb-thread-context px-3 py-1">This tab’s own chat</div>}
       {anchoredFromTitle && <div className="rb-thread-context shrink-0 px-3 py-1">
         <span>{linked ? "Following" : "From"} {anchoredFromTitle}</span>
       </div>}

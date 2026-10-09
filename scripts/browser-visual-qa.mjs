@@ -105,7 +105,7 @@ try {
     await cdp.evaluate("window.__qa.setChatKind('browser')"); await settle();
     await click("[data-browser-chat-composer] textarea"); await cdp.call("Input.insertText", { text: "A browser conversation draft with several lines.\n".repeat(12) }); await settle();
     await measureLayout(`${size} page conversation`, true); await screenshot(`${size}-page-conversation`);
-    check(`${size}: shared chat has per-tab opt out`, await cdp.evaluate("[...document.querySelectorAll('[data-browser-chat-header] button')].some(button=>button.textContent==='New chat for this tab')"));
+    check(`${size}: shared chat offers the tab chat and linked mode`, await cdp.evaluate("[...document.querySelectorAll('[data-browser-chat-header] button')].some(button=>button.textContent==='Tab chat') && document.querySelector('[data-browser-chat-header] [aria-label=\"Linked mode\"]')?.getAttribute('aria-pressed')==='true'"));
     await click('[aria-label="Conversation actions"]'); check(`${size}: conversation menu bounded`, (await bounds('[role="menu"]'))?.within);
     const actions = await cdp.evaluate("[...document.querySelector('[role=menu]').children].map(e=>e.textContent.trim())");
     check(`${size}: exactly three conversation menu rows`, JSON.stringify(actions) === JSON.stringify(["Start a research mission", "Text sizeA−A+", "Clear history"]), actions);
