@@ -100,7 +100,8 @@ it, that's the discussion to have before merging.
    > in `flushAndCollectHandles` — so typing, dragging and every other input
    > felt late. The ring it drew sat on the plates' 1px border, which their own
    > `overflow: hidden` clips: all that paint bought a few antialiased pixels
-   > at the corners.
+   > at the corners. `scripts/perf-idle.sh` ("Responsiveness" below) is that
+   > diagnosis as a recipe.
 
 ## Guards in CI
 
@@ -161,6 +162,114 @@ npm run build
 If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may
 not be.
+
+## Responsiveness
+
+The rules above keep the main thread free; this section measures whether it
+is. The bar is the one set by the editors people compare Redline to:
+
+| Goal | Target |
+|---|---|
+| Input latency (INP), p95 | under 50 ms |
+| Frame gaps at idle | none longer than one refresh interval |
+| WebKit GPU process at idle | near 0% CPU (under 5%) |
+| Renderer memory | flat over days of uptime |
+
+### Instruments
+
+**The probe** — `src/lib/perfProbe.ts`. Rolling over the last two minutes:
+
+- `input` — per interaction (a keystroke, a click, the down and up of a
+  drag), its slowest event's time from input to the next paint, from the
+  Event Timing API, split into `keyboard` and `pointer`. The engine reports
+  only events of 16 ms or more and rounds to 8 ms, so the probe also counts
+  every keydown and pointerdown and files the unreported ones at the 16 ms
+  floor: **a value of 16 means "at most 16"** (`floorMs`). Without Event
+  Timing it falls back to input-to-next-frame timing and says
+  `source: "approximate"`.
+- `frames` — gaps between `requestAnimationFrame` callbacks while the page is
+  visible: p50/p95/max and a histogram. A healthy 60 Hz gap is ~16.7 ms;
+  anything in the 34 ms bucket or above is a frame the main thread dropped.
+  Pointer *moves* are not interactions to Event Timing, so **pane-drag
+  smoothness is read here**, not from `input`.
+- `longTasks` / `longAnimationFrames` — where the engine has them. WebKit has
+  neither (2026-10), and the snapshot says `null` rather than reporting a
+  clean zero; `supported` lists what was live.
+
+It runs by default in a dev build. On a release build it is off until
+switched on: **⌘K → "Start the performance probe"** (the choice persists;
+"Stop the performance probe" turns it off in either build — do that before
+an idle `sample`, because its frame sampler wakes the renderer every frame).
+
+Two ways to read it:
+
+```bash
+# Any build, from a terminal — the daemon evaluates window.__rlPerf in the
+# main webview. windowMs: 1000–120000 (default 60000).
+curl -s 'http://127.0.0.1:7676/v1/perf?windowMs=20000' | jq
+```
+
+```js
+// A dev build's Web Inspector console.
+__rlPerf.snapshot(20000)   // __rlPerf.reset() starts a scenario clean
+```
+
+**The idle recipe** — `scripts/perf-idle.sh`. With the app open on the
+default Aurora theme, the probe off and hands off the keyboard:
+
+```bash
+scripts/perf-idle.sh             # 3 s; --seconds N, --keep for the raw reports
+```
+
+It finds the app's WebKit helpers through LaunchServices ("Redline Graphics
+and Media", "Redline Web Content"; the app's own renderer is the oldest — the
+others are browser tabs), runs `sample` on the GPU process and the renderer
+concurrently, and prints each one's CPU over the window, its physical
+footprint, the share of the GPU's rendering threads spent in
+`WebCore::Gradient::paint`, the share of the renderer's
+`RemoteLayerTreeDrawingArea.CommitQueue` spent waiting in
+`flushAndCollectHandles`, and `/v1/perf` if the probe is on. Healthy: GPU
+under 5%, `Gradient::paint` ~0%, the commit queue absent or not waiting. The
+2026-10-09 storm read 102%, ~83% and 88% (rule 6). `--app Safari` runs the
+same recipe against any WebKit app, which is how to check the recipe itself.
+
+### Baseline — release build, to be measured
+
+**Not yet measured.** The numbers have to come from the release build with a
+person at the keyboard, which the change that added the instruments could not
+do. Measure on `npm run redline`, never on `tauri dev`: the dev build runs
+React's development build with StrictMode's double renders and unbundled
+modules, so it measures the build rather than the app. Fill in the table
+with the date, the commit and the app's uptime:
+
+1. Build and install with `npm run redline`, launch it, keep the Aurora
+   theme, and quit other heavy apps. Note the uptime — the renderer's memory
+   is the one number that depends on it.
+2. **Idle.** Probe off (⌘K → "Stop the performance probe" if it is on), hands
+   off for 10 s, then `scripts/perf-idle.sh`. Record GPU CPU and both
+   footprints.
+3. ⌘K → "Start the performance probe".
+4. Each scenario below for 20 s, then **immediately**
+   `curl -s 'http://127.0.0.1:7676/v1/perf?windowMs=20000' | jq .snapshot`,
+   then 20 s hands off before the next, so no window spans two scenarios:
+   - **Front Door typing** — type continuously into the Front Door composer.
+   - **Comment typing** — type into a plan comment's reply composer.
+   - **Typing during a streaming reply** — send a chat question, then type
+     into the composer while the reply streams.
+   - **Pane drag** — drag the sidebar divider back and forth.
+   - **Idle frames** — hands off, probe on.
+
+| Measure | Scenario → field | Goal | Release value |
+|---|---|---|---|
+| INP p95, Front Door typing | Front Door → `input.keyboard.p95` | < 50 ms | to be measured |
+| INP p95, comment typing | Comment → `input.keyboard.p95` | < 50 ms | to be measured |
+| INP p95, typing while a reply streams | Streaming → `input.keyboard.p95` | < 50 ms | to be measured |
+| Frame gap p95 / max, reply streaming | Streaming → `frames.p95`, `frames.max` | ≤ 17.5 ms p95 | to be measured |
+| Frame gap p95 / max, pane drag | Pane drag → `frames.p95`, `frames.max` | ≤ 17.5 ms p95 | to be measured |
+| INP p95, pane drag down/up | Pane drag → `input.pointer.p95` | < 50 ms | to be measured |
+| Frame gap max at idle | Idle frames → `frames.max` | one refresh interval | to be measured |
+| GPU process CPU at idle | `perf-idle.sh` | < 5% | to be measured |
+| Renderer footprint (and uptime) | `perf-idle.sh` | flat over days | to be measured |
 
 ## Boot budget
 

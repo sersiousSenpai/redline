@@ -3288,6 +3288,38 @@ async fn handle_liveness(State(app_state): State<AppState>) -> impl IntoResponse
     }))
 }
 
+#[derive(Deserialize)]
+struct PerfQ {
+    #[serde(rename = "windowMs")]
+    window_ms: Option<u64>,
+}
+
+/// The read `GET /v1/perf` evaluates in the main webview: the probe's
+/// snapshot over the last `window_ms`, or `running:false` when it is off. The
+/// window is a clamped integer, so nothing caller-supplied reaches the script.
+fn perf_probe_script(window_ms: Option<u64>) -> String {
+    let window_ms = window_ms.unwrap_or(60_000).clamp(1_000, 120_000);
+    format!(
+        "(function(){{try{{var p=window.__rlPerf;return JSON.stringify(p?{{running:true,snapshot:p.snapshot({window_ms})}}:{{running:false}});}}catch(e){{return JSON.stringify({{running:false,error:String(e)}});}}}})()"
+    )
+}
+
+/// GET `/v1/perf?windowMs=` — the responsiveness probe's rolling input-latency
+/// and frame-gap summary (docs/perf-budget.md "Responsiveness"), read out of
+/// the main webview's `window.__rlPerf`. A release build has no Web
+/// Inspector, so this is how a release baseline is read;
+/// `scripts/perf-idle.sh` prints it beside the GPU and renderer samples.
+/// Pull-only: the probe runs only when switched on (always in dev, ⌘K in a
+/// release build), and nothing is collected here or sent anywhere.
+async fn handle_perf(
+    State(app_state): State<AppState>,
+    Query(q): Query<PerfQ>,
+) -> axum::response::Response {
+    eval_json_response(
+        daemon_eval(&app_state.app_handle, "main", &perf_probe_script(q.window_ms)).await,
+    )
+}
+
 /// POST `/v1/admin/shutdown` — gracefully retire this instance: answer, then
 /// run the normal exit path (`RunEvent::Exit` snapshots the ledger and kills
 /// every child agent/PTY) and release :1420/:7676 for the caller. Master
@@ -3496,6 +3528,8 @@ async fn run_server(state: AppState) {
         // against a headless incumbent (window gone, daemon alive).
         .route("/v1/liveness", get(handle_liveness))
         .route("/v1/admin/shutdown", post(handle_admin_shutdown))
+        // The responsiveness probe's readout (perf budget, "Responsiveness").
+        .route("/v1/perf", get(handle_perf))
         // Control-plane auth (Shardplate Phase 2): every request is checked
         // against the frozen v1 contract in `auth::all_routes()` — mutating
         // routes demand the per-boot bearer token (or a scoped extension
@@ -13879,6 +13913,19 @@ mod tests {
         assert!(other.try_lock().is_ok());
         drop(guard);
         assert!(same.try_lock().is_ok());
+    }
+
+    /// `GET /v1/perf` evaluates script in the app's own webview, so the only
+    /// caller input — the window — must arrive as a clamped integer.
+    #[test]
+    fn perf_probe_script_reads_the_probe_with_a_clamped_window() {
+        let default = perf_probe_script(None);
+        assert!(default.contains("window.__rlPerf"));
+        assert!(default.contains("p.snapshot(60000)"));
+        assert!(default.contains("running:false"));
+        assert!(perf_probe_script(Some(5)).contains("p.snapshot(1000)"));
+        assert!(perf_probe_script(Some(30_000)).contains("p.snapshot(30000)"));
+        assert!(perf_probe_script(Some(u64::MAX)).contains("p.snapshot(120000)"));
     }
 
     /// The selection bar is a user script like any other, so what it costs to

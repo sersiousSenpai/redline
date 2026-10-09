@@ -436,6 +436,7 @@ import {
 import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
 import { markOnce } from "./lib/bootMarks";
+import { perfProbeOn, setPerfProbe } from "./lib/perfProbeSwitch";
 import type { BootstrapState, DaemonState } from "./types";
 import {
   integrationHealth,
@@ -2042,6 +2043,8 @@ function App() {
   // paletteCommands memo below, and both wired globals (⌘K, ⌘⇧0) are
   // matched by lib/keymap so the combos live in one place.
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Whether the responsiveness probe runs — its only switch is the palette.
+  const [perfProbe, setPerfProbeShown] = useState(perfProbeOn);
   // Doors-open boot (A2): main.tsx armed the closed frame before React
   // mounted; this parts the plates after the reveal. Purely decorative — it
   // reports only whether the plates are mid-flight (the native browser
@@ -7714,6 +7717,7 @@ function App() {
         })),
         currentConversation: voiceDocked ? (dockContext?.kind ?? null) : null,
         chats: chats.slice(0, 8).map((c) => ({ id: c.companionId, title: c.title })),
+        perfProbe,
         actions: {
           // ⌘K "Plan a build" lands on the front door, which is now the
           // primary way to start one. The Drafter is still one hop away
@@ -7758,6 +7762,10 @@ function App() {
           },
           zoomReset: () => setDocZoom(1),
           replayTour: () => setTourOpen(true),
+          togglePerfProbe: () => {
+            void setPerfProbe(!perfProbe);
+            setPerfProbeShown(!perfProbe);
+          },
           enterHarness: (id) => {
             const manifest = harnessList.find((h) => h.id === id);
             if (manifest) enterHarness(manifest);
@@ -7772,6 +7780,7 @@ function App() {
       summaries,
       theme,
       font,
+      perfProbe,
       harnessList,
       activeHarness,
       enterHarness,

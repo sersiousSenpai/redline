@@ -124,6 +124,8 @@ export interface CommandDeps {
   currentConversation?: string | null;
   /** Recent chats, for coming back to one from anywhere. */
   chats?: { id: string; title: string }[];
+  /** Whether the responsiveness probe is running (`perfProbeSwitch.ts`). */
+  perfProbe?: boolean;
   actions: {
     draftNewPlan: () => void;
     openSession: (id: string) => void;
@@ -147,6 +149,9 @@ export interface CommandDeps {
     setFont: (name: string) => void;
     zoomReset: () => void;
     replayTour: () => void;
+    /** Start / stop the responsiveness probe. The palette is its only switch:
+     *  a release build has no Web Inspector to reach `window.__rlPerf`. */
+    togglePerfProbe?: () => void;
     enterHarness?: (id: string) => void;
     exitHarness?: () => void;
   };
@@ -331,6 +336,15 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
     group: "Help",
     run: actions.replayTour,
   });
+  if (actions.togglePerfProbe) {
+    commands.push({
+      id: "perf-probe",
+      title: deps.perfProbe ? "Stop the performance probe" : "Start the performance probe",
+      detail: "Input latency and frame gaps, read at /v1/perf",
+      group: "Help",
+      run: actions.togglePerfProbe,
+    });
+  }
 
   return commands;
 }

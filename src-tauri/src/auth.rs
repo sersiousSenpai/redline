@@ -669,6 +669,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         request: "— (empty body)",
         response: "JSON {ok, pid}; the process runs its exit cleanup and terminates moments later",
     },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/perf",
+        class: RouteClass::Open,
+        purpose: "The responsiveness probe's rolling input-latency and frame-gap summary, read from the main webview (docs/perf-budget.md \"Responsiveness\")",
+        request: "query: windowMs (1000-120000, default 60000)",
+        response: "JSON {running: false}, or {running: true, snapshot: {windowMs, coveredMs, supported, input, frames, longTasks, longAnimationFrames}}",
+    },
 ];
 
 /// Every route this daemon serves, in one table: Redline's own rows
