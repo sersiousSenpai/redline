@@ -23,7 +23,7 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {} }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { browseId: string; label: string; onToggleLinked?: () => void; seed?: { text: string } }) => <div data-conversation={props.browseId} data-label={props.label} data-seed={props.seed?.text}><button onClick={props.onToggleLinked}>Linked toggle</button></div> }));
+vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { browseId: string; label: string; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; seed?: { text: string } }) => <div data-conversation={props.browseId} data-label={props.label} data-seed={props.seed?.text}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button></div> }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 
@@ -72,6 +72,12 @@ async function mount(props: Partial<ComponentProps<typeof BrowserPane>> = {}) {
   await act(async () => root.render(<BrowserPane onClose={() => {}} dockSlot={dock} dockPill="page" {...props}/>));
   await settle();
 }
+// `usePersistedState` stores JSON, so this is the literal `true`.
+const linkedModeOn = () => localStorage.setItem("redline.browser.linkedMode", "true");
+const conversation = () => dock.querySelector("[data-conversation]")!.getAttribute("data-conversation");
+const sharedThread = () => JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!).regular.browseId as string;
+const clickTab = (id: string) => act(async () => host.querySelector<HTMLElement>(`[data-tab-id="t-${id}"]`)!.click());
+const clickDock = (label: string) => act(async () => [...dock.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label)!.click());
 
 it.each(["button", "shortcut"])("opens the new-tab home without a native webview via %s", async (via) => {
   await mount();
@@ -122,7 +128,7 @@ it("gives native Edit commands back to the address input and reselects on Cmd+L"
 });
 
 it("manual tab selection preserves the shared thread and retargets the page", async () => {
-  await mount(); const shared = dock.querySelector('[data-conversation]')!.getAttribute('data-conversation');
+  linkedModeOn(); await mount(); const shared = dock.querySelector('[data-conversation]')!.getAttribute('data-conversation');
   for (const id of ["one", "two"]) {
     await act(async () => host.querySelector<HTMLElement>(`[data-tab-id="t-${id}"]`)!.click());
     expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe(shared);
@@ -181,11 +187,104 @@ it("adopts background mission tabs without stealing focus and ignores foreign wo
 });
 
 it("opts a tab out of shared chat and returns to the same shared thread", async () => {
-  await mount(); const shared = dock.querySelector('[data-conversation]')!.getAttribute('data-conversation');
-  await act(async () => dock.querySelector<HTMLButtonElement>("button")!.click());
-  expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe('two');
-  await act(async () => dock.querySelector<HTMLButtonElement>("button")!.click());
-  expect(dock.querySelector('[data-conversation]')!.getAttribute('data-conversation')).toBe(shared);
+  linkedModeOn(); await mount(); const shared = conversation();
+  await clickDock("Tab toggle");
+  expect(conversation()).toBe("two");
+  await clickDock("Tab toggle");
+  expect(conversation()).toBe(shared);
+});
+
+describe("linked mode decides tab chat vs shared chat", () => {
+  it("gives every tab its own chat by default, and a flip to shared lasts until you switch away", async () => {
+    await mount();
+    expect(conversation()).toBe("two");
+    for (const id of ["one", "two"]) { await clickTab(id); expect(conversation()).toBe(id); }
+    await clickTab("one"); await clickDock("Tab toggle");
+    expect(conversation()).toBe(sharedThread());
+    expect(dock.querySelector("[data-label]")!.getAttribute("data-label")).toBe("browser-t-one");
+    await clickTab("two"); expect(conversation()).toBe("two");
+    await clickTab("one"); expect(conversation()).toBe("one");
+  });
+
+  it("switches every tab to the shared chat with the mode toggle, and back", async () => {
+    await mount();
+    await clickDock("Mode toggle");
+    const shared = sharedThread();
+    expect(conversation()).toBe(shared);
+    expect(localStorage.getItem("redline.browser.linkedMode")).toBe("true");
+    await clickTab("one"); expect(conversation()).toBe(shared);
+    await clickDock("Tab toggle"); expect(conversation()).toBe("one");
+    await clickTab("two"); expect(conversation()).toBe(shared);
+    await clickTab("one"); expect(conversation()).toBe(shared);
+    await clickDock("Mode toggle"); expect(conversation()).toBe("one");
+  });
+
+  it("keeps a flipped shared chat on screen while its agent opens a tab", async () => {
+    await mount();
+    await clickDock("Tab toggle");
+    const shared = sharedThread();
+    await event("browse-open-tab", { url: "https://three.test" });
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe("https://three.test");
+    expect(conversation()).toBe(shared);
+    await clickTab("one"); expect(conversation()).toBe("one");
+  });
+
+  it("returns to the exact thread a conversation link names, in either mode", async () => {
+    const open = (conversationId: string) => act(async () => { window.dispatchEvent(new CustomEvent("redline-open-conversation", { detail: { conversationKind: "browse", conversationId } })); });
+    linkedModeOn(); await mount();
+    const shared = conversation()!;
+    await open("one"); expect(conversation()).toBe("one");
+    await open(shared); expect(conversation()).toBe(shared);
+    await clickDock("Mode toggle");
+    await open("two"); expect(conversation()).toBe("two");
+    await open(shared); expect(conversation()).toBe(shared);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe("plan Search", () => {
+  const url = "https://search.test/?q=token+bucket";
+  const search = (nonce: number) => ({ url, nonce, chat: { text: "Research token buckets", autoSend: true } });
+  const tabCount = () => host.querySelectorAll('[role="tab"]').length;
+  it.each([true, false])("opens a fresh tab with its own thread every time (linked mode %s)", async (linked) => {
+    if (linked) linkedModeOn();
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed });
+    const before = conversation();
+    await mount({ onOpenRequestConsumed, openRequest: search(1) });
+    const first = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect(first).not.toBe(before);
+    expect(tabCount()).toBe(3);
+    // The research turn is seeded into the new tab's own thread — the one the
+    // research comment links to.
+    expect(conversation()).toBe(first);
+    expect(dock.querySelector(`[data-conversation="${first}"]`)!.getAttribute("data-seed")).toBe("Research token buckets");
+    await mount({ onOpenRequestConsumed, openRequest: search(2) });
+    const second = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect(second).not.toBe(first);
+    expect(tabCount()).toBe(4);
+    expect(conversation()).toBe(second);
+    // "View result" brings the first search's own thread back, not the shared one.
+    await mount({ onOpenRequestConsumed, openRequest: { url, nonce: 3, focusBrowseId: first } });
+    expect(conversation()).toBe(first);
+    expect(tabCount()).toBe(4);
+    // The Front Door's quiet reopen leaves the choice to linked mode.
+    await mount({ onOpenRequestConsumed, openRequest: { url, nonce: 4, focusBrowseId: second, quiet: true } });
+    expect(conversation()).toBe(linked ? sharedThread() : second);
+  });
+  it("waits for the restored pages when the search is what first opens the browser", async () => {
+    // The pane mounts with the request, and the saved workspace swaps in
+    // after it — the search's tab must land in that set, not before it.
+    linkedModeOn();
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed, openRequest: search(1) });
+    const browseId = onOpenRequestConsumed.mock.lastCall![0] as string;
+    expect([...host.querySelectorAll('[role="tab"]')].map((tab) => tab.getAttribute("aria-label"))).toEqual(["one", "two", "search.test"]);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe(url);
+    expect(conversation()).toBe(browseId);
+    expect(dock.querySelector("[data-seed]")!.getAttribute("data-seed")).toBe("Research token buckets");
+    expect(onOpenRequestConsumed).toHaveBeenCalledOnce();
+  });
 });
 
 it("shows the same native bounds again after an overlay hides both tiles", async () => {
@@ -315,7 +414,7 @@ it("an inspector click immediately opens chat with the element attached", async 
 
 it("reveals page chat before an element or text action seeds its composer", async () => {
   localStorage.setItem("redline.browser.selectedDiscussion", JSON.stringify({ regular: true }));
-  await mount();
+  linkedModeOn(); await mount();
   await event("browser-page-event", { label: "browser-t-two", kind: "selection", value: { id: 1, action: "ask", text: "Selected evidence", url: "https://two.test", title: "two" } });
   expect(dock.querySelector("[data-selected-discussion]")).toBeNull();
   const chat = dock.querySelector<HTMLElement>("[data-conversation]")!;

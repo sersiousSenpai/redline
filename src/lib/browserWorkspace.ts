@@ -6,7 +6,6 @@ export interface SavedBrowserWorkspace {
   tabs: { id?: string | null; url: string; title?: string; browseId?: string | null }[];
   layout?: BrowserLayout;
   groups?: TabGroup[];
-  ownChatTabs?: string[];
   organized?: boolean;
   /** A mosaic's definition (see browserMosaics). The backend keeps these when a save omits them. */
   name?: string;

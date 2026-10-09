@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
+    AttachState, BrowseHarness, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
     Comment, CommentAttachment,
     CommentKind, CommentOffer, ResearchLink,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
@@ -637,7 +637,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 7;
+    const SCHEMA_VERSION: i64 = 8;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -659,6 +659,7 @@ impl Database {
             (5, Self::migrate_v5),
             (6, Self::migrate_v6),
             (7, Self::migrate_v7),
+            (8, Self::migrate_v8),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -710,14 +711,13 @@ impl Database {
             // and carry on. Only a forward stamp whose schema is genuinely
             // missing something we need is refused.
             //
-            // Except what v5 adds, which is applied first: a nullable column
-            // and a new table this build owns, both idempotent. A foreign
-            // lineage has never heard of either, and refusing over them would
-            // brick a database that is otherwise perfectly usable. The same
-            // goes for v6's and v7's nullable columns.
+            // Except what v5–v8 add, which is applied first: nullable columns
+            // and new tables this build owns, all idempotent. A foreign
+            // lineage has never heard of them, and refusing over them would
+            // brick a database that is otherwise perfectly usable.
             Self::migrate_v5(conn)?;
             Self::migrate_v6(conn)?;
-            Self::migrate_v7(conn)?;
+            Self::migrate_v8(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -834,7 +834,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"]), (8, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (8, "browse_messages", &["backend"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -1000,6 +1000,36 @@ impl Database {
         let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if !columns.is_empty() && !columns.iter().any(|name| name == "mode") {
             conn.execute("ALTER TABLE thread_messages ADD COLUMN mode TEXT", [])?;
+        }
+        Ok(())
+    }
+
+    /// v7 → v8: a browse chat's own provider/model/effort pick
+    /// (`BrowseHarness`) beside its resumable session id, the Codex thread a
+    /// Codex pick resumes (with its usage total, the next turn's meter
+    /// baseline), and which provider wrote each reply. All nullable columns.
+    ///
+    /// Two branches both claimed v7 before either shipped, one for the thread
+    /// mode and one for these columns, so a database stamped 7 by the browse
+    /// branch's build lacks `thread_messages.mode`. Re-running the idempotent
+    /// v7 step first (the `migrate_v3` pattern) repairs that stamp too.
+    /// Idempotent, so it is also safe on the forward-stamp path.
+    fn migrate_v8(conn: &Connection) -> rusqlite::Result<()> {
+        Self::migrate_v7(conn)?;
+        for (table, column) in [
+            ("browse_threads", "backend"),
+            ("browse_threads", "model"),
+            ("browse_threads", "effort"),
+            ("browse_threads", "codex_thread_id"),
+            ("browse_threads", "codex_usage"),
+            ("browse_messages", "backend"),
+        ] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            // No table at all is a foreign schema; `verify_schema` names it.
+            if !columns.is_empty() && !columns.iter().any(|name| name == column) {
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
+            }
         }
         Ok(())
     }
@@ -5925,8 +5955,8 @@ impl Database {
         let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_messages
-                (id, browse_id, role, body, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (id, browse_id, role, body, status, created_at, backend)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 msg.id,
                 msg.browse_id,
@@ -5934,6 +5964,7 @@ impl Database {
                 msg.body,
                 msg.status,
                 msg.created_at,
+                msg.backend,
             ],
         )?;
         Ok(())
@@ -5942,7 +5973,7 @@ impl Database {
     pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
         let conn = self.lock_conn();
         let mut stmt = conn.prepare(
-            "SELECT id, browse_id, role, body, status, created_at
+            "SELECT id, browse_id, role, body, status, created_at, backend
              FROM browse_messages
              WHERE browse_id = ?1
              ORDER BY created_at, id",
@@ -5955,6 +5986,7 @@ impl Database {
                 body: row.get(3)?,
                 status: row.get(4)?,
                 created_at: row.get(5)?,
+                backend: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -6005,12 +6037,120 @@ impl Database {
     /// tool-output context (page snapshots, WebFetch, code reads, git diffs) grew
     /// past the model's window and now throws on every `--resume`. Dropping the id
     /// makes the next turn start a fresh session (re-embedding a snapshot) instead
-    /// of re-sending the over-limit context forever. The visible thread is kept.
+    /// of re-sending the over-limit context forever. The visible thread is kept,
+    /// and so is the chat's model pick: only the id is nulled, never the row.
     pub fn clear_browse_session(&self, browse_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "DELETE FROM browse_threads WHERE browse_id = ?1",
+            "UPDATE browse_threads SET claude_session_id = NULL WHERE browse_id = ?1",
             params![browse_id],
+        )?;
+        Ok(())
+    }
+
+    /// The Codex thread a Codex pick resumes. Its own column, never
+    /// `claude_session_id`: neither CLI rejects the other's id, so each
+    /// provider keeps (and resumes) only its own — the `comments.fork_backend`
+    /// rule, per page chat.
+    pub fn get_browse_codex_thread(&self, browse_id: &str) -> Option<String> {
+        self.lock_conn()
+            .query_row(
+                "SELECT codex_thread_id FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// The Codex thread's running usage total (JSON) as of its last turn. The
+    /// app-server reports thread totals, so this is the next turn's baseline.
+    pub fn get_browse_codex_usage(&self, browse_id: &str) -> Option<String> {
+        self.lock_conn()
+            .query_row(
+                "SELECT codex_usage FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Store the Codex thread and its usage total. Upserts, and never touches
+    /// the Claude session or the pick.
+    pub fn set_browse_codex_thread(
+        &self,
+        browse_id: &str,
+        thread_id: &str,
+        usage: &str,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "INSERT INTO browse_threads (browse_id, codex_thread_id, codex_usage)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(browse_id) DO UPDATE SET codex_thread_id = ?2, codex_usage = ?3",
+            params![browse_id, thread_id, usage],
+        )?;
+        Ok(())
+    }
+
+    /// Move the stored Codex thread's usage total, and nothing else: a turn
+    /// that resumed it but never answered still advanced the thread's totals.
+    /// A no-op once that thread is no longer the stored one (reset, or the
+    /// whole row dropped by "Clear history").
+    pub fn set_browse_codex_usage(
+        &self,
+        browse_id: &str,
+        thread_id: &str,
+        usage: &str,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "UPDATE browse_threads SET codex_usage = ?3 WHERE browse_id = ?1 AND codex_thread_id = ?2",
+            params![browse_id, thread_id, usage],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the Codex thread (and its baseline) — `clear_browse_session`'s
+    /// Codex counterpart. The Claude session, the pick and the visible thread
+    /// all stay.
+    pub fn clear_browse_codex_thread(&self, browse_id: &str) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "UPDATE browse_threads SET codex_thread_id = NULL, codex_usage = NULL WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        Ok(())
+    }
+
+    /// This chat's own provider/model/effort pick; all `None` when it has never
+    /// had one (or has no row yet).
+    pub fn get_browse_harness(&self, browse_id: &str) -> BrowseHarness {
+        self.lock_conn()
+            .query_row(
+                "SELECT backend, model, effort FROM browse_threads WHERE browse_id = ?1",
+                params![browse_id],
+                |row| {
+                    Ok(BrowseHarness {
+                        backend: row.get(0)?,
+                        model: row.get(1)?,
+                        effort: row.get(2)?,
+                    })
+                },
+            )
+            .unwrap_or_default()
+    }
+
+    /// Store this chat's pick. Upserts, and never touches either resumable id:
+    /// a model change resumes the same session on the next turn.
+    pub fn set_browse_harness(
+        &self,
+        browse_id: &str,
+        harness: &BrowseHarness,
+    ) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "INSERT INTO browse_threads (browse_id, backend, model, effort)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(browse_id) DO UPDATE SET backend = ?2, model = ?3, effort = ?4",
+            params![browse_id, harness.backend, harness.model, harness.effort],
         )?;
         Ok(())
     }
@@ -11432,6 +11572,7 @@ mod tests {
             body: "hello".into(),
             status: "complete".into(),
             created_at: 10,
+            backend: None,
         })
         .unwrap();
         db.insert_browse_message(&BrowseMessage {
@@ -11441,6 +11582,7 @@ mod tests {
             body: "hi".into(),
             status: "complete".into(),
             created_at: 20,
+            backend: None,
         })
         .unwrap();
         let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
@@ -11468,6 +11610,7 @@ mod tests {
             body: body.into(),
             status: status.into(),
             created_at: at,
+            backend: None,
         };
         db.insert_browse_message(&msg("b1", "user", "hello", "complete", 10)).unwrap();
         db.insert_browse_message(&msg("b2", "assistant", "error_during_execution", "error", 20))
@@ -15385,6 +15528,139 @@ body.
         let _ = std::fs::remove_file(path);
     }
 
+    /// The browse chat's model pick is a v8 step, not a `migrate_v1` edit: a
+    /// database already past v1 never runs v1 again.
+    #[test]
+    fn a_v7_database_gains_the_browse_chat_pick() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO browse_threads (browse_id, claude_session_id) VALUES ('tab', 'sid');
+                 INSERT INTO browse_messages (id, browse_id, role, body, status, created_at)
+                     VALUES ('reply', 'tab', 'assistant', 'hi', 'complete', 1);
+                 ALTER TABLE browse_threads DROP COLUMN backend;
+                 ALTER TABLE browse_threads DROP COLUMN model;
+                 ALTER TABLE browse_threads DROP COLUMN effort;
+                 ALTER TABLE browse_threads DROP COLUMN codex_thread_id;
+                 ALTER TABLE browse_threads DROP COLUMN codex_usage;
+                 ALTER TABLE browse_messages DROP COLUMN backend;
+                 PRAGMA user_version=7;",
+            )
+            .unwrap();
+            Database::verify_schema_at(&conn, 7).unwrap();
+            assert!(Database::verify_schema_at(&conn, 8).is_err());
+        }
+        let db = Database::open(&path).expect("a v7 database must open");
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        // The existing row keeps its session and reads as "never picked", with
+        // no Codex thread; its old reply has no provider (it was Claude's).
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid"));
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.load_browse_thread("tab").unwrap()[0].backend, None);
+        Database::migrate_v8(&db.lock_conn()).unwrap(); // replay-safe
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The browse branch's own build stamped its columns as v7, without the
+    /// thread mode. Such a database must still open: v8 re-runs v7.
+    #[test]
+    fn a_database_stamped_7_by_the_browse_branch_gains_the_thread_mode() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE thread_messages DROP COLUMN mode; PRAGMA user_version=7;")
+                .unwrap();
+            assert!(Database::verify_schema_at(&conn, 7).is_err());
+        }
+        let db = Database::open(&path).expect("a browse-branch v7 database must open");
+        assert!(db.load_thread("s1", "c1").unwrap().is_empty());
+        drop(db);
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_browse_chat_pick_outlives_its_session_but_not_its_thread() {
+        let db = Database::open_in_memory().unwrap();
+        let pick = BrowseHarness {
+            backend: Some("claude-code".into()),
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+        };
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+
+        // Either write can come first; neither clobbers the other.
+        db.set_browse_harness("tab", &pick).unwrap();
+        db.set_browse_session("tab", "sid-1").unwrap();
+        assert_eq!(db.get_browse_harness("tab"), pick);
+        let sonnet = BrowseHarness { model: Some("sonnet".into()), effort: None, ..pick.clone() };
+        db.set_browse_harness("tab", &sonnet).unwrap();
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-1"), "a model change resumes the same session");
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+
+        // A context-overflow reset forgets the session only.
+        db.clear_browse_session("tab").unwrap();
+        assert_eq!(db.get_browse_session("tab"), None);
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+        db.set_browse_session("tab", "sid-2").unwrap();
+        assert_eq!(db.get_browse_harness("tab"), sonnet);
+
+        // Clear history drops the whole row, pick included.
+        db.delete_browse_thread("tab").unwrap();
+        assert_eq!(db.get_browse_session("tab"), None);
+        assert_eq!(db.get_browse_harness("tab"), BrowseHarness::default());
+    }
+
+    /// Each provider keeps its own resumable id: storing or forgetting the
+    /// Codex thread never touches the Claude session or the pick, and the
+    /// reverse. Clear history drops both.
+    #[test]
+    fn a_browse_chat_keeps_one_resumable_id_per_provider() {
+        let db = Database::open_in_memory().unwrap();
+        let pick = BrowseHarness { backend: Some("codex".into()), model: Some("gpt-5.5".into()), effort: None };
+        db.set_browse_harness("tab", &pick).unwrap();
+        db.set_browse_codex_thread("tab", "thread-1", r#"{"inputTokens":10}"#).unwrap();
+        db.set_browse_session("tab", "sid-1").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("thread-1"));
+        assert_eq!(db.get_browse_codex_usage("tab").as_deref(), Some(r#"{"inputTokens":10}"#));
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-1"));
+        assert_eq!(db.get_browse_harness("tab"), pick);
+
+        // A Claude context reset leaves the Codex thread; a lost Codex thread
+        // leaves the Claude session.
+        db.clear_browse_session("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab").as_deref(), Some("thread-1"));
+        db.set_browse_session("tab", "sid-2").unwrap();
+        db.clear_browse_codex_thread("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.get_browse_codex_usage("tab"), None);
+        assert_eq!(db.get_browse_session("tab").as_deref(), Some("sid-2"));
+        assert_eq!(db.get_browse_harness("tab"), pick);
+
+        // A reply remembers which provider wrote it.
+        db.insert_browse_message(&BrowseMessage {
+            id: "a1".into(),
+            browse_id: "tab".into(),
+            role: "assistant".into(),
+            body: "hi".into(),
+            status: "complete".into(),
+            created_at: 1,
+            backend: Some("codex".into()),
+        })
+        .unwrap();
+        assert_eq!(db.load_browse_thread("tab").unwrap()[0].backend.as_deref(), Some("codex"));
+
+        db.set_browse_codex_thread("tab", "thread-2", "{}").unwrap();
+        db.delete_browse_thread("tab").unwrap();
+        assert_eq!(db.get_browse_codex_thread("tab"), None);
+        assert_eq!(db.get_browse_session("tab"), None);
+    }
+
     #[test]
     #[ignore = "requires a SQLite backup, never the user's live database"]
     fn migrate_real_v5_backup_for_workbench() {
@@ -15735,6 +16011,7 @@ body.
             body: "queued browse".to_string(),
             status: "queued".to_string(),
             created_at: 10,
+            backend: None,
         })
         .unwrap();
         db.insert_linked_message(&crate::state::LinkedMessage {
@@ -15818,6 +16095,7 @@ body.
             body: "landed".to_string(),
             status: "complete".to_string(),
             created_at: 20,
+            backend: None,
         })
         .unwrap();
         assert_eq!(db.sweep_queued_to_unsent().unwrap(), 4);
@@ -15847,6 +16125,7 @@ body.
                 body: id.to_string(),
                 status: status.to_string(),
                 created_at: ts,
+                backend: None,
             })
             .unwrap();
         }

@@ -764,6 +764,10 @@ export interface BrowseMessage {
   /** "complete" | "error". */
   status: string;
   createdAt: number;
+  /** The provider that wrote a completed reply (`claude-code` | `codex`).
+   *  Null on user and error rows, and on replies from before a page chat
+   *  could run on Codex — those were all Claude. */
+  backend?: string | null;
 }
 
 /** A browser tab's **working list** — the punch list built while clicking

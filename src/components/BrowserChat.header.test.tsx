@@ -4,7 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
 const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
-  config: { current: null as null | { buildSendArgs: (text: string) => Promise<Record<string, unknown>> } },
+  config: { current: null as null | {
+    buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
+    makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
+  } },
   captureMock: vi.fn(async (label: string) => `snapshot:${label}`),
   invokeMock: vi.fn(async () => []),
   turn: { messages: [] as BrowseMessage[], liveText: "", status: "idle", startedAt: null, loaded: true,
@@ -42,13 +45,14 @@ describe("page conversation header", () => {
     expect(await config.current!.buildSendArgs("Compare this page")).toMatchObject({ targetLabel: "browser-b", snapshot: "snapshot:browser-b" });
     expect(captureMock.mock.calls.map(([label]) => label)).toEqual(["browser-a", "browser-b"]);
   });
-  it("shows the title, linked toggle, three menu rows and an empty-state mission link", async () => {
-    const research = vi.fn(), close = vi.fn(), linked = vi.fn();
-    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onClose={close} onToggleLinked={linked} onResearch={research}/>));
+  it("shows the title, chat toggle, three menu rows and an empty-state mission link", async () => {
+    const research = vi.fn(), close = vi.fn(), toggle = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onClose={close} onToggleTabChat={toggle} onResearch={research}/>));
     expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Source page");
     expect(host.querySelector("[data-browser-chat-header]")?.querySelectorAll("button")).toHaveLength(3);
-    expect(button("New chat for this tab")).toBeDefined();
-    await click("New chat for this tab"); expect(linked).toHaveBeenCalledOnce();
+    // A tab's own chat offers the way to the shared one.
+    await click("Shared chat"); expect(toggle).toHaveBeenCalledOnce();
+    expect(host.textContent).not.toContain("This tab’s own chat");
     const composer = host.querySelector("textarea");
     await click("Conversation actions");
     expect([...document.querySelector('[role="menu"]')!.children].map(row => row.textContent)).toEqual(["Start a research mission", "Text sizeA−A+", "Clear history"]);
@@ -62,9 +66,30 @@ describe("page conversation header", () => {
   });
 
   it("names the linked origin", async () => {
-    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked anchoredFromTitle="Origin" onClose={() => {}}/>));
-    expect(button("New chat for this tab")).toBeDefined();
+    const toggle = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked anchoredFromTitle="Origin" onToggleTabChat={toggle} onClose={() => {}}/>));
+    expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Browser chat");
+    await click("Tab chat"); expect(toggle).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("Following Origin");
+  });
+
+  it("switches linked mode from the header and marks a tab chat only when it is the exception", async () => {
+    const mode = vi.fn();
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Linked mode").getAttribute("aria-pressed")).toBe("false");
+    expect(button("Linked mode").textContent).toBe("⛓️‍💥");
+    expect(button("Linked mode").title).toContain("each tab opens its own chat");
+    await click("Linked mode"); expect(mode).toHaveBeenCalledOnce();
+    expect(host.textContent).not.toContain("This tab’s own chat");
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" title="Source page" linkedMode onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Linked mode").getAttribute("aria-pressed")).toBe("true");
+    expect(button("Linked mode").textContent).toBe("🔗");
+    expect(button("Linked mode").title).toContain("stay in the shared chat");
+    expect(button("Shared chat")).toBeDefined();
+    expect(host.textContent).toContain("This tab’s own chat");
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" linked linkedMode onToggleTabChat={() => {}} onToggleLinkedMode={mode} onClose={() => {}}/>));
+    expect(button("Tab chat")).toBeDefined();
+    expect(host.textContent).not.toContain("This tab’s own chat");
   });
 
   it("clears only this thread through the existing backend action", async () => {
@@ -74,6 +99,86 @@ describe("page conversation header", () => {
     expect(invokeMock).toHaveBeenCalledWith("browse_discard", { browseId: "thread" });
     expect(turn.clear).toHaveBeenCalledOnce();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("puts the model picker in one row under the header, with the context on its right", async () => {
+    turn.messages = [{ id: "reply", browseId: "thread", role: "assistant", body: "An answer", status: "complete", createdAt: 1 }];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" anchoredFromTitle="Origin" linkedMode onToggleTabChat={() => {}} onToggleLinkedMode={() => {}} onClose={() => {}}/>));
+    const header = host.querySelector("[data-browser-chat-header]")!;
+    const row = header.nextElementSibling!;
+    expect(row.matches("[data-browser-chat-harness]")).toBe(true);
+    expect(row.nextElementSibling?.matches("[data-browser-chat-messages]")).toBe(true);
+    expect(row.firstElementChild?.getAttribute("aria-label")).toBe("Chat model and effort");
+    expect(header.querySelector('[aria-label="Chat model and effort"]')).toBeNull();
+    expect([...row.querySelectorAll(".rb-thread-context span")].map(span => span.textContent)).toEqual(["This tab’s own chat", "From Origin"]);
+    expect(host.querySelectorAll(".rb-thread-context")).toHaveLength(1);
+    // The reply is attributed to the chat's provider.
+    expect(host.querySelector("[data-browser-chat-messages]")?.textContent).toContain("Claude");
+  });
+
+  it("stores an inherited pick before the first turn, and forgets it with the history", async () => {
+    localStorage.setItem("redline.browse.lastHarness", JSON.stringify({ backend: "claude-code", model: "opus", effort: null }));
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    expect(button("Chat model and effort").textContent).toContain("opus");
+    // The hoisted mock is typed without parameters; read its calls as sent.
+    const calls = () => invokeMock.mock.calls as unknown as [string, unknown?][];
+    const sets = () => calls().filter(([cmd]) => cmd === "browse_thread_set_harness");
+    expect(sets()).toEqual([]);
+    await act(async () => { await config.current!.buildSendArgs("First question"); });
+    expect(sets()).toEqual([["browse_thread_set_harness", { browseId: "thread", backend: "claude-code", model: "opus", effort: null }]]);
+    // Stored before the page is captured, so the turn reads it at start.
+    const setOrder = invokeMock.mock.invocationCallOrder[calls().findIndex(([cmd]) => cmd === "browse_thread_set_harness")];
+    expect(setOrder).toBeLessThan(captureMock.mock.invocationCallOrder[0]);
+    await act(async () => { await config.current!.buildSendArgs("Follow-up"); });
+    expect(sets()).toHaveLength(1);
+    turn.messages = [{ id: "message", browseId: "thread", role: "user", body: "A prior question", status: "complete", createdAt: 1 }];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    await click("Conversation actions"); await click("Clear history");
+    await act(async () => { await config.current!.buildSendArgs("After clearing"); });
+    expect(sets()).toHaveLength(2);
+  });
+
+  it("captures the page again while the provider differs from the last reply's", async () => {
+    const msg = (id: string, role: string, body: string, backend?: string | null): BrowseMessage => ({ id, browseId: "thread", role, body, status: "complete", createdAt: 1, backend });
+    // The last reply came from Codex; the chat is back on Claude (its default).
+    turn.messages = [msg("q", "user", "Question"), msg("a", "assistant", "Codex's answer", "codex")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("First on Claude")).toMatchObject({ snapshot: "snapshot:browser-a" });
+    expect(await config.current!.buildSendArgs("Sent again before a reply")).toMatchObject({ snapshot: "snapshot:browser-a" });
+    // Once Claude has answered, a follow-up is just a follow-up.
+    turn.messages = [...turn.messages, msg("b", "assistant", "Claude's answer", "claude-code")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("Follow-up")).toMatchObject({ snapshot: undefined });
+    // A reply from before Codex page chats was Claude's.
+    turn.messages = [msg("old", "assistant", "An old answer")];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    expect(await config.current!.buildSendArgs("Follow-up")).toMatchObject({ snapshot: undefined });
+    expect(captureMock).toHaveBeenCalledTimes(2);
+
+    // A chat now on Codex after Claude's replies: Codex needs the page too.
+    await act(async () => root.unmount());
+    localStorage.setItem("redline.browse.lastHarness", JSON.stringify({ backend: "codex", model: null, effort: null }));
+    root = createRoot(host);
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-a" onClose={() => {}}/>));
+    await act(async () => { await config.current!.buildSendArgs("Prime the label"); });
+    expect(await config.current!.buildSendArgs("First on Codex")).toMatchObject({ snapshot: "snapshot:browser-a" });
+  });
+
+  it("signs each reply with the provider that wrote it", async () => {
+    localStorage.setItem("redline.browse.lastHarness", JSON.stringify({ backend: "codex", model: null, effort: null }));
+    turn.messages = [
+      { id: "a1", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 1, backend: "claude-code" },
+      { id: "a2", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 2, backend: "codex" },
+      { id: "a3", browseId: "thread", role: "assistant", body: "", status: "complete", createdAt: 3 },
+      { id: "e1", browseId: "thread", role: "assistant", body: "codex ended without producing a reply", status: "error", createdAt: 4 },
+    ];
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    const bylines = [...host.querySelectorAll("[data-browser-chat-messages] > div > span:first-child")].map(span => span.textContent);
+    // An error row is Redline's note about this chat's current turn.
+    expect(bylines).toEqual(["Claude", "Codex", "Claude", "Codex"]);
+    // A reply settling live keeps the provider its done event named.
+    expect(config.current!.makeMessage({ id: "live", role: "assistant", body: "Done", status: "complete", backend: "codex" })).toMatchObject({ backend: "codex" });
+    expect(config.current!.makeMessage({ id: "mine", role: "user", body: "Hi", status: "complete" })).toMatchObject({ backend: null });
   });
 
   it("bounds a long composer without moving it into the scrolling transcript", async () => {
