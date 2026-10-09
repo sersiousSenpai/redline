@@ -25,7 +25,6 @@ import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
   FRONT_DOOR_TEXT_KEY,
   fallbackDestination,
-  frontDoorSuggestions,
   projectNameFromPrompt,
   submitAction,
   type LaunchDestination,
@@ -60,8 +59,8 @@ import { runSupported } from "../lib/planLaunchCommand";
 // The surface is built as ONE island — a single glass slab that changes shape
 // rather than a stack of components that appear and disappear. It settles when
 // idle, lifts on focus, grows with the text, and on ⏎ it becomes the Planning
-// card in place. Everything secondary (suggestions, readiness, the explainer
-// link) orbits that one object and fades rather than jumping.
+// card in place. Everything secondary (the recents, readiness) orbits that one
+// object and fades rather than jumping.
 //
 // The gate matters as much as the look. Three routes silently break the
 // promise (Paused interception captures nothing, a missing `claude` can't
@@ -189,15 +188,10 @@ export interface FrontDoorProps {
   consumeSeed: () => string;
   /** False while the Voice panel owns the mic — one capture at a time. */
   dictationEnabled: boolean;
-  /** Enterable harnesses — "your harnesses" beside "plan a build". The door
-   *  is harness mode's entry point (a contextual entry on the resting
-   *  state, never a header button). Empty hides the row. */
-  harnesses?: { id: string; name: string }[];
-  onEnterHarness?: (id: string) => void;
   /** Recent chats — the contextual way BACK into a conversation. A chat is a
    *  place you return to, and without a way back the room would be reachable
-   *  only by starting a new one. Same orbit discipline as the harness row: a
-   *  way in, never furniture. Empty hides the row. */
+   *  only by starting a new one. A way in, never furniture: the card's
+   *  History menu, hidden when this is empty. */
   chats?: { id: string; title: string }[];
   onOpenChat?: (id: string) => void;
 }
@@ -262,8 +256,6 @@ export function FrontDoor(props: FrontDoorProps) {
     focusNonce,
     consumeSeed,
     dictationEnabled,
-    harnesses = [],
-    onEnterHarness,
     chats = [],
     onOpenChat,
   } = props;
@@ -675,14 +667,6 @@ export function FrontDoor(props: FrontDoorProps) {
     [onFix, text],
   );
 
-  const suggestions = useMemo(
-    () => frontDoorSuggestions(resolvedProject ? basename(resolvedProject) : null),
-    [resolvedProject],
-  );
-  // Squeezed, the chips are the first thing to go: they are a way in, and a
-  // door narrow enough to wrap them into three rows has no room to spare for
-  // one.
-  const suggestionsHidden = hasText || !!offer || tight;
   // The recents are a way in, so they give way to a sentence or to the
   // new-folder offer — but not to focus: a key-summoned card is meant for
   // typing, and its recents should still be there to click instead.
@@ -1062,104 +1046,6 @@ export function FrontDoor(props: FrontDoorProps) {
           >
             <X size={11} />
           </button>
-        </div>
-      )}
-
-      {/* Orbit: everything secondary fades against the island rather than
-          shifting it. The chips retire the moment there is a sentence to
-          finish — they are a way in, not furniture.
-          The collapse is a `grid-template-rows: 1fr → 0fr` on the WRAPPER,
-          not a max-height on the row: a fixed max-height is a lie the moment
-          the chips wrap to a second line, and the overflow lands on top of
-          whatever sits below. This version collapses any height correctly. */}
-      {!floating && <div
-        className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-        aria-hidden={suggestionsHidden}
-      >
-        <div className="rl-fd-suggestions">
-          {suggestions.map((s) => (
-            <button
-              key={s.label}
-              type="button"
-              className="rl-fd-suggestion"
-              tabIndex={suggestionsHidden ? -1 : 0}
-              onClick={() => {
-                setText(s.text);
-                taRef.current?.focus();
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      }
-      {/* "Your harnesses" — the other doors this build can open. Same orbit
-          discipline as the suggestions: a way in, not furniture — the row
-          retires the moment there is a sentence to finish. */}
-      {!floating && harnesses.length > 0 && onEnterHarness && (
-        <div
-          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-          aria-hidden={suggestionsHidden}
-        >
-          <div className="rl-fd-suggestions">
-            <span
-              className="font-sans"
-              style={{
-                fontSize: "var(--rl-text-xs)",
-                color: "var(--color-ink-muted)",
-                alignSelf: "center",
-              }}
-            >
-              Your harnesses
-            </span>
-            {harnesses.map((h) => (
-              <button
-                key={h.id}
-                type="button"
-                className="rl-fd-suggestion"
-                tabIndex={suggestionsHidden ? -1 : 0}
-                title={`Enter ${h.name} — a harness running on Redline`}
-                onClick={() => onEnterHarness(h.id)}
-              >
-                {h.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Recent chats — the way back in. */}
-      {!floating && chats.length > 0 && onOpenChat && (
-        <div
-          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-          aria-hidden={suggestionsHidden}
-        >
-          <div className="rl-fd-suggestions">
-            <span
-              className="font-sans"
-              style={{
-                fontSize: "var(--rl-text-xs)",
-                color: "var(--color-ink-muted)",
-                alignSelf: "center",
-              }}
-            >
-              Recent chats
-            </span>
-            {chats.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className="rl-fd-suggestion"
-                tabIndex={suggestionsHidden ? -1 : 0}
-                title={`Pick up “${c.title}” where you left it`}
-                onClick={() => onOpenChat(c.id)}
-              >
-                {c.title}
-              </button>
-            ))}
-          </div>
         </div>
       )}
 
@@ -1579,8 +1465,8 @@ function NewProjectOffer({
             "it can read Redline's extension ABI and the worked template."
           : kind === "harness"
             ? "A data-only harness pack — surfaces, labels, landing, hero in " +
-              "one harness.json — linked live into this Redline: it appears " +
-              "under Your harnesses now, and edits land on refocus."
+              "one harness.json — linked live into this Redline: ⌘K can " +
+              "enter it now, and edits land on refocus."
             : "A folder with a README and a fresh git repo. Redline won't " +
               "write into a directory that already has something in it."}
       </div>

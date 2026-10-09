@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   fallbackDestination,
-  frontDoorSuggestions,
   projectNameFromPrompt,
   submitAction,
 } from "./frontDoor";
@@ -120,31 +119,6 @@ describe("fallbackDestination", () => {
   it("puts plan one key away from a direct run", () => {
     // "Just do it" → the modifier is "show me first", never another run.
     expect(fallbackDestination("run")).toBe("plan");
-  });
-});
-
-describe("frontDoorSuggestions", () => {
-  it("names the project when there is one", () => {
-    const s = frontDoorSuggestions("redline");
-    expect(s[0].label).toBe("Fix a bug in redline");
-    expect(s[0].text).toBe("Fix a bug in redline: ");
-  });
-
-  it("stays generic with no project", () => {
-    const s = frontDoorSuggestions(null);
-    expect(s[0].label).toBe("Fix a bug");
-    expect(s.some((x) => x.label.includes("undefined"))).toBe(false);
-    for (const x of s) expect(x.text.length).toBeGreaterThan(0);
-  });
-
-  it("never returns text that would launch as-is by mistake", () => {
-    // Chips FILL the composer. Each one is a prefix a human finishes, or a
-    // complete question — never an empty string.
-    for (const projectName of [null, "redline"]) {
-      for (const s of frontDoorSuggestions(projectName)) {
-        expect(s.text.trim().length).toBeGreaterThan(0);
-      }
-    }
   });
 });
 

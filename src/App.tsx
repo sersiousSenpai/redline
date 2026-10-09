@@ -8109,19 +8109,6 @@ function App() {
                 onCreateProject={createFrontDoorProject}
                 focusNonce={frontDoorFocus}
                 consumeSeed={consumeLandingSeed}
-                // "Your harnesses" — the door is where a harness is entered
-                // (a contextual entry, never a header button). Hidden while
-                // inside one: a harness is a place, not a switcher — exit
-                // first.
-                harnesses={
-                  activeHarness
-                    ? []
-                    : harnessList.map((h) => ({ id: h.id, name: h.name }))
-                }
-                onEnterHarness={(id) => {
-                  const manifest = harnessList.find((h) => h.id === id);
-                  if (manifest) enterHarness(manifest);
-                }}
                 // Recent chats — the contextual way back into a conversation.
                 // Bounded: this is a way in, not an index; the room's own
                 // `Chats ▾` holds the full list.

@@ -4457,36 +4457,12 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 
 /* ── Orbit ──────────────────────────────────────────────────────────────── */
 
-/* Starter chips. They retire the moment there is a sentence to finish —
-   collapsing to zero height so the island doesn't shift when they go.
-
-   The collapse animates `grid-template-rows: 1fr → 0fr` on the wrapper, NOT
-   a max-height on the row. A fixed max-height is a lie as soon as the chips
-   wrap to a second line: the row overflows its own clamp and paints on top
-   of whatever sits below it. Grid rows collapse whatever the content
-   actually measures, at any width. */
-.rl-fd-suggest-wrap {
-  display: grid;
-  grid-template-rows: 1fr;
-  margin-top: 14px;
-  opacity: 1;
-  transition:
-    opacity 200ms ease,
-    grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1),
-    margin-top 260ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.rl-fd-suggest-wrap.is-hidden {
-  grid-template-rows: 0fr;
-  opacity: 0;
-  margin-top: 0;
-  pointer-events: none;
-}
+/* A row of chips (the Drafter's openers). */
 .rl-fd-suggestions {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 6px;
-  /* Both required for the 0fr collapse to actually reach zero. */
   min-height: 0;
   overflow: hidden;
 }
@@ -4776,9 +4752,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-frontdoor.is-short .rl-fd-sub {
   display: none;
 }
-.rl-frontdoor.is-short .rl-fd-suggest-wrap {
-  margin-top: 14px;
-}
 .rl-frontdoor.is-short .rl-fd-strip {
   margin-top: 18px;
 }
@@ -4787,11 +4760,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   padding-block: 16px;
 }
 .rl-frontdoor.is-squat .rl-fd-eyebrow {
-  display: none;
-}
-/* The chips are a way in, and a pane this short has no room to spare for one
-   — same reason `is-tight` retires them on the width axis. */
-.rl-frontdoor.is-squat .rl-fd-suggest-wrap {
   display: none;
 }
 /* The fault strip is the one thing here that can be arbitrarily long (one row
@@ -5126,9 +5094,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rl-fd-suggest-wrap {
-    transition: none;
-  }
   .rl-frontdoor,
   .rl-frontdoor.is-in {
     opacity: 1;
