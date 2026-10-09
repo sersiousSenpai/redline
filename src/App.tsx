@@ -2328,7 +2328,7 @@ function App() {
     previousPaneMask.current = combinedPaneMask;
   }, [combinedPaneMask, setPaneCollapsed]);
   // Only surface masking defers intercepts to a toast. A new plan arriving
-  // on the Front Door can select its plan and open the pane in one batch.
+  // on the Front Door can select its plan in one batch; it never opens the pane.
   const paneMaskedRef = useRef(pMask.pane);
   paneMaskedRef.current = pMask.pane;
   const {
@@ -2351,7 +2351,6 @@ function App() {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
     setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
-  const openPanePref = useCallback(() => setPaneCollapsed(false), [setPaneCollapsed]);
   const revealPane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(false);
@@ -3591,8 +3590,7 @@ function App() {
   // count's floor (dockHeightForTiles only ever grows — a dock dragged
   // taller keeps its height, and removing a tile never yanks it shorter;
   // shrinking is the user's job via the divider or the collapse caret) and
-  // uncollapses it (precedent: plan intercepts call setPaneCollapsed(false)
-  // directly). It never touches termFullscreen. The divider's own max is
+  // uncollapses it. It never touches termFullscreen. The divider's own max is
   // looser than this cap, so growth can never exceed what a manual drag
   // allows.
   //
@@ -3886,12 +3884,10 @@ function App() {
           }
         }
         // Where a new plan lands is one rule (`arrivalFocus`): it takes focus
-        // unless you are already reading ANOTHER plan.
+        // unless you are already reading ANOTHER plan. Taking focus never opens
+        // the discussion pane or dock; they stay however the user left them.
         const focusIntercepted = () => {
           selectSessions();
-          // The intercept or its explicit Review action opens the discussion
-          // together with selecting the plan. A toast alone leaves it closed.
-          openPanePref();
           setActiveId(payload.sessionId);
           // Land on the clean latest, even if the reviewer was parked on a
           // historical version when the revision arrived.
@@ -3903,7 +3899,6 @@ function App() {
           const chatId = arrivingLaunch.chatId;
           const title = list.find(item => item.sessionId === payload.sessionId)?.planTitle ?? "Plan";
           setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
-          setDockOpenBy(state => withDockOpen(state, "plan", true));
           if (dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
             const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
             if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
