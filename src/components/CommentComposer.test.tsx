@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { readFileSync } from "node:fs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -24,6 +24,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+import { invoke } from "@tauri-apps/api/core";
 import { CommentComposer } from "./CommentComposer";
 import type { CommentType } from "../types";
 
@@ -31,10 +32,13 @@ const css = readFileSync("src/styles.css", "utf8");
 
 let host: HTMLDivElement;
 let root: Root;
+let quiet: MockInstance;
 beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   invokeMock.mockReset();
   invokeMock.mockImplementation(() => Promise.resolve(null));
+  // The drop router's dev breadcrumbs.
+  quiet = vi.spyOn(console, "debug").mockImplementation(() => {});
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -43,6 +47,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   vi.unstubAllGlobals();
+  quiet.mockRestore();
 });
 
 async function mount(
@@ -211,11 +216,14 @@ describe("CommentComposer — shortcuts live on their controls", () => {
 
 describe("CommentComposer — attachments without a hint line", () => {
   const shot = { path: "/data/attachments/s/shot.png", name: "shot.png", mime: "image/png", bytes: 2048 };
+  const original = document.elementsFromPoint;
+  afterEach(() => { document.elementsFromPoint = original; });
 
   it("a dragged file shows the Drop to attach overlay, and the drop attaches it", async () => {
     invokeMock.mockImplementation((cmd) => Promise.resolve(cmd === "import_attachment" ? shot : null));
     const onSubmit = await mount("feedback");
-    // jsdom lays everything out at 0×0, so the origin is inside the composer.
+    // jsdom has no layout; the drop router asks what is under the pointer.
+    document.elementsFromPoint = () => [host.querySelector("textarea")!];
     const fire = (payload: DropEvent["payload"]) =>
       act(async () => dropListeners.forEach((listener) => listener({ payload })));
     await fire({ type: "over", position: { x: 0, y: 0 } });
@@ -250,5 +258,37 @@ describe("CommentComposer — attachments without a hint line", () => {
     await act(async () => {}); // the chip's thumbnail read settles
     expect(paste.defaultPrevented).toBe(true);
     expect(host.textContent).toContain("shot.png");
+  });
+});
+
+describe("CommentComposer — native file drops", () => {
+  const drag = (payload: DropEvent["payload"]) => act(async () => dropListeners.forEach((fn) => fn({ payload })));
+  const original = document.elementsFromPoint;
+  afterEach(() => { document.elementsFromPoint = original; });
+
+  it("highlights while a file hovers over it and attaches what lands on it", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "import_attachment"
+        ? { path: `/data/${(args as { srcPath: string }).srcPath.split("/").pop()}`, name: "shot.png", mime: "image/png", bytes: 10 }
+        : null);
+    await mount("feedback");
+    const card = host.firstElementChild as HTMLElement;
+    document.elementsFromPoint = () => [card.querySelector("textarea")!];
+    await drag({ type: "over", position: { x: 10, y: 10 } });
+    expect(card.style.outline).toContain("dashed");
+    expect(host.textContent).toContain("Drop to attach");
+    await drag({ type: "drop", paths: ["/Users/me/Desktop/shot.png"], position: { x: 10, y: 10 } });
+    expect(card.style.outline).toBe("");
+    expect(invoke).toHaveBeenCalledWith("import_attachment", { sessionId: "s", srcPath: "/Users/me/Desktop/shot.png" });
+    expect(host.querySelector('[title^="shot.png"]')).not.toBeNull();
+  });
+
+  it("ignores a drop that lands elsewhere", async () => {
+    vi.mocked(invoke).mockClear();
+    await mount("feedback");
+    expect(dropListeners.size).toBe(1);
+    document.elementsFromPoint = () => [document.body];
+    await drag({ type: "drop", paths: ["/Users/me/Desktop/shot.png"], position: { x: 900, y: 900 } });
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_attachment")).toBe(false);
   });
 });

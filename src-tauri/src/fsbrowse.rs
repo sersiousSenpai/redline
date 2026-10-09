@@ -299,8 +299,8 @@ pub fn save_attachment(
 }
 
 /// Copy a dropped file into this session's attachment directory. The drag path:
-/// the OS hands us a real absolute source path (see `TerminalView`'s
-/// `onDragDropEvent` precedent).
+/// the OS hands us a real absolute source path (see the drop router,
+/// `src/lib/nativeFileDrop.ts`).
 #[tauri::command(async)]
 pub fn import_attachment(
     app: tauri::AppHandle,

@@ -18,10 +18,16 @@ const mocks = vi.hoisted(() => ({
   terminals: [] as FakeTerminal[],
   shells: new Map<string, FakePty>(),
   drops: new Set<(event: { payload: unknown }) => void>(),
+  events: new Map<string, Set<(event: { payload: unknown }) => void>>(),
   nextPid: 100,
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, Channel: class { onmessage = (_bytes: ArrayBuffer) => {}; } }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, fn: (event: { payload: unknown }) => void) => {
+  const set = mocks.events.get(name) ?? new Set();
+  set.add(fn);
+  mocks.events.set(name, set);
+  return () => set.delete(fn);
+} }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onFocusChanged: async () => () => {} }) }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: async (fn: (event: { payload: unknown }) => void) => { mocks.drops.add(fn); return () => mocks.drops.delete(fn); } }) }));
 vi.mock("../lib/xtermLoader", () => {
@@ -60,6 +66,7 @@ vi.mock("../lib/xtermLoader", () => {
 
 import { TerminalView, tauriHandoffDeps, whenPtySpawned } from "./TerminalView";
 import { enqueuePtyOp } from "../lib/ptyFence";
+import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement;
@@ -67,6 +74,11 @@ let root: Root;
 let id: string;
 const bytes = (text: string) => new TextEncoder().encode(text).buffer as ArrayBuffer;
 const currentTerm = () => mocks.terminals[mocks.terminals.length - 1];
+/** The element TerminalView registers as its drop target. */
+const terminalHost = () => host.firstElementChild!.firstElementChild!;
+/** jsdom has no layout: say which layers are under the pointer, topmost first. */
+const layersAtPointer = (stack: Element[]) => { document.elementsFromPoint = () => stack; };
+const elementsFromPoint = document.elementsFromPoint;
 const emit = (text: string) => {
   const pty = mocks.shells.get(id)!;
   pty.history += text;
@@ -86,6 +98,8 @@ beforeEach(() => {
   mocks.terminals.length = 0;
   mocks.shells.clear();
   mocks.drops.clear();
+  mocks.events.clear();
+  layersAtPointer([]);
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
     const pty = mocks.shells.get(args.id);
     switch (command) {
@@ -105,6 +119,7 @@ beforeEach(() => {
     }
   });
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.spyOn(console, "debug").mockImplementation(() => {});
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 500, bottom: 300, width: 500, height: 300, toJSON: () => ({}) });
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -114,6 +129,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   await settle();
   host.remove();
+  document.elementsFromPoint = elementsFromPoint;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -197,19 +213,58 @@ describe("terminal view lifecycle", () => {
     expect(touched).not.toHaveBeenCalled();
     act(() => { currentTerm().key(); currentTerm().data("ls\r"); });
     expect(touched).toHaveBeenCalledWith(id);
+    layersAtPointer([terminalHost()]);
     act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/a file.txt"], position: { x: 30, y: 30 } } })));
     expect(touched).toHaveBeenCalledTimes(2);
     expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "'/tmp/a file.txt' " });
   });
 
+  it("takes a file drop through an overlay that sits on the terminal without being a drop target", async () => {
+    await mount();
+    const notch = document.body.appendChild(document.createElement("div"));
+    layersAtPointer([notch, terminalHost()]);
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/x.png"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "'/tmp/x.png' " });
+    notch.remove();
+  });
+
+  it("types a promised drop's quoted path when it lands over the terminal, and ignores one outside", async () => {
+    const touched = await mount();
+    const promised = (payload: unknown) => act(() => mocks.events.get(PROMISED_DROP_EVENT)?.forEach((fn) => fn({ payload })));
+    layersAtPointer([document.body]);
+    promised({ paths: ["/cache/drops/1/Screenshot 1.png"], position: { x: 900, y: 900 } });
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_write")).toBe(false);
+    expect(touched).not.toHaveBeenCalled();
+    layersAtPointer([terminalHost()]);
+    promised({ paths: ["/cache/drops/1/Screenshot 1.png"], position: { x: 30, y: 30 } });
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "'/cache/drops/1/Screenshot 1.png' " });
+    expect(touched).toHaveBeenCalledWith(id);
+  });
+
+  it("never types a dropped file name that holds a control character", async () => {
+    const touched = await mount();
+    layersAtPointer([terminalHost()]);
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/x\rrm -rf ~\r"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_write")).toBe(false);
+    expect(touched).not.toHaveBeenCalled();
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/bad\nname", "/tmp/ok.png"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "'/tmp/ok.png' " });
+  });
+
+  it("ignores a drop onto a hidden terminal", async () => {
+    await mount(false);
+    layersAtPointer([terminalHost()]);
+    act(() => mocks.drops.forEach((fn) => fn({ payload: { type: "drop", paths: ["/tmp/x"], position: { x: 30, y: 30 } } })));
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_write")).toBe(false);
+  });
+
   it("marks text paste and IME input without treating terminal replies as gestures", async () => {
     const touched = await mount();
-    const terminalHost = host.firstElementChild!.firstElementChild!;
     const paste = new Event("paste", { bubbles: true });
     Object.defineProperty(paste, "clipboardData", { value: { items: [], getData: () => "pasted" } });
-    act(() => terminalHost.dispatchEvent(paste));
+    act(() => terminalHost().dispatchEvent(paste));
     expect(touched).toHaveBeenCalledTimes(1);
-    act(() => terminalHost.dispatchEvent(new Event("compositionstart", { bubbles: true })));
+    act(() => terminalHost().dispatchEvent(new Event("compositionstart", { bubbles: true })));
     expect(touched).toHaveBeenCalledTimes(2);
   });
 

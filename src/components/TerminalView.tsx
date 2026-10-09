@@ -3,7 +3,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
@@ -16,6 +15,7 @@ import { isResizing, onResizeSession } from "../lib/resizeSession";
 import type { HandoffDeps } from "../lib/terminalHandoff";
 import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
 import { terminalInputOrigin } from "../lib/terminalInput";
+import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -53,6 +53,12 @@ interface TerminalViewProps {
 function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
+
+// No quoting holds a control character: typed at the prompt, a newline in a
+// file name is Enter. A name like that (one another app chose for a file it
+// promised) is never typed.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 
 // Per-id ordering covers spawn/attach/detach/kill. Unmount releases the view,
 // preserving the shell for StrictMode, HMR and full webview reloads; only an
@@ -638,32 +644,12 @@ export const TerminalView = memo(function TerminalView({
       onExitRef.current(id);
     });
 
-    // Tauri intercepts OS file drops at the webview level (dragDropEnabled
-    // defaults true), so HTML5 drop events never reach xterm. Listen for
-    // Tauri's own event instead — it carries real absolute paths — and
-    // type the quoted path(s) at the prompt (no Enter, so they're editable).
-    const dropPromise = getCurrentWebview().onDragDropEvent((event) => {
-      if (disposed || event.payload.type !== "drop") return;
-      if (!visibleRef.current) return;
-      const paths = event.payload.paths;
-      if (!paths || paths.length === 0) return;
-
-      // Only act when the drop lands over the terminal host element. wry
-      // reports the position in logical AppKit points (relabeled "physical"
-      // without scaling by Tauri), and the webview's top-left is the CSS
-      // viewport origin — so compare to getBoundingClientRect() directly. Do
-      // NOT divide by devicePixelRatio: on Retina that halves the point and
-      // rejects any terminal not pinned to the top-left.
-      const h = hostRef.current;
-      if (h) {
-        const r = h.getBoundingClientRect();
-        const x = event.payload.position.x;
-        const y = event.payload.position.y;
-        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
-        const top = document.elementFromPoint?.(x, y);
-        if (top && !h.contains(top)) return;
-      }
-
+    // OS file drops never reach xterm as HTML5 events; the drop router hands
+    // us real absolute paths instead. Type them quoted at the prompt (no
+    // Enter, so they're editable).
+    const unregisterDrop = registerFileDropTarget(host, (dropped) => {
+      const paths = dropped.filter((p) => !CONTROL_CHAR.test(p));
+      if (!visibleRef.current || paths.length === 0) return;
       const text = paths.map(shellQuote).join(" ") + " ";
       onUserInputRef.current?.(id);
       void invoke("pty_write", { id, data: text }).catch(() => {});
@@ -750,7 +736,7 @@ export const TerminalView = memo(function TerminalView({
       host.removeEventListener("input", onInput, true);
       host.removeEventListener("compositionstart", onInput, true);
       void exitPromise.then((un) => un());
-      void dropPromise.then((un) => un());
+      unregisterDrop();
       void focusPromise.then((un) => un());
       void enqueuePtyOp(id, () => invoke("pty_detach", { id, attachmentId }));
       term.dispose();

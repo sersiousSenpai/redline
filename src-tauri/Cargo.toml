@@ -245,12 +245,15 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
 # properties:` impl block we call, and a feature we depend on shouldn't be
 # somebody else's implementation detail. NSPrintInfo/NSPrintOperation gate
 # `WKWebView::printOperationWithPrintInfo` (browser_output.rs printing).
+# NSDragging/NSFilePromiseReceiver (+ `block2` for its reader block) let
+# promised_drop.rs resolve screenshot-thumbnail drags into real files.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "NSApplication", "NSButton", "NSControl",
     "NSEvent", "NSWindow", "NSView", "NSPasteboard", "NSPanel", "NSResponder",
     "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
     "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-quartz-core",
-    "NSPrintInfo", "NSPrintOperation",
+    "NSPrintInfo", "NSPrintOperation", "NSDragging", "NSFilePromiseReceiver",
+    "block2",
 ] }
 
 [dev-dependencies]

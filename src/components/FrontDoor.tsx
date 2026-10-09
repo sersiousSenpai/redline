@@ -9,7 +9,6 @@ import {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
@@ -20,6 +19,7 @@ import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
 import { useDictation } from "../lib/useDictation";
+import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import {
   fallbackDestination,
   frontDoorSuggestions,
@@ -268,36 +268,21 @@ export function FrontDoor(props: FrontDoorProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const islandRef = useRef<HTMLDivElement | null>(null);
   const [dropHot, setDropHot] = useState(false);
-  const attachmentDropRef = useRef({ attachments, onAttachmentsChange, visible });
-  attachmentDropRef.current = { attachments, onAttachmentsChange, visible };
+  const attachmentDropRef = useRef({ attachments, onAttachmentsChange });
+  attachmentDropRef.current = { attachments, onAttachmentsChange };
+  // Only a visible door is a drop target; hidden, a drop belongs to whatever
+  // is actually under the pointer.
   useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    // Native drop coordinates are logical AppKit points, already CSS pixels.
-    // Hit-testing the topmost DOM node also prevents an obscured composer
-    // from accepting files through a dialog or another overlay.
-    const overIsland = (x: number, y: number) => {
-      const top = document.elementFromPoint?.(x, y);
-      return attachmentDropRef.current.visible && !!top && !!islandRef.current?.contains(top);
-    };
-    void Promise.resolve().then(() => getCurrentWebview().onDragDropEvent(({ payload }) => {
-      if (disposed) return;
-      if (payload.type === "leave") return setDropHot(false);
-      if (payload.type === "over" || payload.type === "enter") {
-        setDropHot(overIsland(payload.position.x, payload.position.y));
-        return;
-      }
-      if (payload.type !== "drop") return;
-      setDropHot(false);
-      if (!payload.paths.length || !overIsland(payload.position.x, payload.position.y)) return;
+    const island = islandRef.current;
+    if (!visible || !island) return;
+    return registerFileDropTarget(island, (paths) => {
       const current = attachmentDropRef.current;
-      const next = [...new Set([...current.attachments, ...payload.paths])];
+      const next = [...new Set([...current.attachments, ...paths])];
       attachmentDropRef.current = { ...current, attachments: next };
       current.onAttachmentsChange(next);
       taRef.current?.focus();
-    })).then((u) => { if (disposed) u(); else unlisten = u; }).catch(() => {});
-    return () => { disposed = true; unlisten?.(); };
-  }, []);
+    }, setDropHot);
+  }, [visible]);
   const [focused, setFocused] = useState(false);
 
   // The door has to survive being squeezed. The document column floors at

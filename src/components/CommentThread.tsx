@@ -974,7 +974,7 @@ function Composer({
   return (
     <div ref={files.hostRef}>
       {/* Same capture as the main composer: Tauri swallows HTML5 drops, so the
-          webview-level event does the work and each host hit-tests itself. */}
+          drop router hands this host its files (see useAttachmentCapture). */}
       <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
       {files.error && (
         <div

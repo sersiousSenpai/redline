@@ -169,9 +169,8 @@ export function CommentComposer({
 
   return (
     <div
-      // The drop hit-test measures against this element: Tauri's drag event is
-      // webview-global, so every composer must decide for itself whether a drop
-      // landed on it (see useAttachmentCapture).
+      // The drop target: a file dropped anywhere on this card attaches to it
+      // (see useAttachmentCapture).
       ref={files.hostRef}
       className="rounded-md border p-3"
       style={{

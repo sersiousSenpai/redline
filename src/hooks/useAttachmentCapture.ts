@@ -2,27 +2,18 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 
+import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import type { CommentAttachment } from "../types";
 
 /** Drag-and-drop + paste capture for a composer, backed by the two Rust
  *  commands that copy the file into app data.
  *
- *  Two things make this non-obvious:
- *
- *  1. **HTML5 `onDrop` never fires in this app.** `tauri.conf.json` doesn't set
- *     `dragDropEnabled`, so it defaults to `true` and the webview swallows OS
- *     file drops before the DOM sees them. The working precedent is
- *     `TerminalView`'s `getCurrentWebview().onDragDropEvent(...)`, which also
- *     hands us real absolute paths — exactly what we want to copy from.
- *
- *  2. **That event is webview-global**, so every listener hears every drop.
- *     Each composer hit-tests the pointer against its own host element, the
- *     same way TerminalView does. Heed its comment: wry reports the position in
- *     logical points that already match CSS pixels, so do NOT divide by
- *     `devicePixelRatio` — on a Retina display that halves the coordinate and
- *     rejects any target not pinned to the top-left.
+ *  **HTML5 `onDrop` never fires in this app** — Tauri swallows OS file drops
+ *  at the webview. The host element registers with the drop router
+ *  (`lib/nativeFileDrop`) instead, which hands over real absolute paths —
+ *  exactly what we want to copy from — when this composer is the topmost
+ *  drop target under the pointer.
  *
  *  Pasted files have no path at all (they're clipboard bytes), so they take the
  *  base64 route instead.
@@ -51,33 +42,12 @@ export function useAttachmentCapture(sessionId: string) {
 
   const clear = useCallback(() => setAttachments([]), []);
 
-  /** Is this pointer position inside our host element? */
-  const isOverHost = useCallback((x: number, y: number) => {
-    const h = hostRef.current;
-    if (!h) return false;
-    const r = h.getBoundingClientRect();
-    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-  }, []);
-
   useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        const p = event.payload;
-        if (p.type === "leave") {
-          setDragOver(false);
-          return;
-        }
-        if (p.type === "over") {
-          setDragOver(isOverHost(p.position.x, p.position.y));
-          return;
-        }
-        if (p.type !== "drop") return;
-        setDragOver(false);
-        if (!isOverHost(p.position.x, p.position.y)) return;
-        const paths = p.paths ?? [];
-        if (paths.length === 0) return;
+    const host = hostRef.current;
+    if (!host) return;
+    return registerFileDropTarget(
+      host,
+      (paths) => {
         setBusy(true);
         setError(null);
         void (async () => {
@@ -94,19 +64,10 @@ export function useAttachmentCapture(sessionId: string) {
           }
           setBusy(false);
         })();
-      })
-      .then((u) => {
-        if (disposed) u();
-        else unlisten = u;
-      })
-      .catch(() => {
-        /* no webview (tests) — paste still works */
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [sessionId, add, isOverHost]);
+      },
+      setDragOver,
+    );
+  }, [sessionId, add]);
 
   /** `onPaste` for the composer's textarea: pick up clipboard files/images. */
   const onPaste = useCallback(

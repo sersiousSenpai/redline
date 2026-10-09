@@ -112,6 +112,8 @@ mod postboot;
 mod preflight;
 mod probe;
 mod project;
+#[cfg(target_os = "macos")]
+mod promised_drop;
 mod pty;
 mod push;
 mod guided;
@@ -13169,6 +13171,12 @@ pub fn run() {
                     let _ = fallback.show();
                 });
             }
+
+            // A screenshot thumbnail dragged in before it has settled is a
+            // file promise, not a file: resolve those into real paths for the
+            // frontend's drop router.
+            #[cfg(target_os = "macos")]
+            promised_drop::install(app.handle());
 
             // A candidate probe is handed a disposable directory. Everything
             // downstream — the database, the daemon token, backups, the

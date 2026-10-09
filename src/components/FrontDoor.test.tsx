@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, createElement, useState, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -12,8 +12,14 @@ import { createRoot, type Root } from "react-dom/client";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(() => Promise.resolve(null)),
 }));
+const eventListeners = vi.hoisted(() => new Map<string, Set<(event: { payload: unknown }) => void>>());
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
+  listen: vi.fn((name: string, fn: (event: { payload: unknown }) => void) => {
+    const set = eventListeners.get(name) ?? new Set();
+    set.add(fn);
+    eventListeners.set(name, set);
+    return Promise.resolve(() => set.delete(fn));
+  }),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(() => Promise.resolve(null)),
@@ -40,6 +46,7 @@ class StubResizeObserver {
   true;
 
 import { FrontDoor, type FrontDoorProps } from "./FrontDoor";
+import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 
 const flush = () =>
   act(async () => {
@@ -48,8 +55,11 @@ const flush = () =>
 
 let host: HTMLDivElement;
 let root: Root;
+let quiet: MockInstance;
 
 beforeEach(() => {
+  // The drop router's dev breadcrumbs.
+  quiet = vi.spyOn(console, "debug").mockImplementation(() => {});
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -60,6 +70,7 @@ afterEach(() => {
   host.remove();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
+  quiet.mockRestore();
 });
 
 const PENDING = { prompt: "Ship the auth rewrite", startedAt: Date.now() - 3000 };
@@ -130,8 +141,8 @@ const flight = () => host.querySelector<HTMLElement>(".rl-fd-flight");
 it("attaches native drops once, merges paths, and highlights the topmost island", async () => {
   const onAttachmentsChange = vi.fn();
   await mount({ attachments: ["/a/x.md"], onAttachmentsChange });
-  const original = document.elementFromPoint;
-  document.elementFromPoint = () => composer();
+  const original = document.elementsFromPoint;
+  document.elementsFromPoint = () => [composer()!];
   try {
     act(() => dropListeners.forEach(fn => fn({ payload: { type: "over", position: { x: 20, y: 30 } } })));
     expect(host.querySelector(".rl-fd-island.is-drop-target")).not.toBeNull();
@@ -140,18 +151,48 @@ it("attaches native drops once, merges paths, and highlights the topmost island"
     expect(onAttachmentsChange).toHaveBeenCalledWith(["/a/x.md", "/a/y.md"]);
     expect(host.querySelector(".is-drop-target")).toBeNull();
     expect(document.activeElement).toBe(composer());
-  } finally { document.elementFromPoint = original; }
+  } finally { document.elementsFromPoint = original; }
 });
 
-it("ignores native drops when a different surface covers the island", async () => {
+it("ignores native drops that miss the island or land on a dialog covering it", async () => {
   const onAttachmentsChange = vi.fn();
   await mount({ onAttachmentsChange });
-  const original = document.elementFromPoint;
-  document.elementFromPoint = () => document.body;
+  const original = document.elementsFromPoint;
+  const dialog = document.body.appendChild(document.createElement("div"));
+  dialog.setAttribute("aria-modal", "true");
+  try {
+    expect(dropListeners.size).toBe(1);
+    document.elementsFromPoint = () => [document.body];
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
+    document.elementsFromPoint = () => [dialog, composer()!];
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
+    expect(onAttachmentsChange).not.toHaveBeenCalled();
+  } finally { document.elementsFromPoint = original; dialog.remove(); }
+});
+
+it("takes native drops only while the door is visible", async () => {
+  const onAttachmentsChange = vi.fn();
+  await mount({ visible: false, onAttachmentsChange });
+  const original = document.elementsFromPoint;
+  document.elementsFromPoint = () => [composer()!];
   try {
     act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
     expect(onAttachmentsChange).not.toHaveBeenCalled();
-  } finally { document.elementFromPoint = original; }
+    await mount({ visible: true, onAttachmentsChange });
+    act(() => dropListeners.forEach(fn => fn({ payload: { type: "drop", paths: ["/a/x.md"], position: { x: 20, y: 30 } } })));
+    expect(onAttachmentsChange).toHaveBeenCalledWith(["/a/x.md"]);
+  } finally { document.elementsFromPoint = original; }
+});
+
+it("attaches a promised drop (a screenshot that hadn't settled) like a native one", async () => {
+  const onAttachmentsChange = vi.fn();
+  await mount({ onAttachmentsChange });
+  const original = document.elementsFromPoint;
+  document.elementsFromPoint = () => [composer()!];
+  try {
+    act(() => eventListeners.get(PROMISED_DROP_EVENT)?.forEach(fn => fn({ payload: { paths: ["/cache/drops/1/Screenshot.png"], position: { x: 20, y: 30 } } })));
+    expect(onAttachmentsChange).toHaveBeenCalledWith(["/cache/drops/1/Screenshot.png"]);
+  } finally { document.elementsFromPoint = original; }
 });
 
 it("lets a floating hover preview appear without taking focus from the document", async () => {
