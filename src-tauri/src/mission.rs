@@ -1111,7 +1111,21 @@ async fn read_mission(
         let mut errored: Option<String> = None;
         let mut saw_json = false;
         let mut pacer = turn::MeterPacer::default();
-        while let Ok(Some(line)) = reader.next_line().await {
+        let mut deltas = turn::DeltaPacer::default();
+        // Append-before-emit (see `turn::push_delta`), one coalesced chunk at
+        // a time.
+        let emit_delta = |text: String| {
+            let seq = turn::push_delta(&buf, &text);
+            let _ = app.emit(
+                "mission-delta",
+                MissionDelta {
+                    mission_id: mission_id.clone(),
+                    text,
+                    seq,
+                },
+            );
+        };
+        while let Ok(Some(line)) = turn::next_line(&mut reader, &mut deltas, &emit_delta).await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -1138,18 +1152,7 @@ async fn read_mission(
             }
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
-                StreamLine::Delta(text) => {
-                    // Append-before-emit: see `turn::push_delta`.
-                    let seq = turn::push_delta(&buf, &text);
-                    let _ = app.emit(
-                        "mission-delta",
-                        MissionDelta {
-                            mission_id: mission_id.clone(),
-                            text,
-                            seq,
-                        },
-                    );
-                }
+                StreamLine::Delta(text) => deltas.push(&text, &emit_delta),
                 StreamLine::Final {
                     text,
                     session_id: sid,
@@ -1163,6 +1166,8 @@ async fn read_mission(
                 StreamLine::Ignore => {}
             }
         }
+        // The terminal events follow; the reply is whole first.
+        deltas.flush(&emit_delta);
         (session, final_text, errored, saw_json)
     };
     let stderr_fut = async {

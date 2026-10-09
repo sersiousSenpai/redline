@@ -5,7 +5,8 @@
 //! The governing rule: *the WebView main thread renders; it never computes or
 //! buffers unboundedly.* These tests fail if a known regression sneaks back in —
 //! a heavy command losing its `(async)` marker (freezes the UI on the main
-//! thread), or the PTY output stream reverting to a per-read firehose. They are
+//! thread), or the PTY output stream or a streamed reply's deltas reverting to
+//! a per-read firehose. They are
 //! cheap source-level invariants, not a substitute for the reviewer checklist in
 //! the doc.
 
@@ -335,5 +336,47 @@ mod tests {
             "pty.rs: the per-read `pty-output` event reintroduces the firehose \
              freeze — stream over the Channel instead"
         );
+    }
+
+    /// A streamed reply's `{surface}-delta` events are a global `app.emit`,
+    /// not a Channel — rule 3's documented exception, which holds only while
+    /// `turn::DeltaPacer` coalesces them to one per 33 ms per turn. Every arm
+    /// that receives a token must hand it to the pacer rather than emit it,
+    /// and every reader must flush what the pacer holds before its terminal.
+    #[test]
+    fn streamed_reply_deltas_stay_coalesced() {
+        let readers = [
+            ("fork.rs", include_str!("fork.rs")),
+            ("companion.rs", include_str!("companion.rs")),
+            ("browse.rs", include_str!("browse.rs")),
+            ("mission.rs", include_str!("mission.rs")),
+            ("memchat.rs", include_str!("memchat.rs")),
+            ("draft_chat.rs", include_str!("draft_chat.rs")),
+            ("voice.rs", include_str!("voice.rs")),
+            ("runner.rs", include_str!("runner.rs")),
+            ("ai_review.rs", include_str!("ai_review.rs")),
+        ];
+        for (file, src) in readers {
+            assert!(src.contains("DeltaPacer::default()"), "{file}: the reader must pace its deltas");
+            assert!(
+                src.contains("deltas.flush(") || src.contains("flush_output("),
+                "{file}: the reader must flush held text before its terminal events"
+            );
+            // Each arm a reader receives one token's text in, up to its end.
+            let arms = ["StreamLine::Delta(text) =>", "NodeEvent::Delta(text))=>", "Some(text) = step.delta"]
+                .into_iter()
+                .flat_map(|marker| src.split(marker).skip(1));
+            for arm in arms {
+                let arm = &arm[..arm.find('}').unwrap_or(arm.len())];
+                assert!(
+                    !arm.contains("app.emit(") && !arm.contains("push_delta("),
+                    "{file}: a delta arm emits per token — hand it to the DeltaPacer:\n{arm}"
+                );
+                assert!(
+                    arm.contains(".push(&text") || arm.contains("push_output("),
+                    "{file}: a delta arm must feed the DeltaPacer:\n{arm}"
+                );
+            }
+        }
     }
 }
