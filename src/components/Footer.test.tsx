@@ -14,7 +14,7 @@ async function mount(backend?: string, waiting = false, waitingAsk = false) {
     comments: [], sessionReady: true, canSubmit: true, canApprove: true,
     waiting, waitingAsk, backend,
     onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-    termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
+    termCollapsed: false, termTabCount: 0, onExpandTerminal: () => {},
   })));
 }
 describe("plan footer provider and execution labels", () => {
@@ -42,7 +42,7 @@ describe("approve, build later, build and reopen", () => {
     await act(async () => root.render(createElement(Footer, {
       comments: [], sessionReady: true, canSubmit: false, canApprove: true, waiting: false, waitingAsk: false,
       backend: "claude-code", onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
-      termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
+      termCollapsed: false, termTabCount: 0, onExpandTerminal: () => {},
       ...over,
     })));
   }
@@ -101,7 +101,7 @@ describe("approve and build with a team (Track O)", () => {
     await act(async () => root.render(createElement(Footer, {
       comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
       onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {}, onBuildTeam: (scale: string) => picked.push(scale),
-      termCollapsed: false, termTabCount: 0, termHasUnseen: false, onExpandTerminal: () => {},
+      termCollapsed: false, termTabCount: 0, onExpandTerminal: () => {},
     })));
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
     const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
@@ -117,5 +117,37 @@ describe("approve and build with a team (Track O)", () => {
     await mount("claude-code");
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More approve options"]')!.click());
     expect([...document.querySelectorAll('[role="menuitem"]')].some((b) => b.textContent?.includes("with a team"))).toBe(false);
+  });
+});
+
+describe("the terminals that need you", () => {
+  async function mountWith(extra: Record<string, unknown>) {
+    await act(async () => root.render(createElement(Footer, {
+      comments: [], sessionReady: true, canSubmit: true, canApprove: true,
+      waiting: false, waitingAsk: false,
+      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
+      termCollapsed: true, termTabCount: 3, onExpandTerminal: () => {},
+      ...extra,
+    })));
+  }
+  const chip = () => [...host.querySelectorAll("button")].find((b) => b.title.includes("⌘⇧J"));
+
+  it("shows a chip only while something needs you, and its click runs the jump", async () => {
+    let jumps = 0;
+    await mountWith({ termNeedYou: 0, onJumpToNeedsYou: () => { jumps++; } });
+    expect(chip()).toBeUndefined();
+    expect(host.textContent).toContain("3 terminals");
+    await mountWith({ termNeedYou: 2, onJumpToNeedsYou: () => { jumps++; } });
+    expect(chip()?.textContent).toBe("2 need you");
+    await act(async () => chip()!.click());
+    expect(jumps).toBe(1);
+    await mountWith({ termNeedYou: 1, onJumpToNeedsYou: () => {} });
+    expect(chip()?.textContent).toBe("1 needs you");
+  });
+
+  it("stands even with the dock open — it is the jump's visible hint, not the dock's", async () => {
+    await mountWith({ termCollapsed: false, termNeedYou: 1, onJumpToNeedsYou: () => {} });
+    expect(chip()).toBeDefined();
+    expect(host.textContent).not.toContain("3 terminals");
   });
 });

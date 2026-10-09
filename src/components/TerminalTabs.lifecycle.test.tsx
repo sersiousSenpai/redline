@@ -4,8 +4,9 @@ import { act, createRef, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
+const mocks = vi.hoisted(() => ({ notify: vi.fn(), invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: mocks.notify }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, handler: (event: { payload: unknown }) => void) => { mocks.listeners.set(name, handler); return () => { if (mocks.listeners.get(name) === handler) mocks.listeners.delete(name); }; } }));
 vi.mock("@tauri-apps/api/path", () => ({ homeDir: async () => "/Users/test/" }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onCloseRequested: async () => () => {} }) }));
@@ -33,8 +34,8 @@ const click = async (selector: string) => {
   expect(button).not.toBeNull();
   await act(async () => button!.click());
 };
-async function mount() {
-  await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} onActivityChange={() => {}} collapsed={false} /></StrictMode>));
+async function mount(props: { collapsed?: boolean; onNeedsYouChange?: (count: number) => void } = {}) {
+  await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={props.collapsed ?? false} onNeedsYouChange={props.onNeedsYouChange} /></StrictMode>));
 }
 async function open(background = false) {
   let id = "";
@@ -47,6 +48,7 @@ beforeEach(() => {
   mocks.inventory = [];
   mocks.cwd = null;
   mocks.listeners.clear();
+  mocks.notify.mockReset();
   mocks.attention = [];
   mocks.procs = [];
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
@@ -557,5 +559,119 @@ describe("parking (park-only automation)", () => {
     await tick(120_000);
     expect(order()).toEqual([shell, server]);
     expect(host.querySelector<HTMLElement>(`[data-header-id="${server}"]`)?.dataset.state).toBe("needs-you");
+  });
+});
+
+describe("reach and notify", () => {
+  const order = () => saved().tiles as string[];
+  const tick = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
+  const emit = async (payload: Record<string, unknown>) => {
+    await act(async () => mocks.listeners.get("term-attention")!({ payload }));
+  };
+  const needsYou = (terminalId: string, at: number) => ({ terminalId, sessionId: "s", at, kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission" });
+  const yourTurn = (terminalId: string, at: number, excerpt: string | null) => ({ terminalId, sessionId: "s", at, kind: "your-turn", excerpt });
+  const badges = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "set_attention_badge").map(([, args]) => args.count);
+  // The plugin import and the permission check settle over a few microtasks.
+  const flush = () => act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("counts what needs you for the footer and the Dock badge, oldest first", async () => {
+    const counts: number[] = [];
+    await mount({ onNeedsYouChange: (n) => counts.push(n) });
+    const a = await open();
+    const b = await open(true);
+    await emit(needsYou(b, 5));
+    await emit(yourTurn(a, 6, "Done."));
+    const last = <T,>(xs: T[]) => xs[xs.length - 1];
+    expect(last(counts)).toBe(2);
+    expect(last(badges())).toBe(2);
+    await click(`[data-type="${b}"]`);
+    expect(last(counts)).toBe(1);
+    expect(last(badges())).toBe(1);
+  });
+
+  it("⌘⇧J walks the terminals that need you, oldest first, placing each by the rule", async () => {
+    await mount();
+    const a = await open();
+    const b = await open(true);
+    const c = await open(true);
+    expect(handle.current!.jumpToNeedsYou()).toBe(false);
+    await emit(needsYou(c, 5));
+    await emit(needsYou(b, 7));
+    let jumped = false;
+    await act(async () => { jumped = handle.current!.jumpToNeedsYou(); });
+    expect(jumped).toBe(true);
+    expect(focused()).toBe(c);
+    await act(async () => { handle.current!.jumpToNeedsYou(); });
+    expect(focused()).toBe(b);
+    // Never by replacing the tile you were on: a, b and c all hold tiles.
+    expect(order()).toEqual([a, c, b]);
+    // And round again.
+    await act(async () => { handle.current!.jumpToNeedsYou(); });
+    expect(focused()).toBe(c);
+  });
+
+  it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.attention = [];
+    await mount();
+    const a = await open();
+    await flush();
+    await emit(needsYou(a, 10));
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    expect(mocks.notify).toHaveBeenLastCalledWith({ title: "repo 1 · needs you", body: "Claude needs your permission" });
+    // The same transition again (a re-sent event) is not news.
+    await emit(needsYou(a, 10));
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    // A new card is.
+    await emit(needsYou(a, 11));
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(2);
+    // A reload: the daemon's snapshot holds that same card — no repeat.
+    await act(async () => root.render(null));
+    mocks.attention = [needsYou(a, 11)];
+    await mount();
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("stays quiet while you're looking, and speaks up when the dock is collapsed", async () => {
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    await mount();
+    const a = await open();
+    await flush();
+    await emit(needsYou(a, 10));
+    await flush();
+    expect(mocks.notify).not.toHaveBeenCalled();
+    await mount({ collapsed: true });
+    await emit(needsYou(a, 12));
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    focus.mockRestore();
+  });
+
+  it("a your-turn notifies after a beat, with the excerpt that filled in — or not at all once read", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    await mount();
+    const a = await open();
+    const b = await open();
+    await flush();
+    await emit(yourTurn(a, 20, null));
+    await emit(yourTurn(a, 20, "Which API key should I use?"));
+    await emit(yourTurn(b, 21, "All done."));
+    // b's turn is answered (typed into) before the beat is up.
+    await click(`[data-type="${b}"]`);
+    await tick(2499);
+    await flush();
+    expect(mocks.notify).not.toHaveBeenCalled();
+    await tick(1);
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
+    expect(mocks.notify).toHaveBeenLastCalledWith({ title: "repo 1 · your turn", body: "Which API key should I use?" });
   });
 });

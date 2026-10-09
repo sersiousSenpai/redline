@@ -67,6 +67,7 @@ import {
   loudOldestFirst,
   mergeAttention,
   mergeProcs,
+  nextNeedsYou,
   putAck,
   SEEN_AFTER_MS,
   staleAcks,
@@ -76,9 +77,16 @@ import {
 import type { TermAttention, TermProc } from "../types";
 import { iconFor } from "../lib/repoIcon";
 import { useRepoIcons } from "../hooks/useRepoIcons";
+import { useAttentionAlerts } from "../hooks/useAttentionAlerts";
+import type { LoudTerminal } from "../lib/attentionAlerts";
 import type { ProjectOption } from "./ProjectPicker";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { TerminalView, enqueuePtyOp, tauriHandoffDeps } from "./TerminalView";
+import {
+  TerminalView,
+  enqueuePtyOp,
+  focusTerminalView,
+  tauriHandoffDeps,
+} from "./TerminalView";
 import { deliverToTerminal } from "../lib/terminalHandoff";
 import {
   TerminalTileHeader,
@@ -121,7 +129,9 @@ interface TerminalTabsProps {
    *  Distinct from onTabsChange — tab count ≠ tile count, and 9 tabs / 2
    *  tiles is normal. App grows the dock from this. */
   onTileCountChange?: (count: number, rows: number) => void;
-  onActivityChange: (hasUnseen: boolean) => void;
+  /** How many terminals need you (needs-you, or an unread your-turn) —
+   *  the footer's "N need you" chip and the ⌘⇧J gate. */
+  onNeedsYouChange?: (count: number) => void;
   /** Dock is fully collapsed (no tile is really visible). */
   collapsed: boolean;
   /** Notified whenever the focused terminal changes. The host (App) uses this
@@ -237,6 +247,11 @@ export interface TerminalTabsHandle {
     cwd: string | null,
     opts?: { background?: boolean },
   ) => string;
+  /** ⌘⇧J: put the next terminal that needs you — oldest transition first,
+   *  walking on from the focused one — on the wall by the placement rule,
+   *  hail it and hand it the caret. False when nothing needs you. The host
+   *  reveals the dock. */
+  jumpToNeedsYou: () => boolean;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -299,7 +314,7 @@ export const TerminalTabs = memo(
       onTabsChange,
       onTabIdsChange,
       onTileCountChange,
-      onActivityChange,
+      onNeedsYouChange,
       collapsed,
       onActiveTabChange,
       heldTerminalIds,
@@ -599,6 +614,7 @@ export const TerminalTabs = memo(
   const [attention, setAttention] = useState<ReadonlyMap<string, TermAttention>>(
     () => new Map(),
   );
+  const [attentionReady, setAttentionReady] = useState(false);
   const attentionRef = useRef(attention);
   attentionRef.current = attention;
   useEffect(() => {
@@ -618,7 +634,12 @@ export const TerminalTabs = memo(
           setAttention((prev) => mergeAttention(prev, rows));
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      // Alerts wait for the snapshot: what it holds happened before this
+      // dock existed and was never news here (useAttentionAlerts).
+      .finally(() => {
+        if (!gone) setAttentionReady(true);
+      });
     return () => {
       gone = true;
       unlisten?.();
@@ -753,9 +774,6 @@ export const TerminalTabs = memo(
     onTileCountChange?.(tiles.length, shape.rows);
   }, [tiles.length, shape.rows, onTileCountChange]);
 
-  useEffect(() => {
-    onActivityChange(unseen.size > 0);
-  }, [unseen, onActivityChange]);
 
   // A tile's view is genuinely seen once it's shown and the dock is open.
   useEffect(() => {
@@ -925,6 +943,30 @@ export const TerminalTabs = memo(
     return { state, text: work?.text ?? null, held: work?.held ?? false };
   };
   const servingPort = (id: string) => procs.get(id)?.ports[0] ?? null;
+
+  // Every terminal that needs you, oldest transition first: the footer's
+  // count, ⌘⇧J's walk, the Dock badge and the OS notifications.
+  const loudTerminals = useMemo<LoudTerminal[]>(
+    () =>
+      loudOldestFirst(
+        tabs.map((t) => t.id),
+        termStates,
+        attention,
+      ).map((id) => ({
+        id,
+        state: termStates.get(id) === "needs-you" ? "needs-you" : "your-turn",
+        at: attention.get(id)?.at ?? 0,
+        label: identity.byId.get(id)?.label ?? "terminal",
+        text: attentionText(attention.get(id)),
+      })),
+    [tabs, termStates, attention, identity],
+  );
+  const loudRef = useRef(loudTerminals);
+  loudRef.current = loudTerminals;
+  useEffect(() => {
+    onNeedsYouChange?.(loudTerminals.length);
+  }, [loudTerminals.length, onNeedsYouChange]);
+  useAttentionAlerts(loudTerminals, collapsed, attentionReady);
 
   // A your-turn is READ once its tile has been on screen and focused, in a
   // focused window, for SEEN_AFTER_MS. Keyed on the transition's `at`, so the
@@ -1513,6 +1555,26 @@ export const TerminalTabs = memo(
   const hintTileRef = useRef(hintTile);
   hintTileRef.current = hintTile;
 
+  // ⌘⇧J and the footer chip. The tile it lands in is hailed (on a wall of
+  // fourteen the focus ring alone doesn't catch the eye) and its terminal
+  // takes the caret a frame later, once the placement has painted — a jump
+  // to a tile already on screen has no reveal transition to focus it.
+  const jumpToNeedsYou = (): boolean => {
+    const target = nextNeedsYou(
+      loudRef.current.map((t) => t.id),
+      tilesRef.current[focusIdxRef.current],
+    );
+    if (!target) return false;
+    revealTerminal(target);
+    requestAnimationFrame(() => {
+      hailTileRef.current(target);
+      focusTerminalView(target);
+    });
+    return true;
+  };
+  const jumpRef = useRef(jumpToNeedsYou);
+  jumpRef.current = jumpToNeedsYou;
+
   // Expose selection to the host. Handlers are recreated each render, so the
   // handle reads them through refs and guards against a stale id (a terminal
   // closed since the folder→terminal mapping was recorded).
@@ -1573,6 +1635,7 @@ export const TerminalTabs = memo(
         addSessionTab({ id, cwd }, opts?.background);
         return id;
       },
+      jumpToNeedsYou: () => jumpRef.current(),
     }),
     [addSessionTab],
   );

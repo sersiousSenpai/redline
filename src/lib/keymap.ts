@@ -7,7 +7,7 @@
 // binding can't drift between the surfaces that describe it.
 //
 // Honest scope: only the wired globals (⌘K palette, ⌘⇧N new plan, ⇧⏎ front
-// door, ⌘⇧0 snap-back, ⌘J front-door toggle) use the matchers
+// door, ⌘⇧0 snap-back, ⌘J front-door toggle, ⌘⇧J needs-you jump) use the matchers
 // below; every other entry documents an existing listener that still owns its
 // own keydown handling (`wired: false`).
 // Rewiring those long-proven listeners through a generic dispatcher would be
@@ -48,6 +48,9 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "snap-back", keys: ["⌘", "⇧", "0"], label: "Snap the layout back", group: "Layout", wired: true },
   // The existing alternate toggle for the front door.
   { id: "dock", keys: ["⌘", "J"], label: "Show / hide the front door", group: "Global", wired: true },
+  // The way back to a blocked agent from anywhere — including from inside a
+  // terminal, so App matches it in the capture phase, ahead of xterm.
+  { id: "needs-you", keys: ["⌘", "⇧", "J"], label: "Jump to the terminal that needs you", group: "Global", wired: true },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
   { id: "pane-terminal", keys: ["⇧", "↓"], label: "Show / hide the terminal", group: "Layout", wired: false },
@@ -104,11 +107,21 @@ export function isNewPlanKey(e: KeyComboInfo): boolean {
   return e.shiftKey && e.code === "KeyN";
 }
 
-/** ⌘J — toggle the front door. Shift and Alt excluded so ⌘⇧J stays free. */
+/** ⌘J — toggle the front door. Shift and Alt excluded: ⌘⇧J is the
+ *  needs-you jump below. */
 export function isDockKey(e: KeyComboInfo): boolean {
   if (!(e.metaKey || e.ctrlKey)) return false;
   if (e.shiftKey || e.altKey) return false;
   return e.key === "j" || e.key === "J";
+}
+
+/** ⌘⇧J — jump to the next terminal that needs you. `e.code` for the same
+ *  reason as snap-back (Shift rewrites e.key), and Alt excluded so ⌥⌘⇧J
+ *  stays free. */
+export function isNeedsYouKey(e: KeyComboInfo): boolean {
+  if (!(e.metaKey || e.ctrlKey)) return false;
+  if (e.altKey) return false;
+  return e.shiftKey && e.code === "KeyJ";
 }
 
 /** Shift+Enter summons the front door without colliding with modified sends. */
