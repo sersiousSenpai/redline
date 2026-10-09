@@ -43,6 +43,14 @@ describe("Home chat containment", () => {
     expect(host.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it("leaves New to a host that offers its own", async () => {
+    await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null} hostOffersNew
+      onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
+      composer={{ text: "", onTextChange: () => {}, render: actions => <div data-chat-composer>{actions}</div> }}/>));
+    expect(host.querySelector("[data-chat-composer] button")).not.toBeNull();
+    expect(Array.from(host.querySelectorAll("[data-chat-composer] button")).some(button => button.textContent === "New chat")).toBe(false);
+  });
+
   it("labels usage under More and does not navigate history when it opens", async () => {
     const onSelectChat = vi.fn();
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
@@ -108,12 +116,15 @@ describe("Home chat containment", () => {
     function Workspace({ surface }: { surface: string }) {
       const [text, setText] = useState("Original launch draft"), [open, setOpen] = useState(true);
       return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} pose="chat" context={surface} busy={false}>
-        <ChatRoom companionId="carried-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
+        <ChatRoom companionId="carried-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}} hostOffersNew
           composer={{ text, onTextChange: setText, render: accessories => <FrontDoor {...base} accessories={accessories} text={text} onTextChange={setText}/> }}/>
       </MonochatIsland></>;
     }
     await act(async () => root.render(<Workspace surface="Document"/>));
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
+    // One way back to compose: the heading's New, not a second composer chip.
+    expect(host.querySelectorAll(".rl-monochat-new")).toHaveLength(1);
+    expect([...host.querySelectorAll("button")].filter(button => /New chat/.test(button.textContent ?? ""))).toEqual([]);
     const input = host.querySelector("textarea")!;
     expect(input.value).toBe("Original launch draft\n\nPrevious chat draft");
     expect(localStorage.getItem("rl.chatDraft.carried-chat")).toBe('""');

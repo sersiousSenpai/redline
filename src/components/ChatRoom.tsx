@@ -131,6 +131,10 @@ export interface ChatRoomProps {
   expanded?: boolean;
   /** "→ Draft" on a reply: open the Drafter seeded with it. */
   onDraft?: (markdown: string) => void;
+  /** The host has its own way back to a blank composer (the Redline card's
+   *  heading New), so the composer's "New chat" chip would be a second
+   *  control for the same thing. */
+  hostOffersNew?: boolean;
   onClose: () => void;
 }
 
@@ -152,6 +156,7 @@ export function ChatRoom({
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
   expanded = false,
   onDraft,
+  hostOffersNew = false,
   onClose,
   seed,
   seedId,
@@ -573,7 +578,7 @@ export function ChatRoom({
   useEffect(() => setActivityOpen(false), [companionId]);
 
   const conversationActions = <>
-    {composer && <button type="button" className="rl-composer-chip" onClick={onEmpty} title="Return to a fresh composer; this conversation stays in History">
+    {composer && !hostOffersNew && <button type="button" className="rl-composer-chip" onClick={onEmpty} title="Return to a fresh composer; this conversation stays in History">
       <Plus size={12}/><span>New chat</span>
     </button>}
     {composer && chats.length > 0 && <ComposerMenu label="Conversation history" value={companionId}
