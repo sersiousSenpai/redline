@@ -4,14 +4,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
+const drops = vi.hoisted(() => new Set<(event: { payload: unknown }) => void>());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(() => Promise.resolve(null)) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
 vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
+  getCurrentWebview: () => ({ onDragDropEvent: (fn: (event: { payload: unknown }) => void) => {
+    drops.add(fn);
+    return Promise.resolve(() => drops.delete(fn));
+  } }),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+import { invoke } from "@tauri-apps/api/core";
 import { CommentComposer } from "./CommentComposer";
 import type { CommentType } from "../types";
 
@@ -90,5 +95,36 @@ describe("CommentComposer — Send vs Save only", () => {
     expect(labels).toContain("Save");
     expect(labels).not.toContain("Send");
     expect(labels).not.toContain("Save only");
+  });
+});
+
+describe("CommentComposer — native file drops", () => {
+  const drag = (payload: unknown) => act(async () => drops.forEach((fn) => fn({ payload })));
+  const original = document.elementsFromPoint;
+  afterEach(() => { document.elementsFromPoint = original; });
+
+  it("highlights while a file hovers over it and attaches what lands on it", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
+      cmd === "import_attachment"
+        ? { path: `/data/${(args as { srcPath: string }).srcPath.split("/").pop()}`, name: "shot.png", mime: "image/png", bytes: 10 }
+        : null);
+    await mount("feedback");
+    const card = host.firstElementChild as HTMLElement;
+    document.elementsFromPoint = () => [card.querySelector("textarea")!];
+    await drag({ type: "over", position: { x: 10, y: 10 } });
+    expect(card.style.outline).toContain("dashed");
+    expect(host.textContent).toContain("Drop to attach");
+    await drag({ type: "drop", paths: ["/Users/me/Desktop/shot.png"], position: { x: 10, y: 10 } });
+    expect(card.style.outline).toBe("");
+    expect(invoke).toHaveBeenCalledWith("import_attachment", { sessionId: "s", srcPath: "/Users/me/Desktop/shot.png" });
+    expect(host.querySelector('[title^="shot.png"]')).not.toBeNull();
+  });
+
+  it("ignores a drop that lands elsewhere", async () => {
+    vi.mocked(invoke).mockClear();
+    await mount("feedback");
+    document.elementsFromPoint = () => [document.body];
+    await drag({ type: "drop", paths: ["/Users/me/Desktop/shot.png"], position: { x: 900, y: 900 } });
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_attachment")).toBe(false);
   });
 });
