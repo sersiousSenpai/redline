@@ -1443,6 +1443,8 @@ function App() {
     id?: string;
     autoSend?: boolean;
     target?: import("./lib/activeSurface").SurfaceInfo;
+    /** What the card attached, read as the sentence left it. */
+    context?: string | null;
   } | null>(null);
   // The mint is in flight. Holds a placeholder so the PREVIOUS conversation
   // can't flash up in the half-second before the new one exists — the same
@@ -7472,16 +7474,21 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatPrewarmKey]);
 
+  // A chat's attachments travel out of band, so the bubble shows only what was
+  // typed, and once per version: what each chat has already been handed is
+  // remembered by block, and only a new or changed block goes again.
+  const chatContextSent = useRef(new Map<string, Set<string>>());
+  const chatAttachment = async (companionId: string, blocks: ContextBlock[]): Promise<string | null> => {
+    if (blocks.length === 0) return null;
+    const builders = await import("./lib/contextBlocks").catch(() => null);
+    return builders ? builders.unsentAttachment(chatContextSent.current, companionId, blocks) : null;
+  };
+
   const chatFromFrontDoor = async () => {
-    if (chatOpening || (chatSeed && chatSeed.autoSend !== false)) return;
+    if (chatOpening || frontDoorLaunchingRef.current || (chatSeed && chatSeed.autoSend !== false)) return;
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
     if (!prompt) return;
-    if (chatId) {
-      setChatSeed({ companionId: chatId, text: prompt, id: crypto.randomUUID(), target: activeSurface });
-      setFrontDoorOpen(true);
-      setFrontDoorText(""); setFrontDoorAttachments([]);
-      return;
-    }
+    frontDoorLaunchingRef.current = true;
     setChatOpening(true);
     setPanelBreaks({ sidebar: false, pane: false });
     // The card GROWS into the chat in place — the composer you were typing in
@@ -7492,14 +7499,17 @@ function App() {
       // The provisional title is the opening sentence, trimmed to 80 by
       // `companion_create`. It is a placeholder, not a name: the backend
       // replaces it with a real one after the first reply lands, unless the
-      // user renames it themselves first.
-      const chat = await invoke<Companion>("companion_create", {
-        title: frontDoorText.trim(),
-      });
+      // user renames it themselves first. The chips are read alongside the
+      // mint, as the sentence leaves the composer.
+      const [chat, blocks] = await Promise.all([
+        invoke<Companion>("companion_create", { title: frontDoorText.trim() }),
+        gatherContext("chat"),
+      ]);
+      const context = await chatAttachment(chat.companionId, blocks);
       setChatId(chat.companionId);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
-      setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface });
+      setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface, context });
       localStorage.setItem(`rl.chatProject.${chat.companionId}`, JSON.stringify(frontDoorProject));
       refreshChats();
       setFrontDoorText("");
@@ -7509,6 +7519,7 @@ function App() {
       setToast(`Couldn't start the chat — ${e}`, 6000);
       setFrontDoorOpen(false);
     } finally {
+      frontDoorLaunchingRef.current = false;
       setChatOpening(false);
     }
   };
@@ -10557,7 +10568,12 @@ function App() {
               seedId={chatSeed?.id}
               seedAutoSend={chatSeed?.autoSend}
               seedTarget={chatSeed?.target}
+              seedContext={chatSeed?.companionId === chatId ? chatSeed.context : null}
               onSeedConsumed={() => setChatSeed(null)}
+              // The card's pressed chips, read per send. Out of band: the
+              // prompt carries them, the bubble only what was typed.
+              contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}
+              onContextLost={() => chatContextSent.current.delete(chatId)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
       {browserMounted && createPortal(

@@ -99,8 +99,19 @@ export interface ChatRoomProps {
   seedId?: string;
   seedAutoSend?: boolean;
   seedTarget?: import("../lib/activeSurface").SurfaceInfo;
+  /** What the card attached to the seed, read when the sentence left it. */
+  seedContext?: string | null;
   /** The seed was sent — clear it, so a remount can't send it twice. */
   onSeedConsumed?: () => void;
+  /** What the card's pressed chips attach to this send, read as it goes out.
+   *  It reaches `companion_send` as `context`, out of band: the agent's prompt
+   *  carries it and the bubble shows only what was typed. Null attaches
+   *  nothing. */
+  contextFor?: () => Promise<string | null>;
+  /** An attachment may never have reached the agent — its send failed or was
+   *  pulled back, or the conversation started a fresh CLI session — so the
+   *  next send should carry everything again. */
+  onContextLost?: () => void;
   /** Working directory for the spawn (the agent's read-only file tools). */
   cwd: string | null;
   /** False while the Voice panel owns the mic — one capture at a time. */
@@ -146,7 +157,10 @@ export function ChatRoom({
   seedId,
   seedAutoSend = true,
   seedTarget,
+  seedContext = null,
   onSeedConsumed,
+  contextFor,
+  onContextLost,
 }: ChatRoomProps) {
   const [savedDraft, setSavedDraft] = usePersistedState<string>(
     `rl.chatDraft.${companionId}`,
@@ -235,15 +249,21 @@ export function ChatRoom({
     historyCmd: "companion_get_thread",
     historyArgs: { companionId },
     sendFailPrefix: "Couldn't reach the chat agent",
-    onSendFailed: (text) => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
-    buildSendArgs: (text, extra) => ({
-      companionId,
-      text,
-      cwd,
-      harness: selectedHarness,
-      mode: (extra as { mode?: ChatMode } | undefined)?.mode ?? "chat",
-      target: (extra as { target?: typeof target } | undefined)?.target ?? target,
-    }),
+    onSendFailed: (text) => { setDraft(current => current.trim() ? `${current}\n\n${text}` : text); onContextLost?.(); },
+    buildSendArgs: async (text, extra) => {
+      const opts = extra as { mode?: ChatMode; target?: typeof target; context?: string | null } | undefined;
+      return {
+        companionId,
+        text,
+        cwd,
+        harness: selectedHarness,
+        mode: opts?.mode ?? "chat",
+        target: opts?.target ?? target,
+        // A seed brings the attachment read when it left the card. A chip
+        // that can't be read attaches nothing rather than failing the send.
+        context: opts && "context" in opts ? opts.context ?? null : (await contextFor?.().catch(() => null)) ?? null,
+      };
+    },
     makeMessage: ({ id, role, body, status }) => ({
       id,
       companionId,
@@ -320,13 +340,22 @@ export function ChatRoom({
   // What the room knows: the workspace brief and evidence the last turn
   // carried, for the Context chip. Read once on mount, then pushed per turn.
   const [context, setContext] = useState<ChatContext | null>(null);
+  // A whole brief once the thread has a reply means a fresh CLI session — a
+  // rotation, or a move to another provider — that never saw the earlier
+  // attachments.
+  const replied = useRef(false);
+  replied.current = messages.some((m) => m.role === "assistant" && m.status === "complete");
+  const contextLost = useRef(onContextLost);
+  contextLost.current = onContextLost;
   useEffect(() => {
     let live = true;
     void invoke<ChatContext | null>("companion_context", { companionId })
       .then((value) => { if (live && value?.brief) setContext(value); })
       .catch(() => {});
     const un = listen<ChatContext>("companion-context", (e) => {
-      if (e.payload.companionId === companionId && e.payload.brief) setContext(e.payload);
+      if (e.payload.companionId !== companionId) return;
+      if (e.payload.delivery === "full" && replied.current) contextLost.current?.();
+      if (e.payload.brief) setContext(e.payload);
     });
     return () => {
       live = false;
@@ -360,10 +389,10 @@ export function ChatRoom({
     const identity = seedId ?? seed;
     if (!identity || seeded.current === identity || !seed?.trim() || !loaded) return;
     seeded.current = identity;
-    if (seedAutoSend) { stick(); onSent?.(); sendTurn(seed, { extra: { target: seedTarget } }); }
+    if (seedAutoSend) { stick(); onSent?.(); sendTurn(seed, { extra: { target: seedTarget, context: seedContext } }); }
     else setDraft(previous => previous.trim() ? `${previous}\n\n${seed}` : seed);
     onSeedConsumed?.();
-  }, [seed, seedId, seedAutoSend, seedTarget, loaded, sendTurn, onSeedConsumed, onSent, setDraft]);
+  }, [seed, seedId, seedAutoSend, seedTarget, seedContext, loaded, sendTurn, onSeedConsumed, onSent, setDraft]);
 
   const streaming = status === "streaming";
   useEffect(() => { onActivityChange?.(streaming); }, [streaming, onActivityChange]);
@@ -417,7 +446,7 @@ export function ChatRoom({
     let text: string | null = null;
     if (id === "armed-plan") { text = armedInstruction; setArmedPlan(null); onCancelQueuedPlan?.(); }
     else if (id === "armed-run") { text = armedRun?.instruction ?? null; setArmedRun(null); }
-    else text = await unqueue(id);
+    else { text = await unqueue(id); if (text !== null) onContextLost?.(); }
     if (edit && text) setDraft(previous => previous.trim() ? `${text}\n\n${previous}` : text);
   };
   const picker = <ChatModePicker mode={mode} onModeChange={setMode} assignee={assignee} onAssigneeChange={setAssignee} harness={selectedHarness} onHarnessChange={changeHarness} catalogs={modelCatalogs} onOpen={onNeedModels} warning={buildConflict ? "Another agent is building here" : null} />;

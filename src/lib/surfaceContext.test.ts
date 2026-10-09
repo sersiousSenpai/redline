@@ -16,7 +16,7 @@ import {
   type ChipSources,
   type ContextChip,
 } from "./surfaceContext";
-import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock } from "./contextBlocks";
+import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment } from "./contextBlocks";
 
 const surface = (kind: SurfaceInfo["kind"], over: Partial<SurfaceInfo> = {}): SurfaceInfo => ({
   kind, id: null, label: null, detail: null, projectPath: null, updatedAt: 0, ...over,
@@ -201,5 +201,42 @@ describe("diffBlock — the review's shape, not its bytes", () => {
     const base = { repo: "/r", base: null, sha: null, files: [], annotations: [], questions: [] };
     expect(diffBlock({ ...base, source: "uncommitted" }).body).toContain("Showing: Uncommitted changes");
     expect(diffBlock({ ...base, source: "commitSha", sha: "0123456789abcdef" }).body).toContain("Showing: Commit `0123456789ab`");
+  });
+});
+
+describe("unsentAttachment — a chat's attachments, once per version", () => {
+  const plan = (version: number, markdown = "# Auth rewrite\n- step one") =>
+    planBlock({ sessionId: "s-1", version, title: "Auth rewrite", markdown });
+  const page = pageBlock({ label: "browser-1", title: "Docs", url: "https://docs.test" });
+
+  it("hands a chat each block once, and nothing when nothing changed", () => {
+    const sent = new Map<string, Set<string>>();
+    const first = unsentAttachment(sent, "chat-1", [plan(3), page]);
+    expect(first).toBe(renderContextBlocks([plan(3), page]));
+    expect(unsentAttachment(sent, "chat-1", [plan(3), page])).toBeNull();
+  });
+
+  it("sends only the block that changed — a revision, or an edit at the same version", () => {
+    const sent = new Map<string, Set<string>>();
+    unsentAttachment(sent, "chat-1", [plan(3), page]);
+    expect(unsentAttachment(sent, "chat-1", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
+    const edited = plan(4, "# Auth rewrite\n- step one\n- step two");
+    expect(unsentAttachment(sent, "chat-1", [edited, page])).toBe(renderContextBlocks([edited]));
+  });
+
+  it("remembers per chat, and forgets a chat whose attachment was lost", () => {
+    const sent = new Map<string, Set<string>>();
+    unsentAttachment(sent, "chat-1", [plan(3)]);
+    // Another conversation has never seen it.
+    expect(unsentAttachment(sent, "chat-2", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    // What App does on onContextLost: the next send carries everything again.
+    sent.delete("chat-1");
+    expect(unsentAttachment(sent, "chat-1", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+  });
+
+  it("attaches nothing for no blocks or only empty ones", () => {
+    const sent = new Map<string, Set<string>>();
+    expect(unsentAttachment(sent, "chat-1", [])).toBeNull();
+    expect(unsentAttachment(sent, "chat-1", [draftBlock("   ")])).toBeNull();
   });
 });

@@ -5,7 +5,8 @@
 // agent can act on. Loaded when something is sent, never at boot — see
 // surfaceContext.ts for which chips exist and how blocks join a prompt.
 
-import type { BrowserIslandPage, ContextBlock } from "./surfaceContext";
+import { renderContextBlocks, type BrowserIslandPage, type ContextBlock } from "./surfaceContext";
+import { fnv1a32Hex } from "./thumbs";
 import type {
   DiffFile,
   DiffSource,
@@ -108,6 +109,23 @@ export function diffBlock(review: {
   }
   lines.push("", "The raw diff is not attached. Run `git diff` in the repository to read it.");
   return { id: "diff", heading: `This diff (${basename(review.repo)})`, body: lines.join("\n") };
+}
+
+/** What a chat hasn't been handed yet, as one attachment, remembered as
+ *  handed. Keyed per chat on each block's content: an unchanged plan rides one
+ *  turn rather than every turn, and a revised one goes again. Null when there
+ *  is nothing new. */
+export function unsentAttachment(sent: Map<string, Set<string>>, chatId: string, blocks: ContextBlock[]): string | null {
+  const seen = sent.get(chatId) ?? new Set<string>();
+  sent.set(chatId, seen);
+  const fresh = blocks.filter((b) => !seen.has(blockKey(b)));
+  for (const b of fresh) seen.add(blockKey(b));
+  return renderContextBlocks(fresh) || null;
+}
+
+/** The chip, the length, and a hash of what it says. */
+function blockKey(b: ContextBlock): string {
+  return `${b.id}:${b.body.length}:${fnv1a32Hex(`${b.heading}\n${b.body}`)}`;
 }
 
 function where(a: { scope: ReviewAnnotation["scope"]; filePath: string; startLine: number; endLine: number }): string {

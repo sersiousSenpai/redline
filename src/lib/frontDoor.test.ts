@@ -285,6 +285,33 @@ describe("front door clear-on-send wiring", () => {
   });
 });
 
+// The card's chips reach a chat out of band (island plan step 6): read per
+// send, deduped per conversation, never folded into the bubble's text.
+describe("chat context wiring", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("the room reads the pressed chips per send, and forgets a chat whose attachment was lost", () => {
+    const start = app.indexOf("<ChatRoom");
+    expect(start).toBeGreaterThan(-1);
+    expect(app.indexOf("<ChatRoom", start + 1)).toBe(-1);
+    const mount = app.slice(start, app.indexOf("/>", app.indexOf("onSeedConsumed=", start)));
+    expect(mount).toContain('contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}');
+    expect(mount).toContain("onContextLost={() => chatContextSent.current.delete(chatId)}");
+    expect(mount).toContain("seedContext={chatSeed?.companionId === chatId ? chatSeed.context : null}");
+  });
+
+  it("a chat started from the composer seeds what was attached as the sentence left", () => {
+    const fn = app.indexOf("const chatFromFrontDoor");
+    expect(fn).toBeGreaterThan(-1);
+    const body = app.slice(fn, app.indexOf("const openChat", fn));
+    expect(body).toContain('gatherContext("chat")');
+    expect(body).toContain("chatAttachment(chat.companionId, blocks)");
+    expect(body).toMatch(/setChatSeed\(\{[^}]*\bcontext \}\)/);
+    // Out of band: the sentence the room sends is the one that was typed.
+    expect(body).not.toContain("withContext(");
+  });
+});
+
 describe("chat composer submission", () => {
   const enter = { key: "Enter", metaKey: false, shiftKey: false };
   it("uses a one-shot mode and Cmd-Enter plans directly", () => {
