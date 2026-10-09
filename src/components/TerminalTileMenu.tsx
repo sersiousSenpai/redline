@@ -195,9 +195,9 @@ export function TerminalTileMenu({
   const activeIdx = Math.min(active, items.length - 1);
   const activeKey = items[activeIdx]?.key;
 
-  // The menu is now the only way to reach an untiled terminal, so it earns
-  // real keyboard reach: focus lands in the filter (or the list), arrows
-  // rove, Enter activates. Escape rides useDismiss.
+  // The menu is the keyboard's way to an untiled terminal (the shelf is the
+  // pointer's), so it earns real keyboard reach: focus lands in the filter
+  // (or the list), arrows rove, Enter activates. Escape rides useDismiss.
   useEffect(() => {
     (filterRef.current ?? listRef.current)?.focus();
   }, []);

@@ -21,6 +21,7 @@ export async function invoke(command:string,args:any={}){
  case 'thread_meters':return {};
  case 'pty_list':return [];
  case 'pty_cwds':return {};
+ case 'pty_procs':case 'term_attention_snapshot':return [];
  case 'pty_cwd':return null;
  case 'fork_thread_model':return [null,null];
  case 'pty_is_live':return false;

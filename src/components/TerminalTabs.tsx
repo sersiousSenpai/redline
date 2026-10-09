@@ -300,9 +300,13 @@ const pct = (v: number) => `${v * 100}%`;
 // after its live cwd's basename, numbered per project in creation order
 // ("redline 1, redline 2, zsh 1") — $HOME and / fall back to "zsh".
 //
-// Every tile carries its own 26px header (repo mark + label + ▾ menu); the
-// menu is the fleet's single inventory — the old tab strip, repo-bubble strip
-// and action cluster all folded into it.
+// Every tile carries its own 26px header (state badge, repo mark, label, ▾
+// menu); the menu is the fleet's single inventory — the old tab strip,
+// repo-bubble strip and action cluster all folded into it. Every terminal
+// without a tile also sits on the shelf above the grid, so nothing open is
+// ever out of sight. Each terminal has a derived state (lib/termState) that
+// decides where it goes (lib/tilePolicy): quiet tiles park themselves on the
+// shelf, and a terminal that needs you glows there until you bring it back.
 //
 // Memoized: a dock drag's one release commit (and any unrelated App state
 // change) must not walk the whole terminal fleet's tree.
