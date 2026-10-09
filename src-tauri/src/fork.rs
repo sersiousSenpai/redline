@@ -502,17 +502,71 @@ fn discuss_seed(comment: &crate::state::Comment) -> String {
     }
 }
 
-/// A chat that opens a thread starts on the reviewer's own question, not on
-/// the comment. The first-turn prompt then quotes the comment as usual and
-/// this block follows it with the question.
-fn chat_question_block(question: &str) -> String {
-    let mut p = String::from("\n\nThey opened a quick chat about it. Their question:\n");
-    for line in question.lines() {
+/// `text` as a markdown quote, one `> ` per line.
+fn quoted(text: &str) -> String {
+    let mut p = String::new();
+    for line in text.lines() {
         p.push_str("> ");
         p.push_str(line);
         p.push('\n');
     }
     p
+}
+
+/// What a first turn sent when it isn't the comment itself: a chat that opens
+/// the thread on the reviewer's question, or a report asked for after chat
+/// turns whose fork never came to be (the opening chat failed, or was
+/// stopped, before a reply landed — "Write it up →" then opens the fork). The
+/// prompt quotes the comment where the opening goes, and this follows it.
+fn sent_after_comment_block(mode: TurnMode, text: &str) -> String {
+    let lead = match mode {
+        TurnMode::Chat => "They opened a quick chat about it. Their question:",
+        TurnMode::Report => "Their latest message:",
+    };
+    format!("\n\n{lead}\n{}", quoted(text))
+}
+
+/// Turn one's prompt, before the mode, sidecar and recap passes. It always
+/// opens on the comment. Usually the turn IS the comment — "💬 Discuss" sends
+/// its seed — and this is the prompt every discussion has always had;
+/// otherwise the seed takes the opening's place and what was sent follows
+/// (`sent_after_comment_block`). `carried` is the history a re-fork inherits
+/// (`continuity_block`); a thread that opened in chat never sent the comment
+/// as a turn, so it is quoted ahead of that history.
+fn opening_turn_prompt(
+    comment: &crate::state::Comment,
+    text: &str,
+    mode: TurnMode,
+    carried: &[ThreadMessage],
+    attachments: &[CommentAttachment],
+    research: &str,
+) -> String {
+    let seed = discuss_seed(comment);
+    // Empty for a genuine first turn, so that prompt is unchanged; populated
+    // only when replacing a wrong-harness fork.
+    let continuity = continuity_block(carried).map(|history| {
+        let opened_on_comment = carried
+            .iter()
+            .find(|m| m.role == "user" && m.status == "complete" && !m.body.trim().is_empty())
+            .is_some_and(|m| m.body.trim() == seed);
+        if opened_on_comment {
+            history
+        } else {
+            format!("Their comment:\n{}\n{history}", quoted(&seed))
+        }
+    });
+    let sent_after = (continuity.is_none() && text.trim() != seed)
+        .then(|| sent_after_comment_block(mode, text));
+    build_first_turn_prompt(
+        matches!(comment.kind, CommentKind::Question),
+        &comment.anchor_id,
+        comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
+        if sent_after.is_some() { &seed } else { text },
+        comment.resolution.as_ref().map(|r| r.body.as_str()),
+        attachments,
+        continuity.as_deref(),
+    ) + research
+        + &sent_after.unwrap_or_default()
 }
 
 fn build_first_turn_prompt(
@@ -1151,39 +1205,21 @@ pub async fn fork_thread_send(
     // in-memory store's activity stamp in step so the sidebar reorders.
     store.touch(&session_id);
 
-    // Build the turn prompt — wrapped on the first turn, verbatim after. The
-    // first turn uses `text` (the frontend's seed) so the persisted user row
-    // and the prompt stay identical.
+    // Build the turn prompt — wrapped on the first turn, verbatim after. A
+    // first turn that is the frontend's seed quotes `text` as the comment, so
+    // the persisted user row and the prompt stay identical.
     let prompt = match &prior_fork {
         None => {
             // Turn one sees everything already attached to the comment as well
             // as anything dropped into this opening message.
             let mut all = comment.attachments.clone();
             all.extend(turn_attachments.iter().cloned());
-            // Empty for a genuine first turn, so that prompt is unchanged;
-            // populated only when replacing a wrong-harness fork.
-            let continuity = continuity_block(carried);
-            // Chat opens on the reviewer's own question rather than on the
-            // comment, so the comment takes the opening's place and the
-            // question follows it — the fork must know what it is chatting
-            // about.
-            let seed = discuss_seed(comment);
-            let chat_question = (mode == TurnMode::Chat && continuity.is_none() && text.trim() != seed)
-                .then_some(text.as_str());
-            build_first_turn_prompt(
-                matches!(comment.kind, CommentKind::Question),
-                &comment.anchor_id,
-                comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
-                if chat_question.is_some() { &seed } else { &text },
-                comment.resolution.as_ref().map(|r| r.body.as_str()),
-                &all,
-                continuity.as_deref(),
-            ) + &research_block(
+            let research = research_block(
                 session.revisions.iter().flat_map(|r| r.comments.iter()),
                 comment,
             )
-            .unwrap_or_default()
-                + &chat_question.map(chat_question_block).unwrap_or_default()
+            .unwrap_or_default();
+            opening_turn_prompt(comment, &text, mode, carried, &all, &research)
         }
         // Follow-ups go verbatim, so a file dropped into one has to announce
         // itself — otherwise the fork never learns the path exists.
@@ -2691,8 +2727,62 @@ mod tests {
         comment.edit = None;
         assert_eq!(discuss_seed(&comment), "Let's talk through this part of the plan.");
 
-        let block = chat_question_block("Why does it drift?\nAnd when?");
-        assert_eq!(block, "\n\nThey opened a quick chat about it. Their question:\n> Why does it drift?\n> And when?\n");
+        comment.body = "This anchor drifts.".into();
+        let chat = opening_turn_prompt(&comment, "Why does it drift?\nAnd when?", TurnMode::Chat, &[], &[], "");
+        assert!(chat.contains("Their comment:\n> This anchor drifts.\n"), "{chat}");
+        assert!(
+            chat.ends_with("\n\nThey opened a quick chat about it. Their question:\n> Why does it drift?\n> And when?\n"),
+            "{chat}"
+        );
+    }
+
+    #[test]
+    fn a_discuss_opening_keeps_the_prompt_every_discussion_has_had() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+        let legacy = build_first_turn_prompt(true, "A.1", None, "This anchor drifts.", None, &[], None);
+        assert_eq!(
+            opening_turn_prompt(&comment, "This anchor drifts.", TurnMode::Report, &[], &[], "\n\nresearch"),
+            format!("{legacy}\n\nresearch"),
+        );
+    }
+
+    /// "Write it up →" after an opening chat that never got a reply: no fork
+    /// exists yet, so the write-up IS turn one. Quoting the request as "their
+    /// comment" would leave the fork answering a comment it was never shown.
+    #[test]
+    fn a_write_up_that_opens_the_fork_still_quotes_the_comment() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+        let write_up = "Write this up — the full answer to my original comment given everything we've discussed, including our chat.";
+        let prompt = opening_turn_prompt(&comment, write_up, TurnMode::Report, &[], &[], "");
+        assert!(prompt.contains("Their comment:\n> This anchor drifts.\n"), "{prompt}");
+        assert!(prompt.ends_with(&format!("\n\nTheir latest message:\n> {write_up}\n")), "{prompt}");
+        assert!(prompt.contains(REPORT_VOICE));
+    }
+
+    /// A re-fork carries the thread's turns. One opened by "💬 Discuss" starts
+    /// on the comment; one opened in chat never sent it, so it goes in front.
+    #[test]
+    fn a_reforked_chat_thread_still_quotes_the_comment() {
+        let mut comment = research_comment("c-1", "blk-1", None);
+        comment.body = "This anchor drifts.".into();
+
+        let chat_first = [chat_msg("user", "Even on reload?"), chat_msg("assistant", "Yes, on every reload.")];
+        let prompt = opening_turn_prompt(&comment, "And on save?", TurnMode::Chat, &chat_first, &[], "");
+        let quoted_at = prompt.find("Their comment:\n> This anchor drifts.\n").expect("the comment is quoted");
+        assert!(quoted_at < prompt.find("This discussion already has history").unwrap());
+        assert!(prompt.contains("\nReviewer (chat): Even on reload?"));
+        assert!(prompt.contains("Their latest message:\n> And on save?\n"));
+        assert!(!prompt.contains("They opened a quick chat"), "the history already says so");
+
+        let discussed = [
+            thread_msg("user", "This anchor drifts.", "complete"),
+            thread_msg("assistant", "## Why it drifts", "complete"),
+        ];
+        let prompt = opening_turn_prompt(&comment, "And on save?", TurnMode::Report, &discussed, &[], "");
+        assert!(!prompt.contains("Their comment:"), "{prompt}");
+        assert!(prompt.contains("\nReviewer: This anchor drifts."));
     }
 
     #[test]
