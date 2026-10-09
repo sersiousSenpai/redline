@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     --keep) KEEP=1; shift ;;
     --gpu) GPU=$2; shift 2 ;;
     --renderer) RENDERER=$2; shift 2 ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -55,7 +55,9 @@ find_helpers() { # <WebKit service suffix> <display-name suffix>
   done
 }
 # Oldest first: the app's own webview starts with it; browser tabs come later.
-oldest() { [ $# -gt 0 ] && ps -o etime=,pid= -p "$(IFS=,; echo "$*")" | awk '
+# No pids prints nothing and succeeds, so `set -e` leaves the report below to
+# say what's missing.
+oldest() { [ $# -gt 0 ] || return 0; ps -o etime=,pid= -p "$(IFS=,; echo "$*")" | awk '
   { n = split($1, a, /[-:]/); s = 0; m = 1
     for (i = n; i >= 1; i--) { s += a[i] * m; m = (i == n || i == n - 1) ? m * 60 : (i == n - 2 ? m * 24 : m) }
     if (s > best) { best = s; pid = $2 } }
