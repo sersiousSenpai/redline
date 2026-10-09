@@ -4,16 +4,17 @@ import { act, createRef, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null }));
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, handler: (event: { payload: unknown }) => void) => { mocks.listeners.set(name, handler); return () => { if (mocks.listeners.get(name) === handler) mocks.listeners.delete(name); }; } }));
 vi.mock("@tauri-apps/api/path", () => ({ homeDir: async () => "/Users/test/" }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onCloseRequested: async () => () => {} }) }));
 vi.mock("../hooks/useRepoIcons", () => ({ useRepoIcons: () => new Map() }));
 vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
-  return { enqueuePtyOp, tauriHandoffDeps: {}, TerminalView: ({ id, visible, onUserInput }: { id: string; visible: boolean; onUserInput: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button></div> };
+  return { enqueuePtyOp, tauriHandoffDeps: {}, focusTerminalView: () => {}, TerminalView: ({ id, visible, onUserInput, onInterrupt }: { id: string; visible: boolean; onUserInput: (id: string) => void; onInterrupt: (id: string) => void }) => <div data-terminal-id={id} data-visible={visible}><button data-type={id} onClick={() => onUserInput(id)}>Type</button><button data-esc={id} onClick={() => { onUserInput(id); onInterrupt(id); }}>Esc</button></div> };
 });
-vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed}><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
+vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, focused, zoomed, state, port, workText, actions }: { identity: { id: string }; tile: number; focused: boolean; zoomed: boolean; state: string; port: number | null; workText: string | null; actions: { onCloseTerminal: (id: string) => void; onNewHome: (tile: number) => void; onFocusTile: (tile: number) => void; onZoomTile: (tile: number) => void } }) => <header data-header-id={identity.id} data-focused={focused} data-zoomed={zoomed} data-state={state} data-port={port ?? ""} data-work={workText ?? ""}><button data-close={identity.id} onClick={() => actions.onCloseTerminal(identity.id)}>Close</button><button data-new={identity.id} onClick={() => actions.onNewHome(tile)}>New home</button><button data-focus={identity.id} onClick={() => actions.onFocusTile(tile)}>Focus</button><button data-zoom={identity.id} onClick={() => actions.onZoomTile(tile)}>Zoom</button></header> }));
 
 import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
 import { TERMINAL_WORKSPACE_KEY } from "../lib/terminalWorkspace";
@@ -45,8 +46,13 @@ beforeEach(() => {
   sessionStorage.clear();
   mocks.inventory = [];
   mocks.cwd = null;
+  mocks.listeners.clear();
+  mocks.attention = [];
+  mocks.procs = [];
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
     if (command === "pty_list") return mocks.inventory;
+    if (command === "term_attention_snapshot") return mocks.attention;
+    if (command === "pty_procs") return mocks.procs;
     if (command === "pty_cwds") return mocks.cwd ? Object.fromEntries(args.ids.map((id: string) => [id, mocks.cwd])) : {};
     return null;
   });
@@ -227,5 +233,94 @@ describe("terminal workspace recovery", () => {
     mocks.invoke.mockImplementation(ordinary);
     await click('[role="status"] button');
     expect(host.querySelector('[role="status"]')).toBeNull();
+  });
+});
+
+describe("terminal state", () => {
+  const stateOf = (id: string) => host.querySelector<HTMLElement>(`[data-header-id="${id}"]`)?.dataset.state;
+  const emit = async (payload: Record<string, unknown>) => {
+    await act(async () => mocks.listeners.get("term-attention")!({ payload }));
+  };
+  const needsYou = (terminalId: string, at: number) => ({ terminalId, sessionId: "s", at, kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission" });
+  const yourTurn = (terminalId: string, at: number, excerpt: string | null = "Which API key should I use?") => ({ terminalId, sessionId: "s", at, kind: "your-turn", excerpt });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a needs-you lights the tile with the agent's words, and typing answers it", async () => {
+    await mount();
+    const id = ids()[0];
+    await emit(needsYou(id, 10));
+    expect(stateOf(id)).toBe("needs-you");
+    expect(host.querySelector<HTMLElement>(`[data-header-id="${id}"]`)?.dataset.work).toBe("Claude needs your permission");
+    expect(host.querySelector<HTMLElement>(".rl-tile-wrap")?.dataset.termState).toBe("needs-you");
+    await click(`[data-type="${id}"]`);
+    expect(stateOf(id)).toBe("working");
+    // A NEW card (new `at`) lights it again: the old answer can't swallow it.
+    await emit(needsYou(id, 11));
+    expect(stateOf(id)).toBe("needs-you");
+  });
+
+  it("Esc clears a working agent — an interrupt fires no hook, so nothing else would", async () => {
+    await mount();
+    const id = await open();
+    await emit({ terminalId: id, sessionId: "s", at: 5, kind: "working" });
+    expect(stateOf(id)).toBe("working");
+    await click(`[data-esc="${id}"]`);
+    expect(stateOf(id)).toBe("idle");
+  });
+
+  it("a your-turn is read after a second in the focused tile of a focused window, and stays read across a reload", async () => {
+    vi.useFakeTimers();
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    await mount();
+    const id = await open();
+    await emit(yourTurn(id, 20, null));
+    // The excerpt fills in as a second event for the same transition.
+    await emit(yourTurn(id, 20, "Which API key should I use?"));
+    expect(stateOf(id)).toBe("your-turn");
+    expect(host.querySelector<HTMLElement>(`[data-header-id="${id}"]`)?.dataset.work).toBe("Which API key should I use?");
+    await act(async () => { vi.advanceTimersByTime(999); });
+    expect(stateOf(id)).toBe("your-turn");
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(stateOf(id)).toBe("idle");
+    expect(saved().acks).toEqual({ [id]: { at: 20, as: "seen" } });
+    // A reload re-reads the daemon's snapshot — still that same turn.
+    await act(async () => root.render(null));
+    mocks.attention = [yourTurn(id, 20)];
+    await mount();
+    expect(stateOf(id)).toBe("idle");
+    focus.mockRestore();
+  });
+
+  it("an unfocused window never reads a your-turn", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    await mount();
+    const id = await open();
+    await emit(yourTurn(id, 20));
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    expect(stateOf(id)).toBe("your-turn");
+  });
+
+  it("process samples: a server reads serving with its port; the shell back in front retires an older turn", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    await mount();
+    const server = await open();
+    const agent = await open();
+    mocks.procs = [
+      { id: server, fgComm: "node", fgIsShell: false, ports: [5173, 24678] },
+      { id: agent, fgComm: "claude", fgIsShell: false, ports: [] },
+    ];
+    await emit(yourTurn(agent, Date.now() - 1000));
+    await act(async () => { vi.advanceTimersByTime(4000); });
+    expect(stateOf(server)).toBe("serving");
+    expect(host.querySelector<HTMLElement>(`[data-header-id="${server}"]`)?.dataset.port).toBe("5173");
+    expect(stateOf(agent)).toBe("your-turn");
+    // The agent exits: its shell holds the foreground in the next sample.
+    mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }];
+    await act(async () => { vi.advanceTimersByTime(4000); });
+    expect(stateOf(agent)).toBe("idle");
   });
 });

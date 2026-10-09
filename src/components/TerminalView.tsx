@@ -15,7 +15,7 @@ import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
 import type { HandoffDeps } from "../lib/terminalHandoff";
 import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
-import { terminalInputOrigin } from "../lib/terminalInput";
+import { isInterruptInput, terminalInputOrigin } from "../lib/terminalInput";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -47,6 +47,9 @@ interface TerminalViewProps {
   /** Keystrokes, paste and native file drops make a convenience shell the
    *  user's terminal, so a subsequent launch must preserve it. */
   onUserInput?: (id: string) => void;
+  /** The user pressed Esc or Ctrl-C in this terminal. An agent interrupted
+   *  that way fires no hook at all, so the host clears its "working" here. */
+  onInterrupt?: (id: string) => void;
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
@@ -242,6 +245,14 @@ export function suppressTerminalRevealFocus(ms = 1500) {
   suppressRevealFocusUntil = performance.now() + ms;
 }
 
+// The caret, on request. A reveal hands a newly shown terminal the caret
+// through its [visible] effect, but a jump to a tile that is ALREADY on
+// screen (⌘⇧J) has no transition to ride — so each live view registers here.
+const termFocusers = new Map<string, () => void>();
+export function focusTerminalView(id: string): void {
+  termFocusers.get(id)?.();
+}
+
 // xterm.js's built-in defaults (the Tango palette), spelled out so the dark
 // branch goes through the same override-merge + contrast clamp as the light
 // branch — previously dark themes got these implicitly, which left Ocean's
@@ -358,6 +369,7 @@ export const TerminalView = memo(function TerminalView({
   onTitle,
   onPaneFocus,
   onUserInput,
+  onInterrupt,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -454,11 +466,13 @@ export const TerminalView = memo(function TerminalView({
   const onExitRef = useRef(onExit);
   const onTitleRef = useRef(onTitle);
   const onUserInputRef = useRef(onUserInput);
+  const onInterruptRef = useRef(onInterrupt);
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
   onExitRef.current = onExit;
   onTitleRef.current = onTitle;
   onUserInputRef.current = onUserInput;
+  onInterruptRef.current = onInterrupt;
 
   // Raw PTY bytes that arrived while this tab was hidden. We skip xterm's ANSI
   // parse for off-screen terminals (the dominant background cost with a fleet
@@ -625,8 +639,11 @@ export const TerminalView = memo(function TerminalView({
     const dataSub = term.onData((d) => {
       const userInput = inputOrigin.takeUserInput();
       if (replaying && !userInput) return;
+      if (userInput && isInterruptInput(d)) onInterruptRef.current?.(id);
       void invoke("pty_write", { id, data: d }).catch(() => {});
     });
+    const focusThis = () => term.focus();
+    termFocusers.set(id, focusThis);
     // onData also includes xterm's automatic replies to terminal queries
     // (including replayed queries). Only actual input gestures claim a
     // placeholder: keys, text paste/IME below, and native file drops.
@@ -739,6 +756,7 @@ export const TerminalView = memo(function TerminalView({
 
     return () => {
       disposed = true;
+      if (termFocusers.get(id) === focusThis) termFocusers.delete(id);
       ro.disconnect();
       schedulerRef.current?.cancel();
       dataSub.dispose();

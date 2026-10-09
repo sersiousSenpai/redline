@@ -37,4 +37,13 @@ describe("terminal workspace persistence", () => {
     expect(readTerminalWorkspace(14)).toBeNull();
     expect(localStorage.getItem(TERMINAL_WORKSPACE_KEY)).toBeNull();
   });
+  it("keeps attention acknowledgements for live tabs only, and tolerates layouts without them", () => {
+    const base = { tabs: [{ id: "a", cwd: null }, { id: "b", cwd: null }], tiles: ["a"], focusedTile: 0, zoomedId: null };
+    expect(parseTerminalWorkspace(base, 14)).toEqual(base);
+    expect(parseTerminalWorkspace({ ...base, acks: { a: { at: 5, as: "seen" }, b: { at: 6, as: "bogus" }, gone: { at: 1, as: "seen" }, c: null } }, 14)?.acks).toEqual({ a: { at: 5, as: "seen" } });
+    expect(parseTerminalWorkspace({ ...base, acks: "nope" }, 14)).toEqual(base);
+    const withAcks = { ...base, acks: { b: { at: 9, as: "cleared" as const } } };
+    saveTerminalWorkspace(withAcks);
+    expect(readTerminalWorkspace(14)).toEqual(withAcks);
+  });
 });

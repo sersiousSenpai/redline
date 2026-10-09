@@ -2331,6 +2331,53 @@ p.rl-block-modified {
   }
 }
 
+/* Terminal state badges (TermStateBadge): a dot per state, coloured from one
+   table. needs-you pulses — on a wall of fourteen it is the one state that
+   has to pull the eye — and working turns a quiet spinner. */
+.rl-term-badge {
+  display: inline-block;
+}
+.rl-term-badge--pulse {
+  animation: rl-term-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rl-term-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-warning) 60%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warning) 0%, transparent);
+  }
+}
+.rl-term-badge--spin {
+  animation: rl-term-spin 1.1s linear infinite;
+}
+@keyframes rl-term-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A tile whose agent is blocked on you is framed in amber. ::before, because
+   ::after is the hail's (above) — both are overlays on the positioned
+   wrapper for the same reason: the terminal paints an opaque background over
+   anything drawn on the wrapper itself. Above the header (z 5) so the frame
+   closes around it; click-through like the hail. */
+.rl-tile-wrap[data-term-state="needs-you"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 80%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-term-badge--pulse,
+  .rl-term-badge--spin {
+    animation: none;
+  }
+}
+
 /* --- Code Review surface (DiffView / ReviewPanel) --------------------------
    Row tint reuses the tracked-changes palette (success = added, warning =
    removed) so a diff reads like the plan redline; the word-level spans are a

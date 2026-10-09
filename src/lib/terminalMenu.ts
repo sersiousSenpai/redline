@@ -9,6 +9,8 @@
 // bubble strip's `repoBubbles.ts`; `orderRepos` and `bumpMru` survive
 // verbatim, the strip's width measurement died with the strip.)
 
+import type { TermState } from "./termState";
+
 /** A candidate repo directory (a review session's project, or an open folder
  *  workspace) as the app already knows it. */
 export interface RepoSource {
@@ -33,6 +35,9 @@ export interface TerminalRef {
    *  shell/TUI put in the window title. Null when it has volunteered nothing
    *  (see lib/termTitle). */
   work?: string | null;
+  /** What it is doing (lib/termState) and, when serving, its lowest port. */
+  state?: TermState;
+  port?: number | null;
 }
 
 /** A terminal with its repo attribution resolved. Unlike the old bubble
@@ -53,8 +58,8 @@ export interface RepoChoice extends RepoSource {
 }
 
 /** The held/intercept red, shared by the in-pane strip, the menu's "plan
- *  held" chip and the header's overflow pip — one export instead of the three
- *  copies the strip era grew. */
+ *  held" chip and the state badges — one export instead of the three copies
+ *  the strip era grew. */
 export const HELD_RED = "#e8553d";
 
 /** Trailing-slash-insensitive compare key (mirrors TerminalTabs' normPath). */

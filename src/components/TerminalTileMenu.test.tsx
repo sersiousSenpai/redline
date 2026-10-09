@@ -152,6 +152,28 @@ describe("terminal tile menu", () => {
     expect(all).toContain("Zoom this tile");
   });
 
+  it("each row carries its terminal's state in words, and an idle one only its news", () => {
+    mount(
+      {
+        rows: [
+          row("agent", { tile: 0, state: "needs-you", work: "Claude needs your permission" }),
+          row("web", { tile: 1, state: "serving", port: 5173 }),
+          row("plan", { state: "held", held: true, work: "Rework the dock" }),
+          row("shell", { state: "idle", unseen: true }),
+        ],
+      },
+      makeActions(),
+    );
+    const texts = rowsIn(menu()!);
+    expect(texts[0]).toContain("needs you");
+    expect(texts[0]).toContain("Claude needs your permission");
+    expect(texts[1]).toContain(":5173");
+    expect(texts[2]).toContain("plan held");
+    expect(texts[3]).toContain("new output");
+    expect(texts[3]).not.toContain("idle");
+    expect(texts[3]).toBe("shell 1new outputredline");
+  });
+
   it("picking a row targets THIS tile and closes the menu", () => {
     const actions = makeActions();
     const onClose = vi.fn();

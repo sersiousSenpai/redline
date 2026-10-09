@@ -159,6 +159,33 @@ describe("terminal tile header", () => {
     expect(heldLine.style.color).toBe(hexToRgb(HELD_RED));
   });
 
+  it("puts the terminal's state in front of its work line", () => {
+    const needs = mount({ state: "needs-you", workText: "Claude needs your permission" });
+    const line = needs.container.querySelector("[data-term-state='needs-you']") as HTMLElement;
+    expect(line.textContent).toContain("Claude needs your permission");
+    // Loud: the agent is speaking to you, so the line is in full ink, and the
+    // badge pulses (styles.css stops it under reduced motion).
+    expect(line.style.color).toBe("var(--color-ink)");
+    expect(line.querySelector(".rl-term-badge--pulse")).not.toBeNull();
+    expect(line.title).toBe("needs you — Claude needs your permission");
+
+    // No words from the agent: the state names itself.
+    const turn = mount({ state: "your-turn" });
+    expect(turn.container.querySelector("[data-term-state='your-turn']")?.textContent).toBe("your turn");
+
+    const busy = mount({ state: "working" });
+    expect(busy.container.querySelector(".rl-term-badge--spin")).not.toBeNull();
+
+    // A server is named by its port — beside its title when it has one.
+    const bare = mount({ state: "serving", port: 5173 });
+    expect(bare.container.querySelector("[data-term-state='serving']")?.textContent).toBe(":5173");
+    const titled = mount({ state: "serving", port: 5173, workText: "vite" });
+    expect(titled.container.querySelector("[data-term-state='serving']")?.textContent).toBe("vite:5173");
+
+    const quiet = mount({ state: "running", workText: "npm test" });
+    expect((quiet.container.querySelector("[data-term-state='running']") as HTMLElement).style.color).toBe("var(--color-ink-muted)");
+  });
+
   it("falls back to a bare spacer when the terminal has volunteered nothing", () => {
     // Absent, not padded with a guess — the header must not invent work.
     const { container } = mount({ workText: null });

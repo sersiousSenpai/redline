@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import type { AttentionAck } from "./termState";
 
 /** The dock layout is worth restoring only while its shells live. A webview
  *  reload (Cmd+R, HMR, the WebContent-crash reload) keeps the PTYs in the Rust
@@ -20,7 +21,15 @@ export interface TerminalWorkspace {
   tiles: readonly string[];
   focusedTile: number;
   zoomedId: string | null;
+  /** Terminals pinned to the wall: parking never takes their tile. Absent in
+   *  layouts saved before pins existed, and when nothing is pinned. */
+  pinned?: string[];
+  /** Local acknowledgements of attention transitions (lib/termState), so a
+   *  your-turn read before a reload doesn't light up again after it. */
+  acks?: Record<string, AttentionAck>;
 }
+
+const ACK_KINDS = new Set<AttentionAck["as"]>(["working", "seen", "cleared"]);
 
 export interface LivePty {
   id: string;
@@ -54,11 +63,25 @@ export function parseTerminalWorkspace(
   const focusedTile = typeof saved.focusedTile === "number" && Number.isInteger(saved.focusedTile)
     ? Math.max(0, Math.min(saved.focusedTile, tiles.length - 1))
     : 0;
+  const pinned = Array.isArray(saved.pinned)
+    ? [...new Set(saved.pinned.filter((id) => typeof id === "string" && ids.has(id)))]
+    : [];
+  const acks: Record<string, AttentionAck> = {};
+  if (saved.acks && typeof saved.acks === "object") {
+    for (const [id, ack] of Object.entries(saved.acks as Record<string, unknown>)) {
+      const a = ack as Partial<AttentionAck> | null;
+      if (!ids.has(id) || !a || typeof a.at !== "number" || !Number.isFinite(a.at)) continue;
+      if (!a.as || !ACK_KINDS.has(a.as)) continue;
+      acks[id] = { at: a.at, as: a.as };
+    }
+  }
   return {
     tabs,
     tiles,
     focusedTile,
     zoomedId: typeof saved.zoomedId === "string" && tiles.includes(saved.zoomedId) ? saved.zoomedId : null,
+    ...(pinned.length ? { pinned } : {}),
+    ...(Object.keys(acks).length ? { acks } : {}),
   };
 }
 

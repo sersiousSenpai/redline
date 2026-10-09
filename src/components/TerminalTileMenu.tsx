@@ -16,6 +16,11 @@ import {
   type RepoChoice,
 } from "../lib/terminalMenu";
 import { Panel, PanelHeader, type PanelProps } from "./popover";
+import {
+  TERM_STATE_COLOR,
+  TermStateBadge,
+  termStateWords,
+} from "./TermStateBadge";
 
 // The tile dropdown — the single place that answers "what's running, switch
 // me to it, or start me a new one", which is what let the tab strip, the repo
@@ -362,6 +367,11 @@ function OpenRow({
 }) {
   const isThisTile = row.tile === menuTile;
   const tiled = row.tile !== null;
+  // What the terminal is doing, in words: "needs you", "working", ":5173".
+  // Idle says nothing — "new output" (below) is the only news an idle
+  // terminal has.
+  const state = row.state;
+  const chip = state ? termStateWords(state, row.port ?? null) : null;
   // State-dot grammar (DocumentsMenu's): filled info = this tile, filled
   // muted = another tile, hollow ring = alive but untiled.
   const dot: CSSProperties = {
@@ -411,12 +421,20 @@ function OpenRow({
             {row.label}
           </span>
           <span className="flex items-center gap-2 ml-auto shrink-0">
-            {row.held && (
+            {state && chip ? (
+              <span
+                className="flex items-center gap-1"
+                style={{ color: TERM_STATE_COLOR[state], fontSize: "10px" }}
+              >
+                <TermStateBadge state={state} size={5} />
+                {chip}
+              </span>
+            ) : row.held && !state ? (
               <span style={{ color: HELD_RED, fontSize: "10px" }}>
                 plan held
               </span>
-            )}
-            {row.unseen && !row.held && (
+            ) : null}
+            {!chip && row.unseen && !row.held && (
               <span
                 className="flex items-center gap-1"
                 style={{ color: "var(--color-info)", fontSize: "10px" }}

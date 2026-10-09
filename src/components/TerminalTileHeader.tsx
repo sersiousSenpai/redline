@@ -4,9 +4,11 @@ import { memo, useRef, useState } from "react";
 
 import { HELD_RED } from "../lib/terminalMenu";
 import { TILE_HEADER_H } from "../lib/tileGrid";
+import { isLoud, type TermState } from "../lib/termState";
 import type { TabIcon } from "../lib/repoIcon";
 import { markImage } from "../lib/repoMarkImage";
 import { useClickPopover } from "./popover";
+import { TermStateBadge, termStateWords } from "./TermStateBadge";
 import {
   TerminalTileMenu,
   TILE_MENU_WIDTH,
@@ -27,13 +29,6 @@ export interface TerminalIdentity {
   repoRoot?: string;
   /** Live cwd, else spawn cwd, else null (= $HOME). */
   dir: string | null;
-}
-
-/** The focused header's overflow pip: terminals in no tile — otherwise
- *  invisible now the tab strip is gone. Toned held > unseen > muted. */
-export interface OverflowPip {
-  count: number;
-  tone: "held" | "unseen" | "muted";
 }
 
 /** The 14px mark in front of a tile's label: the repo's own logo when it
@@ -73,6 +68,13 @@ function TabIconMark({ icon }: { icon: TabIcon }) {
   return <span aria-hidden style={{ ...box, background: icon.tint }} />;
 }
 
+/** The focused header's overflow pip: terminals in no tile — otherwise
+ *  invisible now the tab strip is gone. Toned held > unseen > muted. */
+export interface OverflowPip {
+  count: number;
+  tone: "held" | "unseen" | "muted";
+}
+
 interface TerminalTileHeaderProps {
   tile: number;
   identity: TerminalIdentity;
@@ -80,12 +82,19 @@ interface TerminalTileHeaderProps {
   /** Present on the focused header only. */
   overflow?: OverflowPip | null;
   zoomed: boolean;
-  /** What this terminal is working on — a held plan's title, else the shell's
-   *  laundered window title. Null when it has volunteered nothing.
+  /** What the terminal is doing (lib/termState). Drives the badge in front of
+   *  the work line. */
+  state?: TermState;
+  /** The lowest port a serving terminal listens on. */
+  port?: number | null;
+  /** What this terminal is working on. For a loud state, the agent's own
+   *  words — the needs-you message or the your-turn excerpt; otherwise a held
+   *  plan's title, else the shell's laundered window title. Null when it has
+   *  volunteered nothing.
    *
-   *  Two primitives rather than the `{ text, held }` object `workSignal`
-   *  returns: this component is memo'd on shallow equality, and a fresh object
-   *  per render would re-render every header on every OSC-title tick. */
+   *  Primitives rather than objects throughout: this component is memo'd on
+   *  shallow equality, and a fresh object per render would re-render every
+   *  header on every OSC-title tick. */
   workText?: string | null;
   workHeld?: boolean;
   actions: TileActions;
@@ -113,6 +122,8 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
   focused,
   overflow,
   zoomed,
+  state = "idle",
+  port = null,
   workText = null,
   workHeld = false,
   actions,
@@ -145,6 +156,15 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
         ●{overflow.count}
       </span>
     ) : null;
+
+  // The work line: what the terminal says it is on, else the state's own
+  // words ("working", ":5173"). A loud state reads in full ink — it is the
+  // agent speaking to you — and a server keeps its port beside a title.
+  const loud = isLoud(state);
+  const words = termStateWords(state, port);
+  const lineText = workText ?? words;
+  const lineTitle =
+    words && workText && words !== workText ? `${words} — ${workText}` : lineText;
 
   return (
     <div
@@ -209,35 +229,45 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
           ▾
         </span>
       </button>
-      {/* What it is working on, in the space the spacer used to hold. Same
-          grammar as the menu row: a 4px dot, HELD_RED when a plan is held.
-          Muted ink rather than the menu's full ink — the label beside it is
-          the primary identity and this is the gloss.
+      {/* What it is working on, in the space the spacer used to hold, behind
+          the terminal's state badge: amber and pulsing when its agent is
+          blocked on you, blue for your turn, a quiet spinner while it works,
+          green for a server, HELD_RED for a held plan — an idle terminal
+          keeps the old 4px muted dot. Muted ink unless the state is loud:
+          the label beside it is the primary identity and this is the gloss.
 
           Native `title=`, never `.rl-tipwrap`: the header is `overflow:
           hidden` and would clip the CSS tooltip (see the note above). Both
           this and the label truncate inside `min-w-0` parents, so a narrow
           header in a fourteen-tile grid degrades instead of overflowing. */}
-      {workText ? (
+      {lineText ? (
         <span
           className="flex flex-1 items-center gap-1 min-w-0"
-          title={workText}
+          title={lineTitle ?? undefined}
+          data-term-state={state}
           style={{
             fontSize: "11px",
-            color: workHeld ? HELD_RED : "var(--color-ink-muted)",
+            fontWeight: loud ? 500 : undefined,
+            color: workHeld
+              ? HELD_RED
+              : loud
+                ? "var(--color-ink)"
+                : "var(--color-ink-muted)",
           }}
         >
-          <span
-            aria-hidden
-            className="shrink-0"
-            style={{
-              width: "4px",
-              height: "4px",
-              borderRadius: "50%",
-              background: workHeld ? HELD_RED : "var(--color-ink-muted)",
-            }}
+          <TermStateBadge
+            state={workHeld && state === "idle" ? "held" : state}
+            size={state === "idle" && !workHeld ? 4 : 6}
           />
-          <span className="truncate">{workText}</span>
+          <span className="truncate">{lineText}</span>
+          {state === "serving" && port !== null && workText && (
+            <span
+              className="shrink-0"
+              style={{ color: "var(--color-success)", fontVariantNumeric: "tabular-nums" }}
+            >
+              :{port}
+            </span>
+          )}
         </span>
       ) : (
         <span className="flex-1" />

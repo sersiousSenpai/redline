@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { terminalInputOrigin } from "./terminalInput";
+import { isInterruptInput, terminalInputOrigin } from "./terminalInput";
 import { loadXterm } from "./xtermLoader";
 
 // This exercises the real terminal parser without opening a DOM renderer.
@@ -57,5 +57,16 @@ describe("installed xterm input origin contract", () => {
     expect(origin.takeUserInput()).toBe(false);
     expect(touched).toHaveBeenCalledTimes(1);
     origin.dispose();
+  });
+});
+
+describe("interrupt keystrokes", () => {
+  it("a bare Esc or Ctrl-C interrupts; arrows, Alt-chords and text do not", () => {
+    expect(isInterruptInput("\x1b")).toBe(true);
+    expect(isInterruptInput("\x03")).toBe(true);
+    expect(isInterruptInput("\x1b[A")).toBe(false);
+    expect(isInterruptInput("\x1bb")).toBe(false);
+    expect(isInterruptInput("q")).toBe(false);
+    expect(isInterruptInput("")).toBe(false);
   });
 });
