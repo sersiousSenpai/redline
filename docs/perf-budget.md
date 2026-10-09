@@ -76,6 +76,32 @@ it, that's the discussion to have before merging.
    to sit above the tile cap and never fire — so the fallback path is now a
    routine one rather than a backstop.
 
+6. **Paint is a budget too.** No `infinite` animation, and no animation longer
+   than 300 ms, may animate anything but `transform` or `opacity` (or the
+   individual `translate` / `rotate` / `scale` properties). Those are the only
+   properties WebKit's compositor moves without repainting. Everything else —
+   `background-position`, `box-shadow`, `background`, a registered custom
+   property driving a gradient, even `visibility` — repaints its layer every
+   frame in the GPU process, and every keystroke's layer commit queues behind
+   that backlog. `filter` is not on the list: WebKit composites some filters
+   and repaints others, so it is never a safe default. Large surfaces (body,
+   plates, pane backgrounds) stay static. To make something drift, pulse,
+   sweep or glow, paint it once on a pseudo-element and move that: a crossfade
+   between two static layers (the Aurora edge light), a scaled halo (the live
+   dot), a translated window (the working shimmer).
+
+   > **What it cost before it was a rule (2026-10-09).** The default Aurora
+   > theme animated `background-position` on a 280%-size gradient behind a
+   > mask, forever, on all four plates. With the app idle, the
+   > `com.apple.WebKit.GPU` process sat at 102% CPU, one
+   > `RemoteRenderingBackend` thread spent ~83% of its samples in
+   > `WebCore::Gradient::paint`, and the renderer's
+   > `RemoteLayerTreeDrawingArea.CommitQueue` spent 88% of its samples waiting
+   > in `flushAndCollectHandles` — so typing, dragging and every other input
+   > felt late. The ring it drew sat on the plates' 1px border, which their own
+   > `overflow: hidden` clips: all that paint bought a few antialiased pixels
+   > at the corners.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:
@@ -86,6 +112,13 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
+- `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
+  `src/**/*.css` and every inline `animation:` in a component to the
+  properties its `@keyframes` touch, and fails when an infinite or >300 ms
+  animation touches anything but `transform` / `opacity`. Its `ALLOWLIST`
+  admits finite one-shots only (a focus flash, a tile hail, the snap-back
+  ring), each with a written reason and a duration ceiling; an infinite
+  paint animation cannot be allowlisted.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
   shells out. It is a digest signal, not a test, so it never fails a build: the

@@ -31,27 +31,65 @@ html[data-theme="aurora"] body::before {
 }
 html[data-theme="aurora"] #root { position: relative; z-index: 1; }
 html[data-theme="aurora"] .rl-plate {
+  --rl-aurora-edge: 46%;
   background: linear-gradient(150deg, #111527, #0b101bf5 55%, #0d1720);
   border-color: #8fa7da29;
   box-shadow: 0 0 25px #3ddbb10a, 0 8px 32px #02051165;
 }
+html[data-theme="aurora"] .rl-plate:focus-within { --rl-aurora-edge: 80%; }
+/* The edge light drifts by CROSSFADING two static rings, never by moving one.
+   It used to animate `background-position` on a 280%-size gradient, which the
+   compositor cannot do: four pane-sized layers repainted their gradient every
+   frame, forever, and the GPU process pinned a core with every keystroke
+   queued behind it (docs/perf-budget.md rule 6). Now ::before holds the
+   gradient where the drift began and ::after where it turned, both painted
+   once, and only their opacity moves. The edge alpha rides on the colors so
+   the fade weights can run 0→1, and the 25%/75% stops hold the resting
+   ring's combined coverage through the blend instead of dimming mid-fade.
+   The ring lies on the plate's 1px border, so the plates' own overflow clip
+   shows it only at the rounded corners; the geometry is unchanged here. */
+html[data-theme="aurora"] .rl-plate:not([data-rl-curtain])::before { content: ""; }
+html[data-theme="aurora"] .rl-plate::before,
 html[data-theme="aurora"] .rl-plate::after {
-  inset: -1px; padding: 1px; opacity: .46; border-radius: inherit;
-  background: linear-gradient(115deg, #69e3cc, #8bb7ff 23%, #bd8dff 47%, #eea0d5 67%, #6fe8c4 92%);
+  position: absolute; z-index: 40; pointer-events: none;
+  inset: -1px; padding: 1px; border-radius: inherit;
+  background: linear-gradient(115deg,
+    color-mix(in srgb, #69e3cc var(--rl-aurora-edge), transparent),
+    color-mix(in srgb, #8bb7ff var(--rl-aurora-edge), transparent) 23%,
+    color-mix(in srgb, #bd8dff var(--rl-aurora-edge), transparent) 47%,
+    color-mix(in srgb, #eea0d5 var(--rl-aurora-edge), transparent) 67%,
+    color-mix(in srgb, #6fe8c4 var(--rl-aurora-edge), transparent) 92%);
   background-size: 280% 280%;
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   mask-composite: exclude;
-  animation: rl-aurora-horizon 22s ease-in-out infinite;
 }
-html[data-theme="aurora"] .rl-plate:focus-within::after { opacity: .8; }
-@keyframes rl-aurora-horizon {
-  0%, 100% { background-position: 0% 30%; transform: scale(1); }
-  50% { background-position: 100% 70%; transform: scale(1.0015); }
+html[data-theme="aurora"] .rl-plate::before {
+  background-position: 0% 30%;
+  animation: rl-aurora-dawn 22s infinite;
+}
+html[data-theme="aurora"] .rl-plate::after {
+  background-position: 100% 70%; opacity: 0;
+  animation: rl-aurora-dusk 22s infinite;
+}
+@keyframes rl-aurora-dawn {
+  0% { opacity: 1; animation-timing-function: ease-in; }
+  25% { opacity: .58; animation-timing-function: ease-out; }
+  50% { opacity: 0; animation-timing-function: ease-in; }
+  75% { opacity: .58; animation-timing-function: ease-out; }
+  100% { opacity: 1; }
+}
+@keyframes rl-aurora-dusk {
+  0% { opacity: 0; animation-timing-function: ease-in; }
+  25% { opacity: .58; animation-timing-function: ease-out; }
+  50% { opacity: 1; animation-timing-function: ease-in; }
+  75% { opacity: .58; animation-timing-function: ease-out; }
+  100% { opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  html[data-theme="aurora"] .rl-plate::after { animation: none; transform: none; }
+  html[data-theme="aurora"] .rl-plate::before,
+  html[data-theme="aurora"] .rl-plate::after { animation: none; }
 }
 
 @theme {
@@ -821,14 +859,16 @@ body {
   top: -2px;
   width: 1.2em;
   border-top: 1px solid var(--color-ink);
-  animation: rl-gapcursor-blink 1.1s steps(2, start) infinite;
+  /* Shown for the first half of each beat, gone for the second — the same
+     blink a `visibility` keyframe gave, on the compositor (perf rule 6). */
+  animation: rl-gapcursor-blink 1.1s steps(2, jump-none) infinite;
 }
 .rl-prose.ProseMirror-focused .ProseMirror-gapcursor {
   display: block;
 }
 @keyframes rl-gapcursor-blink {
   to {
-    visibility: hidden;
+    opacity: 0;
   }
 }
 .rl-prose hr {
@@ -1043,18 +1083,31 @@ p.rl-block-modified {
 }
 
 /* ✦ co-authoring: the block a doc-agent instruction targets, pulsing quietly
-   until the tracked suggestion lands (or the turn errors). */
+   until the tracked suggestion lands (or the turn errors). The tint is a
+   static wash on an ::after tucked under the block's text (`isolation` makes
+   the block its own stacking context, so z-index -1 stays inside it), and
+   only its opacity breathes: 4% → 14% → 4%, on the compositor (perf rule 6).
+   ::after is free on Drafter blocks — the only editor this decoration runs in;
+   the comment dot that claims it lives in the plan editor. */
 .rl-generating {
+  position: relative;
+  isolation: isolate;
   border-radius: 3px;
+}
+.rl-generating::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--color-info) 14%, transparent);
+  opacity: 0.29;
   animation: rl-generating-pulse 1.6s ease-in-out infinite;
 }
 @keyframes rl-generating-pulse {
-  0%,
-  100% {
-    background: color-mix(in srgb, var(--color-info) 4%, transparent);
-  }
   50% {
-    background: color-mix(in srgb, var(--color-info) 14%, transparent);
+    opacity: 1;
   }
 }
 
@@ -2142,24 +2195,49 @@ p.rl-block-modified {
 
 /* ── WorkingIndicator (shared "agent is working" cue) ────────────────────
    A left-to-right shimmer over the label plus three staggered trailing dots.
-   The shimmer paints the text itself (background-clip: text) so it works on
-   any theme's muted-ink color without hardcoding a hue. */
+   The label sits in its theme's muted ink; the glint is a copy of it in full
+   ink (`::after`, from data-label) seen through a soft repeating window, so
+   the light lands on the glyphs alone. The window slides right while the copy
+   inside slides left by the same distance — two transforms, so the sweep is
+   compositor-only (perf rule 6) where sliding a `background-clip: text`
+   gradient repainted the label every frame. Geometry, in label widths W: the
+   window spans 5W from -4W, its mask repeats every 2W (a ramp up to full ink
+   and back), and one 1.8 s cycle travels 4W — the old 200%-wide gradient's
+   period and speed exactly. */
 .rl-working-label {
-  background: linear-gradient(
-    90deg,
-    var(--color-ink-muted) 0%,
-    var(--color-ink) 50%,
-    var(--color-ink-muted) 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: rl-working-shimmer 1.8s linear infinite;
+  position: relative;
+  white-space: nowrap;
+  /* Horizontal only: the glint must never widen a scroller, and a vertical
+     clip would cut descenders at the indicator's line-height of 1. */
+  overflow-x: clip;
 }
-@keyframes rl-working-shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
+.rl-working-glint {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -400%;
+  width: 500%;
+  pointer-events: none;
+  -webkit-mask: linear-gradient(90deg, transparent, #000, transparent) 0 0 / 40% 100% repeat-x;
+  mask: linear-gradient(90deg, transparent, #000, transparent) 0 0 / 40% 100% repeat-x;
+  animation: rl-working-sweep 1.8s linear infinite;
+}
+.rl-working-glint::after {
+  content: attr(data-label);
+  position: absolute;
+  top: 0;
+  /* Exactly W wide and 4W in, both as fractions of the window, so its
+     counter-slide cancels the window's by construction. */
+  left: 80%;
+  width: 20%;
+  color: var(--color-ink);
+  animation: rl-working-hold 1.8s linear infinite;
+}
+@keyframes rl-working-sweep {
+  to { transform: translateX(80%); }
+}
+@keyframes rl-working-hold {
+  to { transform: translateX(-400%); }
 }
 .rl-working-dots span {
   animation: rl-working-dot 1.2s ease-in-out infinite;
@@ -2171,10 +2249,8 @@ p.rl-block-modified {
   50% { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rl-working-label {
-    animation: none;
-    background: none;
-    color: var(--color-ink-muted);
+  .rl-working-glint {
+    display: none;
   }
   .rl-working-dots span {
     animation: none;
@@ -2246,39 +2322,6 @@ p.rl-block-modified {
 }
 .rl-voice-tile:not([aria-pressed="true"]):hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
-}
-
-/* Enrolled-tab aura: while a research mission is active, every open browser tab
-   gets a soft theme-accent glow in the strip — an ambient signal of which tabs
-   are under the mission's purview. Tabs that have contributed a pin glow
-   stronger (.rl-tab--mined), hinting at which you've already mined. Reads as one
-   system with the toolbar 🎯 (same --color-info accent). */
-.rl-tab--mission {
-  border-color: color-mix(in srgb, var(--color-info) 45%, var(--color-rule)) !important;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 30%, transparent),
-    0 0 8px color-mix(in srgb, var(--color-info) 28%, transparent);
-  animation: rl-tab-pulse 2.6s ease-in-out infinite;
-}
-.rl-tab--mission.rl-tab--mined {
-  border-color: color-mix(in srgb, var(--color-info) 70%, var(--color-rule)) !important;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 50%, transparent),
-    0 0 12px color-mix(in srgb, var(--color-info) 45%, transparent);
-}
-@keyframes rl-tab-pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 28%, transparent),
-      0 0 6px color-mix(in srgb, var(--color-info) 22%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 40%, transparent),
-      0 0 12px color-mix(in srgb, var(--color-info) 38%, transparent);
-  }
-}
-/* Respect reduced-motion: keep the static glow, drop the pulse. */
-@media (prefers-reduced-motion: reduce) {
-  .rl-tab--mission {
-    animation: none;
-  }
 }
 
 /* "That one." A one-shot bloom on a terminal tile something just pointed at —
@@ -2622,48 +2665,6 @@ p.rl-block-modified {
 }
 .rl-run-pulse {
   animation: rl-run-pulse 1.6s ease-in-out infinite;
-}
-/* The capture shimmer. It lives on the OUTER padding ring of the thumb box, so
-   it stays visible while the native webview covers the inner box — the frame is
-   the only part of the card the DOM still owns mid-capture. */
-.rl-thumb-capturing {
-  background: conic-gradient(
-    from var(--rl-thumb-sweep, 0deg),
-    transparent 0deg,
-    var(--color-info) 40deg,
-    transparent 120deg,
-    transparent 360deg
-  );
-  animation: rl-thumb-sweep 1.4s linear infinite;
-}
-@property --rl-thumb-sweep {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
-}
-@keyframes rl-thumb-sweep {
-  to {
-    --rl-thumb-sweep: 360deg;
-  }
-}
-/* The retake button is a hover affordance — present but unobtrusive until the
-   pointer is on the card. */
-.rl-thumb-refresh {
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-.rl-server-grid > *:hover .rl-thumb-refresh,
-.rl-thumb-refresh:focus-visible {
-  opacity: 1;
-}
-@media (prefers-reduced-motion: reduce) {
-  .rl-thumb-capturing {
-    animation: none;
-    background: var(--color-info);
-  }
-  .rl-thumb-refresh {
-    transition: none;
-  }
 }
 .rl-shortcut-group-title {
   font-size: 11px;
@@ -3321,21 +3322,34 @@ p.rl-block-modified {
   user-select: none;
   white-space: nowrap;
 }
-/* Presence strip's "Live" indicator. */
+/* Presence strip's "Live" indicator. The pulse is a halo disc in the dot's
+   own color that grows to twice the dot (a 4px ring) while fading 45% → 18%:
+   the old spreading box-shadow, drawn with transform + opacity (perf rule 6).
+   It sits over the dot, which is invisible — same color on same color. */
 .rl-live-dot {
+  position: relative;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   display: inline-block;
   background: var(--color-success, #2f9e44);
+}
+.rl-live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: inherit;
+  opacity: 0;
+  pointer-events: none;
   animation: rl-live-pulse 2s ease-in-out infinite;
 }
 @keyframes rl-live-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success, #2f9e44) 45%, transparent); }
-  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success, #2f9e44) 18%, transparent); }
+  0%, 100% { transform: scale(1); opacity: 0.45; }
+  50% { transform: scale(2); opacity: 0.18; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .rl-live-dot { animation: none; }
+  .rl-live-dot::after { animation: none; }
 }
 
 /* Table-of-contents rail: a quiet hover so entries feel clickable without
@@ -3897,15 +3911,32 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   opacity: 0.35;
   cursor: default;
 }
+/* The live mic breathes 18% → 32% → 18% warning. The deeper tint is a static
+   wash under the icon (a z-index -1 ::before inside the button's own stacking
+   context, spanning the border box like the background it deepens) whose
+   opacity pulses (perf rule 6): 17% laid over the 18% base composes to
+   exactly 32% at the crest. */
 .rl-fd-tool.is-hot {
+  position: relative;
+  isolation: isolate;
   border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
   background: color-mix(in srgb, var(--color-warning) 18%, transparent);
   color: var(--color-ink);
+}
+.rl-fd-tool.is-hot::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--color-warning) 17%, transparent);
+  opacity: 0;
   animation: rl-fd-pulse 1.6s ease-in-out infinite;
 }
 @keyframes rl-fd-pulse {
   50% {
-    background: color-mix(in srgb, var(--color-warning) 32%, transparent);
+    opacity: 1;
   }
 }
 .rl-fd-caret {
@@ -5122,7 +5153,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   .rl-fd-island.is-refused-alt {
     animation: none;
   }
-  .rl-fd-tool.is-hot {
+  .rl-fd-tool.is-hot::before {
     animation: none;
   }
 }
