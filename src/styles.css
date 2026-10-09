@@ -3584,42 +3584,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    all twelve themes instead of being a hardcoded slate that fights half of
    them. Motion honours prefers-reduced-motion at the bottom of the block. */
 
-/* The frame the door stands in. While the door is showing, the document
-   scroller stops being a scroller: the hero is a fixed composition, and a
-   composition that scrolls is one that didn't fit.
-
-   It used to size itself with `min-height: 70vh` — VIEWPORT units inside a box
-   that is never the viewport. The pane is `100vh − header − terminal dock −
-   footer`, and the dock alone defaults to 260px, so with the article's own
-   vertical padding on top the door demanded more height than it was given and
-   the scroller obliged. Flex owns the height now: the door fills its pane
-   exactly, and `justify-content: center` centres against the real box instead
-   of a guessed fraction of the window. */
-.rl-doorframe {
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.rl-doorframe > .doc-article {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-.rl-doorframe .rl-frontdoor {
-  flex: 1;
-  min-height: 0;
-}
-/* `width: 100%` is load-bearing, not belt-and-braces. Both of these carry
-   `margin-inline: auto`, and an auto cross-axis margin on a flex item cancels
-   `align-items: stretch` — so without an explicit width they would shrink to
-   fit their content instead of filling the pane up to their own max-width, and
-   the hero would come out narrower than it is anywhere else. */
-.rl-doorframe > .doc-article,
-.rl-doorframe .rl-frontdoor {
-  width: 100%;
-}
-
 .rl-frontdoor {
   /* Centred on its own measure regardless of the plate's wide/normal mode —
      a hero that hugs the left edge of a 1900px pane reads as a stray panel. */
@@ -3649,39 +3613,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
 }
 
-/* The backdrop: ruled paper.
-   Redline's whole metaphor is the marked-up document, and the shell already
-   speaks paper / plate / rule / ink — so the plate's zero state is a sheet
-   waiting to be written on, not a coloured wash. Faint horizontal rules in
-   the ink token, lit from behind the island by a low accent bloom. Both read
-   as the terminal's grid too, which is the other half of the house style.
-
-   MASKED, not merely faded: `mask-image` drives alpha to a hard zero well
-   inside the layer, so unlike a gradient stop there is no residue at the
-   edges and no rectangle can appear. Static — nothing animates. */
-.rl-fd-paper {
-  position: absolute;
-  inset: -8% -12%;
-  pointer-events: none;
-  z-index: 0;
-  background:
-    radial-gradient(
-      46% 34% at 50% 42%,
-      color-mix(in srgb, var(--color-info) 11%, transparent),
-      transparent 72%
-    ),
-    repeating-linear-gradient(
-      to bottom,
-      color-mix(in srgb, var(--color-ink) 7%, transparent) 0 1px,
-      transparent 1px 34px
-    );
-  -webkit-mask-image: radial-gradient(
-    54% 44% at 50% 44%,
-    #000 12%,
-    transparent 76%
-  );
-  mask-image: radial-gradient(54% 44% at 50% 44%, #000 12%, transparent 76%);
-}
 .rl-frontdoor > *:not(.rl-fd-paper) {
   position: relative;
   z-index: 1;
@@ -3700,14 +3631,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   color: color-mix(in srgb, var(--color-ink-muted) 82%, transparent);
   text-align: center;
   margin-bottom: 12px;
-}
-.rl-fd-title {
-  font-size: 40px;
-  font-weight: 600;
-  line-height: 1.08;
-  letter-spacing: -0.022em;
-  color: var(--color-ink);
-  text-align: center;
 }
 .rl-fd-sub {
   margin-top: 10px;
@@ -4464,26 +4387,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   outline-offset: 1px;
 }
 
-.rl-fd-how {
-  align-self: center;
-  margin-top: 26px;
-  border: none;
-  background: transparent;
-  color: var(--color-ink-muted);
-  font-size: 12px;
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 160ms ease, color 160ms ease;
-}
-.rl-fd-how::after {
-  content: " →";
-  opacity: 0.6;
-}
-.rl-fd-how:hover {
-  opacity: 1;
-  color: var(--color-info);
-}
-
 /* ── Planning ─────────────────────────────────────────────────────────────
    The DRAFTER's launch card only. The front door no longer echoes the prompt
    after ⏎ — its sentence leaves — but the Drafter's document never leaves the
@@ -4636,10 +4539,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    because the two squeezes are independent: dragging the terminal dock up
    leaves the door as wide as ever and half as tall. */
 
-.rl-frontdoor.is-compact .rl-fd-title {
-  font-size: 30px;
-  letter-spacing: -0.015em;
-}
 .rl-frontdoor.is-compact .rl-fd-sub {
   font-size: 13px;
   margin-bottom: 20px;
@@ -4668,10 +4567,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-frontdoor.is-tight {
   padding-block: 24px;
 }
-.rl-frontdoor.is-tight .rl-fd-title {
-  font-size: 23px;
-  letter-spacing: -0.01em;
-}
 .rl-frontdoor.is-tight .rl-fd-eyebrow {
   margin-bottom: 8px;
 }
@@ -4679,21 +4574,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    stance and the placeholder carries the instruction. */
 .rl-frontdoor.is-tight .rl-fd-sub {
   display: none;
-}
-.rl-frontdoor.is-tight .rl-fd-title {
-  margin-bottom: 20px;
-}
-.rl-frontdoor.is-tight .rl-fd-how {
-  margin-top: 18px;
-}
-/* The bloom needs room to read as light; at this width it reads as a smudge
-   over the type. Rules only. */
-.rl-frontdoor.is-tight .rl-fd-paper {
-  background: repeating-linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--color-ink) 7%, transparent) 0 1px,
-    transparent 1px 34px
-  );
 }
 
 /* ── Squat ──────────────────────────────────────────────────────────────────
@@ -4708,12 +4588,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    first, then the eyebrow and the chips. The composer is the last thing
    standing here too. */
 
-.rl-frontdoor.is-short .rl-fd-title {
-  font-size: 28px;
-  margin-bottom: 16px;
-}
-.rl-frontdoor.is-short .rl-fd-sub,
-.rl-frontdoor.is-short .rl-fd-how {
+.rl-frontdoor.is-short .rl-fd-sub {
   display: none;
 }
 .rl-frontdoor.is-short .rl-fd-suggest-wrap {
@@ -4728,10 +4603,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 }
 .rl-frontdoor.is-squat .rl-fd-eyebrow {
   display: none;
-}
-.rl-frontdoor.is-squat .rl-fd-title {
-  font-size: 22px;
-  margin-bottom: 12px;
 }
 /* The chips are a way in, and a pane this short has no room to spare for one
    — same reason `is-tight` retires them on the width axis. */
@@ -5085,8 +4956,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   .rl-fd-go,
   .rl-fd-tool,
   .rl-fd-suggestion,
-  .rl-fd-suggestions,
-  .rl-fd-how {
+  .rl-fd-suggestions {
     transition: none;
   }
   .rl-fd-island.is-lifted,

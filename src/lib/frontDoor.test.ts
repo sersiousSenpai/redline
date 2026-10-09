@@ -264,7 +264,7 @@ describe("front door clear-on-send wiring", () => {
     // the now-empty composer, which is the bug reported as "the prompt comes
     // back and I have to delete it".
     const start = app.indexOf("onCancelPending={");
-    const end = app.indexOf("onHowItWorks=", start);
+    const end = app.indexOf("onCreateProject=", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const wiring = app.slice(start, end);
