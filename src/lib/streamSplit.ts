@@ -22,6 +22,12 @@
 //
 // Everything else the reply might write — headings, paragraphs, tables,
 // blockquotes (a blank line ends one), rules, fences — closes at that line.
+// A reply holding a carriage return is not split either: markdown-it reads
+// one as a line break, and this scan counts lines by `\n` alone.
+//
+// The scan reads fences line by line, without their containers, so it can
+// misread one (a fence opened on a list item's own line); `StreamingBubble`
+// has markdown-it confirm each boundary before rendering across it.
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const LIST_ITEM = /^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
@@ -40,7 +46,9 @@ export interface StreamSplit {
  *  and rendering the two separately gives the markup of rendering the
  *  whole. Only ever moves forward as `text` grows by appending. */
 export function splitAtClosedBlock(text: string): StreamSplit {
-  if (REFERENCE.test(text)) return { head: "", tail: text, openFence: -1 };
+  if (REFERENCE.test(text) || text.includes("\r")) {
+    return { head: "", tail: text, openFence: -1 };
+  }
   const lines = text.split("\n");
   let head = 0; // offset where the tail starts
   let headLine = 0;

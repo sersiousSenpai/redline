@@ -57,6 +57,12 @@ describe("splitAtClosedBlock", () => {
     expect(at("See [the docs].\n\nMore\n\n[the docs]: https://example.com").head).toBe("");
   });
 
+  it("does not split a reply holding a carriage return", () => {
+    // markdown-it reads `\r` as a line break; the scan counts `\n` alone, and
+    // would not see this fence (or its blank line) at all.
+    expect(at("Intro\r\n\r\n```js\r\na\r\n\r\nb").head).toBe("");
+  });
+
   it("only moves forward as the text grows", () => {
     const text =
       "# Title\n\nIntro\n\n- a\n- b\n\n- c\n\nAfter\n\n```js\nx\n\ny\n```\n\n| a |\n|---|\n| 1 |\n\nEnd";

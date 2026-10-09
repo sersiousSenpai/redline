@@ -23,7 +23,7 @@ vi.mock("./MarkdownView", async (importOriginal) => {
 });
 
 import StreamingBubble from "./StreamingBubble";
-import { MarkdownView, renderLiveMarkdown } from "./MarkdownView";
+import { MarkdownView, renderLiveMarkdown, splitsCleanly } from "./MarkdownView";
 import { splitAtClosedBlock } from "../lib/streamSplit";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -182,6 +182,18 @@ describe("the split render", () => {
   });
 });
 
+describe("splitsCleanly", () => {
+  it("is markdown-it's verdict on a boundary", () => {
+    expect(splitsCleanly("One.\n\nTwo", "One.\n\n")).toBe(true);
+    // Inside a fence, inside a list item, inside a paragraph: no.
+    expect(splitsCleanly(`${FENCE}\na\n\nb`, `${FENCE}\na\n\n`)).toBe(false);
+    expect(splitsCleanly("- a\n\n  b", "- a\n\n")).toBe(false);
+    expect(splitsCleanly("One\n\u00a0\nTwo", "One\n\u00a0\n")).toBe(false);
+    // A reference definition links the halves.
+    expect(splitsCleanly("[a]\n\n[a]: https://example.com", "[a]\n\n")).toBe(false);
+  });
+});
+
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
@@ -237,6 +249,32 @@ describe("StreamingBubble", () => {
     }
     expect(renders).toEqual(heads);
     expect(heads.length).toBeGreaterThan(3);
+  });
+
+  it("renders whole where the line scan misreads a block", async () => {
+    // A fence opened on a list item's own line: the scan takes the item's
+    // closing fence for an opener, then the bare fence below for its closer,
+    // and would split inside that fence at the blank line.
+    const text = ["- " + FENCE, "  npm i", "  " + FENCE, "", FENCE, "code", "", "more", FENCE, "", "End."].join(
+      "\n",
+    );
+    const misread = splitAtClosedBlock(text.slice(0, text.indexOf("more") + 2));
+    expect(misread.head).toMatch(/code\n\n$/);
+    for (let n = 1; n <= text.length; n++) {
+      const prefix = text.slice(0, n);
+      await bubble({ text: prefix });
+      expect(view().innerHTML, `after ${n} chars`).toBe(serialized(renderLiveMarkdown(prefix, -1)));
+    }
+    expect(renders).not.toContain(misread.head);
+  });
+
+  it("splits again at the next boundary markdown-it confirms", async () => {
+    // A no-break space is a blank line to the scan, and text to markdown-it.
+    const text = "Para\n\u00a0\nNext\n\nAfter";
+    for (let n = 1; n <= text.length; n++) await bubble({ text: text.slice(0, n) });
+    expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
+    expect(renders).not.toContain("Para\n\u00a0\n");
+    expect(renders).toContain("Para\n\u00a0\nNext\n\n");
   });
 
   it("routes a link in the open block through onOpenLink", async () => {

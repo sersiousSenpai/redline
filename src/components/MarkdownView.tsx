@@ -66,6 +66,21 @@ export function renderLiveMarkdown(src: string, openFence: number): string {
   return md.render(src, { rlOpenFence: openFence });
 }
 
+/** Whether `src` renders as its closed blocks `head` plus the rest, each on
+ *  its own (`StreamingBubble`), exactly as it renders whole — asked of
+ *  markdown-it's own block parser: `head` must end where a top-level block
+ *  starts, and no reference definition may link the halves. */
+export function splitsCleanly(src: string, head: string): boolean {
+  const line = head.split("\n").length - 1;
+  const env: { references?: unknown } = {};
+  const tokens: ReturnType<typeof md.parse> = [];
+  md.block.parse(src, md, env, tokens);
+  return (
+    env.references === undefined &&
+    tokens.some((t) => t.level === 0 && t.nesting !== -1 && t.map?.[0] === line)
+  );
+}
+
 // GitHub-style callouts: a blockquote whose first line is `[!NOTE]` (or TIP,
 // WARNING, IMPORTANT, CAUTION) becomes `<blockquote class="rl-callout
 // rl-callout-note">` with the marker line stripped. A small core rule that runs

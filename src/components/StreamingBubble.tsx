@@ -41,8 +41,8 @@ import {
   type RefObject,
 } from "react";
 
-import { MarkdownView, renderLiveMarkdown } from "./MarkdownView";
-import { splitAtClosedBlock } from "../lib/streamSplit";
+import { MarkdownView, renderLiveMarkdown, splitsCleanly } from "./MarkdownView";
+import { splitAtClosedBlock, type StreamSplit } from "../lib/streamSplit";
 import {
   activityLabel,
   contextPressure,
@@ -135,7 +135,7 @@ function StreamingText({
   onOpenLink?: (url: string) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const { head, tail, openFence } = splitAtClosedBlock(text);
+  const { head, tail, openFence } = useClosedBlockSplit(text);
   const tailHtml = useMemo(() => renderLiveMarkdown(tail, openFence), [tail, openFence]);
   // The head's props must hold still while only the tail moves, and a call
   // site's inline link handler is a new function every render.
@@ -153,6 +153,24 @@ function StreamingText({
       <span style={{ color: "var(--color-ink-muted)" }}>{caret}</span>
     </div>
   );
+}
+
+/** `splitAtClosedBlock`, each new boundary confirmed by markdown-it's own
+ *  block parser (`splitsCleanly`) before the bubble renders across it. The
+ *  line scan reads a fence without its container — one opened on a list
+ *  item's line, say — and a misread must cost a whole render, never a wrong
+ *  one. A boundary's verdict holds as the reply grows, so the parse runs once
+ *  per boundary, not once a frame. */
+function useClosedBlockSplit(text: string): StreamSplit {
+  const split = splitAtClosedBlock(text);
+  const checked = useRef({ head: "", clean: true });
+  if (checked.current.head !== split.head) {
+    checked.current = {
+      head: split.head,
+      clean: split.head === "" || splitsCleanly(text, split.head),
+    };
+  }
+  return checked.current.clean ? split : { head: "", tail: text, openFence: -1 };
 }
 
 /** Keep `html` appended to the end of the markdown container (`host`'s first

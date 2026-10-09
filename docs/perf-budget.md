@@ -61,8 +61,9 @@ it, that's the discussion to have before merging.
    > frame into one render (a terminal event renders at once, with the full
    > text), and `StreamingBubble` re-parses only the reply's open last block:
    > the closed blocks go through a memoized `MarkdownView` that parses again
-   > only when another block closes (`src/lib/streamSplit.ts`). A frame costs
-   > one block, not the whole reply.
+   > only when another block closes (`src/lib/streamSplit.ts`), at a boundary
+   > markdown-it's own block parser confirms. A frame costs one block, not the
+   > whole reply.
    >
    > **The token meter's compliance with this rule.** `{surface}-meter`
    > (`meter.rs` / `turn::MeterPacer`) is an `app.emit` and not a `Channel`,
@@ -149,8 +150,9 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
 - `src/components/StreamingBubble.test.tsx` — streams real-shaped replies
   (fences, lists, tables, headings, quotes, mermaid) a few characters at a
-  time and holds the split render to one full render at every step, and pins
-  that the closed blocks' `MarkdownView` re-renders only when a block closes.
+  time and holds the split render to one full render at every step (including
+  where the line scan misreads a block), and pins that the closed blocks'
+  `MarkdownView` re-renders only when a block closes.
 - `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
   `src/**/*.css`, every inline `animation:` in a component and every
   `el.animate(…)` call to the properties it animates, and fails when an
