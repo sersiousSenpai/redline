@@ -44,7 +44,10 @@ function Fixture() {
   const [choice, setChoice] = useState<BackendChoice>({ backend: "codex", model: null, effort: null });
   const [chatSlot, setChatSlot] = useState<HTMLDivElement | null>(null);
   const [presses, setPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  useEffect(() => { Object.assign(window, { __qa: { setOpen, setCompact, setSidecar, setSetup, setSurface, setText, openChat, setTheme: applyTheme } }); document.documentElement.dataset.qaReady = "true"; }, []);
+  // News that never moves anything: plans that arrived while you were busy,
+  // setup left to finish, a review an agent is waiting on.
+  const [arrivals, setArrivals] = useState(0), [setupFault, setSetupFault] = useState(false), [reviewNews, setReviewNews] = useState<string | null>(null);
+  useEffect(() => { Object.assign(window, { __qa: { setOpen, setCompact, setSidecar, setSetup, setSurface, setText, openChat, setArrivals, setSetupFault, setReviewNews, setTheme: applyTheme } }); document.documentElement.dataset.qaReady = "true"; }, []);
   useEffect(() => { if (!open) setChatInRoom(false); }, [open]);
   const roomChat = open && chatInRoom && !!chatId;
   const cardDestination = destination === "run" ? "run" : "plan";
@@ -56,7 +59,7 @@ function Fixture() {
       autoFocusOnShow={where === "door" ? open : where === "chat" && roomChat} accessories={accessories} workbench={workbench}
       visible={where === "door" ? visible : card ? compact : roomChat} choice={project ? { path: project } : null} onChoiceChange={next => setProject(next?.path ?? null)}
       projectOptions={[{ path: "/projects/redline", name: "Redline", source: "workspace" }]} openFolder={null} lastLaunchProject={null} onResolvedProjectChange={noop}
-      attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async () => true} pending={null} onLaunch={() => { setText(""); setCompact(false); }} onRun={() => { setText(""); setCompact(false); }} refusal={null}
+      attachments={[]} onAttachmentsChange={noop} readiness={setupFault ? [{ id: "codex-contract-missing", state: "blocked", label: "The Codex planning integration isn't installed", detail: "Install it to bring plans back to Redline.", fix: { label: "Install integration", kind: "install-integration", backend: "codex" } }] : []} onFix={async () => true} pending={null} onLaunch={() => { setText(""); setCompact(false); }} onRun={() => { setText(""); setCompact(false); }} refusal={null}
       onDrafter={noop} onChat={noop} chatEnabled allowedDestinations={card && surface === "Browser" ? ["plan", "run"] : undefined}
       destination={card ? cardDestination : destination} onDestinationChange={next => { setDestination(next); if (card && (next === "drafter" || next === "chat")) { setCompact(false); setOpen(true); } }}
       backend={choice} onBackendChange={setChoice} modelCatalogs={{ codex: [{ slug: "qa-model", displayName: "Codex model", description: "Fixture model", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" }] }} onNeedModels={noop} onRefreshModels={noop} modelStatus={{ refreshing: false, checkedAt: 1790708400000 }}
@@ -68,10 +71,10 @@ function Fixture() {
     {sidecar && <aside className="qa-discussion" aria-label="Document discussion"><button onClick={() => setSidecar(false)}>Close discussion</button><p>Preserve the original decision. This discussion stays beside its source.</p><textarea aria-label="Anchored reply" placeholder="Continue this discussion…"/><button>Send reply</button></aside>}
     <PaneDivider orientation="horizontal" label="terminal" collapsed={!terminal} dragging={false} onToggle={() => setTerminal(value => !value)} onPointerDown={noop}/>
     {terminal && <div className="qa-terminal rl-term-dock">Terminal · fixture</div>}
-    <Footer comments={[]} sessionReady={surface !== "Home"} canSubmit={false} canApprove={false} canOrchestrate={false} waiting={false} waitingAsk={false} onSubmit={noop} onApprove={noop} onOrchestrate={noop} termCollapsed={!terminal} termTabCount={0} termHasUnseen={false} onExpandTerminal={() => setTerminal(true)}/>
+    <Footer comments={[]} sessionReady={surface !== "Home"} canSubmit={false} canApprove={false} canOrchestrate={false} waiting={false} waitingAsk={false} onSubmit={noop} onApprove={noop} onOrchestrate={noop} termCollapsed={!terminal} termTabCount={0} termHasUnseen={false} onExpandTerminal={() => setTerminal(true)} reviewNews={reviewNews} onOpenReviewNews={() => setReviewNews(null)}/>
     <MonochatIsland clearanceKey={String(terminal)} landing={surface === "Home"} surfaceKey={surface} onVisibilityChange={setVisible}
       open={open} onOpenChange={setOpen} compactOpen={compact} onCompactChange={setCompact} compact={compact && renderComposer("card")}
-      context={roomChat ? "Redline Aurora" : surface === "Document" ? "Auth rewrite" : surface === "Browser" ? "LiDAR-GS" : "Front door"} busy={false}
+      context={roomChat ? "Redline Aurora" : surface === "Document" ? "Auth rewrite" : surface === "Browser" ? "LiDAR-GS" : "Front door"} busy={false} arrivals={arrivals}
       onNewChat={roomChat ? () => { setChatId(null); setChatInRoom(false); } : undefined}>
       <div ref={setChatSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
       {!roomChat && renderComposer("door")}

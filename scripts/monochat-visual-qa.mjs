@@ -40,7 +40,7 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function bounds(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right,scrollHeight:e.scrollHeight,clientHeight:e.clientHeight,visible:r.width>0&&r.height>0,within:r.x>=-1&&r.y>=-1&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1};})()`); }
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/hooks/useFrontDoorConversation.ts", "src/components/MonochatIsland.tsx", "src/components/MonochatIsland.css", "src/components/MonochatCard.tsx", "src/components/MonochatCard.css", "src/components/SurfaceChips.tsx", "src/lib/surfaceContext.ts", "src/components/ChatRoom.tsx", "src/components/MonochatTrace.tsx", "src/components/FrontDoor.tsx", "src/components/ComposerMenu.tsx", "src/components/ComposerMenu.css", "src/App.tsx", "src/components/IntegrationSetupDialog.tsx", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
+  for (const file of ["src/hooks/useFrontDoorConversation.ts", "src/components/MonochatIsland.tsx", "src/components/MonochatIsland.css", "src/components/MonochatCard.tsx", "src/components/MonochatCard.css", "src/components/SurfaceChips.tsx", "src/lib/surfaceContext.ts", "src/components/ChatRoom.tsx", "src/components/MonochatTrace.tsx", "src/components/FrontDoor.tsx", "src/components/ComposerMenu.tsx", "src/components/ComposerMenu.css", "src/App.tsx", "src/components/IntegrationSetupDialog.tsx", "src/components/Footer.tsx", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
   server = await createServer({ configFile:false, root, cacheDir:path.join(temporary,"vite-cache"), optimizeDeps:{entries:["fixtures/monochat-aurora-qa/index.html"], include:["@tauri-apps/plugin-deep-link", "@tauri-apps/api/webview", "@tauri-apps/api/dpi", "@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"]}, plugins:[react(),tailwindcss()], resolve:{alias:[
     {find:/^.*\/hooks\/useAgentTurn$/,replacement:service}, {find:/^.*\/audio\/useReadAloud$/,replacement:service}, {find:/^.*\/lib\/useDictation$/,replacement:service},
     ...["@tauri-apps/api/core","@tauri-apps/api/event","@tauri-apps/api/window","@tauri-apps/plugin-dialog","@tauri-apps/plugin-opener"].map(find=>({find,replacement:service}))
@@ -133,6 +133,32 @@ try {
     check(`${size} pill centred in the footer row`, Math.abs(pill.x+pill.width/2-width/2)<1 && Math.abs(pill.y+pill.height/2-footer.y-footer.height/2)<1 && pill.width===160 && pill.height===40, { pill, footer });
     check(`${size} pill clear of footer controls`, pill.x>=(await bounds('.rl-footer-status')).right && pill.right<=(await bounds('.rl-footer-actions')).x);
     await screenshot(`${size}-pill`);
+    // News that moves nothing (R12, R14): a plan that arrived while you were
+    // busy is a count on the pill's shoulder, clear of its label; a review an
+    // agent waits on is a chip in the footer, clear of the pill.
+    await cdp.evaluate("window.__qa.setArrivals(2)"); await cdp.evaluate("window.__qa.setReviewNews('Review ready')"); await settle();
+    const news = await bounds('.rl-monochat-news');
+    check(`${size} an arrival badges the pill and opens nothing`, news?.visible && news.within && await cdp.evaluate(`document.querySelector('.rl-monochat-news').textContent==='2' && ${pose}==='notch' && !document.querySelector('.rl-monochat-float') && document.querySelector('.rl-monochat-notch').getAttribute('aria-label').endsWith('2 new plans')`), news);
+    check(`${size} the badge sits on the pill's shoulder, clear of its label`, await cdp.evaluate("(() => { const b=document.querySelector('.rl-monochat-news').getBoundingClientRect(); const m=document.querySelector('.rl-portal-membrane').getBoundingClientRect(); const l=[...document.querySelectorAll('.rl-portal-membrane > span')].find(s => !s.className).getBoundingClientRect(); return (b.left >= l.right || b.bottom <= l.top) && b.top < m.top && b.bottom > m.top && b.right <= m.right; })()"));
+    // The app never gets narrower than 900 px (tauri.conf minWidth); below
+    // that the footer is the fixture's, not a window anyone can have.
+    if (width >= 900) {
+      const chip = await bounds('.rl-footer-status button[title="Open the review surface"]');
+      const status = await bounds('.rl-footer-status');
+      check(`${size} a waiting review is a footer chip, 24 px tall, in full view and clear of the pill`, chip?.visible && chip.height >= 24 && chip.x >= status.x && chip.right <= status.right && chip.right <= pill.x && await cdp.evaluate("document.querySelector('.rl-footer-status button[title=\"Open the review surface\"]').textContent==='Review ready → Open'"), { chip, status, pill });
+    }
+    await screenshot(`${size}-news`);
+    await cdp.evaluate("window.__qa.setArrivals(0)"); await cdp.evaluate("window.__qa.setReviewNews(null)"); await settle();
+    // Setup left to finish waits in the composer as one chip, in the door and
+    // the card alike — never a dialog that pops up by itself.
+    await cdp.evaluate("window.__qa.setSetupFault(true)"); await cdp.evaluate("window.__qa.setOpen(true)"); await delay(450); await settle();
+    const fix = await bounds('.rl-frontdoor-focus .rl-fd-setup');
+    check(`${size} setup to finish is a chip in the door's composer, not a dialog`, fix?.visible && fix.height >= 24 && await cdp.evaluate("(() => { const c=document.querySelector('.rl-frontdoor-focus .rl-fd-setup').getBoundingClientRect(), i=document.querySelector('.rl-frontdoor-focus .rl-fd-island').getBoundingClientRect(); return c.left>=i.left && c.right<=i.right && c.top>=i.top && c.bottom<=i.bottom && !document.querySelector('dialog:modal'); })()"), fix);
+    await screenshot(`${size}-setup-chip`);
+    await cdp.evaluate("window.__qa.setOpen(false)"); await delay(400);
+    await cdp.evaluate("window.__qa.setCompact(true)"); await delay(700); await settle();
+    check(`${size} the card shows the same one chip, once`, await cdp.evaluate("document.querySelectorAll('.rl-monochat-float .rl-fd-setup').length===1 && !document.querySelector('.rl-monochat-float .rl-fd-strip')?.textContent.includes('integration')"));
+    await cdp.evaluate("window.__qa.setCompact(false)"); await cdp.evaluate("window.__qa.setSetupFault(false)"); await cardGone(); await settle();
     // Tabbing onto the pill rings and lights it, and opens nothing (WCAG 3.2.1).
     await cdp.evaluate("document.querySelector('#qa-document-focus').focus()");
     for (let i = 0; i < 40 && !await cdp.evaluate("document.activeElement?.classList.contains('rl-monochat-notch')"); i++) await key('Tab','Tab',9);
@@ -278,7 +304,7 @@ try {
       const themes = await cdp.evaluate("import('/src/theme/themes.ts').then(m => m.THEMES.map(t => t.name))");
       const short = [];
       await cdp.evaluate(contrastSweep);
-      await cdp.evaluate("window.__qa.setSurface('Document')"); await settle();
+      await cdp.evaluate("window.__qa.setSurface('Document')"); await cdp.evaluate("window.__qa.setSetupFault(true)"); await settle();
       for (const theme of themes) {
         await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`); await delay(450);
         await cdp.evaluate("window.__qa.setOpen(true)"); await delay(450);
@@ -289,7 +315,7 @@ try {
         await cdp.evaluate("window.__qa.setCompact(false)"); await delay(400);
       }
       check(`every text in the door and the card reaches 4.5:1 in all ${themes.length} themes`, themes.length === 15 && short.length === 0, short);
-      await cdp.evaluate("window.__qa.setTheme('aurora')");
+      await cdp.evaluate("window.__qa.setTheme('aurora')"); await cdp.evaluate("window.__qa.setSetupFault(false)");
     }
   }
 } catch(error) {report.errors.push(error.stack??String(error));}
