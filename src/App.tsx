@@ -433,7 +433,9 @@ import {
 } from "./lib/immersive";
 import type { SwapRect } from "./lib/springSwap";
 import { SpringSwap } from "./components/SpringSwap";
-import { SurfacesPanel } from "./components/SurfacesPanel";
+import { settingsRow } from "./components/SettingsMenu";
+// A Settings row: lazy, in the rows' shared chunk (the header builds the rest).
+const SurfacesPanel = settingsRow("SurfacesPanel");
 import { NudgeCard } from "./components/NudgeCard";
 import {
   dismissSuggestion,

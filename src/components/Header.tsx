@@ -9,15 +9,10 @@ import { useMenuOverlay } from "./menuOverlay";
 import type { ThemeName } from "../theme/themes";
 import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
-import { ThemePicker } from "./ThemePicker";
-import { FontPicker } from "./FontPicker";
-import { LintPicker } from "./LintPicker";
 import { DownloadMenu } from "./DownloadMenu";
-import { ModeToggle } from "./ModeToggle";
-import { AlertSettings } from "./AlertSettings";
 import { MemoryStatusPill } from "./MemoryStatusPill";
 import { LiveSessionMenu } from "./LiveSessionMenu";
-import { SettingsMenu } from "./SettingsMenu";
+import { SettingsMenu, settingsRow } from "./SettingsMenu";
 import { Button } from "./ui/Button";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Pill } from "./ui/Pill";
@@ -37,6 +32,13 @@ const AgentSeats = lazy(() =>
 const ExtensionsPanel = lazy(() =>
   import("./ExtensionsPanel").then((m) => ({ default: m.ExtensionsPanel })),
 );
+// The lighter rows (mode, theme, font, linting, notifications) share one
+// chunk, warmed as the pointer reaches the gear.
+const ModeToggle = settingsRow("ModeToggle");
+const ThemePicker = settingsRow("ThemePicker");
+const FontPicker = settingsRow("FontPicker");
+const LintPicker = settingsRow("LintPicker");
+const AlertSettings = settingsRow("AlertSettings");
 
 // Programmatic window-drag (there is no native title bar — see windowDrag.ts).
 // Lives in lib/ because the immersive hull rail stands in for this header and

@@ -1,10 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { warmableChunk } from "../lib/warmableChunk";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Button } from "./ui/Button";
+
+type Rows = typeof import("./settingsRows");
+const loadRows = () => import("./settingsRows");
+const rowChunks: Array<{ warm: () => void }> = [];
+
+/** A row's control (the theme picker, the mode toggle…), lazy from the rows'
+ *  shared chunk. The menu mounts its rows only while open, so they cost the
+ *  boot path nothing; the chunk is warmed as the pointer or focus reaches the
+ *  gear, so the first open renders them in the frame it opens in (see
+ *  `warmableChunk`). */
+export function settingsRow<K extends keyof Rows>(name: K) {
+  const chunk = warmableChunk(() => loadRows().then((rows) => ({ default: rows[name] })));
+  rowChunks.push(chunk);
+  return lazy(chunk.load);
+}
+const warmRows = () => {
+  for (const chunk of rowChunks) chunk.warm();
+};
 
 // One "Settings" entry point that folds the formerly-loose header controls —
 // interception mode, theme, font, notifications — into a single dropdown, so
@@ -96,6 +115,8 @@ export function SettingsMenu({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
+        onPointerEnter={warmRows}
+        onFocus={warmRows}
         title="Settings — mode, theme, font, notifications"
         aria-haspopup="menu"
         aria-expanded={open}
@@ -144,21 +165,24 @@ export function SettingsMenu({
             overflow: "visible",
           }}
         >
-          <Row label="Mode">{mode}</Row>
-          <Row label="Theme">{theme}</Row>
-          <Row label="Font">{font}</Row>
-          <Row label="Linting">{lint}</Row>
-          <Row label="Agent Seats">{agents}</Row>
-          <Row label="Surfaces">{surfaces}</Row>
-          <Row label="Extensions">{extensions}</Row>
-          <Row label="Notifications">{notifications}</Row>
-          {onOpenIntegrationHooks && <Row label="Integration hooks">
-            <Button ariaLabel="Review integration hooks" onClick={() => {
-              setOpen(false);
-              rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-              onOpenIntegrationHooks();
-            }}>Review…</Button>
-          </Row>}
+          {/* The rows' lazy controls (`settingsRow`) land together. */}
+          <Suspense fallback={null}>
+            <Row label="Mode">{mode}</Row>
+            <Row label="Theme">{theme}</Row>
+            <Row label="Font">{font}</Row>
+            <Row label="Linting">{lint}</Row>
+            <Row label="Agent Seats">{agents}</Row>
+            <Row label="Surfaces">{surfaces}</Row>
+            <Row label="Extensions">{extensions}</Row>
+            <Row label="Notifications">{notifications}</Row>
+            {onOpenIntegrationHooks && <Row label="Integration hooks">
+              <Button ariaLabel="Review integration hooks" onClick={() => {
+                setOpen(false);
+                rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+                onOpenIntegrationHooks();
+              }}>Review…</Button>
+            </Row>}
+          </Suspense>
         </MenuSurface>
       )}
     </div>

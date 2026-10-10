@@ -161,7 +161,29 @@ describe("size guard", () => {
       );
     }
     // …and the trigger itself stays static, or the gear would suspend.
-    expect(header!.text).toMatch(/^import \{ SettingsMenu \} from/m);
+    expect(header!.text).toMatch(/^import \{ SettingsMenu, settingsRow \} from "\.\/SettingsMenu";/m);
+  });
+
+  it("the settings rows' controls ride one lazy chunk, warmed at the gear", () => {
+    // Mode, theme, font, linting, notifications and surfaces render only
+    // inside the open menu; static, they were 16 kB of boot JS (measured
+    // 2026-10-10).
+    const header = files.find(({ rel }) => rel === "components/Header.tsx")!.text;
+    for (const name of ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings"]) {
+      expect(header).toContain(`const ${name} = settingsRow("${name}");`);
+    }
+    const app = files.find(({ rel }) => rel === "App.tsx")!.text;
+    expect(app).toContain('const SurfacesPanel = settingsRow("SurfacesPanel");');
+    // Only the chunk's own barrel imports them.
+    const rows = ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings", "SurfacesPanel"];
+    const offenders = files
+      .filter(({ rel }) => rel !== "components/settingsRows.ts" && !/\.test\.tsx?$/.test(rel))
+      .filter(({ text }) => rows.some((name) => new RegExp(`^import (?!type\\b)[^;]*from "[./]*(?:components/)?${name}"`, "m").test(text)))
+      .map(({ rel }) => rel);
+    expect(offenders).toEqual([]);
+    const menu = files.find(({ rel }) => rel === "components/SettingsMenu.tsx")!.text;
+    expect(menu).toContain('const loadRows = () => import("./settingsRows");');
+    expect(menu).toMatch(/onPointerEnter=\{warmRows\}\s+onFocus=\{warmRows\}/);
   });
 
   it("xterm is value-imported only inside lib/xtermLoader.ts (types are fine)", () => {
