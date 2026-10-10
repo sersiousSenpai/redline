@@ -16,15 +16,24 @@
 //!     The sidecar is kept warm so each sentence is ~sub-second. Kokoro's
 //!     phonemizer is GPL, so it lives in a SEPARATE PROCESS and never links into
 //!     Redline's Apache-2.0 binary — we only exchange text and audio bytes over a
-//!     pipe. The ~88 MB int8 model is downloaded on first use into the app data
+//!     pipe. The ~325 MB fp32 model is downloaded on first use into the app data
 //!     dir. ElevenLabs / Deepgram would slot into the same `match`.
+//!
+//! Every request carries the frontend driver's **generation**. `cancel()` there
+//! (Stop, a barge-in, the next turn) calls `tts_cancel` with the old one, and a
+//! request from a cancelled generation is dropped before it reaches an engine:
+//! Kokoro synthesizes one request at a time, so without this the next reply's
+//! first sentence waited behind the rest of the cancelled one.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -51,26 +60,74 @@ const DEFAULT_ELEVEN_VOICE: &str = "21m00Tcm4TlvDq8ikWAM";
 const ELEVEN_MODEL: &str = "eleven_turbo_v2_5";
 /// Max concurrent ElevenLabs requests we issue. ElevenLabs caps concurrency per
 /// plan (Free 2 / Starter 3 / Creator 5 / …) and returns 429
-/// `concurrent_limit_exceeded` above it. The frontend fires every queued
-/// sentence's synth at once (eager 1-ahead prefetch), so without a cap a
-/// multi-sentence reply trips the limit. 2 stays within every paid tier while
-/// still pipelining a clip ahead; the sequential playback model hides it.
+/// `concurrent_limit_exceeded` above it. The frontend keeps the sentence in
+/// hand plus two read ahead in flight, so without a cap a multi-sentence reply
+/// trips the limit. 2 stays within every tier while still pipelining a clip
+/// ahead; the sequential playback model hides it.
 const ELEVEN_MAX_CONCURRENCY: usize = 2;
+/// How long one cloud synthesis may take, connect to last byte. A sentence
+/// takes a few seconds at worst; a request that stalls past this is given up
+/// so the system voice reads that sentence, rather than holding the reply's
+/// audio until Stop and an ElevenLabs permit for as long as it stalls.
+const CLOUD_TIMEOUT: Duration = Duration::from_secs(20);
 
 // The Kokoro sidecar script is compiled into the binary and written to disk on
 // first use — no Tauri resource-path / dev-vs-bundle ambiguity to chase.
 const KOKORO_SIDECAR_PY: &str = include_str!("../resources/kokoro_sidecar.py");
 
-// Model files (int8, ~88 MB) — downloaded on first use. From the kokoro-onnx
-// project's pinned model release.
-const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx";
+// Model files — downloaded on first use. From the kokoro-onnx project's pinned
+// model release. The fp32 model is ~3x faster than the int8 one on Apple CPUs
+// (int8 ops fall back to slow kernels there) at the reference quality.
+const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx";
 const KOKORO_VOICES_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin";
-const KOKORO_MODEL_FILE: &str = "kokoro-v1.0.int8.onnx";
+const KOKORO_MODEL_FILE: &str = "kokoro-v1.0.onnx";
 const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
+/// The int8 model earlier versions downloaded. It keeps working until the fp32
+/// one is downloaded and verified beside it (`ensure_current_model`), and is
+/// deleted then.
+const KOKORO_LEGACY_MODEL_FILE: &str = "kokoro-v1.0.int8.onnx";
+
+/// What a download must come to before it replaces anything: the release's
+/// published size, and the SHA-256 of that release asset.
+#[derive(Clone, Copy)]
+struct FileCheck {
+    bytes: u64,
+    sha256: &'static str,
+}
+
+const KOKORO_MODEL_CHECK: FileCheck = FileCheck {
+    bytes: 325_532_387,
+    sha256: "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+};
+const KOKORO_VOICES_CHECK: FileCheck = FileCheck {
+    bytes: 28_214_398,
+    sha256: "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+};
 
 /// Emit a setup-progress event roughly every megabyte, so the download bar moves
 /// without flooding the IPC channel with thousands of tiny updates.
 const KOKORO_PROGRESS_STEP: u64 = 1_000_000;
+/// A download that goes this long without a response or a byte is given up.
+/// The background upgrade runs unattended under the one-download lock, so a
+/// stalled connection would otherwise hold it, and every later attempt, for
+/// the rest of the session.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
+
+/// What `tts_synth` answers for a request whose generation was cancelled. The
+/// driver expects it and never reports it.
+const CANCELLED: &str = "cancelled";
+/// How many cancelled generations to remember. The driver keeps at most a few
+/// requests in flight, so only the last few cancels can still have any queued.
+const CANCELS_KEPT: usize = 32;
+
+/// A Kokoro request gets this long, plus `KOKORO_PER_CHAR` per character, before
+/// the sidecar counts as hung. Generous on purpose: the slow int8 model took
+/// ~6 s for a 277-character sentence on a loaded machine, and this allows ~19 s.
+const KOKORO_TIMEOUT_FLOOR: Duration = Duration::from_secs(5);
+const KOKORO_PER_CHAR: Duration = Duration::from_millis(50);
+/// Loading the model on spawn (the handshake) gets this long.
+const KOKORO_SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+const KOKORO_HUNG: &str = "the Kokoro voice stopped responding and was restarted";
 
 /// TTS state: the DB (settings/keys), a reused HTTP client, the Kokoro model
 /// directory, and the warm Kokoro sidecar (lazily spawned). Cloned into managed
@@ -84,9 +141,16 @@ pub struct TtsState {
     /// alive across sentences. `None` until first use / after a death.
     kokoro: Arc<AsyncMutex<Option<KokoroSidecar>>>,
     /// Caps how many ElevenLabs requests we have in flight at once, so the
-    /// frontend's eager per-sentence prefetch can't trip ElevenLabs' per-plan
+    /// frontend's per-sentence read-ahead can't trip ElevenLabs' per-plan
     /// concurrency limit (429 `concurrent_limit_exceeded`).
     eleven_sem: Arc<Semaphore>,
+    /// Generations the frontend has cancelled (`tts_cancel`), newest last.
+    cancelled: Arc<StdMutex<VecDeque<u64>>>,
+    /// One model download at a time: an Enable click and the background
+    /// upgrade must not write the same `.part` file.
+    model_dl: Arc<AsyncMutex<()>>,
+    /// `KOKORO_TIMEOUT_FLOOR`, a field so tests can make a hang quick to detect.
+    kokoro_timeout_floor: Duration,
 }
 
 impl TtsState {
@@ -97,17 +161,45 @@ impl TtsState {
             kokoro_dir: data_dir.join("kokoro"),
             kokoro: Arc::new(AsyncMutex::new(None)),
             eleven_sem: Arc::new(Semaphore::new(ELEVEN_MAX_CONCURRENCY)),
+            cancelled: Arc::new(StdMutex::new(VecDeque::new())),
+            model_dl: Arc::new(AsyncMutex::new(())),
+            kokoro_timeout_floor: KOKORO_TIMEOUT_FLOOR,
         }
     }
 
+    /// The fp32 model once it's in place, else the int8 one an older install
+    /// downloaded (so an upgrade in progress never stops the voice).
     fn model_path(&self) -> PathBuf {
-        self.kokoro_dir.join(KOKORO_MODEL_FILE)
+        let current = self.kokoro_dir.join(KOKORO_MODEL_FILE);
+        let legacy = self.kokoro_dir.join(KOKORO_LEGACY_MODEL_FILE);
+        if !current.exists() && legacy.exists() {
+            legacy
+        } else {
+            current
+        }
     }
     fn voices_path(&self) -> PathBuf {
         self.kokoro_dir.join(KOKORO_VOICES_FILE)
     }
     fn model_present(&self) -> bool {
         self.model_path().exists() && self.voices_path().exists()
+    }
+    /// Only the int8 model is here: the voice works, and the fp32 one should
+    /// be fetched beside it.
+    fn needs_model_upgrade(&self) -> bool {
+        self.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE)
+    }
+
+    fn cancel(&self, generation: u64) {
+        let mut c = self.cancelled.lock().unwrap_or_else(|p| p.into_inner());
+        c.push_back(generation);
+        if c.len() > CANCELS_KEPT {
+            c.pop_front();
+        }
+    }
+    fn is_cancelled(&self, generation: u64) -> bool {
+        let c = self.cancelled.lock().unwrap_or_else(|p| p.into_inner());
+        c.contains(&generation)
     }
     /// Redline's PRIVATE Python virtualenv — created on first "Enable" so the
     /// user never installs Python packages or hunts for an interpreter. Kept
@@ -133,7 +225,8 @@ impl TtsState {
 
 /// The warm Kokoro sidecar: the child process plus its stdio handles. One synth
 /// at a time (guarded by the `AsyncMutex` in `TtsState`); the frontend's
-/// one-ahead prefetch simply queues behind the lock — fine at Kokoro's latency.
+/// read-ahead of two sentences queues behind the lock, and a queued request
+/// whose generation is cancelled meanwhile is dropped when its turn comes.
 struct KokoroSidecar {
     child: tokio::process::Child,
     stdin: ChildStdin,
@@ -255,38 +348,85 @@ pub fn tts_set_settings(
 pub struct TtsAudio {
     audio_base64: String,
     mime: String,
+    /// The speed already rendered into the audio. Kokoro takes the user's speed
+    /// itself, which keeps the pitch; the cloud engines come back at 1 and the
+    /// player makes up the rest with `playbackRate`.
+    speed: f64,
 }
 
 /// Synthesize one chunk of text with the configured engine. Errors if the engine
-/// is `system` (handled client-side) or the chosen engine isn't ready.
+/// is `system` (handled client-side), the chosen engine isn't ready, or the
+/// request's `generation` has been cancelled (with exactly `CANCELLED`).
+///
+/// `voice` makes this one request a Kokoro sample in that voice, whatever
+/// engine and voice are saved: the settings ▶ auditions a voice before the
+/// user saves anything. It rides this command rather than one of its own
+/// because every async command costs ~11 KB of release binary (lib.rs,
+/// `OFF_MAIN_COMMANDS`).
 #[tauri::command]
 pub async fn tts_synth(
     tts: tauri::State<'_, TtsState>,
-    app: AppHandle,
     text: String,
+    generation: u64,
+    speed: Option<f64>,
+    voice: Option<String>,
 ) -> Result<TtsAudio, String> {
-    let text = text.trim().to_string();
+    synth(&tts, &text, generation, speed, voice).await
+}
+
+/// Drop every request of `generation` that hasn't reached an engine yet.
+#[tauri::command]
+pub fn tts_cancel(tts: tauri::State<'_, TtsState>, generation: u64) {
+    tts.cancel(generation);
+}
+
+async fn synth(
+    tts: &TtsState,
+    text: &str,
+    generation: u64,
+    speed: Option<f64>,
+    voice: Option<String>,
+) -> Result<TtsAudio, String> {
+    let text = text.trim();
     if text.is_empty() {
         return Err("empty text".to_string());
     }
-    let engine = tts
-        .db
-        .get_setting(SETTING_ENGINE)
-        .unwrap_or_else(|| "system".to_string());
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
+    }
+    let voice = voice.filter(|v| !v.trim().is_empty());
+    let engine = match voice {
+        Some(_) => "kokoro".to_string(),
+        None => tts
+            .db
+            .get_setting(SETTING_ENGINE)
+            .unwrap_or_else(|| "system".to_string()),
+    };
     let result = match engine.as_str() {
-        "openai" => synth_openai(&tts, &text).await,
-        "elevenlabs" => synth_eleven(&tts, &text).await,
-        "kokoro" => synth_kokoro(&tts, &app, &text).await,
+        "openai" => synth_openai(tts, text).await,
+        "elevenlabs" => synth_eleven(tts, text, generation).await,
+        "kokoro" => {
+            let voice = voice.unwrap_or_else(|| {
+                tts.db
+                    .get_setting(SETTING_KOKORO_VOICE)
+                    .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string())
+            });
+            // The bounds kokoro-onnx accepts; the frontend clamps to the same.
+            let speed = speed.filter(|s| s.is_finite()).unwrap_or(1.0).clamp(0.5, 2.0);
+            synth_kokoro(tts, text, &voice, speed, generation).await
+        }
         other => Err(format!(
             "the '{other}' voice engine has no server-side synthesis"
         )),
     };
-    // Synth errors are swallowed into silence on the frontend (the stream must go
-    // on), so log them here at `error` level (visible at the default `info`
-    // filter) — this is the only place the real provider response (HTTP status +
-    // body snippet for cloud engines) is captured.
+    // Synth errors are swallowed on the frontend (the stream must go on, in the
+    // system voice), so log them here at `error` level (visible at the default
+    // `info` filter) — this is the only place the real provider response (HTTP
+    // status + body snippet for cloud engines) is captured.
     if let Err(ref e) = result {
-        tracing::error!(target: "tts", engine = %engine, "synthesis failed: {e}");
+        if e != CANCELLED {
+            tracing::error!(target: "tts", engine = %engine, "synthesis failed: {e}");
+        }
     }
     result
 }
@@ -307,6 +447,7 @@ async fn synth_openai(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     let resp = tts
         .http
         .post("https://api.openai.com/v1/audio/speech")
+        .timeout(CLOUD_TIMEOUT)
         .bearer_auth(key.trim())
         .json(&serde_json::json!({
             "model": "gpt-4o-mini-tts",
@@ -332,10 +473,11 @@ async fn synth_openai(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     Ok(TtsAudio {
         audio_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         mime: "audio/wav".to_string(),
+        speed: 1.0,
     })
 }
 
-async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
+async fn synth_eleven(tts: &TtsState, text: &str, generation: u64) -> Result<TtsAudio, String> {
     let key = tts
         .db
         .get_setting(SETTING_ELEVEN_KEY)
@@ -347,13 +489,17 @@ async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
         .unwrap_or_else(|| DEFAULT_ELEVEN_VOICE.to_string());
 
     // Hold a permit for the whole request so we never exceed our self-imposed
-    // concurrency cap — the eager frontend prefetch fires every queued
-    // sentence's synth at once, which otherwise trips ElevenLabs' 429.
+    // concurrency cap — the frontend's read-ahead keeps up to three sentences
+    // in flight, which otherwise trips ElevenLabs' 429 on the free tier.
     let _permit = tts
         .eleven_sem
         .acquire()
         .await
         .map_err(|e| format!("voice synth queue closed: {e}"))?;
+    // A request that waited out a cancel behind the cap costs nothing now.
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
+    }
 
     // ElevenLabs addresses voices by id in the URL path and authenticates via
     // the `xi-api-key` header (not bearer). The default response is MP3, which
@@ -364,6 +510,7 @@ async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
             "https://api.elevenlabs.io/v1/text-to-speech/{}",
             voice.trim()
         ))
+        .timeout(CLOUD_TIMEOUT)
         .header("xi-api-key", key.trim())
         .json(&serde_json::json!({
             "text": text,
@@ -387,44 +534,91 @@ async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     Ok(TtsAudio {
         audio_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         mime: "audio/mpeg".to_string(),
+        speed: 1.0,
     })
 }
 
 // --- Kokoro (local) --------------------------------------------------------
 
-async fn synth_kokoro(tts: &TtsState, app: &AppHandle, text: &str) -> Result<TtsAudio, String> {
+async fn synth_kokoro(
+    tts: &TtsState,
+    text: &str,
+    voice: &str,
+    speed: f64,
+    generation: u64,
+) -> Result<TtsAudio, String> {
     if !tts.model_present() {
         return Err(
             "the Kokoro voice isn't installed yet — open Voice settings (⚙) and download it"
                 .to_string(),
         );
     }
-    let voice = tts
-        .db
-        .get_setting(SETTING_KOKORO_VOICE)
-        .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
-    // Speed is left at 1.0 here; the frontend applies the speed slider via Web
-    // Audio `playbackRate`, so it's uniform across every engine.
-    let req = serde_json::json!({ "text": text, "voice": voice, "speed": 1.0 }).to_string();
+    let req = serde_json::json!({ "text": text, "voice": voice, "speed": speed }).to_string();
+    let limit = tts.kokoro_timeout_floor + KOKORO_PER_CHAR * text.chars().count() as u32;
 
     let mut guard = tts.kokoro.lock().await;
+    // Requests wait their turn on that lock. One whose generation was
+    // cancelled while it waited is dropped here, before it costs a synthesis.
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
+    }
     if guard.is_none() {
         *guard = Some(spawn_kokoro(tts).await?);
     }
     // Try once; if the pipe is broken (the sidecar died), respawn and retry once.
-    let first = kokoro_roundtrip(guard.as_mut().unwrap(), &req).await;
-    let b64 = match first {
-        Ok(b64) => b64,
-        Err(_) => {
-            *guard = Some(spawn_kokoro(tts).await?);
-            kokoro_roundtrip(guard.as_mut().unwrap(), &req).await?
+    // Nothing else is retried: after a hang that sentence goes to the system
+    // voice and the next one gets the fresh sidecar, and an error the sidecar
+    // reported for this text or voice would only be reported again.
+    let b64 = match kokoro_request(&mut guard, tts, &req, limit).await {
+        Err(e) if guard.is_none() && e != KOKORO_HUNG => {
+            kokoro_request(&mut guard, tts, &req, limit).await?
         }
+        result => result?,
     };
-    let _ = app; // reserved for a future "kokoro-speaking" event
     Ok(TtsAudio {
         audio_base64: b64,
         mime: "audio/wav".to_string(),
+        speed,
     })
+}
+
+/// One request against the warm sidecar (spawning it if there is none),
+/// bounded by `limit`. A sidecar whose pipe broke is dropped, and one that
+/// doesn't answer in time is killed and dropped, so the next request spawns a
+/// fresh one instead of queueing behind a hung process forever. One that
+/// reports an error for the request stays: it is healthy, and reloading the
+/// model takes seconds.
+async fn kokoro_request(
+    slot: &mut Option<KokoroSidecar>,
+    tts: &TtsState,
+    req: &str,
+    limit: Duration,
+) -> Result<String, String> {
+    let sc = match slot {
+        Some(sc) => sc,
+        None => slot.insert(spawn_kokoro(tts).await?),
+    };
+    let msg = match tokio::time::timeout(limit, kokoro_roundtrip(sc, req)).await {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            *slot = None;
+            return Err(e);
+        }
+        Err(_) => {
+            if let Some(mut hung) = slot.take() {
+                let _ = hung.child.start_kill();
+            }
+            tracing::warn!(target: "kokoro", "no answer in {limit:?}; killed the sidecar");
+            return Err(KOKORO_HUNG.to_string());
+        }
+    };
+    if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
+        return Err(format!("Kokoro synth error: {err}"));
+    }
+    msg.get("audio")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Kokoro returned no audio".to_string())
 }
 
 /// Spawn the Python sidecar, materializing the bundled script first, and wait for
@@ -495,15 +689,23 @@ async fn spawn_kokoro(tts: &TtsState) -> Result<KokoroSidecar, String> {
         stdout: BufReader::new(stdout).lines(),
     };
     // Handshake — the sidecar prints exactly one of `ready`/`error` once loaded.
-    let msg = read_kokoro_msg(&mut sidecar.stdout).await?;
+    // Bounded too: the caller holds the Kokoro lock, and every sentence waits
+    // on it. Dropping the child on the way out kills it (`kill_on_drop`).
+    let msg = tokio::time::timeout(KOKORO_SPAWN_TIMEOUT, read_kokoro_msg(&mut sidecar.stdout))
+        .await
+        .map_err(|_| "the Kokoro voice didn't finish loading within a minute".to_string())??;
     if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
         return Err(format!("Kokoro failed to start: {err}"));
     }
     Ok(sidecar)
 }
 
-/// Send one request line and read back the single response object.
-async fn kokoro_roundtrip(sc: &mut KokoroSidecar, req_json: &str) -> Result<String, String> {
+/// Send one request line and read back the single response object. An `Err`
+/// means the pipe failed, i.e. the sidecar is gone.
+async fn kokoro_roundtrip(
+    sc: &mut KokoroSidecar,
+    req_json: &str,
+) -> Result<serde_json::Value, String> {
     let line = format!("{req_json}\n");
     sc.stdin
         .write_all(line.as_bytes())
@@ -513,14 +715,7 @@ async fn kokoro_roundtrip(sc: &mut KokoroSidecar, req_json: &str) -> Result<Stri
         .flush()
         .await
         .map_err(|e| format!("Kokoro flush failed: {e}"))?;
-    let msg = read_kokoro_msg(&mut sc.stdout).await?;
-    if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
-        return Err(format!("Kokoro synth error: {err}"));
-    }
-    msg.get("audio")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Kokoro returned no audio".to_string())
+    read_kokoro_msg(&mut sc.stdout).await
 }
 
 /// Read the next protocol message, skipping any non-protocol chatter the Python
@@ -586,15 +781,28 @@ pub async fn tts_kokoro_status(tts: tauri::State<'_, TtsState>) -> Result<Kokoro
 /// Pre-spawn the Kokoro sidecar (which loads the model during its handshake) so
 /// the first real sentence doesn't pay the ~seconds of cold-start. Best-effort:
 /// a no-op unless Kokoro is the engine and installed.
+///
+/// An install that only has the int8 model then fetches the fp32 one in the
+/// background of this call (`kokoro-setup` phase `upgrade`), which is why
+/// every caller fires it and forgets it rather than awaiting it.
 #[tauri::command]
-pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>) -> Result<(), String> {
+pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>, app: AppHandle) -> Result<(), String> {
     let engine = tts.db.get_setting(SETTING_ENGINE).unwrap_or_default();
     if engine != "kokoro" || !tts.model_present() {
         return Ok(());
     }
-    let mut guard = tts.kokoro.lock().await;
-    if guard.is_none() {
-        *guard = Some(spawn_kokoro(&tts).await?);
+    {
+        let mut guard = tts.kokoro.lock().await;
+        if guard.is_none() {
+            *guard = Some(spawn_kokoro(&tts).await?);
+        }
+    }
+    // Every panel open warms, so only the first one with nothing downloading
+    // starts the upgrade; a failed one is tried again on a later open.
+    if tts.needs_model_upgrade() && tts.model_dl.try_lock().is_ok() {
+        if let Err(e) = ensure_current_model(&tts, &app, "upgrade").await {
+            tracing::warn!(target: "kokoro", "model upgrade failed, keeping the int8 model: {e}");
+        }
     }
     Ok(())
 }
@@ -741,7 +949,7 @@ async fn ensure_uv(tts: &TtsState, app: &AppHandle) -> Result<PathBuf, String> {
     let url = format!("https://github.com/astral-sh/uv/releases/latest/download/{asset}.tar.gz");
     let tarball = tts.kokoro_dir.join("uv.tar.gz");
     let _ = tokio::fs::remove_file(&tarball).await;
-    download_if_missing(tts, app, &url, &tarball, "uv").await?;
+    download_if_missing(tts, app, &url, &tarball, "uv", None).await?;
 
     // Unpack with the system `tar` (gzip built in on macOS) and lift out the
     // single `uv` binary; the tarball expands to `<asset>/uv`.
@@ -847,17 +1055,29 @@ async fn ensure_kokoro_venv(tts: &TtsState, app: &AppHandle) -> Result<(), Strin
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KokoroSetup {
-    /// `"model"`, `"voices"`, or `"done"`.
+    /// `"model"`, `"voices"`, `"upgrade"` (the fp32 model replacing an
+    /// install's int8 one, in the background), or `"done"`.
     phase: String,
     received: u64,
     total: u64,
 }
 
-/// Download the Kokoro model + voices into the app data dir (idempotent — skips
-/// files already present). Emits `kokoro-setup` progress events.
+fn emit_setup(app: &AppHandle, phase: &str, received: u64, total: u64) {
+    let _ = app.emit(
+        "kokoro-setup",
+        KokoroSetup {
+            phase: phase.to_string(),
+            received,
+            total,
+        },
+    );
+}
+
 /// One-click "Enable natural voice": set up a private Python venv with
-/// `kokoro-onnx` (only if one isn't already reachable) and download the model.
-/// The user installs and configures nothing.
+/// `kokoro-onnx` (only if one isn't already reachable) and download the model
+/// and voices into the app data dir (idempotent — skips files already present).
+/// Emits `kokoro-setup` progress events. The user installs and configures
+/// nothing.
 #[tauri::command]
 pub async fn tts_kokoro_install(
     tts: tauri::State<'_, TtsState>,
@@ -882,18 +1102,46 @@ pub async fn tts_kokoro_install(
     }
 
     // 2. The model files.
-    download_if_missing(&tts, &app, KOKORO_MODEL_URL, &tts.model_path(), "model").await?;
-    download_if_missing(&tts, &app, KOKORO_VOICES_URL, &tts.voices_path(), "voices").await?;
+    ensure_current_model(&tts, &app, "model").await?;
+    let voices = tts.voices_path();
+    download_if_missing(&tts, &app, KOKORO_VOICES_URL, &voices, "voices", Some(KOKORO_VOICES_CHECK))
+        .await?;
 
-    let _ = app.emit(
-        "kokoro-setup",
-        KokoroSetup {
-            phase: "done".to_string(),
-            received: 0,
-            total: 0,
-        },
-    );
+    emit_setup(&app, "done", 0, 0);
     Ok(())
+}
+
+/// Make the fp32 model the one on disk: download and verify it if it isn't
+/// there, then retire an int8 model an older install left beside it. A failed
+/// download leaves the int8 model loading as before.
+async fn ensure_current_model(tts: &TtsState, app: &AppHandle, phase: &str) -> Result<(), String> {
+    let _one_at_a_time = tts.model_dl.lock().await;
+    let dest = tts.kokoro_dir.join(KOKORO_MODEL_FILE);
+    let fetched =
+        download_if_missing(tts, app, KOKORO_MODEL_URL, &dest, phase, Some(KOKORO_MODEL_CHECK)).await;
+    if fetched.is_ok() {
+        retire_legacy_model(tts).await;
+    }
+    // Nothing awaits the background upgrade to show how it went, so it ends
+    // its own progress line either way (a failure is logged by the caller).
+    if phase == "upgrade" {
+        emit_setup(app, "done", 0, 0);
+    }
+    fetched
+}
+
+/// Once the fp32 model is in place, stop a sidecar that may still have the
+/// int8 one loaded (the next sentence spawns a fresh one on the new model) and
+/// delete the int8 file.
+async fn retire_legacy_model(tts: &TtsState) {
+    let legacy = tts.kokoro_dir.join(KOKORO_LEGACY_MODEL_FILE);
+    if !legacy.exists() || !tts.kokoro_dir.join(KOKORO_MODEL_FILE).exists() {
+        return;
+    }
+    if let Some(mut old) = tts.kokoro.lock().await.take() {
+        let _ = old.child.start_kill();
+    }
+    let _ = tokio::fs::remove_file(&legacy).await;
 }
 
 async fn download_if_missing(
@@ -902,68 +1150,91 @@ async fn download_if_missing(
     url: &str,
     dest: &Path,
     phase: &str,
+    check: Option<FileCheck>,
 ) -> Result<(), String> {
     if dest.exists() {
         return Ok(());
     }
-    // Download to a `.part` sibling, then atomically rename — a crash mid-download
-    // never leaves a truncated file that looks complete.
+    fetch_checked(&tts.http, url, dest, phase, check, DOWNLOAD_STALL, |received, total| {
+        emit_setup(app, phase, received, total)
+    })
+    .await
+}
+
+/// Stream `url` into a `.part` sibling of `dest`, then rename it into place —
+/// a crash mid-download never leaves a truncated file that looks complete.
+/// With a `check`, the file is hashed as it arrives and only the exact
+/// published file is renamed in. Any failure, including `stall` passing with
+/// nothing received, deletes the `.part`, so `dest` (and whatever model sits
+/// beside it) is left as it was.
+async fn fetch_checked(
+    http: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    phase: &str,
+    check: Option<FileCheck>,
+    stall: Duration,
+    progress: impl Fn(u64, u64),
+) -> Result<(), String> {
     let tmp = dest.with_extension("part");
-    let mut resp = tts
-        .http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "downloading the Kokoro {phase} failed: HTTP {}",
-            resp.status()
-        ));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| format!("creating the Kokoro {phase} file failed: {e}"))?;
-    let mut received: u64 = 0;
-    let mut last_emit: u64 = 0;
-    let _ = app.emit(
-        "kokoro-setup",
-        KokoroSetup {
-            phase: phase.to_string(),
-            received: 0,
-            total,
-        },
-    );
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?
-    {
-        file.write_all(&chunk)
+    let stalled = || format!("downloading the Kokoro {phase} stalled — try again");
+    let fetched = async {
+        let mut resp = tokio::time::timeout(stall, http.get(url).send())
             .await
-            .map_err(|e| format!("writing the Kokoro {phase} failed: {e}"))?;
-        received += chunk.len() as u64;
-        if received - last_emit >= KOKORO_PROGRESS_STEP {
-            last_emit = received;
-            let _ = app.emit(
-                "kokoro-setup",
-                KokoroSetup {
-                    phase: phase.to_string(),
-                    received,
-                    total,
-                },
-            );
+            .map_err(|_| stalled())?
+            .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "downloading the Kokoro {phase} failed: HTTP {}",
+                resp.status()
+            ));
         }
+        let total = resp.content_length().unwrap_or(0);
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("creating the Kokoro {phase} file failed: {e}"))?;
+        let mut hasher = check.map(|_| Sha256::new());
+        let mut received: u64 = 0;
+        let mut last_emit: u64 = 0;
+        progress(0, total);
+        while let Some(chunk) = tokio::time::timeout(stall, resp.chunk())
+            .await
+            .map_err(|_| stalled())?
+            .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("writing the Kokoro {phase} failed: {e}"))?;
+            if let Some(h) = hasher.as_mut() {
+                h.update(&chunk);
+            }
+            received += chunk.len() as u64;
+            if received - last_emit >= KOKORO_PROGRESS_STEP {
+                last_emit = received;
+                progress(received, total);
+            }
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("flushing the Kokoro {phase} failed: {e}"))?;
+        if let (Some(c), Some(h)) = (check, hasher) {
+            if received != c.bytes || format!("{:x}", h.finalize()) != c.sha256 {
+                return Err(format!(
+                    "the downloaded Kokoro {phase} wasn't the published file \
+                     ({received} bytes), so it was discarded — try again"
+                ));
+            }
+        }
+        Ok(())
     }
-    file.flush()
-        .await
-        .map_err(|e| format!("flushing the Kokoro {phase} failed: {e}"))?;
-    drop(file);
+    .await;
+    if let Err(e) = fetched {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     tokio::fs::rename(&tmp, dest)
         .await
-        .map_err(|e| format!("finalizing the Kokoro {phase} failed: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("finalizing the Kokoro {phase} failed: {e}"))
 }
 
 #[cfg(test)]
@@ -1029,5 +1300,318 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("redline-kokoro-test-{}", std::process::id()));
         let tts = TtsState::new(db, dir);
         assert!(!tts.model_present());
+    }
+
+    /// A fresh app data dir (with its `kokoro` dir) for one test.
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("redline-tts-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("kokoro")).unwrap();
+        dir
+    }
+
+    /// A stand-in for the Python sidecar. `spawn_kokoro` runs the configured
+    /// interpreter as `<python> <script> <model> <voices>`, so a shell script
+    /// in the interpreter's place speaks the protocol. It logs each spawn (with
+    /// the model it was given) and each request beside itself, and answers
+    /// every request with a tiny clip, except: it never answers one containing
+    /// "hang", reports an error for the voice "zz_nope" as kokoro-onnx does,
+    /// and exits on the first "DIE_ONCE" (answering it after a respawn). With
+    /// a `broken` file beside it, it fails to load, as a bad model does.
+    const FAKE_SIDECAR: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "spawn $2" >> "$dir/spawns.log"
+if [ -e "$dir/broken" ]; then echo '{"error":"failed to load Kokoro model: broken"}'; exit 0; fi
+echo '{"ready":true}'
+while IFS= read -r line; do
+  echo "$line" >> "$dir/requests.log"
+  case "$line" in
+    *hang*) read -r _ ;;
+    *zz_nope*) echo '{"error":"Voice zz_nope not found in available voices"}' ;;
+    *DIE_ONCE*) [ -e "$dir/died" ] || { touch "$dir/died"; exit 0; }; echo '{"audio":"UklGRg=="}' ;;
+    *) echo '{"audio":"UklGRg=="}' ;;
+  esac
+done
+"#;
+
+    /// Kokoro as the engine, installed with `model_file`, on the fake sidecar.
+    /// Returns the state and its Kokoro dir (where the fake writes its logs).
+    #[cfg(unix)]
+    fn fake_kokoro(label: &str, model_file: &str) -> (TtsState, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let data = scratch_dir(label);
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(model_file), b"").unwrap();
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let fake = dir.join("fake-python");
+        std::fs::write(&fake, FAKE_SIDECAR).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.set_setting(SETTING_ENGINE, "kokoro").unwrap();
+        db.set_setting(SETTING_PYTHON_PATH, &fake.to_string_lossy()).unwrap();
+        (TtsState::new(db, data), dir)
+    }
+
+    fn log_lines(dir: &Path, name: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Serve `body` to one HTTP request on a loopback port.
+    fn serve_once(body: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut req = [0u8; 2048];
+                let _ = s.read(&mut req);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        format!("http://{addr}/kokoro-v1.0.onnx")
+    }
+
+    /// Serve the start of a body on a loopback port, then go quiet with the
+    /// connection open, as a stalled download does.
+    fn serve_then_stall() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut req = [0u8; 2048];
+                let _ = s.read(&mut req);
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+                let _ = s.write_all(&[0u8; 10]);
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+        format!("http://{addr}/kokoro-v1.0.onnx")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_generation_never_reaches_the_sidecar() {
+        let (tts, dir) = fake_kokoro("cancelled", KOKORO_MODEL_FILE);
+        tts.cancel(41);
+        let stale = synth(&tts, "The rest of the stopped reply.", 41, None, None).await;
+        assert_eq!(stale.err().as_deref(), Some(CANCELLED));
+        assert!(log_lines(&dir, "spawns.log").is_empty(), "not even a spawn");
+        // The next generation speaks normally.
+        synth(&tts, "The next reply.", 42, None, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "requests.log").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_cancelled_while_it_waits_for_kokoro_is_dropped_on_its_turn() {
+        let (tts, dir) = fake_kokoro("queued", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        // The sentence ahead of it is synthesizing: it holds the lock.
+        let ahead = tts.kokoro.lock().await;
+        let queued = tokio::spawn({
+            let tts = tts.clone();
+            async move { synth(&tts, "Behind the stop.", 2, None, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tts.cancel(2);
+        drop(ahead);
+        assert_eq!(queued.await.unwrap().err().as_deref(), Some(CANCELLED));
+        assert_eq!(
+            log_lines(&dir, "requests.log").len(),
+            1,
+            "only the warm-up reached the sidecar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_sidecar_times_out_and_the_next_sentence_gets_a_fresh_one() {
+        let (mut tts, dir) = fake_kokoro("hung", KOKORO_MODEL_FILE);
+        tts.kokoro_timeout_floor = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let hung = synth(&tts, "hang", 1, None, None).await;
+        assert_eq!(hung.err().as_deref(), Some(KOKORO_HUNG));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(tts.kokoro.lock().await.is_none(), "the hung sidecar was dropped");
+        synth(&tts, "The next sentence.", 1, None, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 2, "respawned once");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_warm_sidecar_that_died_is_respawned_and_the_sentence_retried() {
+        let (tts, dir) = fake_kokoro("died", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        synth(&tts, "DIE_ONCE", 1, None, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sidecar_that_cant_load_is_tried_once_per_sentence() {
+        let (tts, dir) = fake_kokoro("broken", KOKORO_MODEL_FILE);
+        std::fs::write(dir.join("broken"), b"").unwrap();
+        let err = synth(&tts, "One.", 1, None, None).await.err().unwrap();
+        assert!(err.contains("failed to load"), "{err}");
+        // A second spawn would fail the same way, and every sentence waits on
+        // the lock behind it (up to a minute each when the load hangs).
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_error_kokoro_reports_for_a_request_keeps_the_warm_sidecar() {
+        let (tts, dir) = fake_kokoro("synth-error", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        let err = synth(&tts, "A sample.", 1, None, Some("zz_nope".into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(err.contains("zz_nope not found"), "{err}");
+        synth(&tts, "The next sentence.", 1, None, None).await.unwrap();
+        // The sidecar is fine; reloading the model would only repeat the error.
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1);
+        assert_eq!(log_lines(&dir, "requests.log").len(), 3, "the bad one isn't retried");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kokoro_renders_the_users_speed_and_an_auditioned_voice() {
+        let (tts, dir) = fake_kokoro("speed", KOKORO_MODEL_FILE);
+        tts.db.set_setting(SETTING_KOKORO_VOICE, "am_adam").unwrap();
+        let saved = synth(&tts, "One.", 1, Some(1.5), None).await.unwrap();
+        assert_eq!(saved.speed, 1.5, "the player must not speed it up again");
+        let sample = synth(&tts, "Two.", 1, Some(9.0), Some("af_heart+am_michael".into()))
+            .await
+            .unwrap();
+        assert_eq!(sample.speed, 2.0, "clamped to what kokoro-onnx accepts");
+        let reqs: Vec<serde_json::Value> = log_lines(&dir, "requests.log")
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(reqs[0]["voice"], "am_adam");
+        assert_eq!(reqs[0]["speed"], 1.5);
+        assert_eq!(reqs[1]["voice"], "af_heart+am_michael");
+        assert_eq!(reqs[1]["speed"], 2.0);
+        // An audition never replaces the saved voice.
+        assert_eq!(read_settings(&tts).kokoro_voice, "am_adam");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_voice_sample_uses_kokoro_whatever_engine_is_saved() {
+        let (tts, dir) = fake_kokoro("sample", KOKORO_MODEL_FILE);
+        tts.db.set_setting(SETTING_ENGINE, "system").unwrap();
+        assert!(synth(&tts, "Plain speech.", 1, None, None).await.is_err());
+        synth(&tts, "A sample.", 2, None, Some("bf_emma".into())).await.unwrap();
+        assert_eq!(log_lines(&dir, "requests.log").len(), 1);
+        assert_eq!(read_settings(&tts).engine, "system", "nothing was saved");
+    }
+
+    #[test]
+    fn the_int8_model_keeps_loading_until_the_fp32_one_is_in_place() {
+        let data = scratch_dir("models");
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        assert!(!tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_MODEL_FILE), "a fresh install gets fp32");
+        assert!(!tts.needs_model_upgrade());
+
+        std::fs::write(dir.join(KOKORO_LEGACY_MODEL_FILE), b"int8").unwrap();
+        assert!(tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE));
+        assert!(tts.needs_model_upgrade());
+
+        std::fs::write(dir.join(KOKORO_MODEL_FILE), b"fp32").unwrap();
+        assert!(tts.model_path().ends_with(KOKORO_MODEL_FILE));
+        assert!(!tts.needs_model_upgrade());
+    }
+
+    #[tokio::test]
+    async fn a_download_that_isnt_the_published_model_is_discarded() {
+        let data = scratch_dir("bad-download");
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(KOKORO_LEGACY_MODEL_FILE), b"int8").unwrap();
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        let dest = dir.join(KOKORO_MODEL_FILE);
+        let url = serve_once(b"cut off mid-download");
+        let err = fetch_checked(
+            &tts.http,
+            &url,
+            &dest,
+            "upgrade",
+            Some(KOKORO_MODEL_CHECK),
+            DOWNLOAD_STALL,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("wasn't the published file"), "{err}");
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists(), "no half file left behind");
+        assert!(tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE), "the int8 model still loads");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_download_is_given_up_and_leaves_nothing_behind() {
+        let data = scratch_dir("stalled-download");
+        let dest = data.join("kokoro").join(KOKORO_MODEL_FILE);
+        let http = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let err = fetch_checked(
+            &http,
+            &serve_then_stall(),
+            &dest,
+            "upgrade",
+            Some(KOKORO_MODEL_CHECK),
+            Duration::from_millis(300),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("stalled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(4), "not held until the server gave up");
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_download_switches_the_voice_to_fp32_and_retires_int8() {
+        let (tts, dir) = fake_kokoro("upgrade", KOKORO_LEGACY_MODEL_FILE);
+        synth(&tts, "Speaking on int8.", 1, None, None).await.unwrap();
+
+        const BODY: &[u8] = b"fp32 weights";
+        let check = FileCheck {
+            bytes: BODY.len() as u64,
+            sha256: Box::leak(format!("{:x}", Sha256::digest(BODY)).into_boxed_str()),
+        };
+        let dest = dir.join(KOKORO_MODEL_FILE);
+        let url = serve_once(BODY);
+        fetch_checked(&tts.http, &url, &dest, "upgrade", Some(check), DOWNLOAD_STALL, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), BODY);
+        retire_legacy_model(&tts).await;
+        assert!(!dir.join(KOKORO_LEGACY_MODEL_FILE).exists());
+        assert!(tts.kokoro.lock().await.is_none(), "the int8 sidecar was stopped");
+
+        synth(&tts, "Speaking on fp32.", 1, None, None).await.unwrap();
+        let spawns = log_lines(&dir, "spawns.log");
+        assert!(spawns[0].ends_with(KOKORO_LEGACY_MODEL_FILE), "{spawns:?}");
+        assert!(spawns[1].ends_with(KOKORO_MODEL_FILE), "{spawns:?}");
     }
 }

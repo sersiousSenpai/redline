@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import { playVoiceSample } from "../audio/cloudTts";
+import {
+  describeVoice,
+  gradeRank,
+  isLowGrade,
+  joinBlend,
+  KOKORO_VOICES,
+  splitBlend,
+} from "../audio/kokoroVoices";
+import { loadVoicePrefs } from "../audio/speech";
 
 /** TTS engines the panel can select. `system` is the built-in (free, robotic)
  *  `speechSynthesis`; `kokoro` is a free natural voice that runs locally; `openai`
@@ -42,21 +53,6 @@ const OPENAI_VOICES = [
   "shimmer", "verse",
 ];
 
-// A curated subset of Kokoro-82M's voices (it ships many more).
-const KOKORO_VOICES: { id: string; label: string }[] = [
-  { id: "af_heart", label: "Heart — US female (warm)" },
-  { id: "af_bella", label: "Bella — US female" },
-  { id: "af_nicole", label: "Nicole — US female (soft)" },
-  { id: "af_sarah", label: "Sarah — US female" },
-  { id: "am_adam", label: "Adam — US male" },
-  { id: "am_michael", label: "Michael — US male" },
-  { id: "am_puck", label: "Puck — US male (lively)" },
-  { id: "bf_emma", label: "Emma — UK female" },
-  { id: "bf_isabella", label: "Isabella — UK female" },
-  { id: "bm_george", label: "George — UK male" },
-  { id: "bm_lewis", label: "Lewis — UK male" },
-];
-
 // A few ElevenLabs stock voices (IDs are stable across accounts). Any voice ID
 // from the user's ElevenLabs library can be pasted in instead.
 const ELEVEN_VOICES: { id: string; label: string }[] = [
@@ -71,6 +67,25 @@ const ELEVEN_VOICES: { id: string; label: string }[] = [
 const ELEVEN_MODEL = "eleven_turbo_v2_5";
 
 const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
+
+const label: React.CSSProperties = {
+  fontSize: "12px",
+  fontWeight: 600,
+  color: "var(--color-ink)",
+};
+const field: React.CSSProperties = {
+  fontSize: "12px",
+  background: "var(--color-paper)",
+  color: "var(--color-ink)",
+  border: "1px solid var(--color-rule)",
+  borderRadius: "4px",
+  padding: "5px 7px",
+  width: "100%",
+};
+const muted: React.CSSProperties = {
+  fontSize: "11px",
+  color: "var(--color-ink-muted, #888)",
+};
 
 interface VoiceSettingsProps {
   onClose: () => void;
@@ -225,7 +240,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             ? "Downloading the voice model…"
             : p === "voices"
               ? "Downloading voices…"
-              : "Working…";
+              : p === "upgrade"
+                ? "Downloading the faster voice model…"
+                : "Working…";
 
   const save = async () => {
     setSaving(true);
@@ -250,25 +267,6 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     } finally {
       setSaving(false);
     }
-  };
-
-  const label: React.CSSProperties = {
-    fontSize: "12px",
-    fontWeight: 600,
-    color: "var(--color-ink)",
-  };
-  const field: React.CSSProperties = {
-    fontSize: "12px",
-    background: "var(--color-paper)",
-    color: "var(--color-ink)",
-    border: "1px solid var(--color-rule)",
-    borderRadius: "4px",
-    padding: "5px 7px",
-    width: "100%",
-  };
-  const muted: React.CSSProperties = {
-    fontSize: "11px",
-    color: "var(--color-ink-muted, #888)",
   };
 
   const kokoroReady =
@@ -322,7 +320,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <span style={muted}>
             Kokoro runs fully on your Mac — free, no key, offline. The first time,
             Redline sets up a private voice engine and downloads the model
-            (~250&nbsp;MB). You don't need to install anything.
+            (~600&nbsp;MB). You don't need to install anything.
           </span>
 
           {kokoroStatus &&
@@ -349,7 +347,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                   alignSelf: "flex-start",
                 }}
               >
-                {installing ? "Setting up…" : "Enable natural voice (~250 MB)"}
+                {installing ? "Setting up…" : "Enable natural voice (~600 MB)"}
               </button>
               {installing && (
                 <div className="flex flex-col gap-1">
@@ -389,20 +387,20 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             </div>
           )}
 
-          <div className="flex flex-col gap-1.5">
-            <span style={label}>Voice</span>
-            <select
-              value={kokoroVoice}
-              onChange={(e) => setKokoroVoice(e.target.value)}
-              style={field}
-            >
-              {KOKORO_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          {progress?.phase === "upgrade" && !installing && (
+            <span style={muted}>
+              Downloading a faster voice model in the background
+              {progress.total ? ` — ${mb(progress.received)} / ${mb(progress.total)}` : "…"}
+              . The current one keeps talking until it's ready.
+            </span>
+          )}
+
+          <KokoroVoicePicker
+            value={kokoroVoice}
+            onChange={setKokoroVoice}
+            canSample={kokoroReady}
+            onError={setError}
+          />
         </div>
       )}
 
@@ -607,5 +605,193 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         </button>
       </div>
     </div>
+  );
+}
+
+/** Kokoro's English voices as a list to audition: each with its published
+ *  grade, best first, and a ▶ that plays a sample at the user's speed without
+ *  saving anything. The saved voice is only ever changed by the user's pick. */
+function KokoroVoicePicker({
+  value,
+  onChange,
+  canSample,
+  onError,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  canSample: boolean;
+  onError: (msg: string) => void;
+}) {
+  const [voice, blend] = splitBlend(value);
+  const current = describeVoice(voice);
+  // A saved voice outside the table (set by hand) still shows, ungraded.
+  const rows = KOKORO_VOICES.some((v) => v.id === voice)
+    ? KOKORO_VOICES
+    : [current, ...KOKORO_VOICES];
+
+  // Keep the chosen voice in view: a saved voice graded low sits far down the
+  // list, and it should be seen among its neighbours, not found by scrolling.
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = listRef.current;
+    const row = list?.querySelector("input:checked")?.parentElement?.parentElement;
+    if (!list || !row) return;
+    const top = row.offsetTop;
+    if (top < list.scrollTop || top + row.offsetHeight > list.scrollTop + list.clientHeight) {
+      list.scrollTop = top - (list.clientHeight - row.offsetHeight) / 2;
+    }
+  }, [voice]);
+
+  // The voice value whose sample is playing, and how to stop it. Starting a
+  // sample stops the last one; leaving settings stops it too.
+  const [sampling, setSampling] = useState<string | null>(null);
+  const stopSample = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopSample.current?.(), []);
+  const sample = (v: string) => {
+    stopSample.current?.();
+    stopSample.current = null;
+    if (sampling === v) {
+      setSampling(null);
+      return;
+    }
+    setSampling(v);
+    stopSample.current = playVoiceSample(v, loadVoicePrefs().rate, (err) => {
+      stopSample.current = null;
+      setSampling(null);
+      if (err) onError(err);
+    });
+  };
+  const playButton = (v: string, name: string) => (
+    <button
+      type="button"
+      onClick={() => sample(v)}
+      disabled={!canSample}
+      aria-label={sampling === v ? "Stop the sample" : `Play a sample of ${name}`}
+      title={canSample ? undefined : "Set up the natural voice first"}
+      className="rounded-sm"
+      style={{
+        width: "28px",
+        height: "28px",
+        flexShrink: 0,
+        fontSize: "11px",
+        color: "var(--color-ink)",
+        cursor: canSample ? "pointer" : "default",
+        opacity: canSample ? 1 : 0.4,
+      }}
+    >
+      {sampling === v ? "■" : "▶"}
+    </button>
+  );
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span style={label}>Voice</span>
+        <span style={muted}>
+          {current.name}
+          {current.grade && ` · grade ${current.grade}`}
+        </span>
+      </div>
+      <span style={muted}>
+        Kokoro's author grades each voice by its training audio; higher grades
+        sound more natural. ▶ plays a sample.
+      </span>
+      <div
+        ref={listRef}
+        role="radiogroup"
+        aria-label="Kokoro voice"
+        className="rl-thin-scroll-y"
+        style={{
+          position: "relative",
+          maxHeight: "216px",
+          overflowY: "auto",
+          border: "1px solid var(--color-rule)",
+          borderRadius: "4px",
+        }}
+      >
+        {rows.map((v) => (
+          <div
+            key={v.id}
+            className="flex items-center pr-1"
+            style={{ background: v.id === voice ? "var(--color-anchor-bg)" : undefined }}
+          >
+            <label
+              className="flex items-center gap-2 flex-1"
+              style={{
+                minHeight: "30px",
+                padding: "0 8px",
+                fontSize: "12px",
+                color: "var(--color-ink)",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="radio"
+                name="kokoro-voice"
+                checked={v.id === voice}
+                onChange={() => onChange(joinBlend(v.id, blend))}
+              />
+              <span style={{ fontWeight: v.id === voice ? 600 : 400 }}>{v.name}</span>
+              <span style={muted}>{v.kind}</span>
+              <GradeBadge grade={v.grade} />
+            </label>
+            {playButton(v.id, v.name)}
+          </div>
+        ))}
+      </div>
+      {current.grade && isLowGrade(current.grade) && (
+        <span style={muted}>
+          {current.name} is graded {current.grade}: it had little clean training
+          audio, so it can sound strained. Heart (A) and Bella (A-) are the most
+          natural; Fenrir, Michael and Puck (C+) are the strongest male voices.
+        </span>
+      )}
+      <div className="flex items-center gap-2">
+        <span style={{ ...label, flexShrink: 0 }}>Blend with</span>
+        <select
+          value={blend ?? ""}
+          onChange={(e) => onChange(joinBlend(voice, e.target.value || null))}
+          style={{ ...field, flex: 1, minWidth: 0 }}
+        >
+          <option value="">Nothing (one voice)</option>
+          {KOKORO_VOICES.filter((v) => v.id !== voice).map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.name}, {v.kind} ({v.grade})
+            </option>
+          ))}
+        </select>
+        {blend && playButton(value, `the ${current.name} and ${describeVoice(blend).name} blend`)}
+      </div>
+    </div>
+  );
+}
+
+/** A voice's grade as a small badge: framed in the success tone for A–B, the
+ *  warning tone below C-. The text carries the meaning; color only echoes it. */
+function GradeBadge({ grade }: { grade: string }) {
+  if (!grade) return null;
+  const tone =
+    gradeRank(grade) <= gradeRank("B-")
+      ? "var(--color-success)"
+      : isLowGrade(grade)
+        ? "var(--color-warning)"
+        : "var(--color-rule)";
+  return (
+    <span
+      className="ml-auto"
+      style={{
+        minWidth: "26px",
+        textAlign: "center",
+        fontSize: "11px",
+        fontWeight: 600,
+        padding: "0 4px",
+        borderRadius: "3px",
+        border: `1px solid ${tone}`,
+        color: "var(--color-ink)",
+      }}
+    >
+      <span className="sr-only">grade </span>
+      {grade}
+    </span>
   );
 }

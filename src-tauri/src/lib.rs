@@ -13101,6 +13101,7 @@ pub fn run() {
             tts::tts_get_settings,
             tts::tts_set_settings,
             tts::tts_synth,
+            tts::tts_cancel,
             tts::tts_kokoro_status,
             tts::tts_kokoro_install,
             tts::tts_kokoro_warm,
