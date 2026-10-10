@@ -1079,7 +1079,7 @@ fn turn_target_block(label: &str, following_tabs: bool, mission_id: Option<&str>
     if let Some(id) = mission_id {
         tail.push_str(&format!("Captured mission/workspace ID: {id}. Read its goal and findings through GET /v1/missions/{id} and /v1/missions/{id}/findings. Do not substitute the globally active mission during this turn.\n"));
     } else {
-        tail.push_str("Captured workspace: regular browsing, with no mission. Do not inherit a mission activated after this message was sent.\n");
+        tail.push_str("Captured workspace: no mission (regular browsing or a Mosaic). Do not inherit a mission activated after this message was sent.\n");
     }
     tail
 }
@@ -2683,6 +2683,8 @@ mod contract {
         let regular = super::turn_target_block("browser-t-1", false, None);
         assert!(regular.contains(c["scopePhrases"]["pinned-page"].as_str().unwrap()));
         assert!(!regular.contains("/v1/missions/"));
+        // A Mosaic's turn is captured the same way, and told so.
+        assert!(regular.contains("no mission (regular browsing or a Mosaic)"));
     }
 
     /// The skill teaches what the backend does: shared chats, the captured
