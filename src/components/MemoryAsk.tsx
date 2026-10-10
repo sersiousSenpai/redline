@@ -11,18 +11,21 @@ import { extractCitations } from "../lib/memcite";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useSharedDraft } from "../hooks/useSharedDraft";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
-import TurnFooter from "./TurnFooter";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
+import { QueueTray } from "./QueueTray";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
-import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
+import type { ChatProgressStatus } from "../lib/chatProgress";
 
 // The Memory surface's Ask tab (Second Brain P4): ONE persisted conversation
 // over the lake + catalog, backed by memchat.rs on the `memchat-*` event
 // family. Replies render through the markdown pipeline, and the citations the
 // agent actually wrote (`#seq`, `[[Class]]`) become chips that jump the
 // Timeline to that evidence via `onCite` — the surface owns the tab switch.
+
+/** The memory agent runs on Claude, and a reply is signed by its provider
+ *  (BC-26) — the same name streaming and settled. */
+const BYLINE = "Claude";
 
 interface MemoryAskProps {
   /** Focus the Timeline on cited evidence (the surface switches tabs). */
@@ -43,6 +46,7 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
   // The Ask thread is a singleton (`threadId` is the constant "memchat").
   const {
     messages,
+    queue,
     liveText,
     status,
     startedAt,
@@ -93,10 +97,10 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
   // wall clock, so without this the user watches a blank ticker through the
   // part of the turn where the most is actually happening. Rides the same
   // event channel as the deltas — no new polling.
-  const [retrieving, setRetrieving] = useState<string | null>(null);
+  const [retrieving, setRetrieving] = useState<ChatProgressStatus | null>(null);
   useEffect(() => {
     const un = listen<{ threadId: string; label: string }>("memchat-status", (e) => {
-      setRetrieving(e.payload.label);
+      setRetrieving({ label: e.payload.label, at: Date.now() });
     });
     return () => {
       void un.then((f) => f());
@@ -198,21 +202,6 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
         </button>
       </div>
 
-      {notice && (
-        <div
-          className="font-sans"
-          style={{
-            padding: "6px 16px",
-            fontSize: 12,
-            color: "var(--color-warning)",
-            borderBottom: "1px solid var(--color-rule)",
-            flexShrink: 0,
-          }}
-        >
-          {notice}
-        </div>
-      )}
-
       {/* Thread */}
       <div
         ref={scrollRef}
@@ -224,7 +213,9 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
           style={{
             maxWidth: 780,
             margin: "0 auto",
-            padding: "14px 20px 18px",
+            // The bottom keeps the queue tray's pill clear of the newest line:
+            // the tray overlays the thread rather than shrinking it.
+            padding: "14px 20px 36px",
             display: "flex",
             flexDirection: "column",
             gap: 14,
@@ -241,36 +232,39 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
                 contextReset={resets.has(m.id)}
                 onCite={onCite}
                 onCiteClass={citeClass}
-                onUnqueue={() => {
-                  void unqueue(m.id).then((text) => {
-                    if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
-                  });
-                }}
                 onResend={() => send(m.body)}
               />
             ))
           )}
           {status === "streaming" && (
-            <>
-              {/* One shared bubble now — the badge and the activity line fill
-                  the wait the blank ticker used to. */}
-              <StreamingBubble
-                text={liveText}
-                agent="Memory"
-                inspect={{ surface: "memchat", key: "memchat" }}
-                meter={meter}
-                activity={activity}
-              />
-              {!liveText && (
-                <WorkingIndicator
-                  label={retrieving ?? "Thinking"}
-                  startedAt={startedAt ?? undefined}
-                />
-              )}
-            </>
+            // Its tail is the turn's one status line, narrating retrieval
+            // until the answer starts.
+            <ReplyBlock
+              phase="live"
+              byline={BYLINE}
+              text={liveText}
+              meter={meter}
+              activity={activity}
+              startedAt={startedAt}
+              status={retrieving}
+            >
+              <Evidence body={liveText} onCite={onCite} onCiteClass={citeClass} />
+            </ReplyBlock>
           )}
+          {/* A note ends the thread, quietly: a bar above it would take
+              height from the thread. */}
+          {notice && <p className="rl-thread-note" aria-live="polite">{notice}</p>}
         </div>
       </div>
+
+      <QueueTray
+        rows={queue.map((row) => ({ id: row.id, text: row.body }))}
+        onRemove={(id) => {
+          void unqueue(id).then((text) => {
+            if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+          });
+        }}
+      />
 
       {/* Composer */}
       <div
@@ -312,72 +306,19 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
               borderRadius: 8,
             }}
           />
-          {status === "streaming" && (
-            <button
-              type="button"
-              className="font-sans"
-              onClick={cancel}
-              title="Stop the current reply (queued questions still send)"
-              style={{
-                fontSize: "11px",
-                padding: "6px 14px",
-                borderRadius: 8,
-                cursor: "pointer",
-                border: "1px solid var(--color-rule)",
-                background: "var(--color-bg-elevated)",
-                color: "var(--color-ink)",
-              }}
-            >
-              Stop
-            </button>
-          )}
-          <button
-            type="button"
-            className="font-sans"
-            onClick={() => {
+          <SendStopButton
+            state={sendState(status === "streaming", !!draft.trim())}
+            label="Ask"
+            onSend={() => {
               send(draft);
               setDraft("");
             }}
+            onStop={cancel}
             disabled={!draft.trim()}
-            title={
-              status === "streaming"
-                ? "Queue this question — it sends when the reply finishes"
-                : undefined
-            }
-            style={{
-              fontSize: "11px",
-              padding: "6px 14px",
-              borderRadius: 8,
-              cursor: "pointer",
-              border: "none",
-              background: "var(--color-info)",
-              color: "var(--color-on-accent)",
-              opacity: draft.trim() ? 1 : 0.5,
-            }}
-          >
-            Ask
-          </button>
+          />
         </div>
       </div>
     </div>
-  );
-}
-
-function RoleTag({ role }: { role: string }) {
-  const isUser = role === "user";
-  return (
-    <span
-      className="font-sans"
-      style={{
-        fontSize: "9px",
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.07em",
-        color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
-      }}
-    >
-      {isUser ? "You" : "Memory"}
-    </span>
   );
 }
 
@@ -385,7 +326,6 @@ function AskBubble({
   msg,
   onCite,
   onCiteClass,
-  onUnqueue,
   onResend,
   meter,
   contextReset,
@@ -393,74 +333,75 @@ function AskBubble({
   msg: MemChatMessage;
   onCite: (focus: TimelineFocus) => void;
   onCiteClass: (title: string) => void;
-  onUnqueue?: () => void;
   onResend?: () => void;
-  /** This row's settled meter — the badge and footer that outlive the turn. */
+  /** This row's settled meter — the byline, steps line and tail it keeps. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
 }) {
-  const isUser = msg.role === "user";
+  if (msg.role === "user") {
+    return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} />;
+  }
   const isError = msg.status === "error";
-  const isQueued = isUser && msg.status === "queued";
-  const isUnsent = isUser && msg.status === "unsent";
-  const cites = !isUser && !isError ? extractCitations(msg.body) : { seqs: [], classes: [] };
+  return (
+    <ReplyBlock
+      phase="settled"
+      byline={BYLINE}
+      text={msg.body}
+      error={isError}
+      meter={meter}
+      contextReset={contextReset}
+      inspect={{ surface: "memchat", key: "memchat" }}
+    >
+      {!isError && <Evidence body={msg.body} onCite={onCite} onCiteClass={onCiteClass} />}
+    </ReplyBlock>
+  );
+}
+
+/** The chips for what a reply cites, under its text in both phases — read
+ *  off the streaming text too, so the row never arrives when it settles. */
+function Evidence({
+  body,
+  onCite,
+  onCiteClass,
+}: {
+  body: string;
+  onCite: (focus: TimelineFocus) => void;
+  onCiteClass: (title: string) => void;
+}) {
+  const cites = useMemo(() => extractCitations(body), [body]);
+  if (cites.seqs.length === 0 && cites.classes.length === 0) return null;
   return (
     <div
-      className="flex flex-col gap-0.5"
-      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+      className="font-sans"
+      style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4, alignItems: "center" }}
     >
-      <RoleTag role={msg.role} />
-      {isError ? (
-        <div
-          style={{
-            fontSize: "12.5px",
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            color: "var(--color-warning)",
-          }}
-        >
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={msg.body} compact rich={!isUser} />
+      <span style={{ fontSize: 10, color: "var(--color-ink-muted)" }}>Evidence</span>
+      {cites.seqs.map((s) => (
+        <CiteChip
+          key={`s${s}`}
+          label={`#${s}`}
+          title={`Jump the Timeline to event #${s}`}
+          onClick={() => onCite({ seqs: [s], label: `#${s}` })}
+        />
+      ))}
+      {cites.seqs.length > 1 && (
+        <CiteChip
+          label="all cited"
+          title="Filter the Timeline to every event this reply cites"
+          onClick={() =>
+            onCite({ seqs: cites.seqs, label: `${cites.seqs.length} cited events` })
+          }
+        />
       )}
-      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
-      {isUnsent && <UnsentNote onResend={onResend} />}
-      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
-      {(cites.seqs.length > 0 || cites.classes.length > 0) && (
-        <div
-          className="font-sans"
-          style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 4, alignItems: "center" }}
-        >
-          <span style={{ fontSize: 10, color: "var(--color-ink-muted)" }}>Evidence</span>
-          {cites.seqs.map((s) => (
-            <CiteChip
-              key={`s${s}`}
-              label={`#${s}`}
-              title={`Jump the Timeline to event #${s}`}
-              onClick={() => onCite({ seqs: [s], label: `#${s}` })}
-            />
-          ))}
-          {cites.seqs.length > 1 && (
-            <CiteChip
-              label="all cited"
-              title="Filter the Timeline to every event this reply cites"
-              onClick={() =>
-                onCite({ seqs: cites.seqs, label: `${cites.seqs.length} cited events` })
-              }
-            />
-          )}
-          {cites.classes.map((c) => (
-            <CiteChip
-              key={`c${c.toLowerCase()}`}
-              label={c}
-              title={`Filter the Timeline to events filed under “${c}”`}
-              onClick={() => onCiteClass(c)}
-            />
-          ))}
-        </div>
-      )}
+      {cites.classes.map((c) => (
+        <CiteChip
+          key={`c${c.toLowerCase()}`}
+          label={c}
+          title={`Filter the Timeline to events filed under “${c}”`}
+          onClick={() => onCiteClass(c)}
+        />
+      ))}
     </div>
   );
 }

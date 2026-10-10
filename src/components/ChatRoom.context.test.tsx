@@ -26,7 +26,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: async (event: string, handler: (e: { payload: unknown }) => void) => { listeners.set(event, handler); return () => listeners.delete(event); },
 }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div>{body}</div> }));
-vi.mock("./StreamingBubble", () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
+vi.mock("./StreamingText", () => ({ StreamingText: ({ text }: { text: string }) => <div>{text}</div> }));
 import { ChatRoom, type ChatRoomProps, type ChatWorkbenchComposer } from "./ChatRoom";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 
@@ -131,7 +131,8 @@ describe("chat context, out of band", () => {
     turn.queue = [{ id: "m-queued", body: "and now?" }];
     turn.unqueue.mockResolvedValueOnce("and now?").mockResolvedValueOnce(null);
     await render({ onContextLost });
-    const remove = () => host.querySelector<HTMLButtonElement>('[aria-label="Delete and now?"]')!;
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-queue-pill")!.click());
+    const remove = () => host.querySelector<HTMLButtonElement>('[aria-label="Unqueue and now?"]')!;
     await act(async () => remove().click());
     expect(turn.unqueue).toHaveBeenCalledWith("m-queued");
     expect(onContextLost).toHaveBeenCalledTimes(2);

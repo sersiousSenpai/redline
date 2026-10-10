@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// The streaming bubble renders a reply in two halves — the closed blocks
-// parsed once, the open block re-rendered alone — and that is only a perf
-// change if nobody can see it. These tests stream real-shaped replies through
-// it a few characters at a time and hold the markup to a single full render
-// at every step, and pin that the closed half really is left alone.
+// A streaming reply renders in two halves — the closed blocks parsed once,
+// the open block re-rendered alone — and that is only a perf change if nobody
+// can see it. These tests stream real-shaped replies through it a few
+// characters at a time and hold the markup to a single full render at every
+// step, and pin that the closed half really is left alone.
 import { act, createElement, memo, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +22,7 @@ vi.mock("./MarkdownView", async (importOriginal) => {
   return { ...actual, MarkdownView: Counted };
 });
 
-import StreamingBubble, { StreamingText } from "./StreamingBubble";
+import { StreamingText } from "./StreamingText";
 import { MarkdownView, renderLiveMarkdown, splitsCleanly } from "./MarkdownView";
 import { splitAtClosedBlock } from "../lib/streamSplit";
 
@@ -150,7 +150,7 @@ function fullRender(text: string): string {
   return renderLiveMarkdown(text, openFence < 0 ? -1 : openFence + headLines);
 }
 
-/** The halves rendered apart, as the bubble does. */
+/** The halves rendered apart, as the live reply does. */
 function splitRender(text: string): string {
   const { head, tail, openFence } = splitAtClosedBlock(text);
   return renderLiveMarkdown(head, -1) + renderLiveMarkdown(tail, openFence);
@@ -207,8 +207,8 @@ afterEach(async () => {
   host.remove();
 });
 
-const bubble = (props: Partial<ComponentProps<typeof StreamingBubble>> & { text: string }) =>
-  act(async () => root.render(<StreamingBubble agent="Claude" {...props} />));
+const stream = (props: ComponentProps<typeof StreamingText>) =>
+  act(async () => root.render(<StreamingText {...props} />));
 const view = () => host.querySelector(".rl-md") as HTMLElement;
 /** Markup as the DOM serializes it, so strings compare like rendered nodes. */
 const serialized = (html: string) => {
@@ -217,18 +217,23 @@ const serialized = (html: string) => {
   return div.innerHTML;
 };
 
-describe("StreamingBubble", () => {
+describe("StreamingText", () => {
   it.each(FIXTURES)("%s: streams to the markup of one full MarkdownView", async (_, text) => {
     for (let n = 5; n < text.length + 5; n += 5) {
       const prefix = text.slice(0, n);
-      await bubble({ text: prefix });
+      await stream({ text: prefix });
       expect(view().innerHTML, `after ${n} chars`).toBe(serialized(fullRender(prefix)));
     }
-    // The finished reply, against a real full render with the same props.
+    // The finished reply, against a real full render with the same props —
+    // and against the settled row's `rich` render, the same markup for a
+    // body with no diagram: nothing moves when the reply settles. (A diagram
+    // streams as its fence and settles drawn; that one is allowed to differ.)
     const reference = document.createElement("div");
     const referenceRoot = createRoot(reference);
-    await act(async () => referenceRoot.render(<MarkdownView body={text} compact />));
-    expect(view().outerHTML).toBe(reference.firstElementChild?.outerHTML);
+    for (const rich of text.includes(`${FENCE}mermaid`) ? [false] : [false, true]) {
+      await act(async () => referenceRoot.render(<MarkdownView body={text} compact rich={rich} />));
+      expect(view().outerHTML, rich ? "rich" : "plain").toBe(reference.firstElementChild?.outerHTML);
+    }
     await act(async () => referenceRoot.unmount());
   });
 
@@ -243,7 +248,7 @@ describe("StreamingBubble", () => {
       if (head !== last) heads.push(head);
       const before = view()?.firstChild ?? null;
       // A call site's inline link handler: a new function every render.
-      await bubble({ text: prefix, onOpenLink: () => {} });
+      await stream({ text: prefix, onOpenLink: () => {} });
       // A tail-only delta leaves the closed blocks' nodes where they were.
       if (tailOnly) expect(view().firstChild).toBe(before);
     }
@@ -262,7 +267,7 @@ describe("StreamingBubble", () => {
     expect(misread.head).toMatch(/code\n\n$/);
     for (let n = 1; n <= text.length; n++) {
       const prefix = text.slice(0, n);
-      await bubble({ text: prefix });
+      await stream({ text: prefix });
       expect(view().innerHTML, `after ${n} chars`).toBe(serialized(renderLiveMarkdown(prefix, -1)));
     }
     expect(renders).not.toContain(misread.head);
@@ -271,7 +276,7 @@ describe("StreamingBubble", () => {
   it("splits again at the next boundary markdown-it confirms", async () => {
     // A no-break space is a blank line to the scan, and text to markdown-it.
     const text = "Para\n\u00a0\nNext\n\nAfter";
-    for (let n = 1; n <= text.length; n++) await bubble({ text: text.slice(0, n) });
+    for (let n = 1; n <= text.length; n++) await stream({ text: text.slice(0, n) });
     expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
     expect(renders).not.toContain("Para\n\u00a0\n");
     expect(renders).toContain("Para\n\u00a0\nNext\n\n");
@@ -279,7 +284,7 @@ describe("StreamingBubble", () => {
 
   it("routes a link in the open block through onOpenLink", async () => {
     const onOpenLink = vi.fn();
-    await bubble({ text: "Closed.\n\nSee https://example.com/docs for", onOpenLink });
+    await stream({ text: "Closed.\n\nSee https://example.com/docs for", onOpenLink });
     expect(renders).toEqual(["Closed.\n\n"]);
     const link = view().querySelector("a")!;
     link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -291,32 +296,30 @@ describe("StreamingBubble", () => {
     // blocks' view re-renders with a new class, and React must not re-assign
     // its markup (which would take the open block's nodes with it).
     const text = "Closed.\n\nStill open";
-    await bubble({ text });
-    await bubble({ text, room: true });
+    await stream({ text });
+    await stream({ text, room: true });
     expect(view().className).toBe("rl-md rl-md-room");
     expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
   });
 
-  it("keeps the room scale, the caret, and the lead paragraph's place", async () => {
-    await bubble({ text: "Lead.\n\nNext", room: true });
+  it("keeps the room scale and the lead paragraph's place, with no caret after it", async () => {
+    await stream({ text: "Lead.\n\nNext", room: true });
     expect(view().className).toBe("rl-md rl-md-room");
     // The tail joins the same container, so `.rl-md > p:first-child` is
     // still the reply's first paragraph and nothing else.
     expect(Array.from(view().children).map((el) => el.outerHTML)).toEqual(["<p>Lead.</p>", "<p>Next</p>"]);
-    expect(host.textContent).toMatch(/Next\s*▌$/);
-    await bubble({ text: "Lead.\n\nNext", room: true, retrying: true });
+    // The markdown is the only thing in its container: no caret glyph on a
+    // line of its own that vanishes when the reply settles.
+    expect(view().nextSibling).toBeNull();
+    expect(host.textContent).toMatch(/Next\s*$/);
     expect(host.textContent).not.toContain("▌");
   });
-});
 
-describe("StreamingText", () => {
-  it("streams the same split render without the bubble around it", async () => {
-    // The plan comment's chat and the review thread: a class on the
-    // container, and no caret unless one is given.
+  it("is one markdown view in a container that carries the caller's class", async () => {
     const text = "Closed.\n\nStill open";
-    await act(async () => root.render(<StreamingText text={text} className="rl-chat-agent" />));
+    await stream({ text, className: "rl-reply-text" });
     const container = host.firstElementChild as HTMLElement;
-    expect(container.className).toBe("rl-chat-agent");
+    expect(container.className).toBe("rl-reply-text");
     expect(Array.from(container.children)).toEqual([view()]);
     expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
     expect(renders).toEqual(["Closed.\n\n"]);

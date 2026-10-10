@@ -61,6 +61,11 @@ export interface TurnMeter {
   /** The CLI's own `total_cost_usd`. Never computed from a price table. */
   costUsd: number | null;
   rev: number;
+  /** A settled turn's tool calls, oldest first (`replySteps.toolSteps`):
+   *  stored with the row's meter at settle, so the reply's steps line expands
+   *  to the same list after a relaunch as it did when the turn ended. Absent
+   *  on a live meter and on rows from before steps were kept. */
+  steps?: Activity[];
 }
 
 /** The meter event payload every `{surface}-meter` carries, minus the
@@ -249,13 +254,14 @@ export function meterBadgeLabel(m: TurnMeter | null): string | null {
 }
 
 /** The footer line under a settled bubble:
- *  `opus · xhigh · 34.2k in (91% cached) · 1.4k out · 12.4s`. */
-export function meterFooterLabel(m: TurnMeter | null): string | null {
+ *  `opus · xhigh · 34.2k in (91% cached) · 1.4k out · 12.4s`. A reply's tail
+ *  passes `withModel: false`: its byline names the model when it matters. */
+export function meterFooterLabel(m: TurnMeter | null, withModel = true): string | null {
   if (!m) return null;
   const parts: string[] = [];
-  const info = modelInfo(m.model);
+  const info = withModel ? modelInfo(m.model) : null;
   if (info) parts.push(info.short);
-  if (m.effort) parts.push(m.effort);
+  if (withModel && m.effort) parts.push(m.effort);
   const inTokens = m.inputTokens + m.cacheReadTokens + m.cacheCreationTokens;
   if (inTokens > 0) {
     const cached = cachedShare(m);

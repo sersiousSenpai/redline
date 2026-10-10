@@ -2,7 +2,7 @@
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { turn } = vi.hoisted(() => ({ turn: { messages: [] as { id: string; role: string; body: string; status: string }[], liveText: "A long reply. ".repeat(500), status: "streaming", startedAt: 1_000, loaded: true,
+const { turn } = vi.hoisted(() => ({ turn: { messages: [] as { id: string; role: string; body: string; status: string }[], queue: [], liveText: "A long reply. ".repeat(500), status: "streaming", startedAt: 1_000, loaded: true,
   send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), meter: null, activity: [], meters: {} } }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
@@ -11,7 +11,7 @@ vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false,
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => [] }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
-vi.mock("./StreamingBubble", () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
+vi.mock("./StreamingText", () => ({ StreamingText: ({ text }: { text: string }) => <div>{text}</div> }));
 import { ChatRoom } from "./ChatRoom";
 import { FrontDoor, type FrontDoorProps } from "./FrontDoor";
 import { MonochatIsland } from "./MonochatIsland";
@@ -50,7 +50,7 @@ describe("Home chat containment", () => {
     expect(host.querySelector('[role="dialog"][aria-label="Activity and usage"]')).toBeNull();
   });
 
-  it("keeps the scrolling reply separate from the fixed composer and progress", async () => {
+  it("keeps the scrolling reply separate from the fixed composer, with no strip between them", async () => {
     await render();
     const room = host.querySelector<HTMLElement>("[data-chat-room]")!;
     const messages = host.querySelector<HTMLElement>("[data-chat-messages]")!;
@@ -62,7 +62,11 @@ describe("Home chat containment", () => {
     expect(messages.style.flexBasis).toBe("0%");
     expect(composer.classList.contains("shrink-0")).toBe(true);
     expect(composer.parentElement).toBe(room);
-    expect(host.querySelector("[data-chat-progress]")?.parentElement).toBe(room);
+    // The turn's status is the reply's own tail, inside the scroller: nothing
+    // between the thread and the composer takes height from the thread.
+    expect(host.querySelector("[data-chat-progress]")).toBeNull();
+    expect(messages.querySelector("[data-reply] [role=status]")).not.toBeNull();
+    expect(composer.previousElementSibling).toBe(messages);
     expect(messages.querySelector("textarea")).toBeNull();
     expect(composer.querySelector("textarea")?.style.maxHeight).toBe("160px");
   });
@@ -75,15 +79,20 @@ describe("Home chat containment", () => {
     await act(async () => host.querySelector<HTMLButtonElement>(".rl-chat-mode-chip")!.click());
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".rl-chat-mode-menu button")].find(button => button.textContent === "Plan")!.click());
     expect(host.querySelector(".rl-chat-mode-chip")?.textContent).toContain("Plan");
-    const send = [...host.querySelectorAll<HTMLButtonElement>("[data-chat-composer] button")].slice(-1)[0]!;
-    await act(async () => send.click());
+    // With the box empty the one button is Stop; an instruction makes it
+    // queue the plan behind the reply.
+    const send = () => host.querySelector<HTMLButtonElement>("[data-chat-composer] .rl-send")!;
+    expect(send().dataset.send).toBe("stop");
+    await act(async () => writeSharedDraft("rl.chatDraft.carried-chat", "Keep it small"));
+    expect(send().dataset.send).toBe("queue");
+    await act(async () => send().click());
     expect(host.querySelector(".rl-chat-mode-chip")?.textContent).toContain("Plan");
-    expect(host.querySelector('[aria-label="Queued messages"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Queued messages"]')?.textContent).toContain("Keep it small");
     expect(onPlan).not.toHaveBeenCalled();
     turn.status = "idle";
     await act(async () => renderPlanning());
     expect(onPlan).toHaveBeenCalledOnce();
-    expect(onPlan.mock.calls[0][0]).toMatchObject({ companionId: "carried-chat", instruction: "" });
+    expect(onPlan.mock.calls[0][0]).toMatchObject({ companionId: "carried-chat", instruction: "Keep it small" });
   });
 
   it("uses only the floating launch input, migrates the old chat draft, and preserves it across surfaces", async () => {

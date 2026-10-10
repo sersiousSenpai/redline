@@ -21,11 +21,15 @@
 
 import type { QueuedTurn, TurnStatus } from "../types";
 import { mergeMeter, type Activity, type TurnMeter } from "./turnMeter";
+import { toolSteps } from "./replySteps";
 
-/** Activity entries kept per turn on the frontend. The backend ring is 200;
- *  the surfaces render the newest one, so a smaller local cap is enough and
- *  keeps a long tool-heavy turn from growing component state without bound. */
-export const ACTIVITY_KEEP = 40;
+/** Activity entries kept per turn on the frontend: the backend's ring
+ *  (`turn::ACTIVITY_CAP`), entry for entry. A settled reply keeps the newest
+ *  tool steps of that ring (`meter::settle`), and a turn requests and thinks
+ *  between its tools, so a shorter ring here would expand to a fraction of
+ *  the steps the same reply shows after a relaunch. Bounded all the same, so
+ *  a long tool-heavy turn can't grow component state without limit. */
+export const ACTIVITY_KEEP = 200;
 
 /** Settled rows a mounted surface holds (docs/perf-budget.md rule 7). No
  *  surface pages its history, so a thread longer than this shows its newest
@@ -154,6 +158,15 @@ function mergeHistory<M extends TurnMessage>(local: M[], rows: M[]): M[] {
   return [...fresh, ...local].sort((a, b) => a.createdAt - b.createdAt);
 }
 
+/** The settled rows' meters with the ending turn's added under `id`, its
+ *  tool steps kept with it — what `meter::settle` stores for the same row, so
+ *  a reply's steps line expands to the same list after a relaunch. */
+function rowMeters<M extends TurnMessage>(state: TurnState<M>, id: string): Record<string, TurnMeter> {
+  if (!state.meter) return state.meters;
+  const steps = toolSteps(state.activity);
+  return { ...state.meters, [id]: steps.length ? { ...state.meter, steps } : state.meter };
+}
+
 /** The user message an assistant row is the failed answer to — what a Retry
  *  re-sends. `null` when there is none above it. */
 export function priorUserBody<M extends TurnMessage>(
@@ -250,11 +263,9 @@ function step<M extends TurnMessage>(
         startedAt: null,
         settled: true,
         retrying: false,
-        // The turn's meter becomes the ROW's meter: the badge and footer
-        // belong to the bubble now, not to a stream that just ended.
-        meters: state.meter
-          ? { ...state.meters, [action.message.id]: state.meter }
-          : state.meters,
+        // The turn's meter becomes the ROW's meter: the byline, steps line
+        // and tail belong to the reply now, not to a stream that just ended.
+        meters: rowMeters(state, action.message.id),
         meter: null,
         activity: [],
       };
@@ -278,9 +289,7 @@ function step<M extends TurnMessage>(
         retrying: false,
         // A failed turn's economics are the most interesting on the thread:
         // "cost 40k and then died" is exactly what you want to see later.
-        meters: state.meter
-          ? { ...state.meters, [action.message.id]: state.meter }
-          : state.meters,
+        meters: rowMeters(state, action.message.id),
         meter: null,
         activity: [],
       };

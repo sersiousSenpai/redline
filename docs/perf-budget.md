@@ -59,7 +59,7 @@ it, that's the discussion to have before merging.
    > second per streaming turn. `perf_guard.rs` pins the pacing. On the
    > frontend, `useAgentTurn` folds the chunks that land within one animation
    > frame into one render (a terminal event renders at once, with the full
-   > text), and `StreamingBubble` re-parses only the reply's open last block:
+   > text), and `StreamingText` re-parses only the reply's open last block:
    > the closed blocks go through a memoized `MarkdownView` that parses again
    > only when another block closes (`src/lib/streamSplit.ts`), at a boundary
    > markdown-it's own block parser confirms. A frame costs one block, not the
@@ -205,6 +205,38 @@ it, that's the discussion to have before merging.
    > ranked. `docs/renderer-memory-2026-10-09.md` has the investigation and
    > before/after numbers from `scripts/memory-soak.mjs`.
 
+8. **A reply settles pixel-identically, and the thread's viewport is constant
+   through a turn.** Every chat surface draws a reply with one component,
+   `ReplyBlock`, whose skeleton is the same streaming and settled: a head
+   row of one fixed height holding the byline (one string in both phases)
+   and, once the turn has used a tool, its steps — on that row, so a tool
+   that fires after the text has begun never pushes a line in above it —
+   then the text (`StreamingText` live, `MarkdownView` settled —
+   byte-identical markup for a body with no diagram), and a tail row of one
+   fixed height. At settle only the steps' words and the tail's contents
+   change; nothing above, inside or around the text arrives or leaves. A
+   tail action that doesn't fit scrolls within the row rather than taking a
+   second line. A turn shows one status line (the live tail's), no caret glyph,
+   no progress strip and no streaming-only box; Stop is the composer's
+   primary button, so the composer keeps its width. The thread's viewport
+   keeps its height from send to settle: a queued message waits in a tray
+   that overlays the thread's reserved bottom, and an in-turn notice ends
+   the thread instead of a bar taking height above it. A reader parked at
+   the bottom stays pinned through any resize (`useStickToBottom`), and a
+   reader scrolled up into a reply is never moved. The Layout Instability
+   API cannot see this kind of jank: a settle *replaces* the streamed nodes,
+   and layout-shift entries only count nodes that moved, so CLS reads about
+   zero through a 66 px jump. Measure text positions instead.
+
+   > **What it cost before it was a rule (2026-10-10).** In the chat card, a
+   > bordered progress strip took 53 px of the thread at send and left at
+   > settle, so the pinned transcript jumped 66 px as every reply finished.
+   > On every surface the settled row wrapped the body in one more `<div>`,
+   > which dropped the lead paragraph from 13.5 px/450 to 12.5 px/400 (the
+   > text rewrapped) and gave a heading-first reply a top margin, and a reader
+   > scrolled up into a reply was moved 18.7 px when it settled. A queued
+   > message's tray hid the reply's newest 52 px until the next token.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:
@@ -223,7 +255,7 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
-- `src/components/StreamingBubble.test.tsx` — streams real-shaped replies
+- `src/components/StreamingText.test.tsx` — streams real-shaped replies
   (fences, lists, tables, headings, quotes, mermaid) a few characters at a
   time and holds the split render to one full render at every step (including
   where the line scan misreads a block), and pins that the closed blocks'
@@ -255,6 +287,24 @@ These are cheap regression nets, not a substitute for the rules above:
   once-per-crossing warning, and `perf_guard.rs` pins that the watch starts and
   `/v1/perf` serves it. `scripts/memory-soak.mjs` is the manual counterpart (it
   needs Chrome): run it before merging anything that keeps state across mounts.
+- Rule 8 — `scripts/chat-stream-visual-qa.mjs` (needs Chrome) drives every
+  chat surface (page chat at its largest text size too) through a turn on
+  the production components and checks text positions at settle (for a
+  heading-first reply and a reader scrolled up too) and when a tool fires
+  after the text began, viewport heights at send, at settle and with a
+  message queued, one status line live and none settled, streaming-only
+  boxes, the tail row's height and its actions in reach, the lead
+  paragraph's size, code frames and the composer's width. A known violation goes in
+  its `EXPECTED_FAIL` with a reason, and one that starts passing fails the
+  run until its entry goes. `src/components/ReplyBlock.test.tsx` pins the
+  skeleton, byline and text markup identical across the phases and the
+  stylesheet's fixed tail and overlaying tray; `chatStatus.test.tsx` pins,
+  on each surface, one status line, Stop in the composer's one button, the
+  reply through `ReplyBlock`, the user's turn as a card and the queue in its
+  tray; `renderHygiene.test.ts` scans the surfaces for a bubble, footer or
+  working indicator of their own; `MarkdownView.test.ts` the rich-equals-plain
+  markup and the frame and flush rules; `useStickToBottom.test.tsx` the
+  re-pin on resize.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
   shells out, or reaches SQLite (`.database()`, a store's `db` handle, called

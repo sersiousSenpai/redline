@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { TurnStatus } from "../types";
@@ -12,6 +14,7 @@ import {
   type TurnMessage,
   type TurnState,
 } from "./agentTurn";
+import { STEPS_KEEP } from "./replySteps";
 import { emptyMeter, type TurnMeter } from "./turnMeter";
 
 const msg = (over: Partial<TurnMessage> = {}): TurnMessage => ({
@@ -399,14 +402,21 @@ describe("the meter", () => {
   });
 
   it("appends activity, newest last, bounded", () => {
-    const many: TurnAction<TurnMessage>[] = Array.from({ length: 60 }, (_, i) => ({
+    const many: TurnAction<TurnMessage>[] = Array.from({ length: ACTIVITY_KEEP + 20 }, (_, i) => ({
       type: "meter" as const,
       meter: meter({ rev: i + 1 }),
       activity: { at: i, kind: "tool", label: `t${i}` },
     }));
     const s = run(many);
     expect(s.activity).toHaveLength(ACTIVITY_KEEP);
-    expect(s.activity[s.activity.length - 1]?.label).toBe("t59");
+    expect(s.activity[s.activity.length - 1]?.label).toBe(`t${ACTIVITY_KEEP + 19}`);
+  });
+
+  it("keeps the backend's ring and its steps cap, so a reply keeps the same steps on both sides", () => {
+    const rust = (file: string, name: string) =>
+      Number(readFileSync(join(process.cwd(), "src-tauri/src", file), "utf8").match(new RegExp(`pub const ${name}: usize = (\\d+);`))?.[1]);
+    expect(ACTIVITY_KEEP).toBe(rust("turn.rs", "ACTIVITY_CAP"));
+    expect(STEPS_KEEP).toBe(rust("meter.rs", "STEPS_KEEP"));
   });
 
   it("adopts the probe's meter and ring on a remount", () => {
@@ -453,6 +463,47 @@ describe("the meter", () => {
     expect(s.meter).toBeNull();
     expect(s.activity).toEqual([]);
     expect(s.meters["row-1"]?.outputTokens).toBe(40);
+  });
+
+  it("keeps the turn's tool steps with the row, as the stored meter does", () => {
+    const tools = Array.from({ length: 45 }, (_, i) => ({ at: i + 10, kind: "tool", label: `Read ${i}` }));
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, toolCalls: 45 }), activity: { at: 1, kind: "thinking", label: "Thinking…" } },
+      ...tools.map((activity, i) => ({ type: "meter" as const, meter: meter({ rev: 5 + i, toolCalls: 45 }), activity })),
+      { type: "done", message: msg({ id: "row-1" }) },
+    ]);
+    // Tool steps only, the newest 40 — the live ring's cap and `meter::settle`'s.
+    expect(s.meters["row-1"]?.steps?.map((step) => step.label)).toEqual(tools.slice(-40).map((step) => step.label));
+    // A turn that used no tools keeps none.
+    const quiet = run([
+      { type: "meter", meter: meter({ rev: 4 }), activity: { at: 1, kind: "thinking", label: "Thinking…" } },
+      { type: "done", message: msg({ id: "row-2" }) },
+    ]);
+    expect(quiet.meters["row-2"]?.steps).toBeUndefined();
+  });
+
+  it("keeps the same steps as the stored meter when the turn requested and thought between tools", () => {
+    // The backend's ring, as `push_meta` fills it: each tool comes after a
+    // request and some thinking. `meter::settle` keeps the newest 40 TOOL
+    // steps of it, so a ring the frontend cut to its newest 40 ENTRIES would
+    // expand to a third of the list a relaunch shows.
+    const ring = Array.from({ length: 30 }, (_, i) => [
+      { at: i * 3 + 1, kind: "requesting", label: "Requesting…" },
+      { at: i * 3 + 2, kind: "thinking", label: "Thinking…" },
+      { at: i * 3 + 3, kind: "tool", label: `Read ${i}` },
+    ]).flat();
+    const stored = ring.filter((entry) => entry.kind === "tool").map((entry) => entry.label);
+    const live = run([
+      ...ring.map((activity, i) => ({ type: "meter" as const, meter: meter({ rev: i + 1, toolCalls: 30 }), activity })),
+      { type: "done", message: msg({ id: "row-1" }) },
+    ]);
+    expect(live.meters["row-1"]?.steps?.map((step) => step.label)).toEqual(stored);
+    // A remount mid-turn takes the backend's whole ring from the probe.
+    const remounted = run([
+      { type: "probe", status: status({ streaming: true, partial: "A", seq: 1, meter: meter({ rev: 90, toolCalls: 30 }), activity: ring }) },
+      { type: "done", message: msg({ id: "row-2" }) },
+    ]);
+    expect(remounted.meters["row-2"]?.steps?.map((step) => step.label)).toEqual(stored);
   });
 
   it("keeps a failed turn's economics too", () => {

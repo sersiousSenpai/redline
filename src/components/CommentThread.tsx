@@ -6,16 +6,15 @@ import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
 import type { Comment, CommentAttachment, ThreadMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { priorUserBody } from "../lib/agentTurn";
-import { RetryNote, UnsentNote } from "./QueuedChip";
+import { RetryNote } from "./TurnNotes";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 // The rider note a transcript produces — also used to detect that an attached
 // rider is stale (the discussion continued after attaching).
 import { transcriptNote } from "../lib/attachmentNote";
 import { agentLabelFor } from "../lib/backendChoice";
 import { AttachmentChips } from "./AttachmentChips";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble, { StreamingText } from "./StreamingBubble";
-import TurnFooter from "./TurnFooter";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
 import type { TurnMeter } from "../lib/turnMeter";
 import { DiscussModelChip } from "./DiscussModelChip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -211,9 +210,9 @@ export const CommentThread = memo(function CommentThread({
   useEffect(() => { if (loaded) onHasDiscussion?.(hasDiscussion); }, [loaded, hasDiscussion, onHasDiscussion]);
   useEffect(() => { if (loaded) monochat?.reportActivity?.(`${sessionId}:${commentId}`, turn.status === "streaming"); }, [loaded, sessionId, commentId, turn.status, monochat?.reportActivity]);
   const status: ThreadStatus = turn.status;
-  // When the current wait began — drives the WorkingIndicator's elapsed
-  // counter through the dead air before the first delta. Backend clock now,
-  // so a remount mid-turn shows the true elapsed time instead of restarting.
+  // When the current wait began — the live reply's elapsed clock. Backend
+  // clock, so a remount mid-turn shows the true elapsed time instead of
+  // restarting.
   const workStartedAt = turn.startedAt;
   // When the reviewer manually collapses an expanded thread, suppress the
   // streaming auto-expand until the next send — otherwise a long streamed reply
@@ -269,14 +268,15 @@ export const CommentThread = memo(function CommentThread({
   });
 
   // Chat is rapid-fire: when a reply settles, the next question is a
-  // keystroke away — unless the reviewer has moved elsewhere in the app.
+  // keystroke away — while the reviewer is still in this thread. With focus
+  // elsewhere, or on nothing (they clicked away to read), a turn end never
+  // takes the caret (design decision 1).
   const wasStreaming = useRef(false);
   useEffect(() => {
     const was = wasStreaming.current;
     wasStreaming.current = status === "streaming";
     if (!was || status === "streaming" || view !== "chat" || !expanded) return;
-    const active = document.activeElement;
-    if (active && active !== document.body && !hostRef.current?.contains(active)) return;
+    if (!hostRef.current?.contains(document.activeElement)) return;
     composerRef.current?.focus();
   }, [status, view, expanded]);
 
@@ -662,6 +662,8 @@ export const CommentThread = memo(function CommentThread({
                 <ChatBubble
                   key={m.id}
                   msg={m}
+                  agent={agent}
+                  meter={turn.meters[m.id]}
                   onRetry={
                     m.status === "error" && m === lastRow
                       ? retryAt(chatRows, i)
@@ -670,23 +672,19 @@ export const CommentThread = memo(function CommentThread({
                   onResend={m.status === "unsent" ? resend(m) : undefined}
                 />
               ))}
-              {chatInFlight &&
-                (liveText ? (
-                  <StreamingText
-                    className="rl-chat-agent"
-                    text={liveText}
-                    caret={retrying ? "" : "▌"}
-                  />
-                ) : (
-                  <WorkingIndicator
-                    label={retrying ? "Retrying" : "Thinking"}
-                    startedAt={workStartedAt ?? undefined}
-                  />
-                ))}
-              {/* A write-up streams in the report, not here. */}
-              {status === "streaming" && !chatInFlight && (
-                <WorkingIndicator compact label="Writing it up" />
+              {chatInFlight && (
+                <ReplyBlock
+                  phase="live"
+                  byline={agent}
+                  text={liveText}
+                  meter={turn.meter}
+                  activity={turn.activity}
+                  startedAt={workStartedAt}
+                  retrying={retrying}
+                />
               )}
+              {/* A write-up streams in the report, not here. */}
+              {status === "streaming" && !chatInFlight && <ElsewhereStatus label="Writing it up in the report" />}
             </div>
           ) : (
             <div
@@ -722,9 +720,7 @@ export const CommentThread = memo(function CommentThread({
                     >
                       💬 Chatted · {item.count} {item.count === 1 ? "message" : "messages"}
                     </button>
-                    {item.last && chatInFlight && (
-                      <WorkingIndicator compact label="Replying" />
-                    )}
+                    {item.last && chatInFlight && <ElsewhereStatus label="Replying in the chat" />}
                     {/* The chat has run past the last write-up: fold it into
                         a fresh report on request. Derived from the rows, so
                         it survives a remount. */}
@@ -741,22 +737,17 @@ export const CommentThread = memo(function CommentThread({
                 ),
               )}
               {status === "streaming" && !chatInFlight && (
-                <>
-                  {/* The badge and the activity line fill the wait the blank
-                      ticker used to — so the bubble renders from the first line
-                      of the stream, not the first token. */}
-                  <StreamingBubble
-                    text={liveText}
-                    agent={agent}
-                    inspect={{ surface: "fork", key: commentId }}
-                    retrying={retrying}
-                    meter={turn.meter}
-                    activity={turn.activity}
-                  />
-                  {!liveText && !retrying && (
-                    <WorkingIndicator startedAt={workStartedAt ?? undefined} />
-                  )}
-                </>
+                // From the first line of the stream, not the first token: its
+                // tail is the turn's one status line, filling the wait.
+                <ReplyBlock
+                  phase="live"
+                  byline={agent}
+                  text={liveText}
+                  meter={turn.meter}
+                  activity={turn.activity}
+                  startedAt={workStartedAt}
+                  retrying={retrying}
+                />
               )}
             </div>
           )}
@@ -865,6 +856,20 @@ export const CommentThread = memo(function CommentThread({
   );
 });
 
+/** A turn told elsewhere: the reply streams in the other view, and this one
+ *  says so in a quiet line — the view's one status, never a second
+ *  indicator beside a streaming reply. */
+function ElsewhereStatus({ label }: { label: string }) {
+  return (
+    <span role="status" className="rl-thread-elsewhere">
+      <span className="rl-working-label">
+        {label}…
+        <span className="rl-working-glint" data-label={`${label}…`} aria-hidden />
+      </span>
+    </span>
+  );
+}
+
 // Memoized, like the chat's bubble below: a row whose props haven't moved
 // sits out the thread's renders, the stream's tokens included.
 const MessageBubble = memo(function MessageBubble({
@@ -880,95 +885,68 @@ const MessageBubble = memo(function MessageBubble({
   onRetry?: () => void;
   /** Present only on a user row whose send never became a turn. */
   onResend?: () => void;
-  /** This row's settled meter — the badge and footer that outlive the turn. */
+  /** This row's settled meter — the byline, steps line and tail it keeps. */
   meter?: TurnMeter | null;
 }) {
-  const isUser = msg.role === "user";
+  if (msg.role === "user") return <UserRow msg={msg} onResend={onResend} />;
   const isError = msg.status === "error";
-  const isUnsent = msg.status === "unsent";
   return (
-    <div className="flex flex-col gap-0.5">
-      <span
-        style={{
-          fontSize: "9px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: isUser
-            ? "var(--color-ink-muted)"
-            : isError
-              ? "var(--color-warning)"
-              : "var(--color-info)",
-        }}
-      >
-        {/* Redline wrote the error sentence, not the model. Bylining it
-            `agent` is what made a raw machine token read as something Claude
-            had said. */}
-        {isUser ? "You" : isError ? "Redline" : agent}
-      </span>
-      {isError ? (
-        <div
-          style={{
-            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            color: "var(--color-warning)",
-          }}
-        >
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={msg.body} compact rich />
-      )}
+    <ReplyBlock
+      phase="settled"
+      // Redline wrote the error sentence, not the model. Bylining it `agent`
+      // is what made a raw machine token read as something Claude had said.
+      byline={isError ? "Redline" : agent}
+      text={msg.body}
+      error={isError}
+      meter={meter}
+      inspect={{ surface: "fork", key: msg.commentId }}
+    >
       {isError && onRetry && <RetryNote onRetry={onRetry} />}
-      {isUnsent && <UnsentNote onResend={onResend} />}
-      {!isUser && <TurnFooter meter={meter} />}
-      {/* What the reviewer attached to this turn — read-only in the
-          transcript; the fork was given the paths to read. */}
-      {msg.attachments && msg.attachments.length > 0 && (
-        <AttachmentChips attachments={msg.attachments} />
-      )}
-    </div>
+    </ReplyBlock>
   );
 });
 
-/** One chat turn: plain bubbles, no bylines — the reviewer's right-aligned
- *  and tinted, the agent's left and borderless. Never `rich`, so a quick
- *  answer can't sprout a diagram. */
+/** The reviewer's turn, with what they attached to it — read-only in the
+ *  transcript; the fork was given the paths to read. */
+function UserRow({ msg, onResend }: { msg: ThreadMessage; onResend?: () => void }) {
+  return (
+    <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend}>
+      {msg.attachments && msg.attachments.length > 0 && <AttachmentChips attachments={msg.attachments} />}
+    </UserTurn>
+  );
+}
+
+/** One chat turn: the same anatomy as the report's, never `rich`, so a
+ *  quick answer can't sprout a diagram. */
 const ChatBubble = memo(function ChatBubble({
   msg,
+  agent,
+  meter,
   onRetry,
   onResend,
 }: {
   msg: ThreadMessage;
+  agent: string;
+  meter?: TurnMeter | null;
   /** Present only on the thread's last row when it failed. */
   onRetry?: () => void;
   /** Present only on a user row whose send never became a turn. */
   onResend?: () => void;
 }) {
+  if (msg.role === "user") return <UserRow msg={msg} onResend={onResend} />;
   const isError = msg.status === "error";
   return (
-    <div className={msg.role === "user" ? "rl-chat-user" : "rl-chat-agent"}>
-      {isError ? (
-        <div
-          style={{
-            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            color: "var(--color-warning)",
-          }}
-        >
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={msg.body} compact />
-      )}
+    <ReplyBlock
+      phase="settled"
+      byline={isError ? "Redline" : agent}
+      text={msg.body}
+      error={isError}
+      rich={false}
+      meter={meter}
+      inspect={{ surface: "fork", key: msg.commentId }}
+    >
       {isError && onRetry && <RetryNote onRetry={onRetry} />}
-      {msg.status === "unsent" && <UnsentNote onResend={onResend} />}
-      {msg.attachments && msg.attachments.length > 0 && (
-        <AttachmentChips attachments={msg.attachments} />
-      )}
-    </div>
+    </ReplyBlock>
   );
 });
 
@@ -1057,36 +1035,9 @@ function Composer({
           overflow: "hidden",
         }}
       />
-      {streaming ? (
-        <button
-          type="button"
-          onClick={onStop}
-          className="rounded px-2 py-1 font-medium"
-          style={{
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-rule)",
-            color: "var(--color-ink)",
-            fontSize: "11px",
-          }}
-        >
-          Stop
-        </button>
-      ) : (
-        <button
-          type="button"
-          onClick={submit}
-          disabled={!draft.trim()}
-          className="rounded px-2 py-1 font-medium"
-          style={{
-            background: "var(--color-info)",
-            color: "var(--color-on-accent)",
-            fontSize: "11px",
-            opacity: draft.trim() ? 1 : 0.5,
-          }}
-        >
-          Send
-        </button>
-      )}
+      {/* The fork can't queue: while it replies, the one button is Stop,
+          and the next question waits in the box. */}
+      <SendStopButton state={sendState(streaming, !!draft.trim(), false)} onSend={submit} onStop={onStop} disabled={!draft.trim()} />
       </div>
     </div>
   );

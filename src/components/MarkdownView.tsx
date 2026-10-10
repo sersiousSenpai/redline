@@ -59,7 +59,7 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   return `<div class="rl-codeblock">${inner}<button class="rl-copy-btn" type="button" title="Copy" aria-label="Copy code">⧉</button></div>\n`;
 };
 
-/** Render the open end of a streaming reply (`StreamingBubble`): exactly
+/** Render the open end of a streaming reply (`StreamingText`): exactly
  *  MarkdownView's markup, except that the code fence starting on line
  *  `openFence` is still being written and so is not highlighted yet. */
 export function renderLiveMarkdown(src: string, openFence: number): string {
@@ -67,7 +67,7 @@ export function renderLiveMarkdown(src: string, openFence: number): string {
 }
 
 /** Whether `src` renders as its closed blocks `head` plus the rest, each on
- *  its own (`StreamingBubble`), exactly as it renders whole — asked of
+ *  its own (`StreamingText`), exactly as it renders whole — asked of
  *  markdown-it's own block parser: `head` must end where a top-level block
  *  starts, and no reference definition may link the halves. */
 export function splitsCleanly(src: string, head: string): boolean {
@@ -225,10 +225,16 @@ export const MarkdownView = memo(function MarkdownView({
       }
     }
   };
-  const segments = useMemo(
-    () => (rich ? splitMermaidSegments(body) : null),
-    [rich, body],
-  );
+  // A rich body with no diagram takes the plain path: the per-segment wrapper
+  // <div> below would sit between `.rl-md` and its first block, so the lead
+  // paragraph and the flush first heading (`.rl-md > :first-child`) would
+  // change the moment a streamed reply settled into its rich row. Plain, the
+  // settled markup is the streamed markup, byte for byte.
+  const segments = useMemo(() => {
+    if (!rich) return null;
+    const split = splitMermaidSegments(body);
+    return split.length === 1 && split[0].kind === "md" ? null : split;
+  }, [rich, body]);
   // Plain path: one cached parse keyed on the source. The `__html` object is
   // cached with it: React re-assigns `innerHTML` whenever that object is a new
   // one, so an inline literal would rebuild the DOM on every re-render.
@@ -236,8 +242,10 @@ export const MarkdownView = memo(function MarkdownView({
     () => (segments ? null : { __html: md.render(body) }),
     [segments, body],
   );
-  // Rich path: each markdown segment rendered once and cached together; mermaid
-  // segments are left to MermaidView (null placeholder keeps indices aligned).
+  // Rich path, a body with a diagram: each markdown segment rendered once and
+  // cached together; mermaid segments are left to MermaidView (null
+  // placeholder keeps indices aligned). styles.css carries the first/last
+  // block rules through the segment wrappers.
   const segmentHtml = useMemo(
     () =>
       segments

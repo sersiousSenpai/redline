@@ -5,11 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import type { DraftComment, ThreadMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { priorUserBody } from "../lib/agentTurn";
-import { RetryNote } from "./QueuedChip";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
-import TurnFooter from "./TurnFooter";
-import { WorkingIndicator } from "./WorkingIndicator";
+import { backendLabel } from "../lib/backendChoice";
+import { RetryNote } from "./TurnNotes";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
 import { useMonochat } from "./MonochatContext";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 
@@ -237,19 +236,26 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
   });
   const { messages, liveText, status } = turn;
   const streaming = status === "streaming";
+  // The provider the thread runs on signs its replies (BC-26), streaming and
+  // settled alike; Redline signs the error rows it wrote.
+  const provider = backendLabel(monochat?.harness.backend ?? "claude-code");
+  const seat = monochat?.harness.model ?? null;
   useEffect(() => { if (turn.loaded) monochat?.reportActivity?.(`${draftId}:${commentId}`, streaming); }, [turn.loaded, draftId, commentId, streaming, monochat?.reportActivity]);
 
+  /** Whether it went: the agent can't queue, so a send while it replies
+   *  keeps the text in the box. */
   const send = (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || streaming) return;
+    if (!trimmed || streaming) return false;
     turn.send(trimmed);
+    return true;
   };
 
   /** Re-send the question an error row is the failed answer to. Last row only
    *  — an error further up has already been answered by what followed it. */
   const retryAt = (i: number): (() => void) | undefined => {
     const body = priorUserBody(messages, i);
-    return body ? () => send(body) : undefined;
+    return body ? () => void send(body) : undefined;
   };
 
   return (
@@ -258,61 +264,40 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
       style={{ borderTop: "1px solid var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      {messages.map((m, i) => (
-        <div key={m.id} className="flex flex-col gap-0.5">
-          <span
-            style={{
-              fontSize: "9px",
-              fontWeight: 600,
-              textTransform: "uppercase",
-              letterSpacing: "0.07em",
-              color:
-                m.status === "error"
-                  ? "var(--color-warning)"
-                  : m.role === "user"
-                    ? "var(--color-ink-muted)"
-                    : "var(--color-info)",
-            }}
-          >
-            {/* Redline wrote the error sentence, not the model. */}
-            {m.role === "user" ? "You" : m.status === "error" ? "Redline" : "Agent"}
-          </span>
-          {m.status === "error" ? (
-            <div
-              style={{
-                fontSize: "11.5px",
-                whiteSpace: "pre-wrap",
-                color: "var(--color-warning)",
-              }}
-            >
-              {m.body}
-            </div>
-          ) : (
-            <MarkdownView body={m.body} compact rich />
-          )}
-          {m.role !== "user" && <TurnFooter meter={turn.meters[m.id]} />}
-          {m.status === "error" &&
-            i === messages.length - 1 &&
-            (() => {
-              const onRetry = retryAt(i);
-              return onRetry ? <RetryNote onRetry={onRetry} /> : null;
-            })()}
-        </div>
-      ))}
-      {streaming && (
-        <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
-          <StreamingBubble
-            text={liveText}
-            agent="Drafter"
+      {messages.map((m, i) =>
+        m.role === "user" ? (
+          <UserTurn key={m.id} body={m.body} />
+        ) : (
+          <ReplyBlock
+            key={m.id}
+            phase="settled"
+            byline={m.status === "error" ? "Redline" : provider}
+            seat={seat}
+            text={m.body}
+            error={m.status === "error"}
+            meter={turn.meters[m.id]}
             inspect={{ surface: "drafter", key: draftId }}
-            retrying={turn.retrying}
-            meter={turn.meter}
-            activity={turn.activity}
-          />
-          {!liveText && !turn.retrying && (
-            <WorkingIndicator compact startedAt={turn.startedAt ?? undefined} />
-          )}
-        </div>
+          >
+            {m.status === "error" &&
+              i === messages.length - 1 &&
+              (() => {
+                const onRetry = retryAt(i);
+                return onRetry ? <RetryNote onRetry={onRetry} /> : null;
+              })()}
+          </ReplyBlock>
+        ),
+      )}
+      {streaming && (
+        <ReplyBlock
+          phase="live"
+          byline={provider}
+          seat={seat}
+          text={liveText}
+          meter={turn.meter}
+          activity={turn.activity}
+          startedAt={turn.startedAt}
+          retrying={turn.retrying}
+        />
       )}
       <div className="flex items-end gap-1">
         <textarea
@@ -321,13 +306,11 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              send(draft);
-              setDraft("");
+              if (send(draft)) setDraft("");
             }
           }}
           placeholder="Ask about this part…"
           rows={1}
-          disabled={streaming}
           className="flex-1 rounded px-1.5 py-1"
           style={{
             fontSize: "11.5px",
@@ -338,23 +321,16 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
             resize: "none",
           }}
         />
-        <button
-          type="button"
-          onClick={() => {
-            send(draft);
-            setDraft("");
+        {/* The agent can't queue: while it replies, the one button is Stop,
+            and the box stays open for the next question. */}
+        <SendStopButton
+          state={sendState(streaming, !!draft.trim(), false)}
+          onSend={() => {
+            if (send(draft)) setDraft("");
           }}
-          disabled={!draft.trim() || streaming}
-          className="rounded px-1.5 py-1"
-          style={{
-            fontSize: "10.5px",
-            background: "var(--color-info)",
-            color: "var(--color-on-accent)",
-            opacity: draft.trim() && !streaming ? 1 : 0.5,
-          }}
-        >
-          ↑
-        </button>
+          onStop={turn.cancel}
+          disabled={!draft.trim()}
+        />
       </div>
     </div>
   );

@@ -11,7 +11,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -461,6 +461,7 @@ export function FrontDoor(props: FrontDoorProps) {
   // the sentence off and goes back to being a door; a second ⏎ starts a second
   // plan in its own terminal tile and the flight pill re-points at the newest.
   const canSubmit = hasText || hasPills;
+  const stopping = !!workbench?.streaming && !hasText;
 
   const attemptLaunch = useCallback(() => {
     if (!canSubmit) return;
@@ -946,12 +947,20 @@ export function FrontDoor(props: FrontDoorProps) {
             >
               <Mic size={14} />
             </button>
+            {/* In a chat, the one primary button (design decision 5): while
+                the reply runs, an empty box makes it Stop and text makes it
+                Queue — the same button in the same slot, so the field beside
+                it never changes width. */}
             <button
               type="button"
-              onClick={() => { taRef.current?.focus(); send(liveDestination); }}
-              disabled={!canSubmit || (liveDestination === "chat" && chatPending)}
+              onClick={() => { taRef.current?.focus(); if (stopping) workbench?.onStop(); else send(liveDestination); }}
+              disabled={!stopping && (!canSubmit || (liveDestination === "chat" && chatPending))}
+              data-state={workbench ? (stopping ? "stop" : workbench.streaming ? "queue" : "send") : undefined}
+              aria-label={stopping ? "Stop" : undefined}
               title={
-                liveDestination === "chat" && chatPending ? "Opening the conversation…" : combine.length > 0
+                stopping ? "Stop the current reply (queued messages still send)"
+                : workbench?.streaming ? "Queue this — it sends when the reply finishes (⏎)"
+                : liveDestination === "chat" && chatPending ? "Opening the conversation…" : combine.length > 0
                   ? `Combine ${combine.length} plans into one new plan (⏎)`
                   : liveDestination === "drafter"
                     ? "Open this in the drafter (⏎)"
@@ -963,7 +972,7 @@ export function FrontDoor(props: FrontDoorProps) {
               }
               className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
             >
-              {floating ? <ArrowUp size={17}/> : <CornerDownLeft size={15} />}
+              {stopping ? <Square size={11} fill="currentColor" /> : floating ? <ArrowUp size={17}/> : <CornerDownLeft size={15} />}
             </button>
             </div>
           </div>

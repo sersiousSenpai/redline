@@ -8,12 +8,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => []) }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: mocks.snapshot }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (config: { buildSendArgs: SendBuilder }) => {
   mocks.build = config.buildSendArgs;
-  return { messages: [], liveText: "", status: "idle", startedAt: null, loaded: true,
+  return { messages: [], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), clear: vi.fn(), meter: null, activity: null, meters: {} };
 } }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
-vi.mock("./StreamingBubble", () => ({ default: () => null }));
-vi.mock("./TurnFooter", () => ({ default: () => null, ThreadMeterStrip: () => null }));
+vi.mock("./StreamingText", () => ({ StreamingText: () => null }));
 import { BrowserChat } from "./BrowserChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

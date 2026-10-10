@@ -427,6 +427,35 @@ describe("FrontDoor model and effort controls", () => {
 });
 
 describe("the floating replacement composer", () => {
+  it("makes its one button Stop while a chat's reply runs on an empty box, and Queue once there is text", async () => {
+    const onStop = vi.fn(), onSubmit = vi.fn();
+    const workbench = { picker: null, mode: "chat" as const, cycleMode: () => {}, onSubmit, project: null, onProjectChange: () => {}, streaming: true, onStop };
+    await mount({ floating: true, destination: "chat", workbench });
+    const go = () => host.querySelector<HTMLButtonElement>(".rl-fd-go")!;
+    const before = go();
+    expect(go().dataset.state).toBe("stop");
+    expect(go().disabled).toBe(false);
+    expect(go().getAttribute("aria-label")).toBe("Stop");
+    composer()?.blur();
+    await act(async () => go().click());
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    // Like a send from the same key, a Stop leaves the caret in the box — not
+    // on a key that is about to read "nothing to send".
+    expect(document.activeElement).toBe(composer());
+    // The same button in the same slot, and the field stays open.
+    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "and then?"));
+    expect(go()).toBe(before);
+    expect(go().dataset.state).toBe("queue");
+    expect(composer()?.disabled).toBe(false);
+    await act(async () => go().click());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    // No reply running: send.
+    await mount({ floating: true, destination: "chat", workbench: { ...workbench, streaming: false }, text: "" });
+    expect(go().dataset.state).toBe("send");
+    expect(go().disabled).toBe(true);
+  });
+
   it("preserves a second message while the conversation is opening instead of overwriting its first send", async () => {
     const onChat = vi.fn();
     await mount({ floating: true, destination: "chat", chatPending: true, onChat, text: "The next thought" });

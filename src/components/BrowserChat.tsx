@@ -17,12 +17,11 @@ import type { BrowseMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useSharedDraft } from "../hooks/useSharedDraft";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
-import TurnFooter, { ThreadMeterStrip } from "./TurnFooter";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
+import { QueueTray } from "./QueueTray";
+import { ThreadMeterStrip } from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
-import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
 import { agentLabelFor, backendLabel } from "../lib/backendChoice";
@@ -148,6 +147,7 @@ export const BrowserChat = memo(function BrowserChat({
   const sentAgent = useRef<{ browseId: string; agent: string } | null>(null);
   const {
     messages,
+    queue,
     liveText,
     status,
     startedAt,
@@ -279,11 +279,13 @@ export const BrowserChat = memo(function BrowserChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed, loaded]);
 
-  // Follow streaming/new turns only while the user is parked at the bottom;
-  // if they've scrolled up to read, leave their position untouched.
+  /** × in the queue tray: out of the queue, its text back in the composer. */
+  function unqueueToDraft(id: string) {
+    void unqueue(id).then((text) => {
+      if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+    });
+  }
 
-  // Recompute stickiness from the live scroll position. A small threshold keeps
-  // "follow" engaged through sub-pixel rounding and the trailing cursor glyph.
   function discard() {
     void invoke("browse_discard", { browseId }).catch(() => {});
     clear();
@@ -335,12 +337,19 @@ export const BrowserChat = memo(function BrowserChat({
           <button type="button" className="rb-button" aria-label="Larger text" disabled={zoom >= 1.6} onClick={() => adjustZoom(0.1)}>A+</button>
         </div>
         <BrowserMenuItem disabled={!messages.length} onClick={() => { setConversationPanel(null); discard(); }}>Clear history</BrowserMenuItem>
+        {/* What the thread has spent, by model: a consult spawns a real child
+            `claude`, so by subprocess is the honest unit. Here rather than
+            above the composer, where its arrival took height from the
+            thread. */}
+        <ThreadMeterStrip meters={meters} />
       </BrowserPopover>}
 
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 py-3"
+        // The bottom padding keeps the queue tray's pill clear of the newest
+        // line: the tray overlays the thread rather than shrinking it.
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 pb-9"
         data-browser-chat-messages
       >
         {!loaded ? null : messages.length === 0 && status === "idle" ? (
@@ -359,6 +368,7 @@ export const BrowserChat = memo(function BrowserChat({
               // A reply is signed by the provider that wrote it; an error row
               // is Redline's own note about this chat's current turn.
               agent={m.status === "complete" ? agentLabelFor(m.backend) : agent}
+              seat={harness.pick.model}
               meter={meters[m.id]}
               contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
@@ -366,11 +376,6 @@ export const BrowserChat = memo(function BrowserChat({
               onSendToDrafter={onSendToDrafter}
               onAddToMission={onAddToMission}
               onAddToCart={onAddToCart}
-              onUnqueue={() => {
-                void unqueue(m.id).then((text) => {
-                  if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
-                });
-              }}
               onResend={() => {
                 stick();
                 send(m.body);
@@ -379,29 +384,23 @@ export const BrowserChat = memo(function BrowserChat({
           ))
         )}
         {status === "streaming" && (
-          <>
-            {/* The bubble renders from the FIRST line of the stream, not the
-                first token: the badge and the activity line are exactly what
-                fills the wait a blank ticker used to. */}
-            <StreamingBubble
-              text={liveText}
-              agent={sentAgent.current?.browseId === browseId ? sentAgent.current.agent : agent}
-              inspect={{ surface: "browse", key: browseId }}
-              meter={meter}
-              activity={activity}
-              onOpenLink={onOpenLink}
-            />
-            {!(liveText) && (
-              <WorkingIndicator startedAt={startedAt ?? undefined} />
-            )}
-          </>
+          // From the FIRST line of the stream, not the first token: its tail
+          // is the turn's one status line, filling the wait.
+          <ReplyBlock
+            phase="live"
+            byline={sentAgent.current?.browseId === browseId ? sentAgent.current.agent : agent}
+            seat={harness.pick.model}
+            text={liveText}
+            meter={meter}
+            activity={activity}
+            startedAt={startedAt}
+            onOpenLink={onOpenLink}
+          />
         )}
       </div>
 
+      <QueueTray rows={queue.map((row) => ({ id: row.id, text: row.body }))} onRemove={unqueueToDraft} />
       <div data-browser-chat-composer className="min-w-0 px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
-        {/* Economics BY SUBPROCESS: a consult spawns a real child `claude`, so
-            "by model" is the honest unit here, not "by message". */}
-        <ThreadMeterStrip meters={meters} />
         <Composer
           taRef={composerRef}
           draft={draft}
@@ -426,12 +425,12 @@ export const BrowserChat = memo(function BrowserChat({
 function MessageBubble({
   msg,
   agent,
+  seat,
   onOpenLink,
   onSendToRedline,
   onSendToDrafter,
   onAddToMission,
   onAddToCart,
-  onUnqueue,
   onResend,
   meter,
   contextReset,
@@ -439,75 +438,55 @@ function MessageBubble({
   msg: BrowseMessage;
   /** The provider's name over an assistant reply. */
   agent: string;
+  /** The model this chat asked for, if it named one. */
+  seat: string | null;
   onOpenLink?: (url: string) => void;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
-  onUnqueue?: () => void;
   onResend?: () => void;
-  /** This row's settled meter — the badge and footer that outlive the turn. */
+  /** This row's settled meter — the byline, steps line and tail it keeps. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
 }) {
-  const isUser = msg.role === "user";
+  if (msg.role === "user") {
+    return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} onOpenLink={onOpenLink} />;
+  }
   const isError = msg.status === "error";
-  const isQueued = isUser && msg.status === "queued";
-  const isUnsent = isUser && msg.status === "unsent";
-  const text = msg.body;
-  const showActions = !isUser && !isError && text.trim().length > 0;
   return (
-    <div
-      className="flex flex-col gap-0.5 group/msg"
-      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
-    >
-      <span
-        style={{
-          fontSize: "9px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
-        }}
-      >
-        {isUser ? "You" : agent}
-      </span>
-      {isError ? (
-        <div
-          style={{
-            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            color: "var(--color-warning)",
-          }}
-        >
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={text} compact rich onLinkClick={onOpenLink} />
-      )}
-      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
-      {isUnsent && <UnsentNote onResend={onResend} />}
-      {showActions && (
-        <MessageActions
-          messageId={msg.id}
-          body={text}
-          onSendToRedline={onSendToRedline}
-          onSendToDrafter={onSendToDrafter}
-          onAddToMission={onAddToMission}
-          onAddToCart={onAddToCart}
-        />
-      )}
-      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
-    </div>
+    <ReplyBlock
+      phase="settled"
+      byline={agent}
+      seat={seat}
+      text={msg.body}
+      error={isError}
+      meter={meter}
+      contextReset={contextReset}
+      inspect={{ surface: "browse", key: msg.browseId }}
+      onOpenLink={onOpenLink}
+      actions={
+        !isError && msg.body.trim() ? (
+          <MessageActions
+            messageId={msg.id}
+            body={msg.body}
+            onSendToRedline={onSendToRedline}
+            onSendToDrafter={onSendToDrafter}
+            onAddToMission={onAddToMission}
+            onAddToCart={onAddToCart}
+          />
+        ) : undefined
+      }
+    />
   );
 }
 
-/** Footer actions on a settled assistant reply: copy the whole message (covers
- *  prose, where per-block buttons don't reach), and — when wired — ship the
- *  reply into Redline, either straight to Claude Code (after confirming the
- *  target repo) or via the Prompt Drafter. Revealed on hover over the bubble. */
+/** A settled reply's actions, in its tail row: copy the whole message (covers
+ *  prose, where per-block buttons don't reach), pin it to the mission, add it
+ *  to the task list, continue the conversation elsewhere — and, when wired
+ *  outside a conversation, ship it into Redline straight to Claude Code
+ *  (after confirming the target repo) or via the Prompt Drafter. */
 function MessageActions({
   messageId,
   body,
@@ -541,48 +520,21 @@ function MessageActions({
       window.setTimeout(() => setPinned("idle"), 1400);
     });
   };
-  const actionStyle: React.CSSProperties = {
-    fontSize: "10px",
-    lineHeight: 1,
-    padding: "2px 6px",
-    border: "1px solid var(--color-rule)",
-    borderRadius: "5px",
-    background: "var(--color-paper)",
-    color: "var(--color-ink-muted)",
-    cursor: "pointer",
-  };
   return (
-    <div className="flex items-center gap-1.5 mt-0.5 opacity-0 group-hover/msg:opacity-100 group-focus-within/msg:opacity-100 transition-opacity">
-      <button type="button" onClick={copy} title="Copy this reply" style={actionStyle}>
-        {copied ? (
-          "Copied ✓"
-        ) : (
-          <span className="inline-flex items-center gap-1">
-            <Copy size={10} strokeWidth={2} /> Copy
-          </span>
-        )}
+    <span data-reply-actions className="contents">
+      <button type="button" className="rl-reply-action" onClick={copy} title="Copy this reply">
+        {copied ? "Copied ✓" : <><Copy size={11} strokeWidth={2} aria-hidden /> Copy</>}
       </button>
       {onAddToMission && (
-        <button
-          type="button"
-          onClick={pin}
-          title="Pin this reply to the active mission"
-          style={{ ...actionStyle, color: "var(--color-info)" }}
-        >
-          {pinned === "ok" ? (
-            "Pinned ✓"
-          ) : pinned === "failed" ? (
-            "Pin failed ✗"
-          ) : (
-            <span className="inline-flex items-center gap-1">
-              <Pin size={10} strokeWidth={2} /> Add to mission
-            </span>
-          )}
+        <button type="button" className="rl-reply-action" data-tone="info" onClick={pin} title="Pin this reply to the active mission">
+          {pinned === "ok" ? "Pinned ✓" : pinned === "failed" ? "Pin failed ✗" : <><Pin size={11} strokeWidth={2} aria-hidden /> Mission</>}
         </button>
       )}
       {onAddToCart && (
         <button
           type="button"
+          className="rl-reply-action"
+          data-tone="info"
           onClick={() => {
             // Same truthfulness rule as the pin beside it: an add that never
             // reached the DB must not flash a tick.
@@ -592,40 +544,22 @@ function MessageActions({
             });
           }}
           title="Add this reply to the task list"
-          style={{ ...actionStyle, color: "var(--color-info)" }}
         >
-          <ListTodo size={12} aria-hidden style={{ display: "inline", marginRight: 4, verticalAlign: "-2px" }}/>
-          {listed === "ok"
-            ? "Added ✓"
-            : listed === "failed"
-              ? "Add failed ✗"
-              : "＋ Add to task list"}
+          {listed === "ok" ? "Added ✓" : listed === "failed" ? "Add failed ✗" : <><ListTodo size={12} aria-hidden /> Task list</>}
         </button>
       )}
       <ContinueAs through={messageId} />
       {!source && onSendToDrafter && (
-        <button
-          type="button"
-          onClick={() => onSendToDrafter(body)}
-          title="Open this reply in the Prompt Drafter to shape before sending"
-          style={{ ...actionStyle, color: "var(--color-info)" }}
-        >
-          <span className="inline-flex items-center gap-1">
-            <PenLine size={10} strokeWidth={2} /> Open in Drafter
-          </span>
+        <button type="button" className="rl-reply-action" data-tone="info" onClick={() => onSendToDrafter(body)} title="Open this reply in the Prompt Drafter to shape before sending">
+          <PenLine size={11} strokeWidth={2} aria-hidden /> Drafter
         </button>
       )}
       {!source && onSendToRedline && (
-        <button
-          type="button"
-          onClick={() => onSendToRedline(body)}
-          title="Send this reply to Claude Code — you'll confirm the target repo"
-          style={{ ...actionStyle, color: "var(--color-info)" }}
-        >
-          Send to Claude Code ▶
+        <button type="button" className="rl-reply-action" data-tone="info" onClick={() => onSendToRedline(body)} title="Send this reply to Claude Code — you'll confirm the target repo">
+          Claude Code ▶
         </button>
       )}
-    </div>
+    </span>
   );
 }
 
@@ -682,37 +616,7 @@ function Composer({
           overflowY: "auto",
         }}
       />
-      {streaming && (
-        <button
-          type="button"
-          onClick={onStop}
-          title="Stop the current reply (queued messages still send)"
-          className="rounded px-2 py-1 font-medium"
-          style={{
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-rule)",
-            color: "var(--color-ink)",
-            fontSize: "11px",
-          }}
-        >
-          Stop
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={onSend}
-        disabled={!draft.trim()}
-        title={streaming ? "Queue this message — it sends when the reply finishes" : undefined}
-        className="rounded px-2 py-1 font-medium"
-        style={{
-          background: "var(--color-info)",
-          color: "var(--color-on-accent)",
-          fontSize: "11px",
-          opacity: draft.trim() ? 1 : 0.5,
-        }}
-      >
-        Send
-      </button>
+      <SendStopButton state={sendState(streaming, !!draft.trim())} onSend={onSend} onStop={onStop} disabled={!draft.trim()} />
     </div>
   );
 }

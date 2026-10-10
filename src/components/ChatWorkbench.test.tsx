@@ -12,16 +12,32 @@ beforeEach(() => { host = document.createElement("div"); document.body.append(ho
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === text)!;
 it("tray actions deliver stable message identities and disable steering for plan/new-agent rows", async () => {
-  const onSteer = vi.fn(), onDelete = vi.fn(), onEdit = vi.fn(), onPromote = vi.fn();
-  await act(async () => root.render(<QueueTray rows={[{id:"a",text:"First",mode:"chat"},{id:"b",text:"Second",mode:"plan"},{id:"c",text:"Third",mode:"build",assignee:"agent"}]} {...{onSteer,onDelete,onEdit,onPromote}} />));
+  const onSteer = vi.fn(), onRemove = vi.fn(), onPromote = vi.fn();
+  await act(async () => root.render(<QueueTray rows={[{id:"a",text:"First",mode:"chat"},{id:"b",text:"Second",mode:"plan"},{id:"c",text:"Third",mode:"build",assignee:"agent"}]} {...{onSteer,onRemove,onPromote}} />));
+  // Collapsed, the pill says how many wait and which goes next.
+  const pill = host.querySelector<HTMLButtonElement>(".rl-queue-pill")!;
+  expect(pill.textContent).toBe("3 queuedFirst");
+  expect(pill.getAttribute("aria-expanded")).toBe("false");
+  expect(host.querySelector(".rl-queue-row")).toBeNull();
+  await act(async () => pill.click());
   const steer = [...host.querySelectorAll<HTMLButtonElement>("button")].filter(button => button.textContent === "↪ Steer");
   expect(steer.map(button => button.disabled)).toEqual([false,true,true]);
   await act(async () => steer[0].click()); expect(onSteer).toHaveBeenCalledWith("a");
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More actions for First"]')!.click());
-  await act(async () => button("Edit").click()); expect(onEdit).toHaveBeenCalledWith("a");
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More actions for First"]')!.click());
-  await act(async () => button("Send next").click()); expect(onPromote).toHaveBeenCalledWith("a");
-  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Delete First"]')!.click()); expect(onDelete).toHaveBeenCalledWith("a");
+  // The first row already sends next.
+  expect([...host.querySelectorAll(".rl-queue-row")].map(row => [...row.querySelectorAll("button")].some(b => b.textContent === "↑ Next"))).toEqual([false,true,true]);
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>("button")].filter(b => b.textContent === "↑ Next")[0].click()); expect(onPromote).toHaveBeenCalledWith("b");
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Unqueue First"]')!.click()); expect(onRemove).toHaveBeenCalledWith("a");
+});
+it("tray offers no steering where the surface has none, and leaves when the queue empties", async () => {
+  const onRemove = vi.fn();
+  await act(async () => root.render(<QueueTray rows={[{id:"a",text:"Only"}]} onRemove={onRemove} />));
+  await act(async () => host.querySelector<HTMLButtonElement>(".rl-queue-pill")!.click());
+  expect([...host.querySelectorAll(".rl-queue-row button")].map(b => b.textContent)).toEqual(["×"]);
+  await act(async () => root.render(<QueueTray rows={[]} onRemove={onRemove} />));
+  expect(host.innerHTML).toBe("");
+  // Back with a new queue, it starts collapsed.
+  await act(async () => root.render(<QueueTray rows={[{id:"b",text:"Next one"}]} onRemove={onRemove} />));
+  expect(host.querySelector(".rl-queue-pill")?.getAttribute("aria-expanded")).toBe("false");
 });
 it("mode picker exposes Build assignee and reuses provider model catalogs", async () => {
   const onModeChange = vi.fn(), onAssigneeChange = vi.fn(), onHarnessChange = vi.fn();
