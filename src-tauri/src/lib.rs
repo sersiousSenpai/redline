@@ -12683,6 +12683,26 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "harness_agent_update",
     "harness_preview_discard",
     "harness_uninstall",
+    // Files and the views of them: the file explorer and viewer, attachments, the
+    // highlighter (a syntect parse), repo logos (an ancestor walk and hashes), and
+    // the browser's tab pictures and memory shots on disk.
+    "doc_lines",
+    "highlight_diff",
+    "import_attachment",
+    "list_dir",
+    "open_doc",
+    "read_file_base64",
+    "read_text_file",
+    "repo_icon",
+    "save_attachment",
+    "save_text_file",
+    "shot_forget",
+    "shots_caption_backlog",
+    "shots_get_policy",
+    "shots_list",
+    "shots_set_policy",
+    "thumbs_list",
+    "thumbs_prune",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls

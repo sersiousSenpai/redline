@@ -48,10 +48,11 @@ mod tests {
     }
 
     #[test]
-    fn heavy_highlight_commands_stay_async() {
+    fn heavy_highlight_commands_stay_off_the_main_thread() {
         let src = include_str!("highlight.rs");
         assert_off_main_command(src, "highlight.rs", "open_doc");
         assert_off_main_command(src, "highlight.rs", "doc_lines");
+        assert_off_main_command(src, "highlight.rs", "highlight_diff");
     }
 
     #[test]
@@ -77,12 +78,14 @@ mod tests {
     }
 
     #[test]
-    fn heavy_fsbrowse_commands_stay_async() {
+    fn heavy_fsbrowse_commands_stay_off_the_main_thread() {
         let src = include_str!("fsbrowse.rs");
         assert_off_main_command(src, "fsbrowse.rs", "list_dir");
         assert_off_main_command(src, "fsbrowse.rs", "read_text_file");
         assert_off_main_command(src, "fsbrowse.rs", "read_file_base64");
         assert_off_main_command(src, "fsbrowse.rs", "save_text_file");
+        assert_off_main_command(src, "fsbrowse.rs", "save_attachment");
+        assert_off_main_command(src, "fsbrowse.rs", "import_attachment");
         assert_off_main_command(src, "fsbrowse.rs", "ensure_dir");
     }
 
@@ -91,7 +94,7 @@ mod tests {
     /// the shell's `cd`. Squarely the shape that must never run on the WebView
     /// main thread.
     #[test]
-    fn heavy_repoicon_commands_stay_async() {
+    fn heavy_repoicon_commands_stay_off_the_main_thread() {
         let src = include_str!("repoicon.rs");
         assert_off_main_command(src, "repoicon.rs", "repo_icon");
     }
@@ -207,11 +210,17 @@ mod tests {
     /// and writes a PNG. Blocking the WebView thread on any of that would
     /// freeze the app for the length of every capture.
     #[test]
-    fn heavy_thumbs_commands_stay_async() {
+    fn heavy_thumbs_commands_stay_off_the_main_thread() {
         let src = include_str!("thumbs.rs");
         assert_off_main_command(src, "thumbs.rs", "browser_take_thumbnail");
         assert_off_main_command(src, "thumbs.rs", "thumbs_list");
         assert_off_main_command(src, "thumbs.rs", "thumbs_prune");
+        // The memory shots: a directory listing, a file delete, the policy and
+        // the caption counts in SQLite.
+        let shots = include_str!("shots.rs");
+        for func in ["shots_list", "shot_forget", "shots_get_policy", "shots_set_policy", "shots_caption_backlog"] {
+            assert_off_main_command(shots, "shots.rs", func);
+        }
     }
 
     /// The Bookshelf writes the document itself on the drafter's 400ms persist

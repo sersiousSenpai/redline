@@ -184,7 +184,7 @@ pub struct ShotEntry {
 
 /// Every shot on disk. The frontend calls this ONCE at mount so it knows what
 /// exists without a failed `read_file_base64` per row.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn shots_list(app: AppHandle) -> Result<Vec<ShotEntry>, String> {
     let dir = shots_dir(&app)?;
     let mut out = Vec::new();
@@ -220,7 +220,7 @@ pub fn shots_list(app: AppHandle) -> Result<Vec<ShotEntry>, String> {
 /// "Forget this picture" — content-addressed, so it forgets the page in every
 /// tab that ever saw it. Clears `shot_key` on every row pointing at it, then
 /// deletes the file.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn shot_forget(
     app: AppHandle,
     store: tauri::State<'_, crate::state::SessionStore>,
@@ -315,7 +315,7 @@ pub async fn capture_redline_surface(
 /// pair — a generic settings write from the webview would be a much wider
 /// surface than this one control needs, and every other toggle here
 /// (`ledger_*_capture_external`) is scoped for the same reason.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn shots_get_policy(
     store: tauri::State<'_, crate::state::SessionStore>,
 ) -> Result<serde_json::Value, String> {
@@ -332,7 +332,7 @@ pub fn shots_get_policy(
     }))
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn shots_set_policy(
     store: tauri::State<'_, crate::state::SessionStore>,
     denylist: Option<String>,
@@ -357,7 +357,7 @@ pub fn shots_set_policy(
 /// its `act` must never spawn the captioner. A background job that quietly
 /// sends screenshots to a model is exactly the kind of thing that should
 /// require a person to press something.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn shots_caption_backlog(
     store: tauri::State<'_, crate::state::SessionStore>,
 ) -> Result<serde_json::Value, String> {

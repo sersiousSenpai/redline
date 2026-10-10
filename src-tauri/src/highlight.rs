@@ -289,7 +289,8 @@ impl Highlighter {
     /// The doc's per-line tokens, computed once on first call and cached. `None`
     /// when the doc isn't highlightable or no grammar matched (caller renders
     /// plain text). Heavy (syntect parse) — only ever reached off the UI thread
-    /// via the `(async)` `doc_highlight` / `doc_lines` commands.
+    /// via the `doc_highlight` / `doc_lines` commands, which run on the blocking
+    /// pool (`OFF_MAIN_COMMANDS`).
     fn tokens<'a>(&self, path: &str, doc: &'a CachedDoc) -> Option<&'a Vec<Vec<Token>>> {
         doc.tokens
             .get_or_init(|| {
@@ -648,12 +649,13 @@ fn scope_class(scope: &str) -> Option<&'static str> {
 /// a file flash in the theme's flat foreground for however long the (cold) grammar
 /// took to compile. Huge docs return `lines: None` and are paged via `doc_lines`.
 ///
-/// `(async)` is load-bearing: reading a large file off disk *and* tokenizing it
-/// must not land on the **main thread** (a plain `#[tauri::command]` would), which
-/// would beach-ball the UI. `(async)` runs the body on a worker thread; the viewer
+/// The blocking pool is load-bearing: reading a large file off disk *and*
+/// tokenizing it must not land on the **main thread** (a plain `#[tauri::command]`
+/// that `OFF_MAIN_COMMANDS` doesn't name would), which would beach-ball the UI.
+/// The pool runs the body on a worker thread; the viewer
 /// shows a brief "Loading…" only if the tokenize is slow (a cold grammar's
 /// one-time regex compile), never a plain placeholder.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn open_doc(
     path: String,
     hl: tauri::State<'_, Arc<Highlighter>>,
@@ -694,9 +696,9 @@ pub struct DiffHighlight(pub Option<Vec<Arc<Vec<Vec<Token>>>>>);
 
 /// Tokenize a diff file's hunk segments into `.hljs-*` classed runs. Content-
 /// keyed (segment hash) rather than path+mtime — diff text isn't a file on
-/// disk. `(async)` is load-bearing: the syntect parse must not run on the
-/// WebView main thread.
-#[tauri::command(async)]
+/// disk. The blocking pool (`OFF_MAIN_COMMANDS`) is load-bearing: the syntect
+/// parse must not run on the WebView main thread.
+#[tauri::command]
 pub fn highlight_diff(
     req: DiffHighlightRequest,
     hl: tauri::State<'_, Arc<Highlighter>>,
@@ -718,9 +720,9 @@ pub fn highlight_diff(
 
 /// Return display lines for `[start, end)` (clamped) — the paging path for docs
 /// too large to inline. Lines carry `tokens` when the doc is highlightable, else
-/// raw `text`. `(async)` so a first-window tokenize never lands on the main
-/// thread.
-#[tauri::command(async)]
+/// raw `text`. On the blocking pool (`OFF_MAIN_COMMANDS`) so a first-window
+/// tokenize never lands on the main thread.
+#[tauri::command]
 pub fn doc_lines(
     path: String,
     start: usize,
