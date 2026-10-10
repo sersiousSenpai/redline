@@ -4,14 +4,15 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 
 const script = readFileSync("src-tauri/src/browser_frontdoor_shortcut.js", "utf8");
-function frame() {
+function frame({ main = false } = {}) {
   const listeners = new Map<string, (event: Record<string, unknown>) => void>();
   const postMessage = vi.fn();
-  const window = { top: {}, webkit: { messageHandlers: { redlineBrowser: { postMessage } } }, addEventListener: vi.fn((name: string, listener: (event: Record<string, unknown>) => void) => listeners.set(name, listener)) };
+  const window: Record<string, unknown> = { top: {}, webkit: { messageHandlers: { redlineBrowser: { postMessage } } }, addEventListener: vi.fn((name: string, listener: (event: Record<string, unknown>) => void) => listeners.set(name, listener)) };
+  if (main) window.top = window;
   const context = { window };
   runInNewContext(script, context);
   runInNewContext(script, context);
-  return { window, postMessage, key: (extra = {}) => {
+  return { window: window as { addEventListener: ReturnType<typeof vi.fn> }, postMessage, listeners, key: (extra = {}) => {
     const event = { key: "Enter", shiftKey: true, isTrusted: true, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn(), ...extra };
     listeners.get("keydown")!(event);
     return event;
@@ -20,7 +21,7 @@ function frame() {
 describe("front door shortcut in embedded page frames", () => {
   it("installs once in an iframe and forwards a trusted Shift+Enter before page handlers", () => {
     const { window, postMessage, key } = frame();
-    expect(window.addEventListener).toHaveBeenCalledTimes(1);
+    expect(window.addEventListener.mock.calls.filter(([name]) => name === "keydown")).toHaveLength(1);
     expect(window.addEventListener).toHaveBeenCalledWith("keydown", expect.any(Function), true);
     const event = key();
     expect(event.preventDefault).toHaveBeenCalledOnce();
@@ -47,6 +48,20 @@ describe("front door shortcut in embedded page frames", () => {
     expect(key({ target: editor }).preventDefault).not.toHaveBeenCalled();
     expect(postMessage).not.toHaveBeenCalled();
     expect(key({ target: host, composedPath: () => [host] }).preventDefault).toHaveBeenCalledOnce();
+  });
+  it("says a sub-frame was pressed, which the page's own signals never hear — and only a real press", () => {
+    const { postMessage, listeners } = frame();
+    listeners.get("pointerdown")!({ isTrusted: true });
+    listeners.get("touchstart")!({ isTrusted: true });
+    listeners.get("pointerdown")!({ isTrusted: false });
+    expect(postMessage.mock.calls.map(([raw]) => JSON.parse(raw))).toEqual([
+      { kind: "interaction", value: "pointerdown" },
+      { kind: "interaction", value: "touchstart" },
+    ]);
+    // The main frame has the page's own signals for that.
+    const main = frame({ main: true });
+    expect(main.listeners.has("pointerdown")).toBe(false);
+    expect(main.window.addEventListener).toHaveBeenCalledTimes(1);
   });
   it("leaves composition, ordinary Enter and modified shortcuts alone", () => {
     const { postMessage, key } = frame();
