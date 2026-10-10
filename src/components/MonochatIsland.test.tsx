@@ -7,7 +7,7 @@ import { MonochatIsland, landingFit } from "./MonochatIsland";
 import "./MonochatCard";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
-import { DOOR_CLOSE_MS, DOOR_GROW_MS, inverseTransform, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_SPRING } from "../lib/springSwap";
+import { DOOR_CLOSE_MS, DOOR_GROW_MS, fadeOutKeyframes, inverseTransform, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_OUT_EASING, SWAP_SPRING } from "../lib/springSwap";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
@@ -35,12 +35,15 @@ function Harness({ landing = false, busy = false, arrivals, announce, onOpen, on
   const [open, setOpen] = useState(false);
   const [compact, setCompact] = useState(false);
   const [surface, setSurface] = useState("document");
+  const [handoff, setHandoff] = useState(false);
   return <>
     <header className="rl-app-header"><button id="header-surface">Review</button></header>
     <article className="rl-doc-column"><button id="document-focus">Document</button><button id="navigate" onClick={() => setSurface("browser")}>Browser</button>
       {/* A recent: the owner closes the door and goes there in one batch. */}
-      <button id="open-recent" onClick={() => { setOpen(false); setSurface("plan"); }}>Recent</button></article>
-    <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }}
+      <button id="open-recent" onClick={() => { setOpen(false); setSurface("plan"); }}>Recent</button>
+      {/* The plan the door launched has landed: the owner hands off into it. */}
+      <button id="hand-off" onClick={() => { setHandoff(true); setOpen(false); }}>Plan landed</button></article>
+    <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }} handoff={handoff}
       compactOpen={compact} onCompactChange={setCompact} compact={<div className="rl-fd-island"><textarea aria-label="Compact reply" defaultValue=""/></div>}
       context="Plan" busy={busy} arrivals={arrivals} announce={announce} onNewChat={onNewChat}>
       {children ?? <div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
@@ -704,6 +707,28 @@ describe("the door's flights", () => {
     expect(welcome?.options).toMatchObject({ duration: 100, fill: "forwards" });
     // The pill is already back under it, to land on.
     expect(pill().dataset.hidden).toBe("false");
+    await advance(DOOR_CLOSE_MS);
+    expect(layer.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("handing off into the plan it launched, it fades where it is and gives the caret to the plan", async () => {
+    const calls = flights();
+    boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
+    await render(<Harness>{welcomeDoor}</Harness>);
+    await click('[aria-label="Open front door"]');
+    expect(document.activeElement).toBe(main());
+    calls.length = 0;
+    await click("#hand-off");
+    const layer = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+    expect(layer.hasAttribute("data-closing")).toBe(true);
+    // Back and away under the plan springing out of its composer — not back
+    // toward the pill.
+    const flight = calls.filter(call => call.element === room());
+    expect(flight).toHaveLength(1);
+    expect(flight[0].frames).toEqual(fadeOutKeyframes());
+    expect(flight[0].options).toEqual({ duration: DOOR_CLOSE_MS, easing: SWAP_OUT_EASING, fill: "forwards" });
+    // The caret goes to the plan's main area, not back to where it was.
+    expect(document.activeElement).toBe(main_());
     await advance(DOOR_CLOSE_MS);
     expect(layer.hasAttribute("data-closing")).toBe(false);
   });

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { afterEach, describe, expect, it } from "vitest";
-import { arrivalFocus, arrivalMessage, isWritingKey, writingNow, WRITING_MS, type ArrivalState } from "./planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow, WRITING_MS, type ArrivalState } from "./planArrival";
 
 const at = (over: Partial<ArrivalState>): ArrivalState => ({
   activeId: null,
@@ -52,6 +52,31 @@ describe("arrivalFocus", () => {
     expect(arrivalFocus(at({ writing: true }))).toBe("flash");
     expect(arrivalFocus(at({ writing: true, mainSurface: "browser" }))).toBe("flash");
     expect(arrivalFocus(at({ writing: true, activeId: "A", plateMode: "plan", mainSurface: "drafter" }))).toBe("flash");
+  });
+});
+
+describe("your own launch from the door", () => {
+  const door = { open: true, showing: "L1", draft: "", attachments: 0 };
+
+  it("hands off into the plan: ⏎ was the gesture, wherever the door was opened", () => {
+    // The open door always counts as writing; a handoff wins over that.
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true }))).toBe("handoff");
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, activeId: "A", plateMode: "plan" }))).toBe("handoff");
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, mainSurface: "browser" }))).toBe("handoff");
+  });
+
+  it("is the launch the open door is showing, with nothing new begun there", () => {
+    expect(ownDoorLaunch(door, "L1")).toBe(true);
+    // Someone else's plan, or one with no launch behind it, still flashes.
+    expect(ownDoorLaunch(door, "L2")).toBe(false);
+    expect(ownDoorLaunch(door, null)).toBe(false);
+    expect(ownDoorLaunch({ ...door, showing: null }, null)).toBe(false);
+    // A door closed since, or one where a new draft was begun, keeps to the
+    // flash: the door stays, and so does the sentence.
+    expect(ownDoorLaunch({ ...door, open: false }, "L1")).toBe(false);
+    expect(ownDoorLaunch({ ...door, draft: "And then the docs" }, "L1")).toBe(false);
+    expect(ownDoorLaunch({ ...door, draft: "  " }, "L1")).toBe(true);
+    expect(ownDoorLaunch({ ...door, attachments: 1 }, "L1")).toBe(false);
   });
 });
 

@@ -53,7 +53,7 @@ import {
 } from "./lib/landing";
 import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
-import { arrivalFocus, arrivalMessage, isWritingKey, writingNow } from "./lib/planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
@@ -748,9 +748,20 @@ function App() {
     return false;
   });
   // Fresh view of it for listeners: the open door is where you are, caret
-  // or not, so a plan arriving flashes over it.
+  // or not, so a plan arriving flashes over it — unless it is the one you
+  // launched from it (`doorLaunchRef`).
   const frontDoorOpenRef = useRef(frontDoorOpen);
   frontDoorOpenRef.current = frontDoorOpen;
+  // The plan launch the open door is showing in place since its ⏎. When that
+  // plan lands with nothing new begun in the door, the door hands off into it
+  // (`doorHandoff`): it fades where it is while the plan springs out of its
+  // composer. Cleared when the door closes or takes up a chat.
+  const doorLaunchRef = useRef<string | null>(null);
+  const [doorHandoff, setDoorHandoff] = useState(false);
+  useEffect(() => {
+    if (frontDoorOpen) setDoorHandoff(false);
+    else doorLaunchRef.current = null;
+  }, [frontDoorOpen]);
   // The pill's compact card, sprung out by a hover. Never open at launch and
   // never re-opened by coming back to a surface.
   const [doorCompact, setDoorCompact] = useState(false);
@@ -4094,7 +4105,28 @@ function App() {
           plateMode: plateModeRef.current,
           viewedVersion: viewedVersionRef.current,
           writing,
+          ownDoorLaunch: ownDoorLaunch({
+            open: frontDoorOpenRef.current,
+            showing: doorLaunchRef.current,
+            draft: getFrontDoorText(),
+            attachments: frontDoorAttachmentsRef.current.length,
+          }, payload.launchId),
         });
+        if (focus === "handoff") {
+          // The plan you launched with ⏎ from the door you are still in: that
+          // was the gesture, and this is what it asked for. The door hands
+          // off into it — the plan springs out of the composer its sentence
+          // left while the door fades where it is — and the caret goes to the
+          // plan. Said politely, as any arrival on screen is.
+          const island = document.querySelector(".rl-frontdoor-focus[data-open='true'] .rl-fd-island")?.getBoundingClientRect();
+          if (island && island.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: island.left, top: island.top, width: island.width, height: island.height } });
+          setDoorHandoff(true);
+          setFrontDoorOpen(false);
+          selectSurfaceRef.current("document");
+          focusIntercepted();
+          announceDoor(arrivalMessage(title));
+          return;
+        }
         if (focus === "focus" && !paneMaskedRef.current) {
           // On the document surface: on screen now. From the Front Door the
           // plate turns into the plan, which is the point of launching one.
@@ -7584,8 +7616,10 @@ function App() {
       setFrontDoorText("");
       setFrontDoorAttachments([]);
       // Handed off: the compact card shrinks back into the pill, which shows
-      // the work. The open door shows it in place.
+      // the work. The open door shows it in place, and hands off into the
+      // plan when it lands.
       setDoorCompact(false);
+      if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
       announceDoor(mode === "run" ? "Run started in the terminal." : "Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
@@ -7673,6 +7707,8 @@ function App() {
     // The door GROWS into the chat in place — the composer you were typing in
     // is the bottom of the thread you are now inside — and `selectSurface` is
     // deliberately not called, because nothing is being navigated away from.
+    // A plan launched from it earlier then lands as any other would.
+    doorLaunchRef.current = null;
     setFrontDoorOpen(true);
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
@@ -7708,6 +7744,7 @@ function App() {
   // `Chats ▾`). The dock comes forward wherever the user happens to be — a
   // conversation is not a place you navigate to any more.
   const openChat = (id: string) => {
+    doorLaunchRef.current = null;
     setFrontDoorDest("chat");
     setChatId(id);
     setChatSeed(null);
@@ -10759,6 +10796,7 @@ function App() {
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
         onOpenChange={setFrontDoorOpen}
+        handoff={doorHandoff}
         compactOpen={doorCompact}
         onCompactChange={setDoorCompact}
         compact={doorCompact && renderMonochatComposer("card")}

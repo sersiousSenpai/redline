@@ -14,10 +14,13 @@ import type { MainSurface } from "./mainSurface";
  *    another plan or a file, or looking back at an older version of this
  *    one. Nothing moves: the arrival marks its sidebar row, badges the pill
  *    and says so in a brief notice with Open.
+ *  - `handoff`: it is the plan you launched with ⏎ from the door you are
+ *    still in, and you have begun nothing new there since. That ⏎ was the
+ *    gesture and this is what it asked for: the door hands off into the plan.
  *
  *  One rule replaces the old special cases. "A live dock conversation on
  *  another plan" was only ever a way of reading another plan. */
-export type ArrivalFocus = "focus" | "flash";
+export type ArrivalFocus = "focus" | "flash" | "handoff";
 
 export interface ArrivalState {
   /** The session on screen, or null. */
@@ -30,9 +33,13 @@ export interface ArrivalState {
   viewedVersion?: number | null;
   /** The user is writing (see `writingNow`). */
   writing?: boolean;
+  /** It is the user's own launch from the door they are still in
+   *  (`ownDoorLaunch`). */
+  ownDoorLaunch?: boolean;
 }
 
 export function arrivalFocus(state: ArrivalState): ArrivalFocus {
+  if (state.ownDoorLaunch) return "handoff";
   const onPlate = state.mainSurface === "document";
   if (onPlate && state.plateMode === "file") return "flash";
   // A new version of the plan already selected is the answer waited for: it
@@ -43,6 +50,25 @@ export function arrivalFocus(state: ArrivalState): ArrivalFocus {
   }
   if (state.writing) return "flash";
   return onPlate && state.plateMode === "plan" ? "flash" : "focus";
+}
+
+/** The open door, as an arriving plan finds it. */
+export interface DoorAtArrival {
+  open: boolean;
+  /** The launch the door is showing in place: set by ⏎ in the open door,
+   *  cleared when the door closes or takes up a chat. */
+  showing: string | null;
+  /** What is in its composer now. */
+  draft: string;
+  attachments: number;
+}
+
+/** Whether a plan arriving as `launchId` is the user's own launch from the
+ *  door, which is still open on it with nothing new begun: no sentence or
+ *  attachment put in the composer since. A new draft keeps the door, and the
+ *  plan flashes like any other. */
+export function ownDoorLaunch(door: DoorAtArrival, launchId: string | null | undefined): boolean {
+  return door.open && !!launchId && door.showing === launchId && !door.draft.trim() && door.attachments === 0;
 }
 
 /** How long a keystroke keeps someone writing, as far as an arrival goes. */
