@@ -35,7 +35,7 @@ describe("a plan arriving while you are busy flashes", () => {
   it("hands off into the plan you launched from the door you are still in, and only that one", () => {
     // The rule is planArrival's (`ownDoorLaunch`), read at the moment it lands.
     const focus = arrival.slice(arrival.indexOf("const focus = arrivalFocus({"), arrival.indexOf('if (focus === "handoff")'));
-    expect(focus).toMatch(/ownDoorLaunch: ownDoorLaunch\(\{\s*open: frontDoorOpenRef\.current,\s*showing: doorLaunchRef\.current,\s*draft: getFrontDoorText\(\),\s*attachments: frontDoorAttachmentsRef\.current\.length,\s*typedAt: typedAtRef\.current,\s*\}, payload\.launchId, Date\.now\(\)\)/);
+    expect(focus).toMatch(/ownDoorLaunch: ownDoorLaunch\(\{\s*open: frontDoorOpenRef\.current,\s*showing: doorLaunchRef\.current,\s*draft: getFrontDoorText\(\),\s*attachments: frontDoorAttachmentsRef\.current\.length,\s*typedAt: typedAtRef\.current,\s*choosing: hasChildOverlay\(\),\s*\}, payload\.launchId, Date\.now\(\)\)/);
     // The door closes into the plan, which springs out of its composer, and
     // says so; nothing else of the door's is touched.
     const block = handoff();

@@ -65,8 +65,9 @@ const loadCard = () => import("./MonochatCard");
 const MonochatCard = lazy(loadCard);
 
 /** A menu, picker or dialog layered over the island owns the pointer and Esc.
- *  Not one the open door's sweep left inert behind it: that one is under. */
-const hasChildOverlay = () => Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]')).some(overlay => !overlay.closest("[inert]"));
+ *  Not one the open door's sweep left inert behind it: that one is under.
+ *  Also how a plan arriving finds someone choosing in the door. */
+export const hasChildOverlay = () => Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]')).some(overlay => !overlay.closest("[inert]"));
 /** Not in the chat slot while it is folded away (`hidden`). */
 const shown = (element: Element) => !element.closest("[hidden]");
 /** The composer the door puts the caret in — a chat's own when it holds one. */

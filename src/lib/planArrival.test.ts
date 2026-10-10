@@ -58,7 +58,7 @@ describe("arrivalFocus", () => {
 describe("your own launch from the door", () => {
   // The ⏎ itself is the last key typed: minutes before the plan lands.
   const NOW = 600_000;
-  const door: DoorAtArrival = { open: true, showing: "L1", draft: "", attachments: 0, typedAt: NOW - 120_000 };
+  const door: DoorAtArrival = { open: true, showing: "L1", draft: "", attachments: 0, typedAt: NOW - 120_000, choosing: false };
   const own = (d: DoorAtArrival, launchId: string | null) => ownDoorLaunch(d, launchId, NOW);
 
   it("hands off into the plan: ⏎ was the gesture, wherever the door was opened", () => {
@@ -88,6 +88,11 @@ describe("your own launch from the door", () => {
     expect(own({ ...door, typedAt: NOW - 800 }, "L1")).toBe(false);
     expect(own({ ...door, typedAt: NOW - WRITING_MS + 1 }, "L1")).toBe(false);
     expect(own({ ...door, typedAt: NOW - WRITING_MS }, "L1")).toBe(true);
+  });
+
+  it("is never a door someone is choosing in: a menu of its is open", () => {
+    // Picking the project or the model for what comes next is begun too.
+    expect(own({ ...door, choosing: true }, "L1")).toBe(false);
   });
 });
 

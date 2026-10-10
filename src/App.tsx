@@ -348,7 +348,7 @@ import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
-import { MonochatIsland } from "./components/MonochatIsland";
+import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -4112,6 +4112,7 @@ function App() {
             draft: getFrontDoorText(),
             attachments: frontDoorAttachmentsRef.current.length,
             typedAt: typedAtRef.current,
+            choosing: hasChildOverlay(),
           }, payload.launchId, Date.now()),
         });
         if (focus === "handoff") {
