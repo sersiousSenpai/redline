@@ -76,6 +76,7 @@ import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
 import { MissionStartDialog } from "./MissionStartDialog";
 import { useMission } from "../hooks/useMission";
+import { usePageActions } from "../hooks/usePageActions";
 
 // A native child webview is an OS-level layer painted on top of the React DOM —
 // it does not flow inline. So this component renders an invisible placeholder
@@ -512,6 +513,9 @@ function BrowserPaneBase({
   const [activeId, setActiveId] = useState(() => initialActiveRef.current!);
   const picker = useElementPicker(`browser-${activeId}`, setWorkspaceError);
   const pickerRef = useRef(picker); pickerRef.current = picker;
+  // The pages the agent is acting on: a dot on each tab, and the running
+  // action named in the page chat's live line (BC-41).
+  const pageActions = usePageActions();
   // The page chat's scope: which thread it shows and which page a turn
   // targets. That is the structure layer's world, built from these tabs, the
   // tab on screen and the workspace plus a slice only its reducer writes; the
@@ -624,6 +628,9 @@ function BrowserPaneBase({
   // remounts and shows the item instead of silently going stale (it loads from
   // the DB on mount and has no reason to poll).
   const [listReloadKey, setListReloadKey] = useState(0);
+  // Synthesize from the page chat's goal card, waiting for the Mission panel
+  // to mount and run it. Consumed once started, like a seed.
+  const [synthesizeAsked, setSynthesizeAsked] = useState(false);
 
   /** One read of the live page: where it is, and what is highlighted on it.
    *
@@ -2331,7 +2338,7 @@ function BrowserPaneBase({
 
   return (
     <div className="rb-workspace">
-      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
+      {!browserFullscreen && <Suspense fallback={null}><BrowserTabRail tabs={tabs} activeId={activeId} acting={new Set(tabs.filter((tab) => pageActions.acting.has(`browser-${tab.id}`)).map((tab) => tab.id))} onSelect={selectTab} onCloseTab={closeTab} onNewTab={() => openTab(NEWTAB)} onTabDrag={startTabDrag} onResize={scheduleSync} tileBadges={tileBadges(visibleBrowseIds)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab}
         groups={groups} organized={organized} organizing={organizing} onMode={value => setOrganizedByWorkspace(prev => ({ ...prev, [workspaceKey]: value }))} onOrganize={() => void organizeTabs()} onToggleGroup={id => setGroups(groups.map(group => group.id === id ? { ...group, collapsed: !group.collapsed } : group))}/></Suspense>}
       <div className="rb-workspace-pages">
       {!browserFullscreen && <BrowserChrome tabs={tabs} activeId={activeId} address={addr} onAddress={setAddr}
@@ -2423,6 +2430,8 @@ function BrowserPaneBase({
                       void mission.setGoal(mission.activeMission.missionId, title, goal)
                     }
                     onSynthesize={onSynthesizeToDrafter}
+                    synthesizeAsked={synthesizeAsked}
+                    onSynthesizeStarted={() => setSynthesizeAsked(false)}
                   />
                 ) : (
                   <MissionEmptyState onStart={() => setMissionDialogOpen(true)} />
@@ -2438,6 +2447,23 @@ function BrowserPaneBase({
                   onToggleTabChat={toggleTabChat}
                   onToggleLinkedMode={toggleLinkedMode}
                   onResearch={openResearch}
+                  pageActions={pageActions.running}
+                  // The element picker runs on a web page only; it attaches
+                  // what is picked as a chip (BC-15, BC-40).
+                  onPickElement={/^https?:\/\//i.test(activeTab.url) ? () => void picker.start(activeTab.url) : undefined}
+                  taskList={{ nonce: listReloadKey, onOpen: () => setChatHere({ open: true, pill: "cart" }) }}
+                  mission={mission.activeMission ? {
+                    title: mission.activeMission.title,
+                    goal: mission.activeMission.goal,
+                    findings: mission.findings.length,
+                    onOpen: () => setChatHere({ open: true, pill: "mission" }),
+                    // The mission's synthesis is its orchestrator's turn:
+                    // Synthesize opens the Mission panel and starts it there.
+                    onSynthesize: () => {
+                      setSynthesizeAsked(true);
+                      setChatHere({ open: true, pill: "mission" });
+                    },
+                  } : null}
                   projectDir={projectDir}
                   onClose={() => setChatHere({ open: false })}
                   onOpenLink={openSource}

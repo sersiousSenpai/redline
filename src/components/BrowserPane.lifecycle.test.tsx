@@ -23,10 +23,13 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string) => unknown; seed?: { text: string; source: { kind: string } } }) => {
+vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
   mocks.chatRenders.push(`${props.conversation.kind}:${props.conversation.browseId}`);
-  return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button>
-    <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button></div>;
+  const action = props.pageActions?.get(props.conversation.targetLabel);
+  return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}
+    data-page-action={action ? `${action.kind}:${action.tab}` : undefined} data-mission={props.mission?.title} data-can-pick={props.onPickElement ? "yes" : "no"}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button>
+    <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button>
+    <button onClick={props.taskList?.onOpen}>Open task list</button><button onClick={props.mission?.onSynthesize}>Synthesize</button></div>;
 } }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
@@ -299,6 +302,37 @@ describe("linked mode decides tab chat vs shared chat", () => {
     await clickDock("Pin reply");
     const opened = dock.querySelector("[data-label]")!.getAttribute("data-label")!.replace("browser-t-", "");
     expect(addFinding).toHaveBeenCalledWith({ body: "A finding", browseId: opened, sourceUrl: "https://three.test/", sourceTitle: "three.test" });
+  });
+});
+
+describe("the agent acting on a page", () => {
+  it("dots the tab and names the action in the chat while it runs, and clears the dot when the turn ends", async () => {
+    await mount();
+    const label = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
+    const tab = () => host.querySelector(`[data-tab-id="${label.replace("browser-", "")}"]`)!;
+    await event("browser-action", { label, kind: "click", tab: 1, status: "running" });
+    expect(tab().hasAttribute("data-agent-acting")).toBe(true);
+    expect(tab().getAttribute("aria-label")).toContain("the agent is acting on this page");
+    expect(dock.querySelector("[data-page-action]")?.getAttribute("data-page-action")).toBe("click:1");
+    // Done: the chat's live line moves on, the dot stays until the turn ends.
+    await event("browser-action", { label, kind: "click", tab: 1, status: "completed" });
+    expect(dock.querySelector("[data-page-action]")).toBeNull();
+    expect(tab().hasAttribute("data-agent-acting")).toBe(true);
+    await event("browse-done", { browseId: "one" });
+    expect(tab().hasAttribute("data-agent-acting")).toBe(false);
+  });
+
+  it("hands the page chat the Task list, the mission's goal card and the element picker", async () => {
+    mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits", goal: "Compare token buckets" }, findings: [] };
+    const openDockPill = vi.fn();
+    await mount({ onOpenDockPill: openDockPill });
+    expect(dock.querySelector("[data-mission]")?.getAttribute("data-mission")).toBe("Rate limits");
+    expect(dock.querySelector("[data-can-pick]")?.getAttribute("data-can-pick")).toBe("yes");
+    await clickDock("Open task list");
+    expect(openDockPill).toHaveBeenLastCalledWith("cart");
+    // Synthesize is the mission's own turn: it opens the Mission panel.
+    await clickDock("Synthesize");
+    expect(openDockPill).toHaveBeenLastCalledWith("mission");
   });
 });
 

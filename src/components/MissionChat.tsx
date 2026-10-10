@@ -24,6 +24,10 @@ interface MissionChatProps {
   onEditGoal: (title: string, goal: string) => void;
   /** Hand a synthesized brief (markdown) to the Prompt Drafter. */
   onSynthesize?: (markdown: string) => void;
+  /** Synthesize was pressed elsewhere (the page chat's goal card): run it
+   *  here once the thread is ready, then say so. */
+  synthesizeAsked?: boolean;
+  onSynthesizeStarted?: () => void;
 }
 
 /** The orchestrator runs on Claude, and a reply is signed by its provider
@@ -50,6 +54,8 @@ export function MissionChat({
   onJumpToFinding,
   onEditGoal,
   onSynthesize,
+  synthesizeAsked = false,
+  onSynthesizeStarted,
 }: MissionChatProps) {
   const missionId = mission.missionId;
   // Composer draft survives surface switches and app restarts (the component
@@ -110,6 +116,22 @@ export function MissionChat({
   useEffect(() => {
     stick();
   }, [missionId]);
+
+  function synthesize() {
+    stick();
+    send(SYNTHESIZE_PROMPT, {
+      localBody: "✦ Synthesize the mission",
+      extra: "synthesize",
+    });
+  }
+  // Asked for from the page chat: once the thread has loaded and no reply is
+  // running, the same turn the button below starts.
+  useEffect(() => {
+    if (!synthesizeAsked || !loaded || status === "streaming") return;
+    onSynthesizeStarted?.();
+    synthesize();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [synthesizeAsked, loaded, status]);
 
 
   return (
@@ -189,13 +211,7 @@ export function MissionChat({
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
         <button
           type="button"
-          onClick={() => {
-            stick();
-            send(SYNTHESIZE_PROMPT, {
-              localBody: "✦ Synthesize the mission",
-              extra: "synthesize",
-            });
-          }}
+          onClick={synthesize}
           disabled={status === "streaming"}
           className="w-full rounded px-2 py-1.5 font-medium mb-2"
           style={{

@@ -3,7 +3,8 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
-const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
+const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
+  dictation: { listening: false, toggle: vi.fn(), onFinal: (_text: string) => {} },
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
     onSent?: (args: Record<string, unknown>) => void;
@@ -12,24 +13,32 @@ const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
   captureMock: vi.fn(async (label: string) => `snapshot:${label}`),
   // The preflight probe finds a ready Codex: a Codex last pick is inherited
   // only when this machine can run it.
-  invokeMock: vi.fn(async (cmd?: string) => cmd === "preflight_status"
+  invokeMock: vi.fn(async (cmd?: string): Promise<unknown> => cmd === "preflight_status"
     ? { codex: { found: true, usable: true, signedIn: true, authState: "signed-in" }, hook: {}, skill: {} }
     : []),
-  turn: { messages: [] as BrowseMessage[], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
-    send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), clear: vi.fn(), meter: null, activity: null, meters: {} },
+  turn: { messages: [] as BrowseMessage[], queue: [] as BrowseMessage[], liveText: "", status: "idle", startedAt: null as number | null, loaded: true,
+    send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(async (_id: string): Promise<string | null> => null), clear: vi.fn(), meter: null,
+    activity: null as null | { at: number; kind: string; label: string }[], meters: {} as Record<string, unknown> },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("../lib/useDictation", () => ({ useDictation: ({ onFinal }: { onFinal: (text: string) => void }) => {
+  dictation.onFinal = onFinal;
+  return { listening: dictation.listening, partial: "", error: null, start: () => {}, stop: () => {}, toggle: dictation.toggle };
+} }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
-vi.mock("./StreamingText", () => ({ StreamingText: () => null }));
+vi.mock("./StreamingText", () => ({ StreamingText: ({ text, className }: { text: string; className?: string }) => <div className={className}>{text}</div> }));
 import { BrowserChat } from "./BrowserChat";
+import { writeSharedDraft } from "../hooks/useSharedDraft";
 import type { ResolvedConversation } from "../lib/browserChat/scope";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
 beforeEach(() => {
-  localStorage.clear(); vi.clearAllMocks(); turn.messages = [];
+  localStorage.clear(); vi.clearAllMocks(); turn.messages = []; turn.queue = []; turn.status = "idle"; turn.liveText = ""; turn.activity = null; turn.meters = {};
+  // Drafts live in a store shared across mounts, and so across tests.
+  for (const key of ["rl.chatDraft.browse.thread", "rl.chatChips.browse.thread"]) writeSharedDraft(key, "");
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
@@ -76,33 +85,48 @@ describe("page conversation header", () => {
     expect(await sendTurn("Asked again")).toMatchObject({ snapshot: "snapshot:browser-a" });
     expect(await sendTurn("Follow-up")).not.toHaveProperty("snapshot");
   });
-  it("shows the title, chat toggle, three menu rows and an empty-state mission link", async () => {
+  it("draws one header row: what it follows, ⋯ and ×, with the chat switch and the rest in ⋯", async () => {
     const research = vi.fn(), close = vi.fn(), toggle = vi.fn();
     await show({ onClose: close, onToggleTabChat: toggle, onResearch: research });
-    expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Source page");
-    expect(host.querySelector("[data-browser-chat-header]")?.querySelectorAll("button")).toHaveLength(3);
-    // A tab's own chat offers the way to the shared one.
-    await click("Shared chat"); expect(toggle).toHaveBeenCalledOnce();
+    const header = host.querySelector("[data-browser-chat-header]")!;
+    expect(header.textContent).toContain("Source page");
+    expect([...header.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"))).toEqual(["Conversation actions", "Close discussion"]);
+    // The thread comes straight after it: no second row.
+    expect(header.nextElementSibling?.matches("[data-browser-chat-messages]")).toBe(true);
     expect(host.textContent).not.toContain("This tab’s own chat");
     const composer = host.querySelector("textarea");
     await click("Conversation actions");
-    expect([...document.querySelector('[role="menu"]')!.children].map(row => row.textContent)).toEqual(["Start a research mission", "Text sizeA−A+", "Clear history"]);
+    expect([...document.querySelector('[role="menu"]')!.children].map(row => row.textContent)).toEqual(["Open the shared chat", "Start a research mission", "Text sizeA−A+", "Show the raw stream", "Clear history"]);
     expect(button("Clear history").disabled).toBe(true);
     await click("Larger text"); expect(localStorage.getItem("redline.browseZoom")).toBe("1.1");
-    await act(async () => document.querySelector<HTMLButtonElement>('[role="menu"] button')!.click());
-    expect(research).toHaveBeenCalledOnce();
+    // A tab's own chat offers the way to the shared one.
+    await click("Open the shared chat"); expect(toggle).toHaveBeenCalledOnce();
+    await click("Conversation actions");
+    await click("Start a research mission"); expect(research).toHaveBeenCalledOnce();
     expect(host.querySelector("textarea")).toBe(composer);
-    expect(host.querySelector("[data-browser-chat-composer]")?.textContent).toContain("Start a research mission");
     await click("Close discussion"); expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("starts a new chat from the composer with a few things to do and one tip", async () => {
+    const research = vi.fn();
+    await show({ onResearch: research });
+    const empty = host.querySelector("[data-browser-chat-empty]")!;
+    expect([...empty.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Summarize this page", "Extract a table", "Start a mission"]);
+    expect(empty.querySelector(".rb-tip")?.textContent).toContain("choose Ask");
+    await click("Summarize this page");
+    expect(turn.send).toHaveBeenCalledWith("Summarize this page.");
+    await click("Start a mission"); expect(research).toHaveBeenCalledOnce();
+    // Nothing took the caret.
+    expect(document.activeElement).not.toBe(host.querySelector("textarea"));
   });
 
   it("names the page a shared chat is on, never the shared chat itself as where it came from", async () => {
     const toggle = vi.fn();
     await show({ conversation: sharedChat({ targetNumber: 2, targetTitle: "Docs", exception: true }), onToggleTabChat: toggle });
-    expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("Browser chat");
-    await click("Tab chat"); expect(toggle).toHaveBeenCalledOnce();
-    expect([...host.querySelectorAll(".rb-thread-context span")].map(span => span.textContent)).toEqual(["Shared chat", "On tab 2 — Docs"]);
+    expect([...host.querySelectorAll("[data-browser-chat-header] .rb-thread-context span")].map(span => span.textContent)).toEqual(["Shared chat", "On tab 2 — Docs"]);
     expect(host.textContent).not.toContain("Following");
+    await click("Conversation actions");
+    await click("Open this tab’s own chat"); expect(toggle).toHaveBeenCalledOnce();
   });
 
   it("switches linked mode from the header and marks a tab chat only when it is the exception", async () => {
@@ -117,11 +141,11 @@ describe("page conversation header", () => {
     expect(button("Linked mode").getAttribute("aria-pressed")).toBe("true");
     expect(button("Linked mode").textContent).toBe("🔗");
     expect(button("Linked mode").title).toContain("stay in the shared chat");
-    expect(button("Shared chat")).toBeDefined();
-    expect(host.textContent).toContain("This tab’s own chat");
+    expect(host.querySelector("[data-browser-chat-header]")?.textContent).toContain("This tab’s own chat");
     await show({ conversation: sharedChat(), linkedMode: true, onToggleTabChat: () => {}, onToggleLinkedMode: mode });
-    expect(button("Tab chat")).toBeDefined();
     expect(host.textContent).not.toContain("This tab’s own chat");
+    // The header row holds the linked icon, ⋯ and × and nothing else (BC-36).
+    expect(host.querySelector("[data-browser-chat-header]")?.querySelectorAll("button")).toHaveLength(3);
   });
 
   it("clears only this thread through the existing backend action", async () => {
@@ -133,16 +157,14 @@ describe("page conversation header", () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
-  it("puts the model picker in one row under the header, with the context on its right", async () => {
+  it("puts the model picker in the composer's footer as quiet text, and the context in the header row", async () => {
     turn.messages = [{ id: "reply", browseId: "thread", role: "assistant", body: "An answer", status: "complete", createdAt: 1 }];
     await show({ conversation: tabChat({ exception: true, anchoredFrom: "Origin", targetNumber: 3, targetTitle: "Opened" }), linkedMode: true, onToggleTabChat: () => {}, onToggleLinkedMode: () => {} });
     const header = host.querySelector("[data-browser-chat-header]")!;
-    const row = header.nextElementSibling!;
-    expect(row.matches("[data-browser-chat-harness]")).toBe(true);
-    expect(row.nextElementSibling?.matches("[data-browser-chat-messages]")).toBe(true);
-    expect(row.firstElementChild?.getAttribute("aria-label")).toBe("Chat model and effort");
     expect(header.querySelector('[aria-label="Chat model and effort"]')).toBeNull();
-    expect([...row.querySelectorAll(".rb-thread-context span")].map(span => span.textContent)).toEqual(["This tab’s own chat", "On tab 3 — Opened", "From Origin"]);
+    const picker = host.querySelector('[data-browser-chat-composer] [aria-label="Chat model and effort"]')!;
+    expect(picker.hasAttribute("data-quiet")).toBe(true);
+    expect([...header.querySelectorAll(".rb-thread-context span")].map(span => span.textContent)).toEqual(["This tab’s own chat", "On tab 3 — Opened", "From Origin"]);
     expect(host.querySelectorAll(".rb-thread-context")).toHaveLength(1);
     // The reply is attributed to the chat's provider.
     expect(host.querySelector("[data-browser-chat-messages]")?.textContent).toContain("Claude");
@@ -234,19 +256,115 @@ describe("page conversation header", () => {
     }
   });
 
-  it("bounds a long composer without moving it into the scrolling transcript", async () => {
+  it("grows the composer to 40% of the panel, then scrolls it, without moving it into the transcript", async () => {
     await show();
+    Object.defineProperty(host.querySelector("[data-browser-chat]"), "clientHeight", { configurable: true, value: 500 });
     const textarea = host.querySelector("textarea")!;
     Object.defineProperty(textarea, "scrollHeight", { configurable: true, value: 2000 });
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "Long draft\n".repeat(100));
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(textarea.style.height).toBe("160px");
+    expect(textarea.style.height).toBe("200px");
     expect(textarea.style.overflowY).toBe("auto");
     expect(host.querySelector("[data-browser-chat-messages] textarea")).toBeNull();
     expect(host.querySelector("[data-browser-chat-composer]")?.classList.contains("shrink-0")).toBe(true);
     expect(host.querySelector("[data-browser-chat]")?.classList.contains("overflow-hidden")).toBe(true);
+  });
+
+  it("BC-27 keeps one round button: the mic on an empty box, send with text, stop while a reply runs", async () => {
+    await show();
+    const face = () => host.querySelector<HTMLButtonElement>("[data-browser-chat-composer] .rl-send")!;
+    expect(face().dataset.send).toBe("mic");
+    await act(async () => face().click());
+    expect(dictation.toggle).toHaveBeenCalledOnce();
+    // What was heard joins the draft, and the button becomes send.
+    await act(async () => dictation.onFinal("compare the plans"));
+    expect(host.querySelector("textarea")!.value).toBe("compare the plans");
+    expect(face().dataset.send).toBe("send");
+    await act(async () => face().click());
+    expect(turn.send).toHaveBeenCalledWith("compare the plans");
+    turn.status = "streaming";
+    await show();
+    expect(face().dataset.send).toBe("stop");
+    await act(async () => face().click());
+    expect(turn.cancel).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the thread", () => {
+  const steps = (...labels: string[]) => labels.map((label, i) => ({ at: i + 1, kind: "tool", label }));
+  const rows = () => [...host.querySelectorAll("[data-work-rows] > li")].map((li) => li.textContent);
+
+  it("draws a reply's steps as rows under its text, the same live and once settled", async () => {
+    const ring = steps("reading the page…", "searching the web…", "clicking…", "Clicked “Buy” · tab 2");
+    Object.assign(turn, { status: "streaming", startedAt: 1, liveText: "Done — it is in the cart.", activity: ring });
+    turn.messages = [{ id: "q", browseId: "thread", role: "user", body: "Buy it", status: "complete", createdAt: 1 }];
+    await show();
+    const live = rows();
+    expect(live).toEqual(["Explored 1 page, 1 search", "Clicked “Buy” · tab 2"]);
+    // Under the text, never above it.
+    const reply = host.querySelector('[data-reply="live"]')!;
+    expect(reply.querySelector(".rl-reply-text")!.compareDocumentPosition(reply.querySelector("[data-work-rows]")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // No steps line in the head as well.
+    expect(reply.querySelector("[data-reply-steps]")).toBeNull();
+    Object.assign(turn, { status: "idle", liveText: "", activity: null, meters: { a: { toolCalls: 4, steps: ring } } });
+    turn.messages = [...turn.messages, { id: "a", browseId: "thread", role: "assistant", body: "Done — it is in the cart.", status: "complete", createdAt: 2 }];
+    await show();
+    expect(rows()).toEqual(live);
+  });
+
+  it("names the step running now in the one live line, a page action by its kind and tab", async () => {
+    Object.assign(turn, { status: "streaming", startedAt: 1, liveText: "", activity: steps("acting on the page…") });
+    turn.messages = [{ id: "q", browseId: "thread", role: "user", body: "Buy it", status: "complete", createdAt: 1 }];
+    await show({ pageActions: new Map([["browser-page", { kind: "click", tab: 2, at: Date.now() }]]) });
+    expect([...host.querySelectorAll("[role=status]")].map((el) => el.textContent?.trim())).toEqual(["Clicking · tab 2"]);
+    // A running step is the live line, not yet a row.
+    expect(rows()).toEqual([]);
+  });
+
+  it("shows the context a message carried as chips in its card, after a reload too", async () => {
+    turn.messages = [{ id: "q", browseId: "thread", role: "user", body: "> Token buckets refill\n\nWhy?", status: "complete", createdAt: 1 }];
+    await show();
+    const card = host.querySelector("[data-user-turn]")!;
+    expect(card.querySelector(".rb-chip")?.textContent).toBe("Token buckets refill");
+    expect(card.querySelector(".rb-chip")?.getAttribute("data-kind")).toBe("quote");
+  });
+});
+
+describe("the status rail", () => {
+  it("BC-39 sits outside the thread: the queue opens upward, Esc closes it, and × puts the text back", async () => {
+    turn.status = "streaming";
+    turn.queue = [{ id: "q-1", browseId: "thread", role: "user", body: "> A passage\n\nand one more thing", status: "queued", createdAt: 2 }];
+    turn.unqueue.mockResolvedValueOnce("> A passage\n\nand one more thing");
+    await show();
+    const rail = host.querySelector("[data-browser-chat-rail]")!;
+    expect(rail.closest("[data-browser-chat-messages]")).toBeNull();
+    await act(async () => rail.querySelector<HTMLButtonElement>(".rl-queue-pill")!.click());
+    expect(rail.querySelector('[data-tray="queue"]')).not.toBeNull();
+    await act(async () => { host.querySelector("textarea")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    expect(rail.querySelector("[data-tray]")).toBeNull();
+    await act(async () => rail.querySelector<HTMLButtonElement>(".rl-queue-pill")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label^="Unqueue"]')!.click());
+    expect(host.querySelector("textarea")!.value).toBe("and one more thing");
+    expect(host.querySelector("[data-browser-chat-composer] .rb-chip")?.textContent).toContain("A passage");
+  });
+
+  it("counts the open Task-list items and opens the list; a mission shows its goal with Synthesize", async () => {
+    invokeMock.mockImplementation(async (cmd?: string) => cmd === "browse_list_get"
+      ? { list: {}, items: [{ id: "i1", body: "Fix the hero", done: false, pageTitle: "Home" }, { id: "i2", body: "Done one", done: true, pageTitle: "Home" }] }
+      : []);
+    const openTasks = vi.fn(), synthesize = vi.fn(), openMission = vi.fn();
+    await show({ taskList: { nonce: 0, onOpen: openTasks }, mission: { title: "Rate limits", goal: "Compare token buckets", findings: 2, onOpen: openMission, onSynthesize: synthesize } });
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
+    await click("Task list · 1");
+    expect(host.querySelector('[data-tray="tasks"]')?.textContent).toContain("Fix the hero");
+    await click("Open the Task list"); expect(openTasks).toHaveBeenCalledOnce();
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-mission]")!.click());
+    const card = host.querySelector('[data-tray="mission"]')!;
+    expect(card.textContent).toContain("Compare token buckets");
+    expect(card.textContent).toContain("2 findings");
+    await click("Synthesize"); expect(synthesize).toHaveBeenCalledOnce();
   });
 });
 
@@ -255,21 +373,47 @@ describe("seeds", () => {
   it("takes the caret only for a gesture whose point is typing next, and sends a one-tap intent", async () => {
     // Its own thread: drafts live in a store shared across mounts.
     const seeded = tabChat({ browseId: "seeded" });
-    await show({ conversation: seeded, seed: { text: "> A passage", nonce: 1, source: { kind: "selection", action: "ask" } } });
+    await show({ conversation: seeded, seed: { text: "> A passage\n\n", nonce: 1, source: { kind: "selection", action: "ask" } } });
     await frame();
     const box = host.querySelector("textarea")!;
-    expect(box.value).toBe("> A passage");
+    // The passage is a chip, not raw text in the field (BC-40).
+    expect(box.value).toBe("");
+    expect(host.querySelector("[data-browser-chat-composer] .rb-chip")?.textContent).toContain("A passage");
     expect(document.activeElement).toBe(box);
     box.blur();
     await show({ conversation: seeded, seed: { text: "> Define it", nonce: 2, source: { kind: "selection", action: "define" } } });
     await frame();
     expect(turn.send).toHaveBeenCalledWith("> Define it");
     expect(document.activeElement).not.toBe(box);
-    expect(box.value).toBe("> A passage");
+    expect(host.querySelectorAll("[data-browser-chat-composer] .rb-chip")).toHaveLength(1);
     // A plan Search sends its research turn without moving the caret either.
     await show({ conversation: seeded, seed: { text: "Research token buckets", nonce: 3, source: { kind: "plan-search" } } });
     await frame();
     expect(turn.send).toHaveBeenLastCalledWith("Research token buckets");
     expect(document.activeElement).not.toBe(box);
+    // Sent, the chip and the question go as one message, and both clear.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "What does it mean?");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(turn.send).toHaveBeenLastCalledWith("> A passage\n\nWhat does it mean?");
+    expect(box.value).toBe("");
+    expect(host.querySelector("[data-browser-chat-composer] .rb-chip")).toBeNull();
+  });
+
+  it("puts a picked element in a chip with the caret after it, merging below what was typed", async () => {
+    const seeded = tabChat({ browseId: "picked" });
+    await show({ conversation: seeded });
+    const box = host.querySelector("textarea")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "half a thought");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await show({ conversation: seeded, seed: { text: 'Inspect this element:\n\n```json\n{"tag":"button","accessibleName":"Buy"}\n```', nonce: 4, source: { kind: "element" } } });
+    await frame();
+    expect(box.value).toBe("half a thought");
+    expect(host.querySelector("[data-browser-chat-composer] .rb-chip")?.textContent).toContain("<button> Buy");
+    expect(document.activeElement).toBe(box);
   });
 });

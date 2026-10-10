@@ -211,11 +211,12 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
  *  effort. Modelled on the plan discussions' `DiscussModelChip`, plus a
  *  Provider row. Never disabled while a reply streams: the pick applies to the
  *  next message, the way the Companion's does. Codex is offered only when
- *  this machine can run it; otherwise its option says why not. */
-export function BrowseHarnessChip({ harness }: { harness: BrowseHarness }) {
+ *  this machine can run it; otherwise its option says why not. In the
+ *  composer's footer it is quiet text that opens upward. */
+export function BrowseHarnessChip({ harness, footer = false }: { harness: BrowseHarness; footer?: boolean }) {
   const { pick, seat, saving, error, save } = harness;
   const anchor = useRef<HTMLButtonElement>(null);
-  const popover = useClickPopover(anchor, "left");
+  const popover = useClickPopover(anchor, "left", footer ? "above" : "below");
   const { catalogs, errors, request } = useModelCatalogs();
   const codexReadiness = useCodexReadiness(popover.open);
   useEffect(() => { if (popover.open) request(pick.backend, pick.backend); }, [popover.open, pick.backend, request]);
@@ -233,7 +234,7 @@ export function BrowseHarnessChip({ harness }: { harness: BrowseHarness }) {
   const providerBlocker = (backend: Backend) =>
     backend !== "codex" ? null : codexReadiness.blocker === undefined ? "Checking Codex…" : codexReadiness.blocker;
   return <>
-    <button type="button" ref={anchor} className="rb-harness-chip" title="Applies to the next message" aria-label="Chat model and effort" aria-haspopup="menu" aria-expanded={popover.open} onClick={popover.toggle}>
+    <button type="button" ref={anchor} className="rb-harness-chip" data-quiet={footer || undefined} title="Applies to the next message" aria-label="Chat model and effort" aria-haspopup="menu" aria-expanded={popover.open} onClick={popover.toggle}>
       <span>{label}</span><ChevronDown size={12} aria-hidden/>
     </button>
     {popover.open && <Panel {...popover.panelProps} label="Chat model and effort">

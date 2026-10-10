@@ -20,7 +20,9 @@
 //!   searches folded; anything a reader can act on is never behind it. It
 //!   sits on the byline's row, one fixed height whether or not it is there:
 //!   an agent that writes before its first tool would otherwise push a line
-//!   in above text already being read.
+//!   in above text already being read. The page chat turns it off and draws
+//!   each step as a row of its own under the text (`children`), where a new
+//!   one moves nothing already written.
 //! - **Text.** `StreamingText` live, `MarkdownView` settled — byte-identical
 //!   markup for a body with no diagram.
 //! - **Tail row.** One fixed height in both phases. Live it is the turn's one
@@ -88,6 +90,9 @@ export interface ReplyBlockProps {
   contextReset?: boolean;
   /** Settled: the surface's actions on this reply, for the tail row. */
   actions?: ReactNode;
+  /** Draw the head row's steps line. Off on a surface that shows the steps
+   *  as rows of their own under the text (`children`). */
+  stepsLine?: boolean;
   /** Where this thread's raw wire is captured, for the tail's ⋯. Omit and
    *  there is no ⋯ — and nothing is ever captured. */
   inspect?: { surface: string; key: string };
@@ -112,6 +117,7 @@ export function ReplyBlock({
   room = false,
   contextReset = false,
   actions,
+  stepsLine = true,
   inspect,
   onOpenLink,
   className,
@@ -129,7 +135,7 @@ export function ReplyBlock({
   }
   const model = modelInfo(meter?.model);
   const named = model && swapped(seat, model.id) ? `${byline} · ${model.short}` : byline;
-  const steps = meter && hasSteps(meter) ? (live ? toolSteps(activity) : (meter.steps ?? [])) : null;
+  const steps = stepsLine && meter && hasSteps(meter) ? (live ? toolSteps(activity) : (meter.steps ?? [])) : null;
   return (
     <div
       className={className ? `rl-reply ${className}` : "rl-reply"}
@@ -354,9 +360,12 @@ export function UserTurn({
   onResend,
   unsent = false,
   onOpenLink,
+  context,
   children,
 }: {
   body: string;
+  /** What the message carried, shown above its text (the page chat's chips). */
+  context?: ReactNode;
   room?: boolean;
   /** The send never became a turn: say so, and offer it again. */
   unsent?: boolean;
@@ -368,7 +377,8 @@ export function UserTurn({
 }) {
   return (
     <div className="rl-user-turn" data-user-turn data-room={room || undefined}>
-      <MarkdownView body={body} compact room={room} onLinkClick={onOpenLink} />
+      {context}
+      {body && <MarkdownView body={body} compact room={room} onLinkClick={onOpenLink} />}
       {children}
       {unsent && <UnsentNote onResend={onResend} />}
     </div>

@@ -138,7 +138,10 @@ describe("one reply anatomy", () => {
   });
 
   it("every queueing surface shows its queue in the tray, and no surface shows it in the transcript", () => {
-    for (const path of SURFACES.slice(0, 4)) expect(read(path), path).toMatch(/<QueueTray\b/);
+    // The page chat's tray is one of its status rail's (BC-39), from the
+    // same pill and rows.
+    for (const path of SURFACES.slice(0, 4)) expect(read(path), path).toMatch(path.endsWith("BrowserChat.tsx") ? /<StatusRail\b/ : /<QueueTray\b/);
+    expect(read("src/components/BrowserChatParts.tsx")).toMatch(/<QueuePill\b[\s\S]*<QueueRows\b|<QueueRows\b[\s\S]*<QueuePill\b/);
     expect(read("src/hooks/useAgentTurn.ts")).toMatch(/messages: state\.messages,/);
     for (const path of SURFACES) expect(read(path), path).not.toMatch(/QueuedChip|status === "queued"/);
   });

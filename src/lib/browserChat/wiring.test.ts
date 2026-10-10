@@ -27,6 +27,8 @@ const procRs = read("src-tauri/src/claude_proc.rs");
 const skillRs = read("src-tauri/src/skill.rs");
 const skill = read("skills/browse/SKILL.md");
 const chat = read("src/components/BrowserChat.tsx");
+const composer = read("src/components/BrowserChatComposer.tsx");
+const parts = read("src/components/BrowserChatParts.tsx");
 const pane = read("src/components/BrowserPane.tsx");
 const replyBlock = read("src/components/ReplyBlock.tsx");
 const app = read("src/App.tsx");
@@ -143,7 +145,7 @@ describe("the activity line names what the agent is doing", () => {
     expect(result).toMatch(/pub kind: /);
     expect(result).toMatch(/pub tab: /);
   });
-  it.fails("BC-34 KNOWN GAP: the action route's acknowledgements reach the chat's tool row", () => {
+  it("BC-34 BC-41 the action route's acknowledgements reach the chat's live line and the tab", () => {
     expect(actionsRs).toContain('emit("browser-action"');
     // Wherever the listener lands (the chat, the pane, a hook), typed or not.
     const ui = ["src/components", "src/hooks", "src/lib"].flatMap((dir) =>
@@ -151,16 +153,56 @@ describe("the activity line names what the agent is doing", () => {
         .filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f))
         .map((f) => read(`${dir}/${f}`)));
     expect(ui.some((src) => /\blisten(?:<[^()]*?>)?\(\s*["'`]browser-action["'`]/.test(src)), "nothing listens to browser-action").toBe(true);
+    // The pane hands the running actions to the chat and the dots to the tabs.
+    expect(pane).toContain("usePageActions()");
+    expect(pane).toMatch(/pageActions=\{pageActions\.running\}/);
+    expect(pane).toMatch(/<BrowserTabRail[^>]*acting=\{/);
+  });
+  it("BC-34 BC-41 what an action did is written onto the turn that targets its page, so the row outlives a relaunch", () => {
+    // Every outcome path reports, and reporting writes the step.
+    expect(fnBody(actionsRs, "report")).toContain("note_action(");
+    expect(actionsRs.match(/report\(&app, &result\)/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(browseRs).toContain("turn::push_activity(");
+    for (const verb of Object.values(contract.actionOutcomes.done)) expect(actionsRs, `no "${verb}" outcome`).toContain(`"${verb} `);
+    expect(actionsRs).toContain(`"${contract.actionOutcomes.tookOver}"`);
   });
 });
 
 describe("the page chat's UI laws", () => {
-  it("BC-27 the composer is never disabled", () => {
-    const textarea = chat.slice(chat.indexOf("<textarea"), chat.indexOf("/>", chat.indexOf("<textarea")));
+  it("BC-27 the composer is never disabled, and its one button is the layer's", () => {
+    expect(composer).toContain("<textarea");
+    const textarea = composer.slice(composer.indexOf("<textarea"), composer.indexOf("/>", composer.indexOf("<textarea")));
     expect(textarea).not.toMatch(/\bdisabled=/);
+    expect(chat).toContain("composerModel({");
+    expect(composer).toMatch(/<SendStopButton[^>]*state=\{model\.button\}/);
   });
   it("BC-33 nothing in the chat takes the caret on mount", () => {
-    expect(chat).not.toMatch(/autoFocus/);
+    for (const src of [chat, composer, parts]) expect(src).not.toMatch(/autoFocus/);
+  });
+  it("BC-25 BC-36 the header is one row; the model picker sits in the composer's footer", () => {
+    const header = chat.slice(chat.indexOf("data-browser-chat-header"), chat.indexOf("</div>", chat.indexOf("data-browser-chat-header")));
+    expect(header).not.toContain("BrowseHarnessChip");
+    expect(chat).not.toContain("data-browser-chat-harness");
+    expect(chat).toMatch(/picker=\{<BrowseHarnessChip harness=\{harness\} footer \/>\}/);
+  });
+  it("BC-39 the status rail sits between the thread and the composer, over the thread, never in it", () => {
+    const thread = chat.indexOf("data-browser-chat-messages");
+    const rail = chat.indexOf("<StatusRail");
+    const composerAt = chat.indexOf("data-browser-chat-composer");
+    expect(thread).toBeGreaterThan(0);
+    expect(rail).toBeGreaterThan(thread);
+    expect(composerAt).toBeGreaterThan(rail);
+    // A zero-height anchor (the queue tray's), so nothing it opens takes height.
+    expect(parts).toMatch(/className="rl-queue-anchor rb-rail-anchor"/);
+  });
+  it("BC-40 a highlight, an element or a Task-list item arrives as a chip, and the card shows it again", () => {
+    expect(chat).toMatch(/const parts = userTurnParts\(seed\.text\);\s*addChips\(parts\.chips\)/);
+    expect(chat).toContain("composeTurn(chips, draft)");
+    expect(chat).toMatch(/context=\{<TurnContext chips=\{parts\.chips\} pictures \/>\}/);
+  });
+  it("BC-38 the thread follows within 48 px and parks a long reply at its start", () => {
+    expect(chat).toContain("threshold: FOLLOW_WITHIN_PX");
+    expect(chat).toContain("parkAt({");
   });
   it("BC-35 links in replies open as Redline tabs", () => {
     // Every turn the chat draws hands its link handler to the one reply
