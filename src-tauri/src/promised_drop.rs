@@ -18,7 +18,8 @@
 //!   promised file has landed (or `PROMISE_TIMEOUT` passes with at least one
 //!   in) the paths go to the frontend as `PROMISED_DROP_EVENT`, positioned
 //!   where the drop happened, so the drop router (src/lib/nativeFileDrop.ts)
-//!   treats them like any other drop;
+//!   treats them like any other drop. A drop with nothing in by then delivers
+//!   its first file when it lands, up to `LATE_LIMIT` later, and never after;
 //! - with no promise, PNG or TIFF image data is written there as a PNG.
 //!
 //! Everything else (browser tabs, ordinary file drops, drags that start
@@ -36,6 +37,11 @@ use tauri::Manager;
 pub const PROMISED_DROP_EVENT: &str = "redline://promised-drop";
 /// How long a drop waits for its promised files before delivering what it has.
 const PROMISE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long past that a drop that had landed nothing still delivers its first
+/// file. Later, the layout and the user have moved on: the path would be typed
+/// into whatever sits under the old drop point now, a half-typed command line
+/// included.
+const LATE_LIMIT: Duration = Duration::from_secs(15);
 /// Drop copies older than this are swept at startup. They only have to live
 /// as long as whatever they were dropped on takes to read them.
 const DROP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -114,6 +120,12 @@ impl Arrivals {
             return None;
         }
         self.deliver()
+    }
+
+    /// The late limit passed: nothing that lands from now on is delivered.
+    /// True when the drop was still waiting for its first file.
+    fn abandon(&mut self) -> bool {
+        !std::mem::replace(&mut self.delivered, true)
     }
 
     fn complete(&mut self) -> Option<Vec<PathBuf>> {
@@ -501,6 +513,10 @@ mod native {
                 );
                 deliver(hook, paths, position);
             }
+            tokio::time::sleep(LATE_LIMIT).await;
+            if arrivals.lock().is_ok_and(|mut arrivals| arrivals.abandon()) {
+                tracing::warn!("promised_drop: gave up on a drop whose files never landed");
+            }
         });
     }
 
@@ -680,6 +696,20 @@ mod tests {
         );
         assert_eq!(arrivals.settle(Some("/d/b.png".into())), None);
         assert_eq!(arrivals.expire(), None);
+    }
+
+    #[test]
+    fn a_file_landing_past_the_late_limit_is_never_delivered() {
+        let mut arrivals = Arrivals::default();
+        arrivals.expect(1);
+        assert_eq!(arrivals.expire(), None);
+        assert!(arrivals.abandon(), "the drop was still waiting");
+        assert_eq!(arrivals.settle(Some("/d/a.png".into())), None);
+        // A drop that already delivered has nothing left to give up on.
+        let mut done = Arrivals::default();
+        done.expect(1);
+        assert_eq!(done.settle(Some("/d/a.png".into())), Some(vec!["/d/a.png".into()]));
+        assert!(!done.abandon());
     }
 
     #[test]
