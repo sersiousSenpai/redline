@@ -5293,6 +5293,14 @@ html[data-rl-resizing] [data-rl-pane] {
 .rl-discuss-pill[data-rl-stowed="icon"] .rl-discuss-label {
   display: none;
 }
+/* The plan section the voice agent is talking about (planPoint.ts): a soft
+   outline while its sentence plays or its chip is hovered. Static — it comes
+   and goes, nothing animates — and an outline, so the text never moves. */
+.rl-voice-point {
+  outline: 2px solid color-mix(in srgb, var(--color-info) 45%, transparent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
 /* Guarantee the icon has desk to stand on: the drafter's desk gutter widens
    from the base 28px to 40px. Static — a gutter driven by the measured stage
    would move the sheet, change the gap, and oscillate the very state that set
