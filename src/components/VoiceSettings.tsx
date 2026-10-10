@@ -5,6 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { playVoiceSample } from "../audio/cloudTts";
+import type {
+  DictationEngine,
+  DictationStatus,
+  WhisperModelId,
+  WhisperModelStatus,
+} from "../audio/dictationTypes";
 import {
   describeVoice,
   gradeRank,
@@ -19,10 +25,6 @@ import { loadVoicePrefs } from "../audio/speech";
  *  `speechSynthesis`; `kokoro` is a free natural voice that runs locally; `openai`
  *  and `elevenlabs` are premium cloud voices (each needs the user's own key). */
 export type TtsEngine = "system" | "kokoro" | "openai" | "elevenlabs";
-
-/** Dictation (speech-to-text) backends. `auto` prefers local Whisper when its
- *  model is installed and falls back to Apple; the other two force one. */
-export type DictationEngine = "auto" | "apple" | "whisper";
 
 interface TtsSettings {
   engine: string;
@@ -68,6 +70,11 @@ const ELEVEN_MODEL = "eleven_turbo_v2_5";
 
 const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 
+const WHISPER_MODELS: Record<WhisperModelId, { name: string; note: string }> = {
+  base: { name: "Whisper base", note: "quick" },
+  turbo: { name: "Whisper large turbo", note: "best with names and code terms" },
+};
+
 const label: React.CSSProperties = {
   fontSize: "12px",
   fontWeight: 600,
@@ -111,10 +118,11 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
 
   // Dictation (microphone → text). Independent of the TTS engine above: this is
   // which recognizer transcribes your speech. `auto` prefers local Whisper once
-  // its model is downloaded, else Apple's built-in on-device recognizer.
+  // a model is downloaded, else Apple's built-in on-device recognizer.
   const [dictationEngine, setDictationEngine] =
     useState<DictationEngine>("auto");
-  const [whisperPresent, setWhisperPresent] = useState(false);
+  const [whisperModel, setWhisperModel] = useState<WhisperModelId>("base");
+  const [whisperModels, setWhisperModels] = useState<WhisperModelStatus[]>([]);
   const [whisperInstalling, setWhisperInstalling] = useState(false);
   const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
 
@@ -136,17 +144,17 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     };
   }, []);
 
-  // Load the dictation engine + Whisper model presence once.
+  // Load the dictation engine, the Whisper model choice and what's installed once.
   useEffect(() => {
     let alive = true;
-    void Promise.all([
-      invoke<string>("dictation_get_engine").catch(() => "auto"),
-      invoke<boolean>("whisper_model_present").catch(() => false),
-    ]).then(([eng, present]) => {
-      if (!alive) return;
-      setDictationEngine((eng as DictationEngine) || "auto");
-      setWhisperPresent(present);
-    });
+    void invoke<DictationStatus>("dictation_status")
+      .then((s) => {
+        if (!alive) return;
+        setDictationEngine(s.engine || "auto");
+        setWhisperModel(s.whisperModel || "base");
+        setWhisperModels(s.whisperModels);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -203,8 +211,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     setError(null);
     setWhisperProgress(null);
     try {
-      await invoke("whisper_install");
-      setWhisperPresent(await invoke<boolean>("whisper_model_present"));
+      await invoke("whisper_install", { model: whisperModel });
+      setWhisperModels((await invoke<DictationStatus>("dictation_status")).whisperModels);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -259,7 +267,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         elevenVoice,
       });
       // Dictation engine is a separate setting from the TTS engine above.
-      await invoke("dictation_set_engine", { engine: dictationEngine });
+      await invoke("dictation_set_engine", { engine: dictationEngine, whisperModel });
       onSaved(engine);
       onClose();
     } catch (e) {
@@ -268,6 +276,11 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       setSaving(false);
     }
   };
+
+  const chosenWhisper = whisperModels.find((m) => m.id === whisperModel);
+  const whisperPresent = !!chosenWhisper?.present;
+  // What dictation runs until the chosen model is downloaded.
+  const whisperFallback = whisperModels.find((m) => m.present);
 
   const kokoroReady =
     !!kokoroStatus && kokoroStatus.modelPresent && kokoroStatus.pythonReady;
@@ -501,9 +514,24 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <option value="apple">Apple — built-in, no download</option>
         </select>
 
+        {(dictationEngine === "whisper" || dictationEngine === "auto") && (
+          <select
+            value={whisperModel}
+            onChange={(e) => setWhisperModel(e.target.value as WhisperModelId)}
+            aria-label="Whisper model"
+            style={field}
+          >
+            {whisperModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {`${WHISPER_MODELS[m.id].name} — ${Math.round(m.bytes / 1_000_000)} MB, ${WHISPER_MODELS[m.id].note}`}
+              </option>
+            ))}
+          </select>
+        )}
         {(dictationEngine === "whisper" || dictationEngine === "auto") &&
+          chosenWhisper &&
           (whisperPresent
-            ? statusRow(true, "Whisper model installed")
+            ? statusRow(true, `${WHISPER_MODELS[chosenWhisper.id].name} installed`)
             : (
                 <div className="flex flex-col gap-1.5">
                   <button
@@ -524,7 +552,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                   >
                     {whisperInstalling
                       ? "Downloading…"
-                      : "Download Whisper model (~140 MB)"}
+                      : chosenWhisper.partial > 0
+                        ? `Resume download (${mb(chosenWhisper.partial)} of ${mb(chosenWhisper.bytes)})`
+                        : `Download ${WHISPER_MODELS[chosenWhisper.id].name} (${mb(chosenWhisper.bytes)})`}
                   </button>
                   {whisperInstalling && (
                     <div className="flex flex-col gap-1">
@@ -556,10 +586,17 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                       </span>
                     </div>
                   )}
-                  {dictationEngine === "auto" && !whisperInstalling && (
+                  {!whisperInstalling && whisperFallback ? (
                     <span style={muted}>
-                      Until the model is downloaded, dictation uses Apple.
+                      Until it is downloaded, dictation uses {WHISPER_MODELS[whisperFallback.id].name}.
                     </span>
+                  ) : (
+                    dictationEngine === "auto" &&
+                    !whisperInstalling && (
+                      <span style={muted}>
+                        Until the model is downloaded, dictation uses Apple.
+                      </span>
+                    )
                   )}
                 </div>
               ))}

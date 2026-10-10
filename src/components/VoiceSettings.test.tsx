@@ -6,10 +6,15 @@ import { createRoot, type Root } from "react-dom/client";
 
 // The Kokoro voice picker: graded voices to audition with ▶, a blend, and the
 // rule that only the user's own pick ever changes the saved voice — someone on
-// am_adam (graded F+) is shown the grade, never moved off it.
+// am_adam (graded F+) is shown the grade, never moved off it. And the Whisper
+// model choice for dictation.
 
 const invoked: { cmd: string; args: Record<string, unknown> }[] = [];
 let savedVoice = "am_adam";
+let whisperModels = [
+  { id: "base", present: true, bytes: 147_964_211, partial: 0 },
+  { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
+];
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args: Record<string, unknown>) => {
     invoked.push({ cmd, args: args ?? {} });
@@ -30,8 +35,15 @@ vi.mock("@tauri-apps/api/core", () => ({
         pythonPath: "/venv/bin/python3",
         detail: "Natural voice is ready.",
       });
-    if (cmd === "dictation_get_engine") return Promise.resolve("auto");
-    if (cmd === "whisper_model_present") return Promise.resolve(true);
+    if (cmd === "dictation_status")
+      return Promise.resolve({
+        holder: null,
+        engine: "auto",
+        whisperModel: "base",
+        whisperActive: "base",
+        whisperModels,
+        outputRoute: { kind: "speakers", transport: "builtin" },
+      });
     return Promise.resolve(null);
   }),
 }));
@@ -72,6 +84,10 @@ let root: Root;
 beforeEach(() => {
   invoked.length = 0;
   samples.length = 0;
+  whisperModels = [
+    { id: "base", present: true, bytes: 147_964_211, partial: 0 },
+    { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
+  ];
   handlers.clear();
   savedVoice = "am_adam";
   localStorage.clear();
@@ -168,5 +184,40 @@ describe("Kokoro voice picker", () => {
     );
     await act(async () => fire("kokoro-setup", { phase: "done", received: 0, total: 0 }));
     expect(host.textContent).not.toContain("faster voice model");
+  });
+});
+
+describe("Whisper model choice", () => {
+  const pick = async (value: string) => {
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Whisper model"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  };
+
+  it("offers the large model as a download, while base keeps dictating", async () => {
+    await mount();
+    expect(host.textContent).toContain("Whisper base installed");
+    await pick("turbo");
+    expect(host.textContent).toContain("Until it is downloaded, dictation uses Whisper base.");
+    whisperModels = [whisperModels[0], { ...whisperModels[1], present: true }];
+    await act(async () => button("Download Whisper large turbo (574.0 MB)").click());
+    await flush();
+    expect(invoked.find((c) => c.cmd === "whisper_install")!.args).toEqual({ model: "turbo" });
+    expect(host.textContent).toContain("Whisper large turbo installed");
+    await act(async () => button("Save").click());
+    await flush();
+    expect(invoked.find((c) => c.cmd === "dictation_set_engine")!.args).toEqual({
+      engine: "auto",
+      whisperModel: "turbo",
+    });
+  });
+
+  it("resumes a download an interruption left half done", async () => {
+    whisperModels = [whisperModels[0], { ...whisperModels[1], partial: 200_000_000 }];
+    await mount();
+    await pick("turbo");
+    expect(button("Resume download (200.0 MB of 574.0 MB)")).toBeTruthy();
   });
 });

@@ -101,6 +101,7 @@ mod capture_ocr;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
+mod pinned_fetch;
 mod plan_meter;
 mod polis_host;
 /// Where the Polis Memory crates' sources are (asked of `cargo metadata`);
@@ -12561,6 +12562,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    // Reads the settings and checks the model files on disk.
+    "dictation_status",
     "draft_source_add",
     "draft_source_delete",
     "draft_source_import_file",
@@ -13076,9 +13079,8 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cycle,
             dictation::dictation_kill_all,
+            dictation::dictation_status,
             dictation_whisper::whisper_install,
-            dictation_whisper::whisper_model_present,
-            dictation_whisper::dictation_get_engine,
             dictation_whisper::dictation_set_engine,
             devmap::dev_servers_scan,
             devmap::dev_server_stop,
