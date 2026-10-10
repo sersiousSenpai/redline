@@ -2666,11 +2666,11 @@ function App() {
   // folder — by focusing a terminal sitting in it (linked nav), `cd`ing there,
   // or clicking its sidebar tab — reopens whatever file you last had open in
   // that folder, so every project keeps its place. Keyed by folder path; a ref
-  // because it's written from handlers and read from the poll loop.
+  // because it's written from handlers and read from the cwd follow.
   const folderFileRef = useRef<Map<string, string | null>>(new Map());
   // Reverse of folder→file: which terminal currently lives in each folder, so
   // clicking a folder tab can focus its terminal. Each terminal maps to exactly
-  // one folder (its live cwd); the poll keeps it pruned.
+  // one folder (its live cwd); the cwd follow keeps it pruned.
   const folderTermRef = useRef<Map<string, string>>(new Map());
   // Per-terminal context: the folder this terminal lives in and the file last
   // viewed *from* it. Switching terminal tabs restores this instantly (no
@@ -2787,8 +2787,8 @@ function App() {
 
   // Switch the sidebar to a folder and reopen the file last viewed there. The
   // single path for "this folder is now active", whatever triggered it. Does
-  // NOT touch terminal focus — that's the caller's concern (the poll is itself
-  // terminal-driven; a tab click adds the focus via selectFolderTab).
+  // NOT touch terminal focus — that's the caller's concern (the cwd follow is
+  // itself terminal-driven; a tab click adds the focus via selectFolderTab).
   const activateFolder = useCallback(
     (path: string) => {
       selectFolder(path);
@@ -2957,8 +2957,9 @@ function App() {
 
   // Terminal tab switch → instantly restore that terminal's folder + file
   // (the cwd report above follows within a fleet tick; this is immediate).
-  // Respects the linked-nav toggle exactly like the poll does, and falls back
-  // to the folder's own memory when this terminal hasn't viewed a file yet.
+  // Respects the linked-nav toggle exactly like the cwd follow does, and falls
+  // back to the folder's own memory when this terminal hasn't viewed a file
+  // yet.
   useEffect(() => {
     if (!activeTermId || !linkNavRef.current) return;
     const ctx = termCtxRef.current.get(activeTermId);
