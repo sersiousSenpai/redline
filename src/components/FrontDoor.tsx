@@ -784,7 +784,9 @@ export function FrontDoor(props: FrontDoorProps) {
     <div
       ref={rootRef}
       className={rootClass}
-      data-tour="landing"
+      // The tour's "type what you want to build" step: the door's own
+      // composer, never a chat's or the compact card's.
+      data-tour={welcome ? "landing" : undefined}
       data-chat-composer={floating ? true : undefined}
       // Published so `.rl-fd-input`'s max-height is the SAME number the
       // auto-grow effect clamps to, rather than a copy that drifts.

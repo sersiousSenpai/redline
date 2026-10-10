@@ -127,7 +127,7 @@ describe("landing wiring", () => {
   });
 
   it("keeps the tour anchor the landing carried", () => {
-    expect(frontDoor).toContain('data-tour="landing"');
+    expect(frontDoor).toContain('data-tour={welcome ? "landing" : undefined}');
   });
 
   it("the front door is REACHABLE from any state, a plan selected or not", () => {
