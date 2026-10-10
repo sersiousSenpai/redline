@@ -25,6 +25,7 @@ import {
 import { cloudTtsDriver } from "../audio/cloudTts";
 import { UtteranceDetector, DEFAULT_VAD_SILENCE_MS } from "../audio/vad";
 import { Playback, type NarrationMark } from "../audio/playback";
+import { PREROLL_CLEAR_MS } from "../audio/dictationTypes";
 import { splitReply, spokenPause } from "../audio/voiceStream";
 import {
   IDLE_TURN,
@@ -745,9 +746,16 @@ function VoicePanelBase({
     stall: () => void;
   }>({ point: () => {}, idle: () => {}, stall: () => {} });
   const playbackRef = useRef<Playback | null>(null);
+  // When the agent's voice last went quiet (Infinity while it sounds): the
+  // warm mic's pre-roll, the moment before a capture starts, holds its end
+  // for a little while after.
+  const quietAtRef = useRef(0);
   if (!playbackRef.current) {
     playbackRef.current = new Playback({
-      onClipStart: () => setAudioBusy(true),
+      onClipStart: () => {
+        quietAtRef.current = Infinity;
+        setAudioBusy(true);
+      },
       onPoint: (marks) => playbackEventsRef.current.point(marks),
       onIdle: () => playbackEventsRef.current.idle(),
       onStall: () => playbackEventsRef.current.stall(),
@@ -1346,6 +1354,7 @@ function VoicePanelBase({
     },
     idle: () => {
       setAudioBusy(false);
+      if (quietAtRef.current === Infinity) quietAtRef.current = Date.now();
       readingRef.current = null;
       if (autoAddArmedRef.current) runAutoAdd();
     },
@@ -1688,7 +1697,10 @@ function VoicePanelBase({
     setError(null);
     setListening(true);
     setPartial("");
-    void invoke("dictation_start").catch((e) => {
+    // Re-armed right after the agent spoke: the warm mic's last moments are
+    // its voice, never the user's first word.
+    const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS;
+    void invoke("dictation_start", { preroll }).catch((e) => {
       hfArmedRef.current = false;
       handsFreeRef.current = false;
       setHandsFree(false);
@@ -1886,12 +1898,15 @@ function VoicePanelBase({
       talkingRef.current = true;
       captureRef.current = { startedAt: since, heard: false };
       setError(null);
+      // Talking over the agent's voice: what the warm mic heard just before
+      // the press is that voice, not the user's first syllable.
+      const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS;
       // Talking over the agent: silence it and stop its turn in place, so it
       // stops generating what nobody will hear — its memory stays whole.
       if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
       setListening(true);
       setPartial("");
-      void invoke("dictation_start").catch((e) => {
+      void invoke("dictation_start", { preroll }).catch((e) => {
         talkingRef.current = false;
         setListening(false);
         setError(String(e));
