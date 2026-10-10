@@ -71,11 +71,15 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
 
 ## Open
 
-- **Which thread a mission pin came from.** A pin records the page the
-  reply was about (the turn's target) under that page's tab, which is what
-  the jump to a finding and the page capture read. The thread is not
-  recorded: a finding has no column for it, so a pin from a shared chat
-  jumps back to its page, not to that chat.
+- **Which page and thread a mission pin came from.** A pin records the page
+  the conversation targets when you pin (the tab on screen, not the tab it is
+  anchored to) under that page's tab, which is what the jump to a finding and
+  the page capture read. For the reply just written that is the page it was
+  about; an older reply in a shared chat, pinned after you moved to another
+  tab, is filed under the tab you are on, because a message does not keep
+  the tab its turn targeted (the column below). The thread is not recorded
+  either: a finding has no column for it, so a pin from a shared chat jumps
+  back to its page, not to that chat.
 
 - **Which tab a shared chat's message was about.** The user's card shows the
   context the message carried, but not the tab a shared chat's turn
