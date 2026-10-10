@@ -6,7 +6,7 @@
 //! one round button (`composerModel`: mic, send, queue or stop). The field is
 //! never disabled and nothing here takes the caret on its own (BC-27, BC-33).
 
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { Camera, Image as ImageIcon, MousePointerClick, Plus } from "lucide-react";
 import type { ComposerModel } from "../lib/browserChat/turn";
 import type { TurnChip } from "../lib/browserChat/transcript";
@@ -71,7 +71,8 @@ export function BrowserChatComposer({
     el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
     el.style.overflowY = el.scrollHeight > cap ? "auto" : "hidden";
   };
-  useEffect(autosize, [draft]);
+  // Before paint: a restored draft opens at its height, never one row first.
+  useLayoutEffect(autosize, [draft]);
   const note = dictation.listening ? dictation.partial || "Listening…" : error ?? dictation.error;
   return (
     <div className="rb-capsule" data-listening={dictation.listening || undefined}>

@@ -133,8 +133,9 @@ export interface ComposerModel {
   primaryIsStop: boolean;
   primaryEnabled: boolean;
   /** The one round button's face: the mic on an empty box, so speaking is
-   *  one press away; send with something to send; queue with something to
-   *  send while a reply runs; stop on an empty box while it runs. */
+   *  one press away, and for as long as it listens, being the only way to
+   *  stop it; send with something to send; queue with something to send
+   *  while a reply runs; stop on an empty box while it runs. */
   button: "mic" | "send" | "queue" | "stop";
   canQueue: boolean;
   /** Inject into the running turn. Browse has no steer route yet (BC-29). */
@@ -145,8 +146,9 @@ export interface ComposerModel {
 }
 
 /** `chips` counts attached context: a quoted passage alone is a message.
- *  `canDictate` is false when the mic is someone else's. */
-export function composerModel(i: { phase: TurnPhase; queued: number; draft: string; chips?: number; canDictate?: boolean }): ComposerModel {
+ *  `canDictate` is false when the mic is someone else's; `listening`, that
+ *  this box's mic is hot. */
+export function composerModel(i: { phase: TurnPhase; queued: number; draft: string; chips?: number; canDictate?: boolean; listening?: boolean }): ComposerModel {
   const streaming = i.phase === "streaming";
   const typed = i.draft.trim().length > 0 || (i.chips ?? 0) > 0;
   const canQueue = !streaming || i.queued < QUEUE_CAP;
@@ -157,7 +159,7 @@ export function composerModel(i: { phase: TurnPhase; queued: number; draft: stri
     primary: streaming ? "queue" : "send",
     primaryIsStop,
     primaryEnabled: streaming ? !typed || canQueue : typed,
-    button: primaryIsStop ? "stop" : typed ? (streaming ? "queue" : "send") : i.canDictate === false ? "send" : "mic",
+    button: i.listening ? "mic" : primaryIsStop ? "stop" : typed ? (streaming ? "queue" : "send") : i.canDictate === false ? "send" : "mic",
     canQueue,
     canSteer: false,
     pickerLive: true,

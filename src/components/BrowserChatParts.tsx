@@ -195,6 +195,11 @@ export function StatusRail({
 }) {
   const toggle = (next: RailTray) => onTray(tray === next ? null : next);
   const open = tray === "queue" && queue.length ? "queue" : tray === "tasks" && tasks.length ? "tasks" : tray === "mission" && mission ? "mission" : null;
+  // A tray whose rows ran out closes, so it waits to be asked for again
+  // instead of reopening on its own when rows come back.
+  useEffect(() => {
+    if (tray && !open) onTray(null);
+  }, [tray, open, onTray]);
   if (following && !queue.length && !tasks.length && !mission) return null;
   return (
     <div className="rl-queue-anchor rb-rail-anchor" data-browser-chat-rail>

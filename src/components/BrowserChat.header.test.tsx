@@ -290,6 +290,32 @@ describe("page conversation header", () => {
     await act(async () => face().click());
     expect(turn.cancel).toHaveBeenCalledOnce();
   });
+
+  it("BC-27 keeps the mic on the button while it listens, so dictation can always be stopped", async () => {
+    dictation.listening = true;
+    try {
+      await show();
+      const face = () => host.querySelector<HTMLButtonElement>("[data-browser-chat-composer] .rl-send")!;
+      const box = host.querySelector("textarea")!;
+      // Typing beside a hot mic must not trade the only way to stop it for send.
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "and also");
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(face().dataset.send).toBe("mic");
+      expect(face().getAttribute("aria-label")).toBe("Stop dictating");
+      // Nor does a reply that starts meanwhile turn it into Stop.
+      turn.status = "streaming";
+      await show();
+      expect(face().dataset.send).toBe("mic");
+      await act(async () => face().click());
+      expect(dictation.toggle).toHaveBeenCalledOnce();
+      expect(turn.cancel).not.toHaveBeenCalled();
+    } finally {
+      dictation.listening = false;
+      turn.status = "idle";
+    }
+  });
 });
 
 describe("the thread", () => {
@@ -348,6 +374,23 @@ describe("the status rail", () => {
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label^="Unqueue"]')!.click());
     expect(host.querySelector("textarea")!.value).toBe("and one more thing");
     expect(host.querySelector("[data-browser-chat-composer] .rb-chip")?.textContent).toContain("A passage");
+  });
+
+  it("BC-39 closes a tray whose rows ran out, so it never reopens by itself", async () => {
+    turn.status = "streaming";
+    turn.queue = [{ id: "q-1", browseId: "thread", role: "user", body: "one more thing", status: "queued", createdAt: 2 }];
+    await show();
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-browser-chat-rail] .rl-queue-pill")!.click());
+    expect(host.querySelector('[data-tray="queue"]')).not.toBeNull();
+    // The queue drains into the thread.
+    turn.queue = [];
+    await show();
+    expect(host.querySelector("[data-tray]")).toBeNull();
+    // A later message queues: its pill shows, its tray waits to be asked for.
+    turn.queue = [{ id: "q-2", browseId: "thread", role: "user", body: "and another", status: "queued", createdAt: 3 }];
+    await show();
+    expect(host.querySelector("[data-browser-chat-rail] .rl-queue-pill")).not.toBeNull();
+    expect(host.querySelector("[data-tray]")).toBeNull();
   });
 
   it("counts the open Task-list items and opens the list; a mission shows its goal with Synthesize", async () => {

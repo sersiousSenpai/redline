@@ -78,6 +78,13 @@ describe("the composer", () => {
     // With the mic someone else's, an empty box shows a send with nothing to send.
     expect(composerModel({ phase: "idle", queued: 0, draft: "", canDictate: false })).toMatchObject({ button: "send", primaryEnabled: false });
   });
+  it("BC-27 a hot mic keeps the button's mic face, the one way to stop it, whatever else is in the box", () => {
+    expect(composerModel({ phase: "idle", queued: 0, draft: "typed beside it", listening: true }).button).toBe("mic");
+    expect(composerModel({ phase: "idle", queued: 0, draft: "", chips: 1, listening: true }).button).toBe("mic");
+    expect(composerModel({ phase: "streaming", queued: 0, draft: "", listening: true }).button).toBe("mic");
+    // Enter still sends what was typed.
+    expect(composerModel({ phase: "idle", queued: 0, draft: "typed beside it", listening: true })).toMatchObject({ primary: "send", primaryEnabled: true });
+  });
   it("BC-40 an attached chip alone is something to send", () => {
     expect(composerModel({ phase: "idle", queued: 0, draft: "", chips: 1 })).toMatchObject({ button: "send", primaryEnabled: true });
     expect(composerModel({ phase: "streaming", queued: 0, draft: "", chips: 1 })).toMatchObject({ button: "queue", primaryIsStop: false });

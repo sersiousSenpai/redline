@@ -474,7 +474,7 @@ export const BrowserChat = memo(function BrowserChat({
   };
 
   const tasks = useTaskListPeek(workspace, taskList?.nonce ?? 0);
-  const model = composerModel({ phase: status, queued: queue.length, draft, chips: chips.length });
+  const model = composerModel({ phase: status, queued: queue.length, draft, chips: chips.length, listening: dictation.listening });
   // What the header says the chat follows: the page, and the kind of chat
   // only when it is the exception (BC-3, BC-5).
   const context = contextLine(conversation);
