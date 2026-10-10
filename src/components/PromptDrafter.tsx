@@ -1604,6 +1604,7 @@ function PromptDrafterBase({
                white paper reads as on the document however clear of the words
                it is. */
             textInset={0}
+            voiceKey={`drafter:${draftId}`}
           />
         )}
       </div>

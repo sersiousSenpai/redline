@@ -89,6 +89,19 @@ describe("DiscussPill states", () => {
     expect(badge()).toBeNull();
   });
 
+  it("shows only its own conversation's turn", async () => {
+    await act(async () => root.render(<DiscussPill onClick={onClick} voiceKey="plan-2" />));
+    await act(async () => setVoiceAway({ key: "plan-1", state: "thinking" }));
+    await settle();
+    expect(badge()).toBeNull();
+    expect(pill().getAttribute("aria-label")).toBe("Discuss — talk or type with your agent");
+    // …while still following it, so plan-1's own pill has the news later.
+    await emit("voice-done", { sessionId: "plan-1" });
+    expect(getVoiceAway()).toEqual({ key: "plan-1", state: "waiting" });
+    await act(async () => root.render(<DiscussPill onClick={onClick} voiceKey="plan-1" />));
+    expect(badge()?.getAttribute("data-state")).toBe("waiting");
+  });
+
   it("stays one button: a click still just opens the panel", async () => {
     await act(async () => setVoiceAway({ key: "plan-1", state: "waiting" }));
     expect(host.querySelectorAll("button")).toHaveLength(1);

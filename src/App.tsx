@@ -9275,6 +9275,7 @@ function App() {
                 }
                 textInset={64}
                 measureKey={`${docWide}:${docMeasure}`}
+                voiceKey={dockContext?.key}
               />
             )}
           {/* Floating document zoom + line-width control — pinned to the pane

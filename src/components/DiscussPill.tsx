@@ -39,6 +39,7 @@ export function DiscussPill({
   textRef,
   textInset = 0,
   measureKey,
+  voiceKey,
 }: {
   onClick: () => void;
   title?: string;
@@ -56,10 +57,15 @@ export function DiscussPill({
    *  without this the pill would hold its old pose until something else
    *  happened to resize the pane. */
   measureKey?: unknown;
+  /** The voice key the panel opens on from here: the pill shows a turn left
+   *  running only when it is this conversation's. */
+  voiceKey?: string;
 }) {
   const pillRef = useRef<HTMLButtonElement | null>(null);
-  const away = useVoiceAway();
-  const awayKey = away?.state === "thinking" ? away.key : null;
+  const tracked = useVoiceAway();
+  const awayKey = tracked?.state === "thinking" ? tracked.key : null;
+  // Another plan's waiting reply is that plan's news, not this one's.
+  const away = tracked && (voiceKey === undefined || tracked.key === voiceKey) ? tracked : null;
 
   // A turn still running: its end — whenever it lands — means a reply is
   // waiting. One that ended while the pill was off screen is caught by asking.

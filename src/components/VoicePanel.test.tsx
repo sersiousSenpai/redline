@@ -424,6 +424,12 @@ describe("turns", () => {
     await mount();
     expect(getVoiceAway()).toBeNull();
   });
+
+  it("leaves another plan's waiting reply on that plan's pill when it opens", async () => {
+    setVoiceAway({ key: "plan-0", state: "waiting" });
+    await mount();
+    expect(getVoiceAway()).toEqual({ key: "plan-0", state: "waiting" });
+  });
 });
 
 // --- what is shown before the first word ------------------------------------------

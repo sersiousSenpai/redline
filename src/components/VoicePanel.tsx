@@ -50,7 +50,7 @@ import {
   showComment,
   titleFor,
 } from "../audio/planPoint";
-import { setVoiceAway } from "../audio/voiceAway";
+import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import {
   markdownToSpeakable,
   flattenSections,
@@ -912,8 +912,9 @@ function VoicePanelBase({
     // mount→cleanup→mount in dev, or the real unmount→remount of a load gap.
     // Without this the cleanup would kill the session we're about to reuse.
     cancelPendingStop(sessionId);
-    // Opening the panel is looking at whatever the pill was holding up.
-    setVoiceAway(null);
+    // Opening the panel is looking at whatever the pill was holding up for
+    // this conversation (another plan's waiting reply stays on its pill).
+    if (getVoiceAway()?.key === sessionId) setVoiceAway(null);
     // Spawn the warm child and mark it ready once spawned. (A fresh `claude
     // --input-format stream-json` doesn't emit `init` until its first turn, so
     // we can't wait on `voice-ready` to show Ready — but `voice-exit` /
