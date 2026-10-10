@@ -63,7 +63,7 @@ function Fixture() {
       onDrafter={noop} onChat={noop} chatEnabled allowedDestinations={card && surface === "Browser" ? ["plan", "run"] : undefined}
       destination={card ? cardDestination : destination} onDestinationChange={next => { setDestination(next); if (card && (next === "drafter" || next === "chat")) { setCompact(false); setOpen(true); } }}
       backend={choice} onBackendChange={setChoice} modelCatalogs={{ codex: [{ slug: "qa-model", displayName: "Codex model", description: "Fixture model", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" }] }} onNeedModels={noop} onRefreshModels={noop} modelStatus={{ refreshing: false, checkedAt: 1790708400000 }}
-      onCancelPending={noop} onRevealPending={noop} onCreateProject={async () => null} focusNonce={0} consumeSeed={() => ""} dictationEnabled
+      onCancelPending={noop} onRevealPending={noop} onCreateProject={async () => null} focusNonce={0} consumeSeed={() => ""}
       chats={where === "door" ? chats.map(chat => ({ id: chat.companionId, title: chat.title })) : undefined} onOpenChat={where === "door" ? openChat : undefined}/>;
   };
   return <><nav className="qa-nav rl-app-header"><strong>REDLINE <span>AURORA</span></strong><button onClick={() => setSurface("Home")}>Home</button><button onClick={() => setSurface("Document")}>Document</button><button onClick={() => setSurface("Browser")}>Browser</button><button onClick={() => { setSidecar(true); }}>Discussion</button><button onClick={() => setSetup(true)}>Integration setup</button></nav>
@@ -79,7 +79,7 @@ function Fixture() {
       <div ref={setChatSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
       {!roomChat && renderComposer("door")}
     </MonochatIsland>
-    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} dictationEnabled harness={choice} onClose={() => setOpen(false)} expanded={roomChat}
+    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} harness={choice} onClose={() => setOpen(false)} expanded={roomChat}
       composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: (accessories, workbench) => renderComposer("chat", accessories, workbench) }}/>, chatSlot)}
     {setup && <IntegrationSetupDialog backend="codex" health={null} busy={false} error="The previous verification timed out. Your draft is saved; retry when Codex is available." progress={null} done={false} pending onInstall={noop} onDismiss={() => setSetup(false)} onLocate={noop}/>}
   </>;

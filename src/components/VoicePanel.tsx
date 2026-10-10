@@ -26,6 +26,7 @@ import { cloudTtsDriver } from "../audio/cloudTts";
 import { UtteranceDetector, DEFAULT_VAD_SILENCE_MS } from "../audio/vad";
 import { Playback, type NarrationMark } from "../audio/playback";
 import { PREROLL_CLEAR_MS } from "../audio/dictationTypes";
+import { quietFor } from "../audio/audible";
 import { splitReply, spokenPause } from "../audio/voiceStream";
 import {
   IDLE_TURN,
@@ -40,8 +41,9 @@ import {
   isBenignDictationError,
   isNonSpeech,
   offerAnswer,
-  type DictationError,
 } from "../audio/utterance";
+import { broker } from "../audio/dictationBroker";
+import { registerTurnTaker } from "../audio/dictationHost";
 import {
   holdPoint,
   pointAt,
@@ -113,10 +115,9 @@ interface VoiceCapturedEvent {
   body: string;
 }
 
-// Push-to-talk dictation events (no sessionId — one capture at a time).
-interface DictationTextEvent {
-  text: string;
-}
+/** The panel's captures' owner (dictationBroker.ts): its push-to-talk takes
+ *  the mic from anyone; hands-free listening yields to anyone. */
+const VOICE_OWNER = "voice";
 
 /** A capture confirmation's handles: Undo for a while, Show for good. */
 interface CaptureNote {
@@ -1046,7 +1047,7 @@ function VoicePanelBase({
         setTimeout(() => {
           pendingStops.delete(sessionId);
           void invoke("voice_session_stop", { sessionId }).catch(() => {});
-          void invoke("dictation_kill_all").catch(() => {});
+          broker.cancel(VOICE_OWNER);
         }, 300),
       );
     };
@@ -1699,14 +1700,23 @@ function VoicePanelBase({
     setPartial("");
     // Re-armed right after the agent spoke: the warm mic's last moments are
     // its voice, never the user's first word.
-    const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS;
-    void invoke("dictation_start", { preroll }).catch((e) => {
-      hfArmedRef.current = false;
-      handsFreeRef.current = false;
-      setHandsFree(false);
-      setListening(false);
-      setError(String(e));
-    });
+    const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
+    void broker.start(VOICE_OWNER, { kind: "open", preroll }).then(
+      (grant) => {
+        if (grant.granted) return;
+        // A dictation holds the mic: listen again once it is done.
+        hfArmedRef.current = false;
+        rearmDelayRef.current = 1000;
+        setListening(false);
+      },
+      (e) => {
+        hfArmedRef.current = false;
+        handsFreeRef.current = false;
+        setHandsFree(false);
+        setListening(false);
+        setError(String(e));
+      },
+    );
   }, []);
 
   // Tear the mic down and stop detecting (toggle off, error, or unmount).
@@ -1715,7 +1725,7 @@ function VoicePanelBase({
     vadRef.current?.reset();
     setListening(false);
     setPartial("");
-    void invoke("dictation_kill_all").catch(() => {});
+    broker.cancel(VOICE_OWNER);
   }, []);
 
   // VAD says the user paused → this is the end of an utterance. Close the mic
@@ -1728,7 +1738,7 @@ function VoicePanelBase({
       hfArmedRef.current = false;
       setListening(false);
       setUtterancePending(true);
-      void invoke<string>("dictation_stop")
+      void broker.stop(VOICE_OWNER)
         .then((finalText) => {
           setPartial("");
           const text = ((finalText || vadText) || "").trim();
@@ -1785,65 +1795,67 @@ function VoicePanelBase({
     return () => clearTimeout(t);
   }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, armHandsFree]);
 
-  // Live partial transcript + dictation errors from the native mic.
+  // Live partial transcript + dictation errors from the native mic: this
+  // panel's captures only (the broker routes by owner), so a dictation into
+  // a composer never paints here or feeds the end-of-utterance detector.
   useEffect(() => {
-    let disposed = false;
-    const unlisteners: UnlistenFn[] = [];
-    const add = (u: UnlistenFn) => {
-      if (disposed) u();
-      else unlisteners.push(u);
-    };
-    const wire = async () => {
-      add(
-        await listen<DictationTextEvent>("dictation-partial", (e) => {
-          setPartial(e.payload.text);
-          if (e.payload.text.trim()) captureRef.current.heard = true;
-          // In hands-free, the partial stream drives end-of-utterance detection.
+    const detach = broker.attach(VOICE_OWNER, {
+      partial: (text) => {
+        setPartial(text);
+        if (text.trim()) captureRef.current.heard = true;
+        // In hands-free, the partial stream drives end-of-utterance detection.
+        if (handsFreeRef.current && hfArmedRef.current) {
+          vadRef.current?.feed(text);
+        }
+      },
+      error: (e) => {
+        // "No speech detected" and its kin: the recognizer had nothing (more)
+        // to hear. A push-to-talk hold carries on to its release; hands-free
+        // listens again after a beat. Neither is worth a red line, and
+        // neither turns hands-free off.
+        if (isBenignDictationError(e)) {
           if (handsFreeRef.current && hfArmedRef.current) {
-            vadRef.current?.feed(e.payload.text);
+            hfArmedRef.current = false;
+            rearmDelayRef.current = 1000;
+            vadRef.current?.reset();
+            setListening(false);
+            setPartial("");
+            // The task is over but its capture is still open, and
+            // `dictation_start` does nothing while one is: close it, so
+            // the re-arm really listens.
+            broker.cancel(VOICE_OWNER);
           }
-        }),
-      );
-      add(
-        await listen<DictationError>("dictation-error", (e) => {
-          // "No speech detected" and its kin: the recognizer had nothing (more)
-          // to hear. A push-to-talk hold carries on to its release; hands-free
-          // listens again after a beat. Neither is worth a red line, and
-          // neither turns hands-free off.
-          if (isBenignDictationError(e.payload)) {
-            if (handsFreeRef.current && hfArmedRef.current) {
-              hfArmedRef.current = false;
-              rearmDelayRef.current = 1000;
-              vadRef.current?.reset();
-              setListening(false);
-              setPartial("");
-              // The task is over but its capture is still open, and
-              // `dictation_start` does nothing while one is: close it, so
-              // the re-arm really listens.
-              void invoke("dictation_kill_all").catch(() => {});
-            }
-            return;
-          }
-          talkingRef.current = false;
-          // Likewise the capture a failed task leaves open, or the next press
-          // would start nothing.
-          void invoke("dictation_kill_all").catch(() => {});
-          // A real mic error can't be auto-recovered cleanly, and re-arming
-          // would just loop, so drop out of hands-free and surface it.
+          return;
+        }
+        talkingRef.current = false;
+        // Likewise the capture a failed task leaves open, or the next press
+        // would start nothing.
+        broker.cancel(VOICE_OWNER);
+        // A real mic error can't be auto-recovered cleanly, and re-arming
+        // would just loop, so drop out of hands-free and surface it.
+        hfArmedRef.current = false;
+        handsFreeRef.current = false;
+        setHandsFree(false);
+        vadRef.current?.reset();
+        setListening(false);
+        setPartial("");
+        setError(e.error);
+      },
+      // A dictation took the mic (the hold key, a composer's mic): this
+      // capture is over. Hands-free listens again once the mic is free.
+      preempted: () => {
+        talkingRef.current = false;
+        if (hfArmedRef.current) {
           hfArmedRef.current = false;
-          handsFreeRef.current = false;
-          setHandsFree(false);
-          vadRef.current?.reset();
-          setListening(false);
-          setPartial("");
-          setError(e.payload.error);
-        }),
-      );
-    };
-    void wire();
+          rearmDelayRef.current = 1000;
+        }
+        vadRef.current?.reset();
+        setListening(false);
+        setPartial("");
+      },
+    });
     return () => {
-      disposed = true;
-      for (const u of unlisteners) u();
+      detach();
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current);
         stopTimerRef.current = null;
@@ -1898,15 +1910,16 @@ function VoicePanelBase({
       talkingRef.current = true;
       captureRef.current = { startedAt: since, heard: false };
       setError(null);
-      // Talking over the agent's voice: what the warm mic heard just before
-      // the press is that voice, not the user's first syllable.
-      const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS;
+      // Talking over the agent's voice (or a chat read aloud elsewhere): what
+      // the warm mic heard just before the press is that voice, not the
+      // user's first syllable.
+      const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
       // Talking over the agent: silence it and stop its turn in place, so it
       // stops generating what nobody will hear — its memory stays whole.
       if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
       setListening(true);
       setPartial("");
-      void invoke("dictation_start", { preroll }).catch((e) => {
+      void broker.start(VOICE_OWNER, { kind: "hold", preroll }).catch((e) => {
         talkingRef.current = false;
         setListening(false);
         setError(String(e));
@@ -1926,7 +1939,7 @@ function VoicePanelBase({
     stopTimerRef.current = setTimeout(() => {
       stopTimerRef.current = null;
       setListening(false);
-      void invoke<string>("dictation_stop")
+      void broker.stop(VOICE_OWNER)
         .then((finalText) => {
           setPartial("");
           const text = (finalText || "").trim();
@@ -1938,6 +1951,26 @@ function VoicePanelBase({
         .catch((e) => setError(String(e)));
     }, CAPTURE_TAIL_MS);
   }, [submitSpoken]);
+
+  // Esc on the hold-to-dictate key's turn: nothing is sent.
+  const cancelTalk = useCallback(() => {
+    if (handsFreeRef.current) return;
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    talkingRef.current = false;
+    setListening(false);
+    setPartial("");
+    broker.cancel(VOICE_OWNER);
+  }, []);
+
+  // The hold-to-dictate key, with nothing that takes text focused (or focus
+  // in this panel), is a turn here: the panel's own push-to-talk.
+  useEffect(
+    () => registerTurnTaker({ start: startTalk, stop: stopTalk, cancel: cancelTalk }),
+    [startTalk, stopTalk, cancelTalk],
+  );
 
   // A key-held talk: Space with focus in the panel (off its controls), or on
   // the talk button itself. It counts once held KEY_HOLD_MS; released sooner,
@@ -2103,6 +2136,8 @@ function VoicePanelBase({
       ref={panelRef}
       tabIndex={-1}
       onKeyDown={onPanelKeyDown}
+      // The hold-to-dictate key is a turn here, even from the typed input.
+      data-dictation-turn
       className="flex-1 min-w-0 flex flex-col"
       style={{
         background: "var(--color-bg-elevated)",

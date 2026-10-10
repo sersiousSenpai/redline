@@ -122,8 +122,6 @@ export interface ChatRoomProps {
   onContextLost?: (why: import("../lib/surfaceContext").ContextLoss) => void;
   /** Working directory for the spawn (the agent's read-only file tools). */
   cwd: string | null;
-  /** False while the Voice panel owns the mic — one capture at a time. */
-  dictationEnabled: boolean;
   projectOptions?: ProjectOption[];
   lastLaunchProject?: string | null;
   onPlan?: (request: ChatPlanRequest) => void;
@@ -156,7 +154,6 @@ export function ChatRoom({
   onSelectChat,
   onEmpty,
   cwd,
-  dictationEnabled,
   projectOptions = NO_PROJECTS,
   lastLaunchProject = null,
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
@@ -484,11 +481,7 @@ export function ChatRoom({
     threadKey: companionId,
     onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
   });
-  const dictation = useDictation({
-    enabled: dictationEnabled && !composer,
-    onFinal: (spoken) =>
-      setDraft((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
-  });
+  const dictation = useDictation(taRef);
 
   const attach = async () => {
     try {
@@ -728,6 +721,8 @@ export function ChatRoom({
       {/* The floating launch composer owns input when supplied. */}
       {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel }) : <div
         data-chat-composer
+        data-dictation-anchor
+        data-dictation-send
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
       >
@@ -757,14 +752,6 @@ export function ChatRoom({
                   </button>
                 </span>
               ))}
-            </div>
-          )}
-          {dictation.listening && (
-            <div
-              className="font-sans mb-1"
-              style={{ fontSize: 11.5, color: "var(--color-ink-muted)", maxHeight: 60, overflowY: "auto" }}
-            >
-              {dictation.partial || "Listening…"}
             </div>
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
@@ -804,15 +791,8 @@ export function ChatRoom({
               icon={<Plus size={14} />}
             />
             <IconButton
-              title={
-                dictationEnabled
-                  ? dictation.listening
-                    ? "Stop dictating"
-                    : "Dictate"
-                  : "The voice panel is using the microphone"
-              }
+              title={dictation.listening ? "Stop dictating" : "Dictate"}
               onClick={dictation.toggle}
-              disabled={!dictationEnabled}
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
@@ -1001,20 +981,17 @@ function IconButton({
   title,
   onClick,
   icon,
-  disabled,
   hot,
 }: {
   title: string;
   onClick: () => void;
   icon: React.ReactNode;
-  disabled?: boolean;
   hot?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={disabled}
       title={title}
       style={{
         display: "flex",
@@ -1023,11 +1000,10 @@ function IconButton({
         width: 30,
         height: 30,
         borderRadius: 8,
-        cursor: disabled ? "default" : "pointer",
+        cursor: "pointer",
         border: "1px solid var(--color-rule)",
         background: hot ? "var(--color-info)" : "transparent",
         color: hot ? "var(--color-on-accent)" : "var(--color-ink-muted)",
-        opacity: disabled ? 0.45 : 1,
       }}
     >
       {icon}

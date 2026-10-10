@@ -73,13 +73,12 @@ export function BrowserChatComposer({
   };
   // Before paint: a restored draft opens at its height, never one row first.
   useLayoutEffect(autosize, [draft]);
-  const note = dictation.listening ? dictation.partial || "Listening…" : error ?? dictation.error;
   return (
     <div className="rb-capsule" data-listening={dictation.listening || undefined}>
       <TurnContext chips={chips} onRemove={onRemoveChip} />
-      {note && (
-        <div className="rb-capsule-note" aria-live="polite" data-error={!dictation.listening || undefined}>
-          {note}
+      {error && (
+        <div className="rb-capsule-note" aria-live="polite" data-error>
+          {error}
         </div>
       )}
       <textarea

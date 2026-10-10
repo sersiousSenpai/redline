@@ -114,7 +114,6 @@ function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
     onCreateProject: () => Promise.resolve(null),
     focusNonce: 0,
     consumeSeed: () => "",
-    dictationEnabled: false,
     ...over,
   };
 }

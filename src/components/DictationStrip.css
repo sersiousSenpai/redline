@@ -1,0 +1,70 @@
+/* The dictation strip (DictationStrip.tsx): a fixed overlay pinned to the
+   composer a dictation will land in, so it can never move the composer.
+   Its transcript wears the Front Door's old live-partial ink. */
+.rl-dictation-strip {
+  position: fixed;
+  z-index: 1001;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  box-sizing: border-box;
+  border-radius: 15px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-bg-elevated);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+  font-size: var(--rl-text-sm, 12px);
+  pointer-events: none;
+  animation: rl-dictation-in 140ms ease-out;
+}
+.rl-dictation-strip[data-phase="placing"] .rl-dictation-wave { opacity: 0.4; }
+.rl-dictation-wave {
+  display: flex;
+  align-items: center;
+  gap: 1.5px;
+  height: 16px;
+  flex: none;
+}
+.rl-dictation-wave i {
+  display: block;
+  width: 2px;
+  height: 16px;
+  border-radius: 1px;
+  background: var(--color-info);
+  transform-origin: center;
+  transition: transform 50ms linear;
+}
+.rl-dictation-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-style: italic;
+  color: color-mix(in srgb, var(--color-info) 80%, var(--color-ink-muted));
+}
+.rl-dictation-strip[data-phase="notice"] .rl-dictation-text { font-style: normal; color: var(--color-ink); }
+.rl-dictation-hint {
+  flex: none;
+  color: var(--color-ink-muted);
+  font-size: 11px;
+}
+.rl-dictation-copy {
+  flex: none;
+  pointer-events: auto;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+@keyframes rl-dictation-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-dictation-strip { animation: none; }
+  .rl-dictation-wave i { transition: none; }
+}

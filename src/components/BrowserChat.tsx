@@ -467,11 +467,8 @@ export const BrowserChat = memo(function BrowserChat({
   }
 
   // Speaking into the box is one press away: the mic is the round button's
-  // face on an empty box. What is heard joins the draft.
-  const dictation = useDictation({
-    enabled: true,
-    onFinal: (spoken) => setDraft((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
-  });
+  // face on an empty box. What is heard lands in the box, at its caret.
+  const dictation = useDictation(composerRef);
 
   const attach = {
     onScreenshot: () => {
@@ -639,7 +636,7 @@ export const BrowserChat = memo(function BrowserChat({
         tray={tray}
         onTray={setTray}
       />
-      <div data-browser-chat-composer className="rb-composer shrink-0">
+      <div data-browser-chat-composer data-dictation-anchor data-dictation-send className="rb-composer shrink-0">
         <BrowserChatComposer
           taRef={composerRef}
           frameRef={frameRef}

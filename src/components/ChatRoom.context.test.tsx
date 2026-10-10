@@ -52,7 +52,7 @@ const PLAN = "## Context — This plan (v3, Warm chat)\n\nPlan session: s-7\n\n#
 async function render(props: Partial<ChatRoomProps> = {}, typed = "is this sound?") {
   writeSharedDraft("test.chatComposer", typed);
   await act(async () => root.render(<ChatRoom companionId="chat-1" cwd="/Users/me/redline" onSelectChat={() => {}} onEmpty={() => {}}
-    dictationEnabled={false} onClose={() => {}}
+    onClose={() => {}}
     composer={{ draftKey: "test.chatComposer", render: (_actions, wb) => { workbench = wb; return null; } }}
     {...props} />));
 }

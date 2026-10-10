@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
 const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
-  dictation: { listening: false, toggle: vi.fn(), onFinal: (_text: string) => {} },
+  dictation: { listening: false, toggle: vi.fn() },
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
     onSent?: (args: Record<string, unknown>, outcome?: { started: boolean; queued: boolean; messageId: string }) => void;
@@ -21,15 +21,13 @@ const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
     activity: null as null | { at: number; kind: string; label: string }[], meters: {} as Record<string, unknown> },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("../lib/useDictation", () => ({ useDictation: ({ onFinal }: { onFinal: (text: string) => void }) => {
-  dictation.onFinal = onFinal;
-  return { listening: dictation.listening, partial: "", error: null, start: () => {}, stop: () => {}, toggle: dictation.toggle };
-} }));
+vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: dictation.listening, toggle: dictation.toggle }) }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
 vi.mock("./StreamingText", () => ({ StreamingText: ({ text, className }: { text: string; className?: string }) => <div className={className}>{text}</div> }));
 import { BrowserChat } from "./BrowserChat";
+import { placeText, targetFor } from "../audio/dictationTarget";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 import type { ResolvedConversation } from "../lib/browserChat/scope";
 
@@ -278,12 +276,13 @@ describe("page conversation header", () => {
     expect(face().dataset.send).toBe("mic");
     await act(async () => face().click());
     expect(dictation.toggle).toHaveBeenCalledOnce();
-    // What was heard joins the draft, and the button becomes send.
-    await act(async () => dictation.onFinal("compare the plans"));
-    expect(host.querySelector("textarea")!.value).toBe("compare the plans");
+    // What was heard lands in the box as the dictation host writes it, and
+    // the button becomes send.
+    await act(async () => void placeText(targetFor(host.querySelector("textarea"))!, "compare the plans"));
+    expect(host.querySelector("textarea")!.value).toBe("Compare the plans");
     expect(face().dataset.send).toBe("send");
     await act(async () => face().click());
-    expect(turn.send).toHaveBeenCalledWith("compare the plans");
+    expect(turn.send).toHaveBeenCalledWith("Compare the plans");
     turn.status = "streaming";
     await show();
     expect(face().dataset.send).toBe("stop");

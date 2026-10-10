@@ -29,7 +29,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 async function render() { await act(async () => root.render(createElement(ChatRoom, {
   companionId: "chat-1", onSelectChat: () => {}, onEmpty: () => {}, cwd: null,
-  dictationEnabled: false, onClose: () => {},
+  onClose: () => {},
 }))); }
 const primary = () => host.querySelector<HTMLButtonElement>("[data-chat-composer] .rl-send")!;
 describe("Chat room progress placement", () => {

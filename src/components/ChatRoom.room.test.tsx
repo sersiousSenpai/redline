@@ -49,7 +49,7 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 
 async function render(props: Partial<ChatRoomProps> = {}) {
   await act(async () => root.render(<ChatRoom companionId="chat-1" cwd="/Users/me/redline" onSelectChat={() => {}} onEmpty={() => {}}
-    dictationEnabled={false} onClose={() => {}} {...props} />));
+    onClose={() => {}} {...props} />));
 }
 const button = (label: string) => Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(b => b.textContent === label);
 

@@ -3973,13 +3973,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-fd-input::placeholder {
   color: var(--color-ink-muted);
 }
-.rl-fd-partial {
-  padding: 0 4px;
-  font-size: var(--rl-text-sm);
-  font-style: italic;
-  color: color-mix(in srgb, var(--color-info) 80%, var(--color-ink-muted));
-}
-
 .rl-fd-tools {
   display: flex;
   align-items: center;
@@ -4731,10 +4724,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-fd-fix.is-primary:hover:not(:disabled) {
   background: var(--color-info);
   filter: brightness(1.08);
-}
-.rl-fd-err {
-  font-size: 11px;
-  color: var(--color-warning);
 }
 .rl-fd-name {
   min-width: 190px;

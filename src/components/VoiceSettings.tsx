@@ -20,6 +20,7 @@ import {
   splitBlend,
 } from "../audio/kokoroVoices";
 import { loadVoicePrefs } from "../audio/speech";
+import { HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "../audio/voiceHotkey";
 
 /** TTS engines the panel can select. `system` is the built-in (free, robotic)
  *  `speechSynthesis`; `kokoro` is a free natural voice that runs locally; `openai`
@@ -125,6 +126,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [whisperModels, setWhisperModels] = useState<WhisperModelStatus[]>([]);
   const [whisperInstalling, setWhisperInstalling] = useState(false);
   const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
+  // The key held to dictate anywhere (per machine, like the voice prefs).
+  const [holdKey, setHoldKey] = useState<HoldKey>(loadHoldKey);
 
   useEffect(() => {
     let alive = true;
@@ -268,6 +271,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       });
       // Dictation engine is a separate setting from the TTS engine above.
       await invoke("dictation_set_engine", { engine: dictationEngine, whisperModel });
+      saveHoldKey(holdKey);
       onSaved(engine);
       onClose();
     } catch (e) {
@@ -497,6 +501,25 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         style={{ borderTop: "1px solid var(--color-rule)" }}
       >
         <span style={label}>Dictation (microphone → text)</span>
+        <label className="flex flex-col gap-1">
+          <span style={muted}>
+            Hold this key anywhere in Redline and speak: your words go into the
+            text box you are in, or to the plan's discussion. Double-tap it to
+            keep the mic open.
+          </span>
+          <select
+            value={holdKey}
+            onChange={(e) => setHoldKey(e.target.value as HoldKey)}
+            aria-label="Dictation key"
+            style={field}
+          >
+            {HOLD_KEYS.map((k) => (
+              <option key={k.key} value={k.key}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <span style={muted}>
           Which recognizer transcribes your speech when you dictate. Both run
           fully on your Mac — no audio ever leaves the device. Whisper is a

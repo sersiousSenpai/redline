@@ -49,6 +49,12 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
             if selectors.len() > 8 || selectors.iter().any(|selector| selector.as_str().is_none_or(|s| s.len() > 4096)) { return None; }
         }
         "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door"].contains(&value.get("value")?.as_str()?) { return None; } }
+        // The hold-to-dictate key, pressed in the page (browser_frontdoor_shortcut.js).
+        "voice" => {
+            let v = value.get("value")?.as_str()?;
+            let code = v.strip_prefix("down:").or_else(|| v.strip_prefix("field:"));
+            if !matches!(v, "up" | "other" | "escape") && !code.is_some_and(|c| matches!(c, "AltRight" | "MetaRight" | "ControlRight")) { return None; }
+        }
         "focus" | "interaction" => {}
         _ => return None,
     }
@@ -73,12 +79,13 @@ fn signal_for_pane(raw: &str) -> Option<Value> {
 
 fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
     let value = signal_for_pane(raw)?;
-    // Subframes may summon the front door, and say they were pressed (the
-    // island's card closes on a press anywhere in the page). All other
-    // browser actions and page-state updates remain restricted to the main
-    // frame.
+    // Subframes may summon the front door, say they were pressed (the
+    // island's card closes on a press anywhere in the page), and hold the
+    // dictation key (a field in a frame has the keyboard as much as the page
+    // does). All other browser actions and page-state updates remain
+    // restricted to the main frame.
     let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart");
-    (main_frame || press || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
+    (main_frame || press || value["kind"] == "voice" || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
 }
 #[cfg(target_os = "macos")]
 mod native {
@@ -204,6 +211,28 @@ mod tests {
             r#"{"kind":"focus"}"#,
         ] { assert!(signal_for_frame(raw, false).is_none()); }
         assert!(signal_for_frame(r#"{"kind":"shortcut","value":"close-tab"}"#, true).is_some());
+    }
+
+    #[test]
+    fn the_dictation_key_comes_from_any_frame_with_only_its_own_values() {
+        for raw in [
+            r#"{"kind":"voice","value":"down:AltRight"}"#,
+            r#"{"kind":"voice","value":"field:MetaRight"}"#,
+            r#"{"kind":"voice","value":"down:ControlRight"}"#,
+            r#"{"kind":"voice","value":"up"}"#,
+            r#"{"kind":"voice","value":"other"}"#,
+            r#"{"kind":"voice","value":"escape"}"#,
+        ] {
+            assert!(signal_for_frame(raw, false).is_some(), "{raw}");
+        }
+        for raw in [
+            r#"{"kind":"voice","value":"down:KeyA"}"#,
+            r#"{"kind":"voice","value":"field:"}"#,
+            r#"{"kind":"voice","value":"send"}"#,
+            r#"{"kind":"voice"}"#,
+        ] {
+            assert!(parse_signal(raw).is_none(), "{raw}");
+        }
     }
 
     #[test]

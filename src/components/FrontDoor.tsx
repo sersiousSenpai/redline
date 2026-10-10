@@ -190,8 +190,6 @@ export interface FrontDoorProps {
    *  buffered keystrokes. */
   focusNonce: number;
   consumeSeed: () => string;
-  /** False while the Voice panel owns the mic — one capture at a time. */
-  dictationEnabled: boolean;
   /** Recent chats — the contextual way BACK into a conversation. A chat is a
    *  place you return to, and without a way back the room would be reachable
    *  only by starting a new one. A way in, never furniture: the card's
@@ -268,7 +266,6 @@ export function FrontDoor(props: FrontDoorProps) {
     onCreateProject,
     focusNonce,
     consumeSeed,
-    dictationEnabled,
     chats = [],
     onOpenChat,
   } = props;
@@ -475,11 +472,9 @@ export function FrontDoor(props: FrontDoorProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchedAt]);
 
-  const dictation = useDictation({
-    enabled: dictationEnabled,
-    onFinal: (spoken) =>
-      setText((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
-  });
+  // The mic locks dictation open into the box; the words arrive through the
+  // box's own onChange, and the live strip sits over the composer.
+  const dictation = useDictation(taRef);
 
   // The island's growth into the document editor. Declared here, above the
   // send path, because `send` captures the FLIP's starting box on the gesture.
@@ -804,7 +799,7 @@ export function FrontDoor(props: FrontDoorProps) {
         </div>
       )}
       {chips}
-      <div ref={islandRef} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
+      <div ref={islandRef} data-dictation-anchor data-dictation-send={workbench || liveDestination === "chat" ? "" : undefined} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
               attachment is a file handed to a prompt, and these are whole
@@ -893,6 +888,9 @@ export function FrontDoor(props: FrontDoorProps) {
                 : floating ? "What are we working on?" : "What do you want to build?"
             }
             aria-label="Message Redline"
+            // The door's own box takes what is said with nothing focused,
+            // as it takes what is typed (type-to-start).
+            data-dictation-default={welcome && visible ? "" : undefined}
             value={text}
             rows={1}
             spellCheck
@@ -901,11 +899,6 @@ export function FrontDoor(props: FrontDoorProps) {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
           />
-          {dictation.listening && (
-            <div className="rl-fd-partial">
-              {dictation.partial || "Listening…"}
-            </div>
-          )}
           <div className="rl-fd-tools">
             {workbench ? workbench.picker : <BackendMenu
               choice={backend}
@@ -988,22 +981,10 @@ export function FrontDoor(props: FrontDoorProps) {
               <Plus size={14} />
             </button>
 
-            {dictation.error && (
-              <span className="rl-fd-err" title={dictation.error}>
-                mic error
-              </span>
-            )}
             <button
               type="button"
               onClick={dictation.toggle}
-              disabled={!dictationEnabled}
-              title={
-                dictationEnabled
-                  ? dictation.listening
-                    ? "Stop dictating"
-                    : "Dictate"
-                  : "The voice panel is using the microphone"
-              }
+              title={dictation.listening ? "Stop dictating" : "Dictate"}
               className={`rl-fd-tool${dictation.listening ? " is-hot" : ""}`}
             >
               <Mic size={14} />

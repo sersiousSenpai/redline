@@ -28,14 +28,14 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 async function render() {
-  await act(async () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} dictationEnabled={false} onClose={() => {}} />));
+  await act(async () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} onClose={() => {}} />));
 }
 
 describe("Home chat containment", () => {
   it("labels usage under More and does not navigate history when it opens", async () => {
     const onSelectChat = vi.fn();
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
-      onSelectChat={onSelectChat} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
+      onSelectChat={onSelectChat} onEmpty={() => {}} onClose={() => {}}
       composer={{ draftKey: "test.emptyDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
     // The card's heading New is the one way back to compose.
     expect([...host.querySelectorAll("[data-chat-composer] button")].some(button => /New chat/.test(button.textContent ?? ""))).toBe(false);
@@ -74,7 +74,7 @@ describe("Home chat containment", () => {
   it("keeps the sticky Plan mode and holds a tray handoff until idle", async () => {
     turn.messages = [{ id: "reply", role: "assistant", body: "A complete reply", status: "complete" }];
     const onPlan = vi.fn();
-    const renderPlanning = () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} dictationEnabled={false} onClose={() => {}} onPlan={onPlan} />);
+    const renderPlanning = () => root.render(<ChatRoom companionId="carried-chat" onSelectChat={() => {}} onEmpty={() => {}} cwd={null} onClose={() => {}} onPlan={onPlan} />);
     await act(async () => renderPlanning());
     await act(async () => host.querySelector<HTMLButtonElement>(".rl-chat-mode-chip")!.click());
     await act(async () => [...host.querySelectorAll<HTMLButtonElement>(".rl-chat-mode-menu button")].find(button => button.textContent === "Plan")!.click());
@@ -106,12 +106,12 @@ describe("Home chat containment", () => {
       attachments: [], onAttachmentsChange() {}, readiness: [], onFix: async () => true, pending: null, onLaunch() {}, refusal: null,
       onDrafter() {}, onRun() {}, onChat() {}, chatEnabled: true, destination: "chat", onDestinationChange() {},
       backend: { backend: "codex", model: null, effort: null }, onBackendChange() {}, modelCatalogs: {}, onNeedModels() {},
-      onCancelPending() {}, onRevealPending() {}, onCreateProject: async () => null, focusNonce: 0, consumeSeed: () => "", dictationEnabled: false,
+      onCancelPending() {}, onRevealPending() {}, onCreateProject: async () => null, focusNonce: 0, consumeSeed: () => "",
     };
     function Workspace({ surface }: { surface: string }) {
       const [open, setOpen] = useState(true);
       return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} onNewChat={() => {}} context={surface} busy={false}>
-        <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
+        <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} onClose={() => {}}
           composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: accessories => <FrontDoor {...base} accessories={accessories}/> }}/>
       </MonochatIsland></>;
     }

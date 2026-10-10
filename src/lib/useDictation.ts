@@ -1,127 +1,51 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useSyncExternalStore, type RefObject } from "react";
 
-// A thin hook over the same three invokes and two events `VoicePanel` uses,
-// so the front-door composer can be spoken into without pulling the voice
-// surface's machinery along with it.
-//
-// The native constraint that shapes this: there is ONE capture at a time and
-// it carries no session id, so two callers pressing the mic would fight over
-// the same recognizer. `enabled` is how the caller stands down — the Voice
-// panel owns the mic whenever it is open, and this hook must no-op then.
+// A composer's mic button, and nothing more. The capture itself — the one
+// owner of the mic, the live strip, the cleanup, writing into the field — is
+// the dictation host's (src/audio/dictationHost.ts), a lazy chunk shared with
+// the hold-to-dictate key: a press here locks the mic open into this
+// composer's field, and the words arrive as if typed (the field's own
+// onChange). This module is on the boot path (the Front Door has a mic), so
+// it holds only which field is being dictated into, and the way to load the
+// host.
+
+let live: Element | null = null;
+const listeners = new Set<() => void>();
+const subscribe = (l: () => void) => {
+  listeners.add(l);
+  return () => listeners.delete(l);
+};
+const getLive = () => live;
+
+/** The host says which field a capture is writing into (null: none). */
+export function setDictationLive(el: Element | null): void {
+  if (el === live) return;
+  live = el;
+  for (const l of listeners) l();
+}
+
+let host: Promise<typeof import("../audio/dictationHost")> | null = null;
+export function loadDictation(): Promise<typeof import("../audio/dictationHost")> {
+  return (host ??= import("../audio/dictationHost"));
+}
 
 export interface Dictation {
+  /** A capture is writing into this composer's field. */
   listening: boolean;
-  /** Live transcript while listening — a preview, never committed text. */
-  partial: string;
-  error: string | null;
-  start: () => void;
-  /** Stops and hands the finalized transcript to `onFinal`. */
-  stop: () => void;
+  /** Start dictating into the field (mic open until pressed again), or
+   *  finish. */
   toggle: () => void;
 }
 
-export function useDictation({
-  enabled,
-  onFinal,
-}: {
-  enabled: boolean;
-  onFinal: (text: string) => void;
-}): Dictation {
-  const [listening, setListening] = useState(false);
-  const [partial, setPartial] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const listeningRef = useRef(false);
-  listeningRef.current = listening;
-  const onFinalRef = useRef(onFinal);
-  onFinalRef.current = onFinal;
-
-  // Subscribe once. The partial stream is global (no session id), so the
-  // guard is our own listening flag — a Voice-panel capture must not paint
-  // its transcript into the composer.
-  useEffect(() => {
-    let disposed = false;
-    const unlisteners: UnlistenFn[] = [];
-    const add = (u: UnlistenFn) => {
-      if (disposed) u();
-      else unlisteners.push(u);
-    };
-    void (async () => {
-      add(
-        await listen<{ text: string }>("dictation-partial", (e) => {
-          if (listeningRef.current) setPartial(e.payload.text);
-        }),
-      );
-      add(
-        await listen<{ error: string }>("dictation-error", (e) => {
-          if (!listeningRef.current) return;
-          listeningRef.current = false;
-          setListening(false);
-          setPartial("");
-          setError(e.payload.error);
-        }),
-      );
-    })();
-    return () => {
-      disposed = true;
-      for (const u of unlisteners) u();
-    };
-  }, []);
-
-  const start = useCallback(() => {
-    if (!enabled || listeningRef.current) return;
-    setError(null);
-    setPartial("");
-    listeningRef.current = true;
-    setListening(true);
-    void invoke("dictation_start").catch((e) => {
-      listeningRef.current = false;
-      setListening(false);
-      setError(String(e));
-    });
-  }, [enabled]);
-
-  const stop = useCallback(() => {
-    if (!listeningRef.current) return;
-    listeningRef.current = false;
-    setListening(false);
-    void invoke<string>("dictation_stop")
-      .then((finalText) => {
-        setPartial("");
-        const text = (finalText || "").trim();
-        if (text) onFinalRef.current(text);
-      })
-      .catch((e) => setError(String(e)));
-  }, []);
-
-  const toggle = useCallback(() => {
-    if (listeningRef.current) stop();
-    else start();
-  }, [start, stop]);
-
-  // Never leave the mic hot: an unmount mid-capture (surface switch, a plan
-  // arriving) has to release the recognizer, and a Voice panel opening takes
-  // the mic away from us by contract.
-  useEffect(() => {
-    if (enabled) return;
-    if (!listeningRef.current) return;
-    listeningRef.current = false;
-    setListening(false);
-    setPartial("");
-    void invoke("dictation_kill_all").catch(() => {});
-  }, [enabled]);
-
-  useEffect(
-    () => () => {
-      if (!listeningRef.current) return;
-      listeningRef.current = false;
-      void invoke("dictation_kill_all").catch(() => {});
+export function useDictation(field: RefObject<HTMLElement | null>): Dictation {
+  const current = useSyncExternalStore(subscribe, getLive, getLive);
+  return {
+    listening: !!current && current === field.current,
+    toggle: () => {
+      const el = field.current;
+      if (el) void loadDictation().then((m) => m.toggleInto(el));
     },
-    [],
-  );
-
-  return { listening, partial, error, start, stop, toggle };
+  };
 }

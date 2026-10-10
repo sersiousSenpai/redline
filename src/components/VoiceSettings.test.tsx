@@ -79,6 +79,7 @@ vi.mock("../audio/cloudTts", () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { VoiceSettings } from "./VoiceSettings";
+import { loadHoldKey, saveHoldKey } from "../audio/voiceHotkey";
 
 const flush = () =>
   act(async () => {
@@ -243,5 +244,24 @@ describe("Whisper model choice", () => {
     await mount();
     await pick("turbo");
     expect(button("Resume download (200.0 MB of 574.0 MB)")).toBeTruthy();
+  });
+});
+
+describe("dictation key", () => {
+  it("offers the hold key, Right Option by default, and saves a change with the rest", async () => {
+    await mount();
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Dictation key"]')!;
+    expect(select.value).toBe("AltRight");
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Right ⌥ Option", "Right ⌘ Command", "Right ⌃ Control", "Off"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "MetaRight");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // Not until Save.
+    expect(loadHoldKey()).toBe("AltRight");
+    await save();
+    expect(loadHoldKey()).toBe("MetaRight");
+    expect(localStorage.getItem("redline.dictation.key")).toBe("MetaRight");
+    saveHoldKey("AltRight");
   });
 });

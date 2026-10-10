@@ -51,6 +51,10 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   // The way back to a blocked agent from anywhere — including from inside a
   // terminal, so App matches it in the capture phase, ahead of xterm.
   { id: "needs-you", keys: ["⌘", "⇧", "J"], label: "Jump to the terminal that needs you", group: "Global", wired: true },
+  // Not a chord: a modifier held on its own (audio/voiceHotkey.ts, which owns
+  // its listener). Double-tap locks the mic open; Voice settings changes it.
+  // One cap for the key: the cheat sheet splits caps at plain spaces.
+  { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
   { id: "pane-terminal", keys: ["⇧", "↓"], label: "Show / hide the terminal", group: "Layout", wired: false },
