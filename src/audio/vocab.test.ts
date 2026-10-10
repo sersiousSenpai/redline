@@ -32,7 +32,7 @@ const PLAN = `# Voice plan
 Keep Kokoro as the fallback, and run the Front Door through \`VoicePanel.tsx\`.
 The Kokoro sidecar in \`tts.rs\` streams PCM; \`dictation_start\` takes an owner.
 Describe the change. Rename VoicePanel to TalkPanel, and keep useStickToBottom.
-Then the size budget: SIZE stays binding, and the Front Door stays light.
+Then the size budget: SIZE stays binding, and the Front Door stays light up front.
 
 \`\`\`ts
 const IgnoredInsideFences = notVocabulary_either;

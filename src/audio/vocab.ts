@@ -131,9 +131,10 @@ export function planVocab(markdown: string): { terms: string[]; identifiers: str
   for (const m of prose.matchAll(CAPITALIZED)) {
     let words = m[0].split(/[ -]/);
     let mid = /[a-z0-9,;)]\s$/.test(prose.slice(Math.max(0, m.index - 3), m.index));
-    // "The Front Door", "Keep Kokoro": an ordinary word in front is the
+    // "The Front Door", "Keep Kokoro": an everyday word in front is the
     // sentence's start, and what follows it is capitalized for its own sake.
-    while (words.length > 1 && ordinary(words[0])) {
+    // (Only everyday words: "Front" stays, though the plan says "front" too.)
+    while (words.length > 1 && COMMON.has(words[0].toLowerCase())) {
       words = words.slice(1);
       mid = true;
     }
