@@ -27,6 +27,16 @@ describe("front door shortcut in embedded page frames", () => {
     expect(event.stopImmediatePropagation).toHaveBeenCalledOnce();
     expect(JSON.parse(postMessage.mock.calls[0][0])).toEqual({ kind: "shortcut", value: "open-front-door" });
   });
+  it("leaves a text field's Shift+Enter to the page: it is the newline there", () => {
+    const { postMessage, key } = frame();
+    for (const target of [{ tagName: "TEXTAREA" }, { tagName: "INPUT" }, { tagName: "SELECT" }, { tagName: "DIV", isContentEditable: true }]) {
+      expect(key({ target }).preventDefault).not.toHaveBeenCalled();
+    }
+    expect(postMessage).not.toHaveBeenCalled();
+    // Anywhere else in the page the chord is still Redline's.
+    expect(key({ target: { tagName: "BODY" } }).preventDefault).toHaveBeenCalledOnce();
+    expect(postMessage).toHaveBeenCalledOnce();
+  });
   it("leaves composition, ordinary Enter and modified shortcuts alone", () => {
     const { postMessage, key } = frame();
     for (const extra of [{ isTrusted: false }, { isComposing: true }, { keyCode: 229 }, { shiftKey: false }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) {

@@ -1,11 +1,14 @@
 // Installed in every frame: keyboard events inside an iframe do not bubble
-// to the top page. This script only forwards the explicit front-door chord.
+// to the top page. This script only forwards the explicit front-door chord,
+// and never from a text field, where it is the page's own newline.
 (function () {
   if (window.__redline_frontdoor_shortcut_installed) return;
   window.__redline_frontdoor_shortcut_installed = true;
   window.addEventListener("keydown", (event) => {
     if (!event.isTrusted || event.isComposing || event.keyCode === 229) return;
     if (event.key !== "Enter" || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+    const target = event.target;
+    if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.repeat) return;

@@ -9238,8 +9238,8 @@ function App() {
                 </Suspense>
               )
             ) : (
-              // The empty plate shows nothing: the way in is the Redline card,
-              // which floats over every surface instead of resting here.
+              // The empty plate shows nothing of its own: the Front Door rests
+              // over it (MonochatIsland's resting pose).
               null
             )}
           </article>

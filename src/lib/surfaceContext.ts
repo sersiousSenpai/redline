@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// What the Redline card can attach from the surface you are standing on.
+// What the Front Door's composer can attach from the surface you are standing
+// on — in the door, the pill's compact card, or a chat.
 //
 // Every surface offers its own "this thing" chip — the page, the plan, the
 // open file, the draft, the diff — and a pressed chip rides along with
-// whatever the card sends. Explicit by design: nothing is attached that the
+// whatever the composer sends. Explicit by design: nothing is attached that the
 // user was not shown and left pressed, and a surface with nothing selectable
 // on screen offers no chip at all rather than one that attaches nothing.
 //
@@ -17,7 +18,7 @@
 import type { SurfaceInfo } from "./activeSurface";
 import type { LaunchDestination } from "./frontDoor";
 
-/** The browser tab the card would quote, as BrowserPane reports it. */
+/** The browser tab the composer would quote, as BrowserPane reports it. */
 export interface BrowserIslandPage {
   label: string;
   title: string;
@@ -105,8 +106,8 @@ export function toggleChip(presses: ChipPresses, surfaceKey: string, chip: Conte
   return { surfaceKey, on: { ...on, [chip.id]: !isChipPressed(chip, presses, surfaceKey) } };
 }
 
-/** The heading's "Redline · …" — where the card is, in words. Null on the
- *  empty plate, which has nothing to name. */
+/** Where the Front Door is, in words: the room's name for screen readers.
+ *  Null on the empty plate, which has nothing to name. */
 export function surfaceContextLabel(surface: SurfaceInfo, pageTitle?: string | null): string | null {
   switch (surface.kind) {
     case "plan":

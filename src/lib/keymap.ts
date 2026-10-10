@@ -38,7 +38,7 @@ export interface KeyBinding {
 
 export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "palette", keys: ["⌘", "K"], label: "Command palette", group: "Global", wired: true },
-  { id: "front-door", keys: ["⇧", "⏎"], label: "Open the front door", group: "Global", wired: true },
+  { id: "front-door", keys: ["⇧", "⏎"], label: "Open the front door (outside a text field)", group: "Global", wired: true },
   // The front door — the app's resting state, and the only path that clears
   // the session selection. It had no chord at all, which was survivable while
   // the sessions sidebar was always there carrying its row; it isn't, now that
@@ -124,7 +124,9 @@ export function isNeedsYouKey(e: KeyComboInfo): boolean {
   return e.shiftKey && e.code === "KeyJ";
 }
 
-/** Shift+Enter summons the front door without colliding with modified sends. */
+/** Shift+Enter summons the front door without colliding with modified sends.
+ *  The chord alone: callers leave it to a text field that has focus, where it
+ *  is the newline (a composer, a web form, Claude Code's prompt). */
 export function isFrontDoorKey(e: KeyComboInfo): boolean {
   return e.key === "Enter" && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
 }
