@@ -66,7 +66,7 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
-import { StreamingText } from "./StreamingBubble";
+import { StreamingText } from "./StreamingText";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
 // turnState.ts): the panel acts only on the turn it is waiting for.
