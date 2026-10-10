@@ -464,6 +464,14 @@ describe("studioTtsDriver: the stand-in", () => {
     expect(standins.map((s) => s.text)).toEqual([LONG(3), LONG(4)]);
   });
 
+  it("asks whether Kokoro is set up once per window, not once per chat", async () => {
+    await driver();
+    await driver();
+    studio.playStudioSample("ryan", "Studio voice ready.", () => {});
+    await advance(0);
+    expect(named("tts_kokoro_status")).toHaveLength(1);
+  });
+
   it("is the system voice where Kokoro isn't set up, and takes a refused piece", async () => {
     rust.kokoro = false;
     rust.refuse = "studio_disabled";

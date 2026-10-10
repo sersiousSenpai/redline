@@ -209,6 +209,19 @@ export function studioSurface(surface: string, open: boolean): void {
   void invoke("tts_studio", { op: "surface", args: { surface, open } }).catch(() => {});
 }
 
+/** Kokoro's voice when Kokoro is set up to stand in, else null. Asked once
+ *  per window: the check starts a Python, and every chat makes a driver. */
+let kokoroCheck: Promise<string | null> | null = null;
+function kokoroStandin(): Promise<string | null> {
+  kokoroCheck ??= Promise.all([
+    invoke<{ modelPresent: boolean; pythonReady: boolean }>("tts_kokoro_status"),
+    invoke<{ kokoroVoice?: string }>("tts_get_settings"),
+  ])
+    .then(([k, s]) => (k.modelPresent && k.pythonReady ? s.kokoroVoice || "af_heart" : null))
+    .catch(() => null);
+  return kokoroCheck;
+}
+
 /** Why the studio voice can't take a reply starting now, if it can't. */
 function unready(): Reason | null {
   if (studio.state === "disabled") return "disabled";
@@ -275,16 +288,7 @@ export function studioTtsDriver(opts: StudioOptions = {}): SpeechDriver {
   watchStudio();
   // The stand-in: Kokoro, in the user's voice for it, when it is set up.
   let kokoro: string | null = null;
-  if (!opts.preview) {
-    void Promise.all([
-      invoke<{ modelPresent: boolean; pythonReady: boolean }>("tts_kokoro_status"),
-      invoke<{ kokoroVoice?: string }>("tts_get_settings"),
-    ])
-      .then(([k, s]) => {
-        if (k.modelPresent && k.pythonReady) kokoro = s.kokoroVoice || "af_heart";
-      })
-      .catch(() => {});
-  }
+  if (!opts.preview) void kokoroStandin().then((v) => (kokoro = v));
   let standin: SpeechDriver | null = null;
   const standinDriver = () => {
     if (!standin) {
