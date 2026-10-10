@@ -154,6 +154,12 @@ function wcagContrast(a: string, b: string): number {
  * `onto` names every surface the color is also read on, checked by the WCAG
  * formula proper: the muted ink sits on raised cards and composers as much as
  * on the page, and there Homebrew and Terminal fell under the floor.
+ *
+ * An accent used as text is the same search the other way round: the ink
+ * blended all the way toward the accent (`maxT` 1) is the accent itself, kept
+ * exactly where it reads; where it doesn't — Silver Aerogel's blue is 2.1:1 on
+ * its grey paper, Blossom's yellow 1.8:1 — it stays only as close to the
+ * accent as `onto` allows. It is not read on itself, so `onSurface` is off.
  */
 function mutedInk(
   ink: string,
@@ -161,9 +167,10 @@ function mutedInk(
   maxT: number,
   minContrast: number,
   onto: string[] = [],
+  onSurface = true,
 ): string {
   const legible = (color: string) =>
-    contrastRatio(color, surface) >= minContrast &&
+    (!onSurface || contrastRatio(color, surface) >= minContrast) &&
     onto.every((s) => wcagContrast(color, s) >= minContrast);
   if (legible(mix(ink, surface, maxT))) return mix(ink, surface, maxT);
   // Binary-search the blend amount; contrast is monotonic in t.
@@ -175,27 +182,6 @@ function mutedInk(
     else hi = mid;
   }
   return mix(ink, surface, lo);
-}
-
-/**
- * An accent hue used as text, held at `minContrast` (the WCAG formula proper)
- * on every surface in `onto`. A theme whose accent already clears it keeps the
- * accent exactly; one that doesn't — Silver Aerogel's blue is 2.1:1 on its
- * grey paper, Blossom's yellow 1.8:1 — has it blended toward the ink only as
- * far as that takes, so it still reads as the accent. Contrast with each
- * surface grows as the blend nears the ink, which every theme holds at 4.5:1.
- */
-function accentInk(accent: string, ink: string, onto: string[], minContrast: number): string {
-  const legible = (color: string) => onto.every((s) => wcagContrast(color, s) >= minContrast);
-  if (legible(accent)) return accent;
-  let lo = 0;
-  let hi = 1;
-  for (let i = 0; i < 24; i++) {
-    const mid = (lo + hi) / 2;
-    if (legible(mix(accent, ink, mid))) hi = mid;
-    else lo = mid;
-  }
-  return mix(accent, ink, hi);
 }
 
 /** How much of the ink a hover wash may carry: up to `maxAlpha`, in whole
@@ -276,8 +262,8 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-success": base.green,
     // Text, so held to the body-text floor on the page and on raised cards
     // (a comment's thread sits on one) — the fills and rules keep the hue.
-    "color-info-text": accentInk(base.blue, fg, [bg, elevated], 4.5),
-    "color-warning-text": accentInk(base.yellow, fg, [bg, elevated], 4.5),
+    "color-info-text": mutedInk(fg, base.blue, 1, 4.5, [bg, elevated], false),
+    "color-warning-text": mutedInk(fg, base.yellow, 1, 4.5, [bg, elevated], false),
     "color-bg-elevated": elevated,
     "color-on-accent": onAccent,
     // White, unless the theme's blue is too light for it (Aurora's is

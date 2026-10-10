@@ -431,7 +431,7 @@ import {
   panelMask,
   panelsMasked,
 } from "./lib/immersive";
-import type { SwapRect } from "./lib/springSwap";
+import { boxOf, type SwapRect } from "./lib/springSwap";
 import { SpringSwap } from "./components/SpringSwap";
 import { SurfacesPanel } from "./components/SurfacesPanel";
 import { NudgeCard } from "./components/NudgeCard";
@@ -4086,9 +4086,10 @@ function App() {
           setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
           // The chat turns into its plan in place only while you sit idle
           // in it: the agent picks the moment, minutes later.
-          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
-            const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
-            if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
+          const receipt = `[data-chat-plan-receipt="${CSS.escape(chatId)}"]`;
+          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(receipt)) {
+            const from = boxOf(receipt);
+            if (from) setPlanSwap({ launchId: payload.launchId!, from });
             selectSurfaceRef.current("document");
             focusIntercepted();
           } else {
@@ -4118,8 +4119,8 @@ function App() {
           // off into it — the plan springs out of the composer its sentence
           // left while the door fades where it is — and the caret goes to the
           // plan. Said politely, as any arrival on screen is.
-          const island = document.querySelector(".rl-frontdoor-focus[data-open='true'] .rl-fd-island")?.getBoundingClientRect();
-          if (island && island.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: island.left, top: island.top, width: island.width, height: island.height } });
+          const from = boxOf(".rl-frontdoor-focus[data-open='true'] .rl-fd-island");
+          if (from) setPlanSwap({ launchId: payload.launchId!, from });
           setDoorHandoff(true);
           setFrontDoorOpen(false);
           selectSurfaceRef.current("document");
@@ -7647,9 +7648,7 @@ function App() {
     // Measured HERE, synchronously, while the island is still on screen — one
     // render later it is gone. This is the box the Drafter springs out of:
     // the door's composer (a chat's in the dock is not the one sending).
-    const island = document.querySelector(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
-    const r = island?.getBoundingClientRect();
-    const from = r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
+    const from = boxOf(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
     frontDoorLaunchingRef.current = true;
     // Everything else lands in ONE batch once the context is read, so the
     // card never shows a cleared composer while the Drafter is on its way.

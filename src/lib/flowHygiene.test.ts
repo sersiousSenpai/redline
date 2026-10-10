@@ -39,6 +39,7 @@ describe("a plan arriving while you are busy flashes", () => {
     // The door closes into the plan, which springs out of its composer, and
     // says so; nothing else of the door's is touched.
     const block = handoff();
+    expect(block).toContain('boxOf(".rl-frontdoor-focus[data-open=\'true\'] .rl-fd-island")');
     expect(block).toContain("setPlanSwap(");
     expect(block).toContain("setDoorHandoff(true);");
     expect(block).toContain("setFrontDoorOpen(false);");
