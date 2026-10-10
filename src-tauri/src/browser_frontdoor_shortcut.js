@@ -7,8 +7,10 @@
   window.addEventListener("keydown", (event) => {
     if (!event.isTrusted || event.isComposing || event.keyCode === 229) return;
     if (event.key !== "Enter" || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
-    const target = event.target;
-    if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) return;
+    // The field itself, even inside a web component (the window sees only
+    // its host), and a custom editor that says it is a text box.
+    const target = (event.composedPath && event.composedPath()[0]) || event.target;
+    if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "") || (target.closest && target.closest('[role="textbox"]')))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.repeat) return;

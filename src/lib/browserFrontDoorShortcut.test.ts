@@ -37,6 +37,17 @@ describe("front door shortcut in embedded page frames", () => {
     expect(key({ target: { tagName: "BODY" } }).preventDefault).toHaveBeenCalledOnce();
     expect(postMessage).toHaveBeenCalledOnce();
   });
+  it("finds the field inside a web component, and a custom editor that calls itself a text box", () => {
+    const { postMessage, key } = frame();
+    // At the window a shadow-DOM field retargets to its host; the composed
+    // path still starts at the field.
+    const host = { tagName: "CHAT-COMPOSER", closest: () => null };
+    expect(key({ target: host, composedPath: () => [{ tagName: "TEXTAREA" }, host] }).preventDefault).not.toHaveBeenCalled();
+    const editor = { tagName: "DIV", closest: (selector: string) => (selector === '[role="textbox"]' ? editor : null) };
+    expect(key({ target: editor }).preventDefault).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(key({ target: host, composedPath: () => [host] }).preventDefault).toHaveBeenCalledOnce();
+  });
   it("leaves composition, ordinary Enter and modified shortcuts alone", () => {
     const { postMessage, key } = frame();
     for (const extra of [{ isTrusted: false }, { isComposing: true }, { keyCode: 229 }, { shiftKey: false }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
