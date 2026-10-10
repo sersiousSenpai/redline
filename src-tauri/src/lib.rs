@@ -3694,6 +3694,7 @@ async fn handle_suggest_feedback(
                 author = comment.author.as_deref().unwrap_or(""),
                 "agent feedback comment landed"
             );
+            let landed = voice::land_feedback(&app_state.app_handle, &app_state.store, &session_id, comment, None);
             let _ = app_state.app_handle.emit(
                 "comments-changed",
                 SessionEvent {
@@ -3701,7 +3702,7 @@ async fn handle_suggest_feedback(
                 },
             );
             refresh_tray(&app_state.app_handle, &app_state.store);
-            (StatusCode::CREATED, Json(comment)).into_response()
+            (StatusCode::CREATED, Json(landed)).into_response()
         }
         Err(e) => agent_error_response(e).into_response(),
     }
@@ -3763,6 +3764,7 @@ async fn handle_offer_feedback(
         status: "pending".to_string(),
         created_at: ledger::now_millis(),
         stale: false,
+        explicit: req.explicit,
     };
     if let Err(e) = db.insert_comment_offer(&offer) {
         return browser_error_response(e.to_string());
@@ -3771,8 +3773,11 @@ async fn handle_offer_feedback(
         session_id = %session_id,
         offer_id = %offer.id,
         agent = %offer.agent_id,
+        explicit = offer.explicit,
         "plan item offered (not written)"
     );
+    // The agent's read-back names the section, so hand it the title it lands in.
+    let section_title = agent::section_title_for(&app_state.store, &session_id, &offer.block_id);
     let _ = app_state.app_handle.emit("comment-offer", &offer);
     extension_host::publish(
         ext_events::COMMENT_OFFER,
@@ -3785,12 +3790,19 @@ async fn handle_offer_feedback(
             ts_ms: extension_host::now_ms(),
         },
     );
+    let note = if offer.explicit {
+        "staged — read it back in one sentence; Redline adds it after your read-back. Do not post it yourself"
+    } else {
+        "offered — the user taps ＋ Add as item to create it; do not post it yourself"
+    };
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
             "id": offer.id,
             "status": "pending",
-            "note": "offered — the user taps ＋ Add as item to create it; do not post it yourself",
+            "explicit": offer.explicit,
+            "sectionTitle": section_title,
+            "note": note,
         })),
     )
         .into_response()
@@ -13074,6 +13086,7 @@ pub fn run() {
             review::review_list_viewed,
             voice::voice_session_start,
             voice::voice_send,
+            voice::voice_interrupt,
             voice::voice_clean,
             voice::voice_session_stop,
             voice::voice_forget,

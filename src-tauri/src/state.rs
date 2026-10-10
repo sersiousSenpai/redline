@@ -907,6 +907,12 @@ pub struct CommentOffer {
     /// column: staleness is a fact about the current plan, not about the row.
     #[serde(default)]
     pub stale: bool,
+    /// The user explicitly asked for this capture, so the live panel adds it
+    /// after the agent's read-back. Carried by the `comment-offer` event only,
+    /// **not** a column: a panel that mounts later finds an ordinary chip that
+    /// waits for a tap, since nobody heard that read-back.
+    #[serde(default)]
+    pub explicit: bool,
 }
 
 /// One turn in a draft's discussion thread (the Prompt Drafter's 💬 agent).
