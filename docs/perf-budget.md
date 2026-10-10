@@ -72,7 +72,8 @@ it, that's the discussion to have before merging.
    is one `pty_cwds` subprocess for every visible tile (never one `lsof` per
    pane), every other tick adds `pty_procs` (each terminal's foreground
    program and listening ports, for the wall's state badges: one `ps` and one
-   `lsof` whatever the terminal count), it pauses while the window is hidden,
+   `lsof` whatever the terminal count, run beside the cwd read so a slow scan
+   never holds it up), it pauses while the window is hidden,
    and the shell follows the focused terminal's cwd from its reads instead of
    running a loop of its own. WebGL renderers are visibility-scoped
    and capped at `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's

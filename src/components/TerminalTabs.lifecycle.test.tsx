@@ -371,6 +371,23 @@ describe("the fleet poll", () => {
     expect(count("pty_procs") - procs).toBe(2);
   });
 
+  // The process scan is a system-wide `lsof` of listening sockets, the read
+  // most likely to crawl or hang on a loaded machine. The cwd read is what
+  // labels the tiles and what the shell's folder-follow runs on; it used to
+  // be its own loop and must not wait behind that scan.
+  it("a process scan that never returns holds up no cwd read", async () => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) =>
+      command === "pty_procs" ? new Promise(() => {}) : base(command, args));
+    await mount();
+    await tick(4000);
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await tick(8000);
+    expect(count("pty_cwds") - cwds).toBe(4);
+    expect(count("pty_procs")).toBe(procs);
+  });
+
   it("a new tile is read at once without moving the process-sample cadence", async () => {
     await mount();
     await tick(1000);

@@ -837,27 +837,37 @@ export const TerminalTabs = memo(
   // focused terminal's cwd from these reads (`onFocusedCwd`) instead of
   // running an `lsof` loop of its own.
   //
-  // One sample at a time (usePoll): on a loaded machine a slow scan must not
-  // stack a second one behind it. Paused while the window is hidden. Hidden
-  // terminals keep their last-known label and refresh the instant they're
-  // shown (a `tiles` change samples now) or the menu opens (refreshAllCwds).
+  // Each read runs one at a time: on a loaded machine a slow scan must not
+  // stack a second one behind it. The cwd read goes through usePoll; the
+  // process scan keeps its own flag and runs beside it, never in front of it,
+  // because its system-wide `lsof` is the read that crawls or hangs, and the
+  // cwds are what the labels and the host's folder-follow wait on. Paused
+  // while the window is hidden. Hidden terminals keep their last-known label
+  // and refresh the instant they're shown (a `tiles` change samples now) or
+  // the menu opens (refreshAllCwds).
   const procsAtRef = useRef(-Infinity);
+  const procsOutRef = useRef(false);
   const sampleFleetNow = usePoll(
     async () => {
-      const procsDue =
-        Date.now() - procsAtRef.current >= PROCS_POLL_MS - FLEET_POLL_MS / 2;
-      if (procsDue) procsAtRef.current = Date.now();
-      await Promise.all([
-        invoke<Record<string, string>>("pty_cwds", { ids: [...tilesRef.current] })
-          .then((map) => mergeCwds(Object.entries(map)))
+      if (
+        !procsOutRef.current &&
+        Date.now() - procsAtRef.current >= PROCS_POLL_MS - FLEET_POLL_MS / 2
+      ) {
+        procsAtRef.current = Date.now();
+        procsOutRef.current = true;
+        void sampleProcs()
           .catch(() => {
-            /* keep last-known labels */
-          }),
-        procsDue &&
-          sampleProcs().catch(() => {
             /* keep the last sample */
-          }),
-      ]);
+          })
+          .finally(() => {
+            procsOutRef.current = false;
+          });
+      }
+      await invoke<Record<string, string>>("pty_cwds", { ids: [...tilesRef.current] })
+        .then((map) => mergeCwds(Object.entries(map)))
+        .catch(() => {
+          /* keep last-known labels */
+        });
     },
     FLEET_POLL_MS,
     { pauseWhenHidden: true, leading: false },
