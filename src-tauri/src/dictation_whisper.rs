@@ -26,7 +26,11 @@
 //!          over thousands of real dictations;
 //!       3. the capture's **vocabulary** goes in as the initial prompt only
 //!          once the gate has passed — over near-silence a prompt makes Whisper
-//!          read the dictionary back ([`plan_decode`]).
+//!          read the dictionary back ([`plan_decode`]);
+//!       4. a decoded segment that is only a note about non-speech —
+//!          "(clapping)", "[BLANK_AUDIO]", "*static*", a lone "." — is
+//!          dropped, so a key tap never types a note into a composer
+//!          ([`is_note`]).
 //!   - **Resampling** — [`resample_to_16k`] converts the microphone's
 //!     hardware-rate PCM (44.1/48 kHz) down to the 16 kHz Whisper requires.
 //!
@@ -188,6 +192,30 @@ pub fn vocab_prompt(vocab: &[String]) -> Option<String> {
     Some(format!(" {}.", kept.join(", ")))
 }
 
+/// Whether a decoded segment is only a transcriber's note about non-speech:
+/// one or more `[…]`, `(…)` or `*…*` notes, or no letters or digits at all
+/// (".", "♪"). Whisper writes these over taps and breaths, the sounds loud
+/// enough to pass the silence gate.
+pub fn is_note(segment: &str) -> bool {
+    let mut rest = segment.trim();
+    if !rest.chars().any(char::is_alphanumeric) {
+        return true;
+    }
+    while !rest.is_empty() {
+        let close = match rest.as_bytes()[0] {
+            b'[' => ']',
+            b'(' => ')',
+            b'*' => '*',
+            _ => return false,
+        };
+        let Some(end) = rest[1..].find(close) else {
+            return false;
+        };
+        rest = rest[end + 2..].trim_start();
+    }
+    true
+}
+
 /// Decoder threads: three quarters of the cores, between 4 and 12 — enough to
 /// finish a short utterance fast without starving the UI on a big machine.
 pub fn decode_threads(cores: usize) -> i32 {
@@ -342,7 +370,8 @@ impl WhisperState {
 }
 
 /// One whisper.cpp pass over `pcm`, greedy, English. `guards` sets the
-/// hallucination thresholds (off only to measure what they buy).
+/// hallucination thresholds and drops note-only segments (off only to measure
+/// what they buy).
 #[cfg(target_os = "macos")]
 fn decode(ctx: &WhisperContext, pcm: &[f32], prompt: Option<&str>, guards: bool) -> Result<String, String> {
     let mut state = ctx
@@ -384,7 +413,9 @@ fn decode(ctx: &WhisperContext, pcm: &[f32], prompt: Option<&str>, guards: bool)
     let mut out = String::new();
     for i in 0..n {
         if let Ok(seg) = state.full_get_segment_text(i) {
-            out.push_str(&seg);
+            if !(guards && is_note(&seg)) {
+                out.push_str(&seg);
+            }
         }
     }
     Ok(out.trim().to_string())
@@ -680,6 +711,16 @@ mod tests {
     }
 
     #[test]
+    fn notes_about_non_speech_are_told_from_words() {
+        for note in ["[BLANK_AUDIO]", " [BLANK_AUDIO] [BLANK_AUDIO]", "(clapping)", "*static*", ".", " ♪ ", ""] {
+            assert!(is_note(note), "{note:?}");
+        }
+        for words in ["Thank you.", "Use the (old) path", "[clap] Hello", "*really* fast", "(unclosed"] {
+            assert!(!is_note(words), "{words:?}");
+        }
+    }
+
+    #[test]
     fn decode_threads_are_three_quarters_of_the_cores_within_four_to_twelve() {
         assert_eq!(decode_threads(2), 4);
         assert_eq!(decode_threads(8), 6);
@@ -736,7 +777,8 @@ mod tests {
     /// `REDLINE_WHISPER_OUT=<jsonl>`. Writes one line per clip and variant:
     /// each model bare (no gate, guards or prompt — the old path), gated and
     /// guarded without a prompt, and with the vocabulary prompt too (the
-    /// shipping path). `REDLINE_WHISPER_ONLY` and `REDLINE_WHISPER_VARIANTS`
+    /// shipping path); and "ungated", the shipping path without its gate,
+    /// which shows what the gate saves on non-speech. `REDLINE_WHISPER_ONLY` and `REDLINE_WHISPER_VARIANTS`
     /// (comma lists) narrow the models and variants, and
     /// `REDLINE_WHISPER_PROMPT_FILE` replaces the built prompt with a file's
     /// text, to compare prompt formats.
@@ -768,19 +810,20 @@ mod tests {
             .unwrap();
             for clip in &manifest {
                 let pcm = read_wav_16k(clip["file"].as_str().unwrap());
-                for (variant, guarded, prompt) in
-                    [("bare", false, None), ("guarded", true, None), ("prompted", true, prompt.as_deref())]
-                {
+                for (variant, guarded, gated, prompt) in [
+                    ("bare", false, false, None),
+                    ("guarded", true, true, None),
+                    ("prompted", true, true, prompt.as_deref()),
+                    ("ungated", true, false, prompt.as_deref()),
+                ] {
                     if !listed("REDLINE_WHISPER_VARIANTS", variant) {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let text = if !guarded {
-                        decode(&ctx, &pcm, None, false).unwrap()
-                    } else if speech_gate(&pcm) {
-                        decode(&ctx, &pcm, prompt, true).unwrap()
-                    } else {
+                    let text = if gated && !speech_gate(&pcm) {
                         String::new()
+                    } else {
+                        decode(&ctx, &pcm, prompt, guarded).unwrap()
                     };
                     let line = serde_json::json!({
                         "engine": format!("whisper-{}-{variant}", model.id),
