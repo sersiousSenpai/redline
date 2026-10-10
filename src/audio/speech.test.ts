@@ -142,6 +142,44 @@ describe("SpeechQueue", () => {
     q.enqueue("Done. "); // trailing space completes the sentence
     expect(states).toEqual(["speaking", "idle"]);
   });
+
+  it("a sentence finishing after a cancel doesn't count against the next turn", () => {
+    // Every driver can report a stopped utterance late: the system voice
+    // errors out its queue after `cancel()`, a stopped clip fires 'ended'.
+    const finishers: (() => void)[] = [];
+    const driver: SpeechDriver = {
+      speak: (_text, _opts, onDone) => finishers.push(onDone),
+      cancel: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    };
+    const q = new SpeechQueue({ driver, prefs: { voiceURI: null, rate: 1 } });
+    q.enqueue("Old reply. ");
+    q.cancel();
+    q.enqueue("New one. New two. ");
+    finishers[0](); // the old sentence's late onDone
+    finishers[1](); // "New one." ends
+    expect(q.getState()).toBe("speaking"); // "New two." is still to come
+    finishers[2]();
+    expect(q.getState()).toBe("idle");
+  });
+
+  it("a sentence arriving while paused joins the pause", () => {
+    const driver: SpeechDriver = {
+      speak: () => {},
+      cancel: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    };
+    const q = new SpeechQueue({ driver, prefs: { voiceURI: null, rate: 1 } });
+    q.enqueue("First. ");
+    q.pause();
+    q.enqueue("Second, streamed in after the pause. ");
+    expect(q.getState()).toBe("paused"); // ▶ still offers to resume
+    q.resume();
+    expect(driver.resume).toHaveBeenCalled();
+    expect(q.getState()).toBe("speaking");
+  });
 });
 
 describe("readAloudStep", () => {

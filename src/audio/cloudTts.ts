@@ -4,16 +4,25 @@
 // Rust-synth speech driver: a `SpeechDriver` (see `speech.ts`) that synthesizes
 // each streamed sentence through the Rust `tts_synth` command and plays the
 // returned audio through the Web Audio API, in order. `tts_synth` resolves the
-// engine server-side, so this one driver serves BOTH the cloud premium voice
-// (OpenAI) and the local Kokoro voice — identical on the frontend.
+// engine server-side, so this one driver serves BOTH the cloud premium voices
+// (OpenAI, ElevenLabs) and the local Kokoro voice — identical on the frontend.
 //
-// Two things keep the spoken stream tight despite each clip being a round-trip:
-//   1. EAGER synthesis — a sentence starts synthesizing the instant it's known
-//      (in `speak`), not when playback reaches it. So while one clip plays, every
-//      sentence already queued (and every new one that arrives) is synthesizing
-//      in parallel; by the time we need it, it's usually ready. Playback order is
-//      still preserved because the run loop awaits each clip's promise in turn.
-//   2. SILENCE TRIM — engines pad clips with leading/trailing quiet, which reads
+// What keeps the spoken stream tight, and stoppable:
+//   1. READ-AHEAD — a sentence starts synthesizing before playback reaches it,
+//      so the next clip is usually ready when the current one ends; but never
+//      more than `READ_AHEAD` sentences beyond the one in hand. Kokoro
+//      synthesizes one request at a time, so everything requested is a queue the
+//      next reply waits behind: "Read the plan" once requested all ~950
+//      sentences of a long plan at once.
+//   2. GENERATIONS — `cancel()` (Stop, barge-in, the next turn) starts a new
+//      generation and tells Rust (`tts_cancel`) to drop the old one's requests
+//      that haven't reached an engine. A clip from an old generation is never
+//      played, and its `onDone` never lands on the next turn's count.
+//   3. NOTHING WEDGES — a clip whose 'ended' never fires is let go after its
+//      length plus `CLIP_GRACE_MS`; a context left suspended (⏸ then Stop) or
+//      interrupted by the system is resumed; a clip that throws costs only that
+//      sentence; a sentence the engine fails on is read by the system voice.
+//   4. SILENCE TRIM — engines pad clips with leading/trailing quiet, which reads
 //      as a gap between back-to-back sentences. We play only the non-silent span.
 //
 // Kept out of `speech.ts` so that file stays free of Tauri imports and remains
@@ -26,7 +35,26 @@ import { clampRate, type SpeechDriver } from "./speech";
 interface TtsAudio {
   audioBase64: string;
   mime: string;
+  /** The speed already rendered into the audio: Kokoro takes the user's speed
+   *  itself, the cloud engines come back at 1. */
+  speed: number;
 }
+
+/** Sentences that may be synthesizing (or synthesized and waiting) beyond the
+ *  one in hand. */
+export const READ_AHEAD = 2;
+/** How long past its own length a clip may go without 'ended' before playback
+ *  counts as stuck and moves on. */
+export const CLIP_GRACE_MS = 1500;
+/** What `tts_synth` answers for a request whose generation was cancelled:
+ *  expected, never a failure to report. */
+const CANCELLED = "cancelled";
+
+// Generations are unique across every driver in the app, because `tts_cancel`
+// is app-wide: cancelling the voice panel's reply must never drop a chat's read
+// aloud. Seeding from the clock keeps two windows' counters apart as well.
+let lastGeneration = Date.now();
+const nextGeneration = () => ++lastGeneration;
 
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -55,100 +83,262 @@ function trimBounds(buf: AudioBuffer): { offset: number; duration: number } {
   };
 }
 
+/** A synthesized sentence, decoded. */
+interface Clip {
+  audio: AudioBuffer;
+  speed: number;
+}
+
+/** A sentence being heard. `done` settles once — when it ends, is stopped, or
+ *  its watchdog gives up on it — so nothing waiting on it can hang. */
+interface Playing {
+  done: Promise<void>;
+  stop(): void;
+  /** ⏸: paused time doesn't count against the watchdog. */
+  hold(): void;
+  /** ▶: re-arms the watchdog with the full allowance, never less than is left. */
+  release(): void;
+}
+
+/** Start something audible and watch it: `begin` starts it and calls `ended`
+ *  when it finishes; if that hasn't happened `limitMs` after it was (re)armed,
+ *  it is stopped and treated as finished. `begin` may throw. */
+function watched(
+  limitMs: number,
+  begin: (ended: () => void) => { stop(): void; hold?(): void; release?(): void },
+): Playing {
+  let settled = false;
+  let settle!: () => void;
+  const done = new Promise<void>((resolve) => (settle = resolve));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    settle();
+  };
+  const handle = begin(finish);
+  const arm = () => {
+    clearTimeout(timer);
+    if (settled) return;
+    timer = setTimeout(() => {
+      console.warn("[tts] a clip never reported its end; moving on");
+      handle.stop();
+      finish();
+    }, limitMs);
+  };
+  arm();
+  return {
+    done,
+    stop: () => {
+      handle.stop();
+      finish();
+    },
+    hold: () => {
+      clearTimeout(timer);
+      handle.hold?.();
+    },
+    release: () => {
+      handle.release?.();
+      arm();
+    },
+  };
+}
+
+/** Play the non-silent span of `clip` at the user's `rate`; null for a clip
+ *  with nothing audible in it. */
+function playClip(ctx: AudioContext, clip: Clip, rate: number): Playing | null {
+  const { offset, duration } = trimBounds(clip.audio);
+  if (duration <= 0) return null;
+  // Kokoro has already rendered the user's speed, which keeps the pitch; for an
+  // engine that couldn't, `playbackRate` makes up the difference (shifting the
+  // pitch, which is fine in the 0.5–2× range).
+  const playbackRate = clampRate(rate) / (clip.speed || 1);
+  return watched((duration / playbackRate) * 1000 + CLIP_GRACE_MS, (ended) => {
+    const src = ctx.createBufferSource();
+    src.buffer = clip.audio;
+    src.playbackRate.value = playbackRate;
+    src.connect(ctx.destination);
+    src.onended = ended;
+    src.start(0, offset, duration);
+    return {
+      stop: () => {
+        try {
+          src.stop();
+        } catch {
+          /* already stopped */
+        }
+      },
+    };
+  });
+}
+
+/** The system voice reading one sentence: the stand-in when the engine failed
+ *  on it, so a reply keeps talking instead of going quiet. Null where there is
+ *  no system voice. */
+function speakWithSystemVoice(text: string, rate: number): Playing | null {
+  const synth = typeof window !== "undefined" ? window.speechSynthesis : undefined;
+  if (!synth) return null;
+  const r = clampRate(rate);
+  // ~15 characters a second at 1×; twice that before calling it stuck.
+  return watched((text.length / 15 / r) * 2000 + CLIP_GRACE_MS, (ended) => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = r;
+    u.onend = ended;
+    u.onerror = ended;
+    synth.speak(u);
+    return {
+      stop: () => synth.cancel(),
+      hold: () => synth.pause(),
+      release: () => synth.resume(),
+    };
+  });
+}
+
 /** A `SpeechDriver` backed by the Rust `tts_synth` command + Web Audio playback.
- *  `onError` (optional) is called with the failure message whenever a sentence
- *  fails to synthesize — without it, a failure is silent silence and the user
- *  has no idea why the voice stopped. The Rust side also logs the real provider
- *  response (HTTP status + body) at `error` level. */
+ *  `onError` (optional) is called with the failure message when a sentence fails
+ *  to synthesize — once per problem, not once per sentence, since a failing
+ *  engine fails every sentence the same way. The sentence itself is read by the
+ *  system voice. The Rust side also logs the real provider response (HTTP status
+ *  + body) at `error` level. */
 export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
   let ctx: AudioContext | null = null;
   const audioCtx = () => (ctx ??= new AudioContext());
 
-  // Each item carries its OWN in-flight synthesis promise — started at enqueue.
-  type Item = { buf: Promise<AudioBuffer | null>; rate: number; onDone: () => void };
+  type Item = {
+    text: string;
+    rate: number;
+    onDone: () => void;
+    /** Started by the read-ahead, or when the item's turn comes. */
+    clip?: Promise<Clip | null>;
+  };
   let queue: Item[] = [];
-  let running = false;
-  let cancelled = false;
-  let current: AudioBufferSourceNode | null = null;
+  let generation = nextGeneration();
+  // Whether this generation has asked Rust for anything, i.e. whether a cancel
+  // has anything there to drop.
+  let requested = false;
+  // The generation whose run loop is live (0 = none), and the signal that
+  // wakes that loop out of an await when its generation is cancelled.
+  let loop = 0;
+  let halt = () => {};
+  let halted = new Promise<void>((resolve) => (halt = resolve));
+  let current: Playing | null = null;
+  let paused = false;
+  let lastError = "";
 
-  const synth = async (text: string): Promise<AudioBuffer | null> => {
+  /** Resume a context that isn't running — left suspended by ⏸ then Stop, or
+   *  interrupted by the system — unless the user has paused on purpose. A
+   *  closed one is replaced on next use. */
+  const wake = () => {
+    if (!ctx || paused) return;
+    if (ctx.state === "closed") ctx = null;
+    else if (ctx.state !== "running") void ctx.resume().catch(() => {});
+  };
+
+  /** Null when the engine failed on it (the system voice reads it instead) or
+   *  when its generation was cancelled (nobody plays it). */
+  const synth = async (text: string, rate: number, gen: number): Promise<Clip | null> => {
+    requested = true;
     try {
-      const res = await invoke<TtsAudio>("tts_synth", { text });
-      const bytes = base64ToBytes(res.audioBase64);
+      const res = await invoke<TtsAudio>("tts_synth", {
+        text,
+        generation: gen,
+        speed: clampRate(rate),
+      });
+      if (gen !== generation) return null;
       // `decodeAudioData` detaches the buffer, so hand it a fresh ArrayBuffer.
-      return await audioCtx().decodeAudioData(bytes.buffer as ArrayBuffer);
+      const bytes = base64ToBytes(res.audioBase64);
+      const audio = await audioCtx().decodeAudioData(bytes.buffer as ArrayBuffer);
+      lastError = "";
+      return { audio, speed: res.speed || 1 };
     } catch (e) {
-      // Still surfaced as silence for this sentence (the stream must continue),
-      // but no longer silent about WHY — log it and report it upward.
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("[tts] synth failed:", msg);
-      onError?.(msg);
+      if (gen === generation && msg !== CANCELLED) {
+        console.error("[tts] synth failed:", msg);
+        if (msg !== lastError) onError?.(msg);
+        lastError = msg;
+      }
       return null;
     }
   };
 
-  const play = (audio: AudioBuffer, rate: number): Promise<void> =>
-    new Promise((resolve) => {
-      const { offset, duration } = trimBounds(audio);
-      if (duration <= 0) {
-        resolve();
-        return;
-      }
-      const src = audioCtx().createBufferSource();
-      src.buffer = audio;
-      // The clip is rendered at normal speed; play it faster/slower to honor the
-      // speed slider (this also shifts pitch, fine in the 0.5–2× range).
-      src.playbackRate.value = clampRate(rate);
-      src.connect(audioCtx().destination);
-      current = src;
-      src.onended = () => {
-        if (current === src) current = null;
-        resolve();
-      };
-      src.start(0, offset, duration);
-    });
-
-  const run = async () => {
-    if (running) return;
-    running = true;
-    while (!cancelled) {
-      const item = queue.shift();
-      if (!item) break;
-      const audio = await item.buf; // already synthesizing since enqueue
-      if (cancelled) {
-        item.onDone();
-        break;
-      }
-      if (audio) await play(audio, item.rate);
-      item.onDone();
+  /** Start synthesizing what playback reaches next — never more than
+   *  `READ_AHEAD` sentences past the one in hand. */
+  const fill = () => {
+    for (const item of queue.slice(0, READ_AHEAD)) {
+      item.clip ??= synth(item.text, item.rate, generation);
     }
-    running = false;
+  };
+
+  // One loop per generation, and it exits the moment that generation is
+  // cancelled: a cancelled reply's sentence must not be played into the next.
+  const run = async () => {
+    if (loop === generation) return;
+    const gen = (loop = generation);
+    const stopped = halted.then(() => null);
+    const live = () => gen === generation;
+    try {
+      while (live() && queue.length) {
+        const item = queue.shift()!;
+        const pending = (item.clip ??= synth(item.text, item.rate, gen));
+        fill();
+        const clip = await Promise.race([pending, stopped]);
+        if (!live()) return;
+        let playing: Playing | null = null;
+        try {
+          wake();
+          playing = clip
+            ? playClip(audioCtx(), clip, item.rate)
+            : speakWithSystemVoice(item.text, item.rate);
+          current = playing;
+          if (playing) {
+            if (paused) playing.hold();
+            await Promise.race([playing.done, stopped]);
+          }
+        } catch (e) {
+          // A clip that can't be played costs that one sentence, never the queue.
+          console.error("[tts] playback failed:", e);
+        } finally {
+          if (current === playing) current = null;
+        }
+        if (live()) item.onDone();
+      }
+    } finally {
+      if (loop === gen) loop = 0;
+    }
   };
 
   return {
     speak(text, opts, onDone) {
-      cancelled = false;
-      // Kick off synthesis immediately so it overlaps playback + arrival.
-      queue.push({ buf: synth(text), rate: opts.rate, onDone });
+      queue.push({ text, rate: opts.rate, onDone });
+      wake();
+      fill();
       void run();
     },
     cancel() {
-      cancelled = true;
+      const cancelled = generation;
+      generation = nextGeneration();
       queue = [];
-      if (current) {
-        try {
-          current.stop();
-        } catch {
-          /* already stopped */
-        }
-        current = null;
-      }
+      halt();
+      halted = new Promise((resolve) => (halt = resolve));
+      current?.stop();
+      current = null;
+      // ⏸ then Stop must not leave the context suspended: every later clip
+      // would start, never end, and keep the queue "speaking" for good.
+      paused = false;
+      wake();
+      if (requested) void invoke("tts_cancel", { generation: cancelled }).catch(() => {});
+      requested = false;
     },
     pause() {
+      paused = true;
       void ctx?.suspend();
+      current?.hold();
     },
     resume() {
+      paused = false;
       void ctx?.resume();
+      current?.release();
     },
   };
 }

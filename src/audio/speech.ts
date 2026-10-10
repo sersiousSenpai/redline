@@ -192,6 +192,9 @@ export class SpeechQueue {
   // When true, the next enqueue tries to emit an early first chunk (clause-level)
   // so a reply starts speaking sooner; cleared once that first chunk is spoken.
   private firstChunkPending = false;
+  // Bumped by every cancel. A sentence's `onDone` only counts if no cancel has
+  // happened since it was spoken.
+  private epoch = 0;
   prefs: VoicePrefs;
 
   constructor(opts?: {
@@ -252,6 +255,7 @@ export class SpeechQueue {
   cancel(): void {
     this.buffer = "";
     this.outstanding = 0;
+    this.epoch += 1;
     this.firstChunkPending = false;
     this.driver.cancel();
     this.setState("idle");
@@ -271,11 +275,19 @@ export class SpeechQueue {
 
   private speakNow(sentence: string): void {
     this.outstanding += 1;
-    this.setState("speaking");
+    // A sentence arriving while paused joins the pause; it doesn't un-pause
+    // the indicator over audio that is still held.
+    if (this.state !== "paused") this.setState("speaking");
+    const epoch = this.epoch;
     this.driver.speak(
       sentence,
       { rate: this.prefs.rate, voiceURI: this.prefs.voiceURI },
       () => {
+        // A sentence from before the last cancel finishing late (a stopped
+        // clip's 'ended', the system voice erroring out its queue) belongs to a
+        // turn that is over. Counting it against this one would report idle a
+        // sentence early, and hands-free would open the mic over the reply.
+        if (epoch !== this.epoch) return;
         this.outstanding = Math.max(0, this.outstanding - 1);
         if (this.outstanding === 0 && this.state !== "paused") {
           this.setState("idle");

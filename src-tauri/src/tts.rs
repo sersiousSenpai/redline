@@ -18,10 +18,18 @@
 //!     Redline's Apache-2.0 binary — we only exchange text and audio bytes over a
 //!     pipe. The ~88 MB int8 model is downloaded on first use into the app data
 //!     dir. ElevenLabs / Deepgram would slot into the same `match`.
+//!
+//! Every request carries the frontend driver's **generation**. `cancel()` there
+//! (Stop, a barge-in, the next turn) calls `tts_cancel` with the old one, and a
+//! request from a cancelled generation is dropped before it reaches an engine:
+//! Kokoro synthesizes one request at a time, so without this the next reply's
+//! first sentence waited behind the rest of the cancelled one.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
@@ -51,10 +59,10 @@ const DEFAULT_ELEVEN_VOICE: &str = "21m00Tcm4TlvDq8ikWAM";
 const ELEVEN_MODEL: &str = "eleven_turbo_v2_5";
 /// Max concurrent ElevenLabs requests we issue. ElevenLabs caps concurrency per
 /// plan (Free 2 / Starter 3 / Creator 5 / …) and returns 429
-/// `concurrent_limit_exceeded` above it. The frontend fires every queued
-/// sentence's synth at once (eager 1-ahead prefetch), so without a cap a
-/// multi-sentence reply trips the limit. 2 stays within every paid tier while
-/// still pipelining a clip ahead; the sequential playback model hides it.
+/// `concurrent_limit_exceeded` above it. The frontend keeps the sentence in
+/// hand plus two read ahead in flight, so without a cap a multi-sentence reply
+/// trips the limit. 2 stays within every tier while still pipelining a clip
+/// ahead; the sequential playback model hides it.
 const ELEVEN_MAX_CONCURRENCY: usize = 2;
 
 // The Kokoro sidecar script is compiled into the binary and written to disk on
@@ -72,6 +80,22 @@ const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
 /// without flooding the IPC channel with thousands of tiny updates.
 const KOKORO_PROGRESS_STEP: u64 = 1_000_000;
 
+/// What `tts_synth` answers for a request whose generation was cancelled. The
+/// driver expects it and never reports it.
+const CANCELLED: &str = "cancelled";
+/// How many cancelled generations to remember. The driver keeps at most a few
+/// requests in flight, so only the last few cancels can still have any queued.
+const CANCELS_KEPT: usize = 32;
+
+/// A Kokoro request gets this long, plus `KOKORO_PER_CHAR` per character, before
+/// the sidecar counts as hung. Generous on purpose: the slow int8 model took
+/// ~6 s for a 277-character sentence on a loaded machine, and this allows ~19 s.
+const KOKORO_TIMEOUT_FLOOR: Duration = Duration::from_secs(5);
+const KOKORO_PER_CHAR: Duration = Duration::from_millis(50);
+/// Loading the model on spawn (the handshake) gets this long.
+const KOKORO_SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
+const KOKORO_HUNG: &str = "the Kokoro voice stopped responding and was restarted";
+
 /// TTS state: the DB (settings/keys), a reused HTTP client, the Kokoro model
 /// directory, and the warm Kokoro sidecar (lazily spawned). Cloned into managed
 /// Tauri state; mirrors how `VoiceState` carries its `Arc<Database>`.
@@ -84,9 +108,13 @@ pub struct TtsState {
     /// alive across sentences. `None` until first use / after a death.
     kokoro: Arc<AsyncMutex<Option<KokoroSidecar>>>,
     /// Caps how many ElevenLabs requests we have in flight at once, so the
-    /// frontend's eager per-sentence prefetch can't trip ElevenLabs' per-plan
+    /// frontend's per-sentence read-ahead can't trip ElevenLabs' per-plan
     /// concurrency limit (429 `concurrent_limit_exceeded`).
     eleven_sem: Arc<Semaphore>,
+    /// Generations the frontend has cancelled (`tts_cancel`), newest last.
+    cancelled: Arc<StdMutex<VecDeque<u64>>>,
+    /// `KOKORO_TIMEOUT_FLOOR`, a field so tests can make a hang quick to detect.
+    kokoro_timeout_floor: Duration,
 }
 
 impl TtsState {
@@ -97,6 +125,8 @@ impl TtsState {
             kokoro_dir: data_dir.join("kokoro"),
             kokoro: Arc::new(AsyncMutex::new(None)),
             eleven_sem: Arc::new(Semaphore::new(ELEVEN_MAX_CONCURRENCY)),
+            cancelled: Arc::new(StdMutex::new(VecDeque::new())),
+            kokoro_timeout_floor: KOKORO_TIMEOUT_FLOOR,
         }
     }
 
@@ -108,6 +138,18 @@ impl TtsState {
     }
     fn model_present(&self) -> bool {
         self.model_path().exists() && self.voices_path().exists()
+    }
+
+    fn cancel(&self, generation: u64) {
+        let mut c = self.cancelled.lock().unwrap_or_else(|p| p.into_inner());
+        c.push_back(generation);
+        if c.len() > CANCELS_KEPT {
+            c.pop_front();
+        }
+    }
+    fn is_cancelled(&self, generation: u64) -> bool {
+        let c = self.cancelled.lock().unwrap_or_else(|p| p.into_inner());
+        c.contains(&generation)
     }
     /// Redline's PRIVATE Python virtualenv — created on first "Enable" so the
     /// user never installs Python packages or hunts for an interpreter. Kept
@@ -133,7 +175,8 @@ impl TtsState {
 
 /// The warm Kokoro sidecar: the child process plus its stdio handles. One synth
 /// at a time (guarded by the `AsyncMutex` in `TtsState`); the frontend's
-/// one-ahead prefetch simply queues behind the lock — fine at Kokoro's latency.
+/// read-ahead of two sentences queues behind the lock, and a queued request
+/// whose generation is cancelled meanwhile is dropped when its turn comes.
 struct KokoroSidecar {
     child: tokio::process::Child,
     stdin: ChildStdin,
@@ -255,38 +298,72 @@ pub fn tts_set_settings(
 pub struct TtsAudio {
     audio_base64: String,
     mime: String,
+    /// The speed already rendered into the audio. Kokoro takes the user's speed
+    /// itself, which keeps the pitch; the cloud engines come back at 1 and the
+    /// player makes up the rest with `playbackRate`.
+    speed: f64,
 }
 
 /// Synthesize one chunk of text with the configured engine. Errors if the engine
-/// is `system` (handled client-side) or the chosen engine isn't ready.
+/// is `system` (handled client-side), the chosen engine isn't ready, or the
+/// request's `generation` has been cancelled (with exactly `CANCELLED`).
 #[tauri::command]
 pub async fn tts_synth(
     tts: tauri::State<'_, TtsState>,
-    app: AppHandle,
     text: String,
+    generation: u64,
+    speed: Option<f64>,
 ) -> Result<TtsAudio, String> {
-    let text = text.trim().to_string();
+    synth(&tts, &text, generation, speed).await
+}
+
+/// Drop every request of `generation` that hasn't reached an engine yet.
+#[tauri::command]
+pub fn tts_cancel(tts: tauri::State<'_, TtsState>, generation: u64) {
+    tts.cancel(generation);
+}
+
+async fn synth(
+    tts: &TtsState,
+    text: &str,
+    generation: u64,
+    speed: Option<f64>,
+) -> Result<TtsAudio, String> {
+    let text = text.trim();
     if text.is_empty() {
         return Err("empty text".to_string());
+    }
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
     }
     let engine = tts
         .db
         .get_setting(SETTING_ENGINE)
         .unwrap_or_else(|| "system".to_string());
     let result = match engine.as_str() {
-        "openai" => synth_openai(&tts, &text).await,
-        "elevenlabs" => synth_eleven(&tts, &text).await,
-        "kokoro" => synth_kokoro(&tts, &app, &text).await,
+        "openai" => synth_openai(tts, text).await,
+        "elevenlabs" => synth_eleven(tts, text, generation).await,
+        "kokoro" => {
+            let voice = tts
+                .db
+                .get_setting(SETTING_KOKORO_VOICE)
+                .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
+            // The bounds kokoro-onnx accepts; the frontend clamps to the same.
+            let speed = speed.filter(|s| s.is_finite()).unwrap_or(1.0).clamp(0.5, 2.0);
+            synth_kokoro(tts, text, &voice, speed, generation).await
+        }
         other => Err(format!(
             "the '{other}' voice engine has no server-side synthesis"
         )),
     };
-    // Synth errors are swallowed into silence on the frontend (the stream must go
-    // on), so log them here at `error` level (visible at the default `info`
-    // filter) — this is the only place the real provider response (HTTP status +
-    // body snippet for cloud engines) is captured.
+    // Synth errors are swallowed on the frontend (the stream must go on, in the
+    // system voice), so log them here at `error` level (visible at the default
+    // `info` filter) — this is the only place the real provider response (HTTP
+    // status + body snippet for cloud engines) is captured.
     if let Err(ref e) = result {
-        tracing::error!(target: "tts", engine = %engine, "synthesis failed: {e}");
+        if e != CANCELLED {
+            tracing::error!(target: "tts", engine = %engine, "synthesis failed: {e}");
+        }
     }
     result
 }
@@ -332,10 +409,11 @@ async fn synth_openai(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     Ok(TtsAudio {
         audio_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         mime: "audio/wav".to_string(),
+        speed: 1.0,
     })
 }
 
-async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
+async fn synth_eleven(tts: &TtsState, text: &str, generation: u64) -> Result<TtsAudio, String> {
     let key = tts
         .db
         .get_setting(SETTING_ELEVEN_KEY)
@@ -347,13 +425,17 @@ async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
         .unwrap_or_else(|| DEFAULT_ELEVEN_VOICE.to_string());
 
     // Hold a permit for the whole request so we never exceed our self-imposed
-    // concurrency cap — the eager frontend prefetch fires every queued
-    // sentence's synth at once, which otherwise trips ElevenLabs' 429.
+    // concurrency cap — the frontend's read-ahead keeps up to three sentences
+    // in flight, which otherwise trips ElevenLabs' 429 on the free tier.
     let _permit = tts
         .eleven_sem
         .acquire()
         .await
         .map_err(|e| format!("voice synth queue closed: {e}"))?;
+    // A request that waited out a cancel behind the cap costs nothing now.
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
+    }
 
     // ElevenLabs addresses voices by id in the URL path and authenticates via
     // the `xi-api-key` header (not bearer). The default response is MP3, which
@@ -387,44 +469,78 @@ async fn synth_eleven(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     Ok(TtsAudio {
         audio_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
         mime: "audio/mpeg".to_string(),
+        speed: 1.0,
     })
 }
 
 // --- Kokoro (local) --------------------------------------------------------
 
-async fn synth_kokoro(tts: &TtsState, app: &AppHandle, text: &str) -> Result<TtsAudio, String> {
+async fn synth_kokoro(
+    tts: &TtsState,
+    text: &str,
+    voice: &str,
+    speed: f64,
+    generation: u64,
+) -> Result<TtsAudio, String> {
     if !tts.model_present() {
         return Err(
             "the Kokoro voice isn't installed yet — open Voice settings (⚙) and download it"
                 .to_string(),
         );
     }
-    let voice = tts
-        .db
-        .get_setting(SETTING_KOKORO_VOICE)
-        .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
-    // Speed is left at 1.0 here; the frontend applies the speed slider via Web
-    // Audio `playbackRate`, so it's uniform across every engine.
-    let req = serde_json::json!({ "text": text, "voice": voice, "speed": 1.0 }).to_string();
+    let req = serde_json::json!({ "text": text, "voice": voice, "speed": speed }).to_string();
+    let limit = tts.kokoro_timeout_floor + KOKORO_PER_CHAR * text.chars().count() as u32;
 
     let mut guard = tts.kokoro.lock().await;
+    // Requests wait their turn on that lock. One whose generation was
+    // cancelled while it waited is dropped here, before it costs a synthesis.
+    if tts.is_cancelled(generation) {
+        return Err(CANCELLED.to_string());
+    }
     if guard.is_none() {
         *guard = Some(spawn_kokoro(tts).await?);
     }
     // Try once; if the pipe is broken (the sidecar died), respawn and retry once.
-    let first = kokoro_roundtrip(guard.as_mut().unwrap(), &req).await;
-    let b64 = match first {
-        Ok(b64) => b64,
-        Err(_) => {
-            *guard = Some(spawn_kokoro(tts).await?);
-            kokoro_roundtrip(guard.as_mut().unwrap(), &req).await?
+    // A hang isn't retried: that sentence goes to the system voice, and the
+    // next one gets the fresh sidecar.
+    let b64 = match kokoro_request(&mut guard, tts, &req, limit).await {
+        Err(e) if e != KOKORO_HUNG => {
+            *guard = None;
+            kokoro_request(&mut guard, tts, &req, limit).await?
         }
+        result => result?,
     };
-    let _ = app; // reserved for a future "kokoro-speaking" event
     Ok(TtsAudio {
         audio_base64: b64,
         mime: "audio/wav".to_string(),
+        speed,
     })
+}
+
+/// One request against the warm sidecar (spawning it if there is none),
+/// bounded by `limit`. A sidecar that doesn't answer in time is killed and
+/// dropped, so the next request spawns a fresh one instead of queueing behind
+/// a hung process forever.
+async fn kokoro_request(
+    slot: &mut Option<KokoroSidecar>,
+    tts: &TtsState,
+    req: &str,
+    limit: Duration,
+) -> Result<String, String> {
+    let sc = match slot {
+        Some(sc) => sc,
+        None => slot.insert(spawn_kokoro(tts).await?),
+    };
+    match tokio::time::timeout(limit, kokoro_roundtrip(sc, req)).await {
+        Ok(result) => result,
+        Err(_) => {
+            if let Some(mut hung) = slot.take() {
+                let _ = hung.child.start_kill();
+            }
+            tracing::warn!(target: "kokoro", "no answer in {limit:?}; killed the sidecar");
+            Err(KOKORO_HUNG.to_string())
+        }
+    }
 }
 
 /// Spawn the Python sidecar, materializing the bundled script first, and wait for
@@ -495,7 +611,11 @@ async fn spawn_kokoro(tts: &TtsState) -> Result<KokoroSidecar, String> {
         stdout: BufReader::new(stdout).lines(),
     };
     // Handshake — the sidecar prints exactly one of `ready`/`error` once loaded.
-    let msg = read_kokoro_msg(&mut sidecar.stdout).await?;
+    // Bounded too: the caller holds the Kokoro lock, and every sentence waits
+    // on it. Dropping the child on the way out kills it (`kill_on_drop`).
+    let msg = tokio::time::timeout(KOKORO_SPAWN_TIMEOUT, read_kokoro_msg(&mut sidecar.stdout))
+        .await
+        .map_err(|_| "the Kokoro voice didn't finish loading within a minute".to_string())??;
     if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
         return Err(format!("Kokoro failed to start: {err}"));
     }
@@ -1029,5 +1149,122 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("redline-kokoro-test-{}", std::process::id()));
         let tts = TtsState::new(db, dir);
         assert!(!tts.model_present());
+    }
+
+    /// A fresh app data dir (with its `kokoro` dir) for one test.
+    fn scratch_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("redline-tts-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("kokoro")).unwrap();
+        dir
+    }
+
+    /// A stand-in for the Python sidecar. `spawn_kokoro` runs the configured
+    /// interpreter as `<python> <script> <model> <voices>`, so a shell script
+    /// in the interpreter's place speaks the protocol. It logs each spawn (with
+    /// the model it was given) and each request beside itself, answers every
+    /// request with a tiny clip, and never answers one containing "hang".
+    const FAKE_SIDECAR: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "spawn $2" >> "$dir/spawns.log"
+echo '{"ready":true}'
+while IFS= read -r line; do
+  echo "$line" >> "$dir/requests.log"
+  case "$line" in
+    *hang*) read -r _ ;;
+    *) echo '{"audio":"UklGRg=="}' ;;
+  esac
+done
+"#;
+
+    /// Kokoro as the engine, installed, on the fake sidecar.
+    /// Returns the state and its Kokoro dir (where the fake writes its logs).
+    #[cfg(unix)]
+    fn fake_kokoro(label: &str) -> (TtsState, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let data = scratch_dir(label);
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(KOKORO_MODEL_FILE), b"").unwrap();
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let fake = dir.join("fake-python");
+        std::fs::write(&fake, FAKE_SIDECAR).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.set_setting(SETTING_ENGINE, "kokoro").unwrap();
+        db.set_setting(SETTING_PYTHON_PATH, &fake.to_string_lossy()).unwrap();
+        (TtsState::new(db, data), dir)
+    }
+
+    fn log_lines(dir: &Path, name: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join(name))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cancelled_generation_never_reaches_the_sidecar() {
+        let (tts, dir) = fake_kokoro("cancelled");
+        tts.cancel(41);
+        let stale = synth(&tts, "The rest of the stopped reply.", 41, None).await;
+        assert_eq!(stale.err().as_deref(), Some(CANCELLED));
+        assert!(log_lines(&dir, "spawns.log").is_empty(), "not even a spawn");
+        // The next generation speaks normally.
+        synth(&tts, "The next reply.", 42, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "requests.log").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_request_cancelled_while_it_waits_for_kokoro_is_dropped_on_its_turn() {
+        let (tts, dir) = fake_kokoro("queued");
+        synth(&tts, "Warm up.", 1, None).await.unwrap();
+        // The sentence ahead of it is synthesizing: it holds the lock.
+        let ahead = tts.kokoro.lock().await;
+        let queued = tokio::spawn({
+            let tts = tts.clone();
+            async move { synth(&tts, "Behind the stop.", 2, None).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tts.cancel(2);
+        drop(ahead);
+        assert_eq!(queued.await.unwrap().err().as_deref(), Some(CANCELLED));
+        assert_eq!(
+            log_lines(&dir, "requests.log").len(),
+            1,
+            "only the warm-up reached the sidecar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_sidecar_times_out_and_the_next_sentence_gets_a_fresh_one() {
+        let (mut tts, dir) = fake_kokoro("hung");
+        tts.kokoro_timeout_floor = Duration::from_millis(200);
+        let started = std::time::Instant::now();
+        let hung = synth(&tts, "hang", 1, None).await;
+        assert_eq!(hung.err().as_deref(), Some(KOKORO_HUNG));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(tts.kokoro.lock().await.is_none(), "the hung sidecar was dropped");
+        synth(&tts, "The next sentence.", 1, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 2, "respawned once");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kokoro_renders_the_users_speed() {
+        let (tts, dir) = fake_kokoro("speed");
+        let first = synth(&tts, "One.", 1, Some(1.5)).await.unwrap();
+        assert_eq!(first.speed, 1.5, "the player must not speed it up again");
+        let second = synth(&tts, "Two.", 1, Some(9.0)).await.unwrap();
+        assert_eq!(second.speed, 2.0, "clamped to what kokoro-onnx accepts");
+        let reqs: Vec<serde_json::Value> = log_lines(&dir, "requests.log")
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(reqs[0]["speed"], 1.5);
+        assert_eq!(reqs[1]["speed"], 2.0);
     }
 }
