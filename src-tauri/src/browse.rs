@@ -772,7 +772,8 @@ fn carried_history(thread: &[BrowseMessage], current: &str, provider: Provider, 
 
 /// A first-turn snapshot can finish after the same conversation moves to a
 /// different workspace. Resolve the captured owner, never a newer active goal.
-/// Missing workspace IDs retain the legacy active-mission fallback.
+/// Missing workspace IDs retain the legacy active-mission fallback. Regular
+/// browsing and a Mosaic (`mosaic:<id>`) are workspaces with no mission.
 fn captured_browse_mission(
     db: &Database,
     workspace_id: Option<&str>,
@@ -780,6 +781,7 @@ fn captured_browse_mission(
 ) -> Result<Option<crate::state::Mission>, String> {
     let id = match workspace_id {
         Some("regular") => return Ok(None),
+        Some(id) if id.starts_with("mosaic:") => return Ok(None),
         Some(id) if id.trim().is_empty() => return Err("Workspace ID cannot be empty".into()),
         Some(id) => Some(id),
         None => legacy_active_id,
@@ -1878,6 +1880,10 @@ mod tests {
             }).unwrap();
         }
         assert!(captured_browse_mission(&db, Some("regular"), Some("new-mission")).unwrap().is_none());
+        // A Mosaic is a workspace of its own with no mission: its page chat
+        // sends `mosaic:<id>`, which must neither fail nor fall back to the
+        // active mission.
+        assert!(captured_browse_mission(&db, Some("mosaic:grid-1"), Some("new-mission")).unwrap().is_none());
         let original = captured_browse_mission(&db, Some("old-mission"), Some("new-mission")).unwrap().unwrap();
         assert_eq!(original.mission_id, "old-mission");
         assert_eq!(original.goal, "Goal for old-mission");
