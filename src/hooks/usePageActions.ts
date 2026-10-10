@@ -25,13 +25,20 @@ interface Acknowledgement {
  *  on its own: an action the page chat didn't drive (the Companion, a
  *  mission) ends no page-chat turn. */
 const LINGER_MS = 20_000;
+/** The action route ends every action within its 30 s deadline
+ *  (`browser_actions::execute`). An action still unheard of after that had
+ *  its request dropped mid-way, as Stop does to the agent's, and no outcome
+ *  is coming. */
+const RUN_LIMIT_MS = 31_000;
 
 export function usePageActions(): { running: ReadonlyMap<string, RunningPageAction>; acting: ReadonlySet<string> } {
   const [running, setRunning] = useState<ReadonlyMap<string, RunningPageAction>>(() => new Map());
   const [acting, setActing] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {
-    // Finished actions whose dot still shows, with the timer that clears it.
+    // Finished actions whose dot still shows, with the timer that clears it,
+    // and running ones, with the timer that gives up on their outcome.
     const finished = new Map<string, number>();
+    const overdue = new Map<string, number>();
     const drop = (labels: readonly string[]) => {
       if (!labels.length) return;
       for (const label of labels) {
@@ -40,19 +47,28 @@ export function usePageActions(): { running: ReadonlyMap<string, RunningPageActi
       }
       setActing((prev) => (labels.some((label) => prev.has(label)) ? new Set([...prev].filter((label) => !labels.includes(label))) : prev));
     };
+    const stopRunning = (label: string) => setRunning((prev) => {
+      if (!prev.has(label)) return prev;
+      const next = new Map(prev);
+      next.delete(label);
+      return next;
+    });
     const subscriptions = [
       listen<Acknowledgement>("browser-action", ({ payload: ack }) => {
         const live = ack.status === "accepted" || ack.status === "running";
-        setRunning((prev) => {
-          const next = new Map(prev);
-          if (live) next.set(ack.label, { kind: ack.kind, tab: ack.tab, at: Date.now() });
-          else next.delete(ack.label);
-          return next;
-        });
+        if (live) setRunning((prev) => new Map(prev).set(ack.label, { kind: ack.kind, tab: ack.tab, at: Date.now() }));
+        else stopRunning(ack.label);
         window.clearTimeout(finished.get(ack.label));
+        window.clearTimeout(overdue.get(ack.label));
+        overdue.delete(ack.label);
         if (live) {
           finished.delete(ack.label);
           setActing((prev) => (prev.has(ack.label) ? prev : new Set(prev).add(ack.label)));
+          overdue.set(ack.label, window.setTimeout(() => {
+            overdue.delete(ack.label);
+            stopRunning(ack.label);
+            drop([ack.label]);
+          }, RUN_LIMIT_MS));
         } else {
           finished.set(ack.label, window.setTimeout(() => drop([ack.label]), LINGER_MS));
         }
@@ -62,7 +78,7 @@ export function usePageActions(): { running: ReadonlyMap<string, RunningPageActi
       ...["browse-done", "browse-error", "browse-cancelled"].map((event) => listen(event, () => drop([...finished.keys()]))),
     ];
     return () => {
-      for (const timer of finished.values()) window.clearTimeout(timer);
+      for (const timer of [...finished.values(), ...overdue.values()]) window.clearTimeout(timer);
       for (const subscription of subscriptions) void subscription.then((stop) => stop()).catch(() => {});
     };
   }, []);

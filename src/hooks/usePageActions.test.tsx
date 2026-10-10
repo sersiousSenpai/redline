@@ -61,4 +61,22 @@ describe("usePageActions", () => {
     await act(async () => handlers.get("browse-done")?.({ payload: { browseId: "one" } }));
     expect(probe().getAttribute("data-acting")).toBe("browser-t3");
   });
+
+  it("lets go of an action whose outcome never came, once the route's deadline has passed", async () => {
+    // Stop kills the agent's request mid-action, and the route's handler goes
+    // with it before it can say how the action ended.
+    await act(async () => root.render(<Probe />));
+    await ack("browser-t2", "accepted");
+    await ack("browser-t2", "running");
+    await act(async () => { vi.advanceTimersByTime(30_000); });
+    expect(probe().getAttribute("data-running")).toBe("browser-t2:click:2");
+    await act(async () => { vi.advanceTimersByTime(2_000); });
+    expect(probe().getAttribute("data-running")).toBe("");
+    expect(probe().getAttribute("data-acting")).toBe("");
+    // An outcome that does come in time keeps its usual course.
+    await ack("browser-t2", "running");
+    await ack("browser-t2", "completed");
+    await act(async () => { vi.advanceTimersByTime(19_000); });
+    expect(probe().getAttribute("data-acting")).toBe("browser-t2");
+  });
 });
