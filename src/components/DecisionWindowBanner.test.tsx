@@ -61,5 +61,11 @@ describe("the decision countdown", () => {
       expect(rule, selector).not.toBeNull();
       expect(RAISED_Z).toBeGreaterThan(Number(rule![1]));
     }
+    // Never over a toast, though: one placed at the top would hide under it.
+    // Level is enough, because App mounts the toast after the banner.
+    const toast = /^\.rl-toast \{[^}]*z-index: (\d+)/m.exec(readFileSync(join(process.cwd(), "src/styles.css"), "utf8"));
+    expect(RAISED_Z).toBeLessThanOrEqual(Number(toast![1]));
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app.indexOf("<DecisionWindowBanner")).toBeLessThan(app.indexOf("<RedlineToast"));
   });
 });

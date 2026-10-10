@@ -14,8 +14,9 @@ interface DecisionWindowBannerProps {
 }
 
 /** Over the door's paper and the pill's card (both at z-index 55 in
- *  MonochatIsland.css), level with the door's own setup notice. */
-export const RAISED_Z = 75;
+ *  MonochatIsland.css), and level with a toast — which App mounts later, so
+ *  a notice placed at the top (the browser's) still reads over it. */
+export const RAISED_Z = 56;
 
 // Ambient-mode prompt: a plan arrived, auto-approving on a countdown unless the
 // reviewer opens it. Because the terminal is co-present, this is visible without
