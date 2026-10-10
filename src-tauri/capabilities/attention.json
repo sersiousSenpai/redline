@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "attention",
-  "description": "Terminal attention: OS notifications from the app's own webview only, never the embedded browser's pages",
+  "description": "Attention from the app's own webview only, never the embedded browser's pages: OS notifications and a Dock bounce, never bringing the window forward",
   "webviews": ["main"],
-  "permissions": ["notification:default"]
+  "permissions": ["notification:default", "core:window:allow-request-user-attention"]
 }

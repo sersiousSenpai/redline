@@ -151,3 +151,30 @@ describe("the terminals that need you", () => {
     expect(host.textContent).not.toContain("3 terminals");
   });
 });
+
+// An agent's review request is news, never a move (10/10): the chip is the
+// way there, for as long as the agent waits.
+describe("a review waiting for you", () => {
+  async function mountWith(extra: Record<string, unknown>) {
+    await act(async () => root.render(createElement(Footer, {
+      comments: [], sessionReady: true, canSubmit: true, canApprove: true,
+      waiting: false, waitingAsk: false,
+      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
+      termCollapsed: false, termTabCount: 1, onExpandTerminal: () => {},
+      ...extra,
+    })));
+  }
+  const chip = () => [...host.querySelectorAll("button")].find((b) => b.title === "Open the review surface");
+
+  it("shows a chip only while a review waits, and its click is the way there", async () => {
+    let opened = 0;
+    await mountWith({ reviewNews: null, onOpenReviewNews: () => { opened++; } });
+    expect(chip()).toBeUndefined();
+    await mountWith({ reviewNews: "Review ready", onOpenReviewNews: () => { opened++; } });
+    expect(chip()?.textContent).toBe("Review ready → Open");
+    await act(async () => chip()!.click());
+    expect(opened).toBe(1);
+    await mountWith({ reviewNews: "Run report ready", onOpenReviewNews: () => {} });
+    expect(chip()?.textContent).toBe("Run report ready → Open");
+  });
+});

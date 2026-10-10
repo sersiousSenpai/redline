@@ -13,7 +13,8 @@ interface DecisionWindowBannerProps {
 
 // Ambient-mode prompt: a plan arrived, auto-approving on a countdown unless the
 // reviewer opens it. Because the terminal is co-present, this is visible without
-// any window switch.
+// any window switch — and it never makes one: from another app, the Dock
+// bounces instead (App's `plan-decision-window` listener).
 export function DecisionWindowBanner({
   event,
   onOpen,
@@ -23,6 +24,16 @@ export function DecisionWindowBanner({
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((event.deadlineMs - Date.now()) / 1000)),
   );
+
+  // Said once, politely, a beat after the banner appears: a live region
+  // speaks what changes in it, not what it was born holding. The ticking
+  // count is for the eye — read out each second, it would drown the page.
+  const [said, setSaid] = useState("");
+  useEffect(() => {
+    const secs = Math.max(0, Math.ceil((event.deadlineMs - Date.now()) / 1000));
+    const id = setTimeout(() => setSaid(`Plan version ${event.version} is ready. Auto-approving in ${secs} seconds unless you open it for review.`), 100);
+    return () => clearTimeout(id);
+  }, [event.version, event.deadlineMs]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -38,6 +49,8 @@ export function DecisionWindowBanner({
 
   return (
     <div
+      role="region"
+      aria-label="Plan decision"
       className="flex items-center justify-between gap-4 px-6 py-2 border-b font-sans"
       style={{
         borderColor: "var(--color-rule)",
@@ -45,6 +58,7 @@ export function DecisionWindowBanner({
         fontSize: "12px",
       }}
     >
+      <span className="sr-only" role="status" aria-live="polite">{said}</span>
       <span style={{ color: "var(--color-ink)" }}>
         Plan v{event.version} ready ·{" "}
         <span style={{ color: "var(--color-ink-muted)" }}>

@@ -59,3 +59,39 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(arrival).toContain('mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}');
   });
 });
+
+describe("an agent's review request or a run's report never switches the surface", () => {
+  it("both events tell, and neither moves", () => {
+    const review = between('const p = listen("review-requested"', "return () => {");
+    expect(review).toContain('tellReview("review")');
+    expect(review).not.toContain("selectSurface");
+    const report = between('const rep = listen<{ sessionId: string }>("orchestration-report"', "return () => {");
+    expect(report).toContain("setRunReportFor(e.payload.sessionId);");
+    expect(report).toContain('tellReview("report")');
+    expect(report).not.toContain("selectSurface");
+  });
+
+  it("a notice once, the footer's chip, and the OS only from another app", () => {
+    const tell = between("const tellReview = useCallback(", "}, []);");
+    // The only way to the review surface is the notice's own Open.
+    expect(tell.match(/selectSurfaceRef\.current\("review"\)/g)).toHaveLength(1);
+    expect(tell).toContain('action: { label: "Open", onAction: () => selectSurfaceRef.current("review") }');
+    expect(tell).toContain('import("./lib/osNotice")');
+    expect(tell).toContain("noticeWhenAway(");
+    const footer = between("<Footer", "/>\n      </ChromeSlot>");
+    expect(footer).toContain('reviewNews={reviewNews === "report" ? "Run report ready" : reviewNews === "review" ? "Review ready" : null}');
+    expect(footer).toContain('onOpenReviewNews={() => selectSurface("review")}');
+    // Over once you are there, or once the agent stops waiting.
+    expect(app).toMatch(/if \(mainSurface === "review"\) setReviewNews\(null\);/);
+    expect(app).toMatch(/if \(!codeReview\.holdActive\) setReviewNews\(/);
+  });
+});
+
+describe("the decision countdown never brings Redline forward", () => {
+  it("bounces the Dock and notifies instead of un-minimizing or focusing the window", () => {
+    const decision = between("const decisionUnlisten = listen<PlanDecisionWindowEvent>(", "return () => {");
+    expect(decision).toContain("noticeWhenAway(");
+    expect(decision).not.toMatch(/unminimize|setFocus/);
+    expect(app).not.toMatch(/\.unminimize\(\)|getCurrentWindow\(\)\.setFocus\(\)|w\.setFocus\(\)/);
+  });
+});

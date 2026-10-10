@@ -12,25 +12,7 @@ import {
   YOUR_TURN_NOTIFY_DELAY_MS,
   type LoudTerminal,
 } from "../lib/attentionAlerts";
-
-/** Permission is asked once per launch, at the first notification — never at
- *  boot, and never again after a "no". */
-let permission: Promise<boolean> | null = null;
-
-async function notify(title: string, body: string): Promise<void> {
-  try {
-    // Loaded at the first notification: nothing on the boot path pays for it.
-    const plugin = await import("@tauri-apps/plugin-notification");
-    permission ??= (async () =>
-      (await plugin.isPermissionGranted()) ||
-      (await plugin.requestPermission()) === "granted")();
-    if (await permission) plugin.sendNotification({ title, body });
-  } catch {
-    // No plugin or no permission system (tests, a stripped build): stay
-    // quiet, and ask again next time rather than caching the failure.
-    permission = null;
-  }
-}
+import { notify } from "../lib/osNotice";
 
 /** The Dock badge and OS notifications for the terminals that need you.
  *

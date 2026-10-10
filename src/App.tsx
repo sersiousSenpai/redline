@@ -375,7 +375,6 @@ const TerminalTabs = lazy(() =>
   })),
 );
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
-import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
@@ -617,6 +616,11 @@ const IntegrationSetupDialog = lazy(() =>
 );
 const HookConflictModal = lazy(() =>
   import("./components/HookConflictModal").then((m) => ({ default: m.HookConflictModal })),
+);
+/** Ambient mode's decision countdown: shown only after a plan arrives in
+ *  that mode, so nothing on the boot path needs it. */
+const DecisionWindowBanner = lazy(() =>
+  import("./components/DecisionWindowBanner").then((m) => ({ default: m.DecisionWindowBanner })),
 );
 
 const BookshelfView = lazy(() =>
@@ -2034,20 +2038,53 @@ function App() {
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
   const devServers = useDevServers(serversOpen);
-  // A `/redline-code-review` curl is holding for feedback → surface the review
-  // pane immediately (the hook itself adopts the repo/source/round).
+  // An agent asking for a code review (a `/redline-code-review` curl holding
+  // for feedback), or a run filing its exit report, is news — never a move.
+  // The review surface waits for you: a notice says so once, a footer chip
+  // holds the way in until you go there (or the agent stops waiting), and
+  // from another app the Dock bounces and a notification says it. The agent
+  // waits either way; the hook itself adopts the repo/source/round.
+  const [reviewNews, setReviewNews] = useState<"review" | "report" | null>(null);
+  const reviewNewsRef = useRef(reviewNews);
+  reviewNewsRef.current = reviewNews;
+  const tellReview = useCallback((kind: "review" | "report") => {
+    const message = kind === "report" ? "Run report ready" : "Review ready";
+    const there = mainSurfaceRef.current === "review";
+    // A report's own review request follows it in: one piece of news.
+    if (!there && reviewNewsRef.current) return;
+    // Already on the review surface, it is on screen: only the OS is told.
+    if (!there) {
+      reviewNewsRef.current = kind;
+      setReviewNews(kind);
+      setToast({
+        message,
+        tone: "info",
+        action: { label: "Open", onAction: () => selectSurfaceRef.current("review") },
+        ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+      });
+    }
+    void import("./lib/osNotice")
+      .then(({ noticeWhenAway }) => noticeWhenAway(message, kind === "report" ? "A run filed its report. Open Redline to review it." : "An agent is waiting for your code review in Redline."))
+      .catch(() => {});
+  }, []);
   useEffect(() => {
     let alive = true;
     const p = listen("review-requested", () => {
-      if (!alive) return;
-      selectSurfaceRef.current("review");
+      if (alive) tellReview("review");
     });
     return () => {
       alive = false;
       void p.then((un) => un());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tellReview]);
+  // Over once you go to the review surface, or once the agent stops
+  // waiting on a review nobody opened. A report waits for you.
+  useEffect(() => {
+    if (mainSurface === "review") setReviewNews(null);
+  }, [mainSurface]);
+  useEffect(() => {
+    if (!codeReview.holdActive) setReviewNews((news) => (news === "review" ? null : news));
+  }, [codeReview.holdActive]);
   // Orchestrated runs: which plan session's RunReport container wraps the
   // review surface (null = the plain review pane). Opened by the exit-report
   // event or by clicking a run chip in the sessions pane.
@@ -2073,19 +2110,19 @@ function App() {
   );
   useEffect(() => {
     let alive = true;
-    // The orchestrator filed its exit report → open the RunReport container
-    // (the review-requested event that follows lands inside it).
+    // The orchestrator filed its exit report → the review surface opens on
+    // the RunReport container (the review-requested event that follows
+    // lands inside it), whenever the user goes there.
     const rep = listen<{ sessionId: string }>("orchestration-report", (e) => {
       if (!alive) return;
       setRunReportFor(e.payload.sessionId);
-      selectSurfaceRef.current("review");
+      tellReview("report");
     });
     return () => {
       alive = false;
       void rep.then((un) => un());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tellReview]);
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -4177,18 +4214,13 @@ function App() {
           return;
         }
         setDecisionWindow(e.payload);
-        // Attention-grab: a short window is useless behind other windows.
-        void (async () => {
-          try {
-            const w = getCurrentWindow();
-            if (!(await w.isFocused())) {
-              await w.unminimize();
-              await w.setFocus();
-            }
-          } catch {
-            /* window API unavailable — banner still shows */
-          }
-        })();
+        // A short window is useless unseen, so from another app the Dock
+        // bounces and a notification says so. Never by un-minimizing or
+        // bringing Redline to the front: going there is the user's move.
+        const seconds = Math.max(0, Math.ceil((e.payload.deadlineMs - Date.now()) / 1000));
+        void import("./lib/osNotice")
+          .then(({ noticeWhenAway }) => noticeWhenAway(`Plan v${e.payload.version} ready`, `Auto-approving in ${seconds}s unless you open it in Redline.`))
+          .catch(() => {});
       },
     );
     return () => {
@@ -8431,12 +8463,14 @@ function App() {
       </ChromeSlot>
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
-        <DecisionWindowBanner
-          event={decisionWindow}
-          onOpen={openDecisionForReview}
-          onApprove={approveFromDecision}
-          onExpire={dismissDecisionWindow}
-        />
+        <Suspense fallback={null}>
+          <DecisionWindowBanner
+            event={decisionWindow}
+            onOpen={openDecisionForReview}
+            onApprove={approveFromDecision}
+            onExpire={dismissDecisionWindow}
+          />
+        </Suspense>
       )}
       {joinedActive && joinedPresence && joinedRoom && !joinedRoom.revoked ? (
         <PresenceBar
@@ -10419,6 +10453,8 @@ function App() {
         termTabCount={termTabCount}
         termNeedYou={termNeedYou}
         onJumpToNeedsYou={jumpToNeedsYou}
+        reviewNews={reviewNews === "report" ? "Run report ready" : reviewNews === "review" ? "Review ready" : null}
+        onOpenReviewNews={() => selectSurface("review")}
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
