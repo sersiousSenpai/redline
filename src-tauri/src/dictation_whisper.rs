@@ -17,8 +17,8 @@
 //!     first-ever release waits on it. Released on app exit (`RunEvent::Exit`).
 //!   - **Inference** — [`WhisperState::transcribe`] turns one accumulated
 //!     utterance (16 kHz mono `f32`) into text. It is blocking (whisper.cpp is
-//!     CPU/GPU-bound), so callers run it under `tokio::task::spawn_blocking`.
-//!     Three guards keep Whisper from inventing words:
+//!     CPU/GPU-bound), so it runs on the blocking pool, under `dictation_stop`.
+//!     Four guards keep Whisper from inventing words:
 //!       1. a **silence gate**: an utterance with no window that sounds like
 //!          speech is never decoded ([`speech_gate`]);
 //!       2. **hallucination thresholds** on the decoder (entropy 2.8, average
@@ -234,7 +234,7 @@ struct Loaded {
 /// Whisper backend state, managed by Tauri next to `DictationState` / `TtsState`.
 /// Carries the DB (settings), a reused HTTP client for the model download,
 /// the model directory, and the lazily-loaded resident model. Cloneable (all
-/// fields are `Arc`/cheap) so it can be moved into `spawn_blocking`.
+/// fields are `Arc`/cheap) so it can be moved onto the thread that warms it.
 #[derive(Clone)]
 pub struct WhisperState {
     db: Arc<Database>,
@@ -354,7 +354,7 @@ impl WhisperState {
 
     /// Transcribe one accumulated utterance (16 kHz mono `f32`) to text, with
     /// the capture's vocabulary. Silence comes back as "" without a decode.
-    /// **Blocking** — call under `tokio::task::spawn_blocking`.
+    /// **Blocking** — never on the main thread or a runtime worker.
     #[cfg(target_os = "macos")]
     pub fn transcribe(&self, pcm_16k_mono: &[f32], vocab: &[String]) -> Result<String, String> {
         let Some(plan) = plan_decode(pcm_16k_mono, vocab) else {

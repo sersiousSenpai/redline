@@ -15,17 +15,20 @@
 //! takes the mic from whoever has it, who hears `dictation-preempted`; an
 //! open-mic start (`"open"`, the default) is refused while another owner holds
 //! it. A stop or cancel from an owner that no longer holds the mic does
-//! nothing. Callers that pass no owner share `"default"`, which keeps the
-//! one-capture-at-a-time behaviour they were written for.
+//! nothing, and one ends only its own claim's capture, even when it reaches
+//! the main thread after the next capture began. Callers that pass no owner
+//! share `"default"`, which keeps the one-capture-at-a-time behaviour they
+//! were written for.
 //!
 //! **A warm mic with pre-roll.** The audio engine keeps running for `WARM`
 //! after a capture ends, its one permanent tap filling a ring with the last
 //! `PREROLL_MS` of audio, and the tap itself closes the mic once that time is
 //! up with no capture on it (no timer task). A capture started while warm
-//! opens at once and begins with that ring, so a first syllable spoken as the
-//! key goes down is never clipped. Each start checks the warm engine is still
-//! running on the same input format, and rebuilds it if sleep or a device
-//! change stopped it.
+//! opens at once and begins with that ring — what the mic heard since the last
+//! capture finished, never that capture's own end — so a first syllable
+//! spoken as the key goes down is never clipped. Each start checks the warm
+//! engine is still running on the same input format, and rebuilds it if sleep
+//! or a device change stopped it.
 //!
 //! **Levels.** While capturing, the tap emits `dictation-level` once per 50 ms
 //! of audio (20 Hz), RMS and peak in dBFS: the waveform of a dictation strip,
@@ -275,6 +278,7 @@ fn clean_vocab(raw: Vec<String>) -> Vec<String> {
 /// How long the warm mic stays open after a capture ends.
 #[cfg(target_os = "macos")]
 const WARM: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How much audio from before a press a capture starts with.
 const PREROLL_MS: f64 = 300.0;
 /// One `dictation-level` event per this much audio.
@@ -294,6 +298,11 @@ impl PreRoll {
     /// Size the ring for a mic at `rate` and empty it.
     fn reset(&mut self, rate: f64) {
         self.buf = vec![0.0; (rate * PREROLL_MS / 1000.0).round() as usize];
+        self.clear();
+    }
+
+    /// Forget what the ring holds, keeping its size.
+    fn clear(&mut self) {
         self.next = 0;
         self.len = 0;
     }
@@ -384,6 +393,8 @@ struct TapShared {
     preroll: PreRoll,
     /// The warm mic's sample rate.
     rate: f64,
+    /// The claim whose capture is attached, if one is.
+    seq: Option<u64>,
     /// Whisper captures only: the utterance so far, at `rate`, from the
     /// pre-roll on.
     pcm: Option<Vec<f32>>,
@@ -400,6 +411,38 @@ impl TapShared {
     fn reset(&mut self, rate: f64) {
         self.rate = rate;
         self.preroll.reset(rate);
+    }
+
+    /// Attach claim `seq`'s capture: metered from now on, and accumulating
+    /// into `pcm` (a Whisper capture's, which starts with its pre-roll).
+    fn attach(&mut self, seq: u64, owner: &str, pcm: Option<Vec<f32>>) {
+        self.seq = Some(seq);
+        self.pcm = pcm;
+        self.meter = Some(LevelMeter::new(owner.to_string(), self.rate));
+        self.cool_at = None;
+    }
+
+    /// Detach the attached capture if it is claim `only`'s (any claim's, for
+    /// `None`), starting the warm mic's countdown to `cool_at`: its Whisper
+    /// PCM, or `None` when another claim's capture is attached, or none is —
+    /// a stop that reaches the main thread after the next capture began must
+    /// not end that one. A `finished` capture also empties the ring: what it
+    /// holds was that capture's own end, which the next must not repeat.
+    fn detach(&mut self, only: Option<u64>, finished: bool, cool_at: std::time::Instant) -> Option<Vec<f32>> {
+        if self.seq.is_none() || only.is_some_and(|s| self.seq != Some(s)) {
+            return None;
+        }
+        self.seq = None;
+        self.meter = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.request = None;
+        }
+        self.cool_at = Some(cool_at);
+        if finished {
+            self.preroll.clear();
+        }
+        Some(self.pcm.take().unwrap_or_default())
     }
 
     /// Whether the warm mic's time is up at `now`: no capture is live and the
@@ -627,17 +670,17 @@ impl DictationInner {
         (DictationGrant { granted: true, holder: owner.to_string(), preempted }, Some(seq))
     }
 
-    /// Let go of the mic if `owner` holds it (whoever does, for `None`).
-    /// Whether it did: a stop from an owner that lost the mic must not end
-    /// the capture that took it.
-    fn release(&self, owner: Option<&str>) -> bool {
+    /// Let go of the mic if `owner` holds it (whoever does, for `None`). The
+    /// claim it let go of, to end that claim's capture and no other: a stop
+    /// from an owner that lost the mic must not end the capture that took it.
+    fn release(&self, owner: Option<&str>) -> Option<u64> {
         let mut holder = self.holder.lock().unwrap();
-        let held = holder.as_ref().is_some_and(|h| owner.is_none_or(|o| h.owner == o));
-        if held {
+        let seq = holder.as_ref().filter(|h| owner.is_none_or(|o| h.owner == o)).map(|h| h.seq);
+        if seq.is_some() {
             *holder = None;
             self.active.store(false, Ordering::SeqCst);
         }
-        held
+        seq
     }
 
     /// The owner of claim `seq`, while that claim still holds the mic.
@@ -760,7 +803,7 @@ pub fn dictation_start(
         let takeover = grant.preempted.is_some();
         app.run_on_main_thread(move || {
             if takeover {
-                retire_capture(&state, false);
+                retire_capture(&state, false, None);
             }
             authorize_then_capture(app_main, state, seq)
         })
@@ -801,9 +844,9 @@ pub fn dictation_stop(
     owner: Option<String>,
 ) -> Result<String, String> {
     let owner = owner.unwrap_or_else(|| DEFAULT_OWNER.to_string());
-    if !dictation.inner.release(Some(&owner)) {
+    let Some(seq) = dictation.inner.release(Some(&owner)) else {
         return Ok(String::new());
-    }
+    };
     // Apple's latest — the immediate answer for the Apple engine, and the
     // fallback if Whisper inference fails.
     let apple_text = dictation.inner.latest.lock().unwrap().clone();
@@ -813,11 +856,12 @@ pub fn dictation_stop(
         let engine = *dictation.inner.engine.lock().unwrap();
         let vocab = std::mem::take(&mut *dictation.inner.vocab.lock().unwrap());
         let state = dictation.inner.clone();
-        // End the capture on the UI thread and get its PCM back: once the tap
-        // has let go of it, no late buffer can race the drain.
+        // End this claim's capture on the UI thread and get its PCM back: once
+        // the tap has let go of it, no late buffer can race the drain. A
+        // capture started since is left alone.
         let (tx, rx) = tokio::sync::oneshot::channel::<(Vec<f32>, f64)>();
         let scheduled = app.run_on_main_thread(move || {
-            let _ = tx.send(retire_capture(&state, true));
+            let _ = tx.send(retire_capture(&state, true, Some(seq)));
         });
         // If scheduling failed the session is reclaimed on next start / exit;
         // don't hang waiting for a signal that will never come.
@@ -847,16 +891,20 @@ pub fn dictation_stop(
                         String::new()
                     }
                 };
+            // Not written back to `latest`: by now it may be the next
+            // capture's, and its stop would fall back to this text.
             let final_text = if whisper_text.trim().is_empty() {
                 apple_text
             } else {
                 whisper_text
             };
-            *dictation.inner.latest.lock().unwrap() = final_text.clone();
             emit_text(&app, "dictation-final", &owner, final_text.clone());
             return Ok(final_text);
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = seq;
 
     emit_text(&app, "dictation-final", &owner, apple_text.clone());
     Ok(apple_text)
@@ -904,11 +952,10 @@ pub fn dictation_cycle(
                 return;
             }
             // Finalize this utterance's recognition, then listen for the next
-            // on the same engine. The ring holds this utterance's own end, so
-            // the next one starts without it.
-            retire_capture(&state, true);
+            // on the same engine, from its first buffer on.
+            retire_capture(&state, true, Some(seq));
             if let Some(mic) = state.mic.lock().unwrap().as_ref() {
-                arm_capture(&app_main, &state, mic, &owner, false);
+                arm_capture(&app_main, &state, mic, &owner, seq, false);
             }
         });
     }
@@ -933,14 +980,16 @@ pub fn dictation_kill_all(
         dictation.kill_all();
         return Ok(());
     };
-    if dictation.inner.release(Some(&owner)) {
+    if let Some(seq) = dictation.inner.release(Some(&owner)) {
         #[cfg(target_os = "macos")]
         {
             let state = dictation.inner.clone();
             let _ = app.run_on_main_thread(move || {
-                retire_capture(&state, false);
+                retire_capture(&state, false, Some(seq));
             });
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = seq;
     }
     #[cfg(not(target_os = "macos"))]
     let _ = &app;
@@ -1053,7 +1102,7 @@ fn begin_capture(app: &AppHandle, state: &Arc<DictationInner>, seq: u64) {
     };
     let guard = state.mic.lock().unwrap();
     let mic = guard.as_ref().expect("ensure_mic left a mic");
-    arm_capture(app, state, mic, &owner, true);
+    arm_capture(app, state, mic, &owner, seq, true);
     if !cold {
         return;
     }
@@ -1149,12 +1198,20 @@ unsafe fn on_buffer(state: &DictationInner, buffer: &AVAudioPCMBuffer) -> (Vec<D
     (levels, tap.cooled(std::time::Instant::now()))
 }
 
-/// Arm a fresh recognition for `owner` on the warm mic: a request carrying the
-/// capture's vocabulary, a task streaming its partials to
-/// `dictation-partial`, and — with `preroll` — the ring's last `PREROLL_MS`
-/// handed to it first. Main thread; the task is kept in `state.capture`.
+/// Arm a fresh recognition for claim `seq` of `owner` on the warm mic: a
+/// request carrying the capture's vocabulary, a task streaming its partials
+/// to `dictation-partial`, and — with `preroll` — the ring's last
+/// `PREROLL_MS` handed to it first. Main thread; the task is kept in
+/// `state.capture`.
 #[cfg(target_os = "macos")]
-fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owner: &str, preroll: bool) {
+fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owner: &str, seq: u64, preroll: bool) {
+    // A capture whose stop hasn't reached this thread yet: it ends here, so
+    // its stop finds nothing of this one's to end.
+    if state.capture.lock().unwrap().is_some() {
+        retire_capture(state, false, None);
+    }
+    // What an older task left behind is not this capture's transcript.
+    state.latest.lock().unwrap().clear();
     // SAFETY (this fn): on the UI thread, on objects created here or kept
     // alive by the warm mic.
     let request = unsafe { SFSpeechAudioBufferRecognitionRequest::new() };
@@ -1222,28 +1279,30 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
         if let Some(buffer) = unsafe { preroll_buffer(&mic.format, &ring) } {
             unsafe { request.appendAudioPCMBuffer(&buffer) };
         }
-        tap.pcm = whisper.then_some(ring);
-        tap.meter = Some(LevelMeter::new(owner.to_string(), tap.rate));
+        tap.attach(seq, owner, whisper.then_some(ring));
         tap.request = Some(TapRequest(request.clone()));
-        tap.cool_at = None;
     }
     *state.capture.lock().unwrap() = Some(CaptureTask { request, task, _result_handler: result_handler });
 }
 
-/// End the live capture's recognition — `finish` keeps what it heard,
-/// otherwise it is cancelled — and detach it from the tap, which then closes
-/// the mic `WARM` later unless another capture starts. Returns its Whisper
-/// PCM (empty for an Apple capture) and the rate it was taken at. Main thread.
+/// End the attached capture's recognition, if it is claim `only`'s (any
+/// claim's, for `None`) — `finish` keeps what it heard, otherwise it is
+/// cancelled — and detach it from the tap, which then closes the mic once its
+/// warm time is up unless another capture starts. Returns its Whisper PCM
+/// (empty for an Apple capture, or when there was nothing of `only`'s to end)
+/// and the rate it was taken at. Main thread.
 #[cfg(target_os = "macos")]
-fn retire_capture(state: &DictationInner, finish: bool) -> (Vec<f32>, f64) {
-    state.armed.fetch_add(1, Ordering::SeqCst);
+fn retire_capture(state: &DictationInner, finish: bool, only: Option<u64>) -> (Vec<f32>, f64) {
+    let cool_at = std::time::Instant::now() + WARM;
     let drained = {
         let mut tap = state.tap.lock().unwrap();
-        tap.request = None;
-        tap.meter = None;
-        tap.cool_at = Some(std::time::Instant::now() + WARM);
-        (tap.pcm.take().unwrap_or_default(), tap.rate)
+        let rate = tap.rate;
+        match tap.detach(only, finish, cool_at) {
+            Some(pcm) => (pcm, rate),
+            None => return (Vec::new(), rate),
+        }
     };
+    state.armed.fetch_add(1, Ordering::SeqCst);
     if let Some(capture) = state.capture.lock().unwrap().take() {
         // SAFETY: main thread; the capture's objects are still live.
         unsafe {
@@ -1263,7 +1322,7 @@ fn retire_capture(state: &DictationInner, finish: bool) -> (Vec<f32>, f64) {
 /// call in flight, which needs the `TapShared` lock.
 #[cfg(target_os = "macos")]
 fn teardown_mic(state: &DictationInner) {
-    retire_capture(state, false);
+    retire_capture(state, false, None);
     let mic = state.mic.lock().unwrap().take();
     if let Some(mic) = mic {
         // SAFETY: main thread; the mic's objects are still live.
@@ -1403,11 +1462,11 @@ mod tests {
         assert_eq!(grant.preempted.as_deref(), Some("voice-panel"));
         assert!(second > first, "a new claim");
         assert_eq!(inner.owner_of(first.unwrap()), None, "the old claim's start won't open anything");
-        assert!(!inner.release(Some("voice-panel")), "its late stop is a no-op");
+        assert_eq!(inner.release(Some("voice-panel")), None, "its late stop is a no-op");
         assert_eq!(inner.seq_of("comment"), second);
         assert!(inner.active.load(Ordering::SeqCst));
 
-        assert!(inner.release(Some("comment")));
+        assert_eq!(inner.release(Some("comment")), second, "a stop ends its own claim");
         assert!(!inner.active.load(Ordering::SeqCst));
         assert_eq!(inner.take_mic("voice-panel", Kind::Open).0.granted, true, "free again");
     }
@@ -1418,8 +1477,8 @@ mod tests {
         let (_, seq) = inner.take_mic(DEFAULT_OWNER, Kind::parse(None));
         assert!(seq.is_some());
         assert_eq!(inner.take_mic(DEFAULT_OWNER, Kind::Open).1, None, "a second start is a no-op");
-        assert!(inner.release(Some(DEFAULT_OWNER)));
-        assert!(!inner.release(Some(DEFAULT_OWNER)), "a stop with nothing live does nothing");
+        assert_eq!(inner.release(Some(DEFAULT_OWNER)), seq);
+        assert_eq!(inner.release(Some(DEFAULT_OWNER)), None, "a stop with nothing live does nothing");
     }
 
     #[test]
@@ -1486,8 +1545,7 @@ mod tests {
         tap.reset(1_000.0); // a 300-sample ring, 50-sample windows
         tap.feed(&[0.1; 250], &mut Vec::new());
         // A Whisper capture starts with the ring, then takes what follows.
-        tap.pcm = Some(tap.preroll.snapshot());
-        tap.meter = Some(LevelMeter::new("door".into(), tap.rate));
+        tap.attach(1, "door", Some(tap.preroll.snapshot()));
         let mut levels = Vec::new();
         tap.feed(&[0.2; 100], &mut levels);
         let pcm = tap.pcm.take().unwrap();
@@ -1511,6 +1569,59 @@ mod tests {
         tap.cool_at = Some(later(5_000));
         tap.meter = Some(LevelMeter::new("door".into(), 16_000.0));
         assert!(!tap.cooled(later(9_000)));
+    }
+
+    #[test]
+    fn a_stop_ends_its_own_capture_and_never_the_one_started_after_it() {
+        let now = std::time::Instant::now();
+        let mut tap = TapShared::default();
+        tap.reset(1_000.0);
+        assert_eq!(tap.detach(None, true, now), None, "nothing attached");
+        // The first capture's stop is still on its way to the main thread
+        // when the next capture (claim 2) is armed, cancelling it.
+        tap.attach(1, "door", Some(Vec::new()));
+        assert_eq!(tap.detach(None, false, now), Some(Vec::new()));
+        tap.attach(2, "door", Some(vec![0.5; 10]));
+        assert_eq!(tap.detach(Some(1), true, now), None, "claim 1's late stop");
+        assert_eq!(tap.seq, Some(2), "the newer capture is still attached");
+        assert!(tap.meter.is_some() && tap.cool_at.is_none());
+        tap.feed(&[0.25; 5], &mut Vec::new());
+        assert_eq!(tap.detach(Some(2), true, now).map(|pcm| pcm.len()), Some(15), "its own stop drains it");
+        assert_eq!((tap.seq, tap.cool_at), (None, Some(now)));
+        assert!(tap.meter.is_none() && tap.pcm.is_none());
+    }
+
+    #[test]
+    fn a_finished_capture_never_opens_the_next_with_its_own_end() {
+        let now = std::time::Instant::now();
+        let mut tap = TapShared::default();
+        tap.reset(1_000.0); // a 300-sample ring
+        tap.attach(1, "door", None);
+        tap.feed(&[0.1; 400], &mut Vec::new());
+        tap.detach(Some(1), true, now);
+        assert!(tap.preroll.snapshot().is_empty(), "the stopped capture already heard all of it");
+        // The next press, 100 ms on, starts with just those 100 ms.
+        tap.feed(&[0.2; 100], &mut Vec::new());
+        assert_eq!(tap.preroll.snapshot(), vec![0.2; 100]);
+        // A capture taken over or cancelled heard nothing it keeps: the ring
+        // stays for the push-to-talk that took the mic.
+        tap.attach(2, "voice-panel", None);
+        tap.feed(&[0.3; 300], &mut Vec::new());
+        tap.detach(None, false, now);
+        assert_eq!(tap.preroll.snapshot(), vec![0.3; 300]);
+    }
+
+    /// A stop waits for the main thread to end its capture: on the main
+    /// thread itself it would wait forever. An install drives a download of
+    /// hundreds of megabytes to its end, and the status is asked per turn.
+    #[test]
+    fn the_stop_the_install_and_the_status_run_off_the_main_thread() {
+        let pool = crate::codehealth::command_list(include_str!("lib.rs"), "OFF_MAIN_COMMANDS");
+        for name in ["dictation_stop", "whisper_install", "dictation_status"] {
+            assert!(pool.iter().any(|n| n == name), "lib.rs: `{name}` must be in OFF_MAIN_COMMANDS");
+        }
+        let src = include_str!("dictation.rs");
+        assert!(src.contains("#[tauri::command]\npub fn dictation_stop("), "a plain command the pool runs");
     }
 
     #[test]
