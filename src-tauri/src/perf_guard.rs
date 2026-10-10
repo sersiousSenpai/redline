@@ -102,11 +102,20 @@ mod tests {
     /// and one `lsof` for the whole fleet. A subprocess fork on the WebView
     /// main thread is exactly perf-budget rule 4.
     #[test]
-    fn heavy_pty_cwd_commands_stay_async() {
+    fn heavy_pty_cwd_commands_stay_off_the_main_thread() {
         let src = include_str!("pty.rs");
         assert_off_main_command(src, "pty.rs", "pty_cwd");
         assert_off_main_command(src, "pty.rs", "pty_cwds");
         assert_off_main_command(src, "pty.rs", "pty_procs");
+        // …and the lifecycle: a spawn forks a shell, a kill reaps one.
+        for func in ["pty_spawn", "pty_list", "pty_attach", "pty_detach", "pty_resize", "pty_kill", "pty_kill_all"] {
+            assert_off_main_command(src, "pty.rs", func);
+        }
+        // Keystrokes keep their order by staying on the main thread.
+        let pool = crate::codehealth::off_main_commands(include_str!("lib.rs"));
+        for func in ["pty_write", "pty_ack"] {
+            assert!(!pool.iter().any(|name| name == func), "pty.rs: `{func}` must stay on the main thread for byte order");
+        }
     }
 
     /// Rule 5: what the wall polls scales per call, never per terminal. One

@@ -12658,6 +12658,20 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "save_revision_to_obsidian",
     "set_session_project",
     "write_plan_handoff",
+    // The terminals' lifecycle and the wall's polls: a fork, a kill, an lsof or ps
+    // scan. The frontend fences each id's spawn/attach/kill/resize itself
+    // (`enqueuePtyOp`); `pty_write` and `pty_ack` stay on the main thread for
+    // keystroke order.
+    "pty_attach",
+    "pty_cwd",
+    "pty_cwds",
+    "pty_detach",
+    "pty_kill",
+    "pty_kill_all",
+    "pty_list",
+    "pty_procs",
+    "pty_resize",
+    "pty_spawn",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls
