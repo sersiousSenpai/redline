@@ -178,6 +178,8 @@ describe("identity and the dock", () => {
     expect(resolveConversation(w)).toMatchObject({ browseId: "one", targetNumber: 1 });
     w = run(w, { type: "reorder-tabs", order: ["t-two", "t-one"] });
     expect(resolveConversation(w)).toMatchObject({ browseId: "one", targetNumber: 2, targetLabel: "browser-t-one" });
+    // An order that names one tab twice would drop the other; it is ignored.
+    expect(run(w, { type: "reorder-tabs", order: ["t-one", "t-one"] }).tabs).toEqual(w.tabs);
   });
   it("BC-10 the dock advertises the resolved conversation, whatever the panel's state", () => {
     const w = run(world(), mode);

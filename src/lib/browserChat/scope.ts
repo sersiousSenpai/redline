@@ -203,10 +203,12 @@ function step(w: ChatWorld, e: ChatEvent): ChatWorld {
       return { ...w, tabs, activeId, discussionId };
     }
     case "reorder-tabs": {
-      // Numbers are positional; durable ids ride along (BC-1).
+      // Numbers are positional; durable ids ride along (BC-1). An order that
+      // is not exactly the open tabs (one missing, one twice) is ignored
+      // rather than allowed to drop a tab.
       const byId = new Map(w.tabs.map((t) => [t.id, t]));
       const tabs = e.order.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []));
-      return tabs.length === w.tabs.length ? { ...w, tabs } : w;
+      return tabs.length === w.tabs.length && new Set(tabs).size === tabs.length ? { ...w, tabs } : w;
     }
     case "toggle-tab-chat": {
       // Relative to what is ON SCREEN (the anchored conversation), then
