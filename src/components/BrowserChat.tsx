@@ -227,9 +227,8 @@ export const BrowserChat = memo(function BrowserChat({
   // Who each send ran on and the page it was sent against, read as it went
   // out: a pick changed while a reply streams applies to the next message,
   // and a tab switched to meanwhile is not the page it acts on (BC-12,
-  // BC-26). A send that starts at once is the turn in flight from the
-  // moment it is built; one queued behind a reply is kept by its row's id
-  // until its own turn starts, so it never re-signs the reply in flight.
+  // BC-26). A message queued behind a reply is kept by its row's id until
+  // its own turn starts, so it never re-signs the reply in flight.
   const builtFor = useRef(new WeakMap<object, SentTurn>());
   const sentFor = useRef(new Map<string, SentTurn>());
   const lastStarted = useRef<SentTurn | null>(null);
@@ -259,10 +258,14 @@ export const BrowserChat = memo(function BrowserChat({
         // The page, scope and workspace this turn was typed against, captured
         // now: a queued turn keeps them through any tab switch (BC-12).
         const target = conversation;
-        // A chat showing an inherited pick stores it before its first turn.
-        const runsOn = (await harness.commit()).backend;
-        const sent = { agent: backendLabel(runsOn), targetLabel: target.targetLabel };
+        // A send that starts at once is the turn in flight from this moment;
+        // one queued behind a reply is filed under its row by `onSent`.
+        const sent: SentTurn = { agent, targetLabel: target.targetLabel };
         if (status !== "streaming") lastStarted.current = sent;
+        // A chat showing an inherited pick stores it before its first turn,
+        // and runs on the default when that write fails.
+        const runsOn = (await harness.commit()).backend;
+        sent.agent = backendLabel(runsOn);
         // The opening turn embeds a DOM snapshot so the agent is grounded
         // without a round-trip, and so does a turn on a page the conversation
         // has not grounded on; follow-ups rely on its /snapshot tool. The
