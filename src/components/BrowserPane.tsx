@@ -360,7 +360,7 @@ function BrowserPaneBase({
   const [organizing, setOrganizing] = useState(false);
   const organizeEpoch = useRef(0);
   const organized = organizedByWorkspace[workspaceKey] ?? false;
-  useEffect(() => { try { if (!localStorage.getItem("redline.browser.followDefaultV1")) { setLinkedByWorkspace(prev => Object.fromEntries(Object.entries(prev).filter(([, value]) => value))); localStorage.setItem("redline.browser.followDefaultV1", "true"); } } catch { /* optional migration */ } }, []);
+  useEffect(() => { try { if (!localStorage.getItem("redline.browser.followDefaultV1")) { setLinkedByWorkspace(prev => Object.fromEntries(Object.entries(prev).filter(([, value]) => value))); localStorage.setItem("redline.browser.followDefaultV1", "true"); } localStorage.removeItem("redline.browser.ownChatTabs"); } catch { /* optional migration */ } }, []);
 
   // id → live Webview handle. Kept in a ref (not state) because these are
   // native resources we create/destroy imperatively, not render outputs.

@@ -285,6 +285,24 @@ describe("plan Search", () => {
     expect(dock.querySelector("[data-seed]")!.getAttribute("data-seed")).toBe("Research token buckets");
     expect(onOpenRequestConsumed).toHaveBeenCalledOnce();
   });
+  it("still opens when last session's mission can't be restored because the list failed", async () => {
+    // A mission was active last session and mission_list failed: the restore
+    // falls back to regular browsing instead of holding the request for a Retry.
+    const closeMission = vi.fn();
+    mocks.mission = { activeMissionId: "m-last", activeMission: null, missionsLoaded: false, error: "Could not load research missions: database is locked", closeMission };
+    const onOpenRequestConsumed = vi.fn();
+    await mount({ onOpenRequestConsumed, openRequest: search(1) });
+    expect(onOpenRequestConsumed).toHaveBeenCalledOnce();
+    expect(closeMission).toHaveBeenCalled();
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Could not load research missions");
+    expect(conversation()).toBe(onOpenRequestConsumed.mock.lastCall![0]);
+  });
+});
+
+it("forgets the retired per-tab chat key", async () => {
+  localStorage.setItem("redline.browser.ownChatTabs", JSON.stringify({ regular: ["t-one"] }));
+  await mount();
+  expect(localStorage.getItem("redline.browser.ownChatTabs")).toBeNull();
 });
 
 it("shows the same native bounds again after an overlay hides both tiles", async () => {
