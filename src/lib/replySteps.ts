@@ -16,7 +16,8 @@
 import { formatDuration, type Activity, type TurnMeter } from "./turnMeter";
 
 /** Steps kept per reply — the same cap `meter::settle` keeps (`STEPS_KEEP`),
- *  and the live ring's (`ACTIVITY_KEEP`), so neither side keeps more. */
+ *  taken from the same ring (`ACTIVITY_KEEP` is the backend's
+ *  `ACTIVITY_CAP`), so both sides keep the same steps. */
 export const STEPS_KEEP = 40;
 
 /** The turn's tool calls, oldest first, newest `STEPS_KEEP`. */

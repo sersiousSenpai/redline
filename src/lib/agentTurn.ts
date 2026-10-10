@@ -23,10 +23,13 @@ import type { QueuedTurn, TurnStatus } from "../types";
 import { mergeMeter, type Activity, type TurnMeter } from "./turnMeter";
 import { toolSteps } from "./replySteps";
 
-/** Activity entries kept per turn on the frontend. The backend ring is 200;
- *  the surfaces render the newest one, so a smaller local cap is enough and
- *  keeps a long tool-heavy turn from growing component state without bound. */
-export const ACTIVITY_KEEP = 40;
+/** Activity entries kept per turn on the frontend: the backend's ring
+ *  (`turn::ACTIVITY_CAP`), entry for entry. A settled reply keeps the newest
+ *  tool steps of that ring (`meter::settle`), and a turn requests and thinks
+ *  between its tools, so a shorter ring here would expand to a fraction of
+ *  the steps the same reply shows after a relaunch. Bounded all the same, so
+ *  a long tool-heavy turn can't grow component state without limit. */
+export const ACTIVITY_KEEP = 200;
 
 /** Settled rows a mounted surface holds (docs/perf-budget.md rule 7). No
  *  surface pages its history, so a thread longer than this shows its newest
