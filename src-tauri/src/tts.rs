@@ -16,7 +16,7 @@
 //!     The sidecar is kept warm so each sentence is ~sub-second. Kokoro's
 //!     phonemizer is GPL, so it lives in a SEPARATE PROCESS and never links into
 //!     Redline's Apache-2.0 binary — we only exchange text and audio bytes over a
-//!     pipe. The ~88 MB int8 model is downloaded on first use into the app data
+//!     pipe. The ~325 MB fp32 model is downloaded on first use into the app data
 //!     dir. ElevenLabs / Deepgram would slot into the same `match`.
 //!
 //! Every request carries the frontend driver's **generation**. `cancel()` there
@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -69,12 +70,34 @@ const ELEVEN_MAX_CONCURRENCY: usize = 2;
 // first use — no Tauri resource-path / dev-vs-bundle ambiguity to chase.
 const KOKORO_SIDECAR_PY: &str = include_str!("../resources/kokoro_sidecar.py");
 
-// Model files (int8, ~88 MB) — downloaded on first use. From the kokoro-onnx
-// project's pinned model release.
-const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx";
+// Model files — downloaded on first use. From the kokoro-onnx project's pinned
+// model release. The fp32 model is ~3x faster than the int8 one on Apple CPUs
+// (int8 ops fall back to slow kernels there) at the reference quality.
+const KOKORO_MODEL_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx";
 const KOKORO_VOICES_URL: &str = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin";
-const KOKORO_MODEL_FILE: &str = "kokoro-v1.0.int8.onnx";
+const KOKORO_MODEL_FILE: &str = "kokoro-v1.0.onnx";
 const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
+/// The int8 model earlier versions downloaded. It keeps working until the fp32
+/// one is downloaded and verified beside it (`ensure_current_model`), and is
+/// deleted then.
+const KOKORO_LEGACY_MODEL_FILE: &str = "kokoro-v1.0.int8.onnx";
+
+/// What a download must come to before it replaces anything: the release's
+/// published size, and the SHA-256 of that release asset.
+#[derive(Clone, Copy)]
+struct FileCheck {
+    bytes: u64,
+    sha256: &'static str,
+}
+
+const KOKORO_MODEL_CHECK: FileCheck = FileCheck {
+    bytes: 325_532_387,
+    sha256: "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+};
+const KOKORO_VOICES_CHECK: FileCheck = FileCheck {
+    bytes: 28_214_398,
+    sha256: "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+};
 
 /// Emit a setup-progress event roughly every megabyte, so the download bar moves
 /// without flooding the IPC channel with thousands of tiny updates.
@@ -113,6 +136,9 @@ pub struct TtsState {
     eleven_sem: Arc<Semaphore>,
     /// Generations the frontend has cancelled (`tts_cancel`), newest last.
     cancelled: Arc<StdMutex<VecDeque<u64>>>,
+    /// One model download at a time: an Enable click and the background
+    /// upgrade must not write the same `.part` file.
+    model_dl: Arc<AsyncMutex<()>>,
     /// `KOKORO_TIMEOUT_FLOOR`, a field so tests can make a hang quick to detect.
     kokoro_timeout_floor: Duration,
 }
@@ -126,18 +152,32 @@ impl TtsState {
             kokoro: Arc::new(AsyncMutex::new(None)),
             eleven_sem: Arc::new(Semaphore::new(ELEVEN_MAX_CONCURRENCY)),
             cancelled: Arc::new(StdMutex::new(VecDeque::new())),
+            model_dl: Arc::new(AsyncMutex::new(())),
             kokoro_timeout_floor: KOKORO_TIMEOUT_FLOOR,
         }
     }
 
+    /// The fp32 model once it's in place, else the int8 one an older install
+    /// downloaded (so an upgrade in progress never stops the voice).
     fn model_path(&self) -> PathBuf {
-        self.kokoro_dir.join(KOKORO_MODEL_FILE)
+        let current = self.kokoro_dir.join(KOKORO_MODEL_FILE);
+        let legacy = self.kokoro_dir.join(KOKORO_LEGACY_MODEL_FILE);
+        if !current.exists() && legacy.exists() {
+            legacy
+        } else {
+            current
+        }
     }
     fn voices_path(&self) -> PathBuf {
         self.kokoro_dir.join(KOKORO_VOICES_FILE)
     }
     fn model_present(&self) -> bool {
         self.model_path().exists() && self.voices_path().exists()
+    }
+    /// Only the int8 model is here: the voice works, and the fp32 one should
+    /// be fetched beside it.
+    fn needs_model_upgrade(&self) -> bool {
+        self.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE)
     }
 
     fn cancel(&self, generation: u64) {
@@ -706,15 +746,28 @@ pub async fn tts_kokoro_status(tts: tauri::State<'_, TtsState>) -> Result<Kokoro
 /// Pre-spawn the Kokoro sidecar (which loads the model during its handshake) so
 /// the first real sentence doesn't pay the ~seconds of cold-start. Best-effort:
 /// a no-op unless Kokoro is the engine and installed.
+///
+/// An install that only has the int8 model then fetches the fp32 one in the
+/// background of this call (`kokoro-setup` phase `upgrade`), which is why
+/// every caller fires it and forgets it rather than awaiting it.
 #[tauri::command]
-pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>) -> Result<(), String> {
+pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>, app: AppHandle) -> Result<(), String> {
     let engine = tts.db.get_setting(SETTING_ENGINE).unwrap_or_default();
     if engine != "kokoro" || !tts.model_present() {
         return Ok(());
     }
-    let mut guard = tts.kokoro.lock().await;
-    if guard.is_none() {
-        *guard = Some(spawn_kokoro(&tts).await?);
+    {
+        let mut guard = tts.kokoro.lock().await;
+        if guard.is_none() {
+            *guard = Some(spawn_kokoro(&tts).await?);
+        }
+    }
+    // Every panel open warms, so only the first one with nothing downloading
+    // starts the upgrade; a failed one is tried again on a later open.
+    if tts.needs_model_upgrade() && tts.model_dl.try_lock().is_ok() {
+        if let Err(e) = ensure_current_model(&tts, &app, "upgrade").await {
+            tracing::warn!(target: "kokoro", "model upgrade failed, keeping the int8 model: {e}");
+        }
     }
     Ok(())
 }
@@ -861,7 +914,7 @@ async fn ensure_uv(tts: &TtsState, app: &AppHandle) -> Result<PathBuf, String> {
     let url = format!("https://github.com/astral-sh/uv/releases/latest/download/{asset}.tar.gz");
     let tarball = tts.kokoro_dir.join("uv.tar.gz");
     let _ = tokio::fs::remove_file(&tarball).await;
-    download_if_missing(tts, app, &url, &tarball, "uv").await?;
+    download_if_missing(tts, app, &url, &tarball, "uv", None).await?;
 
     // Unpack with the system `tar` (gzip built in on macOS) and lift out the
     // single `uv` binary; the tarball expands to `<asset>/uv`.
@@ -967,17 +1020,29 @@ async fn ensure_kokoro_venv(tts: &TtsState, app: &AppHandle) -> Result<(), Strin
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KokoroSetup {
-    /// `"model"`, `"voices"`, or `"done"`.
+    /// `"model"`, `"voices"`, `"upgrade"` (the fp32 model replacing an
+    /// install's int8 one, in the background), or `"done"`.
     phase: String,
     received: u64,
     total: u64,
 }
 
-/// Download the Kokoro model + voices into the app data dir (idempotent — skips
-/// files already present). Emits `kokoro-setup` progress events.
+fn emit_setup(app: &AppHandle, phase: &str, received: u64, total: u64) {
+    let _ = app.emit(
+        "kokoro-setup",
+        KokoroSetup {
+            phase: phase.to_string(),
+            received,
+            total,
+        },
+    );
+}
+
 /// One-click "Enable natural voice": set up a private Python venv with
-/// `kokoro-onnx` (only if one isn't already reachable) and download the model.
-/// The user installs and configures nothing.
+/// `kokoro-onnx` (only if one isn't already reachable) and download the model
+/// and voices into the app data dir (idempotent — skips files already present).
+/// Emits `kokoro-setup` progress events. The user installs and configures
+/// nothing.
 #[tauri::command]
 pub async fn tts_kokoro_install(
     tts: tauri::State<'_, TtsState>,
@@ -1002,18 +1067,41 @@ pub async fn tts_kokoro_install(
     }
 
     // 2. The model files.
-    download_if_missing(&tts, &app, KOKORO_MODEL_URL, &tts.model_path(), "model").await?;
-    download_if_missing(&tts, &app, KOKORO_VOICES_URL, &tts.voices_path(), "voices").await?;
+    ensure_current_model(&tts, &app, "model").await?;
+    let voices = tts.voices_path();
+    download_if_missing(&tts, &app, KOKORO_VOICES_URL, &voices, "voices", Some(KOKORO_VOICES_CHECK))
+        .await?;
 
-    let _ = app.emit(
-        "kokoro-setup",
-        KokoroSetup {
-            phase: "done".to_string(),
-            received: 0,
-            total: 0,
-        },
-    );
+    emit_setup(&app, "done", 0, 0);
     Ok(())
+}
+
+/// Make the fp32 model the one on disk: download and verify it if it isn't
+/// there, then retire an int8 model an older install left beside it. A failed
+/// download leaves the int8 model loading as before.
+async fn ensure_current_model(tts: &TtsState, app: &AppHandle, phase: &str) -> Result<(), String> {
+    let _one_at_a_time = tts.model_dl.lock().await;
+    let dest = tts.kokoro_dir.join(KOKORO_MODEL_FILE);
+    download_if_missing(tts, app, KOKORO_MODEL_URL, &dest, phase, Some(KOKORO_MODEL_CHECK)).await?;
+    retire_legacy_model(tts).await;
+    if phase == "upgrade" {
+        emit_setup(app, "done", 0, 0);
+    }
+    Ok(())
+}
+
+/// Once the fp32 model is in place, stop a sidecar that may still have the
+/// int8 one loaded (the next sentence spawns a fresh one on the new model) and
+/// delete the int8 file.
+async fn retire_legacy_model(tts: &TtsState) {
+    let legacy = tts.kokoro_dir.join(KOKORO_LEGACY_MODEL_FILE);
+    if !legacy.exists() || !tts.kokoro_dir.join(KOKORO_MODEL_FILE).exists() {
+        return;
+    }
+    if let Some(mut old) = tts.kokoro.lock().await.take() {
+        let _ = old.child.start_kill();
+    }
+    let _ = tokio::fs::remove_file(&legacy).await;
 }
 
 async fn download_if_missing(
@@ -1022,68 +1110,89 @@ async fn download_if_missing(
     url: &str,
     dest: &Path,
     phase: &str,
+    check: Option<FileCheck>,
 ) -> Result<(), String> {
     if dest.exists() {
         return Ok(());
     }
-    // Download to a `.part` sibling, then atomically rename — a crash mid-download
-    // never leaves a truncated file that looks complete.
+    fetch_checked(&tts.http, url, dest, phase, check, |received, total| {
+        emit_setup(app, phase, received, total)
+    })
+    .await
+}
+
+/// Stream `url` into a `.part` sibling of `dest`, then rename it into place —
+/// a crash mid-download never leaves a truncated file that looks complete.
+/// With a `check`, the file is hashed as it arrives and only the exact
+/// published file is renamed in. Any failure deletes the `.part`, so `dest`
+/// (and whatever model sits beside it) is left as it was.
+async fn fetch_checked(
+    http: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    phase: &str,
+    check: Option<FileCheck>,
+    progress: impl Fn(u64, u64),
+) -> Result<(), String> {
     let tmp = dest.with_extension("part");
-    let mut resp = tts
-        .http
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "downloading the Kokoro {phase} failed: HTTP {}",
-            resp.status()
-        ));
-    }
-    let total = resp.content_length().unwrap_or(0);
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| format!("creating the Kokoro {phase} file failed: {e}"))?;
-    let mut received: u64 = 0;
-    let mut last_emit: u64 = 0;
-    let _ = app.emit(
-        "kokoro-setup",
-        KokoroSetup {
-            phase: phase.to_string(),
-            received: 0,
-            total,
-        },
-    );
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?
-    {
-        file.write_all(&chunk)
+    let fetched = async {
+        let mut resp = http
+            .get(url)
+            .send()
             .await
-            .map_err(|e| format!("writing the Kokoro {phase} failed: {e}"))?;
-        received += chunk.len() as u64;
-        if received - last_emit >= KOKORO_PROGRESS_STEP {
-            last_emit = received;
-            let _ = app.emit(
-                "kokoro-setup",
-                KokoroSetup {
-                    phase: phase.to_string(),
-                    received,
-                    total,
-                },
-            );
+            .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "downloading the Kokoro {phase} failed: HTTP {}",
+                resp.status()
+            ));
         }
+        let total = resp.content_length().unwrap_or(0);
+        let mut file = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("creating the Kokoro {phase} file failed: {e}"))?;
+        let mut hasher = check.map(|_| Sha256::new());
+        let mut received: u64 = 0;
+        let mut last_emit: u64 = 0;
+        progress(0, total);
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("writing the Kokoro {phase} failed: {e}"))?;
+            if let Some(h) = hasher.as_mut() {
+                h.update(&chunk);
+            }
+            received += chunk.len() as u64;
+            if received - last_emit >= KOKORO_PROGRESS_STEP {
+                last_emit = received;
+                progress(received, total);
+            }
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("flushing the Kokoro {phase} failed: {e}"))?;
+        if let (Some(c), Some(h)) = (check, hasher) {
+            if received != c.bytes || format!("{:x}", h.finalize()) != c.sha256 {
+                return Err(format!(
+                    "the downloaded Kokoro {phase} wasn't the published file \
+                     ({received} bytes), so it was discarded — try again"
+                ));
+            }
+        }
+        Ok(())
     }
-    file.flush()
-        .await
-        .map_err(|e| format!("flushing the Kokoro {phase} failed: {e}"))?;
-    drop(file);
+    .await;
+    if let Err(e) = fetched {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     tokio::fs::rename(&tmp, dest)
         .await
-        .map_err(|e| format!("finalizing the Kokoro {phase} failed: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("finalizing the Kokoro {phase} failed: {e}"))
 }
 
 #[cfg(test)]
@@ -1177,14 +1286,14 @@ while IFS= read -r line; do
 done
 "#;
 
-    /// Kokoro as the engine, installed, on the fake sidecar.
+    /// Kokoro as the engine, installed with `model_file`, on the fake sidecar.
     /// Returns the state and its Kokoro dir (where the fake writes its logs).
     #[cfg(unix)]
-    fn fake_kokoro(label: &str) -> (TtsState, PathBuf) {
+    fn fake_kokoro(label: &str, model_file: &str) -> (TtsState, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let data = scratch_dir(label);
         let dir = data.join("kokoro");
-        std::fs::write(dir.join(KOKORO_MODEL_FILE), b"").unwrap();
+        std::fs::write(dir.join(model_file), b"").unwrap();
         std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
         let fake = dir.join("fake-python");
         std::fs::write(&fake, FAKE_SIDECAR).unwrap();
@@ -1203,10 +1312,30 @@ done
             .collect()
     }
 
+    /// Serve `body` to one HTTP request on a loopback port.
+    fn serve_once(body: &'static [u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut req = [0u8; 2048];
+                let _ = s.read(&mut req);
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(body);
+            }
+        });
+        format!("http://{addr}/kokoro-v1.0.onnx")
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cancelled_generation_never_reaches_the_sidecar() {
-        let (tts, dir) = fake_kokoro("cancelled");
+        let (tts, dir) = fake_kokoro("cancelled", KOKORO_MODEL_FILE);
         tts.cancel(41);
         let stale = synth(&tts, "The rest of the stopped reply.", 41, None).await;
         assert_eq!(stale.err().as_deref(), Some(CANCELLED));
@@ -1219,7 +1348,7 @@ done
     #[cfg(unix)]
     #[tokio::test]
     async fn a_request_cancelled_while_it_waits_for_kokoro_is_dropped_on_its_turn() {
-        let (tts, dir) = fake_kokoro("queued");
+        let (tts, dir) = fake_kokoro("queued", KOKORO_MODEL_FILE);
         synth(&tts, "Warm up.", 1, None).await.unwrap();
         // The sentence ahead of it is synthesizing: it holds the lock.
         let ahead = tts.kokoro.lock().await;
@@ -1241,7 +1370,7 @@ done
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hung_sidecar_times_out_and_the_next_sentence_gets_a_fresh_one() {
-        let (mut tts, dir) = fake_kokoro("hung");
+        let (mut tts, dir) = fake_kokoro("hung", KOKORO_MODEL_FILE);
         tts.kokoro_timeout_floor = Duration::from_millis(200);
         let started = std::time::Instant::now();
         let hung = synth(&tts, "hang", 1, None).await;
@@ -1255,7 +1384,7 @@ done
     #[cfg(unix)]
     #[tokio::test]
     async fn kokoro_renders_the_users_speed() {
-        let (tts, dir) = fake_kokoro("speed");
+        let (tts, dir) = fake_kokoro("speed", KOKORO_MODEL_FILE);
         let first = synth(&tts, "One.", 1, Some(1.5)).await.unwrap();
         assert_eq!(first.speed, 1.5, "the player must not speed it up again");
         let second = synth(&tts, "Two.", 1, Some(9.0)).await.unwrap();
@@ -1266,5 +1395,70 @@ done
             .collect();
         assert_eq!(reqs[0]["speed"], 1.5);
         assert_eq!(reqs[1]["speed"], 2.0);
+    }
+
+    #[test]
+    fn the_int8_model_keeps_loading_until_the_fp32_one_is_in_place() {
+        let data = scratch_dir("models");
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        assert!(!tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_MODEL_FILE), "a fresh install gets fp32");
+        assert!(!tts.needs_model_upgrade());
+
+        std::fs::write(dir.join(KOKORO_LEGACY_MODEL_FILE), b"int8").unwrap();
+        assert!(tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE));
+        assert!(tts.needs_model_upgrade());
+
+        std::fs::write(dir.join(KOKORO_MODEL_FILE), b"fp32").unwrap();
+        assert!(tts.model_path().ends_with(KOKORO_MODEL_FILE));
+        assert!(!tts.needs_model_upgrade());
+    }
+
+    #[tokio::test]
+    async fn a_download_that_isnt_the_published_model_is_discarded() {
+        let data = scratch_dir("bad-download");
+        let dir = data.join("kokoro");
+        std::fs::write(dir.join(KOKORO_LEGACY_MODEL_FILE), b"int8").unwrap();
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        let dest = dir.join(KOKORO_MODEL_FILE);
+        let url = serve_once(b"cut off mid-download");
+        let err = fetch_checked(&tts.http, &url, &dest, "upgrade", Some(KOKORO_MODEL_CHECK), |_, _| {})
+            .await
+            .unwrap_err();
+        assert!(err.contains("wasn't the published file"), "{err}");
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists(), "no half file left behind");
+        assert!(tts.model_present());
+        assert!(tts.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE), "the int8 model still loads");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_verified_download_switches_the_voice_to_fp32_and_retires_int8() {
+        let (tts, dir) = fake_kokoro("upgrade", KOKORO_LEGACY_MODEL_FILE);
+        synth(&tts, "Speaking on int8.", 1, None).await.unwrap();
+
+        const BODY: &[u8] = b"fp32 weights";
+        let check = FileCheck {
+            bytes: BODY.len() as u64,
+            sha256: Box::leak(format!("{:x}", Sha256::digest(BODY)).into_boxed_str()),
+        };
+        let dest = dir.join(KOKORO_MODEL_FILE);
+        fetch_checked(&tts.http, &serve_once(BODY), &dest, "upgrade", Some(check), |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), BODY);
+        retire_legacy_model(&tts).await;
+        assert!(!dir.join(KOKORO_LEGACY_MODEL_FILE).exists());
+        assert!(tts.kokoro.lock().await.is_none(), "the int8 sidecar was stopped");
+
+        synth(&tts, "Speaking on fp32.", 1, None).await.unwrap();
+        let spawns = log_lines(&dir, "spawns.log");
+        assert!(spawns[0].ends_with(KOKORO_LEGACY_MODEL_FILE), "{spawns:?}");
+        assert!(spawns[1].ends_with(KOKORO_MODEL_FILE), "{spawns:?}");
     }
 }

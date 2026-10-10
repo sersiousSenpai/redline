@@ -225,7 +225,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             ? "Downloading the voice model…"
             : p === "voices"
               ? "Downloading voices…"
-              : "Working…";
+              : p === "upgrade"
+                ? "Downloading the faster voice model…"
+                : "Working…";
 
   const save = async () => {
     setSaving(true);
@@ -322,7 +324,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <span style={muted}>
             Kokoro runs fully on your Mac — free, no key, offline. The first time,
             Redline sets up a private voice engine and downloads the model
-            (~250&nbsp;MB). You don't need to install anything.
+            (~600&nbsp;MB). You don't need to install anything.
           </span>
 
           {kokoroStatus &&
@@ -349,7 +351,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                   alignSelf: "flex-start",
                 }}
               >
-                {installing ? "Setting up…" : "Enable natural voice (~250 MB)"}
+                {installing ? "Setting up…" : "Enable natural voice (~600 MB)"}
               </button>
               {installing && (
                 <div className="flex flex-col gap-1">
@@ -387,6 +389,14 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                 </span>
               )}
             </div>
+          )}
+
+          {progress?.phase === "upgrade" && !installing && (
+            <span style={muted}>
+              Downloading a faster voice model in the background
+              {progress.total ? ` — ${mb(progress.received)} / ${mb(progress.total)}` : "…"}
+              . The current one keeps talking until it's ready.
+            </span>
           )}
 
           <div className="flex flex-col gap-1.5">

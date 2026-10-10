@@ -65,7 +65,7 @@ complete picture; none is a Redline telemetry channel.
 | Embedded browser (WKWebView) | Loads pages the user navigates to | User browsing. |
 | Agent `WebSearch` / `WebFetch` tools | Web requests by the spawned research agents | User-initiated research turns. |
 | `tts.rs` | ElevenLabs / OpenAI speech APIs | Only when the user configures an API key and selects that engine. |
-| `tts.rs` (Kokoro), `dictation_whisper.rs` | One-time model download (GitHub / Hugging Face) | Only when the user enables that local engine; the model then runs offline. |
+| `tts.rs` (Kokoro), `dictation_whisper.rs` | One-time model download (GitHub / Hugging Face) | Only when the user enables that local engine; the model then runs offline. A Kokoro install that still has the older int8 model fetches the fp32 one once, in the background, when the voice warms up. |
 | `codehealth.rs` — the **Shipwright digest**, Tier A | Redacted excerpts of the user's own reopen notes and edit pairs, baked into the Shipwright's model prompt | Only when the user clicks the Shipwright. |
 
 > **The Shipwright digest is the one egress this program adds**, and it is the
