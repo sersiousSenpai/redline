@@ -148,7 +148,7 @@ pub fn browser_inspect(app: tauri::AppHandle, label: String) -> Result<(), Strin
     view.eval(include_str!("browser_inspector.js")).map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn browser_set_appearance(app: tauri::AppHandle, label: String, website: String, zoom: f64) -> Result<(), String> {
     use tauri::Manager;
     if !browser_label(&label) || !["default", "light", "dark", "forced"].contains(&website.as_str()) { return Err("Invalid browser appearance target".into()); }

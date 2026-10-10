@@ -660,7 +660,7 @@ pub fn mission_delete(
 
 /// Pin a finding (the user's "I like this part"). Captures the source tab so the
 /// orchestrator and findings board can attribute it.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn mission_add_finding(
     app: AppHandle,
     mission: tauri::State<'_, MissionState>,

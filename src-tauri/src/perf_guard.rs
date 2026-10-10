@@ -62,8 +62,20 @@ mod tests {
             assert_off_main_command(workspace, "browser_workspace.rs", command);
         }
         assert_off_main_command(include_str!("mission.rs"), "mission.rs", "mission_add_finding");
-        for command in ["watch_hook_conflicts", "unwatch_hook_conflicts"] {
+        for command in ["scan_hook_conflicts", "remove_hook_conflicts", "watch_hook_conflicts", "unwatch_hook_conflicts"] {
             assert_off_main_command(include_str!("hook_conflicts.rs"), "hook_conflicts.rs", command);
+        }
+        // A page's appearance waits on its webview.
+        assert_off_main_command(include_str!("browser_events.rs"), "browser_events.rs", "browser_set_appearance");
+    }
+
+    /// Build Redline's patch view and restart preflight run git against the
+    /// candidate and check the bundle on disk; a discard deletes a workspace.
+    #[test]
+    fn build_redline_reads_stay_off_the_main_thread() {
+        let src = include_str!("self_develop.rs");
+        for func in ["self_develop_patch", "self_develop_preflight", "self_develop_discard"] {
+            assert_off_main_command(src, "self_develop.rs", func);
         }
     }
 
@@ -139,8 +151,9 @@ mod tests {
     /// project roots off disk, on a poll — squarely the shape that must never
     /// run on the WebView main thread.
     #[test]
-    fn heavy_devmap_commands_stay_async() {
+    fn heavy_devmap_commands_stay_off_the_main_thread() {
         let src = include_str!("devmap.rs");
+        assert_off_main_command(src, "devmap.rs", "dev_server_set_thumb");
         assert_off_main_command(src, "devmap.rs", "dev_servers_scan");
         assert_off_main_command(src, "devmap.rs", "dev_server_stop");
         assert_off_main_command(src, "devmap.rs", "dev_server_stop_plan");
@@ -317,6 +330,8 @@ mod tests {
             "memory_forget",
             "memory_note_write",
             "export_context_bundle",
+            "context_search",
+            "memory_restore",
             "mirror_status",
             "mirror_sync",
             "mirror_rebuild",

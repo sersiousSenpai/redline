@@ -149,13 +149,13 @@ pub fn delete(db: &Database, id: &str) -> Result<(), String> {
     db.lock_conn().execute("DELETE FROM browser_workspaces WHERE id=?1", [id]).map_err(|e| e.to_string())?;
     Ok(())
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn browser_workspace_list(store: tauri::State<'_, crate::state::SessionStore>, prefix: String) -> Result<Vec<Value>, String> { list(&store.database(), &prefix) }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn browser_workspace_delete(store: tauri::State<'_, crate::state::SessionStore>, workspace_id: String) -> Result<(), String> { delete(&store.database(), &workspace_id) }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn browser_workspace_read(store: tauri::State<'_, crate::state::SessionStore>, workspace_id: String) -> Result<Option<Value>, String> { read(&store.database(), &workspace_id) }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn browser_workspace_write(store: tauri::State<'_, crate::state::SessionStore>, workspace_id: String, value: Value, expected_revision: Option<i64>) -> Result<Value, String> { write(&store.database(), &workspace_id, value, expected_revision) }
 #[cfg(test)]
 mod tests {

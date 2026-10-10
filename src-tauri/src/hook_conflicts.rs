@@ -452,7 +452,7 @@ fn scan_sources(sources: &[Source]) -> ConflictScan {
     scan
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn scan_hook_conflicts(backend: Option<String>, project_path: Option<String>) -> ConflictScan {
     scan_sources(&sources(
         backend.as_deref(),
@@ -611,7 +611,7 @@ fn remove_at(sources: &[Source], identities: &[ConflictIdentity]) -> RemovalRepo
         scan: scan_sources(sources),
     }
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn remove_hook_conflicts(
     backend: Option<String>,
     project_path: Option<String>,
@@ -630,7 +630,7 @@ static WATCHES: LazyLock<Mutex<HashMap<String, Debouncer<RecommendedWatcher>>>> 
 struct Changed {
     watch_id: String,
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn watch_hook_conflicts(
     app: tauri::AppHandle,
     backend: Option<String>,
@@ -688,7 +688,7 @@ pub fn watch_hook_conflicts(
         .insert(watch_id.clone(), debouncer);
     Ok(watch_id)
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn unwatch_hook_conflicts(watch_id: String) {
     WATCHES
         .lock()

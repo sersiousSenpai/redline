@@ -730,7 +730,7 @@ pub fn memchat_turn_status(chat: tauri::State<'_, MemChatState>) -> TurnStatus {
 }
 
 /// The Ask thread's persisted turns, oldest-first.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn memchat_thread(
     chat: tauri::State<'_, MemChatState>,
 ) -> Result<Vec<MemChatMessage>, String> {
@@ -769,7 +769,7 @@ pub fn memchat_unqueue(
 /// "New conversation": kill any in-flight turn, drop any queued sends, the
 /// thread rows and the resumable session. The turns already captured in the
 /// lake stay there.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn memchat_clear(chat: tauri::State<'_, MemChatState>) -> Result<(), String> {
     if let Some(mut child) = chat.turns.discard(MEMCHAT_ID).and_then(|p| p.child) {
         let _ = child.start_kill();

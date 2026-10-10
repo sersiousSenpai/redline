@@ -990,7 +990,7 @@ fn run_capture(program: &str, args: &[String]) -> Result<String, String> {
 }
 
 /// One sweep of the machine. See the module header for the spawn budget.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn dev_servers_scan(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -1222,7 +1222,7 @@ fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevSe
 /// Remember a freshly-captured thumbnail against its card's row, so the picture
 /// outlives the process it depicts: stop the server and the card keeps showing
 /// what it was serving.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn dev_server_set_thumb(
     store: tauri::State<'_, SessionStore>,
     project_path: String,
@@ -1249,7 +1249,7 @@ pub struct ProbeView {
     pub suggestions: Vec<launch::LaunchOption>,
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn dev_server_probe(project_path: String) -> ProbeView {
     let root = Path::new(&project_path);
     let probe = probe_project(root);
@@ -1365,7 +1365,7 @@ fn prepare_stop(
     Ok(StopSnapshot { plan, identities })
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn dev_server_stop_plan(
     app: tauri::AppHandle,
     pid: u32,
@@ -1472,7 +1472,7 @@ fn execute_stop(
     ))
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn dev_server_stop(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,

@@ -10910,7 +10910,7 @@ fn memory_map(store: tauri::State<'_, SessionStore>) -> Result<context::MemoryMa
 
 /// BM25 search over captured browse pages — the Timeline's page-content
 /// search. Same query/clamp discipline as `GET /v1/context/browse/search`.
-#[tauri::command(async)]
+#[tauri::command]
 fn context_search(
     store: tauri::State<'_, SessionStore>,
     q: String,
@@ -12097,7 +12097,7 @@ fn memory_embed_settings(
 /// Returns `false` when there is nothing archived: never compacted, compacted
 /// before archiving existed, or forgotten on purpose (a forget deletes the
 /// archive too — forget means forget).
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_restore(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -12703,6 +12703,35 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "shots_set_policy",
     "thumbs_list",
     "thumbs_prune",
+    // The rest: the Localhost scan and stops (subprocesses, ports, project roots),
+    // hook-conflict scans and file watches, browser workspaces on disk, Build
+    // Redline's patch and preflight, the work graph, Memory Ask's thread, a
+    // page's appearance (waits on its webview), mission findings, and two memory
+    // reads in lib.rs.
+    "browser_set_appearance",
+    "browser_workspace_delete",
+    "browser_workspace_list",
+    "browser_workspace_read",
+    "browser_workspace_write",
+    "context_search",
+    "dev_server_probe",
+    "dev_server_set_thumb",
+    "dev_server_stop",
+    "dev_server_stop_plan",
+    "dev_servers_scan",
+    "get_work_graph",
+    "memchat_clear",
+    "memchat_thread",
+    "memory_restore",
+    "mission_add_finding",
+    "remove_hook_conflicts",
+    "scan_hook_conflicts",
+    "self_develop_discard",
+    "self_develop_patch",
+    "self_develop_preflight",
+    "unwatch_hook_conflicts",
+    "watch_hook_conflicts",
+    "work_ready_count",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls
