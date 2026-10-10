@@ -42,7 +42,8 @@ describe("Search from the plan", () => {
     const run = app.slice(app.indexOf("const runPlanSearch ="), app.indexOf("const viewResearch ="));
     expect(run).toContain('type: "question"');
     expect(run).toContain("research: { query, browseId: \"\", url }");
-    expect(run).toContain("autoSend: true");
+    // The pane sends it: a plan Search's seed always goes out (seedPolicy).
+    expect(run).toContain("chat: { text: researchSeed(");
     const consumed = app.slice(app.indexOf("const onBrowserOpenConsumed ="), app.indexOf("const openUrlInBrowser ="));
     expect(consumed).toContain("research: { ...pending.request.research!, browseId }");
   });

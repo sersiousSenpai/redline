@@ -284,7 +284,7 @@ describe("the page chat's UI laws", () => {
     expect(fnBody(libRs, "browser_can_suspend")).toContain("is_targeted(");
     pinnedBy("src-tauri/src/browse.rs", "fn a_tab_a_running_turn_targets_stays_live");
   });
-  it.fails("BC-37 KNOWN VIOLATION: the browser pill's hover composer launches Plan/Run only", () => {
+  it("BC-37 the browser pill's hover composer launches Plan/Run only", () => {
     const restricted = /pillComposerDestinations\(\s*"browser"\s*\)/.test(door) || /allowedDestinations=\{[^}]*"plan",\s*"run"/.test(door);
     expect(restricted, "the browser's compact composer must restrict destinations").toBe(true);
   });

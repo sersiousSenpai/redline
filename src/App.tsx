@@ -5388,7 +5388,7 @@ function App() {
         research: { query, browseId: "", url },
       },
     };
-    setBrowserOpenRequest({ url, nonce: Date.now(), chat: { text: researchSeed(sel.text, instruction, title), autoSend: true } });
+    setBrowserOpenRequest({ url, nonce: Date.now(), chat: { text: researchSeed(sel.text, instruction, title) } });
     selectSurface("browser");
   };
   // "View result →" on a research comment: wake its tab with the chat open,
@@ -6433,7 +6433,7 @@ function App() {
   const [browserOpenRequest, setBrowserOpenRequest] = useState<{
     url: string;
     nonce: number;
-    chat?: { text: string; autoSend?: boolean };
+    chat?: { text: string };
     focusBrowseId?: string;
     quiet?: boolean;
   } | null>(null);
