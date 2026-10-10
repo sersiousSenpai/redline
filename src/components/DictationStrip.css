@@ -35,15 +35,21 @@
   transform-origin: center;
   transition: transform 50ms linear;
 }
+/* The newest words stay in view: the line runs right to left, so a long
+   transcript loses its beginning to the ellipsis; the words themselves read
+   left to right in their own isolated span. */
 .rl-dictation-text {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
   font-style: italic;
   color: color-mix(in srgb, var(--color-info) 80%, var(--color-ink-muted));
 }
+.rl-dictation-text > span { direction: ltr; unicode-bidi: isolate; }
 .rl-dictation-strip[data-phase="notice"] .rl-dictation-text { font-style: normal; color: var(--color-ink); }
 .rl-dictation-hint {
   flex: none;

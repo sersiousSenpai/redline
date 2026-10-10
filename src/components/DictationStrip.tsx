@@ -81,9 +81,6 @@ export function stripBox(anchor: DOMRect | null, viewport: { width: number; heig
   return { left, top: above >= 4 ? above : top + 4, width };
 }
 
-/** The tail of a long transcript: the words being said, not the first ones. */
-const tail = (text: string, max = 90) => (text.length > max ? "…" + text.slice(-max) : text);
-
 export function DictationStrip() {
   const s = useSyncExternalStore(strip.subscribe, strip.get, strip.get);
   const anchor = s?.anchor ?? null;
@@ -131,7 +128,9 @@ export function DictationStrip() {
           return <i key={i} style={{ transform: `scaleY(${level ?? 0.08})` }} />;
         })}
       </span>
-      <span className="rl-dictation-text">{tail(s.text) || "Listening…"}</span>
+      <span className="rl-dictation-text">
+        <span>{s.text || "Listening…"}</span>
+      </span>
       {s.copy ? (
         <button
           type="button"
