@@ -1,0 +1,477 @@
+{
+  "note": "docs/renderer-memory-2026-10-09.md section 4. before: the sources at 1b7f6e7 (dirty only by the new test files and fixture); after: 17f22f0, with the rule 7 caps. Same fixture, same Chrome.",
+  "before": {
+    "startedAt": "2026-10-10T00:40:44.140Z",
+    "commit": "1b7f6e7",
+    "dirty": true,
+    "fixture": "fixtures/memory-soak",
+    "limitations": [
+      "Headless Chrome (V8), not WKWebView (JavaScriptCore): absolute sizes differ, growth per step is the signal.",
+      "React's development build, as `tauri dev` runs it.",
+      "The Tauri boundary is synthetic: no database, agent, PTY or network."
+    ],
+    "errors": [],
+    "scenarios": {
+      "chatCycles": {
+        "what": "12 cycles of: mount a chat with 40 history rows, stream 8 replies (16 deltas each, every 4th with a broken mermaid fence), unmount",
+        "heapGrowthMBPerCycle": 0.029,
+        "leftoverDiagramNodes": 26,
+        "busListenersAfter": 0,
+        "series": [
+          {
+            "label": "after warm-up",
+            "heapMB": 6.74,
+            "domNodes": 23,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 2,
+            "liveYDocs": 0
+          },
+          {
+            "label": "cycle 1",
+            "heapMB": 6.79,
+            "domNodes": 25,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 4,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 2",
+            "heapMB": 6.86,
+            "domNodes": 27,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 6,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 3",
+            "heapMB": 6.86,
+            "domNodes": 29,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 8,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 4",
+            "heapMB": 6.99,
+            "domNodes": 31,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 10,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 5",
+            "heapMB": 7.04,
+            "domNodes": 33,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 12,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 6",
+            "heapMB": 7.05,
+            "domNodes": 35,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 14,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 7",
+            "heapMB": 7.05,
+            "domNodes": 37,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 16,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 8",
+            "heapMB": 7.09,
+            "domNodes": 39,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 18,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 9",
+            "heapMB": 7.08,
+            "domNodes": 41,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 20,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 10",
+            "heapMB": 7.1,
+            "domNodes": 43,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 22,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 11",
+            "heapMB": 7.08,
+            "domNodes": 45,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 24,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 12",
+            "heapMB": 7.09,
+            "domNodes": 47,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          }
+        ]
+      },
+      "longThread": {
+        "what": "mount a chat whose persisted thread is 2400 rows, then unmount it",
+        "rowsInMemoryAndShown": 2400,
+        "heapWhileOpenMB": 14.03,
+        "heapAfterCloseMB": 0.07,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 6.94,
+            "domNodes": 47,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 0
+          },
+          {
+            "label": "2400-row thread open",
+            "heapMB": 20.97,
+            "domNodes": 44448,
+            "domListeners": 2545,
+            "busListeners": 8,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 0
+          },
+          {
+            "label": "closed",
+            "heapMB": 7.01,
+            "domNodes": 47,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 0
+          }
+        ]
+      },
+      "collabRooms": {
+        "what": "20 cycles of: a Y.Doc with ~66 KB of plan text, createCollabProvider (unreachable relay), awareness set, handle.destroy(), doc dropped",
+        "liveYDocsAfter": 20,
+        "heapGrowthMB": 1.49,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 7.01,
+            "domNodes": 47,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 0
+          },
+          {
+            "label": "after 20 rooms",
+            "heapMB": 8.5,
+            "domNodes": 47,
+            "domListeners": 169,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 20
+          }
+        ]
+      },
+      "repoIcons": {
+        "what": "cd through 300 directories across 3 repos, each repo_icon answer a fresh 256 KB data URL",
+        "cachedDirectories": 300,
+        "heapGrowthMB": 75.2,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 8.49,
+            "domNodes": 47,
+            "domListeners": 165,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 20
+          },
+          {
+            "label": "after 300 directories",
+            "heapMB": 83.69,
+            "domNodes": 47,
+            "domListeners": 165,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 26,
+            "liveYDocs": 20
+          }
+        ]
+      }
+    },
+    "browserVersion": "Chrome/154.0.8037.98"
+  },
+  "after": {
+    "startedAt": "2026-10-10T01:34:28.727Z",
+    "commit": "17f22f0",
+    "dirty": false,
+    "fixture": "fixtures/memory-soak",
+    "limitations": [
+      "Headless Chrome (V8), not WKWebView (JavaScriptCore): absolute sizes differ, growth per step is the signal.",
+      "React's development build, as `tauri dev` runs it.",
+      "The Tauri boundary is synthetic: no database, agent, PTY or network."
+    ],
+    "errors": [],
+    "scenarios": {
+      "chatCycles": {
+        "what": "12 cycles of: mount a chat with 40 history rows, stream 8 replies (16 deltas each, every 4th with a broken mermaid fence), unmount",
+        "heapGrowthMBPerCycle": 0.023,
+        "leftoverDiagramNodes": 0,
+        "busListenersAfter": 0,
+        "series": [
+          {
+            "label": "after warm-up",
+            "heapMB": 6.57,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          },
+          {
+            "label": "cycle 1",
+            "heapMB": 6.59,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 2",
+            "heapMB": 6.66,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 3",
+            "heapMB": 6.67,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 4",
+            "heapMB": 6.76,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 5",
+            "heapMB": 6.8,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 6",
+            "heapMB": 6.8,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 7",
+            "heapMB": 6.81,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 8",
+            "heapMB": 6.84,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 9",
+            "heapMB": 6.83,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 10",
+            "heapMB": 6.85,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 11",
+            "heapMB": 6.84,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          },
+          {
+            "label": "cycle 12",
+            "heapMB": 6.84,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0,
+            "rowsShown": 48
+          }
+        ]
+      },
+      "longThread": {
+        "what": "mount a chat whose persisted thread is 2400 rows, then unmount it",
+        "rowsInMemoryAndShown": 1000,
+        "heapWhileOpenMB": 6.45,
+        "heapAfterCloseMB": 0.04,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 6.73,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          },
+          {
+            "label": "2400-row thread open",
+            "heapMB": 13.18,
+            "domNodes": 18522,
+            "domListeners": 1145,
+            "busListeners": 8,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          },
+          {
+            "label": "closed",
+            "heapMB": 6.77,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          }
+        ]
+      },
+      "collabRooms": {
+        "what": "20 cycles of: a Y.Doc with ~66 KB of plan text, createCollabProvider (unreachable relay), awareness set, handle.destroy(), doc dropped",
+        "liveYDocsAfter": 0,
+        "heapGrowthMB": 0.38,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 6.77,
+            "domNodes": 21,
+            "domListeners": 145,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          },
+          {
+            "label": "after 20 rooms",
+            "heapMB": 7.15,
+            "domNodes": 21,
+            "domListeners": 165,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          }
+        ]
+      },
+      "repoIcons": {
+        "what": "cd through 300 directories across 3 repos, each repo_icon answer a fresh 256 KB data URL",
+        "cachedDirectories": 256,
+        "heapGrowthMB": 0.95,
+        "series": [
+          {
+            "label": "before",
+            "heapMB": 7.14,
+            "domNodes": 21,
+            "domListeners": 165,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          },
+          {
+            "label": "after 300 directories",
+            "heapMB": 8.09,
+            "domNodes": 21,
+            "domListeners": 165,
+            "busListeners": 0,
+            "leftoverDiagramNodes": 0,
+            "liveYDocs": 0
+          }
+        ]
+      }
+    },
+    "browserVersion": "Chrome/154.0.8037.98"
+  }
+}
