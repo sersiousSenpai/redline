@@ -19,6 +19,12 @@
 .rl-queue-row button:hover:not(:disabled), .rl-queue-row button:focus-visible { color: var(--color-ink); background: var(--color-hover-wash); }
 .rl-queue-row button:disabled { opacity: .4; cursor: default; }
 .rl-queue-row .rl-queue-x { min-width: 24px; font-size: 14px; }
+/* The room a flex thread leaves for the pill at its end (the page chat's and
+   the mission's): a box after the newest message, never the scroller's own
+   padding-bottom, which some WebKit builds leave out of what a flex scroller
+   scrolls, putting the newest line under the pill (chat-stream-visual-qa's
+   queue-clear-webkit). With the thread's 10px gap above it, 36px in all. */
+.rl-thread-clearance::after { content: ""; flex: none; height: 26px; }
 /* The composer's one primary button (SendStopButton): send ↑, queue ↑ or
    stop ■ in one fixed slot, so the field beside it never changes width. Its
    glyph is `--color-on-info`: white is under 3:1 on the lighter blues. */

@@ -159,9 +159,9 @@ export function MissionChat({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        // The bottom padding keeps the queue tray's pill clear of the newest
+        // The end spacer keeps the queue tray's pill clear of the newest
         // line: the tray overlays the thread rather than shrinking it.
-        className="flex-1 min-h-0 overflow-y-auto rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 pb-9"
+        className="flex-1 min-h-0 overflow-y-auto rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 rl-thread-clearance"
       >
         {!loaded ? null : messages.length === 0 && status === "idle" ? (
           <div style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>

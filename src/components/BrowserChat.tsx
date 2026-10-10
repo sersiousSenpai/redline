@@ -582,9 +582,9 @@ export const BrowserChat = memo(function BrowserChat({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        // The bottom padding keeps the status rail's pills clear of the
-        // newest line: the rail overlays the thread rather than shrinking it.
-        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 pb-9"
+        // The end spacer keeps the status rail's pills clear of the newest
+        // line: the rail overlays the thread rather than shrinking it.
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 rl-thread-clearance"
         data-browser-chat-messages
       >
         {!loaded ? null : messages.length === 0 && status === "idle" ? (

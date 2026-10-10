@@ -48,7 +48,8 @@ const temporary = await mkdtemp(path.join(tmpdir(), "redline-chat-stream-qa-"));
 const service = path.join(root, "fixtures/chat-stream-qa/services.ts");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const report = { startedAt: new Date().toISOString(), fixture: "fixtures/chat-stream-qa", scenes: {}, screenshots: [], checks: [], errors: [], sourceSha256: {}, limitations: [
-  "Headless Chrome component fixture, not WKWebView: scroll anchoring is switched off for the reader-up check to match WebKit, and frame timing differs.",
+  "Headless Chrome component fixture, not WKWebView: scroll anchoring is switched off for the reader-up and queue-clearance checks to match WebKit, and frame timing differs.",
+  "queue-clear-webkit drops the thread scroller's own padding-bottom to stand in for WebKit builds that leave a flex scroller's end padding out of its scrollable overflow (Redline runs back to macOS 11). The WebKit on the machine that wrote this check counts it, measured with an offscreen WKWebView.",
   "The turn store, agent, dictation, audio and Tauri service interfaces are synthetic; no database, model call or profile is touched.",
   "The card scene is the chat in a card-sized frame, not MonochatIsland itself; the door composer (FrontDoor) is the production component.",
 ] };
@@ -166,6 +167,32 @@ function measure(ask, first, last) {
   };
 }
 const measureTurn = (ask, first, last) => cdp.evaluate(`(${measure})(${JSON.stringify(ask)}, ${JSON.stringify(first)}, ${JSON.stringify(last)})`);
+/** Scrolled to the end, how far the thread's lowest line sits above the
+ *  queue's pill (negative: under it). `legacyWebKit` drops the scroller's own
+ *  padding-bottom first, as a WebKit that leaves a flex scroller's end padding
+ *  out of what it scrolls would. Scroll anchoring is off, as in WebKit. */
+function queueClearance(legacyWebKit) {
+  const scene = document.querySelector("[data-qa-scene]");
+  const pill = scene.querySelector(".rl-queue-pill");
+  const first = (() => { const walk = document.createTreeWalker(scene, NodeFilter.SHOW_TEXT); let n; while ((n = walk.nextNode())) if (n.data.includes("How do we preserve")) return n; return null; })();
+  let scroller = first?.parentElement;
+  while (scroller && !/(auto|scroll)/.test(getComputedStyle(scroller).overflowY)) scroller = scroller.parentElement;
+  if (!pill || !scroller) return null;
+  scroller.style.overflowAnchor = "none";
+  if (legacyWebKit) scroller.style.paddingBottom = "0px";
+  scroller.scrollTop = scroller.scrollHeight;
+  let lowest = -Infinity;
+  const walk = document.createTreeWalker(scroller, NodeFilter.SHOW_TEXT);
+  for (let n; (n = walk.nextNode());) {
+    if (!n.data.trim()) continue;
+    const range = document.createRange(); range.selectNodeContents(n);
+    for (const r of range.getClientRects()) if (r.height > 0) lowest = Math.max(lowest, r.bottom);
+  }
+  const clearance = +(pill.getBoundingClientRect().top - lowest).toFixed(1);
+  scroller.style.paddingBottom = ""; scroller.style.overflowAnchor = "";
+  scroller.scrollTop = scroller.scrollHeight;
+  return clearance;
+}
 /** Applies `patch` and reads the gap to the bottom on the first painted frame. */
 const firstFrameGap = (patch) => cdp.evaluate(`new Promise(resolve => { window.__turn.set(${JSON.stringify(patch)}); requestAnimationFrame(() => resolve((${measure})("QA-QUESTION-2", "MARKERSTART", "MARKEREND").scroller.gapToBottom)); })`);
 
@@ -233,6 +260,14 @@ async function runScene(scene) {
   const readerAfter = parked && (await measureTurn("QA-QUESTION-4", "MARKERUP", "MARKERUPEND")).first?.y;
   await screenshot(`${scene}-8-reader-up-settled`);
   rec.readerUp = { before: readerBefore, after: readerAfter };
+  // A message queued behind the longest reply, the thread parked at its end:
+  // the pill overlays the thread, which must leave its newest line clear.
+  if (queued) {
+    await setTurn({ messages: before, status: "streaming", startedAt: Date.now(), liveText: LONG, meter: meter(400, false), activity: [], queue: [c.queued] }); await settle();
+    rec.queueClearance = { chrome: await cdp.evaluate(`(${queueClearance})(false)`), legacyWebKit: await cdp.evaluate(`(${queueClearance})(true)`) };
+    await screenshot(`${scene}-9-queued-at-end`);
+    await setTurn({ queue: [] }); await settle();
+  }
 
   // ── Checks ──
   const delta = (a, b) => (a == null || b == null ? null : +(b - a).toFixed(1));
@@ -258,6 +293,8 @@ async function runScene(scene) {
     check(scene, "viewport-queue", "keeps the thread viewport when a message is queued", full.scroller.clientHeight === queued.scroller.clientHeight, [full.scroller.clientHeight, queued.scroller.clientHeight]);
     check(scene, "follow-queue", "stays pinned to the newest line after a queued send", queued.scroller.gapToBottom === 0, queued.scroller);
     check(scene, "queue-visible", "shows the queued message", queued.queued, {});
+    check(scene, "queue-clear", "keeps the newest line clear of the queue's pill", rec.queueClearance.chrome != null && rec.queueClearance.chrome >= 0, rec.queueClearance);
+    check(scene, "queue-clear-webkit", "keeps the newest line clear of the pill where WebKit drops a flex scroller's end padding", rec.queueClearance.legacyWebKit != null && rec.queueClearance.legacyWebKit >= 0, rec.queueClearance);
   }
   check(scene, "settle-first-line", "settles without moving its first line", still(delta(full.first?.y, settled.first?.y)), { delta: delta(full.first?.y, settled.first?.y) });
   check(scene, "settle-last-line", "settles without moving its last line", still(delta(full.last?.y, settled.last?.y)), { delta: delta(full.last?.y, settled.last?.y) });
