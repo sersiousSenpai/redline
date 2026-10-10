@@ -89,6 +89,24 @@ describe("watching for corrections", () => {
     expect(learn.mock.calls).toEqual([[{ heard: "civ core", meant: "Kokoro" }]]);
   });
 
+  it("never learns a word half typed over when the next keystroke leaves no swap", () => {
+    const learn = vi.fn();
+    const watch = watchCorrections(around, learn);
+    // Backspaced through, then retyped: "Ko" and "K" are on the way, never meant.
+    type("The civ co sidecar needs work");
+    type("The civ c sidecar needs work");
+    type("The civ  sidecar needs work");
+    type("The civ K sidecar needs work");
+    type("The civ Ko sidecar needs work");
+    type("The civ K sidecar needs work");
+    expect(learn).not.toHaveBeenCalled();
+    type("The civ Kok sidecar needs work");
+    type("The Kokoro sidecar needs work");
+    vi.advanceTimersByTime(1300);
+    expect(learn.mock.calls).toEqual([[{ heard: "civ core", meant: "Kokoro" }]]);
+    watch.stop();
+  });
+
   it("stops after the window", () => {
     const learn = vi.fn();
     watchCorrections(around, learn);

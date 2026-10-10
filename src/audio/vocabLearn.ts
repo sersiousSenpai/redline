@@ -160,8 +160,16 @@ export function watchCorrections(around: AroundText, learn: (c: Correction) => v
     pending = [];
   };
   const look = () => {
-    const found = corrections(base, around.value(), span);
-    if (!found.length) return commit();
+    const value = around.value();
+    const found = corrections(base, value, span);
+    if (!found.length) {
+      // Sent and cleared: the swap the user last left stands. Otherwise it
+      // was a word on its way to another (backspaced through, half retyped).
+      if (!value.trim()) return commit();
+      clearTimeout(settle);
+      pending = [];
+      return;
+    }
     pending = found;
     clearTimeout(settle);
     settle = setTimeout(commit, SETTLE_MS);
