@@ -4647,7 +4647,8 @@ function App() {
 
   // Joined-session shadow (1c): the sidebar row + pane header facts are
   // synthesized entirely from the room's Yjs state — no backend session.
-  const joinedInfo = useJoinedSession(joinedRoom, joinedPresence);
+  // Built afresh every render, so kept by value for the memoized sidebar.
+  const joinedInfo = useStableValue(useJoinedSession(joinedRoom, joinedPresence));
   const joinedActive = !!joinedInfo && activeId === joinedInfo.key;
 
   // Is there an actual DOCUMENT on the plate right now? The zoom / wide-view
