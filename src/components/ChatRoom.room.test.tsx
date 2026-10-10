@@ -2,7 +2,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
+const { turn, calls, contextReply, markdownRenders, readAloud } = vi.hoisted(() => ({
+  readAloud: { speaking: false, stop: () => {}, warm: vi.fn() },
   turn: { messages: [] as { id: string; role: string; body: string; status: string }[], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), meter: null, activity: [], meters: {} },
   calls: [] as { cmd: string; args: Record<string, unknown> }[],
@@ -11,7 +12,7 @@ const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
 }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
-vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => ({ speaking: false, stop: () => {} }) }));
+vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => readAloud }));
 vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args: Record<string, unknown>) => {
@@ -52,6 +53,23 @@ async function render(props: Partial<ChatRoomProps> = {}) {
     dictationEnabled={false} onClose={() => {}} {...props} />));
 }
 const button = (label: string) => Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(b => b.textContent === label);
+
+describe("reading replies aloud", () => {
+  it("starts the voice engine on a hover or a press that turns it on, never on mount", async () => {
+    readAloud.warm.mockClear();
+    await render();
+    expect(readAloud.warm).not.toHaveBeenCalled();
+    const toggle = host.querySelector<HTMLButtonElement>('[aria-label="Read replies aloud"]')!;
+    await act(async () => toggle.dispatchEvent(new MouseEvent("pointerover", { bubbles: true })));
+    expect(readAloud.warm).toHaveBeenCalledTimes(1);
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(readAloud.warm).toHaveBeenCalledTimes(2);
+    // Turning it off is no intent to hear anything.
+    await act(async () => toggle.click());
+    expect(readAloud.warm).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("the chat as a brainstorm room", () => {
   it("reads at plate scale only when the room has the whole plate", async () => {

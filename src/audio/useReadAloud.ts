@@ -35,6 +35,9 @@ export interface ReadAloud {
   speaking: boolean;
   /** Stop immediately and drop what is queued — barge-in, close, Stop. */
   stop: () => void;
+  /** Intent to read aloud — a hover or a press on the control: start the
+   *  engine now so the first sentence doesn't pay its cold start. */
+  warm: () => void;
 }
 
 export function useReadAloud(opts: {
@@ -61,6 +64,14 @@ export function useReadAloud(opts: {
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
+  // Kokoro is warmed only on intent, never because a chat mounted: a warm
+  // is a ~300 MB model load. And never with the one-time fp32 upgrade, a
+  // 325 MB download that only the voice panel and its settings start.
+  const engine = useRef("system");
+  const warm = () => {
+    if (engine.current === "kokoro") void invoke("tts_kokoro_warm", { upgrade: false }).catch(() => {});
+  };
+
   // One queue for the hook's life; the engine is resolved once and swapped in
   // when the answer lands (the default system driver speaks in the meantime).
   useEffect(() => {
@@ -71,9 +82,8 @@ export function useReadAloud(opts: {
     void invoke<{ engine: string }>("tts_get_settings")
       .then((s) => {
         if (!alive || (s.engine || "system") === "system") return;
+        engine.current = s.engine;
         q.setDriver(cloudTtsDriver((m) => onErrorRef.current?.(m)));
-        if (s.engine === "kokoro")
-          void invoke("tts_kokoro_warm").catch(() => {});
       })
       .catch(() => {
         /* the system voice is the fallback, and it is already installed */
@@ -100,7 +110,12 @@ export function useReadAloud(opts: {
     if (!q) return;
     const s = readAloudStep(step.current, { liveText, streaming, enabled });
     step.current = { spokenLen: s.spokenLen, wasStreaming: s.wasStreaming };
-    if (s.prime) q.primeTurn();
+    // A reply starting with reading aloud on is the intent: the engine
+    // starts while the agent thinks, not on the first sentence.
+    if (s.prime) {
+      warm();
+      q.primeTurn();
+    }
     if (s.delta) q.enqueue(s.delta);
     if (s.flush) q.flush();
   }, [liveText, streaming, enabled]);
@@ -108,5 +123,6 @@ export function useReadAloud(opts: {
   return {
     speaking,
     stop: () => queueRef.current?.cancel(),
+    warm,
   };
 }
