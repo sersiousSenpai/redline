@@ -8,6 +8,8 @@ interface Props {
   tabs: TilePage[]; activeId: string; onSelect: (id: string) => void; onCloseTab: (id: string) => void; onNewTab: () => void;
   onTabDrag: (event: PointerEvent, id: string) => void; onResize: () => void;
   tileBadges?: Record<string, number>; hoveredTileTab?: string | null; onHoverTile?: (id: string | null) => void;
+  /** Tabs the agent is acting on: a dot until the turn ends (BC-41). */
+  acting?: ReadonlySet<string>;
   groups: TabGroup[]; organized: boolean; organizing: boolean; onMode: (value: boolean) => void;
   onOrganize: () => void; onToggleGroup: (id: string) => void;
 }
@@ -22,7 +24,7 @@ export default function BrowserTabRail(props: Props) {
   const resize = (next: number) => { setWidth(next); localStorage.setItem("redline.browser.railWidth", String(next)); props.onResize(); };
   const closeTab = (id: string) => { if (id === props.activeId || tabNodes.current.get(id)?.contains(document.activeElement)) closingFocus.current = id; props.onCloseTab(id); };
   useLayoutEffect(() => { if (!closingFocus.current || props.tabs.some(tab => tab.id === closingFocus.current)) return; closingFocus.current = null; tabNodes.current.get(props.activeId)?.focus(); }, [props.tabs, props.activeId]);
-  const renderTab = (tab: TilePage) => <div key={tab.id} ref={node => { if (node) tabNodes.current.set(tab.id, node); else tabNodes.current.delete(tab.id); }} role="tab" aria-label={tab.title || "New tab"} aria-selected={tab.id === props.activeId} tabIndex={tab.id === props.activeId ? 0 : -1} data-tab-id={tab.id} className="rb-tab" data-tile-hover={props.hoveredTileTab === tab.browseId || undefined}
+  const renderTab = (tab: TilePage) => <div key={tab.id} ref={node => { if (node) tabNodes.current.set(tab.id, node); else tabNodes.current.delete(tab.id); }} role="tab" aria-label={`${tab.title || "New tab"}${props.acting?.has(tab.id) ? " — the agent is acting on this page" : ""}`} aria-selected={tab.id === props.activeId} tabIndex={tab.id === props.activeId ? 0 : -1} data-tab-id={tab.id} className="rb-tab" data-tile-hover={props.hoveredTileTab === tab.browseId || undefined} data-agent-acting={props.acting?.has(tab.id) || undefined}
     title={`${tab.title}\n${tab.url}`} onPointerEnter={() => props.onHoverTile?.(tab.browseId)} onPointerLeave={() => props.onHoverTile?.(null)}
     onClick={event => { event.currentTarget.focus({ preventScroll: true }); props.onSelect(tab.id); }}
     onPointerDown={event => { if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return; event.currentTarget.focus({ preventScroll: true }); props.onTabDrag(event, tab.id); }}

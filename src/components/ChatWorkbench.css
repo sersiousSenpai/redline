@@ -24,6 +24,13 @@
 .rl-send { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 999px; background: var(--color-info); color: var(--color-on-accent); cursor: pointer; }
 .rl-send[aria-disabled="true"] { opacity: .45; cursor: default; }
 .rl-send[data-send="stop"] { background: var(--color-ink); color: var(--color-paper); }
+/* The mic face is quieter than send: nothing is waiting to go yet. Hot, it
+   takes the accent and breathes, still while reduced motion is on. */
+.rl-send[data-send="mic"] { background: color-mix(in srgb, var(--color-ink) 9%, transparent); color: var(--color-ink); }
+.rl-send[data-listening] { position: relative; background: var(--color-info); color: var(--color-on-accent); }
+.rl-send[data-listening]::after { content: ""; position: absolute; inset: -4px; border: 2px solid color-mix(in srgb, var(--color-info) 40%, transparent); border-radius: inherit; animation: rl-send-listening 1.4s ease-in-out infinite; }
+@keyframes rl-send-listening { 50% { opacity: .35; transform: scale(1.1); } }
+@media (prefers-reduced-motion: reduce) { .rl-send[data-listening]::after { animation: none; } }
 .rl-chat-mode-picker button, .rl-changes-card button { color: var(--color-ink); border: 1px solid var(--color-rule); background: var(--color-paper); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
 .rl-chat-mode-picker { position: relative; }
 .rl-chat-mode-menu { position: absolute; bottom: 100%; left: 0; z-index: 100; min-width: 265px; padding: 10px; background: var(--color-paper); border: 1px solid var(--color-rule); border-radius: 9px; box-shadow: 0 8px 24px #0002; }

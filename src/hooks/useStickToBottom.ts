@@ -28,6 +28,17 @@ export interface StickToBottom<E extends HTMLElement> {
   onScroll: () => void;
   /** Re-arm following — call when the thread's identity changes. */
   stick: () => void;
+  /** Go to the newest line now, and follow from there. */
+  jump: () => void;
+  /** Stop following and rest the view at `top`. */
+  park: (top: number) => void;
+}
+
+export interface StickOptions {
+  /** How close to the bottom counts as there. */
+  threshold?: number;
+  /** Told each time following starts or stops, for a surface that shows it. */
+  onFollow?: (following: boolean) => void;
 }
 
 /**
@@ -37,10 +48,18 @@ export interface StickToBottom<E extends HTMLElement> {
  */
 export function useStickToBottom<E extends HTMLElement = HTMLDivElement>(
   deps: readonly unknown[],
+  { threshold = STICK_THRESHOLD_PX, onFollow }: StickOptions = {},
 ): StickToBottom<E> {
   const ref = useRef<E | null>(null);
   const stuck = useRef(true);
   const watch = useRef<{ observer: ResizeObserver; el: E; last: Element | null } | null>(null);
+  const onFollowRef = useRef(onFollow);
+  onFollowRef.current = onFollow;
+  const follow = useCallback((next: boolean) => {
+    if (stuck.current === next) return;
+    stuck.current = next;
+    onFollowRef.current?.(next);
+  }, []);
 
   const pin = useCallback(() => {
     const el = ref.current;
@@ -77,13 +96,21 @@ export function useStickToBottom<E extends HTMLElement = HTMLDivElement>(
   const onScroll = useCallback(() => {
     const el = ref.current;
     if (!el) return;
-    stuck.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < STICK_THRESHOLD_PX;
-  }, []);
+    follow(el.scrollHeight - el.scrollTop - el.clientHeight < threshold);
+  }, [follow, threshold]);
 
-  const stick = useCallback(() => {
-    stuck.current = true;
-  }, []);
+  const stick = useCallback(() => follow(true), [follow]);
 
-  return { ref, onScroll, stick };
+  const jump = useCallback(() => {
+    follow(true);
+    pin();
+  }, [follow, pin]);
+
+  const park = useCallback((top: number) => {
+    follow(false);
+    const el = ref.current;
+    if (el) el.scrollTop = top;
+  }, [follow]);
+
+  return { ref, onScroll, stick, jump, park };
 }

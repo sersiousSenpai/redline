@@ -113,13 +113,3 @@ export function promptForSelection(ev: SelectionEvent): string {
   const intent = ev.action === "ask" ? ev.note : INTENT[ev.action] ?? "";
   return [...quoted, "", intent].join("\n");
 }
-
-/** Whether tapping this action sends the turn straight away.
- *
- *  Only `ask` waits: it has no question in it yet. Define/Explain/Research are
- *  already complete instructions, so making the user press ⌘↵ to confirm what
- *  they just tapped would be friction with no payoff. (`list` never reaches the
- *  composer — it's appended to the tab's working list instead.) */
-export function autoSends(action: SelectionAction, note = ""): boolean {
-  return action !== "ask" || !!note.trim();
-}

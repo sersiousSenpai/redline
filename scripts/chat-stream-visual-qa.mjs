@@ -6,7 +6,8 @@
 // Drives every chat surface (fixtures/chat-stream-qa) through one turn —
 // idle → sent → tools → mid-stream → full stream → queued type-ahead →
 // settled, then a heading-first reply whose first tool fires after its text
-// began, and a reader parked mid-reply — and checks the rule in
+// began and is answered before it settles, and a reader parked mid-reply —
+// and checks the rule in
 // docs/perf-budget.md: a reply settles without moving, and the thread's
 // viewport holds still through the turn.
 //
@@ -91,7 +92,9 @@ const OPEN_FENCE_AT = FULL.indexOf("{ maxTokens");
 const HEADING_FIRST = "## MARKERHEAD Meter\n\nMARKERTAIL The meter rides with the row once the turn settles.";
 const LONG = FULL.replace("MARKERSTART", "MARKERUP").replace("MARKEREND", "MARKERUPEND") + "\n\n" +
   Array.from({ length: 24 }, (_, i) => `Paragraph ${i + 1} keeps the reply long enough to scroll past the fold, so the reader can sit mid-reply.`).join("\n\n");
-const meter = (out, done) => ({ model: "claude-opus-4-6", effort: "xhigh", serviceTier: null, speed: null, inputTokens: 4, outputTokens: out, cacheReadTokens: 30200, cacheCreationTokens: 2100, contextTokens: 32304, contextWindow: 200000, toolCalls: 2, lastTool: "Grep", lastToolLabel: "Grep(seat_burn)", thinkingTokens: 120, stopReason: done ? "end_turn" : null, rateLimited: null, numTurns: done ? 3 : null, durationMs: done ? 12400 : null, costUsd: null, rev: out });
+// A settled row's meter keeps the turn's tool steps, as the reducer and
+// `meter::settle` store them, so a surface drawing its steps settles them too.
+const meter = (out, done) => ({ model: "claude-opus-4-6", effort: "xhigh", serviceTier: null, speed: null, inputTokens: 4, outputTokens: out, cacheReadTokens: 30200, cacheCreationTokens: 2100, contextTokens: 32304, contextWindow: 200000, toolCalls: 2, lastTool: "Grep", lastToolLabel: "Grep(seat_burn)", thinkingTokens: 120, stopReason: done ? "end_turn" : null, rateLimited: null, numTurns: done ? 3 : null, durationMs: done ? 12400 : null, costUsd: null, rev: out, ...(done ? { steps: [{ at: 2, kind: "tool", label: "Grep(seat_burn)" }] } : {}) });
 function conversation(scene) {
   const ids = { companionId: "qa", browseId: "b-1", missionId: "m-1", sessionId: "s-1", commentId: "c-1", ...(scene === "comment-chat" ? { mode: "chat" } : {}) };
   const msg = (id, role, body, createdAt) => ({ id, role, body, status: "complete", createdAt, backend: "claude-code", ...ids });
@@ -199,8 +202,14 @@ async function runScene(scene) {
   // text already on screen.
   await setTurn({ messages: [...c.history, c.q2, c.a2, c.q3], status: "streaming", startedAt: Date.now(), liveText: HEADING_FIRST, meter: { ...meter(20, false), toolCalls: 0, lastTool: null, lastToolLabel: null }, activity: [] }); await settle();
   const textFirst = rec.states["6-head-text-first"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
-  await setTurn({ meter: meter(21, false), activity: [{ at: Date.now(), kind: "tool", label: "Grep(seat_burn)" }] }); await settle();
+  const toolAt = Date.now();
+  await setTurn({ meter: meter(21, false), activity: [{ at: toolAt, kind: "tool", label: "Grep(seat_burn)" }] }); await settle();
   const headLive = rec.states["6-head-streaming"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
+  // The tool returns and the model is asked again, as every provider does
+  // before a reply settles: the step is done, and a surface that draws done
+  // steps as rows draws it now, not at the settle.
+  await setTurn({ activity: [{ at: toolAt, kind: "tool", label: "Grep(seat_burn)" }, { at: toolAt + 1, kind: "requesting", label: "Requesting…" }] }); await settle();
+  const headAnswering = rec.states["6-head-answering"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
   await setTurn({ messages: [...c.history, c.q2, c.a2, c.q3, c.a3], liveText: "", status: "idle", meter: null, meters: { a2: meter(OPEN_FENCE_AT, true), a3: meter(20, true) } }); await settle();
   const headSettled = rec.states["7-head-settled"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
   await screenshot(`${scene}-7-head-settled`);
@@ -256,7 +265,7 @@ async function runScene(scene) {
   // the text moves what is ABOVE the line, not the text under it.
   const toolShift = { ask: delta(textFirst.ask, headLive.ask), first: delta(textFirst.first?.y, headLive.first?.y), last: delta(textFirst.last?.y, headLive.last?.y) };
   check(scene, "tool-after-text", "keeps the turn still when a tool fires after the reply has started writing", Object.values(toolShift).every((d) => still(d)), toolShift);
-  check(scene, "settle-heading-first", "settles a heading-first reply without moving it", still(delta(headLive.first?.y, headSettled.first?.y)), { delta: delta(headLive.first?.y, headSettled.first?.y), marginTop: [headLive.first?.marginTop, headSettled.first?.marginTop] });
+  check(scene, "settle-heading-first", "settles a heading-first reply without moving it", still(delta(headAnswering.first?.y, headSettled.first?.y)), { delta: delta(headAnswering.first?.y, headSettled.first?.y), marginTop: [headAnswering.first?.marginTop, headSettled.first?.marginTop] });
   check(scene, "reader-up", "leaves a reader parked mid-reply where they are", readerBefore != null && delta(readerBefore, readerAfter) === 0, { before: readerBefore, after: readerAfter });
   check(scene, "lead-scale", "sizes the lead paragraph at or above the reply's text, at any text size", !!settled.first && parseFloat(settled.first.font) >= parseFloat(settled.last?.font), { lead: settled.first?.font, body: settled.last?.font });
   check(scene, "lead-font", "keeps the lead paragraph's type at settle", !!full.first && full.first.font === settled.first?.font && full.first.weight === settled.first?.weight, { streamed: [full.first?.font, full.first?.weight], settled: [settled.first?.font, settled.first?.weight] });

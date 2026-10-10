@@ -133,6 +133,11 @@
 .rb-tab-rail .rb-tab { min-height:34px; min-width:0; max-width:none; flex:0 0 auto; border-radius:6px; border:1px solid transparent; padding:7px; transform:translateY(var(--tab-drag-y,0px)); }
 .rb-tab-rail .rb-tab[aria-selected=true] { border-color:var(--color-rule); }
 .rb-favicon { width:14px; height:14px; flex:none; object-fit:contain; }
+/* The agent is acting on this page: a dot on the tab's icon until its turn ends. */
+.rb-tab-rail .rb-tab[data-agent-acting] { position:relative; }
+.rb-tab-rail .rb-tab[data-agent-acting]::after { content:""; position:absolute; top:4px; left:4px; width:7px; height:7px; border-radius:50%; background:var(--color-info); box-shadow:0 0 0 2px var(--color-bg-elevated); animation:rb-agent-acting 1.6s ease-in-out infinite; }
+@keyframes rb-agent-acting { 50% { opacity:.4; } }
+@media(prefers-reduced-motion:reduce) { .rb-tab-rail .rb-tab[data-agent-acting]::after { animation:none; } }
 .rb-rail-mode { display:flex; padding:3px 8px; gap:3px; }
 .rb-rail-mode button { flex:1; padding:5px; border:0; border-radius:5px; background:transparent; color:var(--color-ink-muted); font:inherit; font-size:11px; cursor:pointer; }
 .rb-rail-mode button[aria-pressed=true] { background:var(--color-paper); color:var(--color-ink); }

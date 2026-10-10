@@ -387,7 +387,7 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         class: RouteClass::Protected(SCOPE_BROWSER_DRIVE),
         purpose: "Run a serialized typed action on an explicit stable browser target with an observed outcome",
         request: "JSON {operationId, label, expectedRevision?, timeoutMs?, operation:{kind: navigate/click/fill/key/scroll/select/wait, ...}}; no active-tab fallback",
-        response: "JSON {operationId, label, status, elapsedMs, observed, error}; repeat an identical operation ID to retrieve its retained outcome",
+        response: "JSON {operationId, label, kind, tab, status, elapsedMs, observed, error}; repeat an identical operation ID to retrieve its retained outcome",
     },
     RouteSpec {
         method: "POST",

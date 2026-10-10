@@ -1,7 +1,7 @@
 import { act, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ mission: {} as Record<string, unknown>, invoke: vi.fn(), load: vi.fn(), save: vi.fn(), revision: vi.fn(), raceLabel: "", windowFullscreen: false, setFullscreen: vi.fn(), resized: null as (() => void) | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), views: new Map<string, { label: string; log: string[]; visible: boolean; position?: { x: number; y: number }; size?: { width: number; height: number } }>(), createGates: new Map<string, Promise<void>>(), showGates: new Map<string, Promise<void>>() }));
+const mocks = vi.hoisted(() => ({ mission: {} as Record<string, unknown>, chatRenders: [] as string[], invoke: vi.fn(), load: vi.fn(), save: vi.fn(), revision: vi.fn(), raceLabel: "", windowFullscreen: false, setFullscreen: vi.fn(), resized: null as (() => void) | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), views: new Map<string, { label: string; log: string[]; visible: boolean; position?: { x: number; y: number }; size?: { width: number; height: number } }>(), createGates: new Map<string, Promise<void>>(), showGates: new Map<string, Promise<void>>() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, fn) => { mocks.listeners.set(name, fn); return () => { mocks.listeners.delete(name); }; }) }));
 vi.mock("../lib/browserWorkspace", () => ({ loadBrowserWorkspace: mocks.load, saveBrowserWorkspace: mocks.save, noteWorkspaceRevision: mocks.revision }));
@@ -23,7 +23,14 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { browseId: string; label: string; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; seed?: { text: string } }) => <div data-conversation={props.browseId} data-label={props.label} data-seed={props.seed?.text}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button></div> }));
+vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
+  mocks.chatRenders.push(`${props.conversation.kind}:${props.conversation.browseId}`);
+  const action = props.pageActions?.get(props.conversation.targetLabel);
+  return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}
+    data-page-action={action ? `${action.kind}:${action.tab}` : undefined} data-mission={props.mission?.title} data-can-pick={props.onPickElement ? "yes" : "no"}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button>
+    <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button>
+    <button onClick={props.taskList?.onOpen}>Open task list</button><button onClick={props.mission?.onSynthesize}>Synthesize</button></div>;
+} }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 
@@ -40,7 +47,7 @@ const tabs = ["one", "two"].map((browseId) => ({ id: `t-${browseId}`, browseId, 
 const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 160)); }); };
 const event = async (name: string, payload: unknown) => { await act(async () => { mocks.listeners.get(name)?.({ payload }); }); await settle(); };
 beforeEach(() => {
-  localStorage.clear(); mocks.listeners.clear(); mocks.views.clear(); mocks.createGates.clear(); mocks.showGates.clear(); mocks.raceLabel = ""; mocks.mission = {};
+  localStorage.clear(); mocks.listeners.clear(); mocks.views.clear(); mocks.createGates.clear(); mocks.showGates.clear(); mocks.raceLabel = ""; mocks.mission = {}; mocks.chatRenders = [];
   mocks.windowFullscreen = false; mocks.resized = null;
   mocks.setFullscreen.mockReset().mockImplementation(async (value: boolean) => { mocks.windowFullscreen = value; mocks.resized?.(); });
   mocks.invoke.mockReset(); mocks.load.mockReset(); mocks.save.mockReset(); mocks.revision.mockReset();
@@ -75,7 +82,7 @@ async function mount(props: Partial<ComponentProps<typeof BrowserPane>> = {}) {
 // `usePersistedState` stores JSON, so this is the literal `true`.
 const linkedModeOn = () => localStorage.setItem("redline.browser.linkedMode", "true");
 const conversation = () => dock.querySelector("[data-conversation]")!.getAttribute("data-conversation");
-const sharedThread = () => JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!).regular.browseId as string;
+const sharedThread = () => JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!).regular as string;
 const clickTab = (id: string) => act(async () => host.querySelector<HTMLElement>(`[data-tab-id="t-${id}"]`)!.click());
 const clickDock = (label: string) => act(async () => [...dock.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label)!.click());
 
@@ -240,6 +247,93 @@ describe("linked mode decides tab chat vs shared chat", () => {
     await open(shared); expect(conversation()).toBe(shared);
     expect(host.querySelector('[role="alert"]')).toBeNull();
   });
+
+  it("says so when a conversation link names a thread whose tab has closed", async () => {
+    await mount();
+    await act(async () => { window.dispatchEvent(new CustomEvent("redline-open-conversation", { detail: { conversationKind: "browse", conversationId: "closed" } })); });
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("This page conversation's tab is no longer open.");
+    expect(conversation()).toBe("two");
+  });
+
+  it("shows a shared chat on its own thread from its first render, never the tab's thread called shared", async () => {
+    await mount();
+    mocks.chatRenders = [];
+    await clickDock("Tab toggle");
+    const shared = sharedThread();
+    expect(conversation()).toBe(shared);
+    expect(new Set(mocks.chatRenders)).toEqual(new Set([`shared:${shared}`]));
+  });
+
+  it("advertises the shared thread to the dock while another panel is showing", async () => {
+    linkedModeOn();
+    const onDockState = vi.fn();
+    await mount({ dockPill: "cart", onDockState });
+    expect(onDockState).toHaveBeenLastCalledWith(expect.objectContaining({ browseId: sharedThread(), title: "Browser chat" }));
+  });
+
+  it("finds the shared chat an older build saved, with its title and origin beside it", async () => {
+    linkedModeOn();
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: { browseId: "kept", title: "Browser chat", originTabId: "t-one" }, m1: null }));
+    await mount();
+    expect(conversation()).toBe("kept");
+    expect(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!)).toEqual({ regular: "kept" });
+  });
+
+  it("opens a link from a reply beside the conversation, and selects a page that is already open", async () => {
+    await mount();
+    document.body.dataset.link = "https://three.test/";
+    await clickDock("Reply link");
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe("https://three.test/");
+    expect(conversation()).toBe("two");
+    expect(dock.querySelector("[data-label]")!.getAttribute("data-label")).not.toBe("browser-t-two");
+    document.body.dataset.link = "https://one.test";
+    await clickDock("Reply link");
+    expect(conversation()).toBe("one");
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(3);
+    delete document.body.dataset.link;
+  });
+
+  it("pins a reply to the page it was about, not the tab the conversation is anchored to", async () => {
+    const addFinding = vi.fn(async () => true);
+    mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits" }, addFinding };
+    await mount();
+    await event("browse-open-tab", { url: "https://three.test/" });
+    expect(conversation()).toBe("two");
+    await clickDock("Pin reply");
+    const opened = dock.querySelector("[data-label]")!.getAttribute("data-label")!.replace("browser-t-", "");
+    expect(addFinding).toHaveBeenCalledWith({ body: "A finding", browseId: opened, sourceUrl: "https://three.test/", sourceTitle: "three.test" });
+  });
+});
+
+describe("the agent acting on a page", () => {
+  it("dots the tab and names the action in the chat while it runs, and clears the dot when the turn ends", async () => {
+    await mount();
+    const label = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
+    const tab = () => host.querySelector(`[data-tab-id="${label.replace("browser-", "")}"]`)!;
+    await event("browser-action", { label, kind: "click", tab: 1, status: "running" });
+    expect(tab().hasAttribute("data-agent-acting")).toBe(true);
+    expect(tab().getAttribute("aria-label")).toContain("the agent is acting on this page");
+    expect(dock.querySelector("[data-page-action]")?.getAttribute("data-page-action")).toBe("click:1");
+    // Done: the chat's live line moves on, the dot stays until the turn ends.
+    await event("browser-action", { label, kind: "click", tab: 1, status: "completed" });
+    expect(dock.querySelector("[data-page-action]")).toBeNull();
+    expect(tab().hasAttribute("data-agent-acting")).toBe(true);
+    await event("browse-done", { browseId: "one" });
+    expect(tab().hasAttribute("data-agent-acting")).toBe(false);
+  });
+
+  it("hands the page chat the Task list, the mission's goal card and the element picker", async () => {
+    mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits", goal: "Compare token buckets" }, findings: [] };
+    const openDockPill = vi.fn();
+    await mount({ onOpenDockPill: openDockPill });
+    expect(dock.querySelector("[data-mission]")?.getAttribute("data-mission")).toBe("Rate limits");
+    expect(dock.querySelector("[data-can-pick]")?.getAttribute("data-can-pick")).toBe("yes");
+    await clickDock("Open task list");
+    expect(openDockPill).toHaveBeenLastCalledWith("cart");
+    // Synthesize is the mission's own turn: it opens the Mission panel.
+    await clickDock("Synthesize");
+    expect(openDockPill).toHaveBeenLastCalledWith("mission");
+  });
 });
 
 describe("plan Search", () => {
@@ -259,6 +353,7 @@ describe("plan Search", () => {
     // research comment links to.
     expect(conversation()).toBe(first);
     expect(dock.querySelector(`[data-conversation="${first}"]`)!.getAttribute("data-seed")).toBe("Research token buckets");
+    expect(dock.querySelector(`[data-conversation="${first}"]`)!.getAttribute("data-seed-source")).toBe("plan-search");
     await mount({ onOpenRequestConsumed, openRequest: search(2) });
     const second = onOpenRequestConsumed.mock.lastCall![0] as string;
     expect(second).not.toBe(first);
@@ -443,6 +538,8 @@ it("an inspector click immediately opens chat with the element attached", async 
   await event("browser-page-event", { label: "browser-t-two", kind: "inspect", value: { tag: "h1", accessibleName: "Heading" } });
   expect(onOpenDockPill).toHaveBeenLastCalledWith("page");
   expect(dock.querySelector("[data-seed]")?.getAttribute("data-seed")).toContain('"accessibleName": "Heading"');
+  // A picked element waits for the user's question, with the caret placed.
+  expect(dock.querySelector("[data-seed]")?.getAttribute("data-seed-source")).toBe("element");
   expect(host.textContent).not.toContain("Attach to chat");
 });
 
@@ -453,7 +550,7 @@ it("reveals page chat before an element or text action seeds its composer", asyn
   expect(dock.querySelector("[data-selected-discussion]")).toBeNull();
   const chat = dock.querySelector<HTMLElement>("[data-conversation]")!;
   expect(chat.parentElement!.style.display).not.toBe("none");
-  expect(chat.getAttribute("data-conversation")).toBe(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!).regular.browseId);
+  expect(chat.getAttribute("data-conversation")).toBe(sharedThread());
 });
 
 describe("mosaics", () => {

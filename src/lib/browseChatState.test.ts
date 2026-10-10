@@ -4,8 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   CHAT_CLOSED,
   migrateChatPill,
-  pageChatIdentity,
   chatEntryFor,
+  readSharedChats,
   pruneChatState,
   withChatPatch,
   type ChatStateMap,
@@ -101,8 +101,10 @@ it("shares panel visibility while retaining each tab's pill", () => {
   state = withChatPatch(state, "two", { open: false }, 2);
   expect(chatEntryFor(state, "one")).toMatchObject({ open: false, pill: "cart" });
 });
-it("keeps and releases the linked thread while grounding on the active page", () => {
-  const linked = { browseId: "one", title: "One", originTabId: "t-one" };
-  expect(pageChatIdentity({ browseId: "two" }, "t-two", linked)).toEqual({ browseId: "one", label: "browser-t-two" });
-  expect(pageChatIdentity({ browseId: "two" }, "t-two", null)).toEqual({ browseId: "two", label: "browser-t-two" });
+it("reads each workspace's shared chat, in the old shape or the new, and nothing else", () => {
+  // Builds before 10/10 kept a title and an origin tab beside the thread, and
+  // null for a workspace whose chat had gone into a mission.
+  expect(readSharedChats({ regular: { browseId: "s1", title: "Browser chat", originTabId: "t-one" }, m1: null, "mosaic:grid": "s2" }))
+    .toEqual({ regular: "s1", "mosaic:grid": "s2" });
+  for (const junk of [null, "s1", ["s1"], { regular: { title: "no id" } }, { regular: 7 }]) expect(readSharedChats(junk)).toEqual({});
 });

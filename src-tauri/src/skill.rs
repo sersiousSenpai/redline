@@ -72,7 +72,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "browse",
-        version: 8,
+        version: 9,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {

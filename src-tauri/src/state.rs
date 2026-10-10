@@ -1073,23 +1073,6 @@ pub struct MissionFinding {
     pub created_at: i64,
 }
 
-/// One **thumbs verdict** the user gave on a source the browse agent surfaced in
-/// tandem agent mode. Keyed by `(browse_id, source_url)` — re-clicking updates the
-/// same row. `verdict` is +1 (up) or -1 (down); `domain` is derived from the url
-/// so learning can aggregate preferences by host across tabs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceFeedback {
-    pub id: String,
-    pub browse_id: String,
-    pub source_url: String,
-    pub source_title: Option<String>,
-    pub domain: String,
-    pub verdict: i64,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
 /// One turn in a mission's orchestrator discussion thread. Mirrors
 /// `BrowseMessage`, scoped to a `mission_id`. Rows are terminal
 /// (`complete` | `error`); live streaming text is frontend-only state. The

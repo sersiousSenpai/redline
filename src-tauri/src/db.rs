@@ -13,25 +13,9 @@ use crate::state::{
     CommentKind, CommentOffer, ResearchLink,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
     MissionFinding, MissionMessage, PushRecord, Resolution, ReviewAnnotation, ReviewQuestion,
-    ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
+    ReviewSession, Revision, RoundHistoryEntry, SessionStatus, StructuralPayload,
     ThreadMessage, VoiceMessage,
 };
-
-/// Reduce a URL to a bare host for feedback aggregation: strip scheme, any path/
-/// query, a leading `www.`, and lowercase it. Best-effort — a URL we can't parse
-/// falls back to the trimmed input so a row is never lost.
-pub fn domain_of(url: &str) -> String {
-    let s = url.trim();
-    let after_scheme = s.split("://").nth(1).unwrap_or(s);
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // Drop any userinfo@ and :port.
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    host.trim_start_matches("www.").to_ascii_lowercase()
-}
 
 /// Serialize a comment's reopen-round history for the `reopen_history` column.
 /// Empty history stores NULL (keeps pre-feature and never-reopened rows clean).
@@ -6720,62 +6704,10 @@ impl Database {
 
     // --- Source feedback (tandem mode thumbs) ------------------------------
 
-    /// Record (or update) a thumbs verdict for a surfaced source. Upserts on
-    /// `(browse_id, source_url)`: a second click flips `verdict` and bumps
-    /// `updated_at` while keeping the original `created_at`.
-    pub fn upsert_source_feedback(&self, f: &SourceFeedback) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO source_feedback
-                (id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(browse_id, source_url) DO UPDATE SET
-                verdict = excluded.verdict,
-                source_title = excluded.source_title,
-                domain = excluded.domain,
-                updated_at = excluded.updated_at",
-            params![
-                f.id,
-                f.browse_id,
-                f.source_url,
-                f.source_title,
-                f.domain,
-                f.verdict,
-                f.created_at,
-                f.updated_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// All verdicts recorded on a tab's thread, so the sources strip can restore
-    /// its up/down state after a reload.
-    pub fn get_source_feedback(&self, browse_id: &str) -> rusqlite::Result<Vec<SourceFeedback>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at
-             FROM source_feedback
-             WHERE browse_id = ?1
-             ORDER BY updated_at, id",
-        )?;
-        let rows = stmt.query_map(params![browse_id], |row| {
-            Ok(SourceFeedback {
-                id: row.get(0)?,
-                browse_id: row.get(1)?,
-                source_url: row.get(2)?,
-                source_title: row.get(3)?,
-                domain: row.get(4)?,
-                verdict: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
-        rows.collect()
-    }
-
     /// Net thumbs score per domain across ALL tabs (sum of +1/-1), most-liked
-    /// first. Feeds the learned "preferred / avoided sources" line injected into
-    /// the tandem agent prompt.
+    /// first. Feeds the friction digest's source-trust signal (`context.rs`).
+    /// Tandem mode and its thumbs strip are retired, so these are the
+    /// verdicts recorded before then; nothing writes new ones.
     pub fn domain_feedback_summary(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(

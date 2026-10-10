@@ -100,6 +100,13 @@ export interface AgentTurnConfig<M extends TurnMessage> {
   sendFailPrefix: string;
   /** Restore a composer when dispatch was rejected before a turn began. */
   onSendFailed?: (text: string, error: unknown) => void;
+  /** The backend took a send (it started, or queued behind the turn in
+   *  flight), with the args `buildSendArgs` built for it and what the
+   *  backend said of it (its row's id, and whether it queued), when it says.
+   *  Bookkeeping that must only move for a send that landed (browse's
+   *  grounding watermark, who each turn went to) moves here, so a failed
+   *  one leaves it where it was. */
+  onSent?: (args: Record<string, unknown>, outcome?: SendOutcome) => void;
   /** This surface's key in the backend `thread_table` map (`browse` |
    *  `linked` | `mission` | `companion` | `memchat` | `drafter` | `fork`),
    *  used to load the settled rows' stored meters. Omit and the surface simply
@@ -398,6 +405,7 @@ export class AgentTurnController<M extends TurnMessage> {
         this.cmd("send"),
         cfg.queueing === false ? args : { ...args, queue: true },
       );
+      if (this.alive) cfg.onSent?.(args, outcome);
       if (this.alive && outcome) {
         this.dispatch({
           type: "send-resolved",

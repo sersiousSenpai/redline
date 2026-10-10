@@ -67,13 +67,15 @@ interface Surface {
   render: () => ReturnType<typeof createElement>;
   /** Enter during a reply queues the message (the rest reject while busy). */
   queues: boolean;
+  /** An empty box shows the mic rather than a send with nothing to send. */
+  mic?: boolean;
   /** Which view a turn files under, for the plan comment's two. */
   mode?: "chat";
   setup?: () => void;
 }
 const SURFACES: Surface[] = [
   { name: "ChatRoom", queues: true, render: () => createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, dictationEnabled: false, onClose: noop }) },
-  { name: "BrowserChat", queues: true, render: () => createElement(BrowserChat, { browseId: "b-1", label: "browser-b1", title: "Page", onClose: noop }) },
+  { name: "BrowserChat", queues: true, mic: true, render: () => createElement(BrowserChat, { conversation: { kind: "tab", browseId: "b-1", title: "Page", targetLabel: "browser-b1", targetTitle: "Page", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }, workspace: "regular", onClose: noop }) },
   { name: "MissionChat", queues: true, render: () => createElement(MissionChat, { mission, findings: [], onClose: noop, onRemoveFinding: noop, onEditGoal: noop }) },
   { name: "MemoryAsk", queues: true, render: () => createElement(MemoryAsk, { onCite: noop }) },
   { name: "CommentThread report view", queues: false, render: () => createElement(CommentThread, { sessionId: "s-1", comment, autoOpen: true }) },
@@ -110,7 +112,7 @@ const statuses = () => Array.from(host.querySelectorAll("[role=status]")).map((e
 const workingWords = () => host.textContent?.match(/working…|Thinking|Preparing your reply/g) ?? [];
 const field = () => Array.from(host.querySelectorAll("textarea")).pop()!;
 
-describe.each(SURFACES)("$name", ({ render, setup, queues, mode }) => {
+describe.each(SURFACES)("$name", ({ render, setup, queues, mic, mode }) => {
   beforeEach(() => {
     setup?.();
     turn.messages = asked(mode);
@@ -141,16 +143,17 @@ describe.each(SURFACES)("$name", ({ render, setup, queues, mode }) => {
     expect(stop!.disabled).toBe(false);
     expect(Array.from(host.querySelectorAll("button")).filter((b) => b.textContent?.trim() === "Stop")).toEqual([]);
     // Stopped from the keyboard, the reply ends on an empty box: the same
-    // button turns into a Send with nothing to send, and the focus stays in
-    // the composer. A `disabled` button would drop it to the document.
+    // button turns into a Send with nothing to send (or the mic, where the
+    // box takes speech), and the focus stays in the composer. A `disabled`
+    // button would drop it to the document.
     stop!.focus();
     turn.status = "idle";
     await act(async () => { turnStore.version++; turnStore.listeners.forEach((fn) => fn()); });
     const send = host.querySelector<HTMLButtonElement>(".rl-send")!;
     expect(send).toBe(stop);
-    expect(send.dataset.send).toBe("send");
+    expect(send.dataset.send).toBe(mic ? "mic" : "send");
     expect(send.disabled).toBe(false);
-    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect(send.getAttribute("aria-disabled")).toBe(mic ? null : "true");
     expect([send, field()]).toContain(document.activeElement);
   });
 

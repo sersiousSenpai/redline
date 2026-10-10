@@ -380,6 +380,12 @@ impl<Q> Turns<Q> {
         self.inner.lock().unwrap().procs.contains_key(key)
     }
 
+    /// The running turn's buffer, for a writer outside its reader: a page
+    /// action's outcome lands on the turn that asked for it.
+    pub fn partial(&self, key: &str) -> Option<Arc<Mutex<PartialBuf>>> {
+        self.inner.lock().unwrap().procs.get(key).map(|p| p.partial.clone())
+    }
+
     /// Commit small synchronous provider metadata before releasing a slot.
     /// A cancelled reader must never overwrite its successor's resume state.
     pub fn with_owned(&self, key: &str, token: u64, commit: impl FnOnce()) -> bool {
@@ -611,6 +617,20 @@ pub fn push_meta(buf: &Mutex<PartialBuf>, v: &serde_json::Value) -> Option<Meter
         meter: b.meter.clone(),
         activity,
     })
+}
+
+/// Append an entry the stream itself never carried (a page action's
+/// outcome) to the turn's activity ring, mutate-then-emit like [`push_meta`].
+/// `rev` moves so the frontend's guard keeps it, and the entry settles with
+/// the row's steps like any tool call (`meter::settle`).
+pub fn push_activity(buf: &Mutex<PartialBuf>, activity: crate::meter::Activity) -> MeterPayload {
+    let mut b = buf.lock().unwrap();
+    if b.activity.len() >= ACTIVITY_CAP {
+        b.activity.pop_front();
+    }
+    b.activity.push_back(activity.clone());
+    b.meter.bump_rev();
+    MeterPayload { rev: b.meter.rev, meter: b.meter.clone(), activity: Some(activity), discrete: true }
 }
 
 /// The coalescer that keeps the meter off the per-token path (perf-budget

@@ -364,15 +364,39 @@ pub fn assert_read_only_argv(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// A first-turn prompt fragment that makes a browse or linked agent aware of the
-/// active research **mission**, when one is running. Both the per-tab page
-/// discussion and the linked (spanning) discussion can run inside a mission
-/// workspace, but neither is told what the user is researching — so they answer
-/// blind to the goal. This bakes the goal in so they orient their help toward it.
-/// The mission orchestrator (`mission.rs`) embeds the goal natively and needs
-/// none of this. Returns an empty string when no mission is active or the goal is
-/// blank, so callers can push it unconditionally.
+/// A first-turn prompt fragment that makes a discussion agent aware of the
+/// active research **mission**, when one is running. An agent that runs beside
+/// a mission is otherwise never told what the user is researching, so it
+/// answers blind to the goal. This bakes the goal in so it orients its help
+/// toward it. The mission orchestrator (`mission.rs`) embeds the goal natively
+/// and needs none of this. Returns an empty string when no mission is active or
+/// the goal is blank, so callers can push it unconditionally.
 pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
+    mission_block(
+        mission,
+        "  curl -s http://127.0.0.1:7676/v1/mission/active\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/findings\n",
+    )
+}
+
+/// `mission_context_block` for a page chat, whose turn is CAPTURED under one
+/// mission when the user sends it: the re-read routes name that mission, so a
+/// mission the user starts later never answers for this conversation.
+pub fn captured_mission_context_block(mission: Option<&crate::state::Mission>) -> String {
+    let Some(m) = mission else {
+        return String::new();
+    };
+    let id = &m.mission_id;
+    mission_block(
+        Some((&m.title, &m.goal)),
+        &format!(
+            "  curl -s http://127.0.0.1:7676/v1/missions/{id}\n  \
+             curl -s http://127.0.0.1:7676/v1/missions/{id}/findings\n"
+        ),
+    )
+}
+
+fn mission_block(mission: Option<(&str, &str)>, reread: &str) -> String {
     let Some((title, goal)) = mission else {
         return String::new();
     };
@@ -398,10 +422,10 @@ pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
     p.push_str(
         "\nThe user may refine the goal or pin more findings as they browse, so \
          re-read the current mission and its pins whenever you need them (already \
-         permitted — no approval needed):\n  \
-         curl -s http://127.0.0.1:7676/v1/mission/active\n  \
-         curl -s http://127.0.0.1:7676/v1/mission/findings\n\n",
+         permitted — no approval needed):\n",
     );
+    p.push_str(reread);
+    p.push('\n');
     p
 }
 
@@ -672,6 +696,9 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
         .or_else(|| input.get("url"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if let Some(phrase) = page_status_label(text) {
+        return phrase;
+    }
     // A consult spawns a real CHILD `claude` on another surface's seat. The
     // child books its own burn (correct, and new) — but there is no precise
     // parent→child cost edge: the consult request carries no caller identity,
@@ -681,8 +708,6 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
     // follow-on work.
     let phrase = if text.contains("/v1/global/consult") {
         "checking in with a colleague…"
-    } else if text.contains("/v1/linked/consult") {
-        "checking in with a tab's agent…"
     } else if text.contains("/v1/memory/answer-pack") {
         "searching your memory…"
     } else if text.contains("/v1/memory/tree") {
@@ -708,6 +733,90 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
         };
     };
     phrase.to_string()
+}
+
+/// The page agent's bridge calls, named for what they do to the page the user
+/// is watching: a page action by its kind (read off the `/v1/browser/action`
+/// body), a read or switch aimed at a numbered tab by that tab. Mission and
+/// code reads ride along, being the same agent's. `None` for anything else,
+/// including a command that only names a route without calling the bridge
+/// (a search through Redline's own source, a fetched page with a look-alike
+/// path).
+fn page_status_label(text: &str) -> Option<String> {
+    if !text.contains("127.0.0.1:7676/") {
+        return None;
+    }
+    let tab = text
+        .split("tab=")
+        .nth(1)
+        .map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next().unwrap_or(""))
+        .filter(|n| !n.is_empty());
+    let phrase = if let Some(at) = text.find("/v1/browser/") {
+        let route = text[at + "/v1/browser/".len()..]
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or("");
+        match (route, tab) {
+            ("snapshot", Some(n)) => return Some(format!("reading tab {n}…")),
+            ("thread", Some(n)) => return Some(format!("reading tab {n}'s chat…")),
+            ("focus", Some(n)) => return Some(format!("switching to tab {n}…")),
+            ("snapshot", None) => "reading the page…",
+            ("thread", None) => "reading a tab's chat…",
+            ("focus", None) => "switching tabs…",
+            ("active", _) => "checking the tab on screen…",
+            ("tabs", _) => "looking over your tabs…",
+            ("action", _) => action_status_label(text),
+            ("navigate", _) => "navigating…",
+            ("click", _) => "clicking…",
+            ("query", _) => "extracting from the page…",
+            ("open", _) => "opening a tab…",
+            ("download", _) => "saving a file…",
+            _ => return None,
+        }
+    } else if let Some(at) = text.find("/v1/mission") {
+        // The mission and its pins, by the captured routes or the global
+        // pair. The orchestrator's tab and foundation routes under the same
+        // prefix open tabs and write, so they are not named as reads.
+        let path = text[at..]
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_')))
+            .next()
+            .unwrap_or("");
+        match path.rsplit('/').next().unwrap_or("") {
+            "findings" => "reading pinned findings…",
+            "tabs" | "foundation" => return None,
+            _ => "reading the mission…",
+        }
+    } else if text.contains("/v1/code/projects") {
+        "finding your projects…"
+    } else if text.contains("/v1/code/map") {
+        "mapping a project…"
+    } else if text.contains("/v1/code/git") {
+        "reading a project's git…"
+    } else {
+        return None;
+    };
+    Some(phrase.to_string())
+}
+
+/// A `/v1/browser/action` call by its operation's `kind`: the first word after
+/// a "kind" that names one, however the agent quoted the JSON body.
+fn action_status_label(text: &str) -> &'static str {
+    text.split("kind")
+        .skip(1)
+        .find_map(|rest| {
+            let rest = rest.trim_start_matches(|c: char| !c.is_ascii_alphabetic());
+            Some(match rest.split(|c: char| !c.is_ascii_alphabetic()).next()? {
+                "navigate" => "navigating…",
+                "click" => "clicking…",
+                "fill" => "typing into the page…",
+                "key" => "pressing a key…",
+                "scroll" => "scrolling the page…",
+                "select" => "choosing an option…",
+                "wait" => "waiting for the page…",
+                _ => return None,
+            })
+        })
+        .unwrap_or("acting on the page…")
 }
 
 #[cfg(test)]
@@ -818,10 +927,34 @@ mod tests {
             ("curl -s 'http://127.0.0.1:7676/v1/context/browse/search?q=x'", "searching pages…"),
             ("curl -s http://127.0.0.1:7676/v1/context/stats", "counting the record…"),
             ("curl -s http://127.0.0.1:7676/v1/context/sessions/s1/history", "reading a plan's history…"),
+            // The page agent's own bridge: the page, a numbered tab, an action
+            // by its kind however the body is quoted.
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=browser-t3'", "reading the page…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=2'", "reading tab 2…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=3'", "reading tab 3's chat…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=4' -X POST", "switching to tab 4…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d '{"operationId":"op-1","label":"browser-t3","operation":{"kind":"click","selector":"a"}}'"#, "clicking…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d "{\"operation\": {\"kind\": \"fill\", \"value\": \"x\"}}""#, "typing into the page…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -d '{"operationId":"kind-1","operation":{"kind":"scroll","x":0,"y":9}}'"#, "scrolling the page…"),
+            ("curl -s http://127.0.0.1:7676/v1/missions/m-1/findings", "reading pinned findings…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/missions/mission-1' | head", "reading the mission…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/code/git?repo=/r&op=log'", "reading a project's git…"),
+            // Not reads of the goal: the orchestrator opening a mission tab or
+            // writing its foundation keeps the honest fallback.
+            (r#"curl -s http://127.0.0.1:7676/v1/missions/mission-1/tabs -X POST -d '{"url":"https://a.test"}'"#, "Bash…"),
+            ("curl -s http://127.0.0.1:7676/v1/missions/mission-1/foundation -X POST -d '{}'", "Bash…"),
+            // Naming a route is not calling the bridge: an agent searching
+            // Redline's own source for one is not acting on a page.
+            ("grep -rn '/v1/browser/action' src-tauri/src", "Bash…"),
+            ("rg -n '/v1/mission/findings|/v1/code/git' src-tauri", "Bash…"),
         ];
         for (cmd, want) in cases {
             assert_eq!(retrieval_status_label("Bash", &bash(cmd)), want, "for {cmd}");
         }
+        // A fetched page whose path happens to look like a bridge route is
+        // still a fetch.
+        let fetch = serde_json::json!({ "url": "https://api.example.test/v1/missions/42/findings" });
+        assert_eq!(retrieval_status_label("WebFetch", &fetch), "fetching a page…");
         // Non-bridge tools fall back to something honest.
         assert_eq!(retrieval_status_label("Skill", &Value::Null), "loading a skill…");
         assert_eq!(retrieval_status_label("Grep", &Value::Null), "Grep…");
@@ -874,6 +1007,28 @@ mod tests {
         // Re-read routes so a mid-conversation goal/pin change stays reachable.
         assert!(b.contains("/v1/mission/active"));
         assert!(b.contains("/v1/mission/findings"));
+    }
+
+    #[test]
+    fn captured_mission_block_reads_that_mission_never_the_active_one() {
+        assert_eq!(captured_mission_context_block(None), "");
+        let m = crate::state::Mission {
+            mission_id: "mission-7".into(),
+            title: "Breach page".into(),
+            goal: "Draft my breach page".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let b = captured_mission_context_block(Some(&m));
+        assert!(b.contains("Mission: Breach page"));
+        assert!(b.contains("> Draft my breach page"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/mission-7\n"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/mission-7/findings\n"));
+        assert!(!b.contains("/v1/mission/"));
+        // The global block's text is unchanged apart from its routes.
+        let global = mission_context_block(Some(("Breach page", "Draft my breach page")));
+        assert_eq!(global.replace("/v1/mission/active", "/v1/missions/mission-7").replace("/v1/mission/findings", "/v1/missions/mission-7/findings"), b);
     }
 
     #[test]

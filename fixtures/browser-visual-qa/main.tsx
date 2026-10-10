@@ -16,6 +16,9 @@ import { BrowserTileStage, type TilePage } from "../../src/components/BrowserTil
 import { createBoundedPortalHost, PersistentPortalSlot } from "../../src/components/PersistentPortalSlot";
 import { ChatRoom } from "../../src/components/ChatRoom";
 import { BrowserChat } from "../../src/components/BrowserChat";
+import { useChatWorld } from "../../src/hooks/useChatWorld";
+import { resolveConversation } from "../../src/lib/browserChat/scope";
+import { LINKED_MODE_KEY } from "../../src/lib/browseChatState";
 import { reorderTabs, startTabPointerDrag } from "../../src/lib/browserTabDrag";
 import { assignVisibleTile, swapVisibleTiles, tileBadges, visibleGrid, visibleTileIds, type BrowserLayout } from "../../src/lib/browserLayout";
 import { MosaicEditDialog, MosaicManagerDialog } from "../../src/components/MosaicDialogs";
@@ -25,6 +28,9 @@ import "../../src/components/BrowserWorkspace.css";
 import "./fixture.css";
 
 const noop = () => {};
+const pageActions = new Map([["browser-qa-tab-0", { kind: "click", tab: 1, at: Date.now() + 600_000 }]]);
+// The page chat opens shared, under linked mode, as a returning user's would.
+localStorage.setItem(LINKED_MODE_KEY, "true");
 const initialTabs: TilePage[] = ["Research overview", "Evidence and source comparison", "Design notes and decisions", "Implementation reference"].map((title, i) => ({ id: `qa-tab-${i}`, browseId: `qa-page-${i}`, title, url: `https://example.test/source-${i + 1}` }));
 const mosaicTabs: TilePage[] = ["Wall Street Journal", "Seeking Alpha", "Yahoo Finance", "MarketWatch", "Barron's", "Financial Times", "Bloomberg", "Reuters Markets", "CNBC"].map((title, i) => ({ id: `qa-mosaic-${i}`, browseId: `qa-mosaic-page-${i}`, title, url: `https://example.test/markets-${i + 1}` }));
 const shots = new Map([...initialTabs, ...mosaicTabs].map((tab, i) => [tab.id, "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1100"><rect width="900" height="1100" fill="#faf9f6"/><rect width="900" height="64" fill="#ecebe5"/><text x="42" y="41" fill="#52564d" font-family="system-ui" font-size="18">FIELD NOTES · SOURCE ${i + 1}</text><text x="42" y="132" fill="#222921" font-family="Georgia" font-size="36">${tab.title}</text><text x="42" y="175" fill="#697263" font-family="system-ui" font-size="16">Synthetic local page · actual tile component</text>${Array.from({ length: 21 }, (_, n) => `<rect x="42" y="${225 + n * 30}" width="${n % 3 === 2 ? 620 : 795}" height="10" rx="3" fill="#dddfd6"/>`).join("")}<rect x="42" y="880" width="795" height="130" rx="10" fill="#e6ebe2"/></svg>`)]));
@@ -34,7 +40,9 @@ function Fixture() {
   const [address, setAddress] = useState(initialTabs[0].url);
   const [menuOpen, setMenuOpen] = useState(false), [dialog, setDialog] = useState("");
   const [surface, setSurface] = useState("browser"), [chatKind, setChatKind] = useState("room"), [chatOpen, setChatOpen] = useState(true);
-  const [followingTabs, setFollowingTabs] = useState(true), [linkedMode, setLinkedMode] = useState(true);
+  // The page chat's scope goes through the same structure layer the pane's does.
+  const { world: chatWorld, dispatch: dispatchChat } = useChatWorld({ workspace: "regular", tabs, activeId }, () => "qa-shared");
+  const pageConversation = resolveConversation(chatWorld)!;
   const [organized, setOrganized] = useState(false), [showHome, setShowHome] = useState(false);
   const [islandOpen, setIslandOpen] = useState(false);
   // The composer's text lives in the shared draft, as it does in App.
@@ -61,16 +69,20 @@ function Fixture() {
   const pages = ids.map((id) => tabs.find((tab) => tab.browseId === id)!).filter(Boolean);
   // The same projection BrowserPane hands its stage.
   const stageLayout = layout.grid ? { ...layout, grid: visibleGrid(layout, tabs.map((tab) => tab.browseId), stageWidth) } : layout;
-  function select(id: string) { setActiveId(id); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
+  function select(id: string) { setActiveId(id); dispatchChat({ type: "user-select-tab", tabId: id }); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
+  // The page chat as the pane mounts it: a running action on the first tab,
+  // the Task list and a mission in the rail. "browser-empty" is a new chat.
+  const pageChat = chatKind === "browser-empty" ? { ...pageConversation, browseId: "qa-empty" } : pageConversation;
   const conversation = chatKind === "room" ? <ChatRoom companionId="qa-carried" cwd={null} dictationEnabled={false} onSelectChat={noop} onEmpty={noop} onClose={noop} presentation={surface === "room" ? "room" : "browser"}/> : <BrowserChat
-    browseId="qa-browse" label="qa-native-absent" workspaceId="regular" onClose={noop}
-    title="Research sources and evidence" linked={followingTabs} onToggleTabChat={() => setFollowingTabs(value => !value)} linkedMode={linkedMode} onToggleLinkedMode={() => setLinkedMode(value => !value)} anchoredFromTitle={followingTabs ? "Research overview" : undefined}
-    onResearch={noop}/>;
+    key={pageChat.browseId} conversation={pageChat} workspace="regular" onClose={noop}
+    linkedMode={chatWorld.linkedMode} onToggleTabChat={() => dispatchChat({ type: "toggle-tab-chat" })} onToggleLinkedMode={() => dispatchChat({ type: "toggle-linked-mode" })}
+    onResearch={noop} pageActions={pageActions} onPickElement={noop} taskList={{ nonce: 0, onOpen: noop }}
+    mission={{ title: "Team plan pricing", goal: "Decide whether the team plan beats paying per seat for a five-person team over a year.", findings: 3, onOpen: noop, onSynthesize: noop }}/>;
   return <div className="qa-shell">
     <div className="qa-shell-heading"><strong>Redline</strong><span>Browser workspace · isolated visual fixture</span><small>Native pages are synthetic images</small></div>
     <main className="qa-plate">
       {surface === "browser" ? <div className="rb-workspace">
-        <BrowserTabRail tabs={tabs} activeId={activeId} onSelect={select} onCloseTab={id => { setTabs(old => old.filter(tab => tab.id !== id)); if (activeId === id) setActiveId(tabs.find(tab => tab.id !== id)!.id); }} onNewTab={() => setShowHome(true)} onResize={noop}
+        <BrowserTabRail tabs={tabs} activeId={activeId} acting={new Set([tabs[0].id])} onSelect={select} onCloseTab={id => { setTabs(old => old.filter(tab => tab.id !== id)); if (activeId === id) setActiveId(tabs.find(tab => tab.id !== id)!.id); }} onNewTab={() => setShowHome(true)} onResize={noop}
           onTabDrag={(event, id) => startTabPointerDrag(event.nativeEvent, event.currentTarget as HTMLElement, { axis:"y", onDragging:noop, onDrop:(over, tile) => flushSync(() => { const tab=tabs.find(tab => tab.id === id)!; if(tile!==null) setLayout(old=>assignVisibleTile(old,ids,tile,tab.browseId)); else if(over && over!==id) setTabs(old=>reorderTabs(old,id,over)); }) })}
           tileBadges={tileBadges(ids)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} groups={groups} organized={organized} organizing={false} onMode={setOrganized} onOrganize={()=>setGroups(fallbackGroups(tabs))} onToggleGroup={id=>setGroups(old=>old.map(group=>group.id===id?{...group,collapsed:!group.collapsed}:group))}/>
         <div className="rb-workspace-pages">

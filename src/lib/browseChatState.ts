@@ -81,8 +81,8 @@ export function withChatPatch(
 
 /** Serializable dock identities. BrowserPane owns and portals the panels. */
 export interface BrowserDockState {
-  /** The tab whose conversation the pane is showing — usually the active tab,
-   *  but pinned to its origin when an agent opened the visible tab. */
+  /** The page conversation the pane resolves (`dockDescriptor`): a tab's own
+   *  thread, or the workspace's shared one, whether or not the column shows it. */
   browseId: string | null;
   title: string | null;
   /** The active tab's remembered pill, so the dock can lead with it. */
@@ -98,9 +98,23 @@ export function migrateChatPill(pill: unknown): ChatPill {
   return pill === "list" || pill === "cart" ? "cart" : pill === "mission" ? "mission" : "page";
 }
 
-export interface LinkedConversation { browseId: string; title: string; originTabId: string }
-export function pageChatIdentity(tab: { browseId: string }, activeId: string, linked: LinkedConversation | null) {
-  return { browseId: linked?.browseId ?? tab.browseId, label: `browser-${activeId}` };
+/** Linked mode, the global preference (BC-2): JSON `true` or `false`. */
+export const LINKED_MODE_KEY = "redline.browser.linkedMode";
+/** Each workspace's shared chat (BC-4), as `{ [workspace]: browseId }`. */
+export const SHARED_CHATS_KEY = "redline.browser.followByWorkspace";
+
+/** Each workspace's shared chat, read back from storage. Builds before 10/10
+ *  wrote `{ browseId, title, originTabId }` per workspace, and null for one
+ *  whose chat went into a mission; only the thread id was ever read, so that
+ *  is all that survives the read. Anything else is dropped, never trusted. */
+export function readSharedChats(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const chats: Record<string, string> = {};
+  for (const [workspace, value] of Object.entries(raw)) {
+    const id = typeof value === "string" ? value : (value as { browseId?: unknown } | null)?.browseId;
+    if (typeof id === "string" && id) chats[workspace] = id;
+  }
+  return chats;
 }
 
 /** Shortcut origin must belong to this workspace. */
