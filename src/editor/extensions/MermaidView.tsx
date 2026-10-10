@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
  * `mermaid` is a heavy dependency only needed when a diagram is actually on
  * screen, so it is dynamically `import()`-ed inside the render effect. That
  * keeps it off the app's initial paint path and out of the headless vitest
- * module graph (no test instantiates this component).
+ * module graph (the one test that renders this component mocks it).
  *
  * Rendering is deterministic — plan markdown → diagram, no agent in the path.
  */
@@ -25,6 +25,11 @@ async function loadMermaid() {
       // The diagram source is plan content under review — never grant it raw
       // HTML or click handlers.
       securityLevel: "strict",
+      // A failed render shows our own error card. Left to mermaid, it draws
+      // its error diagram into the temp node it measures in and throws before
+      // removing it, so every broken diagram left a node in <body> for the
+      // life of the page (docs/perf-budget.md rule 7).
+      suppressErrorRendering: true,
       // `neutral` is internally consistent on a light background; we always
       // render onto the fixed light figure plate (`.rl-mermaid--ready`), so a
       // single global palette is correct regardless of the app theme. The
@@ -92,8 +97,10 @@ export function MermaidView({ code }: MermaidViewProps) {
           setSvg(null);
           setError(err instanceof Error ? err.message : String(err));
         } finally {
-          // Best-effort sweep of any temp node mermaid left behind on error.
+          // Best-effort sweep of any temp node mermaid left behind on error:
+          // the svg, and the `d`-prefixed wrapper it measures inside.
           document.getElementById(renderId)?.remove();
+          document.getElementById(`d${renderId}`)?.remove();
         }
       })();
     }, 150);

@@ -264,7 +264,9 @@ function PlanEditorBase({
       void persistence?.destroy();
       // No explicit ydoc.destroy(): the editor bound to it tears down in a
       // separate effect whose order isn't guaranteed; dropping all refs and
-      // letting GC reclaim it is safe and avoids destroy-order races.
+      // letting GC reclaim it is safe (the collab handle's destroy leaves
+      // nothing that reaches it, collab/provider.ts) and avoids destroy-order
+      // races.
     };
     // `markdown`/`anchors` deliberately omitted: content reloads only on
     // revisionKey change — the same contract the old initialDoc memo had.

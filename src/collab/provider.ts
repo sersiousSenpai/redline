@@ -124,7 +124,15 @@ export function createCollabProvider(
     },
     destroy() {
       peerListeners.clear();
+      // y-webrtc's destroy() alone leaves two roots that hold this provider,
+      // and through it the whole Y.Doc, for the life of the page
+      // (docs/perf-budget.md rule 7): the shared signaling socket's provider
+      // set, which only disconnect() leaves (closing the socket once no room
+      // needs it), and the awareness's outdated-peer interval, which only its
+      // own destroy() clears.
+      provider.disconnect();
       provider.destroy();
+      provider.awareness.destroy();
     },
   };
 }
