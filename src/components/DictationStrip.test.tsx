@@ -55,6 +55,7 @@ describe("DictationStrip", () => {
   it("shows the words heard and the waveform, outside the composer's flow", async () => {
     const composer = document.createElement("div");
     document.body.appendChild(composer);
+    vi.spyOn(composer, "getBoundingClientRect").mockReturnValue(rect(100, 500, 600, 80));
     await act(async () => root.render(<DictationStrip />));
     expect(mount.querySelector(".rl-dictation-strip")).toBeNull();
     act(() => strip.set({ phase: "listening", text: "", levels: [0.2, 0.9], anchor: composer, hint: "release to insert" }));
@@ -72,6 +73,16 @@ describe("DictationStrip", () => {
     expect(el.querySelector(".rl-dictation-text")!.getAttribute("aria-hidden")).toBe("true");
     act(() => strip.set({ phase: "notice", text: "Didn't catch that", levels: [], anchor: null, hint: "" }));
     expect(mount.querySelector(".sr-only")!.textContent).toBe("Didn't catch that");
+  });
+
+  it("gives a narrow strip's room to the words, not the hint", async () => {
+    const composer = document.createElement("div");
+    document.body.appendChild(composer);
+    vi.spyOn(composer, "getBoundingClientRect").mockReturnValue(rect(100, 500, 240, 32));
+    await act(async () => root.render(<DictationStrip />));
+    act(() => strip.set({ phase: "listening", text: "is the replay safe", levels: [], anchor: composer, hint: "release to send" }));
+    expect(mount.querySelector(".rl-dictation-hint")).toBeNull();
+    expect(mount.querySelector(".rl-dictation-text")!.textContent).toBe("is the replay safe");
   });
 
   it("lets a notice fade, and offers homeless words to copy without taking focus", async () => {

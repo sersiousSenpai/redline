@@ -48,6 +48,8 @@ export interface StripState {
 export const STRIP_BARS = 24;
 const HEIGHT = 30;
 const GAP = 6;
+/** Narrower than this, the strip drops its hint: the words come first. */
+const HINT_MIN_WIDTH = 300;
 
 let state: StripState | null = null;
 const listeners = new Set<() => void>();
@@ -156,7 +158,7 @@ export function DictationStrip() {
           Copy
         </button>
       ) : (
-        <span className="rl-dictation-hint">{s.hint}</span>
+        box.width >= HINT_MIN_WIDTH && <span className="rl-dictation-hint">{s.hint}</span>
       )}
     </div>
   );

@@ -239,7 +239,12 @@ describe("the input row", () => {
     const talk = button("Hold to talk");
     await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
     expect(strip.get()).toMatchObject({ owner: "voice", phase: "listening", text: "", hint: "release to send" });
-    expect(strip.get()?.anchor).toBe(input().form);
+    // Over the row above the input, short of its Hands-free switch: in
+    // hands-free the panel listens most of the time, and that is the way out.
+    vi.spyOn(input().form!, "getBoundingClientRect").mockReturnValue(new DOMRect(10, 500, 340, 32));
+    vi.spyOn(document.querySelector('[role="switch"]')!, "getBoundingClientRect").mockReturnValue(new DOMRect(260, 466, 90, 26));
+    const anchor = strip.get()?.anchor;
+    expect(anchor && "rect" in anchor ? anchor.rect() : null).toEqual(new DOMRect(10, 500, 242, 32));
     await emit("dictation-partial", { owner: "voice", text: "is the replay" });
     await emit("dictation-level", { owner: "voice", rms: -20, peak: -6, ms: 50 });
     expect(strip.get()?.text).toBe("is the replay");

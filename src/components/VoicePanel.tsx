@@ -71,7 +71,7 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
-import { levelHeight, STRIP_BARS, strip } from "./DictationStrip";
+import { levelHeight, STRIP_BARS, strip, type StripAnchor } from "./DictationStrip";
 import { StreamingText } from "./StreamingText";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
@@ -717,6 +717,19 @@ function VoicePanelBase({
   // The input row the strip sits over, and the waveform's latest levels.
   const inputRowRef = useRef<HTMLFormElement | null>(null);
   const levelsRef = useRef<number[]>([]);
+  // The strip covers the row above the input, but never its Hands-free
+  // switch: in hands-free the panel listens most of the time, and the switch
+  // is the way out.
+  const handsFreeSwitchRef = useRef<HTMLButtonElement | null>(null);
+  const stripAnchorRef = useRef<StripAnchor>({
+    rect() {
+      const row = inputRowRef.current?.getBoundingClientRect();
+      if (!row) return null;
+      const toggle = handsFreeSwitchRef.current?.getBoundingClientRect();
+      const right = toggle ? Math.min(row.right, toggle.left - 8) : row.right;
+      return new DOMRect(row.left, row.top, right - row.left, row.height);
+    },
+  });
   // A key-held talk (Space in the panel, or on the talk button): the timer is
   // the hold not yet long enough to count; `keyHeldRef` is one that counted.
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2017,7 +2030,7 @@ function VoicePanelBase({
       owner: VOICE_OWNER,
       phase: "listening" as const,
       text: partial,
-      anchor: inputRowRef.current,
+      anchor: stripAnchorRef.current,
       hint: handsFreeRef.current ? "pause to send" : "release to send",
     };
     if (strip.get()?.owner === VOICE_OWNER) strip.update(next);
@@ -2563,6 +2576,7 @@ function VoicePanelBase({
                           : "Hands-free — getting ready to listen"}
               </span>
               <button
+                ref={handsFreeSwitchRef}
                 type="button"
                 onClick={toggleHandsFree}
                 role="switch"
