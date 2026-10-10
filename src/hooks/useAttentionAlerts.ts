@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   forgetQuieted,
@@ -50,6 +51,21 @@ export function useAttentionAlerts(
   loudRef.current = loud;
   const collapsedRef = useRef(collapsed);
   collapsedRef.current = collapsed;
+  // Whether Redline's window is the one in front. Not document.hasFocus():
+  // that is false while the caret sits in one of Redline's own browser pages
+  // (native webviews in this same window), and a notification then would be
+  // about the app the user is looking at.
+  const windowFocusedRef = useRef(document.hasFocus());
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let live = true;
+    win.isFocused().then((focused) => { if (live) windowFocusedRef.current = focused; }, () => {});
+    const un = win.onFocusChanged(({ payload }) => { windowFocusedRef.current = payload; });
+    return () => {
+      live = false;
+      void un.then((off) => off(), () => {});
+    };
+  }, []);
 
   const badgeRef = useRef<number | null>(null);
   useEffect(() => {
@@ -68,7 +84,7 @@ export function useAttentionAlerts(
     }
     const handled = handledRef.current;
     forgetQuieted(handled, loud);
-    const away = () => !document.hasFocus() || collapsedRef.current;
+    const away = () => !windowFocusedRef.current || collapsedRef.current;
     for (const t of newTransitions(loud, handled)) {
       handled.add(transitionKey(t));
       if (!away()) continue;

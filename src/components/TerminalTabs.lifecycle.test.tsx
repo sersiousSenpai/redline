@@ -4,12 +4,16 @@ import { act, createRef, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ notify: vi.fn(), invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
+const mocks = vi.hoisted(() => ({ windowFocused: true, focusChanged: null as null | ((event: { payload: boolean }) => void), notify: vi.fn(), invoke: vi.fn(), inventory: [] as { id: string; cwd: string | null; pid: number | null; alive: boolean }[], cwd: null as string | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), attention: [] as unknown[], procs: [] as unknown[] }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-notification", () => ({ isPermissionGranted: async () => true, requestPermission: async () => "granted", sendNotification: mocks.notify }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, handler: (event: { payload: unknown }) => void) => { mocks.listeners.set(name, handler); return () => { if (mocks.listeners.get(name) === handler) mocks.listeners.delete(name); }; } }));
 vi.mock("@tauri-apps/api/path", () => ({ homeDir: async () => "/Users/test/" }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onCloseRequested: async () => () => {} }) }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
+  onCloseRequested: async () => () => {},
+  isFocused: async () => mocks.windowFocused,
+  onFocusChanged: async (handler: (event: { payload: boolean }) => void) => { mocks.focusChanged = handler; return () => {}; },
+}) }));
 vi.mock("../hooks/useRepoIcons", () => ({ useRepoIcons: () => new Map() }));
 vi.mock("./TerminalView", async () => {
   const { enqueuePtyOp } = await import("../lib/ptyFence");
@@ -49,6 +53,8 @@ beforeEach(() => {
   mocks.cwd = null;
   mocks.listeners.clear();
   mocks.notify.mockReset();
+  mocks.windowFocused = true;
+  mocks.focusChanged = null;
   mocks.attention = [];
   mocks.procs = [];
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
@@ -297,7 +303,7 @@ describe("terminal state", () => {
 
   it("an unfocused window never reads a your-turn", async () => {
     vi.useFakeTimers();
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.windowFocused = false;
     await mount();
     const id = await open();
     await emit(yourTurn(id, 20));
@@ -307,7 +313,7 @@ describe("terminal state", () => {
 
   it("process samples: a server reads serving with its port; the shell back in front retires a working agent, never an unread turn", async () => {
     vi.useFakeTimers();
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.windowFocused = false;
     await mount();
     const server = await open();
     const agent = await open();
@@ -763,7 +769,7 @@ describe("reach and notify", () => {
   });
 
   it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.windowFocused = false;
     mocks.attention = [];
     await mount();
     const a = await open();
@@ -789,7 +795,6 @@ describe("reach and notify", () => {
   });
 
   it("stays quiet while you're looking, and speaks up when the dock is collapsed", async () => {
-    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
     await mount();
     const a = await open();
     await flush();
@@ -800,12 +805,27 @@ describe("reach and notify", () => {
     await emit(needsYou(a, 12));
     await flush();
     expect(mocks.notify).toHaveBeenCalledTimes(1);
-    focus.mockRestore();
+  });
+
+  it("counts a caret in one of Redline's own browser pages as looking, and another app in front as away", async () => {
+    // The page's native webview has the caret: the main webview has no focus,
+    // but Redline's window is still the one in front.
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    await mount();
+    const a = await open();
+    await flush();
+    await emit(needsYou(a, 10));
+    await flush();
+    expect(mocks.notify).not.toHaveBeenCalled();
+    await act(async () => mocks.focusChanged!({ payload: false }));
+    await emit(needsYou(a, 11));
+    await flush();
+    expect(mocks.notify).toHaveBeenCalledTimes(1);
   });
 
   it("a your-turn notifies after a beat, with the excerpt that filled in — or not at all once read", async () => {
     vi.useFakeTimers();
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    mocks.windowFocused = false;
     await mount();
     const a = await open();
     const b = await open();
