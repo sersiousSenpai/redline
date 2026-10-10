@@ -40,6 +40,56 @@ declare module "@tiptap/core" {
 
 export const commentHighlightsKey = new PluginKey("commentHighlights");
 
+type BlockNode = import("@tiptap/pm/model").Node;
+
+/** Where each range paints inside its block, relative to the block's start
+ *  (null: nowhere), per block node and range object. Nodes are immutable and
+ *  a transaction keeps every block it didn't touch, so a keystroke resolves
+ *  only the ranges in the block it edited — not every anchored block's text,
+ *  walked twice, on every transaction. */
+const paintedIn = new WeakMap<BlockNode, WeakMap<CommentHighlightRange, readonly [number, number] | null>>();
+
+/** Where `range` paints inside `blockNode`, relative to the block's start. */
+function resolveInBlock(blockNode: BlockNode, range: CommentHighlightRange): readonly [number, number] | null {
+  // Tier 0 — line-axis unit path. A `.lN` id addresses one list item / table
+  // cell / code source line; resolve the word range against that unit's own
+  // text so structured blocks no longer collapse to their first inner
+  // textblock (items 1, 6, 9).
+  const parsed = range.subBlockId ? parseSidecarIdTyped(range.subBlockId) : null;
+  if (parsed && parsed.kind === "subBlock" && parsed.axis.kind === "line") {
+    const unit = findUnitNode(blockNode, parsed.axis);
+    if (unit) {
+      const wr = resolveWordsInUnit(unit.unitText, parsed.words);
+      // Validate against the captured quote before trusting a derived index —
+      // a drifted unit resolves to a non-matching slice and falls through to
+      // the proven char/quotedText tiers instead of painting at the wrong spot.
+      if (
+        wr &&
+        wr.end > wr.start &&
+        (range.quotedText.length === 0 || unit.unitText.slice(wr.start, wr.end) === range.quotedText)
+      ) {
+        const unitBase = unit.contentStart + unit.charBase;
+        return [unitBase + wr.start, unitBase + wr.end];
+      }
+    }
+  }
+  // Block-level tiers (sub-id → char range → quotedText self-heal) for
+  // everything the unit path didn't claim. They resolve against the WHOLE
+  // block's text — the coordinate system capture measures `charStart`/
+  // `charEnd` in (the anchored element's flat textContent: for a list, every
+  // item end to end; for a table, every cell). Sub-block-id resolution needs
+  // the block's tag (PRE / UL / BLOCKQUOTE → line axis; everything else →
+  // sentence axis). Text offsets map to doc positions by walking the block's
+  // text nodes — past item 1, list-item and paragraph tokens sit between
+  // them, so base+offset arithmetic would drift.
+  const resolved = resolveRange(blockNode.textContent, pmNodeTagName(blockNode), range);
+  if (!resolved) return null;
+  const relFrom = textOffsetToPos(blockNode, resolved.from, 1);
+  const relTo = textOffsetToPos(blockNode, resolved.to, -1);
+  // `+1` enters the block node.
+  return relFrom !== null && relTo !== null && relTo > relFrom ? [1 + relFrom, 1 + relTo] : null;
+}
+
 /** Map a ProseMirror node type to the DOM tag name `blockKindForTag` keys
  *  on. The mapping mirrors the default Tiptap renderer (codeBlock → pre,
  *  bulletList → ul, etc.) so the resolver's axis pick matches what the
@@ -135,73 +185,14 @@ export const CommentHighlights = Extension.create<
               if (!blockId) return;
               const ranges = byBlock.get(blockId);
               if (!ranges) return;
-              // The fallback tiers resolve against the WHOLE block's text — the
-              // coordinate system capture measures `charStart`/`charEnd` in
-              // (the anchored element's flat textContent: for a list, every
-              // item end to end; for a table, every cell).
-              const blockText = blockNode.textContent;
-              // Sub-block-id resolution needs the block's tag (PRE / UL /
-              // BLOCKQUOTE → line axis; everything else → sentence axis).
-              // The PM Node has the type name; map to the equivalent DOM
-              // tag for `blockKindForTag`.
-              const blockTagName = pmNodeTagName(blockNode);
+              let painted = paintedIn.get(blockNode);
+              if (!painted) paintedIn.set(blockNode, (painted = new WeakMap()));
               for (const range of ranges) {
-                let from: number | null = null;
-                let to: number | null = null;
-
-                // Tier 0 — line-axis unit path. A `.lN` id addresses one list
-                // item / table cell / code source line; resolve the word range
-                // against that unit's own text so structured blocks no longer
-                // collapse to their first inner textblock (items 1, 6, 9).
-                const parsed = range.subBlockId
-                  ? parseSidecarIdTyped(range.subBlockId)
-                  : null;
-                if (
-                  parsed &&
-                  parsed.kind === "subBlock" &&
-                  parsed.axis.kind === "line"
-                ) {
-                  const unit = findUnitNode(blockNode, parsed.axis);
-                  if (unit) {
-                    const wr = resolveWordsInUnit(unit.unitText, parsed.words);
-                    // Validate against the captured quote before trusting a
-                    // derived index — a drifted unit resolves to a non-matching
-                    // slice and falls through to the proven char/quotedText
-                    // tiers instead of painting at the wrong spot.
-                    if (
-                      wr &&
-                      wr.end > wr.start &&
-                      (range.quotedText.length === 0 ||
-                        unit.unitText.slice(wr.start, wr.end) ===
-                          range.quotedText)
-                    ) {
-                      const unitBase =
-                        blockOffset + unit.contentStart + unit.charBase;
-                      from = unitBase + wr.start;
-                      to = unitBase + wr.end;
-                    }
-                  }
-                }
-
-                // Block-level tiers (sub-id → char range → quotedText
-                // self-heal) for everything the unit path didn't claim. Text
-                // offsets map to doc positions by walking the block's text
-                // nodes — past item 1, list-item and paragraph tokens sit
-                // between them, so base+offset arithmetic would drift.
-                if (from === null) {
-                  const resolved = resolveRange(blockText, blockTagName, range);
-                  if (resolved) {
-                    const relFrom = textOffsetToPos(blockNode, resolved.from, 1);
-                    const relTo = textOffsetToPos(blockNode, resolved.to, -1);
-                    if (relFrom !== null && relTo !== null && relTo > relFrom) {
-                      // `+1` enters the block node.
-                      from = blockOffset + 1 + relFrom;
-                      to = blockOffset + 1 + relTo;
-                    }
-                  }
-                }
-
-                if (from === null || to === null) continue;
+                let rel = painted.get(range);
+                if (rel === undefined) painted.set(range, (rel = resolveInBlock(blockNode, range)));
+                if (!rel) continue;
+                const from = blockOffset + rel[0];
+                const to = blockOffset + rel[1];
                 const classes = ["rl-comment-highlight"];
                 if (range.muted) classes.push("rl-comment-highlight--muted");
                 if (storage.focusedId === range.commentId)

@@ -2,7 +2,15 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { Editor } from "@tiptap/core";
 import type { DecorationSet } from "@tiptap/pm/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Counted, not changed: the fallback tiers' text walk, which a keystroke
+// elsewhere must not repeat.
+const walks = vi.hoisted(() => ({ count: 0 }));
+vi.mock("../textOffset", async (load) => {
+  const actual = await load<typeof import("../textOffset")>();
+  return { textOffsetToPos: (...args: Parameters<typeof actual.textOffsetToPos>) => { walks.count++; return actual.textOffsetToPos(...args); } };
+});
 
 import { planMarkdownToDoc } from "../markdown";
 import {
@@ -337,6 +345,31 @@ describe("CommentHighlights — paints in whole-block coordinates", () => {
       }),
     ]);
     expect(paintedText(editor, "c-1")).toBe("item three");
+  });
+
+  it("re-resolves only the block a keystroke edited", () => {
+    const md = [LIST, "<!-- rl:blk-p1 -->", "Plain paragraph text.", ""].join("\n");
+    const editor = paint(md, [
+      at("c-1", "blk-list1", LIST_TEXT, "Beta item"),
+      at("c-2", "blk-p1", "Plain paragraph text.", "paragraph"),
+    ]);
+    expect(paintedText(editor, "c-1")).toBe("Beta item");
+    walks.count = 0;
+    // Type into the paragraph: the list is the same node, so its comment is
+    // not walked again; the paragraph's is.
+    let end = 0;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text === "Plain paragraph text.") end = pos + node.nodeSize;
+    });
+    editor.view.dispatch(editor.state.tr.insertText("!", end));
+    expect(walks.count).toBe(2);
+    expect(paintedText(editor, "c-1")).toBe("Beta item");
+    expect(paintedText(editor, "c-2")).toBe("paragraph");
+    // A transaction that changes no block walks nothing.
+    walks.count = 0;
+    editor.commands.focusCommentHighlight("c-1");
+    expect(walks.count).toBe(0);
+    expect(spans(editor, "c-1")[0].classList.contains("rl-comment-highlight--focused")).toBe(true);
   });
 
   it("paints a top-level paragraph exactly as before", () => {
