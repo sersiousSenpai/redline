@@ -10632,8 +10632,6 @@ function App() {
               // The roomy reading layout only at the card's ⤢ size.
               expanded={frontDoorOpen && islandSize === "tall"}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
-              // The card's heading New is the way back to compose.
-              hostOffersNew
               // Collapses the card; the conversation is still in it on the
               // next open.
               onClose={() => setFrontDoorOpen(false)}

@@ -67,7 +67,7 @@ function Fixture() {
       <div ref={setChatSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
       {!chatId && renderComposer(undefined, true)}
     </MonochatIsland>
-    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} dictationEnabled harness={choice} onClose={() => setOpen(false)} onSent={() => setOpen(true)} expanded={open && size === "tall"} hostOffersNew
+    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} dictationEnabled harness={choice} onClose={() => setOpen(false)} onSent={() => setOpen(true)} expanded={open && size === "tall"}
       composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: (accessories, workbench) => renderComposer(accessories, false, workbench) }}/>, chatSlot)}
     {setup && <IntegrationSetupDialog backend="codex" health={null} busy={false} error="The previous verification timed out. Your draft is saved; retry when Codex is available." progress={null} done={false} pending onInstall={noop} onDismiss={() => setSetup(false)} onLocate={noop}/>}
   </>;

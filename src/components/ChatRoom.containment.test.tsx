@@ -32,32 +32,13 @@ async function render() {
 }
 
 describe("Home chat containment", () => {
-  it("offers a direct New chat action without deleting history or starting another conversation", async () => {
-    const onEmpty = vi.fn(), onSelectChat = vi.fn();
-    await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
-      onSelectChat={onSelectChat} onEmpty={onEmpty} dictationEnabled={false} onClose={() => {}}
-      composer={{ draftKey: "test.unsentDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
-    const button = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-chat-composer] button")).find(button => button.textContent === "New chat");
-    expect(button).toBeDefined();
-    await act(async () => button!.click());
-    expect(onEmpty).toHaveBeenCalledTimes(1);
-    expect(onSelectChat).not.toHaveBeenCalled();
-    expect(host.querySelector('[role="menu"]')).toBeNull();
-  });
-
-  it("leaves New to a host that offers its own", async () => {
-    await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null} hostOffersNew
-      onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
-      composer={{ draftKey: "test.hostNewDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
-    expect(host.querySelector("[data-chat-composer] button")).not.toBeNull();
-    expect(Array.from(host.querySelectorAll("[data-chat-composer] button")).some(button => button.textContent === "New chat")).toBe(false);
-  });
-
   it("labels usage under More and does not navigate history when it opens", async () => {
     const onSelectChat = vi.fn();
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
       onSelectChat={onSelectChat} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
       composer={{ draftKey: "test.emptyDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
+    // The card's heading New is the one way back to compose.
+    expect([...host.querySelectorAll("[data-chat-composer] button")].some(button => /New chat/.test(button.textContent ?? ""))).toBe(false);
     expect(host.querySelector(".rl-monochat-trace-toggle")).toBeNull();
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Conversation actions"]')!.click());
     const usage = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(button => button.textContent?.includes("Activity & usage"))!;
@@ -121,7 +102,7 @@ describe("Home chat containment", () => {
     function Workspace({ surface }: { surface: string }) {
       const [open, setOpen] = useState(true);
       return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} pose="chat" context={surface} busy={false}>
-        <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}} hostOffersNew
+        <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
           composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: accessories => <FrontDoor {...base} accessories={accessories}/> }}/>
       </MonochatIsland></>;
     }
