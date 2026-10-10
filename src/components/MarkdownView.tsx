@@ -45,14 +45,41 @@ md.use(taskLists, { enabled: true, label: true });
 // inline handler — MarkdownView delegates the click (see `onClick` below) and
 // copies the <pre>'s text. This removes the need to hand-select code in the
 // narrow discussion pane (where selection is fiddly over the native webview).
+//
+// A fence a reply is still streaming (`env.rlOpenFence`, its first line —
+// see `renderLiveMarkdown`) renders without highlighting: it re-renders every
+// frame, and its colors arrive once it closes and is rendered for good.
 const defaultFence =
   md.renderer.rules.fence ??
   ((tokens, idx, options, _env, self) =>
     self.renderToken(tokens, idx, options));
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const inner = defaultFence(tokens, idx, options, env, self);
+  const open = typeof env?.rlOpenFence === "number" && tokens[idx].map?.[0] === env.rlOpenFence;
+  const inner = defaultFence(tokens, idx, open ? { ...options, highlight: null } : options, env, self);
   return `<div class="rl-codeblock">${inner}<button class="rl-copy-btn" type="button" title="Copy" aria-label="Copy code">⧉</button></div>\n`;
 };
+
+/** Render the open end of a streaming reply (`StreamingBubble`): exactly
+ *  MarkdownView's markup, except that the code fence starting on line
+ *  `openFence` is still being written and so is not highlighted yet. */
+export function renderLiveMarkdown(src: string, openFence: number): string {
+  return md.render(src, { rlOpenFence: openFence });
+}
+
+/** Whether `src` renders as its closed blocks `head` plus the rest, each on
+ *  its own (`StreamingBubble`), exactly as it renders whole — asked of
+ *  markdown-it's own block parser: `head` must end where a top-level block
+ *  starts, and no reference definition may link the halves. */
+export function splitsCleanly(src: string, head: string): boolean {
+  const line = head.split("\n").length - 1;
+  const env: { references?: unknown } = {};
+  const tokens: ReturnType<typeof md.parse> = [];
+  md.block.parse(src, md, env, tokens);
+  return (
+    env.references === undefined &&
+    tokens.some((t) => t.level === 0 && t.nesting !== -1 && t.map?.[0] === line)
+  );
+}
 
 // GitHub-style callouts: a blockquote whose first line is `[!NOTE]` (or TIP,
 // WARNING, IMPORTANT, CAUTION) becomes `<blockquote class="rl-callout
@@ -202,9 +229,11 @@ export const MarkdownView = memo(function MarkdownView({
     () => (rich ? splitMermaidSegments(body) : null),
     [rich, body],
   );
-  // Plain path: one cached parse keyed on the source.
+  // Plain path: one cached parse keyed on the source. The `__html` object is
+  // cached with it: React re-assigns `innerHTML` whenever that object is a new
+  // one, so an inline literal would rebuild the DOM on every re-render.
   const html = useMemo(
-    () => (segments ? null : md.render(body)),
+    () => (segments ? null : { __html: md.render(body) }),
     [segments, body],
   );
   // Rich path: each markdown segment rendered once and cached together; mermaid
@@ -213,7 +242,7 @@ export const MarkdownView = memo(function MarkdownView({
     () =>
       segments
         ? segments.map((seg) =>
-            seg.kind === "mermaid" ? null : md.render(seg.text),
+            seg.kind === "mermaid" ? null : { __html: md.render(seg.text) },
           )
         : null,
     [segments],
@@ -221,11 +250,7 @@ export const MarkdownView = memo(function MarkdownView({
 
   if (!segments || !segmentHtml) {
     return (
-      <div
-        className={cls}
-        onClick={onClick}
-        dangerouslySetInnerHTML={{ __html: html ?? "" }}
-      />
+      <div className={cls} onClick={onClick} dangerouslySetInnerHTML={html ?? undefined} />
     );
   }
 
@@ -236,7 +261,7 @@ export const MarkdownView = memo(function MarkdownView({
           <MermaidView key={i} code={seg.code} />
         ) : (
           <Fragment key={i}>
-            <div dangerouslySetInnerHTML={{ __html: segmentHtml[i] ?? "" }} />
+            <div dangerouslySetInnerHTML={segmentHtml[i] ?? undefined} />
           </Fragment>
         ),
       )}

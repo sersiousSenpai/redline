@@ -4,7 +4,7 @@
 //! git stash, branch creation, or agent-authored Workflow script participates.
 use crate::db::Database;
 use crate::runner_graph::{self as graph, RunGraph, RunNode, RunOp};
-use crate::turn::{MeterPacer, PartialBuf};
+use crate::turn::{DeltaPacer, MeterPacer, PartialBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -906,6 +906,7 @@ impl RunnerState {
         let mut request_id = 100u64;
         let started = std::time::Instant::now();
         let startup_deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        let mut deltas = DeltaPacer::default();
         let run = async {
             input.write_all(format!("{}\n", crate::codex_conversation::NativeTurn::initialize()).as_bytes()).await.map_err(|error| error.to_string())?;
             loop {
@@ -921,16 +922,16 @@ impl RunnerState {
                             let claim = claim_codex_paths(&self.db, g, node, &approval.paths);
                             let response = json!({"id":approval.id,"result":{"decision":if claim.is_ok() { "accept" } else { "decline" }}});
                             input.write_all(format!("{response}\n").as_bytes()).await.map_err(|error| error.to_string())?;
-                            if let Err(error) = claim { push_output(app, g, node, &partial, &mut result.output, &format!("\nPatch held: {error}\n")); }
+                            if let Err(error) = claim { push_output(app, g, node, &partial, &mut deltas, &mut result.output, &format!("\nPatch held: {error}\n")); }
                         }
                         if let Some(thread) = step.thread {
                             self.db.set_setting(&format!("run.{}.{}.provider", g.run_id, node.id), "codex").map_err(|error| error.to_string())?;
                             self.db.runner_update(&g.run_id, None, |graph, _| { if let Some(current) = graph.nodes.iter_mut().find(|current| current.id == node.id && current.attempt == node.attempt) { current.child_session_id = Some(thread); } consume_queued_prefix(graph, &node.id, node.attempt, &node.queued_messages) })?;
                         }
-                        if let Some(text) = step.delta { push_output(app, g, node, &partial, &mut result.output, &text); }
+                        if let Some(text) = step.delta { push_output(app, g, node, &partial, &mut deltas, &mut result.output, &text); }
                         if let Some(meter) = step.meter { partial.lock().unwrap().meter = meter.clone(); if let Some(app) = app { let _ = app.emit("run-meter", json!({"runId":g.run_id,"nodeId":node.id,"attempt":node.attempt,"rev":meter.rev,"meter":meter})); } }
                         if let Some(error) = step.error { return Err(error); }
-                        if let Some(text) = step.final_text { if result.output.is_empty() { push_output(app, g, node, &partial, &mut result.output, &text); } result.success = !text.trim().is_empty(); return Ok(()); }
+                        if let Some(text) = step.final_text { if result.output.is_empty() { push_output(app, g, node, &partial, &mut deltas, &mut result.output, &text); } result.success = !text.trim().is_empty(); return Ok(()); }
                     }
                     line = errors.next_line(), if stderr_open => match line { Ok(Some(line)) => append_capped(&mut result.output, &format!("\n{line}")), _ => stderr_open = false },
                     control = controls.recv() => match control {
@@ -943,6 +944,7 @@ impl RunnerState {
                         Some(Control::Stop) | None => { result.stopped = true; return Ok(()); }
                     },
                     _ = tokio::time::sleep_until(startup_deadline), if native.turn_id.is_none() => return Err("Codex did not acknowledge the run node within 45 seconds".into()),
+                    () = deltas.due() => flush_output(app, g, node, &partial, &mut deltas),
                 }
             }
         };
@@ -951,6 +953,7 @@ impl RunnerState {
             Err(_) => { result.stopped = true; append_capped(&mut result.output, "\nCodex node exceeded its time limit."); }
             Ok(Ok(())) => {}
         }
+        flush_output(app, g, node, &partial, &mut deltas);
         let _ = child.kill().await; let _ = child.wait().await;
         let _ = self.db.set_setting(&runtime_key, &native.total_usage.to_string());
         let mut meter = partial.lock().unwrap().meter.clone(); meter.duration_ms = Some(started.elapsed().as_millis() as u64);
@@ -1135,6 +1138,7 @@ impl RunnerState {
         let mut terminal_seen = false;
         let mut parse_failed = false;
         let mut pacer = MeterPacer::default();
+        let mut deltas = DeltaPacer::default();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let started = std::time::Instant::now();
         let mut exited_at: Option<std::time::Instant> = None;
@@ -1143,7 +1147,7 @@ impl RunnerState {
             tokio::select! {
                 line=out.next_line(),if out_open=>match line {
                     Ok(Some(line))=>{
-                        if !is_task { push_output(app,g,node,&partial,&mut result.output,&format!("{line}\n")); continue; }
+                        if !is_task { push_output(app,g,node,&partial,&mut deltas,&mut result.output,&format!("{line}\n")); continue; }
                         let Ok(v)=serde_json::from_str::<Value>(&line) else {continue};
                         if let Some(meta)=crate::turn::push_meta(&partial,&v) { if pacer.due(&meta) { if let Some(app)=app {let _=app.emit("run-meter",json!({"runId":g.run_id,"nodeId":node.id,"attempt":node.attempt,"rev":meta.rev,"meter":meta.meter,"activity":meta.activity}));} } }
                         // Observer fallback detects any reported write even if a
@@ -1161,8 +1165,8 @@ impl RunnerState {
                         }
                         match ClaudeCli.parse_event(&v) {
                             Some(NodeEvent::Session(id))=>{ let _=self.db.set_setting(&format!("run.{}.{}.provider",g.run_id,node.id), "claude-code"); let _=self.db.runner_update(&g.run_id,None,|g,_|{if let Some(n)=g.nodes.iter_mut().find(|n|n.id==node.id){n.child_session_id=Some(id);}Ok(())}); },
-                            Some(NodeEvent::Delta(text))=>push_output(app,g,node,&partial,&mut result.output,&text),
-                            Some(NodeEvent::Done(text))=>{ if result.output.is_empty(){push_output(app,g,node,&partial,&mut result.output,&text);} terminal_seen=true; stdin.take(); },
+                            Some(NodeEvent::Delta(text))=>push_output(app,g,node,&partial,&mut deltas,&mut result.output,&text),
+                            Some(NodeEvent::Done(text))=>{ if result.output.is_empty(){push_output(app,g,node,&partial,&mut deltas,&mut result.output,&text);} terminal_seen=true; stdin.take(); },
                             Some(NodeEvent::Failed(text))=>{parse_failed=true; terminal_seen=true; append_capped(&mut result.output,&text); stdin.take();},
                             None=>{},
                         }
@@ -1171,7 +1175,7 @@ impl RunnerState {
                     Err(e)=>{out_open=false;parse_failed=true;append_capped(&mut result.output,&e.to_string());},
                 },
                 line=err.next_line(),if err_open=>match line {
-                    Ok(Some(line))=>push_output(app,g,node,&partial,&mut result.output,&format!("{line}\n")),
+                    Ok(Some(line))=>push_output(app,g,node,&partial,&mut deltas,&mut result.output,&format!("{line}\n")),
                     _=>err_open=false,
                 },
                 control=controls.recv()=>match control {
@@ -1182,6 +1186,7 @@ impl RunnerState {
                         let _=child.start_kill(); break;
                     },
                 },
+                ()=deltas.due()=>flush_output(app,g,node,&partial,&mut deltas),
                 _=tick.tick()=>{
                     if child.try_wait().ok().flatten().is_some() && exited_at.is_none() {exited_at=Some(std::time::Instant::now());}
                     if !descendants_stopped && exited_at.is_some_and(|at|at.elapsed()>Duration::from_millis(500)) {
@@ -1195,6 +1200,7 @@ impl RunnerState {
                 },
             }
         }
+        flush_output(app, g, node, &partial, &mut deltas);
         stdin.take();
         let status = match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
             Ok(Ok(status)) => Some(status),
@@ -1231,16 +1237,42 @@ fn user_frame(text: &str) -> String {
         json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":text}]}})
     )
 }
+/// Add to the node's output now, and stream it as a coalesced `run-delta`
+/// (`turn::DeltaPacer`).
 fn push_output(
     app: Option<&AppHandle>,
     g: &RunGraph,
     node: &RunNode,
     partial: &Mutex<PartialBuf>,
+    deltas: &mut DeltaPacer,
     output: &mut String,
     text: &str,
 ) {
     append_capped(output, text);
-    let seq = crate::turn::push_delta(partial, text);
+    deltas.push(text, &|chunk| emit_output(app, g, node, partial, chunk));
+}
+
+/// Stream what `push_output` is holding: on a quiet stream's deadline, and
+/// before the node's result is reported.
+fn flush_output(
+    app: Option<&AppHandle>,
+    g: &RunGraph,
+    node: &RunNode,
+    partial: &Mutex<PartialBuf>,
+    deltas: &mut DeltaPacer,
+) {
+    deltas.flush(&|chunk| emit_output(app, g, node, partial, chunk));
+}
+
+/// One chunk, append-then-emit (see `turn::push_delta`).
+fn emit_output(
+    app: Option<&AppHandle>,
+    g: &RunGraph,
+    node: &RunNode,
+    partial: &Mutex<PartialBuf>,
+    text: String,
+) {
+    let seq = crate::turn::push_delta(partial, &text);
     if let Some(app) = app {
         let _ = app.emit(
             "run-delta",

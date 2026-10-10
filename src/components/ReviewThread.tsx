@@ -11,6 +11,7 @@ import { useAutoGrow } from "../hooks/useAutoGrow";
 
 import type { ThreadMessage } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { StreamingText } from "./StreamingBubble";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 // Per-annotation discussion thread for the Code Review surface. The compact
@@ -127,7 +128,7 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
               ⟳ Temporary model error — retrying…
             </div>
           ) : liveText ? (
-            <MarkdownView body={liveText} compact />
+            <StreamingText text={liveText} />
           ) : (
             // Backend clock, so a pane switch mid-turn comes back showing the
             // true elapsed wait rather than restarting the counter.

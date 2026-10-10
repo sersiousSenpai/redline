@@ -2215,9 +2215,10 @@ async fn drain_fork(
         let mut saw_json = false;
         let mut streamed = false;
         let mut pacer = turn::MeterPacer::default();
+        let mut deltas = turn::DeltaPacer::default();
         // One delta emitter for both protocols, so the frontend's
         // append-before-emit / seq-watermark contract cannot diverge between
-        // them. See `turn::push_delta`.
+        // them. See `turn::push_delta`; `deltas` coalesces what reaches it.
         let emit_delta = |text: String| {
             let seq = turn::push_delta(buf, &text);
             let _ = app.emit(
@@ -2230,7 +2231,7 @@ async fn drain_fork(
                 },
             );
         };
-        while let Ok(Some(line)) = reader.next_line().await {
+        while let Ok(Some(line)) = turn::next_line(&mut reader, &mut deltas, &emit_delta).await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -2263,7 +2264,7 @@ async fn drain_fork(
                     StreamLine::Init(sid) => fork_session = Some(sid),
                     StreamLine::Delta(text) => {
                         streamed = true;
-                        emit_delta(text);
+                        deltas.push(&text, &emit_delta);
                     }
                     StreamLine::Final { text, session_id: sid } => {
                         if sid.is_some() {
@@ -2283,7 +2284,7 @@ async fn drain_fork(
                         // mid-turn remount recovers from, and what puts the
                         // reply on screen a beat before `fork-done`.
                         streamed = true;
-                        emit_delta(text.clone());
+                        deltas.push(&text, &emit_delta);
                         // Codex can complete more than one agent message in a
                         // turn and has no single authoritative "result" line,
                         // so they accumulate — last-wins would silently drop
@@ -2312,6 +2313,9 @@ async fn drain_fork(
                 },
             }
         }
+        // However the stream ended: `fork-done` / `fork-error` follow this
+        // drain, and they must find the whole reply already delivered.
+        deltas.flush(&emit_delta);
         (fork_session, final_text, errored, saw_json, streamed)
     };
     let stderr_fut = async {

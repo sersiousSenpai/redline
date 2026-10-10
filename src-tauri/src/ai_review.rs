@@ -643,7 +643,9 @@ pub async fn ai_review_start(
             let mut final_text: Option<String> = None;
             let mut errored: Option<String> = None;
             let mut meter = crate::meter::TurnMeter::new();
-            while let Ok(Some(line)) = reader.next_line().await {
+            // The log is per token too: coalesced like every chat surface.
+            let mut deltas = crate::turn::DeltaPacer::default();
+            while let Ok(Some(line)) = crate::turn::next_line(&mut reader, &mut deltas, &emit_log).await {
                 activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -655,12 +657,13 @@ pub async fn ai_review_start(
                 // Second pass over the same value — the ONE accounting rule.
                 meter.observe(&v);
                 match classify_line(&v) {
-                    StreamLine::Delta(text) => emit_log(text),
+                    StreamLine::Delta(text) => deltas.push(&text, &emit_log),
                     StreamLine::Final { text, .. } => final_text = Some(text),
                     StreamLine::Failed(msg) => errored = Some(msg),
                     StreamLine::Init(_) | StreamLine::Ignore => {}
                 }
             }
+            deltas.flush(&emit_log);
             (final_text, errored, meter)
         };
         let stderr_fut = async {

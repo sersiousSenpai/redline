@@ -14,7 +14,7 @@ import { transcriptNote } from "../lib/attachmentNote";
 import { agentLabelFor } from "../lib/backendChoice";
 import { AttachmentChips } from "./AttachmentChips";
 import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
+import StreamingBubble, { StreamingText } from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import type { TurnMeter } from "../lib/turnMeter";
 import { DiscussModelChip } from "./DiscussModelChip";
@@ -631,12 +631,11 @@ export const CommentThread = memo(function CommentThread({
               ))}
               {chatInFlight &&
                 (liveText ? (
-                  <div className="rl-chat-agent">
-                    <MarkdownView body={liveText} compact />
-                    <span aria-hidden style={{ color: "var(--color-ink-muted)" }}>
-                      {retrying ? "" : "▌"}
-                    </span>
-                  </div>
+                  <StreamingText
+                    className="rl-chat-agent"
+                    text={liveText}
+                    caret={retrying ? "" : "▌"}
+                  />
                 ) : (
                   <WorkingIndicator
                     label={retrying ? "Retrying" : "Thinking"}

@@ -1981,6 +1981,14 @@ async fn read_companion(
     let mut errored: Option<String> = None;
     let mut saw_json = false;
     let mut pacer = turn::MeterPacer::default();
+    let mut deltas = turn::DeltaPacer::default();
+    // Append-before-emit (see `turn::push_delta`), one coalesced chunk at a
+    // time. Held text is flushed before anything that reads `buf.text` or
+    // speaks after it: a steer splitting the reply, a status line, the end.
+    let emit_delta = |text: String| {
+        let seq = turn::push_delta(&buf, &text);
+        let _ = app.emit("companion-delta", CompanionDelta { companion_id: companion_id.clone(), text, seq });
+    };
     let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
     if warm.is_some() || native.is_some() { companion.turns.attach_control(&companion_id, token, control_tx); }
     let mut pending_steer: Option<(QueuedCompanionSend, tokio::sync::oneshot::Sender<bool>, u64)> = None;
@@ -2007,12 +2015,14 @@ async fn read_companion(
                     let written = tokio::time::timeout(std::time::Duration::from_secs(10), async { pipe.write_all(frame.as_bytes()).await?; pipe.flush().await }).await;
                     if matches!(written, Ok(Ok(()))) {
                         injected = true;
+                        deltas.flush(&emit_delta);
                         let result = persist_steer(&app, &companion, &companion_id, &buf, &payload);
                         let _ = ack.send(result.is_ok());
                     } else { let _ = ack.send(false); }
                 } else { let _ = ack.send(false); }
                 continue;
             }
+            () = deltas.due() => { deltas.flush(&emit_delta); continue; }
         };
         let line = match next_line {
             Ok(Ok(Some(line))) => line,
@@ -2052,7 +2062,7 @@ async fn read_companion(
         if pending_steer.as_ref().is_some_and(|(_, _, id)| v.get("id").and_then(Value::as_u64) == Some(*id)) {
             let (payload, ack, _) = pending_steer.take().unwrap();
             let accepted = v.get("error").is_none() && v.pointer("/result/turnId").and_then(Value::as_str) == native.as_ref().and_then(|n| n.turn_id.as_deref());
-            if accepted { injected = true; let _ = ack.send(persist_steer(&app, &companion, &companion_id, &buf, &payload).is_ok()); }
+            if accepted { injected = true; deltas.flush(&emit_delta); let _ = ack.send(persist_steer(&app, &companion, &companion_id, &buf, &payload).is_ok()); }
             else { let _ = ack.send(false); }
             continue;
         }
@@ -2068,11 +2078,8 @@ async fn read_companion(
                 }
             }
             if let Some(id) = step.thread { session = Some(id); }
-            if let Some(text) = step.delta {
-                let seq = turn::push_delta(&buf, &text);
-                let _ = app.emit("companion-delta", CompanionDelta { companion_id: companion_id.clone(), text, seq });
-            }
-            if let Some(label) = step.activity { emit_companion_status(&app, &companion_id, &label); }
+            if let Some(text) = step.delta { deltas.push(&text, &emit_delta); }
+            if let Some(label) = step.activity { deltas.flush(&emit_delta); emit_companion_status(&app, &companion_id, &label); }
             if let Some(meter) = step.meter {
                 buf.lock().unwrap_or_else(|error| error.into_inner()).meter = meter.clone();
                 let payload = turn::MeterPayload { rev: meter.rev, meter, activity: None, discrete: true };
@@ -2101,6 +2108,7 @@ async fn read_companion(
         // it carries no answer text.
         for (name, input) in crate::claude_proc::tool_uses(&v) {
             turn_output = true;
+            deltas.flush(&emit_delta);
             emit_companion_status(
                 &app,
                 &companion_id,
@@ -2111,16 +2119,7 @@ async fn read_companion(
             StreamLine::Init(sid) => { turn_output = true; session = Some(sid) }
             StreamLine::Delta(text) => {
                 turn_output = true;
-                // Append-before-emit: see `turn::push_delta`.
-                let seq = turn::push_delta(&buf, &text);
-                let _ = app.emit(
-                    "companion-delta",
-                    CompanionDelta {
-                        companion_id: companion_id.clone(),
-                        text,
-                        seq,
-                    },
-                );
+                deltas.push(&text, &emit_delta);
             }
             StreamLine::Final { text, session_id } => {
                 if session_id.is_some() {
@@ -2136,6 +2135,8 @@ async fn read_companion(
             break;
         }
     }
+    // However the turn ended, the reply is whole before anything reads it.
+    deltas.flush(&emit_delta);
     drop(pending_steer.take());
     companion.turns.clear_control(&companion_id, token);
     drop(stdin.take());

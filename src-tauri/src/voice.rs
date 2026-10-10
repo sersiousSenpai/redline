@@ -1198,7 +1198,19 @@ async fn read_voice(
     // the meter is booked and reset at each terminal rather than at EOF.
     let mut meter = crate::meter::TurnMeter::new();
     let mut pacer = turn::MeterPacer::default();
-    while let Ok(Some(line)) = reader.next_line().await {
+    // Text deltas, coalesced. Held text is flushed before each turn's
+    // terminal: the panel stops accepting deltas once `voice-done` lands.
+    let mut deltas = turn::DeltaPacer::default();
+    let emit_delta = |text: String| {
+        let _ = app.emit(
+            "voice-delta",
+            VoiceDelta {
+                session_id: session_id.clone(),
+                text,
+            },
+        );
+    };
+    while let Ok(Some(line)) = turn::next_line(&mut reader, &mut deltas, &emit_delta).await {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -1242,16 +1254,9 @@ async fn read_voice(
                     },
                 );
             }
-            StreamLine::Delta(text) => {
-                let _ = app.emit(
-                    "voice-delta",
-                    VoiceDelta {
-                        session_id: session_id.clone(),
-                        text,
-                    },
-                );
-            }
+            StreamLine::Delta(text) => deltas.push(&text, &emit_delta),
             StreamLine::Final { text, session_id: sid } => {
+                deltas.flush(&emit_delta);
                 saw_result = true;
                 book_and_reset(&app, &db, &session_id, &mut meter, &mut pacer);
                 if sid.is_some() {
@@ -1315,6 +1320,7 @@ async fn read_voice(
                 }
             }
             StreamLine::Failed(msg) => {
+                deltas.flush(&emit_delta);
                 saw_result = true;
                 // A failed turn spent its input tokens too.
                 book_and_reset(&app, &db, &session_id, &mut meter, &mut pacer);
@@ -1352,7 +1358,9 @@ async fn read_voice(
         }
     }
 
-    // stdout closed → the process is gone. Clean up and tell the frontend.
+    // stdout closed → the process is gone. Clean up and tell the frontend —
+    // after whatever the dying turn had already said.
+    deltas.flush(&emit_delta);
     in_flight.store(false, Ordering::SeqCst);
     {
         voice_remove(&procs, &session_id);

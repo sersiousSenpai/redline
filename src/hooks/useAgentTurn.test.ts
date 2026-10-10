@@ -191,6 +191,86 @@ describe("terminal events through the controller", () => {
   });
 });
 
+describe("render batching", () => {
+  // Hand-driven frames, as in raf.test.ts: we're asserting *when* the
+  // subscribers hear about a delta.
+  let frames: FrameRequestCallback[] = [];
+  beforeEach(() => {
+    frames = [];
+    vi.stubGlobal("requestAnimationFrame", (fn: FrameRequestCallback) => frames.push(fn));
+    vi.stubGlobal("cancelAnimationFrame", () => {
+      frames = [];
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+  const runFrame = () => {
+    const queued = frames;
+    frames = [];
+    for (const fn of queued) fn(performance.now());
+  };
+
+  async function streaming() {
+    const { io, emit, invokeImpl } = fakeIo();
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
+    await ctl.attach();
+    await flush();
+    // What each render would see.
+    const renders: Array<{ phase: string; liveText: string; rows: string[] }> = [];
+    ctl.subscribe(() => {
+      const s = ctl.getState();
+      renders.push({ phase: s.phase, liveText: s.liveText, rows: s.messages.map((m) => m.id) });
+    });
+    return { ctl, emit, renders };
+  }
+
+  it("folds a frame's deltas into one render, with the state current throughout", async () => {
+    const { ctl, emit, renders } = await streaming();
+    emit("browse-delta", { browseId: "L1", text: "The ", seq: 1 });
+    emit("browse-delta", { browseId: "L1", text: "page ", seq: 2 });
+    emit("browse-delta", { browseId: "L1", text: "sells", seq: 3 });
+    expect(renders).toEqual([]);
+    expect(ctl.getState().liveText).toBe("The page sells");
+    runFrame();
+    expect(renders).toEqual([{ phase: "streaming", liveText: "The page sells", rows: [] }]);
+    // An idle frame owes nothing.
+    runFrame();
+    expect(renders).toHaveLength(1);
+    ctl.detach();
+  });
+
+  it("settles at once on done: the pending frame folds in, and never repaints after", async () => {
+    const { ctl, emit, renders } = await streaming();
+    emit("browse-delta", { browseId: "L1", text: "The page ", seq: 1 });
+    runFrame();
+    emit("browse-delta", { browseId: "L1", text: "sells plans.", seq: 2 });
+    emit("browse-done", { browseId: "L1", messageId: "a-db", body: "The page sells plans." });
+    expect(renders[renders.length - 1]).toEqual({ phase: "idle", liveText: "", rows: ["a-db"] });
+    expect(frames).toEqual([]);
+    runFrame();
+    expect(renders).toHaveLength(2);
+    ctl.detach();
+  });
+
+  it("an error settles at once too", async () => {
+    const { ctl, emit, renders } = await streaming();
+    emit("browse-delta", { browseId: "L1", text: "half a ", seq: 1 });
+    emit("browse-error", { browseId: "L1", error: "boom" });
+    expect(renders.map((r) => r.phase)).toEqual(["error"]);
+    expect(frames).toEqual([]);
+    ctl.detach();
+  });
+
+  it("a detach drops the pending frame", async () => {
+    const { ctl, emit, renders } = await streaming();
+    emit("browse-delta", { browseId: "L1", text: "half a ", seq: 1 });
+    ctl.detach();
+    expect(frames).toEqual([]);
+    expect(renders).toEqual([]);
+  });
+});
+
 describe("self-heal", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());

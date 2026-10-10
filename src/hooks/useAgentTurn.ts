@@ -15,6 +15,8 @@
 //!   self-heals a panel whose terminal event was lost (the reader persists the
 //!   terminal row before emitting, so a refetch settles the thread truthfully).
 //!   A done event racing the first false probe disarms the counter.
+//! - Deltas re-render once per animation frame, however many land in it;
+//!   every other event re-renders at once (see `dispatch`).
 //!
 //! The imperative core is `AgentTurnController`, a plain class with injected
 //! `invoke`/`listen` so the mount ordering and self-heal are unit-testable
@@ -24,6 +26,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 
+import { rafCoalesce } from "../lib/raf";
 import {
   initialTurnState,
   reduceTurn,
@@ -199,6 +202,8 @@ export class AgentTurnController<M extends TurnMessage> {
   /** Consecutive self-heal probes that said "idle" while we showed a stream. */
   private miss = 0;
   private healTimer: ReturnType<typeof setInterval> | null = null;
+  /** The subscriber notify a frame's deltas share. */
+  private notifyFrame = rafCoalesce(() => this.notify());
 
   constructor(
     private cfg: () => AgentTurnConfig<M>,
@@ -218,6 +223,19 @@ export class AgentTurnController<M extends TurnMessage> {
     if (next === this.state) return;
     this.state = next;
     this.syncHeal();
+    // The state is always current; only the re-render waits. `turn::DeltaPacer`
+    // paces each turn's deltas, not their delivery, and several can land in
+    // one frame; every render past a frame's first is one the display never
+    // shows, so subscribers hear about deltas once a frame. Anything else —
+    // done above all — notifies now, folding in the frame's pending deltas,
+    // so the render that settles a turn has its full text and no stale frame
+    // repaints after it.
+    if (action.type === "delta") this.notifyFrame();
+    else this.notify();
+  }
+
+  private notify() {
+    this.notifyFrame.cancel();
     for (const fn of this.subs) fn();
   }
 
@@ -310,8 +328,8 @@ export class AgentTurnController<M extends TurnMessage> {
         this.dispatch({ type: "retry", attempt: p.attempt }),
       ),
       // The token/provenance meter. Coalesced backend-side (at most one per
-      // 250ms, plus an immediate one on a discrete change), so unlike `delta`
-      // this subscription is nowhere near the per-token path.
+      // 250ms, plus an immediate one on a discrete change) — a slower clock
+      // than `delta`'s 33ms, so it notifies directly.
       on<MeterPayload>("meter", (p) =>
         this.dispatch({ type: "meter", meter: p.meter, activity: p.activity }),
       ),
@@ -327,6 +345,7 @@ export class AgentTurnController<M extends TurnMessage> {
 
   detach(): void {
     this.alive = false;
+    this.notifyFrame.cancel();
     this.unlistens?.forEach((un) => un());
     this.unlistens = null;
     if (this.healTimer != null) clearInterval(this.healTimer);

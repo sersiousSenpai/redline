@@ -997,8 +997,22 @@ async fn read_draft_chat(
     let mut errored: Option<String> = None;
     let mut saw_json = false;
     let mut pacer = turn::MeterPacer::default();
+    let mut deltas = turn::DeltaPacer::default();
+    // Append-before-emit (see `turn::push_delta`), one coalesced chunk at a
+    // time.
+    let emit_delta = |text: String| {
+        let seq = turn::push_delta(&buf, &text);
+        let _ = app.emit(
+            "draft-chat-delta",
+            DraftChatDelta {
+                draft_id: draft_id.clone(),
+                text,
+                seq,
+            },
+        );
+    };
 
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Ok(Some(line)) = turn::next_line(&mut lines, &mut deltas, &emit_delta).await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -1021,18 +1035,7 @@ async fn read_draft_chat(
         }
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
-            StreamLine::Delta(text) => {
-                // Append-before-emit: see `turn::push_delta`.
-                let seq = turn::push_delta(&buf, &text);
-                let _ = app.emit(
-                    "draft-chat-delta",
-                    DraftChatDelta {
-                        draft_id: draft_id.clone(),
-                        text,
-                        seq,
-                    },
-                );
-            }
+            StreamLine::Delta(text) => deltas.push(&text, &emit_delta),
             StreamLine::Final { text, session_id } => {
                 if session_id.is_some() {
                     session = session_id;
@@ -1043,6 +1046,8 @@ async fn read_draft_chat(
             StreamLine::Ignore => {}
         }
     }
+    // The terminal events follow; the reply is whole first.
+    deltas.flush(&emit_delta);
     let mut stderr_text = String::new();
     while let Ok(Some(line)) = stderr_lines.next_line().await {
         stderr_text.push_str(&line);

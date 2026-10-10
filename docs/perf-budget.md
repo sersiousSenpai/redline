@@ -40,17 +40,43 @@ it, that's the discussion to have before merging.
    instead of flooding the renderer. See `pty.rs` (`Coalescer`, `Flow`) and
    `TerminalView.tsx`.
 
+   > **The streamed replies' compliance with this rule.** A chat reply's
+   > `{surface}-delta` events (fork, companion, browse — Claude and Codex —
+   > mission, memchat, draft-chat, voice, plus `run-delta` and the AI review's
+   > `review-ai-log`) are an `app.emit` and not a `Channel`. That is allowed
+   > only because they are no longer per token: `turn::DeltaPacer` coalesces
+   > each turn's deltas to at most one event per **33 ms** (two frames). The
+   > first token leaves at once, so time to first token is unchanged; what a
+   > window holds leaves as one chunk that is the deltas' exact concatenation.
+   > Held text never waits on the next line — `turn::next_line` (or a
+   > `due()` arm in a reader that already selects) flushes it at its deadline
+   > — and every reader flushes before any other event of the turn (done,
+   > error, cancelled, a status line, a steer that splits the reply) and when
+   > its stream ends, so a final reply is never short. The chunk is what gets
+   > `turn::push_delta`'d, so `seq` counts chunks and the frontend's seq guard
+   > is unchanged. One subscriber per stream is still the Channel's argument:
+   > every mounted listener wakes for every chunk, which is bounded at ~30 a
+   > second per streaming turn. `perf_guard.rs` pins the pacing. On the
+   > frontend, `useAgentTurn` folds the chunks that land within one animation
+   > frame into one render (a terminal event renders at once, with the full
+   > text), and `StreamingBubble` re-parses only the reply's open last block:
+   > the closed blocks go through a memoized `MarkdownView` that parses again
+   > only when another block closes (`src/lib/streamSplit.ts`), at a boundary
+   > markdown-it's own block parser confirms. A frame costs one block, not the
+   > whole reply.
+   >
    > **The token meter's compliance with this rule.** `{surface}-meter`
    > (`meter.rs` / `turn::MeterPacer`) is an `app.emit` and not a `Channel`,
    > which is only allowed because it is not high-frequency: it is coalesced to
    > at most one event per **250 ms**, plus an immediate one on a *discrete*
    > change (first model observation, a new tool call, a rate-limit onset, the
    > terminal) — never per text delta. The meter deliberately does NOT ride the
-   > delta path, which does fire per token. Its payload is a bounded snapshot
-   > (a fixed set of counters plus one ≤160-char activity label), and the
-   > backend ring is capped at 200 entries, so nothing here is unbounded
-   > either. If the meter ever needs per-token resolution, it must move to a
-   > `Channel` first.
+   > delta path, which has its own pacer, and it is a snapshot with its own
+   > `rev` guard, so it never has to be ordered against the text. Its payload
+   > is a bounded snapshot (a fixed set of counters plus one ≤160-char activity
+   > label), and the backend ring is capped at 200 entries, so nothing here is
+   > unbounded either. If the meter ever needs per-token resolution, it must
+   > move to a `Channel` first.
 
 4. **Heavy Tauri commands MUST be `#[tauri::command(async)]`.** A plain
    `#[tauri::command]` runs on the **main thread** — any fs read, parse, encode,
@@ -178,12 +204,21 @@ These are cheap regression nets, not a substitute for the rules above:
   or their place in `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS` (and that every
   name there is registered, and `save_workspace` keeps its order),
   that PTY output stays batched over a Channel (no `pty-output` per-read
-  emit), that run events carry a run id and revision rather than the
-  graph, and that the renderer footprint is watched and served (rule 7).
+  emit), that every streamed reply's delta arm feeds a `DeltaPacer` and its
+  reader flushes it, that run events carry a run id and revision rather than
+  the graph, and that the renderer footprint is watched and served (rule 7).
   Fails the Rust test suite if any of them regresses.
+- `src-tauri/src/turn.rs` tests — `DeltaPacer` coalescing (the leading token,
+  the window, whole and ordered chunks, a gapless `seq`) and its flushes:
+  before done, before error, on an abrupt end, and when the stream goes quiet.
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
+- `src/components/StreamingBubble.test.tsx` — streams real-shaped replies
+  (fences, lists, tables, headings, quotes, mermaid) a few characters at a
+  time and holds the split render to one full render at every step (including
+  where the line scan misreads a block), and pins that the closed blocks'
+  `MarkdownView` re-renders only when a block closes.
 - `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
   `src/**/*.css`, every inline `animation:` in a component and every
   `el.animate(…)` call to the properties it animates, and fails when an

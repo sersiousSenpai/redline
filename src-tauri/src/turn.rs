@@ -31,11 +31,15 @@
 //! are taken (only `status`): registry lock first, then the buffer lock.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::io::{AsyncBufRead, Lines};
 use tokio::process::Child;
+use tokio::time::Instant;
 
 use crate::state::now_millis;
 
@@ -55,10 +59,14 @@ pub const QUEUE_CAP: usize = 5;
 pub const ACTIVITY_CAP: usize = 200;
 
 /// Floor between coalesced `{surface}-meter` events (perf-budget Rule 3).
-/// Text deltas already fire per token; the meter must never ride them.
-/// A DISCRETE change (first model, new tool, rate-limit onset, the terminal)
-/// jumps this queue — see [`MeterPacer`].
+/// The meter never rides the text path, which has its own, tighter floor
+/// ([`DELTA_COALESCE`]). A DISCRETE change (first model, new tool, rate-limit
+/// onset, the terminal) jumps this queue — see [`MeterPacer`].
 pub const METER_COALESCE_MS: i64 = 250;
+
+/// Floor between two of one turn's `{surface}-delta` events — two frames at
+/// 60 Hz (perf-budget Rule 3). See [`DeltaPacer`].
+pub const DELTA_COALESCE: Duration = Duration::from_millis(33);
 
 /// What a remounting panel learns about a key's turn: whether one is
 /// streaming, since when, the reply text streamed so far, and how many deltas
@@ -530,6 +538,11 @@ impl<Q> Drop for SlotGuard<Q> {
 /// That is what makes the frontend rule "drop deltas with `seq <=` the
 /// probed seq" lossless: no delta can be both missing from the probe text
 /// and dropped by the guard. Emitting before appending would break this.
+///
+/// A "delta" here is one EMITTED chunk: readers call this from their
+/// [`DeltaPacer`]'s emit, so text the pacer still holds is in neither the
+/// buffer nor an event, and a probe taken meanwhile is simply behind the
+/// next chunk — never ahead of it.
 pub fn push_delta(buf: &Mutex<PartialBuf>, text: &str) -> u64 {
     let mut b = buf.lock().unwrap();
     b.seq += 1;
@@ -628,6 +641,104 @@ impl MeterPacer {
     }
 }
 
+/// The coalescer that keeps the text path off the per-token rate
+/// (perf-budget Rule 3): a turn's deltas leave at most once per
+/// [`DELTA_COALESCE`], where every token used to be its own `app.emit` — one
+/// `webview.eval` on the main thread each, and one re-render of the bubble.
+/// The [`MeterPacer`] pattern on the text path; one per reader loop.
+///
+/// What it emits is the deltas' exact concatenation, in order: nothing is
+/// dropped, reordered or split. The first delta leaves at once (time to first
+/// token is unchanged); later ones are held until the window since the
+/// previous emit has passed. Held text leaves through one of three doors, and
+/// a reader uses all three:
+///
+/// - [`push`](Self::push), when a delta lands past the window;
+/// - [`next_line`] (or a [`due`](Self::due) arm in a reader that already
+///   selects), when the stream goes quiet — a tool call, a slow token — with
+///   text still held;
+/// - [`flush`](Self::flush), before any other event of the turn (done, error,
+///   cancelled, a status line, a steer that splits the reply) and once the
+///   stream ends, however it ends, so the final text is never short.
+///
+/// `emit` is where a surface does its append-then-emit ([`push_delta`]), once
+/// per chunk. It is taken as `&dyn Fn` so the pacer is one function in the
+/// binary rather than one per call site.
+#[derive(Default)]
+pub struct DeltaPacer {
+    held: String,
+    last: Option<Instant>,
+}
+
+impl DeltaPacer {
+    /// Take one delta; emit it, with anything held, if the window has passed.
+    pub fn push(&mut self, text: &str, emit: &dyn Fn(String)) {
+        self.push_at(text, Instant::now(), emit);
+    }
+
+    fn push_at(&mut self, text: &str, now: Instant, emit: &dyn Fn(String)) {
+        self.held.push_str(text);
+        if self.last.is_none_or(|last| now >= last + DELTA_COALESCE) {
+            self.release(now, emit);
+        }
+    }
+
+    /// Emit whatever is held, whatever the clock says.
+    pub fn flush(&mut self, emit: &dyn Fn(String)) {
+        self.release(Instant::now(), emit);
+    }
+
+    fn release(&mut self, now: Instant, emit: &dyn Fn(String)) {
+        if self.held.is_empty() {
+            return;
+        }
+        self.last = Some(now);
+        emit(std::mem::take(&mut self.held));
+    }
+
+    /// When held text falls due; `None` while nothing is held.
+    pub fn due_at(&self) -> Option<Instant> {
+        if self.held.is_empty() {
+            return None;
+        }
+        Some(self.last.map_or_else(Instant::now, |last| last + DELTA_COALESCE))
+    }
+
+    /// Resolves when held text falls due, and never while nothing is held: a
+    /// `select!` arm for a reader that cannot use [`next_line`]. Owns its
+    /// deadline, so the arm borrows nothing the handler needs.
+    pub fn due(&self) -> impl Future<Output = ()> + Send + 'static {
+        let at = self.due_at();
+        async move {
+            match at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        }
+    }
+}
+
+/// `lines.next_line()` that wakes at the pacer's deadline to flush held text
+/// through `emit`, so a reply that pauses mid-sentence shows its last words
+/// now rather than whenever the next line arrives. Lossless because
+/// `Lines::next_line` is cancel-safe: a read the deadline interrupts loses no
+/// bytes.
+pub async fn next_line<R: AsyncBufRead + Unpin>(
+    lines: &mut Lines<R>,
+    pacer: &mut DeltaPacer,
+    emit: &(dyn Fn(String) + Sync),
+) -> std::io::Result<Option<String>> {
+    loop {
+        let Some(at) = pacer.due_at() else {
+            return lines.next_line().await;
+        };
+        match tokio::time::timeout_at(at, lines.next_line()).await {
+            Ok(line) => return line,
+            Err(_) => pacer.flush(emit),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,6 +826,136 @@ mod tests {
         let b = buf.lock().unwrap();
         assert_eq!(b.text.len(), len_at_cap, "text must stop growing at the cap");
         assert_eq!(b.seq, 3, "seq must keep counting past the cap");
+    }
+
+    #[test]
+    fn delta_pacer_leads_with_the_first_token_and_coalesces_the_window() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut p = DeltaPacer::default();
+        let out: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let emit = |c: String| out.lock().unwrap().push(c);
+        p.push_at("The ", at(0), &emit);
+        p.push_at("quick ", at(5), &emit);
+        p.push_at("brown ", at(20), &emit);
+        assert_eq!(*out.lock().unwrap(), ["The "], "the first token leaves at once; the rest wait");
+        assert_eq!(p.due_at(), Some(at(33)), "held text falls due a window after the last emit");
+        p.push_at("fox", at(33), &emit);
+        assert_eq!(
+            *out.lock().unwrap(),
+            ["The ", "quick brown fox"],
+            "everything held, in order, as one chunk"
+        );
+        assert_eq!(p.due_at(), None);
+        // A quiet spell longer than the window: the next token leaves at once.
+        p.push_at(" jumps", at(500), &emit);
+        assert_eq!(out.lock().unwrap().last().map(String::as_str), Some(" jumps"));
+        // Nothing held: a flush emits nothing — no empty chunk, no seq bump.
+        p.flush(&|c| panic!("an empty flush emitted {c:?}"));
+    }
+
+    #[test]
+    fn delta_pacer_keeps_rapid_deltas_whole_and_in_order() {
+        let t0 = Instant::now();
+        let buf = Mutex::new(PartialBuf::new());
+        let chunks: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+        let emit = |c: String| chunks.lock().unwrap().push((push_delta(&buf, &c), c));
+        let mut p = DeltaPacer::default();
+        let mut sent = String::new();
+        // 2,000 deltas, one every 0.25 ms (a fast model plus line batching).
+        for i in 0..2_000u64 {
+            let delta = format!("{i},");
+            sent.push_str(&delta);
+            p.push_at(&delta, t0 + Duration::from_micros(i * 250), &emit);
+        }
+        p.flush(&emit);
+        let chunks = chunks.into_inner().unwrap();
+        let joined: String = chunks.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(joined, sent, "the chunks are the deltas' exact concatenation");
+        assert_eq!(buf.lock().unwrap().text, sent);
+        // 500 ms of stream: the leading token, one emit per full 33 ms window
+        // after it (15), and the flush.
+        assert_eq!(chunks.len(), 17);
+        let seqs: Vec<u64> = chunks.iter().map(|(s, _)| *s).collect();
+        assert_eq!(seqs, (1..=chunks.len() as u64).collect::<Vec<_>>(), "one seq per chunk, gapless");
+    }
+
+    /// The shape of every surface's reader: lines in, deltas through the
+    /// pacer and `push_delta`, a terminal event (`done`/`error`) after the
+    /// stream ends. Returns the events in the order a listener sees them.
+    async fn read_like_a_surface<R>(stream: R, buf: &Mutex<PartialBuf>) -> Vec<String>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncBufReadExt;
+        let events = Mutex::new(Vec::new());
+        let emit = |text: String| {
+            let seq = push_delta(buf, &text);
+            events.lock().unwrap().push(format!("delta {seq} {text}"));
+        };
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        let mut deltas = DeltaPacer::default();
+        let mut terminal = None;
+        while let Ok(Some(line)) = next_line(&mut lines, &mut deltas, &emit).await {
+            match line.split_once(':') {
+                Some(("d", text)) => deltas.push(text, &emit),
+                _ => terminal = Some(line),
+            }
+        }
+        deltas.flush(&emit);
+        let mut events = events.into_inner().unwrap();
+        events.extend(terminal);
+        events
+    }
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    #[test]
+    fn delta_pacer_flushes_before_done_error_and_an_abrupt_end() {
+        for (wire, terminal) in [
+            ("d:Hel\nd:lo\ndone\n", Some("done")),
+            ("d:Hel\nd:lo\nerror: overloaded\n", Some("error: overloaded")),
+            // No terminal line at all: the child died mid-reply.
+            ("d:Hel\nd:lo", None),
+        ] {
+            let buf = Mutex::new(PartialBuf::new());
+            let events = block_on(read_like_a_surface(wire.as_bytes(), &buf));
+            let mut want = vec!["delta 1 Hel".to_string(), "delta 2 lo".to_string()];
+            want.extend(terminal.map(String::from));
+            assert_eq!(events, want, "{wire:?}: held text must land before the terminal");
+            assert_eq!(buf.lock().unwrap().text, "Hello", "{wire:?}");
+        }
+    }
+
+    #[test]
+    fn next_line_flushes_held_text_when_the_stream_goes_quiet() {
+        use tokio::io::AsyncWriteExt;
+        block_on(async {
+            let (mut child, stdout) = tokio::io::duplex(1 << 12);
+            let buf = Arc::new(Mutex::new(PartialBuf::new()));
+            let reader = tokio::spawn({
+                let buf = buf.clone();
+                async move { read_like_a_surface(stdout, &buf).await }
+            });
+            // Two tokens, then silence — a tool call starting. The second one
+            // is held by the window, and no further line will ever release it.
+            child.write_all(b"d:Reading the\nd: diff\n").await.unwrap();
+            let quiet = Instant::now();
+            while buf.lock().unwrap().text != "Reading the diff" {
+                assert!(quiet.elapsed() < Duration::from_secs(5), "held text never flushed");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            child.write_all(b"done\n").await.unwrap();
+            drop(child);
+            let events = reader.await.unwrap();
+            assert_eq!(events, ["delta 1 Reading the", "delta 2  diff", "done"]);
+        });
     }
 
     #[test]

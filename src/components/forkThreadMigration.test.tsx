@@ -133,6 +133,10 @@ const flush = () =>
     await new Promise((r) => setTimeout(r, 0));
   });
 
+/** Streamed text re-renders on the next animation frame: `useAgentTurn`
+ *  folds a frame's deltas into one render. */
+const nextFrame = () => new Promise((r) => requestAnimationFrame(r));
+
 async function mount(el: ReactElement, open?: (h: HTMLElement) => void) {
   await act(async () => {
     root.render(createElement(StrictMode, null, createElement(MonochatContext.Provider, { value: { harness: { backend: "codex", model: null, effort: null }, conversationId: "shared-root" } }, el)));
@@ -206,6 +210,7 @@ describe.each(CONSUMERS)("$name on the shared turn lifecycle", ({ name, element,
         text: "ZQZQ",
         seq: 1,
       });
+      await nextFrame();
     });
     const hits = (host.textContent ?? "").split("ZQZQ").length - 1;
     expect(hits, "a double-subscribed delta renders twice").toBe(1);
@@ -224,6 +229,7 @@ describe.each(CONSUMERS)("$name on the shared turn lifecycle", ({ name, element,
       // Already folded into `partial`: the seq guard drops it.
       emit("fork-delta", { sessionId: SESSION, commentId: ITEM, text: "B", seq: 2 });
       emit("fork-delta", { sessionId: SESSION, commentId: ITEM, text: "C", seq: 3 });
+      await nextFrame();
     });
     expect(host.textContent).toContain("ABC");
     expect(
@@ -242,6 +248,7 @@ describe.each(CONSUMERS)("$name on the shared turn lifecycle", ({ name, element,
         text: "WRONGTHREAD",
         seq: 1,
       });
+      await nextFrame();
     });
     expect(host.textContent).not.toContain("WRONGTHREAD");
   });

@@ -1337,7 +1337,21 @@ async fn drive_browse_stream(
         let mut errored: Option<String> = None;
         let mut saw_json = false;
         let mut pacer = turn::MeterPacer::default();
-        while let Ok(Some(line)) = reader.next_line().await {
+        let mut deltas = turn::DeltaPacer::default();
+        // Append-before-emit (see `turn::push_delta`), one coalesced chunk at
+        // a time.
+        let emit_delta = |text: String| {
+            let seq = turn::push_delta(buf, &text);
+            let _ = app.emit(
+                "browse-delta",
+                BrowseDelta {
+                    browse_id: browse_id.to_string(),
+                    text,
+                    seq,
+                },
+            );
+        };
+        while let Ok(Some(line)) = turn::next_line(&mut reader, &mut deltas, &emit_delta).await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -1364,18 +1378,7 @@ async fn drive_browse_stream(
             }
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
-                StreamLine::Delta(text) => {
-                    // Append-before-emit: see `turn::push_delta`.
-                    let seq = turn::push_delta(buf, &text);
-                    let _ = app.emit(
-                        "browse-delta",
-                        BrowseDelta {
-                            browse_id: browse_id.to_string(),
-                            text,
-                            seq,
-                        },
-                    );
-                }
+                StreamLine::Delta(text) => deltas.push(&text, &emit_delta),
                 StreamLine::Final {
                     text,
                     session_id: sid,
@@ -1389,6 +1392,8 @@ async fn drive_browse_stream(
                 StreamLine::Ignore => {}
             }
         }
+        // The terminal events follow this drive; the reply is whole first.
+        deltas.flush(&emit_delta);
         (session, final_text, errored, saw_json)
     };
     let stderr_fut = async {
@@ -1428,7 +1433,7 @@ async fn drive_codex<R, W>(
     mut turn: NativeTurn,
     mut stdin: W,
     stdout: R,
-    live: impl Fn(Live),
+    live: impl Fn(Live) + Sync,
 ) -> StreamOutcome
 where
     R: AsyncRead + Unpin,
@@ -1442,9 +1447,17 @@ where
         return out;
     }
     let mut lines = BufReader::new(stdout).lines();
+    let mut deltas = turn::DeltaPacer::default();
+    // Append-before-emit (see `turn::push_delta`), one coalesced chunk at a
+    // time.
+    let emit_delta = |text: String| {
+        let seq = turn::push_delta(buf, &text);
+        live(Live::Delta { text, seq });
+    };
     loop {
         let silence = if turn.turn_id.is_none() { CODEX_START_SILENCE } else { CODEX_TURN_SILENCE };
-        let line = match tokio::time::timeout(silence, lines.next_line()).await {
+        let next = turn::next_line(&mut lines, &mut deltas, &emit_delta);
+        let line = match tokio::time::timeout(silence, next).await {
             Ok(Ok(Some(line))) => line,
             // A Stop kills the app-server, and the reader's cancel check runs
             // before this error is ever shown.
@@ -1485,9 +1498,7 @@ where
             out.session = Some(thread);
         }
         if let Some(text) = step.delta {
-            // Append-before-emit: see `turn::push_delta`.
-            let seq = turn::push_delta(buf, &text);
-            live(Live::Delta { text, seq });
+            deltas.push(&text, &emit_delta);
         }
         if let Some(payload) = push_codex_meta(buf, step.meter, step.activity) {
             live(Live::Meter(payload));
@@ -1510,6 +1521,9 @@ where
             break;
         }
     }
+    // Every exit above — completed, failed, hung up, silent — ends here, and
+    // the terminal events follow: the reply is whole first.
+    deltas.flush(&emit_delta);
     out.usage = Some(turn.total_usage);
     out
 }
@@ -2417,6 +2431,8 @@ mod tests {
             assert_eq!(out.session.as_deref(), Some("thread-9"));
             assert_eq!(out.usage.unwrap()["inputTokens"], 120, "the thread total, next turn's baseline");
             // Real streaming deltas, in order, folded into the partial buffer.
+            // The second lands inside the first's coalescing window, so it is
+            // the end-of-turn flush that delivers it, ahead of the terminal.
             assert_eq!(
                 *deltas.lock().unwrap(),
                 [("The page ".to_string(), 1), ("sells plans.".to_string(), 2)]
