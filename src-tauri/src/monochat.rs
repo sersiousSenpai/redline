@@ -199,7 +199,13 @@ impl Span {
         self.trace.finished_at = Some(now);
         self.trace.elapsed_ms = Some(now.saturating_sub(self.trace.started_at));
         self.trace.model = meter.as_ref().and_then(|meter| meter.model.clone());
-        self.trace.meter = meter;
+        // The steps a settled meter carries belong to its message row
+        // (`meter::attach`); in each of the thousands of traces kept they
+        // would only be weight.
+        self.trace.meter = meter.map(|mut meter| {
+            meter.steps = Vec::new();
+            meter
+        });
         record(&self.db, &self.trace);
     }
 }
@@ -270,10 +276,14 @@ mod tests {
         let mut meter = TurnMeter::new();
         meter.input_tokens = 23;
         meter.output_tokens = 5;
+        // A settled meter carries its reply's tool steps for the message row
+        // (`meter::settle`); the trace keeps the economics, not the steps.
+        meter.steps = vec![crate::meter::Activity { at: 1, kind: "tool".into(), label: "Read…".into() }];
         span.finish("complete", Some(meter));
         let rows = recent(&db, "chat").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].meter.as_ref().unwrap().total_tokens(), 28);
+        assert!(rows[0].meter.as_ref().unwrap().steps.is_empty());
         assert!(recent(&db, "another-chat").unwrap().is_empty());
     }
     #[test]

@@ -237,7 +237,8 @@ pub struct TurnMeter {
     pub rev: u64,
     /// A settled turn's tool calls, oldest first, newest [`STEPS_KEEP`]:
     /// what the reply's steps line expands to after a relaunch. Filled by
-    /// [`settle`] only, so a live meter event never carries it.
+    /// [`settle`] only, so no meter event during the turn carries it (the
+    /// trace drops it too: `monochat::Span::finish`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Activity>,
     /// `message.id` -> last usage. THE dedupe.
