@@ -41,11 +41,10 @@ pub async fn browser_protect_tabs(app: tauri::AppHandle, labels: Vec<String>) ->
     trim(&app).await;
     Ok(())
 }
-fn initialize(db: &Database) -> Result<(), String> {
-    db.lock_conn().execute_batch("CREATE TABLE IF NOT EXISTS browser_workspaces(id TEXT PRIMARY KEY,body TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL)").map_err(|e| e.to_string())
-}
+/// The workspaces table, created by `Database` when it opens, so a read
+/// never needs the writer.
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS browser_workspaces(id TEXT PRIMARY KEY,body TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,updated_at INTEGER NOT NULL)";
 pub fn read(db: &Database, id: &str) -> Result<Option<Value>, String> {
-    initialize(db)?;
     let row: Option<(String, i64)> = db.read_conn().query_row("SELECT body,revision FROM browser_workspaces WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(|e| e.to_string())?;
     row.map(|(body, revision)| { let mut value: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?; value["revision"] = revision.into(); Ok(value) }).transpose()
 }
@@ -58,7 +57,6 @@ pub fn tabs(db: &Database, workspace: &str) -> Result<Vec<Value>, String> {
     raw.map(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string())).transpose().map(Option::unwrap_or_default)
 }
 pub fn find_tab(db: &Database, label: &str) -> Result<Option<Value>, String> {
-    initialize(db)?;
     let id = label.strip_prefix("browser-").ok_or("Invalid browser label")?;
     let bodies = {
         let connection = db.read_conn();
@@ -80,7 +78,6 @@ pub fn find_tab(db: &Database, label: &str) -> Result<Option<Value>, String> {
     Ok(None)
 }
 pub fn write(db: &Database, id: &str, mut value: Value, expected_revision: Option<i64>) -> Result<Value, String> {
-    initialize(db)?;
     if id.is_empty() || id.len() > 160 || !value.is_object() { return Err("Invalid workspace".into()); }
     let tabs = value["tabs"].as_array().ok_or("Workspace tabs are missing")?;
     if tabs.len() > 100 { return Err("A workspace can contain at most 100 tabs".into()); }
@@ -132,7 +129,6 @@ fn durable_url(url: &str) -> bool {
 }
 /// Summaries of the workspaces whose id starts with `prefix`, most recently used first.
 pub fn list(db: &Database, prefix: &str) -> Result<Vec<Value>, String> {
-    initialize(db)?;
     if prefix.is_empty() || prefix.len() > 160 { return Err("Invalid workspace prefix".into()); }
     let rows = {
         let connection = db.read_conn();
@@ -149,7 +145,6 @@ pub fn list(db: &Database, prefix: &str) -> Result<Vec<Value>, String> {
 }
 /// Deletes a saved mosaic. Missions and regular browsing have their own lifecycles.
 pub fn delete(db: &Database, id: &str) -> Result<(), String> {
-    initialize(db)?;
     if !id.starts_with(MOSAIC_PREFIX) || id.len() > 160 { return Err("Only a saved mosaic can be deleted".into()); }
     db.lock_conn().execute("DELETE FROM browser_workspaces WHERE id=?1", [id]).map_err(|e| e.to_string())?;
     Ok(())
@@ -166,6 +161,25 @@ pub fn browser_workspace_write(store: tauri::State<'_, crate::state::SessionStor
 mod tests {
     use super::*;
     use serde_json::json;
+    /// The table exists from the moment the database opens, so a read, a
+    /// listing and a tab lookup run on a read connection alone: they finish
+    /// while another thread holds the writer.
+    #[test] fn reads_never_wait_for_the_writer() {
+        let dir = std::env::temp_dir().join(format!("redline-workspaces-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(Database::open(&dir.join("live.db")).unwrap());
+        write(&db, "mosaic:one", json!({"tabs":[{"id":"a","url":"https://example.org"}]}), Some(0)).unwrap();
+        let held = db.lock_conn();
+        let (reader, (tx, rx)) = (db.clone(), std::sync::mpsc::channel());
+        std::thread::spawn(move || {
+            let _ = tx.send((read(&reader, "mosaic:one").map(|v| v.is_some()), list(&reader, MOSAIC_PREFIX).map(|l| l.len()), find_tab(&reader, "browser-a").map(|t| t.is_some())));
+        });
+        let seen = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("a workspace read must not wait for the writer");
+        drop(held);
+        assert_eq!(seen, (Ok(true), Ok(1), Ok(true)));
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test] fn stale_saves_do_not_overwrite_another_workspace_revision() {
         let db = Database::open_in_memory().unwrap();
         let value = json!({"tabs":[{"id":"a","url":"https://example.org"}],"layout":{"preset":"compare"}});

@@ -12597,8 +12597,7 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "list_sessions",
     "memory_note_get",
     "memory_notes_list",
-    // Its lazy schema check takes the writer, so on the main thread the
-    // activity panel waited out whatever held the database.
+    // Re-read on every turn while the activity panel is open.
     "monochat_traces",
     "orchestration_agent_tail",
     "orchestration_snapshot",

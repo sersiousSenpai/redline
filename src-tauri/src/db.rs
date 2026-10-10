@@ -696,6 +696,7 @@ impl Database {
             let _ = conn.execute_batch(pragma);
         }
         Self::migrate(&conn)?;
+        Self::create_side_tables(&conn)?;
         let wal = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
             .is_ok_and(|mode| mode.eq_ignore_ascii_case("wal"));
@@ -727,6 +728,7 @@ impl Database {
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::migrate(&conn)?;
+        Self::create_side_tables(&conn)?;
         let conn = Arc::new(Mutex::new(conn));
         let polis = PolisStore::attach(
             Arc::clone(&conn),
@@ -746,6 +748,16 @@ impl Database {
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(3))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" | "))
+    }
+
+    /// Tables two modules keep outside the versioned schema
+    /// (`browser_workspace`, `monochat`), created on every open rather than
+    /// before each use: the `CREATE TABLE IF NOT EXISTS` needs the writer, and
+    /// a read that took it first waited out every write. Idempotent, and a
+    /// no-op on a database that has them, so no stamp is involved.
+    fn create_side_tables(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(crate::browser_workspace::SCHEMA)?;
+        conn.execute_batch(crate::monochat::SCHEMA)
     }
 
     /// The schema version this build writes and expects.

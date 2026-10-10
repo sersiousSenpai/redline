@@ -211,24 +211,23 @@ impl Drop for Span {
     }
 }
 
-fn schema(db: &Database) -> rusqlite::Result<()> {
-    db.lock_conn().execute_batch("CREATE TABLE IF NOT EXISTS monochat_traces (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, started_at INTEGER NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS monochat_traces_conversation ON monochat_traces(conversation_id, started_at DESC);")
-}
+/// The traces table, created by `Database` when it opens, so a read never
+/// needs the writer.
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS monochat_traces (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, started_at INTEGER NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS monochat_traces_conversation ON monochat_traces(conversation_id, started_at DESC);";
 pub fn record(db: &Database, trace: &Trace) {
     let result = (|| -> rusqlite::Result<()> {
-        schema(db)?;
         let payload = serde_json::to_string(trace).unwrap_or_default();
         let conn = db.lock_conn();
-        conn.execute("INSERT INTO monochat_traces(id,conversation_id,started_at,payload) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", rusqlite::params![trace.id,trace.conversation_id,trace.started_at,payload])?;
-        conn.execute("DELETE FROM monochat_traces WHERE id IN (SELECT id FROM monochat_traces ORDER BY started_at DESC LIMIT -1 OFFSET 5000)", [])?;
-        Ok(())
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO monochat_traces(id,conversation_id,started_at,payload) VALUES (?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", rusqlite::params![trace.id,trace.conversation_id,trace.started_at,payload])?;
+        tx.execute("DELETE FROM monochat_traces WHERE id IN (SELECT id FROM monochat_traces ORDER BY started_at DESC LIMIT -1 OFFSET 5000)", [])?;
+        tx.commit()
     })();
     if let Err(error) = result {
         tracing::warn!(%error, "Could not record Monochat trace");
     }
 }
 pub fn recent(db: &Database, conversation: &str) -> Result<Vec<Trace>, String> {
-    schema(db).map_err(|error| error.to_string())?;
     let conn = db.read_conn();
     let mut stmt = conn.prepare("SELECT payload FROM monochat_traces WHERE conversation_id=?1 ORDER BY started_at DESC LIMIT 100").map_err(|error| error.to_string())?;
     let rows = stmt

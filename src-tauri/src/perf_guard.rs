@@ -313,8 +313,7 @@ mod tests {
             "browse_thread_set_harness",
             // Polled through a launch handoff.
             "get_run_state",
-            // Re-read on every turn while the activity panel is open; its
-            // lazy schema check takes the writer.
+            // Re-read on every turn while the activity panel is open.
             "monochat_traces",
             // Its liveness check takes each terminal's session lock, which PTY
             // I/O can hold.
