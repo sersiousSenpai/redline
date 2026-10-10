@@ -682,8 +682,10 @@ export const CommentThread = memo(function CommentThread({
                     meter={turn.meters[item.msg.id]}
                     agent={agent}
                     onRetry={
+                      // Against every row, the hidden seed included: a
+                      // failed first reply re-asks the comment itself.
                       item.msg.status === "error" && item.msg === last
-                        ? retryAt(visible, visible.length - 1)
+                        ? retryAt(messages, messages.length - 1)
                         : undefined
                     }
                     onResend={

@@ -489,6 +489,16 @@ describe("report and chat views", () => {
     expect(top).toBe(1000);
   });
 
+  it("offers Retry when the first reply fails, and re-asks the comment", async () => {
+    const failed: ThreadMessage = { ...reply, id: "m-err", body: "Claude stopped early.", status: "error" };
+    history = [seed, failed];
+    await mount(null);
+    await act(async () => clickWith("Discussion"));
+    expect(text()).toContain("Claude stopped early.");
+    await act(async () => clickWith("Retry"));
+    expect(sends()[0]?.[1]).toMatchObject({ mode: "report", text: comment.body });
+  });
+
   it("keeps the reply box in view as a reply streams, unless the reviewer scrolled it away", async () => {
     // The enlarged thread scrolls with the comment pane, so whether the box
     // is on screen is the observer's call.
