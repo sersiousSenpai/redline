@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { useFrontDoorConversation } from "../../src/hooks/useFrontDoorConversation";
+import { writeSharedDraft } from "../../src/hooks/useSharedDraft";
 import { MonochatIsland, type IslandSize, type SummonVia } from "../../src/components/MonochatIsland";
 import { SurfaceChips } from "../../src/components/SurfaceChips";
 import { ChatRoom } from "../../src/components/ChatRoom";
@@ -10,6 +11,7 @@ import { IntegrationSetupDialog } from "../../src/components/IntegrationSetupDia
 import { PaneDivider } from "../../src/components/PaneDivider";
 import { Footer } from "../../src/components/Footer";
 import { applyTheme } from "../../src/theme/applyTheme";
+import { FRONT_DOOR_TEXT_KEY } from "../../src/lib/frontDoor";
 import { isChipPressed, surfaceChips, toggleChip, visibleChips, type ChipPresses } from "../../src/lib/surfaceContext";
 import type { SurfaceInfo } from "../../src/lib/activeSurface";
 import type { BackendChoice } from "../../src/lib/backendChoice";
@@ -17,6 +19,8 @@ import type { DoorRecent } from "../../src/lib/doorRecents";
 import "../../src/styles.css";
 import "./fixture.css";
 const noop = () => {};
+// The composer's text lives in the shared draft, as it does in App.
+const setText = (text: string) => writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
 const recents: DoorRecent[] = [
   { kind: "plan", id: "s1", label: "Auth rewrite", detail: "Plan · redline — Auth rewrite" },
   { kind: "plan", id: "s2", label: "Billing export v2", detail: "Plan · redline — Billing export v2" },
@@ -34,7 +38,6 @@ function Fixture() {
   const [open, setOpen] = useState(!location.search.includes("closed")), [quiet, setQuiet] = useState(false);
   const [sidecar, setSidecar] = useState(false), [setup, setSetup] = useState(false), [surface, setSurface] = useState("Home");
   const [terminal, setTerminal] = useState(false), [size, setSize] = useState<IslandSize>("regular");
-  const [text, setText] = useState("");
   const [destination, setDestination] = useState<"chat" | "plan" | "drafter" | "run">("plan");
   const [project, setProject] = useState<string | null>("/projects/redline");
   const [choice, setChoice] = useState<BackendChoice>({ backend: "codex", model: null, effort: null });
@@ -45,8 +48,8 @@ function Fixture() {
   const chips = visibleChips(surfaceChips(surfaceOf(surface), { page: { title: "LiDAR-GS", url: "https://github.com/x/lidar-gs" }, tasks: true, plan: { version: 3, title: "Auth rewrite" } }), chatId ? "chat" : destination);
   const renderComposer = (accessories?: React.ReactNode, welcome = false, workbench?: Parameters<NonNullable<React.ComponentProps<typeof ChatRoom>["composer"]>["render"]>[1]) => <FrontDoor floating welcome={welcome} recents={recents} onOpenRecent={recent => { if (recent.kind === "chat") openChat(recent.id); }}
           autoFocusOnShow={open && !quiet} accessories={accessories} workbench={workbench}
-          visible={open} text={text} onTextChange={setText} choice={project ? { path: project } : null} onChoiceChange={next => setProject(next?.path ?? null)}
-          projectOptions={[{ path: "/projects/redline", name: "Redline", source: "workspace" }]} resolvedProject={project}
+          visible={open} choice={project ? { path: project } : null} onChoiceChange={next => setProject(next?.path ?? null)}
+          projectOptions={[{ path: "/projects/redline", name: "Redline", source: "workspace" }]} onResolvedProjectChange={noop}
           attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async () => true} pending={null} onLaunch={() => setText("")} onRun={() => setText("")} refusal={null}
           onDrafter={noop} onChat={noop} chatEnabled destination={destination} onDestinationChange={setDestination}
           backend={choice} onBackendChange={setChoice} modelCatalogs={{ codex: [{ slug: "qa-model", displayName: "Codex model", description: "Fixture model", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "medium" }] }} onNeedModels={noop} onRefreshModels={noop} modelStatus={{ refreshing: false, checkedAt: 1790708400000 }}
@@ -64,8 +67,8 @@ function Fixture() {
       <div ref={setChatSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
       {!chatId && renderComposer(undefined, true)}
     </MonochatIsland>
-    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} dictationEnabled harness={choice} onClose={() => setOpen(false)} onSent={() => setOpen(true)} expanded={open && size === "tall"}
-      composer={{ text, onTextChange: setText, render: (accessories, workbench) => renderComposer(accessories, false, workbench) }}/>, chatSlot)}
+    {chatId && chatSlot && createPortal(<ChatRoom companionId={chatId} onSelectChat={openChat} onEmpty={() => setChatId(null)} cwd={null} dictationEnabled harness={choice} onClose={() => setOpen(false)} onSent={() => setOpen(true)} expanded={open && size === "tall"} hostOffersNew
+      composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: (accessories, workbench) => renderComposer(accessories, false, workbench) }}/>, chatSlot)}
     {setup && <IntegrationSetupDialog backend="codex" health={null} busy={false} error="The previous verification timed out. Your draft is saved; retry when Codex is available." progress={null} done={false} pending onInstall={noop} onDismiss={() => setSetup(false)} onLocate={noop}/>}
   </>;
 }

@@ -5,6 +5,8 @@ import BrowserTabRail from "../../src/components/BrowserTabRail";
 import BrowserHomePage from "../../src/components/BrowserHomePage";
 import { MonochatIsland } from "../../src/components/MonochatIsland";
 import { FrontDoor } from "../../src/components/FrontDoor";
+import { writeSharedDraft } from "../../src/hooks/useSharedDraft";
+import { FRONT_DOOR_TEXT_KEY } from "../../src/lib/frontDoor";
 import { fallbackGroups } from "../../src/lib/tabGroups";
 import type { LaunchDestination } from "../../src/lib/launch";
 import { BrowserChrome } from "../../src/components/BrowserChrome";
@@ -34,7 +36,9 @@ function Fixture() {
   const [surface, setSurface] = useState("browser"), [chatKind, setChatKind] = useState("room"), [chatOpen, setChatOpen] = useState(true);
   const [followingTabs, setFollowingTabs] = useState(true), [linkedMode, setLinkedMode] = useState(true);
   const [organized, setOrganized] = useState(false), [showHome, setShowHome] = useState(false);
-  const [islandOpen, setIslandOpen] = useState(false), [draft, setDraft] = useState("");
+  const [islandOpen, setIslandOpen] = useState(false);
+  // The composer's text lives in the shared draft, as it does in App.
+  const clearDraft = () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "");
   const [destination, setDestination] = useState<LaunchDestination>("plan");
   const [groups, setGroups] = useState(() => fallbackGroups(initialTabs));
   const [hoveredTileTab, setHoveredTileTab] = useState<string | null>(null);
@@ -86,7 +90,7 @@ function Fixture() {
     </main>
     {surface === "browser" && <MonochatIsland busy={false} open={islandOpen} onOpenChange={setIslandOpen} surfaceKey={surface} context={tabs.find(tab => tab.id === activeId)?.title ?? null}
       chips={<div className="rl-context-chips" role="group" aria-label="Attach context"><button aria-pressed="true">This page</button><button aria-pressed="false">Task list</button></div>}>
-      <FrontDoor visible={islandOpen} floating text={draft} onTextChange={setDraft} choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} resolvedProject="/tmp/qa-redline" attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={()=>setDraft("")} refusal={null} onDrafter={noop} onRun={()=>setDraft("")} onChat={noop} chatEnabled={false} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""} dictationEnabled={false}/>
+      <FrontDoor visible={islandOpen} floating choice={null} onChoiceChange={noop} projectOptions={[{path:"/tmp/qa-redline",name:"Redline",source:"folder"}]} onResolvedProjectChange={noop} attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async()=>true} pending={null} onLaunch={clearDraft} refusal={null} onDrafter={noop} onRun={clearDraft} onChat={noop} chatEnabled={false} destination={destination} onDestinationChange={setDestination} backend={{backend:"claude-code",model:null,effort:null}} onBackendChange={noop} modelCatalogs={{codex:[]}} onNeedModels={noop} onCancelPending={noop} onRevealPending={noop} onCreateProject={async()=>null} focusNonce={0} consumeSeed={()=>""} dictationEnabled={false}/>
     </MonochatIsland>}
     {createPortal(conversation, host)}
     {dialog === "layout" && <BrowserLayoutDialog layout={layout} available={tabs.length} tabs={tabs} activeBrowseId={pages[0]?.browseId} onChoose={(preset) => setLayout((old) => ({ ...old, preset, maximized: null }))} onSaveDefault={noop} onClose={() => setDialog("")}/>}
