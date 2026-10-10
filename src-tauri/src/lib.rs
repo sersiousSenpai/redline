@@ -12672,6 +12672,17 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "pty_procs",
     "pty_resize",
     "pty_spawn",
+    // The agent harnesses: the agents table in SQLite, and an installed
+    // harness's link on disk.
+    "harness_agent_create",
+    "harness_agent_delete",
+    "harness_agent_duplicate",
+    "harness_agent_list",
+    "harness_agent_set_folder",
+    "harness_agent_set_starred",
+    "harness_agent_update",
+    "harness_preview_discard",
+    "harness_uninstall",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls

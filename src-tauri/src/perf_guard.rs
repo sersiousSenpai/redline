@@ -454,6 +454,26 @@ mod tests {
         }
     }
 
+    /// The agent harnesses: every agent command reads or writes its SQLite
+    /// table, and uninstalling a harness removes its link on disk.
+    #[test]
+    fn harness_commands_stay_off_the_main_thread() {
+        let harness = include_str!("harness.rs");
+        for func in [
+            "harness_agent_create",
+            "harness_agent_list",
+            "harness_agent_update",
+            "harness_agent_set_starred",
+            "harness_agent_set_folder",
+            "harness_agent_delete",
+            "harness_agent_duplicate",
+            "harness_preview_discard",
+        ] {
+            assert_off_main_command(harness, "harness.rs", func);
+        }
+        assert_off_main_command(include_str!("userconfig.rs"), "userconfig.rs", "harness_uninstall");
+    }
+
     /// Adding or removing a watch restarts the FSEvents stream. The commands
     /// stay sync so a mount's watch and its unmount's unwatch keep their
     /// order, which is why the restart itself must never be in their bodies:

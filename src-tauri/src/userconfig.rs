@@ -160,7 +160,7 @@ pub fn harness_install_from_folder(
 
 /// Tauri command (A5a): remove a link-installed harness. Guarded to links —
 /// a hand-authored directory is named, never deleted.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_uninstall(id: String) -> Result<(), String> {
     crate::local_install::uninstall_harness_link(&config_root(), &id)
 }
