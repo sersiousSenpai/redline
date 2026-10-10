@@ -146,7 +146,12 @@ describe("the activity line names what the agent is doing", () => {
   });
   it.fails("BC-34 KNOWN GAP: the action route's acknowledgements reach the chat's tool row", () => {
     expect(actionsRs).toContain('emit("browser-action"');
-    expect(/listen<[^>]*>\(\s*"browser-action"/.test(chat + pane), "nothing listens to browser-action").toBe(true);
+    // Wherever the listener lands (the chat, the pane, a hook), typed or not.
+    const ui = ["src/components", "src/hooks", "src/lib"].flatMap((dir) =>
+      readdirSync(join(process.cwd(), dir), { recursive: true, encoding: "utf8" })
+        .filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f))
+        .map((f) => read(`${dir}/${f}`)));
+    expect(ui.some((src) => /\blisten(?:<[^()]*?>)?\(\s*["'`]browser-action["'`]/.test(src)), "nothing listens to browser-action").toBe(true);
   });
 });
 
