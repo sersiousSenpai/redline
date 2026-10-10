@@ -95,6 +95,19 @@
     "select": "choosing an option…",
     "wait": "waiting for the page…"
   },
+  "actionOutcomes": {
+    "comment": "What a page action did, written onto the turn that asked for it once it has an outcome (browser_actions.rs outcome_step), so the reply's row survives a relaunch: '<done verb> <object> · tab N', '<Kind> failed — <error>', or the stop below.",
+    "done": {
+      "navigate": "Navigated to",
+      "click": "Clicked",
+      "fill": "Typed into",
+      "key": "Pressed",
+      "scroll": "Scrolled",
+      "select": "Chose",
+      "wait": "Waited for"
+    },
+    "tookOver": "Stopped — you took over the page"
+  },
   "tabActivityLabels": {
     "/v1/browser/snapshot": "reading tab {n}…",
     "/v1/browser/thread": "reading tab {n}'s chat…",

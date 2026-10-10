@@ -18,6 +18,19 @@ describe("native page action fixtures", () => {
     expect(run({ kind: "select", selector: "#choice", value: "missing" }).ok).toBe(false);
     expect(document.querySelector("select")!.value).toBe("b");
   });
+  it("names the target the way the chat's row reads it, never by what was typed into it", () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, width: 100, height: 20 } as DOMRect);
+    document.body.innerHTML = '<button id="buy"> Buy   now </button><button id="icon" aria-label="Close dialog">×</button><input id="go" type="submit" value="Search"><label for="email">Email</label><input id="email"><input id="q" placeholder="Search docs"><div id="note" contenteditable="true">secret draft</div><select id="plan"><option value="p">Pro plan</option></select>';
+    expect(run({ kind: "click", selector: "#buy" })).toMatchObject({ ok: true, name: "Buy now" });
+    expect(run({ kind: "click", selector: "#icon" }).name).toBe("Close dialog");
+    expect(run({ kind: "click", selector: "#go" }).name).toBe("Search");
+    expect(run({ kind: "fill", selector: "#email", value: "ada@example.test" })).toMatchObject({ ok: true, name: "Email" });
+    expect(run({ kind: "fill", selector: "#q", value: "rate limits" }).name).toBe("Search docs");
+    // A typed field or an editable region is named by nothing it contains.
+    expect(run({ kind: "click", selector: "#email" }).name).toBe("");
+    expect(run({ kind: "click", selector: "#note" }).name).toBe("");
+    expect(run({ kind: "select", selector: "#plan", value: "p" })).toMatchObject({ ok: true, name: "Pro plan" });
+  });
   it("does not report a missing, disabled, or hidden click target as completed", () => {
     document.body.innerHTML = '<button disabled id="off">No</button>';
     expect(run({ kind: "click", selector: "#gone" }).ok).toBe(false);

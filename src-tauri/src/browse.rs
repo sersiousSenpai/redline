@@ -190,6 +190,28 @@ impl BrowseState {
             .any(|(id, target)| target == label && self.turns.is_running(id))
     }
 
+    /// A page action on `label` has an outcome: write what it did onto each
+    /// running turn that targets that page, as a step of its own. The reply's
+    /// row then names the action live and after a relaunch, and a page the
+    /// user took over says so (BC-34, BC-41).
+    pub fn note_action(&self, app: &AppHandle, label: &str, step: &str) {
+        for (browse_id, meter) in self.record_action(label, step) {
+            let _ = app.emit("browse-meter", BrowseMeter { browse_id, meter });
+        }
+    }
+
+    /// `note_action` short of the emit: each turn written to, and its event.
+    fn record_action(&self, label: &str, step: &str) -> Vec<(String, turn::MeterPayload)> {
+        let ids: Vec<String> = self.targets.lock().unwrap().iter().filter(|(_, target)| *target == label).map(|(id, _)| id.clone()).collect();
+        ids.into_iter()
+            .filter_map(|id| {
+                let buf = self.turns.partial(&id)?;
+                let activity = crate::meter::Activity { at: now_millis(), kind: "tool".into(), label: step.into() };
+                Some((id, turn::push_activity(&buf, activity)))
+            })
+            .collect()
+    }
+
     /// Kill every running browse turn. Backs `browse_kill_all` and app teardown.
     pub fn kill_all(&self) {
         self.turns.kill_all();
@@ -2115,6 +2137,30 @@ mod tests {
         let _other = state.turns.begin("tab-chat").unwrap();
         state.record_target("tab-chat", None);
         assert!(state.targets.lock().unwrap().is_empty());
+    }
+
+    /// A page action's outcome lands on the running turn that targets its
+    /// page, whichever thread that turn runs on, and settles with the row's
+    /// steps, so the reply reads the same after a relaunch (BC-34, BC-41).
+    #[test]
+    fn a_page_actions_outcome_is_a_step_of_the_turn_that_targets_it() {
+        let db = Database::open_in_memory().unwrap();
+        let state = BrowseState::new(Arc::new(Database::open_in_memory().unwrap()));
+        let shared = state.turns.begin("shared-chat").unwrap();
+        state.record_target("shared-chat", Some("browser-t2"));
+        shared.buf().lock().unwrap().meter.tool_calls = 1;
+        assert!(state.record_action("browser-t1", "Clicked “Buy” · tab 1").is_empty(), "another page's action");
+        let written = state.record_action("browser-t2", "Clicked “Buy” · tab 2");
+        assert_eq!(written.len(), 1);
+        let (id, event) = &written[0];
+        assert_eq!(id, "shared-chat");
+        assert_eq!(event.activity.as_ref().map(|a| a.label.as_str()), Some("Clicked “Buy” · tab 2"));
+        assert!(event.rev > 0, "the frontend's guard keeps it");
+        let settled = crate::meter::settle(&db, "browse", &shared.buf());
+        assert_eq!(settled.steps.iter().map(|s| s.label.as_str()).collect::<Vec<_>>(), ["Clicked “Buy” · tab 2"]);
+        // An ended turn takes nothing.
+        drop(shared);
+        assert!(state.record_action("browser-t2", "Scrolled the page · tab 2").is_empty());
     }
 
     /// Two first turns with different VARIABLE inputs (snapshot, mission,

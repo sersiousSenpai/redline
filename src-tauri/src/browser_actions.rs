@@ -85,6 +85,38 @@ pub fn operation_script(op: &Operation) -> Result<String, String> {
     if spec.len() > 32_000 { return Err("Browser action exceeds the input limit".into()); }
     Ok(format!("{}({spec})", include_str!("browser_action.js")))
 }
+/// What an action did, as the reply's work row reads it once it has an
+/// outcome: the contract's past-tense verb (`actionOutcomes`), the object the
+/// page reported, and the tab. `None` while it is only accepted or running.
+fn outcome_step(r: &ActionResult) -> Option<String> {
+    let text = |key: &str| r.observed.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let named = |key: &str, none: &str| text(key).map_or_else(|| none.to_owned(), |name| format!("“{name}”"));
+    let step = match (r.status.as_str(), r.error.as_deref()) {
+        ("completed", _) => match r.kind {
+            "navigate" => format!("Navigated to {}", text("url").map_or_else(|| "the page".to_owned(), |url| url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.").trim_end_matches('/').chars().take(60).collect::<String>())),
+            "click" => format!("Clicked {}", named("name", "an element")),
+            "fill" => format!("Typed into {}", named("name", "a field")),
+            "key" => format!("Pressed {}", text("key").unwrap_or("a key")),
+            "scroll" => "Scrolled the page".into(),
+            "select" => format!("Chose {}", named("name", "an option")),
+            _ => "Waited for the page".into(),
+        },
+        ("interrupted", Some(e)) if e.starts_with("Interrupted by user interaction") => "Stopped — you took over the page".into(),
+        ("interrupted" | "failed", e) => format!("{}{} failed — {}", r.kind[..1].to_uppercase(), &r.kind[1..], e.map_or("no outcome", |e| e.trim_start_matches("Error: "))),
+        _ => return None,
+    };
+    let tab = r.tab.map(|n| format!(" · tab {n}")).unwrap_or_default();
+    Some(format!("{}{tab}", step.chars().take(crate::meter::ACTIVITY_LABEL_CAP - tab.len()).collect::<String>()))
+}
+
+/// Acknowledge an outcome, and write it onto the turn that targets the page.
+fn report(app: &tauri::AppHandle, result: &ActionResult) {
+    let _ = app.emit("browser-action", result);
+    if let (Some(step), Some(browse)) = (outcome_step(result), app.try_state::<crate::browse::BrowseState>()) {
+        browse.note_action(app, &result.label, &step);
+    }
+}
+
 pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<ActionResult, String> {
     if request.operation_id.is_empty() || request.operation_id.len() > 128 || !request.label.starts_with("browser-") || request.label.len() > 160 { return Err("An operation ID and stable browser target are required".into()); }
     let serialized = serde_json::to_string(&request).map_err(|e| e.to_string())?;
@@ -105,7 +137,7 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
             result.status = "interrupted".into();
             result.elapsed_ms = start.elapsed().as_millis() as u64;
             result.error = Some("Timed out waiting for the page action queue; this request did not run.".into());
-            let _ = app.emit("browser-action", &result);
+            report(&app, &result);
             return Ok(result);
         }
     };
@@ -117,7 +149,7 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
         result.status = "failed".into();
         result.error = Some("This operation ID was already used for a different action".into());
         result.elapsed_ms = start.elapsed().as_millis() as u64;
-        let _ = app.emit("browser-action", &result);
+        report(&app, &result);
         return Ok(result);
     }
     result.status = "running".into();
@@ -162,7 +194,7 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
     result.elapsed_ms = start.elapsed().as_millis() as u64;
     if result.status == "interrupted" { queue.interrupted.fetch_add(1, Ordering::SeqCst); }
     { let mut history = queue.results.lock().unwrap(); history.push_back((request.operation_id, serialized, result.clone())); while history.len() > 128 { history.pop_front(); } }
-    let _ = app.emit("browser-action", &result);
+    report(&app, &result);
     drop(_guard);
     crate::browser_workspace::touch(&request.label);
     crate::browser_workspace::trim(&app).await;
@@ -209,6 +241,37 @@ mod tests {
         let ack = ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind: request.operation.kind(), tab: Some(2), status: "running".into(), elapsed_ms: 0, observed: Value::Null, error: None };
         let wire = serde_json::to_value(&ack).unwrap();
         assert_eq!((wire["kind"].as_str(), wire["tab"].as_u64(), wire["label"].as_str()), (Some("select"), Some(2), Some("browser-t2")));
+    }
+    /// The row a reply keeps for each outcome reads with the contract's verbs
+    /// (src/lib/browserChat/contract.json `actionOutcomes`), which the chat
+    /// splits into verb and object; a running action has no row yet.
+    #[test] fn an_outcome_reads_as_the_contracts_past_tense() {
+        let contract: Value = serde_json::from_str(include_str!("../../src/lib/browserChat/contract.json")).unwrap();
+        let done = &contract["actionOutcomes"]["done"];
+        let ack = |kind: &'static str, status: &str, observed: Value, error: Option<&str>| ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind, tab: Some(2), status: status.into(), elapsed_ms: 1, observed, error: error.map(Into::into) };
+        let cases = [
+            ("navigate", json!({"url": "https://www.example.com/pricing/"}), "example.com/pricing"),
+            ("click", json!({"name": "Buy now"}), "“Buy now”"),
+            ("click", json!({"name": ""}), "an element"),
+            ("fill", json!({"name": "Email"}), "“Email”"),
+            ("key", json!({"key": "Enter"}), "Enter"),
+            ("scroll", json!({}), "the page"),
+            ("select", json!({"name": "Pro plan"}), "“Pro plan”"),
+            ("wait", json!({}), "the page"),
+        ];
+        for (kind, observed, object) in cases {
+            let verb = done[kind].as_str().unwrap();
+            assert_eq!(outcome_step(&ack(kind, "completed", observed, None)).unwrap(), format!("{verb} {object} · tab 2"), "{kind}");
+        }
+        let took_over = contract["actionOutcomes"]["tookOver"].as_str().unwrap();
+        assert_eq!(outcome_step(&ack("click", "interrupted", Value::Null, Some("Interrupted by user interaction; inspect the page before retrying a side effect"))).unwrap(), format!("{took_over} · tab 2"));
+        assert_eq!(outcome_step(&ack("click", "failed", Value::Null, Some("Error: Target is not actionable"))).unwrap(), "Click failed — Target is not actionable · tab 2");
+        assert_eq!(outcome_step(&ack("navigate", "interrupted", Value::Null, Some("No confirmed outcome before the timeout."))).unwrap(), "Navigate failed — No confirmed outcome before the timeout. · tab 2");
+        assert!(outcome_step(&ack("click", "running", Value::Null, None)).is_none());
+        assert!(outcome_step(&ack("click", "accepted", Value::Null, None)).is_none());
+        let mut off_strip = ack("scroll", "completed", json!({}), None);
+        off_strip.tab = None;
+        assert_eq!(outcome_step(&off_strip).unwrap(), "Scrolled the page");
     }
     #[test] fn huge_actions_are_rejected() { assert!(operation_script(&Operation::Click { selector: "a".repeat(40_000) }).is_err()); }
     #[test] fn navigation_needs_a_new_document_or_the_requested_location() {
