@@ -28,8 +28,10 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     route: { kind: "speakers", transport: "builtin" } as { kind: string; transport: string },
     turnModel: false,
     turnScore: 0.99 as number | null,
-    // The recognizer's final transcript of an utterance `dictation_cycle` ends.
+    // The recognizer's final transcript of an utterance `dictation_cycle` ends,
+    // and what holds its answer back (a final slow to come).
     final: "",
+    cycleWait: null as Promise<void> | null,
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -71,8 +73,11 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "dictation_kill_all":
         script.micOpen = false;
         return null;
-      case "dictation_cycle":
-        return script.final;
+      case "dictation_cycle": {
+        const final = script.final;
+        if (script.cycleWait) await script.cycleWait;
+        return final;
+      }
       case "dictation_status":
         return {
           holder: null,
@@ -226,6 +231,7 @@ beforeEach(() => {
   script.turnModel = false;
   script.turnScore = 0.99;
   script.final = "";
+  script.cycleWait = null;
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -804,6 +810,54 @@ describe("hands-free", () => {
     expect(sends()[1].context).toContain('carries on from their last one ("rename the panel")');
     expect(host.textContent).not.toContain("(interrupted)");
     expect(host.textContent).not.toContain("You were interrupted");
+  });
+
+  it("carries on a turn taken back before it went out as one line, the whole of it", async () => {
+    await mount();
+    await handsFreeOn();
+    let release!: () => void;
+    script.cycleWait = new Promise<void>((r) => (release = r));
+    script.final = "Rename the panel";
+    await speak("rename the panel");
+    await room(700);
+    // They speak again while the recognizer is still writing the first part.
+    await levels(-26, 200);
+    script.cycleWait = null;
+    await act(async () => release());
+    await wait();
+    expect(sends()).toEqual([]);
+    script.final = "to TalkPanel.";
+    await speak("to TalkPanel", 600);
+    await room(700);
+    expect(sends().map((s) => s.text)).toEqual(["Rename the panel to TalkPanel."]);
+    // Nothing of it was on screen, nor reached the agent: no line is lost, and
+    // there is no earlier message to carry on from.
+    expect(named("voice_send")[0][1]).toMatchObject({ label: null });
+    expect(sends()[0].context ?? "").not.toContain("carries on");
+    expect(names()).not.toContain("voice_interrupt");
+  });
+
+  it("carries on a turn still waiting behind a typed reply without stopping that reply", async () => {
+    await mount();
+    await handsFreeOn();
+    // They start talking, and a typed message goes out meanwhile.
+    await levels(-26, 300);
+    await type("Check the tests too");
+    await submit();
+    expect(sends().map((s) => s.text)).toEqual(["Check the tests too"]);
+    await speak("rename the panel", 700);
+    await room(700);
+    // Their turn waits for the typed one's reply; they carry on before it goes.
+    await levels(-26, 200);
+    expect(names()).not.toContain("voice_interrupt");
+    await speak("to TalkPanel", 600);
+    await room(700);
+    expect(sends()).toHaveLength(1);
+    await emit("voice-done", { ...of(1), body: "", messageId: "m1" });
+    await wait();
+    expect(sends().map((s) => s.text)).toEqual(["Check the tests too", "rename the panel to TalkPanel"]);
+    expect(named("voice_send")[1][1]).toMatchObject({ label: null });
+    expect(sends()[1].context ?? "").not.toContain("carries on");
   });
 
   it("closes the mic on speakers when read-aloud starts while it listens, and opens it again after", async () => {

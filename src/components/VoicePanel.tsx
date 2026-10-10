@@ -608,6 +608,9 @@ function VoicePanelBase({
   // A stop was asked for this turn; asked again once `voice_send` names it,
   // in case the first ask reached the child before the turn did.
   const interruptWantedRef = useRef(false);
+  // The turn is being let go because the user carried the one it answers on
+  // (hands-free), which no "(interrupted)" note marks.
+  const carryingRef = useRef(false);
   const dispatch = useCallback((action: TurnAction) => {
     const prev = turnRef.current;
     const next = turnReducer(prev, action);
@@ -616,6 +619,7 @@ function VoicePanelBase({
     setTurn(next);
     if (prev.phase !== "idle" && next.phase === "idle") {
       interruptWantedRef.current = false;
+      carryingRef.current = false;
       if (interruptTimerRef.current) clearTimeout(interruptTimerRef.current);
       interruptTimerRef.current = null;
       afterTurnRef.current();
@@ -745,11 +749,15 @@ function VoicePanelBase({
   }
   const endpoint = endpointRef.current;
   // The last spoken turn, while speaking again may carry it on: what was said
-  // (its final transcript, on its way), the send that took it once it went,
-  // and whether speaking again took it back. `carryingRef`: the reply to it
-  // is being let go, which no note marks.
-  const carriedRef = useRef<{ said: Promise<string>; id: string | null; taken: boolean } | null>(null);
-  const carryingRef = useRef(false);
+  // (its final transcript, on its way), what its transcript line shows (or
+  // would have, had it gone out), the send that took it once it went out, and
+  // whether speaking again took it back.
+  const carriedRef = useRef<{
+    said: Promise<string>;
+    line: Promise<string>;
+    id: string | null;
+    taken: boolean;
+  } | null>(null);
 
   // Walkthrough cursor. It's an opt-in starter ("Walk me through it") that
   // explains one section at a time and waits — the user taps "Next section" to
@@ -1802,46 +1810,53 @@ function VoicePanelBase({
         (heard) => stripCommand(heard) || text,
         () => text,
       );
-      // Carrying the last turn on: it goes out again with the rest, and the
-      // transcript shows the rest under it.
+      // Carrying the last turn on: it goes out again with the rest. Its line
+      // is the rest, under the last turn's line — or all of it when the last
+      // one never went out, so never showed (taken back, its `id` is final).
       const before = resumed ? carriedRef.current : null;
-      const said = before
-        ? Promise.all([before.said, part]).then((both) => both.filter(Boolean).join(" "))
-        : part;
-      const turn = { said, id: null as string | null, taken: false };
+      const join = (parts: string[]) => parts.filter(Boolean).join(" ");
+      const said = before ? Promise.all([before.said, part]).then(join) : part;
+      const line = before && !before.id ? Promise.all([before.line, part]).then(join) : part;
+      const turn = { said, line, id: null as string | null, taken: false };
       carriedRef.current = turn;
       refreshRoute();
-      void Promise.all([said, part]).then(([whole, rest]) => {
+      void Promise.all([said, line, before?.said]).then(([whole, shown, first]) => {
         if (turn.taken) return;
+        // The agent got the first part: it hears that the two are one.
+        const note = before?.id
+          ? `They paused mid-thought: this message carries on from their last one ("${clip(first ?? "", 160)}") and is meant as one`
+          : null;
+        if (note) contextNotesRef.current.push(note);
         turn.id =
           whole && !isNonSpeech({ text: whole, heldMs: null, heard: true })
-            ? submitSpoken(whole, before && rest ? rest : whole)
+            ? submitSpoken(whole, shown || whole)
             : null;
         if (!turn.id) {
+          if (note) contextNotesRef.current = contextNotesRef.current.filter((n) => n !== note);
           if (carriedRef.current === turn) carriedRef.current = null;
           endpoint.replyOver();
         }
         if (!endpoint.listening) closeMic();
       });
     },
-    // They weren't done: the turn is taken back — its reply, if it went out,
-    // let go before a word of it is heard — and goes out again with what
-    // they say now.
+    // They weren't done: the turn is taken back, to go out again with what
+    // they say now. One still waiting behind another reply just leaves the
+    // queue; one that went out has its reply let go before a word of it is
+    // heard.
     resume: () => {
       const turn = carriedRef.current;
       if (!turn) return;
       turn.taken = true;
       const sent = turn.id;
       if (!sent) return;
-      carryingRef.current = true;
-      setOutbox(outboxRef.current.filter((o) => o.id !== sent));
-      void turn.said.then((first) =>
-        contextNotesRef.current.push(
-          `They paused mid-thought: this message carries on from their last one ("${clip(first, 160)}") and is meant as one`,
-        ),
-      );
+      if (outboxRef.current.some((o) => o.id === sent)) {
+        turn.id = null;
+        setOutbox(outboxRef.current.filter((o) => o.id !== sent));
+        return;
+      }
       stopSpeech();
       if (turnRef.current.phase === "idle") return;
+      carryingRef.current = true;
       interruptWantedRef.current = true;
       if (turnRef.current.interrupting) return;
       dispatch({ type: "interrupt" });
