@@ -472,30 +472,61 @@ mod tests {
                 continue;
             }
             let src = std::fs::read_to_string(&path).unwrap();
-            let lines: Vec<&str> = src.lines().collect();
-            for (i, line) in lines.iter().enumerate() {
-                if !matches!(line.trim(), "#[tauri::command(async)]" | "#[tauri::command]") {
-                    continue;
-                }
-                let Some(at) = lines[i + 1..].iter().position(|l| l.contains("fn ")) else { continue };
-                let signature = lines[i + 1 + at];
-                let file = path.file_name().unwrap().to_string_lossy();
-                if !signature.contains("async fn ") {
-                    if line.trim() != "#[tauri::command]" {
-                        offenders.push(format!("{file}: `(async)` on a sync body: {}", signature.trim()));
-                    }
-                    continue;
-                }
-                async_commands += 1;
-                // The body runs to the function's closing brace at column 0.
-                let body: String = lines[i + 1 + at..].iter().take_while(|l| **l != "}").copied().collect();
-                if !body.contains(".await") {
-                    offenders.push(format!("{file}: an async fn that never awaits: {}", signature.trim()));
-                }
-            }
+            async_commands += async_task_offenders(&path.file_name().unwrap().to_string_lossy(), &src, &mut offenders);
         }
         assert!(async_commands > 10, "the scan found almost no async commands: it is not reading the sources");
         assert!(offenders.is_empty(), "name these in OFF_MAIN_COMMANDS as plain sync commands: {offenders:#?}");
+    }
+
+    /// One file's share of that scan: pushes each `(async)` sync body and each
+    /// `async fn` command that never awaits, and returns how many async
+    /// commands it read.
+    fn async_task_offenders(file: &str, src: &str, offenders: &mut Vec<String>) -> usize {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut async_commands = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if !matches!(line.trim(), "#[tauri::command(async)]" | "#[tauri::command]") {
+                continue;
+            }
+            let Some(at) = lines[i + 1..].iter().position(|l| l.contains("fn ")) else { continue };
+            let signature = lines[i + 1 + at];
+            if !signature.contains("async fn ") {
+                if line.trim() != "#[tauri::command]" {
+                    offenders.push(format!("{file}: `(async)` on a sync body: {}", signature.trim()));
+                }
+                continue;
+            }
+            async_commands += 1;
+            // The body runs to the function's closing brace at column 0, or
+            // ends on the signature's own line when it closes there.
+            let body: String = if signature.contains('{') && signature.trim_end().ends_with('}') {
+                signature.to_string()
+            } else {
+                lines[i + 1 + at..].iter().take_while(|l| **l != "}").copied().collect()
+            };
+            if !body.contains(".await") {
+                offenders.push(format!("{file}: an async fn that never awaits: {}", signature.trim()));
+            }
+        }
+        async_commands
+    }
+
+    /// The scan itself: a one-line body is read alone, so it cannot borrow
+    /// the `.await` of the function after it.
+    #[test]
+    fn the_async_scan_reads_each_body_alone() {
+        let src = "#[tauri::command]\npub async fn ready() -> bool { probe() }\n\nasync fn later() {\n    tick().await;\n}\n\
+                   #[tauri::command]\npub async fn awaits(app: AppHandle) -> Result<(), String> { run(app).await }\n\
+                   #[tauri::command(async)]\npub fn sync_body() {}\n";
+        let mut offenders = Vec::new();
+        assert_eq!(async_task_offenders("x.rs", src, &mut offenders), 2);
+        assert_eq!(
+            offenders,
+            [
+                "x.rs: an async fn that never awaits: pub async fn ready() -> bool { probe() }",
+                "x.rs: `(async)` on a sync body: pub fn sync_body() {}",
+            ]
+        );
     }
 
     /// The handler routes `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS` to the
