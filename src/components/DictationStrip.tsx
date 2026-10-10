@@ -14,7 +14,8 @@
 // never takes focus: its one button keeps the caret where it was.
 //
 // Its host mounts it in a polite live region that is always there (a region
-// that appears with its words is not announced).
+// that appears with its words is not announced); the region hears the strip's
+// state and its notices, not the transcript as it changes.
 
 import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react";
 
@@ -128,7 +129,10 @@ export function DictationStrip() {
           return <i key={i} style={{ transform: `scaleY(${level ?? 0.08})` }} />;
         })}
       </span>
-      <span className="rl-dictation-text">
+      {/* Read out: that it listens, and what a notice says — never each
+          word of a transcript still changing under the speaker. */}
+      <span className="sr-only">{s.phase === "notice" ? s.text : s.phase === "listening" ? "Listening" : ""}</span>
+      <span className="rl-dictation-text" aria-hidden>
         <span>{s.text || "Listening…"}</span>
       </span>
       {s.copy ? (

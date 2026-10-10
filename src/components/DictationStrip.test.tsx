@@ -67,6 +67,11 @@ describe("DictationStrip", () => {
     expect(composer.contains(el)).toBe(false);
     act(() => strip.update({ text: "the kokoro sidecar" }));
     expect(el.querySelector(".rl-dictation-text")!.textContent).toBe("the kokoro sidecar");
+    // A screen reader hears that it listens, not each changing word.
+    expect(el.querySelector(".sr-only")!.textContent).toBe("Listening");
+    expect(el.querySelector(".rl-dictation-text")!.getAttribute("aria-hidden")).toBe("true");
+    act(() => strip.set({ phase: "notice", text: "Didn't catch that", levels: [], anchor: null, hint: "" }));
+    expect(mount.querySelector(".sr-only")!.textContent).toBe("Didn't catch that");
   });
 
   it("lets a notice fade, and offers homeless words to copy without taking focus", async () => {
