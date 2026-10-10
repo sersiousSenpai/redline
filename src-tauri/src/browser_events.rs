@@ -87,6 +87,16 @@ fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
     let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart");
     (main_frame || press || value["kind"] == "voice" || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
 }
+/// The dictation key a page says went down (`down:` or `field:`), if that is
+/// what `value` is. Any script in the page can post what the page script
+/// posts, and such a press opens the microphone and can have the words typed
+/// into the page — so the pane takes one only while that key really is down
+/// and that page has the keyboard (`native`).
+fn voice_press(value: &Value) -> Option<&str> {
+    if value["kind"] != "voice" { return None; }
+    let v = value["value"].as_str()?;
+    v.strip_prefix("down:").or_else(|| v.strip_prefix("field:"))
+}
 #[cfg(target_os = "macos")]
 mod native {
     use super::*;
@@ -96,8 +106,25 @@ mod native {
     use objc2::rc::Retained;
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString};
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
     use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView};
     use tauri::Emitter;
+    /// The dictation key's modifier is down now (either side: the page's own
+    /// keydown said which).
+    fn key_down(code: &str) -> bool {
+        let flag = match code {
+            "AltRight" => NSEventModifierFlags::Option,
+            "MetaRight" => NSEventModifierFlags::Command,
+            _ => NSEventModifierFlags::Control,
+        };
+        NSEvent::modifierFlags_class().contains(flag)
+    }
+    /// The page has the keyboard: its webview (or a view inside it) is the
+    /// key window's first responder.
+    fn has_keyboard(view: &WKWebView) -> bool {
+        let Some(window) = view.window() else { return false; };
+        window.isKeyWindow() && window.firstResponder().and_then(|r| r.downcast::<NSView>().ok()).is_some_and(|r| r.isDescendantOf(view))
+    }
     struct Ivars { app: tauri::AppHandle, label: String, throttle: RefCell<(Instant, u32)> }
     define_class!(
         #[unsafe(super(NSObject))]
@@ -117,6 +144,7 @@ mod native {
                 let Some(raw) = body.downcast_ref::<NSString>() else { return; };
                 let main_frame = message.frameInfo().isMainFrame();
                 let Some(mut value) = signal_for_frame(&raw.to_string(), main_frame) else { return; };
+                if voice_press(&value).is_some_and(|code| !key_down(code) || !message.webView().is_some_and(|view| has_keyboard(&view))) { return; }
                 // An embed's press puts the island's card away, but never
                 // interrupts the agent's page actions: that stays the page's.
                 if value["kind"] == "shortcut" || (value["kind"] == "interaction" && main_frame) { note_input(&self.ivars().label); }
@@ -232,6 +260,17 @@ mod tests {
             r#"{"kind":"voice"}"#,
         ] {
             assert!(parse_signal(raw).is_none(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn only_a_press_of_the_dictation_key_waits_on_the_real_key() {
+        let press = |raw: &str| parse_signal(raw).and_then(|value| voice_press(&value).map(str::to_owned));
+        assert_eq!(press(r#"{"kind":"voice","value":"down:AltRight"}"#).as_deref(), Some("AltRight"));
+        assert_eq!(press(r#"{"kind":"voice","value":"field:MetaRight"}"#).as_deref(), Some("MetaRight"));
+        // Ending or cancelling a capture opens nothing.
+        for raw in [r#"{"kind":"voice","value":"up"}"#, r#"{"kind":"voice","value":"other"}"#, r#"{"kind":"voice","value":"escape"}"#, r#"{"kind":"shortcut","value":"new-tab"}"#] {
+            assert_eq!(press(raw), None, "{raw}");
         }
     }
 

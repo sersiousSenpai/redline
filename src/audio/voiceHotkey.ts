@@ -27,7 +27,9 @@
 // whether the page's focused element takes text. That bridge was chosen over a
 // native app-wide key monitor because it already exists, costs no binary and
 // needs no permission; a page whose scripts don't run (a PDF) doesn't hear the
-// key — click into Redline's own chrome first.
+// key — click into Redline's own chrome first. Since the page's own scripts
+// can post the same signals, Redline takes a page's press only while the key
+// really is down and that page has the keyboard (browser_events.rs).
 
 export const HOLD_MS = 250;
 /** A tap and a press closer together than this lock the mic open. */
