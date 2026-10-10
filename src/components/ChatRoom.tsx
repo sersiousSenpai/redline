@@ -482,7 +482,7 @@ export function ChatRoom({
     liveText,
     streaming,
     threadKey: companionId,
-    onError: (m) => setNotice(`🔇 Voice synthesis failed — ${m}`),
+    onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
   });
   const dictation = useDictation({
     enabled: dictationEnabled && !composer,
