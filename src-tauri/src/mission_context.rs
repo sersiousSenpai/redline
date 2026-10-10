@@ -189,7 +189,7 @@ fn validate_handoff_scope(db: &Database, mission: &str, workspace: &str) -> Resu
         let kind = parts.next().unwrap_or("");
         let id = parts.next().unwrap_or("");
         let (table, column) = conversation_table(kind)?;
-        let c = db.lock_conn();
+        let c = db.read_conn();
         let exists:bool=c.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?1) OR EXISTS(SELECT 1 FROM mission_records WHERE mission_id=?2 AND kind='handoff')"),params![id,mission],|r|r.get(0)).map_err(|e|e.to_string())?;
         return if exists {
             Ok(())
@@ -282,7 +282,7 @@ pub fn recover_interrupted(db: &Database) -> Result<(), String> {
 }
 
 pub fn resume_context(db: &Database, mission: &str) -> Result<String, String> {
-    let c = db.lock_conn();
+    let c = db.read_conn();
     let state = json!({"checkpoint":get(&c,mission,"runtime","current")?,
         "mandate":get(&c,mission,"mandate","current")?,
         "currentJudgments":current_judgments(&c,mission)?,
@@ -486,7 +486,7 @@ pub fn publish(
 }
 
 pub fn resolve(db: &Database, mission: &str, version: &str) -> Result<PublishedContext, String> {
-    let c = db.lock_conn();
+    let c = db.read_conn();
     let v = if version=="latest" {
         let id:Option<String>=c.query_row("SELECT id FROM mission_records WHERE mission_id=?1 AND kind='context' ORDER BY created_at DESC,rowid DESC LIMIT 1",params![mission],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
         id.map(|id|get(&c,mission,"context",&id)).transpose()?.flatten()
@@ -736,7 +736,7 @@ pub async fn mission_foundation(
 }
 
 fn read_state(db: &Database, m: &str) -> Result<Value, String> {
-    let c = db.lock_conn();
+    let c = db.read_conn();
     Ok(
         json!({"runtime":get(&c,m,"runtime","current")?,"mandate":get(&c,m,"mandate","current")?,
         "bots":rows(&c,m,"bot")?,"runs":summaries(&c,m,"run")?,"questions":rows(&c,m,"question")?,
@@ -1217,7 +1217,7 @@ pub(crate) fn capture_scope_policy(
     tab: &str,
     url: &str,
 ) -> Result<Value, String> {
-    capture_policy_in(&db.lock_conn(), m, tab, url, true)
+    capture_policy_in(&db.read_conn(), m, tab, url, true)
 }
 
 pub(crate) fn capture_policy_in(
@@ -1259,7 +1259,7 @@ pub(crate) fn capture_policy_in(
 
 pub fn capture_admission(db: &Database, m: &str, tab: &str, url: &str) -> Result<Value, String> {
     let policy = capture_scope_policy(db, m, tab, url)?;
-    let c = db.lock_conn();
+    let c = db.read_conn();
     let (queued,bytes):(u64,u64)=c.query_row("SELECT COALESCE(SUM(json_extract(body,'$.status') IN ('queued','capturing','processing')),0),COALESCE(SUM(json_extract(body,'$.byteSize')),0) FROM mission_records WHERE mission_id=?1 AND kind='capture' AND json_extract(body,'$.status')!='expired' AND json_extract(body,'$.expiresAt')>?2",params![m,now_millis()],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?;
     if queued >= 20 {
         return Err("capture processing queue is full; capture paused by backpressure".into());
@@ -1550,7 +1550,7 @@ fn prune_captures(db: &Database, m: &str) -> Result<Value, String> {
 
 pub fn prune_all_captures(db: &Database) -> Result<(), String> {
     let missions = {
-        let c = db.lock_conn();
+        let c = db.read_conn();
         let mut stmt=c.prepare("SELECT DISTINCT mission_id FROM mission_records WHERE kind='capture' AND json_extract(body,'$.status')!='expired' AND json_extract(body,'$.expiresAt')<=?1 LIMIT 100").map_err(|e|e.to_string())?;
         let entries = stmt
             .query_map(params![now_millis()], |r| r.get::<_, String>(0))

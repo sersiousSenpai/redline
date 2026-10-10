@@ -282,6 +282,149 @@ mod tests {
         );
     }
 
+    /// The commands a surface polls or a click waits on, each of which reads
+    /// SQLite (the Runs canvas and list, the orchestration drawer, a chat's
+    /// build probe and meters, a browser chat's model pick, session reads) or
+    /// the disk (an agent transcript tail, a restore's transcript scan, the
+    /// install steps, the workspace and harness manifests). On the main
+    /// thread every one of them waits behind whatever holds the database or
+    /// the disk, and the UI waits with it. They run off it by name
+    /// (`OFF_MAIN_COMMANDS`, or `IN_ORDER_COMMANDS` when their calls must
+    /// keep their order), which costs no binary, where `(async)` costs ~11 KB
+    /// a command.
+    #[test]
+    fn polled_and_db_commands_stay_off_the_main_thread() {
+        let off_main = crate::codehealth::off_main_commands(include_str!("lib.rs"));
+        for func in [
+            "runner_list",
+            "runner_get",
+            "runner_graph_view",
+            "runner_report",
+            "runner_review",
+            // The Runs list re-reads on every `orchestration-live` event.
+            "list_orchestrations",
+            "orchestration_snapshot",
+            "orchestration_agent_tail",
+            "companion_build_activity",
+            "thread_meters",
+            "plan_session_meter",
+            "browse_thread_harness",
+            "browse_thread_set_harness",
+            // Polled through a launch handoff.
+            "get_run_state",
+            // Re-read on every turn while the activity panel is open; its
+            // lazy schema check takes the writer.
+            "monochat_traces",
+            // Its liveness check takes each terminal's session lock, which PTY
+            // I/O can hold.
+            "term_attention_snapshot",
+            "get_workspace",
+            "save_workspace",
+            "list_harnesses",
+            "get_ui_prefs",
+            "list_sessions",
+            "get_session",
+            "build_plan_snapshot",
+            "prepare_restore",
+            "memory_note_get",
+            "memory_notes_list",
+            "install_hook",
+            "install_codex_hook",
+            "install_codex_profile",
+            "install_codex_skill",
+            "install_skill",
+        ] {
+            assert!(
+                off_main.iter().any(|name| name == func),
+                "lib.rs: `{func}` must be in OFF_MAIN_COMMANDS — it must not run on \
+                 the WebView main thread (see docs/perf-budget.md)"
+            );
+        }
+    }
+
+    /// Every customization gesture saves the workspace manifest without
+    /// waiting for the last save, and the file is what the next launch loads.
+    /// On the blocking pool two quick saves could land newest-first and leave
+    /// the older layout on disk; taking turns by arrival ticket they can't. A
+    /// command whose calls must keep their order is in that list and only
+    /// that list.
+    #[test]
+    fn workspace_saves_keep_their_order_off_the_main_thread() {
+        let lib = include_str!("lib.rs");
+        let in_order = crate::codehealth::command_list(lib, "IN_ORDER_COMMANDS");
+        let pool = crate::codehealth::command_list(lib, "OFF_MAIN_COMMANDS");
+        assert!(in_order.iter().any(|name| name == "save_workspace"), "lib.rs: `save_workspace` must be in IN_ORDER_COMMANDS");
+        for name in &in_order {
+            assert!(!pool.contains(name), "lib.rs: `{name}` is in IN_ORDER_COMMANDS, so the pool must not run it too");
+        }
+        let handler = &lib[lib.find("fn off_main<").unwrap()..];
+        let handler = &handler[..handler.find("\n}\n").unwrap()];
+        assert!(
+            handler.contains("IN_ORDER_COMMANDS\n            .contains(&command)") && handler.contains("in_turn(ticket, "),
+            "lib.rs: off_main must ticket IN_ORDER_COMMANDS as they arrive and run each in its turn"
+        );
+    }
+
+    /// The handler routes `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS` to the
+    /// blocking pool, and every name there is a registered command: a name
+    /// the generated handler doesn't know would be answered by nobody, and its
+    /// caller would wait forever.
+    #[test]
+    fn off_main_commands_are_registered_and_routed() {
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains(".invoke_handler(off_main(tauri::generate_handler!["));
+        let handler = &lib[lib.find("generate_handler![").unwrap() + "generate_handler![".len()..];
+        let registered: Vec<&str> = handler[..handler.find("])").unwrap()]
+            .split(',')
+            .filter_map(|entry| entry.trim().rsplit("::").next())
+            .collect();
+        let off_main = crate::codehealth::off_main_commands(lib);
+        assert!(!off_main.is_empty());
+        for name in &off_main {
+            assert!(registered.contains(&name.as_str()), "lib.rs names `{name}` off the main thread, but it is not registered");
+        }
+    }
+
+    /// Adding or removing a watch restarts the FSEvents stream. The commands
+    /// stay sync so a mount's watch and its unmount's unwatch keep their
+    /// order, which is why the restart itself must never be in their bodies:
+    /// it belongs to the `fs-watch` thread.
+    #[test]
+    fn fs_watch_restarts_stay_off_the_main_thread() {
+        let src = include_str!("fswatch.rs");
+        for func in ["watch_dir", "unwatch_dir"] {
+            let start = src.find(&format!("pub fn {func}(")).unwrap();
+            let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+            assert!(!body.contains(".watcher()"), "{func} must queue the stream change, not make it: {body}");
+        }
+        assert!(src.contains(".name(\"fs-watch\".into())"));
+    }
+
+    /// Run events name a run and its revision; they never carry the graph.
+    /// A graph carries every node's output, and every mounted listener
+    /// deserializes a broadcast whether it renders the run or not.
+    #[test]
+    fn run_events_carry_an_id_and_a_revision() {
+        let runner = include_str!("runner.rs");
+        assert!(runner.contains("app.emit(\"run-graph\", graph_event(g))"));
+        for (file, src) in [
+            ("runner.rs", runner),
+            ("lib.rs", include_str!("lib.rs")),
+            ("queue.rs", include_str!("queue.rs")),
+            ("self_develop.rs", include_str!("self_develop.rs")),
+        ] {
+            for event in ["\"run-graph\"", "\"runner-changed\""] {
+                for (at, _) in src.match_indices(&format!("emit({event}, ")) {
+                    let arg = &src[at + event.len() + 7..];
+                    assert!(
+                        arg[..arg.find('(').unwrap_or(0)].ends_with("graph_event"),
+                        "{file}: {event} must carry runner::graph_event, not the graph"
+                    );
+                }
+            }
+        }
+    }
+
     /// Not a perf budget but the same mechanism: a source-shape invariant that
     /// a refactor could silently undo, with real stakes.
     ///
@@ -312,6 +455,25 @@ mod tests {
         assert!(
             body.contains(".windows()"),
             "lib.rs: `handle_liveness` must count real windows via `windows()`"
+        );
+    }
+
+    /// Rule 7's readout: the renderer's footprint is watched for the life of
+    /// the app and served on `/v1/perf`. Each is one line to lose in a
+    /// refactor, and losing it is silent: the warning simply never comes.
+    #[test]
+    fn renderer_footprint_is_watched_and_served() {
+        let postboot = include_str!("postboot.rs");
+        assert!(
+            postboot.contains("crate::renderer_memory::watch(app)"),
+            "postboot.rs: start the renderer footprint watch after the reveal"
+        );
+        let lib = include_str!("lib.rs");
+        let body = &lib[lib.find("async fn handle_perf(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("renderer_memory::current()") && body.contains("renderer_memory::note("),
+            "lib.rs: `/v1/perf` must serve the renderer footprint and note a crossing"
         );
     }
 

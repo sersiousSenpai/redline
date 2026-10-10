@@ -62,6 +62,28 @@ it, that's the discussion to have before merging.
    its own `std::thread` (the PTY pump) is also fine — the gotcha is *only*
    synchronous work inside the command body.
 
+   For a command with a sync body, the cheaper way off the main thread is its
+   name in `OFF_MAIN_COMMANDS` (lib.rs): the invoke handler hands the whole
+   call to the blocking pool, through one shared closure. `(async)` builds a
+   tokio task for each command's own future type, about **11 KB of release
+   binary per command** (measured 2026-10-09: 29 commands cost 331,248 B), and
+   the binary has no room for that. Either way, two calls can finish out of
+   order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
+   instead: each call takes a ticket as it arrives and runs on the pool when
+   its turn comes, one at a time (`save_workspace`: every gesture saves
+   without waiting for the last, and the file is what the next launch loads). `watch_dir`/`unwatch_dir` stay
+   sync to keep their order with each other, and hand their slow part to a
+   thread of their own.
+
+   SQLite is heavy whatever the query's size. Every write waits on the one
+   writer connection (`Database::lock_conn`), which a backup, the canary or an
+   embedding tick can hold for seconds. A read goes through
+   `Database::read_conn`, one of a few read-only WAL connections that never
+   wait for the writer and always see every write that has returned; the
+   writer is for writes. State that is edited in memory and then persisted
+   releases its own lock before the write, so a poll reading it never waits on
+   SQLite either (`SessionStore::lock_to_write`).
+
 5. **The number of *visible* terminals is a budget dimension.** The tile grid
    puts up to fourteen live xterms on screen at once, all sharing the one main
    thread — a variable the user controls directly. Each stream is individually
@@ -108,13 +130,57 @@ it, that's the discussion to have before merging.
    > at the corners. `scripts/perf-idle.sh` ("Responsiveness" below) is that
    > diagnosis as a recipe.
 
+7. **Memory is bounded.** Anything the renderer keeps longer than one
+   interaction has a stated cap, written beside it with the reason it is safe:
+   a module-level cache, state a long-lived surface appends to, anything keyed
+   by an id that keeps coming (a directory, a tab, a plan version, a room).
+   Caches drop their oldest entries. A chat's history re-fetches older pages
+   from SQLite where the surface pages, and otherwise holds a hard cap of its
+   newest rows. What a surface creates, its unmount releases: listeners, timers,
+   xterms, providers, and whatever a library leaves running on their behalf
+   (y-webrtc's awareness interval outlives `provider.destroy()`). A leak never
+   shows in a test or a morning's use. It shows as a renderer that is 4 GB
+   after two days, with every GC pause and swap-in landing behind a keystroke.
+
+   | Kept in the renderer | Where | Cap |
+   |---|---|---|
+   | A mounted chat's settled rows | `THREAD_KEEP`, `lib/agentTurn` (and `TRANSCRIPT_KEEP`, `VoicePanel`) | newest 1,000; activity ring 40 |
+   | A hidden terminal's unparsed output | `MAX_HIDDEN_BUFFER_BYTES`, `TerminalView` | 2 MB per terminal; scrollback 5,000 lines; xterm disposed on unmount, WebGL only while visible |
+   | Repo logos by directory | `MAX_REPO_DIRS`, `useRepoIcons` | 256 directories, never a shown one; one copy per repo |
+   | Rasterized repo marks | `MAX_MARKS`, `lib/repoMarkImage` | 128 |
+   | Browser tab pictures | `shotsForOpenTabs`, `BrowserPane` | one per open tab |
+   | Plan text for the Front Door's ranking | `PLAN_CACHE_MAX`, `lib/doorRecents` | 32 plans, one version each |
+   | Memory shots | `LRU_MAX`, `useShotCache` | 60 |
+   | Commit details | `HistoryView` | 64 per view |
+   | AI review log, orchestration tail | `LOG_CAP`, `TAIL_CHAR_BUDGET` | 60,000 characters each |
+   | Perf probe samples | `RETAIN_MS`, `lib/perfProbe` | two minutes, in fixed rings |
+   | A live room's Y.Doc | `collab/provider` `destroy` | released with the room: nothing left that reaches it |
+   | Mermaid's measuring nodes | `MermaidView` | none left in `<body>` |
+   | Drafts flushed this run | `drafterSessionCache`, `App` | one document per draft; not evicted, because it keeps a remount ahead of a database still retrying its write |
+   | Per-id bookkeeping | terminal titles, cwds and handoff seams, closed-tab ids, workspace revisions, `autoDiscussed` | a few bytes per id seen this run (plus an 8 KB output tail per terminal a handoff watched) |
+
+   > **What it cost before it was a rule (2026-10-09).** The renderer had a
+   > 4.0 GB footprint after two days: 3.2 GB of dirty WebKit Malloc, 2.3 GB
+   > swapped. Its 546 "WebAssembly memory" regions were a red herring:
+   > `footprint` gives that name to JavaScriptCore's own VM tag, and an empty
+   > `jsc` shows the same 546. What grew was the plain heap: a browser tab's
+   > picture kept after the tab closed, a repo's logo copied once per directory
+   > a terminal visited, every left collab room's whole Y.Doc, a node in
+   > `<body>` per broken diagram, every version of every plan the Front Door
+   > ranked. `docs/renderer-memory-2026-10-09.md` has the investigation and
+   > before/after numbers from `scripts/memory-soak.mjs`.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:
 
 - `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`
-  and that PTY output stays batched over a Channel (no `pty-output` per-read
-  emit). Fails the Rust test suite if either regresses.
+  or their place in `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS` (and that every
+  name there is registered, and `save_workspace` keeps its order),
+  that PTY output stays batched over a Channel (no `pty-output` per-read
+  emit), that run events carry a run id and revision rather than the
+  graph, and that the renderer footprint is watched and served (rule 7).
+  Fails the Rust test suite if any of them regresses.
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
@@ -128,10 +194,22 @@ These are cheap regression nets, not a substitute for the rules above:
   be allowlisted. The package stylesheets src imports are scanned too: each
   endless paint animation in one is listed in `PACKAGE_SWITCHES` with the
   switch that starts it, which nothing using the package may set.
+- Rule 7 — each cap is tested beside its cache (`useRepoIcons`, `doorRecents`,
+  `agentTurn`, `BrowserPane`'s `shotsForOpenTabs`), and the two releases a
+  library made easy to miss have their own: `src/collab/provider.test.ts`
+  (leaving a room closes the relay socket and stops every timer) and
+  `src/editor/extensions/MermaidView.test.tsx` (a broken diagram leaves
+  nothing in `<body>`). `renderer_memory.rs` tests the footprint read and the
+  once-per-crossing warning, and `perf_guard.rs` pins that the watch starts and
+  `/v1/perf` serves it. `scripts/memory-soak.mjs` is the manual counterpart (it
+  needs Chrome): run it before merging anything that keeps state across mounts.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
-  `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
-  shells out. It is a digest signal, not a test, so it never fails a build: the
-  Shipwright surfaces it and you decide. When you act on one, add it to
+  `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
+  shells out, or reaches SQLite (`.database()`, a store's `db` handle, called
+  or lent to a helper, `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` or
+  `IN_ORDER_COMMANDS` runs it off the main thread anyway. It is a digest
+  signal, not a test, so it never fails a build: the Shipwright surfaces it
+  and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
 - `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers,
@@ -166,7 +244,8 @@ npm run build
 - A new long-running process or job that streams progress → a per-task
   `Channel` with backpressure; render throttled/virtualized summaries, never
   per-item heavy work on the UI thread.
-- Reading or encoding a file in a command → mark it `#[tauri::command(async)]`.
+- Reading or encoding a file in a command → add it to `OFF_MAIN_COMMANDS`
+  (or mark it `#[tauri::command(async)]` when the body is itself async).
 
 If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may
@@ -227,6 +306,24 @@ curl -s 'http://127.0.0.1:7676/v1/perf?windowMs=20000' | jq
 // A dev build's Web Inspector console.
 __rlPerf.snapshot(20000)   // __rlPerf.reset() starts a scenario clean
 ```
+
+**The renderer's footprint** — `src-tauri/src/renderer_memory.rs`. WebKit has
+no `performance.memory`, so Redline reads its renderer from outside: the main
+webview's WebContent pid and that process's physical footprint
+(`proc_pid_rusage`, the number `footprint` and Activity Monitor show). It rides
+on every `/v1/perf` answer as `renderer: {pid, footprintBytes}`, probe on or
+off, and on the 502 when the page can't answer. A watch thread re-finds the pid
+every minute and logs one warning when the footprint passes 1.5 GB (rule 7):
+
+```bash
+curl -s http://127.0.0.1:7676/v1/perf | jq .renderer
+```
+
+**The soak** — `node scripts/memory-soak.mjs`. Headless Chrome, real surfaces
+behind a synthetic Tauri boundary: opens and closes chats while replies stream,
+opens a long thread, joins and leaves collab rooms, walks a terminal through
+directories, and reports what each leaves behind after a forced collection
+(rule 7; `docs/renderer-memory-2026-10-09.md` has the 2026-10-09 numbers).
 
 **The idle recipe** — `scripts/perf-idle.sh`. With the app open on the
 default Aurora theme and hands off the keyboard and pointer (the probe can
@@ -299,7 +396,7 @@ and the app's uptime:
 | Frame gap p95 / max, pane drag | Pane drag → `frames.p95`, `frames.max` | ≤ 17.5 ms p95 | to be measured |
 | INP p95, pane drag down/up | Pane drag → `input.pointer.p95` | < 50 ms | to be measured |
 | GPU process CPU at idle | `perf-idle.sh` | < 5% | to be measured |
-| Renderer footprint (and uptime) | `perf-idle.sh` | flat over days | to be measured |
+| Renderer footprint at 1 h and 8 h of uptime | `/v1/perf` → `renderer.footprintBytes` (or `perf-idle.sh`) | 8 h within 20% of 1 h | to be measured |
 
 ## Boot budget
 

@@ -7,6 +7,7 @@ import {
   ACTIVITY_KEEP,
   initialTurnState,
   reduceTurn,
+  THREAD_KEEP,
   type TurnAction,
   type TurnMessage,
   type TurnState,
@@ -240,6 +241,27 @@ describe("history merge", () => {
     ];
     const s = run([{ type: "history", rows }]);
     expect(s.messages).toHaveLength(3);
+  });
+
+  it("holds the newest THREAD_KEEP rows of a longer thread, and stays there", () => {
+    const rows = Array.from({ length: THREAD_KEEP + 50 }, (_, i) =>
+      msg({ id: `r${i}`, role: i % 2 ? "assistant" : "user", body: `row ${i}`, createdAt: i }),
+    );
+    let s = run([{ type: "history", rows }]);
+    expect(s.messages).toHaveLength(THREAD_KEEP);
+    expect(s.messages[0].id).toBe("r50");
+    // A new reply keeps the window sliding; a refetch of the whole thread
+    // (the self-heal) does not bring the old rows back.
+    s = run(
+      [
+        { type: "done", message: msg({ id: "late", body: "newest", createdAt: THREAD_KEEP + 60 }) },
+        { type: "history", rows },
+      ],
+      s,
+    );
+    expect(s.messages).toHaveLength(THREAD_KEEP);
+    expect(s.messages[s.messages.length - 1].id).toBe("late");
+    expect(s.messages[0].id).toBe("r51");
   });
 });
 

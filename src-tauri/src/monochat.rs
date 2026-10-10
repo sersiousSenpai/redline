@@ -229,7 +229,7 @@ pub fn record(db: &Database, trace: &Trace) {
 }
 pub fn recent(db: &Database, conversation: &str) -> Result<Vec<Trace>, String> {
     schema(db).map_err(|error| error.to_string())?;
-    let conn = db.lock_conn();
+    let conn = db.read_conn();
     let mut stmt = conn.prepare("SELECT payload FROM monochat_traces WHERE conversation_id=?1 ORDER BY started_at DESC LIMIT 100").map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([conversation], |row| row.get::<_, String>(0))

@@ -7,6 +7,9 @@ import { isLiveNode, normalizeGraph, type RunGraph } from "../lib/runner/schema"
 import { applyOps, type Applied, type RunOp } from "../lib/runner/ops";
 import { appendStream, type NodeStream, type RunStreamEvent } from "../lib/runner/stream";
 
+/** `runner_graph_view`'s reply. `next` is null when the preview can't be read. */
+interface RunGraphView { graph: RunGraph; streams: Record<string, NodeStream>; next: string[] | null }
+
 export function useRunGraphList(active: boolean) {
   const [runs, setRuns] = useState<RunGraph[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -90,8 +93,11 @@ export function useRunGraph(runId: string | null, active: boolean) {
       if (loading) { again = true; return; }
       loading = true;
       try {
-        const doc = await invoke<RunGraph>("runner_get", { runId });
+        // One call: the graph, each live node's stream snapshot and the
+        // scheduler's next nodes (`runner_graph_view`).
+        const view = await invoke<RunGraphView>("runner_graph_view", { runId });
         if (disposed) return;
+        const doc = view.graph;
         const live = doc.nodes.filter((n) => isLiveNode(n.status));
         pending = pending.filter((event) => live.some((node) => node.id === event.nodeId && node.attempt <= event.attempt));
         for (const node of doc.nodes) {
@@ -99,20 +105,13 @@ export function useRunGraph(runId: string | null, active: boolean) {
           attempts.set(node.id, node.attempt);
         }
         accept(doc);
-        const snapshots = await Promise.all(live.map(async (node) => {
-          try { return [node.id, await invoke<NodeStream>("runner_node_status", { runId, nodeId: node.id })] as const; }
-          catch { return null; }
-        }));
-        if (disposed) return;
-        for (const snapshot of snapshots) if (snapshot) {
-          const [id, next] = snapshot;
-          if (!baseline[id] || next.seq >= baseline[id].seq) baseline[id] = next;
+        for (const node of live) {
+          const next = view.streams[node.id];
+          if (next && (!baseline[node.id] || next.seq >= baseline[node.id].seq)) baseline[node.id] = next;
         }
         setStreams({ ...baseline }); schedule(); setError(null);
-        try {
-          const preview = await invoke<string[]>("runner_preview", { runId });
-          if (!disposed) setNextIds(preview);
-        } catch { /* a graph remains readable when preview is unavailable */ }
+        // A graph remains readable when the preview is unavailable.
+        if (view.next) setNextIds(view.next);
       } catch (e) { if (!disposed) setError(String(e)); }
       finally { loading = false; if (again && !disposed) { again = false; void refresh(); } }
     };
@@ -127,7 +126,12 @@ export function useRunGraph(runId: string | null, active: boolean) {
     void Promise.all([
       listen<Omit<Extract<RunStreamEvent, { kind: "delta" }>, "kind">>("run-delta", ({ payload }) => onStream({ ...payload, kind: "delta" })),
       listen<Omit<Extract<RunStreamEvent, { kind: "meter" }>, "kind">>("run-meter", ({ payload }) => onStream({ ...payload, kind: "meter" })),
-      listen<RunGraph>("run-graph", ({ payload }) => { if (payload.runId === runId) void refresh(); }),
+      // The event names a run and its revision; a revision this view already
+      // holds (the reply to its own edit) needs no second fetch.
+      listen<{ runId: string; rev: number }>("run-graph", ({ payload }) => {
+        const held = graphRef.current;
+        if (payload.runId === runId && !(held?.runId === runId && held.rev >= payload.rev)) void refresh();
+      }),
       ...["run-done", "run-error"].map((event) => listen<{ runId: string }>(event, ({ payload }) => { if (payload.runId === runId) void refresh(); })),
     ].map(async (subscription) => {
       const un = await subscription;

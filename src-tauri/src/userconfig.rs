@@ -76,6 +76,9 @@ pub fn get_workspace() -> Option<String> {
 
 /// Tauri command: persist the workspace manifest. Every GUI customization
 /// gesture funnels here — the file is the store, the GUI is a lens on it.
+/// Off the main thread as one of the `IN_ORDER_COMMANDS`: the saves take
+/// turns in the order the gestures made them, so they never overlap and the
+/// newest layout is the one left on disk.
 #[tauri::command]
 pub fn save_workspace(json: String) -> Result<(), String> {
     write_workspace_under(&config_root(), &json)

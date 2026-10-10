@@ -616,7 +616,7 @@ pub fn mission_get_tabs(
     mission: tauri::State<'_, MissionState>,
     mission_id: String,
 ) -> Result<Vec<MissionTab>, String> {
-    let c = mission.db.lock_conn();
+    let c = mission.db.read_conn();
     let saved: Option<String> = c
         .query_row(
             "SELECT tabs_json FROM missions WHERE mission_id=?1",

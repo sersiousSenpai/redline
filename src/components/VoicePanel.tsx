@@ -87,6 +87,12 @@ interface VoiceStatus {
 
 const TRANSCRIPT_ROLES = new Set(["you", "agent", "note"]);
 
+/** Transcript lines a mounted panel holds: the newest, the same bound as every
+ *  other chat surface's thread (`THREAD_KEEP` in lib/agentTurn; repeated here
+ *  because importing it would split that module into a chunk of its own). The
+ *  rest stay in SQLite, where the agent still reads them. */
+const TRANSCRIPT_KEEP = 1000;
+
 /** Narrow a persisted row back to a transcript line. An unrecognized role
  *  (a row from a newer build) renders as a plain note rather than vanishing. */
 function toTranscriptLine(m: VoiceMessage): TranscriptLine {
@@ -275,7 +281,16 @@ function VoicePanelBase({
   const liveMarkdownRef = useRef(liveMarkdown);
   liveMarkdownRef.current = liveMarkdown;
   const [error, setError] = useState<string | null>(null);
-  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [transcript, setTranscriptState] = useState<TranscriptLine[]>([]);
+  // Held to the newest TRANSCRIPT_KEEP lines (docs/perf-budget.md rule 7).
+  const setTranscript = useCallback(
+    (next: TranscriptLine[] | ((prev: TranscriptLine[]) => TranscriptLine[])) =>
+      setTranscriptState((prev) => {
+        const lines = typeof next === "function" ? next(prev) : next;
+        return lines.length > TRANSCRIPT_KEEP ? lines.slice(-TRANSCRIPT_KEEP) : lines;
+      }),
+    [],
+  );
   const [originChat, setOriginChat] = useState<{ companionId: string; title: string; messages: { id: string; role: string; body: string }[] } | null>(null);
   useEffect(() => {
     let alive = true;

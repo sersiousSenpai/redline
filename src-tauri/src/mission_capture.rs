@@ -42,7 +42,7 @@ fn reserve_intake(mission: &str, tab: &str) -> Option<IntakeGuard> {
     Some(IntakeGuard(key))
 }
 fn check_cooldown(db: &Database, mission: &str, tab: &str) -> Result<(), String> {
-    let recent: Option<i64> = db.lock_conn().query_row("SELECT MAX(created_at) FROM mission_records WHERE mission_id=?1 AND kind='capture' AND json_extract(body,'$.tabId')=?2 AND json_extract(body,'$.adapter')='redline-keyframes-v1'",params![mission,tab],|r|r.get(0)).map_err(|e|e.to_string())?;
+    let recent: Option<i64> = db.read_conn().query_row("SELECT MAX(created_at) FROM mission_records WHERE mission_id=?1 AND kind='capture' AND json_extract(body,'$.tabId')=?2 AND json_extract(body,'$.adapter')='redline-keyframes-v1'",params![mission,tab],|r|r.get(0)).map_err(|e|e.to_string())?;
     if recent.is_some_and(|at| now_millis() - at < COOLDOWN_MS) {
         return Err("capture event coalesced during cooldown".into());
     }
@@ -76,7 +76,7 @@ fn changed(app: &AppHandle, mission: &str, id: Option<&str>) {
 }
 
 fn record(db: &Database, mission: &str, id: &str) -> Result<Value, String> {
-    context::get(&db.lock_conn(), mission, "capture", id)?.ok_or_else(|| "capture not found".into())
+    context::get(&db.read_conn(), mission, "capture", id)?.ok_or_else(|| "capture not found".into())
 }
 
 fn modify(
@@ -749,7 +749,7 @@ pub fn resume(app: AppHandle, db: Arc<Database>) {
 
 type PendingCapture = (i64, String, String);
 fn pending_page(db: &Database, cursor: i64) -> Result<Vec<PendingCapture>, String> {
-    let conn = db.lock_conn();
+    let conn = db.read_conn();
     let mut statement=conn.prepare("SELECT capture.rowid,capture.mission_id,capture.id FROM mission_records capture JOIN mission_records policy ON policy.mission_id=capture.mission_id AND policy.kind='capture_policy' AND policy.id='current' WHERE capture.rowid>?1 AND capture.kind='capture' AND json_extract(capture.body,'$.adapter')='redline-keyframes-v1' AND json_extract(capture.body,'$.status') IN ('queued','capturing','processing','paused') AND json_extract(capture.body,'$.expiresAt')>?2 AND json_extract(policy.body,'$.enabled')=1 AND COALESCE(json_extract(policy.body,'$.paused'),0)=0 AND EXISTS (SELECT 1 FROM json_each(policy.body,'$.tabIds') tab WHERE tab.value=json_extract(capture.body,'$.tabId')) ORDER BY capture.rowid LIMIT 100").map_err(|e|e.to_string())?;
     let rows = statement
         .query_map(params![cursor, now_millis()], |row| {
@@ -767,7 +767,7 @@ pub(crate) fn readable_capture(db: &Database, mission: &str, id: &str) -> Result
         return Ok(capture);
     }
     context::capture_policy_in(
-        &db.lock_conn(),
+        &db.read_conn(),
         mission,
         capture["tabId"].as_str().unwrap_or(""),
         capture["url"].as_str().unwrap_or(""),

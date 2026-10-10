@@ -123,6 +123,7 @@ mod git_human;
 mod git_test_support;
 mod query;
 mod queue;
+mod renderer_memory;
 mod repoicon;
 mod resolutions;
 mod restore_context;
@@ -3313,7 +3314,9 @@ fn perf_probe_script(window_ms: Option<u64>) -> String {
 
 /// GET `/v1/perf?windowMs=` — the responsiveness probe's rolling input-latency
 /// and frame-gap summary (docs/perf-budget.md "Responsiveness"), read out of
-/// the main webview's `window.__rlPerf`. A release build has no Web
+/// the main webview's `window.__rlPerf`, plus the renderer's footprint read
+/// from outside it (`renderer`, rule 7) — that one even when the page can't
+/// answer, which is when it matters most. A release build has no Web
 /// Inspector, so this is how a release baseline is read;
 /// `scripts/perf-idle.sh` prints it beside the GPU and renderer samples.
 /// Pull-only: the probe runs only when switched on (always in dev, ⌘K in a
@@ -3322,9 +3325,27 @@ async fn handle_perf(
     State(app_state): State<AppState>,
     Query(q): Query<PerfQ>,
 ) -> axum::response::Response {
-    eval_json_response(
-        daemon_eval(&app_state.app_handle, "main", &perf_probe_script(q.window_ms)).await,
-    )
+    let renderer = renderer_memory::current();
+    if let Some(reading) = renderer {
+        renderer_memory::note(reading);
+    }
+    let probe = daemon_eval(&app_state.app_handle, "main", &perf_probe_script(q.window_ms))
+        .await
+        .and_then(|raw| match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Object(probe)) => Ok(probe),
+            _ => Err("the page returned no usable result".to_string()),
+        });
+    match probe {
+        Ok(mut probe) => {
+            probe.insert("renderer".into(), json!(renderer));
+            Json(probe).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error, "renderer": renderer })),
+        )
+            .into_response(),
+    }
 }
 
 /// POST `/v1/admin/shutdown` — gracefully retire this instance: answer, then
@@ -4534,7 +4555,7 @@ async fn mission_prepare_auto(
     )?;
     if handoff["destination"] == "auto" && handoff["status"] == "delivered" && handoff["claimToken"] == claim_token {
         let graph = db.runner_get(handoff["destinationId"].as_str().ok_or("The saved auto-session receipt is incomplete")?)?;
-        let _ = app.emit("runner-changed", &graph);
+        let _ = app.emit("runner-changed", runner::graph_event(&graph));
         return Ok(graph);
     }
     if handoff["destination"] != "auto"
@@ -4564,7 +4585,7 @@ async fn mission_prepare_auto(
             },
         },
     )?;
-    let _ = app.emit("runner-changed", &graph);
+    let _ = app.emit("runner-changed", runner::graph_event(&graph));
     Ok(graph)
 }
 
@@ -12548,6 +12569,104 @@ fn install_skill() -> Result<SkillStatus, String> {
     result
 }
 
+/// Sync commands that run on the blocking pool instead of the main thread:
+/// they read SQLite or the disk, and a poll or a click waits on them
+/// (perf-budget rule 4). `#[tauri::command(async)]` moves a command off the
+/// main thread too, but every one costs ~11 KB of release binary (a tokio task
+/// built for its own future type, measured 2026-10-09 across 29 commands);
+/// an entry here costs a string. A command whose calls must keep their order
+/// doesn't belong here or in `(async)`: two calls can finish out of order.
+/// It goes in `IN_ORDER_COMMANDS`.
+const OFF_MAIN_COMMANDS: &[&str] = &[
+    "build_plan_snapshot",
+    "browse_thread_harness",
+    "browse_thread_set_harness",
+    "companion_build_activity",
+    // A launch handoff polls it until the run leaves `orchestrating`.
+    "get_run_state",
+    "get_session",
+    "get_ui_prefs",
+    "get_workspace",
+    "install_codex_hook",
+    "install_codex_profile",
+    "install_codex_skill",
+    "install_hook",
+    "install_skill",
+    "list_harnesses",
+    "list_orchestrations",
+    "list_sessions",
+    "memory_note_get",
+    "memory_notes_list",
+    // Its lazy schema check takes the writer, so on the main thread the
+    // activity panel waited out whatever held the database.
+    "monochat_traces",
+    "orchestration_agent_tail",
+    "orchestration_snapshot",
+    "plan_session_meter",
+    "prepare_restore",
+    "runner_get",
+    "runner_graph_view",
+    "runner_list",
+    "runner_report",
+    "runner_review",
+    "term_attention_snapshot",
+    "thread_meters",
+];
+
+/// Sync commands that leave the main thread but keep the order their calls
+/// arrived in: each takes a ticket as it arrives and runs on the pool when its
+/// turn comes, one at a time. `save_workspace` is here because every
+/// customization gesture fires one without waiting for the last, and two of
+/// them racing on the pool could leave the older layout on disk for the next
+/// launch to load.
+const IN_ORDER_COMMANDS: &[&str] = &["save_workspace"];
+
+/// The `IN_ORDER_COMMANDS` turn: the next ticket to hand out, and the ticket
+/// whose call may run now.
+static IN_ORDER_TICKETS: AtomicU64 = AtomicU64::new(0);
+static IN_ORDER_TURN: (StdMutex<u64>, std::sync::Condvar) =
+    (StdMutex::new(0), std::sync::Condvar::new());
+
+/// The invoke handler, with the `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS`
+/// handed to the blocking pool whole: one shared closure type, so routing a
+/// command adds no code, where an `(async)` wrapper builds a task per command.
+fn off_main<R: tauri::Runtime>(
+    commands: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    let commands = Arc::new(commands);
+    move |invoke| {
+        let command = invoke.message.command();
+        // Taken here, on the thread the calls arrive on, so tickets follow
+        // arrival order.
+        let ticket = IN_ORDER_COMMANDS
+            .contains(&command)
+            .then(|| IN_ORDER_TICKETS.fetch_add(1, Ordering::Relaxed));
+        if ticket.is_none() && !OFF_MAIN_COMMANDS.contains(&command) {
+            return commands(invoke);
+        }
+        let commands = commands.clone();
+        tauri::async_runtime::spawn_blocking(move || match ticket {
+            Some(ticket) => in_turn(ticket, || commands(invoke)),
+            None => commands(invoke),
+        });
+        true
+    }
+}
+
+/// Run an `IN_ORDER_COMMANDS` call when its ticket's turn comes, then pass the
+/// turn on, even when the call panics: otherwise every later one would wait
+/// forever.
+fn in_turn(ticket: u64, call: impl FnOnce() -> bool) -> bool {
+    let (serving, passed) = &IN_ORDER_TURN;
+    let mut serving = passed
+        .wait_while(serving.lock().unwrap_or_else(|e| e.into_inner()), |now| *now != ticket)
+        .unwrap_or_else(|e| e.into_inner());
+    let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+    *serving += 1;
+    passed.notify_all();
+    handled.unwrap_or(true)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     claude_proc::scrub_inherited_session_env();
@@ -12643,7 +12762,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(webview_guard::on_terminate);
     builder
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(off_main(tauri::generate_handler![
             hook_conflicts::scan_hook_conflicts,
             hook_conflicts::remove_hook_conflicts,
             hook_conflicts::watch_hook_conflicts,
@@ -12759,10 +12878,9 @@ pub fn run() {
             runner::runner_apply,
             runner::runner_start,
             runner::runner_intervene,
-            runner::runner_node_status,
             runner::runner_report,
             runner::runner_review,
-            runner::runner_preview,
+            runner::runner_graph_view,
             runner::runner_node_diff,
             seat_assignment_agent,
             seat_assignment_cancel,
@@ -13141,7 +13259,7 @@ pub fn run() {
             mirror_sync,
             create_memory_vault,
             mcp_config_snippet,
-        ])
+        ]))
         .setup(|app| {
             boot_trace::mark(boot_trace::SETUP_ENTER);
             // Register the `redline://` scheme with the OS at runtime. In a
@@ -13944,6 +14062,39 @@ mod tests {
         assert!(other.try_lock().is_ok());
         drop(guard);
         assert!(same.try_lock().is_ok());
+    }
+
+    /// `IN_ORDER_COMMANDS` calls run in the order their tickets were taken,
+    /// whatever order the pool starts them in, and a call that panics still
+    /// passes the turn on.
+    #[test]
+    fn in_order_calls_run_in_ticket_order() {
+        let tickets: Vec<u64> = (0..4).map(|_| IN_ORDER_TICKETS.fetch_add(1, Ordering::Relaxed)).collect();
+        let ran = Arc::new(StdMutex::new(Vec::new()));
+        let fails = tickets[1];
+        // Newest first, each given a moment to reach its turn and wait.
+        let calls: Vec<_> = tickets
+            .iter()
+            .rev()
+            .map(|&ticket| {
+                let ran = ran.clone();
+                let call = std::thread::spawn(move || {
+                    in_turn(ticket, || {
+                        if ticket == fails {
+                            std::panic::resume_unwind(Box::new("a failed save"));
+                        }
+                        ran.lock().unwrap().push(ticket);
+                        true
+                    })
+                });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                call
+            })
+            .collect();
+        for call in calls {
+            call.join().expect("in_turn contains the panic");
+        }
+        assert_eq!(*ran.lock().unwrap(), vec![tickets[0], tickets[2], tickets[3]]);
     }
 
     /// `GET /v1/perf` evaluates script in the app's own webview, so the only

@@ -27,6 +27,11 @@ import { mergeMeter, type Activity, type TurnMeter } from "./turnMeter";
  *  keeps a long tool-heavy turn from growing component state without bound. */
 export const ACTIVITY_KEEP = 40;
 
+/** Settled rows a mounted surface holds (docs/perf-budget.md rule 7). No
+ *  surface pages its history, so a thread longer than this shows its newest
+ *  rows; the older ones stay in SQLite, where the agent still reads them. */
+export const THREAD_KEEP = 1000;
+
 /** The message shape every chat surface shares; each surface's persisted row
  *  type (BrowseMessage, LinkedMessage, …) extends it. */
 export interface TurnMessage {
@@ -162,6 +167,16 @@ export function priorUserBody<M extends TurnMessage>(
 }
 
 export function reduceTurn<M extends TurnMessage>(
+  state: TurnState<M>,
+  action: TurnAction<M>,
+): TurnState<M> {
+  const next = step(state, action);
+  return next.messages.length > THREAD_KEEP
+    ? { ...next, messages: next.messages.slice(-THREAD_KEEP) }
+    : next;
+}
+
+function step<M extends TurnMessage>(
   state: TurnState<M>,
   action: TurnAction<M>,
 ): TurnState<M> {

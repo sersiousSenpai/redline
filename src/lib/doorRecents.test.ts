@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it, vi } from "vitest";
-import { doorRecents, loadDoorTabs, rankDoorTabs, terms, type PlanText } from "./doorRecents";
+import { doorRecents, loadDoorTabs, PLAN_CACHE_MAX, rankDoorTabs, terms, type PlanText } from "./doorRecents";
 
 const plan = (over: Partial<PlanText>): PlanText => ({ sessionId: "s", title: "", project: "", focus: "", text: "", research: [], ...over });
 
@@ -111,6 +111,27 @@ describe("loadDoorTabs", () => {
     ]);
     expect(tabs.map((t) => t.browseId)).toEqual(["gs", "w"]);
     expect(tabs[0].plan).toBe("MachineOS LiDAR scans");
+  });
+
+  it("reads a plan again only when it changes, and remembers a bounded number", async () => {
+    const now = 100 * 86_400_000;
+    const invoke = vi.fn(async (cmd: string, _args?: { id: string }) =>
+      cmd === "get_session" ? { revisions: [{ rawPlanMarkdown: "# Cache plan", comments: [] }] } : cmd === "mission_list" ? [] : null,
+    );
+    const reads = (id: string) => invoke.mock.calls.filter(([cmd, args]) => cmd === "get_session" && args?.id === id).length;
+    const summary = (sessionId: string, updatedAt = now - 1) =>
+      ({ sessionId, planTitle: sessionId, projectName: "p", updatedAt, status: "in_review" });
+    await loadDoorTabs(invoke as never, [summary("cache-a")], now);
+    await loadDoorTabs(invoke as never, [summary("cache-a")], now);
+    expect(reads("cache-a")).toBe(1);
+    await loadDoorTabs(invoke as never, [summary("cache-a", now - 2)], now);
+    expect(reads("cache-a")).toBe(2);
+    // Enough other plans to push the first one out.
+    for (let pass = 0; pass < PLAN_CACHE_MAX / 8; pass++) {
+      await loadDoorTabs(invoke as never, Array.from({ length: 8 }, (_, i) => summary(`cache-${pass}-${i}`)), now);
+    }
+    await loadDoorTabs(invoke as never, [summary("cache-a", now - 2)], now);
+    expect(reads("cache-a")).toBe(3);
   });
 });
 

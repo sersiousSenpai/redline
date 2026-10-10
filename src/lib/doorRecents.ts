@@ -261,13 +261,16 @@ const PLAN_LIMIT = 8;
 const PLAN_MAX_AGE_MS = 21 * 24 * 60 * 60 * 1000;
 const MISSION_LIMIT = 4;
 
-/** Plan text is fetched once per (session, updatedAt) for the app's lifetime. */
-const planCache = new Map<string, PlanText>();
+/** Plan text, fetched once per plan version. Keyed by session, so a newer
+ *  version replaces the older one instead of joining it, and capped at a few
+ *  passes' worth of plans (docs/perf-budget.md rule 7): it used to keep every
+ *  version of every plan read since launch. */
+const planCache = new Map<string, [updatedAt: number, text: PlanText]>();
+export const PLAN_CACHE_MAX = 4 * PLAN_LIMIT;
 
 async function planText(invoke: Invoke, p: PlanSummaryLike): Promise<PlanText | null> {
-  const key = `${p.sessionId}:${p.updatedAt}`;
-  const hit = planCache.get(key);
-  if (hit) return hit;
+  const hit = planCache.get(p.sessionId);
+  if (hit?.[0] === p.updatedAt) return hit[1];
   const session = await invoke<{
     revisions: { rawPlanMarkdown?: string; receivedAt?: number; comments?: { createdAt: number; research?: { query: string; browseId: string; url?: string } }[] }[];
   } | null>("get_session", { id: p.sessionId }).catch(() => null);
@@ -289,7 +292,9 @@ async function planText(invoke: Invoke, p: PlanSummaryLike): Promise<PlanText | 
     text: markdown.slice(0, 20000),
     research,
   };
-  planCache.set(key, value);
+  planCache.delete(p.sessionId);
+  planCache.set(p.sessionId, [p.updatedAt, value]);
+  if (planCache.size > PLAN_CACHE_MAX) planCache.delete(planCache.keys().next().value!);
   return value;
 }
 

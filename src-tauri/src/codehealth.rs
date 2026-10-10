@@ -317,19 +317,47 @@ const HEAVY_MARKERS: &[&str] = &[
     "base64",
     "fs::read",
     "std::process::Command",
-    // The shared DB lock. Every SQLite read waits on ONE `Mutex<Connection>`
+    // The shared DB lock. Every SQLite write waits on ONE `Mutex<Connection>`
     // that a backup, the canary, or an embedding tick can hold for seconds; a
     // sync command waiting on it waits on the main thread (the 2026-09-29
-    // memory beach ball was exactly this, in `get_work_graph`).
+    // memory beach ball was exactly this, in `get_work_graph`). A command
+    // reaches the database through a store handle as often as through
+    // `.database()`, called or lent to the helper that queries it
+    // (`&companion.db`), and a read connection is still disk I/O.
     ".database()",
     "polis_handle()",
+    "state.db",
+    "settings.db",
+    "companion.db",
+    "lock_conn",
+    "read_conn",
 ];
+
+/// The commands `lib.rs` runs on the blocking pool by name, in any order
+/// (`OFF_MAIN_COMMANDS`) or in arrival order (`IN_ORDER_COMMANDS`): sync in
+/// shape, off the main thread in fact.
+pub fn off_main_commands(lib_src: &str) -> Vec<String> {
+    let mut names = command_list(lib_src, "OFF_MAIN_COMMANDS");
+    names.extend(command_list(lib_src, "IN_ORDER_COMMANDS"));
+    names
+}
+
+/// The names in one `const <list>: &[&str] = &[...]` of `lib.rs`.
+pub fn command_list(lib_src: &str, list: &str) -> Vec<String> {
+    let Some(start) = lib_src.find(&format!("const {list}: &[&str] = &[")) else {
+        return Vec::new();
+    };
+    let list = &lib_src[start..];
+    let list = &list[..list.find("];").unwrap_or(list.len())];
+    list.split('"').skip(1).step_by(2).map(str::to_string).collect()
+}
 
 /// A **sync** `#[tauri::command]` whose body does real work runs on the WebView
 /// main thread and beach-balls the UI — perf-budget rule 4, and the one rule in
 /// this repo that already has both a written rule and a guard test behind it.
-/// Reports the offending function names.
-pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
+/// Reports the offending function names; `off_main` names the ones the invoke
+/// handler runs on the blocking pool anyway.
+pub fn probe_command_hygiene(path: &str, src: &str, off_main: &[String]) -> Vec<StaticFinding> {
     let mut out = Vec::new();
     let bytes: Vec<&str> = src.lines().collect();
     for (i, line) in bytes.iter().enumerate() {
@@ -339,15 +367,20 @@ pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
         // The body runs from the signature to the next top-level `}` at the
         // same indent — approximated by the next `\n}` or `\n    }`, which is
         // enough to catch a heavy call without parsing Rust.
-        let name = bytes
+        let signature = bytes
             .get(i + 1..i + 4)
-            .and_then(|w| w.iter().find(|l| l.contains("fn ")))
+            .and_then(|w| w.iter().find(|l| l.contains("fn ")));
+        // An `async fn` command already runs off the main thread.
+        if signature.is_some_and(|l| l.contains("async fn ")) {
+            continue;
+        }
+        let name = signature
             .and_then(|l| l.split("fn ").nth(1))
             .and_then(|l| l.split(['(', '<']).next())
             .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() {
+        if name.is_empty() || off_main.contains(&name) {
             continue;
         }
         let mut body = String::new();
@@ -735,12 +768,18 @@ pub fn build_code_digest(db: &Database, repo_path: &str) -> CodeDigest {
 
     // --- Tier B: static repo health --------------------------------------
     let sources = read_rust_sources(repo);
+    let lib_src = sources
+        .iter()
+        .find(|(p, _)| p.ends_with("lib.rs"))
+        .map(|(_, s)| s.as_str())
+        .unwrap_or_default();
+    let off_main = off_main_commands(lib_src);
     let mut static_findings: Vec<StaticFinding> = Vec::new();
     for (path, src) in &sources {
         if let Some(f) = probe_oversized(path, src) {
             static_findings.push(f);
         }
-        static_findings.extend(probe_command_hygiene(path, src));
+        static_findings.extend(probe_command_hygiene(path, src, &off_main));
         if let Some(f) = probe_untested(path, src) {
             static_findings.push(f);
         }
@@ -1135,13 +1174,52 @@ mod tests {
                    #[tauri::command]\n\
                    fn locks(store: State<'_, SessionStore>) -> i64 {\n\
                    \x20   store.database().max_ledger_seq().unwrap()\n\
+                   }\n\
+                   #[tauri::command]\n\
+                   pub async fn waits(state: State<'_, RunnerState>) -> Result<(), String> {\n\
+                   \x20   state.db.runner_list().map(|_| ())\n\
                    }\n";
-        let found = probe_command_hygiene("x.rs", src);
+        let found = probe_command_hygiene("x.rs", src, &[]);
+        // `waits` is an `async fn`: already off the main thread, not a finding.
         assert_eq!(found.len(), 2, "the sync+heavy one and the sync DB-lock one: {found:?}");
         assert!(found[0].detail.contains("heavy"));
         assert!(found[0].detail.contains("read_to_string"));
         assert!(found[1].detail.contains("`locks`"));
         assert!(found[1].detail.contains(".database()"));
+    }
+
+    /// Every way a sync command reaches SQLite is flagged: a store's own
+    /// handle (`state.db`, `settings.db`, `companion.db`), called or lent to
+    /// a helper, and the connection itself, writer or reader.
+    #[test]
+    fn command_hygiene_flags_every_way_a_sync_command_reaches_sqlite() {
+        for (handle, body) in [
+            ("state.db", "state.db.runner_list()"),
+            ("settings.db", "settings.db.get_setting(\"k\")"),
+            ("companion.db", "companion.db.list_companions()"),
+            // Lent to a helper, which is where the query runs.
+            ("companion.db", "crate::monochat::recent(&companion.db, \"c\")"),
+            ("settings.db", "agent_seats_view(&settings.db)"),
+            ("lock_conn", "mission.db.lock_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
+            ("read_conn", "mission.db.read_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
+        ] {
+            let src = format!("#[tauri::command]\npub fn reads(x: u32) -> u32 {{\n    let _ = {body};\n    x\n}}\n");
+            let found = probe_command_hygiene("x.rs", &src, &[]);
+            assert_eq!(found.len(), 1, "{handle}: {found:?}");
+            assert!(found[0].detail.contains(handle), "{handle}: {}", found[0].detail);
+            let off_main = src.replace("#[tauri::command]", "#[tauri::command(async)]");
+            assert!(probe_command_hygiene("x.rs", &off_main, &[]).is_empty(), "{handle}");
+            // Routed to the blocking pool by name: off the main thread too.
+            assert!(probe_command_hygiene("x.rs", &src, &["reads".to_string()]).is_empty(), "{handle}");
+        }
+    }
+
+    #[test]
+    fn the_off_main_list_is_read_from_lib_rs() {
+        let lib = "const OFF_MAIN_COMMANDS: &[&str] = &[\n    \"get_session\",\n    // A comment.\n    \"list_sessions\",\n];\nconst OTHER: &[&str] = &[\"no\"];\nconst IN_ORDER_COMMANDS: &[&str] = &[\"save_workspace\"];\n";
+        assert_eq!(off_main_commands(lib), vec!["get_session", "list_sessions", "save_workspace"]);
+        assert_eq!(command_list(lib, "IN_ORDER_COMMANDS"), vec!["save_workspace"]);
+        assert!(off_main_commands("fn main() {}").is_empty());
     }
 
     #[test]

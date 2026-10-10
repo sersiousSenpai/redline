@@ -48,15 +48,27 @@ fn db_conn_is_never_locked_with_unwrap() {
          recovery is a failure the evidence pipeline can never see"
     );
 
-    // The accessor is only worth anything if it is what the file actually
-    // uses. A floor, not an exact count, so ordinary new db methods don't trip
-    // it. (Was 300 before Session A3 of the Polis extraction moved ~110
-    // memory methods onto `PolisStore`; the same invariant now holds there,
-    // below.)
-    let uses = DB_RS.matches("self.lock_conn()").count();
+    // The accessors are only worth anything if they are what the file
+    // actually uses. A floor, not an exact count, so ordinary new db methods
+    // don't trip it. (Was 300 before Session A3 of the Polis extraction moved
+    // ~110 memory methods onto `PolisStore`; the same invariant now holds
+    // there, below.) Reads go through `read_conn()`, which is `lock_conn()`
+    // when there are no read connections and recovers a poisoned read slot
+    // the same way when there are.
+    let uses = DB_RS.matches("self.lock_conn()").count() + DB_RS.matches("self.read_conn()").count();
     assert!(
         uses > 200,
-        "only {uses} call sites go through lock_conn() — the sweep regressed"
+        "only {uses} call sites go through lock_conn() or read_conn() — the sweep regressed"
+    );
+    let read_conn = &DB_RS[DB_RS.find("fn read_conn(&self)").expect("db.rs: read_conn")..];
+    assert!(
+        read_conn[..read_conn.find("\n    }\n").unwrap()].contains("ReadConn::Writer(self.lock_conn())"),
+        "read_conn() must fall back to the writer through lock_conn()"
+    );
+    let take = &DB_RS[DB_RS.find("fn take(&self)").expect("db.rs: Readers::take")..];
+    assert!(
+        take[..take.find("\n    }\n").unwrap()].contains(".lock().unwrap_or_else(|e| e.into_inner())"),
+        "a read slot must recover its guard, not propagate the poison"
     );
 }
 
