@@ -19,6 +19,11 @@
 //!     pipe. The ~325 MB fp32 model is downloaded on first use into the app data
 //!     dir. ElevenLabs / Deepgram would slot into the same `match`.
 //!
+//! The premium local voice, `studio`, streams rather than answering one clip
+//! per request, so it has its own commands and module (`tts_studio.rs`). It
+//! shares this file's uv, Python-environment and download code, and the
+//! generations `tts_cancel` cancels.
+//!
 //! Every request carries the frontend driver's **generation**. `cancel()` there
 //! (Stop, a barge-in, the next turn) calls `tts_cancel` with the old one, and a
 //! request from a cancelled generation is dropped before it reaches an engine:
@@ -36,11 +41,12 @@ use base64::Engine as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::db::Database;
+use crate::tts_studio::Studio;
 
 const SETTING_ENGINE: &str = "tts_engine";
 const SETTING_OPENAI_KEY: &str = "tts_openai_key";
@@ -166,13 +172,17 @@ pub struct TtsState {
     model_dl: Arc<AsyncMutex<()>>,
     /// `KOKORO_TIMEOUT_FLOOR`, a field so tests can make a hang quick to detect.
     kokoro_timeout_floor: Duration,
+    /// The studio voice's sidecar, installer and settings (`tts_studio.rs`).
+    studio: Studio,
 }
 
 impl TtsState {
     pub fn new(db: Arc<Database>, data_dir: PathBuf) -> Self {
+        let http = reqwest::Client::new();
+        let studio = Studio::new(&data_dir, http.clone(), db.clone());
         Self {
             db,
-            http: reqwest::Client::new(),
+            http,
             kokoro_dir: data_dir.join("kokoro"),
             data_dir,
             kokoro: Arc::new(AsyncMutex::new(None)),
@@ -180,7 +190,12 @@ impl TtsState {
             cancelled: Arc::new(StdMutex::new(VecDeque::new())),
             model_dl: Arc::new(AsyncMutex::new(())),
             kokoro_timeout_floor: KOKORO_TIMEOUT_FLOOR,
+            studio,
         }
+    }
+
+    pub(crate) fn studio(&self) -> &Studio {
+        &self.studio
     }
 
     /// The fp32 model once it's in place, else the int8 one an older install
@@ -213,7 +228,7 @@ impl TtsState {
             c.pop_front();
         }
     }
-    fn is_cancelled(&self, generation: u64) -> bool {
+    pub(crate) fn is_cancelled(&self, generation: u64) -> bool {
         let c = self.cancelled.lock().unwrap_or_else(|p| p.into_inner());
         c.contains(&generation)
     }
@@ -256,8 +271,8 @@ struct KokoroSidecar {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TtsSettings {
-    /// `"system"` (frontend `speechSynthesis`), `"openai"`, `"kokoro"`, or
-    /// `"elevenlabs"`.
+    /// `"system"` (frontend `speechSynthesis`), `"openai"`, `"kokoro"`,
+    /// `"elevenlabs"`, or `"studio"`.
     engine: String,
     has_openai_key: bool,
     openai_voice: String,
@@ -265,9 +280,14 @@ pub struct TtsSettings {
     has_eleven_key: bool,
     eleven_voice: String,
     python_path: String,
+    /// The studio voice's model variant, preset speaker and default style.
+    studio_model: String,
+    studio_voice: String,
+    studio_style: String,
 }
 
 fn read_settings(tts: &TtsState) -> TtsSettings {
+    let (studio_model, studio_voice, studio_style) = tts.studio.prefs();
     TtsSettings {
         engine: tts
             .db
@@ -296,6 +316,9 @@ fn read_settings(tts: &TtsState) -> TtsSettings {
             .get_setting(SETTING_ELEVEN_VOICE)
             .unwrap_or_else(|| DEFAULT_ELEVEN_VOICE.to_string()),
         python_path: tts.db.get_setting(SETTING_PYTHON_PATH).unwrap_or_default(),
+        studio_model,
+        studio_voice,
+        studio_style,
     }
 }
 
@@ -307,7 +330,8 @@ pub fn tts_get_settings(tts: tauri::State<'_, TtsState>) -> TtsSettings {
 /// Persist the engine choice and (optionally) the OpenAI key/voice and Kokoro
 /// voice. Each `Option` is only written when `Some` — so saving one field doesn't
 /// clobber another (notably the stored key the UI never sees); pass `Some("")` to
-/// explicitly clear the key.
+/// explicitly clear the key. The studio voice's own settings are saved through
+/// `tts_studio` (`prefs`).
 #[tauri::command]
 pub fn tts_set_settings(
     tts: tauri::State<'_, TtsState>,
@@ -390,10 +414,12 @@ pub async fn tts_synth(
     synth(&tts, &text, generation, speed, voice).await
 }
 
-/// Drop every request of `generation` that hasn't reached an engine yet.
+/// Drop every request of `generation` that hasn't reached an engine yet, and
+/// stop the studio voice's requests of it mid-stream.
 #[tauri::command]
 pub fn tts_cancel(tts: tauri::State<'_, TtsState>, generation: u64) {
     tts.cancel(generation);
+    tts.studio.cancel(generation);
 }
 
 async fn synth(
@@ -951,7 +977,7 @@ pub(crate) async fn ensure_uv(
     http: &reqwest::Client,
     data_dir: &Path,
     root: &Path,
-    progress: impl Fn(u64, u64),
+    progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<PathBuf, String> {
     let uv = root.join("bin").join("uv");
     for found in [&uv, &data_dir.join("kokoro/bin/uv"), &data_dir.join("voice-studio/bin/uv")] {
@@ -1063,7 +1089,7 @@ pub(crate) async fn build_venv(
     uv: &Path,
     root: &Path,
     install: &[OsString],
-    phase: impl Fn(&str),
+    phase: &(dyn Fn(&str) + Sync),
 ) -> Result<PathBuf, String> {
     let [python, create, deps] = venv_steps(uv, root, install);
     phase("python");
@@ -1080,13 +1106,13 @@ pub(crate) async fn build_venv(
 /// Build Kokoro's private environment (`build_venv`) with `kokoro-onnx` in
 /// it. Emits `kokoro-setup` phase events.
 async fn ensure_kokoro_venv(tts: &TtsState, app: &AppHandle) -> Result<(), String> {
-    let uv = ensure_uv(&tts.http, &tts.data_dir, &tts.kokoro_dir, |received, total| {
+    let uv = ensure_uv(&tts.http, &tts.data_dir, &tts.kokoro_dir, &|received, total| {
         emit_setup(app, "uv", received, total)
     })
     .await?;
     // uv's resolver installs kokoro-onnx (which pulls its own bundled
     // espeak-ng wheel) into our private venv.
-    let vpy = build_venv(&uv, &tts.kokoro_dir, &["kokoro-onnx".into()], |phase| {
+    let vpy = build_venv(&uv, &tts.kokoro_dir, &["kokoro-onnx".into()], &|phase| {
         emit_setup(app, phase, 0, 0)
     })
     .await?;
@@ -1201,7 +1227,7 @@ async fn download_if_missing(
         return Ok(());
     }
     let what = format!("the Kokoro {phase}");
-    fetch_checked(&tts.http, url, dest, &what, check, DOWNLOAD_STALL, |received, total| {
+    fetch_checked(&tts.http, url, dest, &what, check, DOWNLOAD_STALL, &|received, total| {
         emit_setup(app, phase, received, total)
     })
     .await
@@ -1226,7 +1252,7 @@ pub(crate) async fn fetch_checked(
     what: &str,
     check: FileCheck,
     stall: Duration,
-    progress: impl Fn(u64, u64),
+    progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<(), String> {
     let mut tmp = dest.as_os_str().to_owned();
     tmp.push(".part");
@@ -1234,14 +1260,14 @@ pub(crate) async fn fetch_checked(
     let stalled = || format!("downloading {what} stalled — try again");
     let failed = |e: &dyn std::fmt::Display| format!("downloading {what} failed: {e}");
     let mut hasher = Sha256::new();
-    let mut received = tokio::fs::metadata(&tmp).await.map_or(0, |m| m.len());
+    let mut received = std::fs::metadata(&tmp).map_or(0, |m| m.len());
     if received > check.bytes {
         let _ = tokio::fs::remove_file(&tmp).await;
         received = 0;
     }
     if received == check.bytes {
         // Complete, but never renamed in (a crash between the two).
-        received = hash_into(&tmp, &mut hasher).await?;
+        received = hash_into(&tmp, &mut hasher)?;
     } else {
         let mut request = http.get(url);
         if received > 0 {
@@ -1259,8 +1285,8 @@ pub(crate) async fn fetch_checked(
             return Err(failed(&format_args!("HTTP {status}")));
         }
         let mut file = if received > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
-            received = hash_into(&tmp, &mut hasher).await?;
-            tokio::fs::OpenOptions::new().append(true).open(&tmp).await
+            received = hash_into(&tmp, &mut hasher)?;
+            std::fs::OpenOptions::new().append(true).open(&tmp).map(tokio::fs::File::from_std)
         } else {
             // A server that ignores Range sends the whole file again.
             received = 0;
@@ -1305,28 +1331,17 @@ pub(crate) async fn fetch_checked(
         .map_err(|e| format!("finalizing {what} failed: {e}"))
 }
 
-/// Feed a file to `hasher`, returning its length.
-async fn hash_into(path: &Path, hasher: &mut Sha256) -> Result<u64, String> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("reading a partial download failed: {e}"))?;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut len = 0;
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("reading a partial download failed: {e}"))?;
-        if n == 0 {
-            return Ok(len);
-        }
-        hasher.update(&buf[..n]);
-        len += n as u64;
-    }
+/// Feed a file to `hasher`, returning its length. A plain blocking read: it
+/// runs once per resumed download, on a task nothing waits on, and an async
+/// file would cost the binary a blocking task per operation.
+fn hash_into(path: &Path, hasher: &mut Sha256) -> Result<u64, String> {
+    let failed = |e: std::io::Error| format!("reading a partial download failed: {e}");
+    let mut file = std::fs::File::open(path).map_err(failed)?;
+    std::io::copy(&mut file, hasher).map_err(failed)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn test_state() -> TtsState {
@@ -1478,7 +1493,7 @@ done
     /// A loopback HTTP server for as long as the test runs. `respond` gets each
     /// request's head and returns the raw response and how many of its bytes
     /// to write before hanging up, as a dropped connection does.
-    fn serve(respond: impl Fn(&str) -> (Vec<u8>, usize) + Send + 'static) -> String {
+    pub(crate) fn serve(respond: impl Fn(&str) -> (Vec<u8>, usize) + Send + 'static) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1494,7 +1509,7 @@ done
     }
 
     /// An HTTP response with `body`, whole.
-    fn http(status: &str, headers: &str, body: &[u8]) -> (Vec<u8>, usize) {
+    pub(crate) fn http(status: &str, headers: &str, body: &[u8]) -> (Vec<u8>, usize) {
         let mut r = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
             body.len()
@@ -1698,7 +1713,7 @@ done
             "the Kokoro upgrade",
             KOKORO_MODEL_CHECK,
             DOWNLOAD_STALL,
-            |_, _| {},
+            &|_, _| {},
         )
         .await
         .unwrap_err();
@@ -1722,7 +1737,7 @@ done
             "the Kokoro upgrade",
             KOKORO_MODEL_CHECK,
             Duration::from_millis(300),
-            |_, _| {},
+            &|_, _| {},
         )
         .await
         .unwrap_err();
@@ -1745,7 +1760,7 @@ done
         };
         let dest = dir.join(KOKORO_MODEL_FILE);
         let url = serve_once(BODY);
-        fetch_checked(&tts.http, &url, &dest, "the Kokoro upgrade", check, DOWNLOAD_STALL, |_, _| {})
+        fetch_checked(&tts.http, &url, &dest, "the Kokoro upgrade", check, DOWNLOAD_STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -1800,7 +1815,8 @@ done
         let url = format!("{base}/resolve/main/model.safetensors");
         let http_client = reqwest::Client::new();
 
-        let err = fetch_checked(&http_client, &url, &dest, "the model", check_for(body), DOWNLOAD_STALL, |_, _| {})
+        let check = check_for(body);
+        let err = fetch_checked(&http_client, &url, &dest, "the model", check, DOWNLOAD_STALL, &|_, _| {})
             .await
             .unwrap_err();
         assert!(err.contains("failed"), "{err}");
@@ -1809,10 +1825,9 @@ done
         assert!(kept > 0 && kept <= 100_000, "{kept}");
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
-        fetch_checked(&http_client, &url, &dest, "the model", check_for(body), DOWNLOAD_STALL, {
-            let seen = seen.clone();
-            move |received, total| seen.lock().unwrap().push((received, total))
-        })
+        let saw = seen.clone();
+        let note = move |received, total| saw.lock().unwrap().push((received, total));
+        fetch_checked(&http_client, &url, &dest, "the model", check_for(body), DOWNLOAD_STALL, &note)
         .await
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1830,7 +1845,8 @@ done
         let dest = data.join("vocab.json");
         std::fs::write(part(&dest), &body[..20_000]).unwrap();
         let client = reqwest::Client::new();
-        fetch_checked(&client, &format!("{base}/f"), &dest, "the vocabulary", check_for(body), DOWNLOAD_STALL, |_, _| {})
+        let url = format!("{base}/f");
+        fetch_checked(&client, &url, &dest, "the vocabulary", check_for(body), DOWNLOAD_STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1848,7 +1864,8 @@ done
         // The first 1,000 bytes on disk aren't the file's.
         std::fs::write(part(&dest), vec![7u8; 1_000]).unwrap();
         let client = reqwest::Client::new();
-        let err = fetch_checked(&client, &format!("{base}/f"), &dest, "the config", check_for(body), DOWNLOAD_STALL, |_, _| {})
+        let url = format!("{base}/f");
+        let err = fetch_checked(&client, &url, &dest, "the config", check_for(body), DOWNLOAD_STALL, &|_, _| {})
             .await
             .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
@@ -1864,7 +1881,8 @@ done
         std::fs::write(part(&dest), &body).unwrap();
         let client = reqwest::Client::new();
         // Nothing listens there: the bytes on disk are enough.
-        fetch_checked(&client, "http://127.0.0.1:9/f", &dest, "the config", check_for(&body), DOWNLOAD_STALL, |_, _| {})
+        let check = check_for(&body);
+        fetch_checked(&client, "http://127.0.0.1:9/f", &dest, "the config", check, DOWNLOAD_STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1922,7 +1940,7 @@ done
         std::fs::create_dir_all(data.join("kokoro/bin")).unwrap();
         std::fs::write(data.join("kokoro/bin/uv"), b"#!/bin/sh\n").unwrap();
         let client = reqwest::Client::new();
-        let uv = ensure_uv(&client, &data, &data.join("voice-studio"), |_, _| {}).await.unwrap();
+        let uv = ensure_uv(&client, &data, &data.join("voice-studio"), &|_, _| {}).await.unwrap();
         assert_eq!(uv, data.join("kokoro/bin/uv"), "no second download");
     }
 }
