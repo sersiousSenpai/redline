@@ -96,7 +96,9 @@ fn outcome_step(r: &ActionResult) -> Option<String> {
             "navigate" => format!("Navigated to {}", text("url").map_or_else(|| "the page".to_owned(), |url| url.trim_start_matches("https://").trim_start_matches("http://").trim_start_matches("www.").trim_end_matches('/').chars().take(60).collect::<String>())),
             "click" => format!("Clicked {}", named("name", "an element")),
             "fill" => format!("Typed into {}", named("name", "a field")),
-            "key" => format!("Pressed {}", text("key").unwrap_or("a key")),
+            // A named key (Enter, Tab, an arrow) reads as itself; a single
+            // character is what was typed, which the row never repeats.
+            "key" => format!("Pressed {}", text("key").filter(|key| key.chars().count() > 1).unwrap_or("a key")),
             "scroll" => "Scrolled the page".into(),
             "select" => format!("Chose {}", named("name", "an option")),
             _ => "Waited for the page".into(),
@@ -263,6 +265,8 @@ mod tests {
             let verb = done[kind].as_str().unwrap();
             assert_eq!(outcome_step(&ack(kind, "completed", observed, None)).unwrap(), format!("{verb} {object} · tab 2"), "{kind}");
         }
+        // A typed character is never named, as a filled field's text never is.
+        assert_eq!(outcome_step(&ack("key", "completed", json!({"key": "p"}), None)).unwrap(), format!("{} a key · tab 2", done["key"].as_str().unwrap()));
         let took_over = contract["actionOutcomes"]["tookOver"].as_str().unwrap();
         assert_eq!(outcome_step(&ack("click", "interrupted", Value::Null, Some("Interrupted by user interaction; inspect the page before retrying a side effect"))).unwrap(), format!("{took_over} · tab 2"));
         assert_eq!(outcome_step(&ack("click", "failed", Value::Null, Some("Error: Target is not actionable"))).unwrap(), "Click failed — Target is not actionable · tab 2");
