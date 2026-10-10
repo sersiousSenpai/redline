@@ -66,6 +66,7 @@ complete picture; none is a Redline telemetry channel.
 | Agent `WebSearch` / `WebFetch` tools | Web requests by the spawned research agents | User-initiated research turns. |
 | `tts.rs` | ElevenLabs / OpenAI speech APIs | Only when the user configures an API key and selects that engine. |
 | `tts.rs` (Kokoro), `dictation_whisper.rs` | One-time model download (GitHub / Hugging Face) | Only when the user enables that local engine; the model then runs offline. A Kokoro install that still has the older int8 model fetches the fp32 one once, in the background, when the voice warms up. |
+| `tts.rs` (Kokoro's runtime) | One-time setup: the pinned uv release (GitHub, SHA-256-checked), a CPython build that uv fetches and checks (GitHub), and `kokoro-onnx` with its packages (PyPI) | Only when the user clicks Enable and no working Python is found. Since 2026-10-10 everything lands under `<app-data>/kokoro/`; an install from before kept its Python in `~/.local/share/uv` and a `python3.12` link in `~/.local/bin`, which Redline leaves in place. |
 | `codehealth.rs` — the **Shipwright digest**, Tier A | Redacted excerpts of the user's own reopen notes and edit pairs, baked into the Shipwright's model prompt | Only when the user clicks the Shipwright. |
 
 > **The Shipwright digest is the one egress this program adds**, and it is the
