@@ -142,7 +142,7 @@ function TreeNode({ entry, depth, activeFile, onOpenFile }: TreeNodeProps) {
           }
         }}
         title={entry.name}
-        className="flex items-center gap-1 cursor-pointer rl-tree-row"
+        className="flex items-center gap-1 cursor-pointer rl-tree-row rl-file-row"
         style={{
           paddingLeft: `${indent}px`,
           paddingRight: "8px",

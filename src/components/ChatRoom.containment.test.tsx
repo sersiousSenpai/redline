@@ -15,6 +15,8 @@ vi.mock("./StreamingBubble", () => ({ default: ({ text }: { text: string }) => <
 import { ChatRoom } from "./ChatRoom";
 import { FrontDoor, type FrontDoorProps } from "./FrontDoor";
 import { MonochatIsland } from "./MonochatIsland";
+import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
+import { writeSharedDraft } from "../hooks/useSharedDraft";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
@@ -34,7 +36,7 @@ describe("Home chat containment", () => {
     const onEmpty = vi.fn(), onSelectChat = vi.fn();
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
       onSelectChat={onSelectChat} onEmpty={onEmpty} dictationEnabled={false} onClose={() => {}}
-      composer={{ text: "Unsent draft", onTextChange: () => {}, render: actions => <div data-chat-composer>{actions}</div> }}/>));
+      composer={{ draftKey: "test.unsentDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
     const button = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-chat-composer] button")).find(button => button.textContent === "New chat");
     expect(button).toBeDefined();
     await act(async () => button!.click());
@@ -55,7 +57,7 @@ describe("Home chat containment", () => {
     const onSelectChat = vi.fn();
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null}
       onSelectChat={onSelectChat} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
-      composer={{ text: "", onTextChange: () => {}, render: actions => <div data-chat-composer>{actions}</div> }}/>));
+      composer={{ draftKey: "test.emptyDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
     expect(host.querySelector(".rl-monochat-trace-toggle")).toBeNull();
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Conversation actions"]')!.click());
     const usage = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(button => button.textContent?.includes("Activity & usage"))!;
@@ -105,19 +107,22 @@ describe("Home chat containment", () => {
 
   it("uses only the floating launch input, migrates the old chat draft, and preserves it across surfaces", async () => {
     turn.status = "idle";
-    localStorage.setItem("rl.chatDraft.carried-chat", JSON.stringify("Previous chat draft"));
-    const base: Omit<FrontDoorProps, "text" | "onTextChange"> = {
-      floating: true, visible: true, choice: null, onChoiceChange() {}, projectOptions: [], resolvedProject: null,
+    // A chat this file has never opened: the old draft is only on disk, as it
+    // is on the first launch after an upgrade.
+    localStorage.setItem("rl.chatDraft.upgraded-chat", JSON.stringify("Previous chat draft"));
+    writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Original launch draft");
+    const base: FrontDoorProps = {
+      floating: true, visible: true, choice: null, onChoiceChange() {}, projectOptions: [], openFolder: null, lastLaunchProject: null, onResolvedProjectChange() {},
       attachments: [], onAttachmentsChange() {}, readiness: [], onFix: async () => true, pending: null, onLaunch() {}, refusal: null,
       onDrafter() {}, onRun() {}, onChat() {}, chatEnabled: true, destination: "chat", onDestinationChange() {},
       backend: { backend: "codex", model: null, effort: null }, onBackendChange() {}, modelCatalogs: {}, onNeedModels() {},
       onCancelPending() {}, onRevealPending() {}, onCreateProject: async () => null, focusNonce: 0, consumeSeed: () => "", dictationEnabled: false,
     };
     function Workspace({ surface }: { surface: string }) {
-      const [text, setText] = useState("Original launch draft"), [open, setOpen] = useState(true);
+      const [open, setOpen] = useState(true);
       return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} pose="chat" context={surface} busy={false}>
-        <ChatRoom companionId="carried-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}} hostOffersNew
-          composer={{ text, onTextChange: setText, render: accessories => <FrontDoor {...base} accessories={accessories} text={text} onTextChange={setText}/> }}/>
+        <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}} hostOffersNew
+          composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: accessories => <FrontDoor {...base} accessories={accessories}/> }}/>
       </MonochatIsland></>;
     }
     await act(async () => root.render(<Workspace surface="Document"/>));
@@ -127,7 +132,10 @@ describe("Home chat containment", () => {
     expect([...host.querySelectorAll("button")].filter(button => /New chat/.test(button.textContent ?? ""))).toEqual([]);
     const input = host.querySelector("textarea")!;
     expect(input.value).toBe("Original launch draft\n\nPrevious chat draft");
-    expect(localStorage.getItem("rl.chatDraft.carried-chat")).toBe('""');
+    // Both drafts reach the disk on the debounce, or at the latest on pagehide.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(localStorage.getItem("rl.chatDraft.upgraded-chat")).toBe('""');
+    expect(localStorage.getItem(FRONT_DOOR_TEXT_KEY)).toBe(JSON.stringify("Original launch draft\n\nPrevious chat draft"));
     await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Collapse Redline"]')!.click());
     expect(host.querySelector<HTMLElement>(".rl-monochat-card")!.hidden).toBe(true);
     await act(async () => root.render(<Workspace surface="Browser"/>));

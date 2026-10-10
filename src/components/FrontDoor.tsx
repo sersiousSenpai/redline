@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -20,9 +21,10 @@ import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
 import { useDictation } from "../lib/useDictation";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
+  FRONT_DOOR_TEXT_KEY,
   fallbackDestination,
-  frontDoorSuggestions,
   projectNameFromPrompt,
   submitAction,
   type LaunchDestination,
@@ -32,6 +34,7 @@ import {
   attemptLaunch as gateLaunch,
   attemptRun as gateRun,
   MIN_COMBINE,
+  resolveLaunchProject,
   type ProjectChoice,
 } from "../lib/launch";
 import type { CombineSource } from "../types";
@@ -56,13 +59,16 @@ import { runSupported } from "../lib/planLaunchCommand";
 // The surface is built as ONE island — a single glass slab that changes shape
 // rather than a stack of components that appear and disappear. It settles when
 // idle, lifts on focus, grows with the text, and on ⏎ it becomes the Planning
-// card in place. Everything secondary (suggestions, readiness, the explainer
-// link) orbits that one object and fades rather than jumping.
+// card in place. Everything secondary (the recents, readiness) orbits that one
+// object and fades rather than jumping.
 //
 // The gate matters as much as the look. Three routes silently break the
 // promise (Paused interception captures nothing, a missing `claude` can't
 // plan, an unapproved `/hooks` never delivers), so ⏎ is refused with the fix
 // rendered inside the island itself. See lib/readiness.ts for the derivation.
+
+/** The composer can size itself to its text in CSS (see `.rl-fd-input`). */
+const FIELD_SIZING = !!globalThis.CSS?.supports("field-sizing", "content");
 
 function basename(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
@@ -93,13 +99,17 @@ export interface FrontDoorProps {
    *  `bootSettled && !loading`, which made a decorative 750 ms plate animation
    *  into a hard floor on when the composer would accept a keystroke. */
   visible: boolean;
-  text: string;
-  onTextChange: (next: string | ((prev: string) => string)) => void;
   choice: ProjectChoice;
   onChoiceChange: (next: ProjectChoice) => void;
   projectOptions: ProjectOption[];
-  /** Where ⏎ would launch right now — App runs `resolveLaunchProject`. */
-  resolvedProject: string | null;
+  /** The rest of what `resolveLaunchProject` reads: the folder open in the
+   *  sidebar and the last repo a launch shipped into. */
+  openFolder: string | null;
+  lastLaunchProject: string | null;
+  /** Where ⏎ would launch, whenever that changes. The composer resolves it,
+   *  because the sentence is the composer's; App needs it for the readiness
+   *  it hands back. */
+  onResolvedProjectChange: (project: string | null) => void;
   attachments: string[];
   onAttachmentsChange: (next: string[]) => void;
   /** Plan sessions handed over by the sidebar's Combine picker. While these
@@ -178,15 +188,10 @@ export interface FrontDoorProps {
   consumeSeed: () => string;
   /** False while the Voice panel owns the mic — one capture at a time. */
   dictationEnabled: boolean;
-  /** Enterable harnesses — "your harnesses" beside "plan a build". The door
-   *  is harness mode's entry point (a contextual entry on the resting
-   *  state, never a header button). Empty hides the row. */
-  harnesses?: { id: string; name: string }[];
-  onEnterHarness?: (id: string) => void;
   /** Recent chats — the contextual way BACK into a conversation. A chat is a
    *  place you return to, and without a way back the room would be reachable
-   *  only by starting a new one. Same orbit discipline as the harness row: a
-   *  way in, never furniture. Empty hides the row. */
+   *  only by starting a new one. A way in, never furniture: the card's
+   *  History menu, hidden when this is empty. */
   chats?: { id: string; title: string }[];
   onOpenChat?: (id: string) => void;
 }
@@ -213,12 +218,12 @@ export function FrontDoor(props: FrontDoorProps) {
     autoFocusOnShow = true,
     chatPending = false,
     accessories,
-    text,
-    onTextChange,
     choice,
     onChoiceChange,
     projectOptions,
-    resolvedProject,
+    openFolder,
+    lastLaunchProject,
+    onResolvedProjectChange,
     attachments,
     onAttachmentsChange,
     combine = [],
@@ -251,11 +256,23 @@ export function FrontDoor(props: FrontDoorProps) {
     focusNonce,
     consumeSeed,
     dictationEnabled,
-    harnesses = [],
-    onEnterHarness,
     chats = [],
     onOpenChat,
   } = props;
+
+  // The sentence is the composer's own, so a keystroke re-renders this door
+  // and nothing around it. App reads it only when something is sent.
+  const [text, setText] = useSharedDraft(FRONT_DOOR_TEXT_KEY);
+  // Where ⏎ would launch. The guess regex-scans the sentence once per known
+  // project, so it runs on the deferred text and the keystroke paints first.
+  const deferredText = useDeferredValue(text);
+  const resolvedProject = useMemo(
+    () => resolveLaunchProject(deferredText, choice, { projectOptions, openFolder, lastLaunchProject }),
+    [deferredText, choice, projectOptions, openFolder, lastLaunchProject],
+  );
+  useEffect(() => {
+    onResolvedProjectChange(resolvedProject);
+  }, [resolvedProject, onResolvedProjectChange]);
 
   const [entered, setEntered] = useState(false);
   useEffect(() => {
@@ -387,11 +404,20 @@ export function FrontDoor(props: FrontDoorProps) {
   // text instead of scrolling inside a fixed frame — up to the cap, after
   // which it scrolls. That inner scroller is the one on this surface that is
   // intentional and it stays.
-  useLayoutEffect(() => {
-    const el = taRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
+  //
+  // Where WebKit has `field-sizing: content` the stylesheet does all of it
+  // (`.rl-fd-input`, under the same `--rl-fd-input-max` cap) and a keystroke
+  // reads no layout at all. Elsewhere it is one measure per frame, ahead of
+  // that frame's paint, instead of a forced reflow inside every keystroke.
+  useEffect(() => {
+    if (FIELD_SIZING) return;
+    const frame = requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
+    });
+    return () => cancelAnimationFrame(frame);
   }, [text, inputCap, width]);
 
   // Type-to-start handoff. A LAYOUT effect, not a passive one: it must focus
@@ -403,8 +429,8 @@ export function FrontDoor(props: FrontDoorProps) {
     lastNonce.current = focusNonce;
     taRef.current?.focus();
     const seed = consumeSeed();
-    if (seed) onTextChange((prev) => prev + seed);
-  }, [focusNonce, consumeSeed, onTextChange]);
+    if (seed) setText((prev) => prev + seed);
+  }, [focusNonce, consumeSeed, setText]);
 
   // Autofocus when the door is the resting state — the whole point is that
   // you can start typing without aiming at anything.
@@ -422,7 +448,7 @@ export function FrontDoor(props: FrontDoorProps) {
   const dictation = useDictation({
     enabled: dictationEnabled,
     onFinal: (spoken) =>
-      onTextChange((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
+      setText((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
   });
 
   // The island's growth into the document editor. Declared here, above the
@@ -623,7 +649,7 @@ export function FrontDoor(props: FrontDoorProps) {
     onChoiceChange({ path });
     setOffer(null);
     // Launch into the fresh folder directly: the chip's state change hasn't
-    // reached App's `resolvedProject` yet, and this launch is that folder's
+    // reached `resolvedProject` yet, and this launch is that folder's
     // whole reason to exist.
     if (launchAfter) (offer.run ? onRun : onLaunch)(path);
   };
@@ -641,14 +667,6 @@ export function FrontDoor(props: FrontDoorProps) {
     [onFix, text],
   );
 
-  const suggestions = useMemo(
-    () => frontDoorSuggestions(resolvedProject ? basename(resolvedProject) : null),
-    [resolvedProject],
-  );
-  // Squeezed, the chips are the first thing to go: they are a way in, and a
-  // door narrow enough to wrap them into three rows has no room to spare for
-  // one.
-  const suggestionsHidden = hasText || !!offer || tight;
   // The recents are a way in, so they give way to a sentence or to the
   // new-folder offer — but not to focus: a key-summoned card is meant for
   // typing, and its recents should still be there to click instead.
@@ -830,7 +848,7 @@ export function FrontDoor(props: FrontDoorProps) {
             spellCheck
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            onChange={(e) => onTextChange(e.target.value)}
+            onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
           />
           {dictation.listening && (
@@ -1028,104 +1046,6 @@ export function FrontDoor(props: FrontDoorProps) {
           >
             <X size={11} />
           </button>
-        </div>
-      )}
-
-      {/* Orbit: everything secondary fades against the island rather than
-          shifting it. The chips retire the moment there is a sentence to
-          finish — they are a way in, not furniture.
-          The collapse is a `grid-template-rows: 1fr → 0fr` on the WRAPPER,
-          not a max-height on the row: a fixed max-height is a lie the moment
-          the chips wrap to a second line, and the overflow lands on top of
-          whatever sits below. This version collapses any height correctly. */}
-      {!floating && <div
-        className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-        aria-hidden={suggestionsHidden}
-      >
-        <div className="rl-fd-suggestions">
-          {suggestions.map((s) => (
-            <button
-              key={s.label}
-              type="button"
-              className="rl-fd-suggestion"
-              tabIndex={suggestionsHidden ? -1 : 0}
-              onClick={() => {
-                onTextChange(s.text);
-                taRef.current?.focus();
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      }
-      {/* "Your harnesses" — the other doors this build can open. Same orbit
-          discipline as the suggestions: a way in, not furniture — the row
-          retires the moment there is a sentence to finish. */}
-      {!floating && harnesses.length > 0 && onEnterHarness && (
-        <div
-          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-          aria-hidden={suggestionsHidden}
-        >
-          <div className="rl-fd-suggestions">
-            <span
-              className="font-sans"
-              style={{
-                fontSize: "var(--rl-text-xs)",
-                color: "var(--color-ink-muted)",
-                alignSelf: "center",
-              }}
-            >
-              Your harnesses
-            </span>
-            {harnesses.map((h) => (
-              <button
-                key={h.id}
-                type="button"
-                className="rl-fd-suggestion"
-                tabIndex={suggestionsHidden ? -1 : 0}
-                title={`Enter ${h.name} — a harness running on Redline`}
-                onClick={() => onEnterHarness(h.id)}
-              >
-                {h.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Recent chats — the way back in. */}
-      {!floating && chats.length > 0 && onOpenChat && (
-        <div
-          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
-          aria-hidden={suggestionsHidden}
-        >
-          <div className="rl-fd-suggestions">
-            <span
-              className="font-sans"
-              style={{
-                fontSize: "var(--rl-text-xs)",
-                color: "var(--color-ink-muted)",
-                alignSelf: "center",
-              }}
-            >
-              Recent chats
-            </span>
-            {chats.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className="rl-fd-suggestion"
-                tabIndex={suggestionsHidden ? -1 : 0}
-                title={`Pick up “${c.title}” where you left it`}
-                onClick={() => onOpenChat(c.id)}
-              >
-                {c.title}
-              </button>
-            ))}
-          </div>
         </div>
       )}
 
@@ -1545,8 +1465,8 @@ function NewProjectOffer({
             "it can read Redline's extension ABI and the worked template."
           : kind === "harness"
             ? "A data-only harness pack — surfaces, labels, landing, hero in " +
-              "one harness.json — linked live into this Redline: it appears " +
-              "under Your harnesses now, and edits land on refocus."
+              "one harness.json — linked live into this Redline: ⌘K can " +
+              "enter it now, and edits land on refocus."
             : "A folder with a README and a fresh git repo. Redline won't " +
               "write into a directory that already has something in it."}
       </div>

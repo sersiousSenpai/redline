@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { usePoll } from "./usePoll";
 
 import type {
   CommitDraft,
@@ -29,18 +30,22 @@ export function usePush(repo: string | null, reviewId: string | null) {
   const reviewIdRef = useRef(reviewId);
   reviewIdRef.current = reviewId;
 
-  const refreshStatus = useCallback(async () => {
-    const r = repoRef.current;
-    if (!r) {
-      setStatus(null);
-      return;
-    }
-    try {
-      setStatus(await invoke<GitStatus>("push_status", { repo: r }));
-    } catch {
-      setStatus(null);
-    }
-  }, []);
+  // Status follows the repo; a modest poll keeps the strip honest while the
+  // agent (or the user's terminal) works underneath it. Every status read,
+  // the poll's and the ones a push asks for, goes through the poll, so a
+  // status that didn't change keeps its object and costs the pane no render.
+  const refreshStatus = usePoll(
+    () => {
+      const r = repoRef.current;
+      return r
+        ? invoke<GitStatus>("push_status", { repo: r }).catch(() => null)
+        : null;
+    },
+    repo ? 10_000 : null,
+    { pauseWhenHidden: true, skipIfUnchanged: true, onResult: setStatus },
+    [repo],
+  );
+  useEffect(() => setStatus(null), [repo]);
 
   const refreshLastPush = useCallback(async () => {
     const id = reviewIdRef.current;
@@ -54,16 +59,6 @@ export function usePush(repo: string | null, reviewId: string | null) {
       setLastPush(null);
     }
   }, []);
-
-  // Status follows the repo; a modest poll keeps the strip honest while the
-  // agent (or the user's terminal) works underneath it.
-  useEffect(() => {
-    setStatus(null);
-    if (!repo) return;
-    void refreshStatus();
-    const id = window.setInterval(() => void refreshStatus(), 10_000);
-    return () => window.clearInterval(id);
-  }, [repo, refreshStatus]);
 
   useEffect(() => {
     setLastPush(null);

@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   fallbackDestination,
-  frontDoorSuggestions,
   projectNameFromPrompt,
   submitAction,
 } from "./frontDoor";
@@ -120,31 +119,6 @@ describe("fallbackDestination", () => {
   it("puts plan one key away from a direct run", () => {
     // "Just do it" → the modifier is "show me first", never another run.
     expect(fallbackDestination("run")).toBe("plan");
-  });
-});
-
-describe("frontDoorSuggestions", () => {
-  it("names the project when there is one", () => {
-    const s = frontDoorSuggestions("redline");
-    expect(s[0].label).toBe("Fix a bug in redline");
-    expect(s[0].text).toBe("Fix a bug in redline: ");
-  });
-
-  it("stays generic with no project", () => {
-    const s = frontDoorSuggestions(null);
-    expect(s[0].label).toBe("Fix a bug");
-    expect(s.some((x) => x.label.includes("undefined"))).toBe(false);
-    for (const x of s) expect(x.text.length).toBeGreaterThan(0);
-  });
-
-  it("never returns text that would launch as-is by mistake", () => {
-    // Chips FILL the composer. Each one is a prefix a human finishes, or a
-    // complete question — never an empty string.
-    for (const projectName of [null, "redline"]) {
-      for (const s of frontDoorSuggestions(projectName)) {
-        expect(s.text.trim().length).toBeGreaterThan(0);
-      }
-    }
   });
 });
 
@@ -309,6 +283,33 @@ describe("chat context wiring", () => {
     expect(body).toMatch(/setChatSeed\(\{[^}]*\bcontext \}\)/);
     // Out of band: the sentence the room sends is the one that was typed.
     expect(body).not.toContain("withContext(");
+  });
+});
+
+// Responsiveness, Phase 2: typing touches only the component being typed in.
+// The sentence was App-level persisted state with no debounce, so every
+// keystroke re-rendered the whole shell and wrote localStorage synchronously.
+// It is the composer's shared draft now; App may read and write it at the
+// moments something is sent or handed back, and never subscribe to it.
+describe("the composer's sentence stays out of App", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("App holds no state for it and never subscribes to it", () => {
+    expect(app).not.toContain('"redline.frontDoor.text"');
+    expect(app).not.toMatch(/const \[frontDoorText\b/);
+    expect(app).not.toMatch(/\buseSharedDraft\(/);
+    const stateKeys = [...app.matchAll(/\buse(?:PersistedState|State)(?:<[^()]*?>)?\(\s*([^,)]*)/g)].map((m) => m[1].trim());
+    expect(stateKeys).not.toContain("FRONT_DOOR_TEXT_KEY");
+  });
+
+  it("hands neither composer a copy of it", () => {
+    const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
+    expect(door).toContain("<FrontDoor");
+    expect(door).not.toMatch(/\btext=\{/);
+    expect(door).not.toContain("onTextChange");
+    // The room is told where the sentence lives instead.
+    const room = app.slice(app.indexOf("<ChatRoom"), app.indexOf("harness={", app.indexOf("<ChatRoom")));
+    expect(room).toContain("composer={{ draftKey: FRONT_DOOR_TEXT_KEY,");
   });
 });
 

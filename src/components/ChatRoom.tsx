@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { ConversationSourceContext } from "./ContinueAs";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -11,6 +11,7 @@ import { Check, Mic, Plus, X } from "lucide-react";
 import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
+import { usePoll } from "../hooks/usePoll";
 import { useDictation } from "../lib/useDictation";
 import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
@@ -19,6 +20,7 @@ import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { toolbarPose, type ToolbarPose } from "../lib/toolbarPose";
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/seatAssign";
 import { usePersistedState } from "../theme/usePersistedState";
+import { readSharedDraft, useSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
 import { BrowserDialog } from "./BrowserSurfaces";
 import { ComposerMenu } from "./ComposerMenu";
 import { MonochatTrace } from "./MonochatTrace";
@@ -57,9 +59,10 @@ import { standaloneNote } from "../lib/notes";
 // voice. The names stay `companion` end to end — tables, events, commands, seat,
 // skill — so nothing is renamed to give it a room; "Chat" is the UI word only.
 //
-// Remounted per thread by the parent (`key={companionId}`): the composer draft
-// is keyed per chat and `usePersistedState` reads its key once, so switching
-// chats is a remount by design rather than a stale draft carried across.
+// Remounted per thread by the parent (`key={companionId}`): the per-chat
+// settings below are `usePersistedState`, which reads its key once, so
+// switching chats is a remount by design rather than a stale mode carried
+// across.
 
 export interface ChatPlanReceipt { kind?: "plan" | "run"; status: "starting" | "planning" | "error" | "done"; instruction: string; terminalId?: string; launchId?: string; sessionId?: string; title?: string; error?: string; blocked?: import("../lib/readiness").ReadinessItem }
 export interface ChatPlanRequest { harness?: BackendChoice; companionId: string; messages: ContinuationMessage[]; instruction: string; project: ProjectChoice; title: string }
@@ -70,7 +73,10 @@ export interface ChatWorkbenchComposer {
 }
 
 export interface ChatRoomProps {
-  composer?: { text: string; onTextChange: React.Dispatch<React.SetStateAction<string>>; attachments?: string[]; onAttachmentsConsumed?: () => void; project?: ProjectChoice; render: (actions: ReactNode, workbench: ChatWorkbenchComposer) => ReactNode };
+  /** The card's composer, which owns input when supplied. Its sentence is the
+   *  shared draft under `draftKey`, so the room reads it there rather than
+   *  being handed a copy that would re-render its owner on every keystroke. */
+  composer?: { draftKey: string; attachments?: string[]; onAttachmentsConsumed?: () => void; project?: ProjectChoice; render: (actions: ReactNode, workbench: ChatWorkbenchComposer) => ReactNode };
   harness?: BackendChoice;
   modelCatalogs?: ModelCatalogs;
   onHarnessChange?: (harness: BackendChoice) => void;
@@ -138,6 +144,8 @@ export interface ChatRoomProps {
   onClose: () => void;
 }
 
+const NO_PROJECTS: ProjectOption[] = [];
+
 export function ChatRoom({
   composer,
   harness,
@@ -151,7 +159,7 @@ export function ChatRoom({
   onEmpty,
   cwd,
   dictationEnabled,
-  projectOptions = [],
+  projectOptions = NO_PROJECTS,
   lastLaunchProject = null,
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
   expanded = false,
@@ -167,19 +175,17 @@ export function ChatRoom({
   contextFor,
   onContextLost,
 }: ChatRoomProps) {
-  const [savedDraft, setSavedDraft] = usePersistedState<string>(
-    `rl.chatDraft.${companionId}`,
-    "",
-  );
-  const draft = composer?.text ?? savedDraft;
-  const setDraft = composer?.onTextChange ?? setSavedDraft;
+  const [draft, setDraft] = useSharedDraft(composer?.draftKey ?? `rl.chatDraft.${companionId}`);
   // Carry a draft from the former separate chat input into the one composer.
   // Clear the old key only after handing its text to the persistent owner.
   useEffect(() => {
-    if (!composer || !savedDraft.trim()) return;
-    composer.onTextChange(previous => previous.includes(savedDraft) ? previous : previous.trim() ? `${previous}\n\n${savedDraft}` : savedDraft);
-    setSavedDraft("");
-  }, [!!composer, savedDraft, setSavedDraft, setDraft]);
+    if (!composer) return;
+    const legacy = `rl.chatDraft.${companionId}`;
+    const savedDraft = readSharedDraft(legacy);
+    if (!savedDraft.trim()) return;
+    setDraft(previous => previous.includes(savedDraft) ? previous : previous.trim() ? `${previous}\n\n${savedDraft}` : savedDraft);
+    writeSharedDraft(legacy, "");
+  }, [!!composer, companionId, setDraft]);
   // Paths, not bytes — the established convention. `composePrompt` folds them
   // into a `Context:` list the agent's Read/Grep can act on.
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -204,12 +210,9 @@ export function ChatRoom({
     return () => { alive = false; };
   }, [companionId]);
   const [buildConflict, setBuildConflict] = useState(false);
-  useEffect(() => {
-    if (mode !== "build" || !project?.path) { setBuildConflict(false); return; }
-    let alive = true;
-    const poll = () => { void invoke<boolean>("companion_build_activity", { companionId, projectPath: project.path }).then(value => { if (alive) setBuildConflict(value); }).catch(() => {}); };
-    poll(); const timer = window.setInterval(poll, 10000); return () => { alive = false; window.clearInterval(timer); };
-  }, [companionId, mode, project?.path]);
+  const buildPath = mode === "build" ? project?.path : undefined;
+  useEffect(() => { if (!buildPath) setBuildConflict(false); }, [buildPath]);
+  usePoll(() => invoke<boolean>("companion_build_activity", { companionId, projectPath: buildPath }), buildPath ? 10_000 : null, { pauseWhenHidden: true, onResult: setBuildConflict }, [companionId, buildPath]);
   const [armedRun, setArmedRun] = useState<ChatPlanRequest | null>(null);
   const [changes, setChanges] = useState<ChatChanges[]>([]);
   const refreshChanges = useCallback(() => { void invoke<ChatChanges[]>("companion_changes", { companionId }).then(rows => setChanges(rows ?? [])).catch(() => {}); }, [companionId]);
@@ -403,7 +406,15 @@ export function ChatRoom({
   useEffect(() => { onActivityChange?.(streaming); }, [streaming, onActivityChange]);
   const canPlan = !!onPlan && (messages.some(message => message.status === "complete") || !!draft.trim());
   const armedInstruction = queuedInstruction ?? armedPlan;
-  const planningProject = resolveLaunchProject([...messages.map(message => message.body), draft].join("\n"), project, { projectOptions, openFolder: null, lastLaunchProject });
+  // Only the room's own picker shows this; the card's composer resolves its
+  // own, so under the card nothing is deferred or scanned. The guess
+  // regex-scans the whole transcript, so it runs on the deferred draft and
+  // only when the transcript or that draft moves.
+  const deferredDraft = useDeferredValue(composer ? null : draft);
+  const planningProject = useMemo(
+    () => deferredDraft === null ? null : resolveLaunchProject([...messages.map(message => message.body), deferredDraft].join("\n"), project, { projectOptions, openFolder: null, lastLaunchProject }),
+    [messages, deferredDraft, project, projectOptions, lastLaunchProject],
+  );
   const queued = queue.length;
   const plan = (instruction: string) => {
     if ((!canPlan && !instruction.trim()) || receipt?.status === "starting" || (receipt?.status === "planning" && receipt.kind !== "run")) return;
@@ -565,15 +576,11 @@ export function ChatRoom({
       write: standaloneNote(ideaNote(body, { id: companionId, title: me?.title ?? "Chat" }, project?.path ?? cwd)),
     });
   }, [companionId, me?.title, project?.path, cwd]);
-  const replyActions = (m: CompanionMessage) => (
-    <ReplyActions
-      body={m.body}
-      room={roomy}
-      onPlan={canPlan ? () => plan(planFromReplyInstruction(m.body)) : undefined}
-      onDraft={onDraft ? () => onDraft(m.body) : undefined}
-      onSaveIdea={() => saveIdea(m.body)}
-    />
-  );
+  // Stable, so a settled bubble sits out every render that isn't about it —
+  // a keystroke in the composer re-renders this room, never the transcript.
+  const planRef = useRef(plan);
+  planRef.current = plan;
+  const planFromReply = useCallback((body: string) => planRef.current(planFromReplyInstruction(body)), []);
   const [activityOpen, setActivityOpen] = useState(false);
   useEffect(() => setActivityOpen(false), [companionId]);
 
@@ -694,14 +701,10 @@ export function ChatRoom({
                 meter={meters[m.id]}
                 contextReset={resets.has(m.id)}
                 room={roomy}
-                actions={m.role === "assistant" && m.status === "complete" && m.body.trim() ? replyActions(m) : undefined}
-                onUnqueue={() => {
-                  void unqueue(m.id).then((text) => {
-                    if (text)
-                      setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
-                  });
-                }}
-                onResend={() => send(m.body)}
+                onPlan={canPlan ? planFromReply : undefined}
+                onDraft={onDraft}
+                onSaveIdea={saveIdea}
+                onResend={send}
               />
             ))
           )}
@@ -880,17 +883,20 @@ function RoleTag({ role, room = false }: { role: string; room?: boolean }) {
   );
 }
 
-function ChatBubble({
+// Memoized: every prop is stable while the composer is being typed in, so the
+// transcript's markdown is not re-rendered per keystroke.
+const ChatBubble = memo(function ChatBubble({
   msg,
   onResend,
   meter,
   contextReset,
   room = false,
-  actions,
+  onPlan,
+  onDraft,
+  onSaveIdea,
 }: {
   msg: CompanionMessage;
-  onUnqueue?: () => void;
-  onResend?: () => void;
+  onResend: (body: string) => void;
   /** This row's settled meter — the badge and footer that outlive the turn. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
@@ -898,8 +904,11 @@ function ChatBubble({
   /** Plate scale: the user's turn is a right-aligned tinted block, the
    *  reply full-width prose with no bubble, like a desktop chat app. */
   room?: boolean;
-  /** The reply's capture row (Copy · → Plan · → Draft · Save idea). */
-  actions?: ReactNode;
+  /** The reply's capture row (Copy · → Plan · → Draft · Save idea), each
+   *  handed the reply's body. */
+  onPlan?: (body: string) => void;
+  onDraft?: (body: string) => void;
+  onSaveIdea: (body: string) => Promise<void>;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -939,12 +948,20 @@ function ChatBubble({
       ) : (
         <MarkdownView body={msg.body} compact room={room} rich={!isUser} />
       )}
-      {isUnsent && <UnsentNote onResend={onResend} />}
-      {!isUser && actions}
+      {isUnsent && <UnsentNote onResend={() => onResend(msg.body)} />}
+      {msg.role === "assistant" && msg.status === "complete" && !!msg.body.trim() && (
+        <ReplyActions
+          body={msg.body}
+          room={room}
+          onPlan={onPlan && (() => onPlan(msg.body))}
+          onDraft={onDraft && (() => onDraft(msg.body))}
+          onSaveIdea={() => onSaveIdea(msg.body)}
+        />
+      )}
       {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
     </div>
   );
-}
+});
 
 /** Copy · → Plan · → Draft · Save idea, under a settled reply. Each label
  *  flips to a short confirmation in place rather than raising a toast. */

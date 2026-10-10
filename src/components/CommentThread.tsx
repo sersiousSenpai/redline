@@ -23,7 +23,7 @@ import { useMonochat } from "./MonochatContext";
 import { useSidecarView, type SidecarView } from "../hooks/useSidecarView";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { askedMode, isChatRow, reportItems } from "../lib/sidecarRows";
-import { useSharedDraft } from "../hooks/useSharedDraft";
+import { useSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -123,7 +123,9 @@ export const CommentThread = memo(function CommentThread({
   // at full height (structured replies + diagrams are meant to be read in full).
   // The reviewer can still collapse to compact via the ⤡ button.
   const [enlarged, setEnlarged] = useState(true);
-  const [draft, setDraft] = useSharedDraft(`redline.sidecarDraft.${sessionId}.${commentId}`);
+  // The reply box's draft. The box subscribes to it, not the thread, so a
+  // keystroke re-renders the box and none of the transcript above it.
+  const draftKey = `redline.sidecarDraft.${sessionId}.${commentId}`;
   // Attachments and the view ride the optimistic user row. `makeMessage`
   // reads these the instant `turn.send` mints that row — synchronously — and
   // `send` clears them immediately after, so they never leak into a later turn.
@@ -164,7 +166,7 @@ export const CommentThread = memo(function CommentThread({
     cancelArgs: { sessionId, commentId },
     queueing: false,
     sendFailPrefix: "Couldn't reach the discussion fork",
-    onSendFailed: text => setDraft(current => current.trim() ? `${current}\n\n${text}` : text),
+    onSendFailed: text => writeSharedDraft(draftKey, current => current.trim() ? `${current}\n\n${text}` : text),
     buildSendArgs: (text, extra) => {
       const { attachments, mode } = extra as SendExtra;
       return {
@@ -386,7 +388,7 @@ export const CommentThread = memo(function CommentThread({
     }
     turn.clear();
     setExpanded(false);
-    setDraft("");
+    writeSharedDraft(draftKey, "");
   }
 
   // The opening user turn is the comment's own text (see `discussSeed`), which
@@ -720,15 +722,11 @@ export const CommentThread = memo(function CommentThread({
 
           <Composer
             sessionId={sessionId}
+            draftKey={draftKey}
             inputRef={composerRef}
-            draft={draft}
-            setDraft={setDraft}
             streaming={status === "streaming"}
             placeholder={view === "chat" ? "Ask anything…" : "Ask a follow-up…"}
-            onSend={(attachments) => {
-              send(draft, view, attachments);
-              setDraft("");
-            }}
+            onSend={(text, attachments) => send(text, view, attachments)}
             onStop={cancel}
           />
 
@@ -826,7 +824,9 @@ export const CommentThread = memo(function CommentThread({
   );
 });
 
-function MessageBubble({
+// Memoized, like the chat's bubble below: a row whose props haven't moved
+// sits out the thread's renders, the stream's tokens included.
+const MessageBubble = memo(function MessageBubble({
   msg,
   agent,
   onRetry,
@@ -889,12 +889,12 @@ function MessageBubble({
       )}
     </div>
   );
-}
+});
 
 /** One chat turn: plain bubbles, no bylines — the reviewer's right-aligned
  *  and tinted, the agent's left and borderless. Never `rich`, so a quick
  *  answer can't sprout a diagram. */
-function ChatBubble({
+const ChatBubble = memo(function ChatBubble({
   msg,
   onRetry,
   onResend,
@@ -929,13 +929,12 @@ function ChatBubble({
       )}
     </div>
   );
-}
+});
 
 function Composer({
   sessionId,
+  draftKey,
   inputRef,
-  draft,
-  setDraft,
   streaming,
   placeholder,
   onSend,
@@ -943,25 +942,28 @@ function Composer({
 }: {
   /** Scopes where a dropped/pasted file is copied. */
   sessionId: string;
+  /** The shared draft this box edits — also the inline anchor's and the
+   *  island's, when they show the same thread. */
+  draftKey: string;
   /** The textarea, so the thread can focus it (Chat, a settled chat reply). */
   inputRef: RefObject<HTMLTextAreaElement | null>;
-  draft: string;
-  setDraft: (s: string) => void;
   streaming: boolean;
   placeholder: string;
-  /** Receives whatever files were captured for this turn; the parent clears
-   *  the draft and this clears its own chips. */
-  onSend: (attachments: CommentAttachment[]) => void;
+  /** Receives the text and whatever files were captured for this turn; this
+   *  box clears both once they are handed over. */
+  onSend: (text: string, attachments: CommentAttachment[]) => void;
   onStop: () => void;
 }) {
+  const [draft, setDraft] = useSharedDraft(draftKey);
   const files = useAttachmentCapture(sessionId);
   const submit = () => {
-    onSend(files.attachments);
+    onSend(draft, files.attachments);
+    setDraft("");
     files.clear();
   };
   // Auto-grow to fit content — no cap, no scrollbar. Recomputed on input and
-  // whenever `draft` changes — the latter catches the parent's clear-on-send so
-  // the box snaps back to its 2-row baseline.
+  // whenever `draft` changes — the latter catches the clear-on-send so the
+  // box snaps back to its 2-row baseline.
   const taRef = inputRef;
   const autosize = () => {
     const el = taRef.current;

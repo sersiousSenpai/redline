@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import type { JSONContent } from "@tiptap/react";
 import type { Editor } from "@tiptap/react";
@@ -53,6 +53,7 @@ import {
 } from "../lib/launch";
 import type { ReadinessItem } from "../lib/readiness";
 import { useTextSelection } from "../hooks/useTextSelection";
+import { usePoll } from "../hooks/usePoll";
 import type { CommentHighlightRange } from "../editor/extensions/CommentHighlights";
 import type { DraftComment } from "../types";
 
@@ -2234,16 +2235,19 @@ function firstLine(prompt: string): string {
  *
  *  `describeAgo` computes at render time, and this surface only re-rendered on
  *  editor transactions — so "Saved · 2s ago" sat there saying 2s for as long as
- *  you weren't typing, which is precisely when you'd look at it. Same shape as
- *  WorkingIndicator's ticker. */
+ *  you weren't typing, which is precisely when you'd look at it. A tick
+ *  renders only when the label it would show has changed (an hour-old save
+ *  says "1h ago" for half an hour), and the clock stops while the window is
+ *  hidden; it catches up the moment it is shown. */
 function SavedAgo({ state }: { state: DrafterSaveState | null }) {
   const at = state?.kind === "saved" ? state.savedAt : undefined;
-  const [, tick] = useState(0);
-  useEffect(() => {
-    if (at === undefined) return;
-    const t = setInterval(() => tick((n) => n + 1), 10_000);
-    return () => clearInterval(t);
-  }, [at]);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  usePoll(
+    () => describeAgo(at),
+    at === undefined ? null : 10_000,
+    { pauseWhenHidden: true, skipIfUnchanged: true, leading: false, onResult: rerender },
+    [at],
+  );
   if (!state) return null;
   return (
     <span

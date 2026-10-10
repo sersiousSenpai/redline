@@ -10,6 +10,7 @@ import { shortcutTabId, pageChatIdentity, type LinkedConversation } from "../lib
 import { ensureCart } from "../lib/browseCart";
 import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
 import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
+import { usePoll } from "../hooks/usePoll";
 import { BrowserFullscreenEdge } from "./BrowserFullscreenEdge";
 import { fallbackGroups, reconcileGroups, validateGroups, moveTabToGroup, type TabGroup } from "../lib/tabGroups";
 import { BrowserChrome } from "./BrowserChrome";
@@ -1343,12 +1344,13 @@ function BrowserPaneBase({
 
   // The JS webview API surfaces no navigation events, so poll the active tab's
   // real URL to keep the address bar and tab title honest as the page navigates
-  // (link clicks, redirects, search submits).
-  useEffect(() => {
-    const tick = async () => {
-      // Skip while hidden under an overlay or the app is backgrounded — nothing
-      // is visible to keep in sync, so don't pay the IPC + re-render cost.
-      if (!visibleRef.current || document.hidden) return;
+  // (link clicks, redirects, search submits). Paused while the app is
+  // backgrounded.
+  usePoll(
+    async () => {
+      // Skip while hidden under an overlay — nothing is visible to keep in
+      // sync, so don't pay the IPC + re-render cost.
+      if (!visibleRef.current) return;
       const id = activeIdRef.current;
       if (!wvMapRef.current.has(id)) return;
       const requestedUrl = tabsRef.current.find((tab) => tab.id === id)?.url;
@@ -1390,10 +1392,10 @@ function BrowserPaneBase({
       } catch {
         /* webview gone mid-poll — ignore */
       }
-    };
-    const interval = window.setInterval(tick, 5000);
-    return () => window.clearInterval(interval);
-  }, []);
+    },
+    5000,
+    { pauseWhenHidden: true, leading: false },
+  );
 
   // Poll the active tab's page signals (set by injected shims on the TOP frame):
   //  • `__redline_fs` — the in-window fullscreen flag (watch-pages + the embed
@@ -1408,24 +1410,33 @@ function BrowserPaneBase({
   //    highlight action bar. Read-and-cleared in the same eval, so a dropped
   //    poll cycle loses nothing and a slow cycle can't double-dispatch.
   // Reuses the proven string-returning eval path — no new native plumbing.
-  // Native page events deliver promptly; this is a low-frequency recovery poll.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      if (cancelled) return;
+  // Native page events deliver promptly; this is a low-frequency recovery
+  // poll, paused while the app is backgrounded.
+  usePoll(
+    async () => {
       // A temporary overlay does not end a video session.
-      if (!visibleRef.current || document.hidden) return;
+      if (!visibleRef.current) return null;
       const id = activeIdRef.current;
-      if (!wvMapRef.current.has(id)) return;
-      try {
-        const raw = await invoke<string>("browser_eval_result", {
-          label: `browser-${id}`,
-          script:
-            '(function(){try{var q=window.__redline_newtabs||[];window.__redline_newtabs=[];' +
-            'var s=window.__redline_selections||[];window.__redline_selections=[];' +
-            'return JSON.stringify({fs:!!window.__redline_fs,tabs:q,sel:s})}catch(e){return "{}"}})()',
-        });
-        if (cancelled || id !== activeIdRef.current) return;
+      if (!wvMapRef.current.has(id)) return null;
+      const raw = await invoke<string>("browser_eval_result", {
+        label: `browser-${id}`,
+        script:
+          '(function(){try{var q=window.__redline_newtabs||[];window.__redline_newtabs=[];' +
+          'var s=window.__redline_selections||[];window.__redline_selections=[];' +
+          'return JSON.stringify({fs:!!window.__redline_fs,tabs:q,sel:s})}catch(e){return "{}"}})()',
+      });
+      return { id, raw };
+    },
+    5000,
+    {
+      pauseWhenHidden: true,
+      leading: false,
+      // Acted on only while the pane is mounted (a drain that lands after
+      // unmount is dropped, as it always was). A throw — the webview gone
+      // mid-poll — is the poll's to swallow.
+      onResult: (drain) => {
+        if (!drain || drain.id !== activeIdRef.current) return;
+        const { id, raw } = drain;
         let sig: { fs?: boolean; tabs?: unknown; sel?: unknown } = {};
         try {
           sig = JSON.parse(raw || "{}");
@@ -1446,16 +1457,9 @@ function BrowserPaneBase({
         parseSelectionEvents(sig.sel).forEach((ev, i) => {
           dispatchSelectionRef.current(ev, now + i);
         });
-      } catch {
-        /* webview gone mid-poll — ignore */
-      }
-    };
-    const interval = window.setInterval(tick, 5000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, []);
+      },
+    },
+  );
 
   const forgetNative = useCallback((id: string, recreate: boolean) => {
     const view = wvMapRef.current.get(id); if (view) geometry.hide(id, view);

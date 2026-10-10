@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// The front door's pure core: what a keystroke means, its starter chips, and
-// the slug proposed to a first-run user who has no project at all. House style
-// — every decision the surface makes lives here so it can be tested without a
-// DOM; FrontDoor.tsx only renders and App.tsx only wires.
+// The front door's pure core: what a keystroke means and the slug proposed to
+// a first-run user who has no project at all. House style — every decision
+// the surface makes lives here so it can be tested without a DOM;
+// FrontDoor.tsx only renders and App.tsx only wires.
 //
 // What is NOT here: anything about *launching*. Project resolution, prompt
 // composition, the readiness gate and the pending-launch shape all moved to
 // `lib/launch.ts` when the Drafter and the browser became doors too — they are
-// shared property. The composer keybindings and chip templater below are not,
-// and stay.
+// shared property. The composer keybindings below are not, and stay.
+
+/** Where the composer's sentence lives: a shared draft (hooks/useSharedDraft)
+ *  that the composer subscribes to and App only reads when something is sent,
+ *  so a keystroke re-renders the composer and never the shell around it. The
+ *  key predates the move, so a half-typed prompt survives the upgrade too. */
+export const FRONT_DOOR_TEXT_KEY = "redline.frontDoor.text";
 
 /** Where the composer sends its text. A sticky setting, not a one-off: you
  *  pick it in `Plan ▾` and it stays picked, so a session spent shaping long
@@ -69,37 +74,6 @@ export function submitAction(
   if (e.metaKey || e.ctrlKey) return fallbackDestination(destination);
   if (e.shiftKey) return "newline";
   return destination;
-}
-
-export interface FrontDoorSuggestion {
-  /** What the chip reads. */
-  label: string;
-  /** What clicking it puts in the composer — it fills, never launches. */
-  text: string;
-}
-
-/** Starter chips. Templated on the project the door would launch into, so a
- *  user with one repo sees its name and a first-run user sees the generic
- *  form. Clicking FILLS the composer (a half-written sentence is an
- *  invitation to finish it; a launched one is a surprise). */
-export function frontDoorSuggestions(
-  projectName: string | null,
-): FrontDoorSuggestion[] {
-  const inProject = projectName ? ` in ${projectName}` : "";
-  return [
-    {
-      label: projectName ? `Fix a bug in ${projectName}` : "Fix a bug",
-      text: `Fix a bug${inProject}: `,
-    },
-    { label: "Add a feature", text: `Add a feature${inProject}: ` },
-    {
-      label: projectName ? `Explain ${projectName}` : "Explain this codebase",
-      text: projectName
-        ? `Explain how ${projectName} works, end to end.`
-        : "Explain how this codebase works, end to end.",
-    },
-    { label: "Write tests", text: "Write tests for " },
-  ];
 }
 
 /** Words that carry no identity in a project name — the leading verb, the

@@ -2,11 +2,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { turn, calls, contextReply } = vi.hoisted(() => ({
+const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
   turn: { messages: [] as { id: string; role: string; body: string; status: string }[], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), meter: null, activity: [], meters: {} },
   calls: [] as { cmd: string; args: Record<string, unknown> }[],
   contextReply: { value: null as unknown },
+  markdownRenders: { count: 0 },
 }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
@@ -21,11 +22,14 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("./MarkdownView", () => ({
-  MarkdownView: ({ body, room, compact }: { body: string; room?: boolean; compact?: boolean }) =>
-    <div data-md data-room={String(!!room)} data-compact={String(!!compact)}>{body}</div>,
+  MarkdownView: ({ body, room, compact }: { body: string; room?: boolean; compact?: boolean }) => {
+    markdownRenders.count++;
+    return <div data-md data-room={String(!!room)} data-compact={String(!!compact)}>{body}</div>;
+  },
 }));
 vi.mock("./StreamingBubble", () => ({ default: ({ text, room }: { text: string; room?: boolean }) => <div data-streaming data-room={String(!!room)}>{text}</div> }));
 import { ChatRoom, type ChatRoomProps } from "./ChatRoom";
+import { writeSharedDraft } from "../hooks/useSharedDraft";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
@@ -112,6 +116,18 @@ describe("the chat as a brainstorm room", () => {
     await act(async () => button("→ Plan")!.click());
     expect(onPlan).toHaveBeenCalledTimes(1);
     expect(onPlan.mock.calls[0][0].instruction).toContain("Yes: keep a warm child per room.");
+  });
+
+  // The card's composer is the room's input, and the room reads its sentence:
+  // a keystroke re-renders the room, but the settled transcript sits it out.
+  it("re-renders no settled reply while the card's composer is typed in", async () => {
+    let composerRenders = 0;
+    await render({ onPlan: vi.fn(), onDraft: vi.fn(), composer: { draftKey: "test.roomDraft", render: () => { composerRenders++; return null; } } });
+    const settled = { markdown: markdownRenders.count, composer: composerRenders };
+    for (const draft of ["W", "Wh", "Why warm?"]) await act(async () => writeSharedDraft("test.roomDraft", draft));
+    expect(composerRenders).toBe(settled.composer + 3);
+    expect(markdownRenders.count).toBe(settled.markdown);
+    expect(host.querySelectorAll("[data-reply-actions]").length).toBe(1);
   });
 
   it("warms the room's agent on mount and lets it go on unmount", async () => {

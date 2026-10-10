@@ -34,8 +34,8 @@ const click = async (selector: string) => {
   expect(button).not.toBeNull();
   await act(async () => button!.click());
 };
-async function mount(props: { collapsed?: boolean; onNeedsYouChange?: (count: number) => void } = {}) {
-  await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={props.collapsed ?? false} onNeedsYouChange={props.onNeedsYouChange} /></StrictMode>));
+async function mount(props: { collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void } = {}) {
+  await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={props.collapsed ?? false} onNeedsYouChange={props.onNeedsYouChange} onFocusedCwd={props.onFocusedCwd} /></StrictMode>));
 }
 async function open(background = false) {
   let id = "";
@@ -319,7 +319,8 @@ describe("terminal state", () => {
     ];
     await emit({ terminalId: agent, sessionId: "s", at: Date.now() - 1000, kind: "working" });
     await emit(yourTurn(oneShot, Date.now() - 1000));
-    await act(async () => { vi.advanceTimersByTime(4000); });
+    // Async: each fleet tick's reads land before the next tick fires.
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
     expect(stateOf(server)).toBe("serving");
     expect(host.querySelector<HTMLElement>(`[data-header-id="${server}"]`)?.dataset.port).toBe("5173");
     expect(stateOf(agent)).toBe("working");
@@ -327,7 +328,7 @@ describe("terminal state", () => {
     // Both agents exit (one killed mid-turn, one a `claude -p` that ended
     // after its Stop): their shells hold the foreground in the next sample.
     mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }, { id: oneShot, fgComm: "zsh", fgIsShell: true, ports: [] }];
-    await act(async () => { vi.advanceTimersByTime(4000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
     expect(stateOf(agent)).toBe("idle");
     expect(stateOf(oneShot)).toBe("your-turn");
   });
@@ -340,13 +341,95 @@ describe("terminal state", () => {
       command === "pty_procs" ? new Promise((resolve) => { release = resolve; }) : base(command, args));
     await mount();
     const scans = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_procs").length;
-    // StrictMode mounts the effect twice; each mount starts its own poll.
+    // Run the fleet poll until a sample is out on a scan that never returns.
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
     const first = scans();
-    await act(async () => { vi.advanceTimersByTime(12_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(scans()).toBe(first);
     await act(async () => { release([]); });
-    await act(async () => { vi.advanceTimersByTime(4000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
     expect(scans()).toBe(first + 1);
+  });
+});
+
+describe("the fleet poll", () => {
+  const count = (command: string) => mocks.invoke.mock.calls.filter(([cmd]) => cmd === command).length;
+  const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reads every visible cwd on one clock, and what each terminal runs on every other tick", async () => {
+    await mount();
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await tick(8000);
+    expect(count("pty_cwds") - cwds).toBe(4);
+    expect(count("pty_procs") - procs).toBe(2);
+  });
+
+  // The process scan is a system-wide `lsof` of listening sockets, the read
+  // most likely to crawl or hang on a loaded machine. The cwd read is what
+  // labels the tiles and what the shell's folder-follow runs on; it used to
+  // be its own loop and must not wait behind that scan.
+  it("a process scan that never returns holds up no cwd read", async () => {
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) =>
+      command === "pty_procs" ? new Promise(() => {}) : base(command, args));
+    await mount();
+    await tick(4000);
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await tick(8000);
+    expect(count("pty_cwds") - cwds).toBe(4);
+    expect(count("pty_procs")).toBe(procs);
+  });
+
+  it("a new tile is read at once without moving the process-sample cadence", async () => {
+    await mount();
+    await tick(1000);
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await open();
+    expect(count("pty_cwds")).toBeGreaterThan(cwds);
+    expect(count("pty_procs")).toBe(procs);
+    await tick(3000);
+    expect(count("pty_procs")).toBe(procs + 1);
+  });
+
+  it("stops while the window is hidden and samples everything the moment it is shown", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const show = (state: DocumentVisibilityState) => act(async () => {
+      visibility = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await mount();
+    await show("hidden");
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await tick(20_000);
+    expect(count("pty_cwds")).toBe(cwds);
+    expect(count("pty_procs")).toBe(procs);
+    await show("visible");
+    expect(count("pty_cwds")).toBe(cwds + 1);
+    expect(count("pty_procs")).toBe(procs + 1);
+  });
+
+  it("hands the host the focused terminal's cwd from the same reads, once per change", async () => {
+    const seen: [string, string][] = [];
+    mocks.cwd = "/work/api";
+    await mount({ onFocusedCwd: (id, cwd) => seen.push([id, cwd]) });
+    const id = focused()!;
+    expect(seen).toEqual([[id, "/work/api"]]);
+    await tick(4000);
+    expect(seen).toHaveLength(1);
+    mocks.cwd = "/work/web";
+    await tick(2000);
+    expect(seen).toEqual([[id, "/work/api"], [id, "/work/web"]]);
   });
 });
 
@@ -530,7 +613,7 @@ describe("the wall: shelf, placement and arrangement", () => {
 describe("parking (park-only automation)", () => {
   const order = () => saved().tiles as string[];
   const shelf = () => [...host.querySelectorAll<HTMLElement>("[data-shelf-id]")].map((chip) => chip.dataset.shelfId!);
-  const tick = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
+  const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
   beforeEach(() => {
     vi.useFakeTimers();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);

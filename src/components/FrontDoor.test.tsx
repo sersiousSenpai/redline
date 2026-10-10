@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { act, createElement, useState, type ReactElement } from "react";
+import { act, createElement, memo, useState, type ReactElement } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createRoot, type Root } from "react-dom/client";
 
 // The door's contract after ⏎, pinned as behaviour rather than as source
@@ -47,6 +49,8 @@ class StubResizeObserver {
 
 import { FrontDoor, type FrontDoorProps } from "./FrontDoor";
 import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
+import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
+import { readSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
 
 const flush = () =>
   act(async () => {
@@ -67,6 +71,8 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  // The sentence outlives the composer by design; the next test starts blank.
+  writeSharedDraft(FRONT_DOOR_TEXT_KEY, "");
   host.remove();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
@@ -78,13 +84,13 @@ const PENDING = { prompt: "Ship the auth rewrite", startedAt: Date.now() - 3000 
 function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
   return {
     visible: true,
-    text: "",
-    onTextChange: () => {},
     choice: null,
     onChoiceChange: () => {},
     // Non-empty, so ⏎ launches instead of offering to create a folder first.
     projectOptions: [{ path: "/tmp/proj", name: "proj", source: "folder" }],
-    resolvedProject: "/tmp/proj",
+    openFolder: null,
+    lastLaunchProject: "/tmp/proj",
+    onResolvedProjectChange: () => {},
     attachments: [],
     onAttachmentsChange: () => {},
     readiness: [],
@@ -112,23 +118,20 @@ function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
   };
 }
 
-/** The composer is controlled by App, so the test has to be the state owner
- *  too — otherwise typing is swallowed and ⏎ would sit on an empty box for a
- *  reason that has nothing to do with what is being tested. */
+/** App owns the backend choice, so the test owns it too. The sentence App
+ *  does not own: it is the composer's shared draft, seeded where a reload or
+ *  App's hand-back would put it. */
 function Harness(props: Partial<FrontDoorProps>) {
-  const [text, setText] = useState(props.text ?? "");
   const [backend, setBackend] = useState(props.backend ?? baseProps().backend);
   return createElement(FrontDoor, {
     ...baseProps(props),
-    text,
     backend,
     onBackendChange: next => { setBackend(next); props.onBackendChange?.(next); },
-    onTextChange: (next) =>
-      setText((prev) => (typeof next === "function" ? next(prev) : next)),
   });
 }
 
-async function mount(props: Partial<FrontDoorProps> = {}): Promise<void> {
+async function mount({ text = "", ...props }: Partial<FrontDoorProps> & { text?: string } = {}): Promise<void> {
+  writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
   await act(async () => {
     root.render(createElement(Harness, props) as ReactElement);
   });
@@ -537,7 +540,8 @@ describe("the floating replacement composer", () => {
 
 it("offers history as an explicit choice without selecting it when the blank composer mounts", async () => {
   const onOpenChat = vi.fn();
-  await act(async () => root.render(<FrontDoor {...baseProps({ floating: true, text: "Keep my unfinished thought", chats: [{ id: "older-chat", title: "Unrelated earlier exchange" }], onOpenChat })}/>));
+  writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Keep my unfinished thought");
+  await act(async () => root.render(<FrontDoor {...baseProps({ floating: true, chats: [{ id: "older-chat", title: "Unrelated earlier exchange" }], onOpenChat })}/>));
   expect(onOpenChat).not.toHaveBeenCalled();
   expect(host.querySelector("textarea")!.value).toBe("Keep my unfinished thought");
   expect(host.textContent).not.toContain("Unrelated earlier exchange");
@@ -604,7 +608,7 @@ describe("FrontDoor — Just run it", () => {
 
   it("offers a folder with no $HOME escape when there is nowhere to run", async () => {
     const onRun = vi.fn();
-    await mount({ destination: "run", onRun, text: "Make a todo app", projectOptions: [], resolvedProject: null });
+    await mount({ destination: "run", onRun, text: "Make a todo app", projectOptions: [], lastLaunchProject: null });
     await pressEnter();
     expect(onRun).not.toHaveBeenCalled();
     expect(host.textContent).toContain("Build this in a new folder");
@@ -616,5 +620,135 @@ describe("FrontDoor — Just run it", () => {
     await mount({ pending: { ...PENDING, kind: "run" } });
     expect(flight()?.textContent).toContain("Running");
     expect(flight()?.textContent).not.toContain("Planning");
+  });
+});
+
+// Responsiveness, Phase 2: typing touches only the component being typed in.
+// The sentence used to be App state, so every keystroke re-rendered the whole
+// shell (every surface, the sidebar, the dock) and wrote localStorage before
+// the character could paint.
+describe("FrontDoor — a keystroke touches only the composer", () => {
+  it("re-renders nothing around it, and reports a new launch target only when the target moves", async () => {
+    const renders = { shell: 0, sibling: 0 };
+    const Sibling = memo(function Sibling() {
+      renders.sibling++;
+      return <aside />;
+    });
+    const props = baseProps({
+      projectOptions: [{ path: "/repos/ledger", name: "ledger", source: "folder" }],
+      lastLaunchProject: null,
+    });
+    // App's wiring in miniature: the launch target is shell state, and the
+    // composer is the one that reports it.
+    function Shell() {
+      renders.shell++;
+      const [target, setTarget] = useState<string | null>(null);
+      return (
+        <>
+          <Sibling />
+          <output data-target>{target ?? "Home"}</output>
+          <FrontDoor {...props} onResolvedProjectChange={setTarget} />
+        </>
+      );
+    }
+    await act(async () => root.render(<Shell />));
+    await flush();
+    const settled = { ...renders };
+
+    for (const value of ["F", "Fix", "Fix the export button"]) await type(value);
+    expect(composer()!.value).toBe("Fix the export button");
+    expect(readSharedDraft(FRONT_DOOR_TEXT_KEY)).toBe("Fix the export button");
+    expect(renders).toEqual(settled);
+
+    // Naming a repo moves the target: the shell hears about THAT, once, and
+    // its memoized children still sit it out.
+    await type("Fix the export button in ledger");
+    expect(host.querySelector("[data-target]")!.textContent).toBe("/repos/ledger");
+    expect(renders).toEqual({ shell: settled.shell + 1, sibling: settled.sibling });
+  });
+
+  it("keeps the sentence through a remount and on disk for a reload", async () => {
+    await mount();
+    await type("half a thought");
+    // A surface switch or a pane toggle takes the composer away…
+    await act(async () => root.render(<div />));
+    expect(composer()).toBeNull();
+    // …and the next one comes back holding the sentence.
+    await act(async () => root.render(createElement(Harness, {})));
+    expect(composer()!.value).toBe("half a thought");
+    // The write trails the typing; pagehide lands it before a reload.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(localStorage.getItem(FRONT_DOOR_TEXT_KEY)).toBe(JSON.stringify("half a thought"));
+  });
+
+  it("shows a sentence App hands back while the composer is on screen", async () => {
+    await mount();
+    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "the sentence a dead launch owed"));
+    expect(composer()!.value).toBe("the sentence a dead launch owed");
+  });
+
+  it("type-to-start drains the buffered keys into the composer's own draft", async () => {
+    let buffered = "hel";
+    const consumeSeed = () => {
+      const seed = buffered;
+      buffered = "";
+      return seed;
+    };
+    await mount({ consumeSeed, autoFocusOnShow: false });
+    await act(async () =>
+      root.render(createElement(Harness, { consumeSeed, autoFocusOnShow: false, focusNonce: 1 })),
+    );
+    expect(document.activeElement).toBe(composer());
+    expect(composer()!.value).toBe("hel");
+    expect(readSharedDraft(FRONT_DOOR_TEXT_KEY)).toBe("hel");
+  });
+});
+
+describe("FrontDoor — growing with the text", () => {
+  /** Frames run when the test says, so "inside the keystroke" is observable. */
+  function stubFrames() {
+    const frames = new Map<number, FrameRequestCallback>();
+    let id = 0;
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      frames.set(++id, cb);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (handle: number) => frames.delete(handle));
+    const run = () =>
+      act(() => {
+        const due = [...frames.values()];
+        frames.clear();
+        due.forEach((cb) => cb(0));
+      });
+    return { frames, run };
+  }
+
+  it("measures once a frame, after the keystrokes, never inside one", async () => {
+    const { frames, run } = stubFrames();
+    await mount();
+    run();
+    const ta = composer()!;
+    Object.defineProperty(ta, "scrollHeight", { configurable: true, get: () => 120 });
+    for (const value of ["a", "ab", "abc"]) await type(value);
+    expect(ta.style.height).not.toBe("120px");
+    expect(frames.size).toBe(1);
+    run();
+    expect(ta.style.height).toBe("120px");
+  });
+
+  it("leaves it to the stylesheet where WebKit sizes fields to their content", async () => {
+    const css = readFileSync(join(process.cwd(), "src/styles.css"), "utf8");
+    expect(css).toMatch(/@supports \(field-sizing: content\) \{\s*\.rl-fd-input \{ field-sizing: content; \}/);
+    vi.stubGlobal("CSS", { supports: (property: string, value: string) => property === "field-sizing" && value === "content" });
+    vi.resetModules();
+    const { FrontDoor: Sized } = await import("./FrontDoor");
+    const { run } = stubFrames();
+    await act(async () => root.render(createElement(Sized, baseProps())));
+    const ta = composer()!;
+    Object.defineProperty(ta, "scrollHeight", { configurable: true, get: () => 120 });
+    for (const value of ["a", "ab", "abc"]) await type(value);
+    run();
+    expect(ta.value).toBe("abc");
+    expect(ta.style.height).toBe("");
   });
 });
