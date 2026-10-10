@@ -110,10 +110,10 @@ export interface ChatRoomProps {
   /** The seed was sent — clear it, so a remount can't send it twice. */
   onSeedConsumed?: () => void;
   /** What the card's pressed chips attach to this send, read as it goes out.
-   *  It reaches `companion_send` as `context`, out of band: the agent's prompt
-   *  carries it and the bubble shows only what was typed. Null attaches
-   *  nothing. */
-  contextFor?: () => Promise<string | null>;
+   *  It reaches `companion_send` as `context` (and `contextAll`), out of band:
+   *  the agent's prompt carries it and the bubble shows only what was typed.
+   *  Null attaches nothing. */
+  contextFor?: () => Promise<import("../lib/surfaceContext").ChatAttachment | null>;
   /** An attachment may never have reached the agent: its send failed or was
    *  pulled back (`unsent`), or the conversation started a fresh CLI session
    *  (`fresh-session`). The owner decides what the next send carries again. */
@@ -260,6 +260,9 @@ export function ChatRoom({
     onSendFailed: (text) => { setDraft(current => current.trim() ? `${current}\n\n${text}` : text); onContextLost?.("unsent"); },
     buildSendArgs: async (text, extra) => {
       const opts = extra as { mode?: ChatMode; target?: typeof target; context?: string | null } | undefined;
+      // A seed brings the attachment read when it left the card. A chip
+      // that can't be read attaches nothing rather than failing the send.
+      const attached = opts && "context" in opts ? { context: opts.context ?? null } : await contextFor?.().catch(() => null);
       return {
         companionId,
         text,
@@ -267,9 +270,8 @@ export function ChatRoom({
         harness: selectedHarness,
         mode: opts?.mode ?? "chat",
         target: opts?.target ?? target,
-        // A seed brings the attachment read when it left the card. A chip
-        // that can't be read attaches nothing rather than failing the send.
-        context: opts && "context" in opts ? opts.context ?? null : (await contextFor?.().catch(() => null)) ?? null,
+        context: attached?.context ?? null,
+        contextAll: attached?.contextAll ?? null,
       };
     },
     makeMessage: ({ id, role, body, status }) => ({
@@ -349,8 +351,8 @@ export function ChatRoom({
   // carried, for the Context chip. Read once on mount, then pushed per turn.
   const [context, setContext] = useState<ChatContext | null>(null);
   // A whole brief once the thread has a reply means a fresh CLI session — a
-  // rotation, or a move to another provider — that never saw the earlier
-  // attachments.
+  // rotation, or a move to another provider — that holds only what was
+  // pressed when it started (the backend hands it `contextAll`).
   const replied = useRef(false);
   replied.current = messages.some((m) => m.role === "assistant" && m.status === "complete");
   const contextLost = useRef(onContextLost);

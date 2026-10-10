@@ -359,6 +359,7 @@ import {
   visibleChips,
   withContext,
   type BrowserIslandPage,
+  type ChatAttachment,
   type ChipPresses,
   type ContextBlock,
   type SentContext,
@@ -7523,12 +7524,13 @@ function App() {
 
   // A chat's attachments travel out of band, so the bubble shows only what was
   // typed, and once per version: what each chat has already been handed is
-  // remembered by block, and only a new or changed block goes again. The room
-  // runs on the door's harness, so a provider switch there is the fresh CLI
-  // session that has to be handed everything again. Every send is recorded,
-  // blocks or not — see `forgetSent`.
+  // remembered by block, and only a new or changed block goes again — with
+  // every pressed block alongside, which the backend uses for a send that
+  // starts a fresh CLI session (a rotation). The room runs on the door's
+  // harness, so a provider switch there starts the record over. Every send is
+  // recorded, blocks or not — see `forgetSent`.
   const chatContextSent = useRef(new Map<string, SentContext>());
-  const chatAttachment = async (companionId: string, blocks: ContextBlock[]): Promise<string | null> => {
+  const chatAttachment = async (companionId: string, blocks: ContextBlock[]): Promise<ChatAttachment | null> => {
     const builders = await import("./lib/contextBlocks").catch(() => null);
     return builders ? builders.unsentAttachment(chatContextSent.current, companionId, frontDoorBackend.backend, blocks) : null;
   };
@@ -7555,7 +7557,7 @@ function App() {
         invoke<Companion>("companion_create", { title: text.trim() }),
         gatherContext("chat"),
       ]);
-      const context = await chatAttachment(chat.companionId, blocks);
+      const context = (await chatAttachment(chat.companionId, blocks))?.context;
       setChatId(chat.companionId);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.

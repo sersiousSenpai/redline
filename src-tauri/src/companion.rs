@@ -84,6 +84,10 @@ pub struct QueuedCompanionSend {
     /// What the user attached from the Redline card's chips when they typed
     /// it. It rides the prompt only, never the stored message.
     context: Option<String>,
+    /// Every pressed chip, including what an earlier send already handed
+    /// over: `context` leaves those out, and a fresh CLI session never saw
+    /// them. See `turn_attachment`.
+    context_all: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +170,7 @@ mod browser_dock_tests {
                 Some("mission-first".into()),
             ),
             context: None,
+            context_all: None,
         };
         assert!(matches!(
             turns.begin_or_enqueue(
@@ -619,6 +624,14 @@ fn attached_context(surface: &SurfaceInfo, context: Option<&str>) -> String {
         "Context the user attached from {}:\n\n<attached-context>\n{context}\n</attached-context>\n\n",
         describe_surface(surface)
     )
+}
+
+/// What a turn attaches. A fresh CLI session (a chat's first turn, a
+/// rotation past the turn budget, a provider handoff, a reset after an
+/// overflow) never saw what earlier sends attached, so it gets every pressed
+/// chip; a resumed one gets only what it hasn't been handed.
+fn turn_attachment(fresh_session: bool, context: Option<String>, context_all: Option<String>) -> Option<String> {
+    if fresh_session { context_all.or(context) } else { context }
 }
 
 /// A steered send skips the turn framing, so its attachment rides with the
@@ -1249,10 +1262,12 @@ fn drain_stderr_task(stderr: ChildStderr) -> tokio::task::JoinHandle<String> {
 /// advances the chat's journal high-water mark. Streaming happens via
 /// `companion-*` events; this returns once the child is spawned, or with
 /// `queued: true` when the send opted in (`queue`) and landed behind an
-/// in-flight turn. `context` is what the user attached from the card's chips:
-/// it reaches the prompt, never the stored message.
-// Eleven arguments: two managed cells, the app handle, and the send's own
-// eight. The same shape (and, elsewhere, the same tolerated warning) as every
+/// in-flight turn. `context` is what the user attached from the card's chips
+/// that this chat hasn't been handed yet, `context_all` every pressed chip
+/// (for a turn that starts a fresh session): they reach the prompt, never
+/// the stored message.
+// Twelve arguments: two managed cells, the app handle, and the send's own
+// nine. The same shape (and, elsewhere, the same tolerated warning) as every
 // other surface's send.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -1268,6 +1283,7 @@ pub async fn companion_send(
     target: Option<SurfaceInfo>,
     mode: Option<TurnMode>,
     context: Option<String>,
+    context_all: Option<String>,
 ) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
@@ -1297,6 +1313,7 @@ pub async fn companion_send(
         harness,
         browser_target,
         context: context.filter(|c| !c.trim().is_empty()),
+        context_all: context_all.filter(|c| !c.trim().is_empty()),
     };
     // Built now, from the payload: a queued send must not follow a later tab
     // or surface switch.
@@ -1392,6 +1409,7 @@ fn start_companion_turn(
             harness,
             browser_target,
             context: attached,
+            context_all,
         } = payload;
         let _ = companion.db.set_setting(&runtime_key(&companion_id, "activeMode"), if mode == TurnMode::Build { "build" } else { "chat" });
         let intent = crate::monochat::classify(&text, &surface);
@@ -1479,6 +1497,7 @@ fn start_companion_turn(
             recap = Some(build_recap(&thread));
         }
         let first_turn = prior_session.is_none();
+        let attached = turn_attachment(first_turn, attached, context_all);
         let baseline = if codex && !first_turn {
             companion.db.get_setting(&runtime_key(&companion_id, "codex.usage")).and_then(|value| serde_json::from_str(&value).ok()).unwrap_or_default()
         } else { Value::Null };
@@ -3186,6 +3205,7 @@ mod tests {
             harness: ConversationHarness::default(),
             browser_target: None,
             context: Some(PLAN_BLOCK.into()),
+            context_all: None,
         };
         let row = user_message("c1", &payload);
         db.insert_companion_message(&row).unwrap();
@@ -3211,6 +3231,47 @@ mod tests {
         assert!(steered.contains("Plan session: s-7"));
         let bare = QueuedCompanionSend { context: None, ..payload };
         assert_eq!(steer_text(&bare), "is this sound?");
+    }
+
+    /// The turn that starts a fresh CLI session — here the rotation at the
+    /// turn budget — carries every pressed chip, not only what the chat
+    /// hasn't been handed: the new session never saw the earlier sends. A
+    /// resumed session gets only what is new.
+    #[test]
+    fn a_rotating_send_carries_the_whole_attachment() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_companion(&chat("c1")).unwrap();
+        db.set_companion_session("c1", "sid-1").unwrap();
+        let mut thread = Vec::new();
+        for i in 0..ROTATE_AFTER_ASSISTANT_TURNS {
+            thread.push(msg(&format!("u{i}"), "c1", "user", "q", i * 2));
+            thread.push(msg(&format!("a{i}"), "c1", "assistant", "a", i * 2 + 1));
+        }
+        let turns = completed_assistant_turns(&thread);
+        assert!(turns - db.get_companion_rotated_at("c1") >= ROTATE_AFTER_ASSISTANT_TURNS, "this send rotates");
+        reset_companion_session(&db, "c1", turns);
+        let fresh = db.get_companion_session("c1").is_none();
+        assert!(fresh);
+
+        // The plan went out turns ago; this send adds only the page.
+        let page = "## Context — This page (Docs)\n\nhttps://docs.test";
+        let all = format!("{PLAN_BLOCK}\n\n{page}");
+        let attached = turn_attachment(fresh, Some(page.into()), Some(all.clone()));
+        let s = surface("plan", Some("Warm chat"), None);
+        let prompt = build_first_turn_prompt(
+            &s,
+            SELF_ID,
+            "",
+            "and now?",
+            &FirstTurnGround { attached: attached.as_deref(), recap: Some("\nCONVERSATION SO FAR — rotated for speed.\n"), ..Default::default() },
+        );
+        assert!(prompt.contains("Plan session: s-7"), "the earlier plan rides the fresh session: {prompt}");
+        assert!(prompt.contains("https://docs.test"));
+
+        // Resumed, only the new block goes; and an older client that sends
+        // no `contextAll` still attaches what it sent.
+        assert_eq!(turn_attachment(false, Some(page.into()), Some(all)).as_deref(), Some(page));
+        assert_eq!(turn_attachment(true, Some(page.into()), None).as_deref(), Some(page));
     }
 
     // --- Rotation ------------------------------------------------------------
@@ -3407,6 +3468,7 @@ mod tests {
             message_id: "m2".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
             browser_target: None,
             context: None,
+            context_all: None,
         };
         match turns.begin_or_enqueue("c1", queued_turn, payload) {
             SendSlot::Enqueued => {}
@@ -3459,6 +3521,7 @@ mod tests {
                 message_id: "m3".into(), surface: SurfaceInfo::default(), harness: ConversationHarness::default(),
                 browser_target: None,
                 context: None,
+                context_all: None,
             },
         );
         let mut row3 = msg("m3", "c1", "user", "wait, scratch that", 3);
@@ -3689,7 +3752,7 @@ mod tests {
     fn scripted_steer_reader_persists_assistant_user_assistant_order() {
         let db=Database::open_in_memory().unwrap();db.insert_companion(&chat("steer")).unwrap();
         let mut user=msg("queued","steer","user","Use the new direction",1);user.status="queued".into();db.insert_companion_message(&user).unwrap();
-        let payload=QueuedCompanionSend{mode:TurnMode::Chat,message_id:user.id.clone(),text:user.body.clone(),cwd:None,surface:SurfaceInfo::default(),harness:ConversationHarness::default(),browser_target:None,context:None};
+        let payload=QueuedCompanionSend{mode:TurnMode::Chat,message_id:user.id.clone(),text:user.body.clone(),cwd:None,surface:SurfaceInfo::default(),harness:ConversationHarness::default(),browser_target:None,context:None,context_all:None};
         let buf=Arc::new(Mutex::new(PartialBuf::new()));let mut results=0;
         for line in include_str!("../../scripts/fixtures/chat-steer.jsonl").lines(){let event:Value=serde_json::from_str(line).unwrap();match event["type"].as_str().unwrap(){
             "stream_event"=>{turn::push_delta(&buf,event["event"]["delta"]["text"].as_str().unwrap());},

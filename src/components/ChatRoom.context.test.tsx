@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // What the Redline card attaches to a chat travels out of band: `contextFor`
-// is read per send and reaches `companion_send` as `context`, while the bubble
-// is only what was typed. These pin the room's half of that contract.
+// is read per send and reaches `companion_send` as `context` and `contextAll`,
+// while the bubble is only what was typed. These pin the room's half of that
+// contract.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,7 +66,7 @@ async function submit() {
 
 describe("chat context, out of band", () => {
   it("reads the card's chips per send and passes them as `context`, never in the bubble", async () => {
-    const contextFor = vi.fn(async () => PLAN);
+    const contextFor = vi.fn(async () => ({ context: PLAN }));
     await render({ contextFor });
     const { text, opts } = await submit();
     expect(opts.localBody).toBe("is this sound?");
@@ -74,22 +75,32 @@ describe("chat context, out of band", () => {
     expect(contextFor).not.toHaveBeenCalled();
     const args = await cfg.current!.buildSendArgs(text, opts.extra);
     expect(contextFor).toHaveBeenCalledTimes(1);
-    expect(args).toMatchObject({ companionId: "chat-1", text: "is this sound?", mode: "chat", context: PLAN });
+    expect(args).toMatchObject({ companionId: "chat-1", text: "is this sound?", mode: "chat", context: PLAN, contextAll: null });
+  });
+
+  it("passes every pressed chip as `contextAll`, for a send that starts a fresh session", async () => {
+    const PAGE = "## Context — This page (Docs)\n\nhttps://docs.test";
+    // The plan went out on an earlier turn; this send adds only the page.
+    await render({ contextFor: async () => ({ context: PAGE, contextAll: `${PLAN}\n\n${PAGE}` }) });
+    const args = await cfg.current!.buildSendArgs("and now?", { mode: "chat" });
+    expect(args).toMatchObject({ context: PAGE, contextAll: `${PLAN}\n\n${PAGE}` });
   });
 
   it("attaches nothing without a source, or when the read fails", async () => {
     await render();
     let args = await cfg.current!.buildSendArgs("hi", { mode: "chat" });
     expect(args.context).toBeNull();
+    expect(args.contextAll).toBeNull();
 
     await render({ contextFor: () => Promise.reject(new Error("snapshot timed out")) });
     args = await cfg.current!.buildSendArgs("hi", { mode: "chat" });
     expect(args.text).toBe("hi");
     expect(args.context).toBeNull();
+    expect(args.contextAll).toBeNull();
   });
 
   it("sends the seed with the attachment read when it left the card", async () => {
-    const contextFor = vi.fn(async () => "a later read");
+    const contextFor = vi.fn(async () => ({ context: "a later read" }));
     await render({ seed: "what about the beta?", seedId: "seed-1", seedContext: PLAN, contextFor }, "");
     const [text, opts] = lastSend();
     expect(text).toBe("what about the beta?");
@@ -99,7 +110,7 @@ describe("chat context, out of band", () => {
   });
 
   it("a seed with nothing attached stays empty-handed", async () => {
-    const contextFor = vi.fn(async () => PLAN);
+    const contextFor = vi.fn(async () => ({ context: PLAN }));
     await render({ seed: "hello", seedId: "seed-2", contextFor }, "");
     const [text, opts] = lastSend();
     const args = await cfg.current!.buildSendArgs(text, (opts as { extra?: unknown }).extra);

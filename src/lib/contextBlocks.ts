@@ -5,7 +5,7 @@
 // agent can act on. Loaded when something is sent, never at boot — see
 // surfaceContext.ts for which chips exist and how blocks join a prompt.
 
-import { renderContextBlocks, type BrowserIslandPage, type ContextBlock, type SentContext } from "./surfaceContext";
+import { renderContextBlocks, type BrowserIslandPage, type ChatAttachment, type ContextBlock, type SentContext } from "./surfaceContext";
 import { fnv1a32Hex } from "./thumbs";
 import type {
   DiffFile,
@@ -113,18 +113,19 @@ export function diffBlock(review: {
 
 /** What a chat hasn't been handed yet, as one attachment, remembered as
  *  handed. Keyed per chat on each block's content: an unchanged plan rides one
- *  turn rather than every turn, and a revised one goes again. Null when there
- *  is nothing new. Call it for every send, blocks or not: each one decides
- *  whether `handedAll` is still true. */
-export function unsentAttachment(sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]): string | null {
+ *  turn rather than every turn, and a revised one goes again. `context` is
+ *  null when there is nothing new; `contextAll`, every pressed block, rides
+ *  along when it says more, for a send that starts a fresh CLI session. Call
+ *  it for every send, blocks or not: each one records what was pressed. */
+export function unsentAttachment(sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]): ChatAttachment {
   const previous = sent.get(chatId);
-  const record: SentContext = previous?.provider === provider
-    ? { ...previous, handedAll: false }
-    : { provider, keys: new Set<string>(), handedAll: true };
+  const record: SentContext = previous?.provider === provider ? previous : { provider, keys: new Set<string>(), pressed: [] };
   sent.set(chatId, record);
+  record.pressed = blocks.map(blockKey);
   const fresh = blocks.filter((b) => !record.keys.has(blockKey(b)));
   for (const b of fresh) record.keys.add(blockKey(b));
-  return renderContextBlocks(fresh) || null;
+  const context = renderContextBlocks(fresh) || null;
+  return { context, contextAll: fresh.length < blocks.length ? renderContextBlocks(blocks) || null : null };
 }
 
 /** The chip, the length, and a hash of what it says. */

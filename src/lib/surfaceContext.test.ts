@@ -15,6 +15,7 @@ import {
   visibleChips,
   withContext,
   type ChipSources,
+  type ContextBlock,
   type ContextChip,
   type SentContext,
 } from "./surfaceContext";
@@ -210,65 +211,82 @@ describe("unsentAttachment — a chat's attachments, once per version", () => {
   const plan = (version: number, markdown = "# Auth rewrite\n- step one") =>
     planBlock({ sessionId: "s-1", version, title: "Auth rewrite", markdown });
   const page = pageBlock({ label: "browser-1", title: "Docs", url: "https://docs.test" });
+  const attach = (sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]) =>
+    unsentAttachment(sent, chatId, provider, blocks).context;
 
   it("hands a chat each block once, and nothing when nothing changed", () => {
     const sent = new Map<string, SentContext>();
-    const first = unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
+    const first = attach(sent, "chat-1", "claude-code", [plan(3), page]);
     expect(first).toBe(renderContextBlocks([plan(3), page]));
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
   });
 
   it("sends only the block that changed — a revision, or an edit at the same version", () => {
     const sent = new Map<string, SentContext>();
-    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
+    attach(sent, "chat-1", "claude-code", [plan(3), page]);
+    expect(attach(sent, "chat-1", "claude-code", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
     const edited = plan(4, "# Auth rewrite\n- step one\n- step two");
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [edited, page])).toBe(renderContextBlocks([edited]));
+    expect(attach(sent, "chat-1", "claude-code", [edited, page])).toBe(renderContextBlocks([edited]));
+  });
+
+  it("carries every pressed block alongside, for a send that starts a fresh session", () => {
+    const sent = new Map<string, SentContext>();
+    // Everything is new: `context` already says it all.
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toEqual({ context: renderContextBlocks([plan(3)]), contextAll: null });
+    // The plan went out already; the page is new.
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toEqual({
+      context: renderContextBlocks([page]),
+      contextAll: renderContextBlocks([plan(3), page]),
+    });
+    // Nothing new, still pressed.
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toEqual({ context: null, contextAll: renderContextBlocks([plan(3)]) });
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toEqual({ context: null, contextAll: null });
   });
 
   it("remembers per chat, and forgets a chat whose attachment was lost", () => {
     const sent = new Map<string, SentContext>();
-    unsentAttachment(sent, "chat-1", "claude-code", [plan(3)]);
+    attach(sent, "chat-1", "claude-code", [plan(3)]);
     // Another conversation has never seen it.
-    expect(unsentAttachment(sent, "chat-2", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-2", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
     // A send that never arrived: the next one carries everything again.
     forgetSent(sent, "chat-1", "unsent");
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
   });
 
   it("starts over when the chat moves to another provider, and again when it moves back", () => {
     // A provider switch is a fresh CLI session either way (companion.rs's
     // handoff), so the first turn on the new provider carries everything.
     const sent = new Map<string, SentContext>();
-    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
-    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    attach(sent, "chat-1", "claude-code", [plan(3), page]);
+    expect(attach(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+    expect(attach(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
   });
 
-  it("a fresh session forgets what it never saw — unless the send that started it handed over everything", () => {
+  it("a fresh session holds exactly what was pressed when it started", () => {
     const sent = new Map<string, SentContext>();
-    unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
-    // A provider switch: this send hands everything to the session it starts,
-    // so the backend's whole-brief signal for it loses nothing.
-    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+    attach(sent, "chat-1", "claude-code", [plan(3), page]);
+    // A rotation: the backend hands the new session `contextAll`, every
+    // pressed block, on the turn that starts it — nothing is lost, and
+    // nothing goes twice.
+    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
-    // A rotation: the turn that starts the fresh session carried nothing new,
-    // so the next one hands everything again.
+    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    // A block handed to the old session but not pressed when the new one
+    // started never reached the new one, so it goes again when pressed.
+    attach(sent, "chat-1", "claude-code", [plan(3)]);
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(unsentAttachment(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
+    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBe(renderContextBlocks([page]));
   });
 
   it("a turn with nothing pressed still counts, and a send that never arrived is always forgotten", () => {
     const sent = new Map<string, SentContext>();
-    unsentAttachment(sent, "chat-1", "claude-code", [plan(3)]);
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toBeNull();
+    attach(sent, "chat-1", "claude-code", [plan(3)]);
+    expect(attach(sent, "chat-1", "claude-code", [])).toBeNull();
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
     forgetSent(sent, "chat-1", "unsent");
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
     // Forgetting a chat that was never handed anything is harmless.
     forgetSent(sent, "chat-9", "fresh-session");
     expect(sent.has("chat-9")).toBe(false);
@@ -276,7 +294,7 @@ describe("unsentAttachment — a chat's attachments, once per version", () => {
 
   it("attaches nothing for no blocks or only empty ones", () => {
     const sent = new Map<string, SentContext>();
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toBeNull();
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [draftBlock("   ")])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [draftBlock("   ")])).toBeNull();
   });
 });
