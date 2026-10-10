@@ -16,3 +16,10 @@ Yusuf Al-Bazian and are NOT licensed under the Apache License. See the
 This product bundles third-party syntax-highlighting grammars (via the
 `two-face` crate) under their own permissive licenses. Those licenses are
 reproduced in THIRD_PARTY_NOTICES.md.
+
+The local voices (Kokoro, and the studio voice built on Qwen3-TTS) are not
+bundled. At the user's request Redline downloads them, with a private Python
+runtime, into its app data folder, and runs them as separate processes. What
+is downloaded, and under which licenses, is listed in VOICE_ENGINE_NOTICES.md.
+This includes the GCC runtime libraries and libquadmath that scipy's macOS
+wheel ships.
