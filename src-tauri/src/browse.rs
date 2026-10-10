@@ -1096,8 +1096,6 @@ fn validate_harness(
     })
 }
 
-/// How a turn's tail names its scope: a tab's own chat is pinned to its page,
-/// a shared chat follows the tab on screen (`contract.json` `scopePhrases`).
 /// The `browse_id` of the tab whose webview is `label`, from the frontend's
 /// mirrored tab list (suspended tabs included). `None` for a label no open
 /// tab has.
@@ -1109,6 +1107,8 @@ fn tab_browse_id(app: &AppHandle, label: &str) -> Option<String> {
         .map(|tab| tab.browse_id)
 }
 
+/// How a turn's tail names its scope: a tab's own chat is pinned to its page,
+/// a shared chat follows the tab on screen (`contract.json` `scopePhrases`).
 fn scope_phrase(following_tabs: bool) -> &'static str {
     if following_tabs { "following tabs (same conversation)" } else { "pinned page" }
 }
