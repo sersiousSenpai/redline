@@ -1,7 +1,7 @@
 import { act, StrictMode, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ invoke: vi.fn(), load: vi.fn(), save: vi.fn(), revision: vi.fn(), raceLabel: "", windowFullscreen: false, setFullscreen: vi.fn(), resized: null as (() => void) | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), views: new Map<string, { label: string; log: string[]; visible: boolean; position?: { x: number; y: number }; size?: { width: number; height: number } }>(), createGates: new Map<string, Promise<void>>(), showGates: new Map<string, Promise<void>>() }));
+const mocks = vi.hoisted(() => ({ mission: {} as Record<string, unknown>, invoke: vi.fn(), load: vi.fn(), save: vi.fn(), revision: vi.fn(), raceLabel: "", windowFullscreen: false, setFullscreen: vi.fn(), resized: null as (() => void) | null, listeners: new Map<string, (event: { payload: unknown }) => void>(), views: new Map<string, { label: string; log: string[]; visible: boolean; position?: { x: number; y: number }; size?: { width: number; height: number } }>(), createGates: new Map<string, Promise<void>>(), showGates: new Map<string, Promise<void>>() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name, fn) => { mocks.listeners.set(name, fn); return () => { mocks.listeners.delete(name); }; }) }));
 vi.mock("../lib/browserWorkspace", () => ({ loadBrowserWorkspace: mocks.load, saveBrowserWorkspace: mocks.save, noteWorkspaceRevision: mocks.revision }));
@@ -22,7 +22,7 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async show() { this.log.push("show"); await mocks.showGates.get(this.label); this.visible = true; this.log.push("shown"); }
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
-vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {} }) }));
+vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
 vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { browseId: string; label: string; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; seed?: { text: string } }) => <div data-conversation={props.browseId} data-label={props.label} data-seed={props.seed?.text}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button></div> }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
@@ -40,7 +40,7 @@ const tabs = ["one", "two"].map((browseId) => ({ id: `t-${browseId}`, browseId, 
 const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 160)); }); };
 const event = async (name: string, payload: unknown) => { await act(async () => { mocks.listeners.get(name)?.({ payload }); }); await settle(); };
 beforeEach(() => {
-  localStorage.clear(); mocks.listeners.clear(); mocks.views.clear(); mocks.createGates.clear(); mocks.showGates.clear(); mocks.raceLabel = "";
+  localStorage.clear(); mocks.listeners.clear(); mocks.views.clear(); mocks.createGates.clear(); mocks.showGates.clear(); mocks.raceLabel = ""; mocks.mission = {};
   mocks.windowFullscreen = false; mocks.resized = null;
   mocks.setFullscreen.mockReset().mockImplementation(async (value: boolean) => { mocks.windowFullscreen = value; mocks.resized?.(); });
   mocks.invoke.mockReset(); mocks.load.mockReset(); mocks.save.mockReset(); mocks.revision.mockReset();

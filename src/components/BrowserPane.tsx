@@ -2099,16 +2099,18 @@ function BrowserPaneBase({
       void swapWorkspace({ kind: "mission", id: pendingId }).catch(() => {
         endRestore(); mission.closeMission();
       });
-    } else if (mission.missionsLoaded) {
-      // The persisted mission no longer exists — resolve to regular browsing
-      // rather than wedging the gate (which would silence persistence and
-      // the daemon mirror forever).
+    } else if (mission.missionsLoaded || mission.error) {
+      // The persisted mission no longer exists, or the list couldn't be read
+      // — resolve to regular browsing rather than wedging the gate (which
+      // would silence persistence and the daemon mirror, and hold every open
+      // request, until a Retry). A failed list keeps its error and Retry on
+      // screen; the mission itself is only closed, not lost.
       initDoneRef.current = true;
       endRestore();
       mission.closeMission();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mission.activeMissionId, mission.activeMission, mission.missionsLoaded]);
+  }, [mission.activeMissionId, mission.activeMission, mission.missionsLoaded, mission.error]);
 
   // Cmd+W (native File ▸ Close Tab) closes the active tab. A menu accelerator
   // fires even while the native webview has focus — which a JS keydown listener
