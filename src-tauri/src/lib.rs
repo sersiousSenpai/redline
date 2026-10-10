@@ -9017,6 +9017,9 @@ struct AgentSeatsView {
     /// `SEAT_FACTS` the Seat Assignment agent reads, so the explanation the
     /// user hovers and the one the agent reasons from can never disagree.
     blurbs: Vec<seatassign::SeatBlurb>,
+    /// What an unset seat runs when it isn't the CLI default (the voice seat's
+    /// built-in brain), so its row can say so.
+    builtin_defaults: std::collections::HashMap<String, seat::SeatConfig>,
 }
 
 fn agent_seats_view(db: &db::Database) -> AgentSeatsView {
@@ -9027,6 +9030,7 @@ fn agent_seats_view(db: &db::Database) -> AgentSeatsView {
         codex_bin: seat::codex_bin_override(),
         can_revert: seat::has_snapshot(db),
         blurbs: seatassign::seat_blurbs(),
+        builtin_defaults: seat::builtin_defaults(),
     }
 }
 

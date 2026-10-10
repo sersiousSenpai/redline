@@ -143,9 +143,10 @@ pub const SEAT_FACTS: &[SeatFact] = &[
                mode; the user is waiting on speech, so latency dominates.",
         traits: &["interactive", "latency_sensitive"],
         note: Some(
-            "This seat does NOT cover voice transcript cleanup — that path hardcodes \
-             haiku and is deliberately not seat-configurable (a utility, not a seat). \
-             Do not justify this seat by transcript work.",
+            "Left unset this seat runs opus at effort low (a built-in default, never \
+             the bare CLI default). It does NOT cover voice transcript cleanup — that \
+             path hardcodes haiku and is deliberately not seat-configurable. Do not \
+             justify this seat by transcript work.",
         ),
     },
     SeatFact {
@@ -1423,6 +1424,15 @@ mod tests {
             seat::KNOWN_SEATS.len(),
             "SEAT_FACTS describes a seat that isn't in KNOWN_SEATS"
         );
+    }
+
+    /// The agent is told what an unset voice seat runs; that sentence must
+    /// follow the one constant it describes.
+    #[test]
+    fn the_voice_fact_names_the_builtin_default() {
+        let (model, effort) = seat::VOICE_SEAT_DEFAULT;
+        let note = seat_fact("voice").and_then(|f| f.note).unwrap();
+        assert!(note.contains(&format!("{model} at effort {effort}")), "{note}");
     }
 
     #[test]

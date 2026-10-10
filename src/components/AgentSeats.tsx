@@ -47,6 +47,9 @@ interface AgentSeatsView {
   codexBin: string | null;
   canRevert: boolean;
   blurbs: SeatBlurb[];
+  /** What an unset seat runs when that isn't the CLI default (the voice
+   *  seat's built-in brain). */
+  builtinDefaults?: Record<string, SeatConfig>;
 }
 
 /** One roster row — mirrors Rust's `seat::SeatRosterEntry` (P3): the seat's
@@ -194,9 +197,12 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
  */
 export const PLAN_SEAT = "plan";
 
-/** Seats whose row reads "Inherit" rather than "Default". */
-function defaultLabelFor(row: SeatRow): string {
-  return row.inherit ? "Inherit" : "Default";
+/** Seats whose row reads "Inherit" rather than "Default"; a seat with a
+ *  built-in default names it, so leaving it unset says what it runs. */
+export function defaultLabelFor(row: SeatRow, builtin?: SeatConfig): string {
+  if (row.inherit) return "Inherit";
+  const named = [builtin?.model, builtin?.effort].filter(Boolean).join(" · ");
+  return named ? `Default (${named})` : "Default";
 }
 
 /** The seat catalogue as a flat lookup, for the proposal card (which is keyed
@@ -782,6 +788,7 @@ export function AgentSeats() {
   const [claudeBin, setClaudeBin] = useState("");
   const [codexBin, setCodexBin] = useState("");
   const [blurbs, setBlurbs] = useState<Record<string, SeatBlurb>>({});
+  const [builtins, setBuiltins] = useState<Record<string, SeatConfig>>({});
   /** The roster rollup by seat: charter/trigger + stats + burn (P3). */
   const [roster, setRoster] = useState<Record<string, SeatRosterEntry>>({});
   // Non-null when the roster rollup failed to load — rendered as a muted
@@ -836,6 +843,7 @@ export function AgentSeats() {
         setBlurbs(
           Object.fromEntries((view.blurbs ?? []).map((b) => [b.seat, b])),
         );
+        setBuiltins(view.builtinDefaults ?? {});
       })
       .catch((e) => setError(String(e)));
     void invoke<SeatRosterEntry[]>("get_seat_roster")
@@ -1050,7 +1058,7 @@ export function AgentSeats() {
 
   const renderSeat = (row: SeatRow) => {
     const cfg = seats[row.name] ?? {};
-    const defaultLabel = defaultLabelFor(row);
+    const defaultLabel = defaultLabelFor(row, builtins[row.name]);
     const summary = seatSummary(seats[row.name]);
     const entry: SeatRosterEntry | undefined = roster[row.name];
     return (
@@ -1171,7 +1179,7 @@ export function AgentSeats() {
   const renderPick = (pick: SeatPick) => {
     const row = SEAT_ROWS[pick.seat];
     const label = row?.label ?? pick.seat;
-    const defaultLabel = row ? defaultLabelFor(row) : "Default";
+    const defaultLabel = row ? defaultLabelFor(row, builtins[pick.seat]) : "Default";
     const current = seats[pick.seat];
     const { from, to } = pickTransition(current, pick, defaultLabel);
     const check = pick.model ? checks[pick.model] : undefined;

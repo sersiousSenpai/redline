@@ -537,19 +537,62 @@ pub fn set_codex_bin_override(db: &Database, path: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The voice brain's built-in `(model, effort)`: what the `voice` seat runs
+/// with until the user picks something else in the Seats settings. Without it
+/// the warm voice child inherited the user's global coding default (Opus 1M at
+/// xhigh), seconds of silence before every spoken reply. A spoken turn wants
+/// a quick, short answer; "go deeper" is the user's call, made in the GUI.
+pub const VOICE_SEAT_DEFAULT: (&str, &str) = ("opus", "low");
+
+/// The built-in config a seat falls back to, field by field, when the user
+/// has set nothing for it. Only `voice` has one; every other seat's default is
+/// the CLI's own.
+pub fn builtin_default(seat: &str) -> SeatConfig {
+    match seat {
+        "voice" => SeatConfig {
+            model: Some(VOICE_SEAT_DEFAULT.0.to_string()),
+            effort: Some(VOICE_SEAT_DEFAULT.1.to_string()),
+            ..SeatConfig::default()
+        },
+        _ => SeatConfig::default(),
+    }
+}
+
+/// Every seat that has a built-in default, for the settings GUI: an unset row
+/// there names what it runs ("Default (opus · low)") rather than implying the
+/// CLI's own default.
+pub fn builtin_defaults() -> HashMap<String, SeatConfig> {
+    KNOWN_SEATS
+        .iter()
+        .map(|seat| (seat.to_string(), builtin_default(seat)))
+        .filter(|(_, cfg)| !cfg.is_empty())
+        .collect()
+}
+
 /// The effective config for a seat: its own row, else its inheritance
-/// fallback, else empty (no flags — the CLI default).
+/// fallback, else empty (no flags — the CLI default). A seat with a built-in
+/// default fills each blank model/effort from it, so picking only a model in
+/// the GUI keeps the default effort rather than dropping to the CLI's.
 fn effective(seat: &str) -> SeatConfig {
-    let s = store().read().unwrap();
-    if let Some(cfg) = s.seats.get(seat).filter(|c| !c.is_empty()) {
-        return cfg.clone();
+    let mut cfg = {
+        let s = store().read().unwrap();
+        s.seats
+            .get(seat)
+            .filter(|c| !c.is_empty())
+            .or_else(|| inherits_from(seat).and_then(|parent| s.seats.get(parent)))
+            .filter(|c| !c.is_empty())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let builtin = builtin_default(seat);
+    let blank = |o: &Option<String>| o.as_deref().map(str::trim).unwrap_or("").is_empty();
+    if blank(&cfg.model) {
+        cfg.model = builtin.model;
     }
-    if let Some(parent) = inherits_from(seat) {
-        if let Some(cfg) = s.seats.get(parent).filter(|c| !c.is_empty()) {
-            return cfg.clone();
-        }
+    if blank(&cfg.effort) {
+        cfg.effort = builtin.effort;
     }
-    SeatConfig::default()
+    cfg
 }
 
 /// The flag tail for a seat's spawn — pure over a config (unit-testable).
@@ -1062,6 +1105,39 @@ mod tests {
         assert_eq!(flag_args("voice"), vec!["--model", "haiku", "--effort", "low"]);
 
         store().write().unwrap().seats.clear();
+    }
+
+    /// An unconfigured voice seat runs the built-in brain, not whatever the
+    /// user's global Claude Code settings say (Opus 1M at xhigh, before this).
+    #[test]
+    fn an_empty_store_gives_the_voice_seat_its_builtin_default() {
+        let _guard = store_guard();
+        store().write().unwrap().seats.clear();
+        let (model, effort) = VOICE_SEAT_DEFAULT;
+        assert_eq!(flag_args("voice"), vec!["--model", model, "--effort", effort]);
+        assert_eq!(model_for("voice").as_deref(), Some(model));
+        // Only voice has one: every other seat still means the CLI default.
+        assert!(flag_args("companion").is_empty());
+
+        // The user's pick wins field by field; a blank field keeps the default.
+        store()
+            .write()
+            .unwrap()
+            .seats
+            .insert("voice".to_string(), cfg(Some("sonnet"), None));
+        assert_eq!(flag_args("voice"), vec!["--model", "sonnet", "--effort", effort]);
+        store()
+            .write()
+            .unwrap()
+            .seats
+            .insert("voice".to_string(), cfg(None, Some("high")));
+        assert_eq!(flag_args("voice"), vec!["--model", model, "--effort", "high"]);
+
+        store().write().unwrap().seats.clear();
+        // The GUI is told about it, and about nothing else.
+        let shown = builtin_defaults();
+        assert_eq!(shown.keys().collect::<Vec<_>>(), ["voice"]);
+        assert_eq!(shown["voice"].effort.as_deref(), Some(effort));
     }
 
     #[test]

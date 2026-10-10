@@ -36,6 +36,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         codexBin: null,
         canRevert: false,
         blurbs: [],
+        builtinDefaults: { voice: { model: "opus", effort: "low" } },
       });
     }
     if (cmd === "get_seat_roster") return Promise.resolve(ROSTER);
@@ -52,6 +53,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import {
   AgentSeats,
   burnSummary,
+  defaultLabelFor,
   formatLastRun,
   formatTokens,
   type SeatRosterEntry,
@@ -105,6 +107,16 @@ describe("roster formatting helpers", () => {
   });
 });
 
+describe("seat default labels", () => {
+  it("names a built-in default and leaves every other seat plain", () => {
+    const voice = { name: "voice", label: "Voice agent" };
+    expect(defaultLabelFor(voice, { model: "opus", effort: "low" })).toBe("Default (opus · low)");
+    expect(defaultLabelFor(voice)).toBe("Default");
+    const thread = { name: "fork_plan", label: "Plan sidecar threads", inherit: true };
+    expect(defaultLabelFor(thread, { model: "opus" })).toBe("Inherit");
+  });
+});
+
 describe("AgentSeats roster rendering", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -146,6 +158,9 @@ describe("AgentSeats roster rendering", () => {
     expect(text).not.toContain("$");
     // A seat absent from the rollup still renders its picker row, blockless.
     expect(text).toContain("Voice agent");
+    // An unset voice seat says what it runs: the built-in brain the backend
+    // served, not the CLI default "Default" alone would imply.
+    expect(text).toContain("Default (opus · low)");
     // The model/effort picker survives the roster growth.
     const picker = Array.from(document.querySelectorAll("button")).find((b) =>
       b.getAttribute("aria-label")?.includes("Librarian model & effort"),
