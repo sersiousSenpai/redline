@@ -1,177 +1,112 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// Voice-activity end-of-utterance detection for hands-free turn-taking (Step 3).
+// The two cheap judgements end-of-turn detection (endpoint.ts) is built on:
+// whether the mic is hearing a voice right now, and whether what was said so
+// far sounds finished.
 //
-// In hands-free mode the native mic (dictation.rs) streams a growing transcript
-// as `dictation-partial` events. There's no explicit "the user stopped talking"
-// signal, so we infer it by timing the partial stream. As long as the transcript
-// keeps growing the user is still speaking, so the end-of-utterance deadline is
-// pushed out; once it stops growing for the silence window, the utterance is done
-// and we hand the final text back so the caller can send the turn and keep
-// listening.
-//
-// ENDPOINTING IS ADAPTIVE. A fixed short pause cuts people off mid-instruction:
-// they breathe, gather a thought, or chain several sentences. So the pause that
-// ends an utterance depends on whether the transcript so far *sounds finished*:
-//   - finished (ends on sentence punctuation, or on a content word) → the base
-//     `silenceMs` window.
-//   - clearly mid-thought (ends on a comma/conjunction/article/preposition, i.e.
-//     a word that almost never ends an instruction) → the longer `continuationMs`
-//     window, so a deliberate "…and then" pause isn't mistaken for the end.
-// This is a text proxy for the prosodic cues (falling pitch, trailing emphasis)
-// that a true acoustic endpointer would use — those aren't available from the
-// SFSpeechRecognizer partial stream, only the words are. Raising both windows
-// also just makes it more patient overall.
-//
-// Kept as pure logic (timers injectable) so the whole VAD decision is unit-tested
-// under node, unlike the native mic path which is signed-run-only.
+// - **Voice, from the mic's level.** The native capture reports one
+//   `dictation-level` per 50 ms of audio (RMS and peak, dBFS). A window is
+//   voice when it stands clear of the room: a noise floor that drops at once
+//   to a quieter window and creeps up only slowly, so a fan or a hum becomes
+//   the floor in a few seconds while a sentence never does. One loud window
+//   on its own (a key tap, a click) is not a voice; two in a row are. This is
+//   real silence, where the old detector timed the transcript — and Apple's
+//   live transcript lags the audio by a beat, so a pause looked longer than
+//   it was and a slow word looked like a pause.
+// - **Unfinished, from the words.** A transcript that trails off on a word
+//   that almost never ends a sentence ("and", "the", "um", "of") or on a
+//   comma is mid-thought, and the pause after it gets longer to run. A
+//   recognizer that punctuates puts a full stop at a pause, so a stop after
+//   such a word does not make it finished; a question mark does.
 
-/** A timer handle — `number` under node/jsdom, `Timeout` under the DOM. */
-export type TimerHandle = ReturnType<typeof setTimeout> | number;
+/** Audio per `dictation-level` event (`LEVEL_WINDOW_MS` in dictation.rs). */
+export const LEVEL_MS = 50;
 
-/** Base end-of-utterance pause for a transcript that *sounds finished*. ~1.8s
- *  reads as "they're done", not just a mid-sentence breath, while giving enough
- *  room not to clip the end of a normal sentence. */
-export const DEFAULT_VAD_SILENCE_MS = 1800;
+/** How far over the room's floor a window must be to count as a voice. */
+const VOICE_OVER_FLOOR_DB = 9;
+/** …and never quieter than this: the level of soft speech at arm's length,
+ *  and the MIC gate's speech window (RMS 0.003). */
+const VOICE_MIN_DB = -50;
+/** Where the floor starts, and the range it moves in. */
+const FLOOR_START_DB = -60;
+const FLOOR_MIN_DB = -80;
+const FLOOR_MAX_DB = -38;
+/** Per window: the share of the gap the floor closes towards a quieter
+ *  window, and how far it may rise towards a louder one (1 dB a second). */
+const FLOOR_FALL = 0.3;
+const FLOOR_RISE_DB = 0.05;
+/** Loud windows in a row before they are a voice. */
+const MIN_RUN = 2;
 
-/** Longer pause required when the transcript ends mid-thought (a trailing
- *  conjunction/article/preposition or a comma). Gives the speaker room to
- *  continue a multi-sentence instruction without being cut off. */
-export const DEFAULT_VAD_CONTINUATION_MS = 3200;
+export interface Level {
+  /** dBFS, −100 for digital silence. */
+  rms: number;
+  peak: number;
+}
 
-/** Words that almost never end a spoken instruction — if the transcript trails
- *  off on one of these, the speaker is mid-thought and we wait the longer window.
- *  Function words (articles, conjunctions, prepositions, determiners, pronouns,
- *  auxiliaries) plus common disfluencies. */
-const CONTINUATION_WORDS = new Set<string>([
-  // articles / determiners
-  "a", "an", "the", "this", "that", "these", "those", "my", "your", "our",
-  "their", "his", "her", "its", "some", "any", "no", "every", "each",
-  // conjunctions
-  "and", "or", "but", "nor", "so", "yet", "because", "since", "although",
-  "though", "while", "whereas", "if", "unless", "until", "as", "plus",
-  // prepositions
-  "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "onto",
-  "upon", "about", "over", "under", "between", "through", "during", "after",
-  "before", "without", "within", "across", "around",
-  // wh- / relatives (often lead into a clause)
-  "that", "which", "who", "whom", "whose", "when", "where", "why", "how",
-  // pronouns / subjects that dangle
-  "i", "we", "you", "they", "it", "he", "she",
-  // auxiliaries / modals
-  "is", "are", "was", "were", "be", "been", "will", "would", "should", "could",
-  "can", "may", "might", "must", "do", "does", "did", "have", "has", "had",
-  // adverbs that lead on
-  "then", "also", "than", "very", "just", "really", "like", "well",
-  // disfluencies / fillers
-  "um", "uh", "er", "erm", "hmm", "uhh", "umm",
+/** Per-window voice detection against the room's own floor. */
+export class VoiceActivity {
+  private floor = FLOOR_START_DB;
+  private loud = 0;
+
+  /** Whether this window is a voice (and so is every window of the run once
+   *  it is long enough — the run's first window is counted late). */
+  push(level: Level): boolean {
+    const loud = level.rms >= Math.max(this.floor + VOICE_OVER_FLOOR_DB, VOICE_MIN_DB);
+    this.loud = loud ? this.loud + 1 : 0;
+    if (level.rms < this.floor) {
+      this.floor += (level.rms - this.floor) * FLOOR_FALL;
+    } else {
+      this.floor += Math.min(level.rms - this.floor, FLOOR_RISE_DB);
+    }
+    this.floor = Math.min(FLOOR_MAX_DB, Math.max(FLOOR_MIN_DB, this.floor));
+    return this.loud >= MIN_RUN;
+  }
+
+  /** Loud windows in a row so far: how long the current sound has lasted. */
+  get run(): number {
+    return this.loud;
+  }
+
+  /** The room's level as heard so far, dBFS. */
+  get noiseFloor(): number {
+    return this.floor;
+  }
+}
+
+/** Words that leave a sentence hanging: articles and possessives (a noun is
+ *  coming), conjunctions, prepositions that need an object, fillers, a
+ *  dangling subject, a copula. Words that often do end a request stay out:
+ *  "it", "that", "this", "in", "on", "up", "so", "then", "do", "can". */
+const DANGLING = new Set([
+  "a", "an", "the", "my", "your", "our", "their", "its", "every",
+  "and", "or", "but", "nor", "plus", "because", "although", "whereas",
+  "unless", "until", "whether", "than", "if",
+  "of", "to", "with", "from", "into", "onto", "upon", "for", "at", "by",
+  "about", "via", "toward", "towards", "like",
+  "um", "uh", "uhm", "umm", "uhh", "er", "erm", "hmm", "mm",
+  "i", "we", "they",
+  "is", "are", "was", "were",
 ]);
 
-export interface UtteranceDetectorOpts {
-  /** Silence after a finished-sounding transcript that ends an utterance. */
-  silenceMs?: number;
-  /** Longer silence required when the transcript ends mid-thought. */
-  continuationMs?: number;
-  /** Called once when a pause marks the end of an utterance, with its text. */
-  onUtteranceEnd: (text: string) => void;
-  /** Injectable for tests; defaults to the global timer functions. */
-  setTimer?: (fn: () => void, ms: number) => TimerHandle;
-  clearTimer?: (h: TimerHandle) => void;
-}
+/** "and then", "or maybe": a conjunction and the adverb that carries on. */
+const CARRY_ON = new Set(["then", "so", "also", "maybe", "still"]);
+const CONJUNCTION = new Set(["and", "or", "but"]);
 
-/**
- * The end-of-utterance pause for a transcript: the longer `continuationMs` when
- * it ends mid-thought (sentence-internal punctuation, or a trailing function
- * word / filler), otherwise the base `silenceMs`. Exported for testing.
- */
-export function endpointSilenceMs(
-  text: string,
-  silenceMs: number,
-  continuationMs: number,
-): number {
-  // Drop trailing closing quotes/brackets so the real last character shows.
-  const core = (text || "").trim().replace(/["'”’)\]]+$/, "");
-  if (!core) return silenceMs;
-  const last = core[core.length - 1];
-  // A finished sentence: trust the punctuation and end on the base window.
-  if (last === "." || last === "!" || last === "?") return silenceMs;
-  // Sentence-internal punctuation ⇒ clearly more is coming.
-  if (last === "," || last === ";" || last === ":" || last === "—" || last === "–") {
-    return continuationMs;
-  }
-  // Otherwise judge by the trailing word.
-  const m = core.toLowerCase().match(/([a-z']+)\s*$/);
-  const word = m ? m[1] : "";
-  if (word && CONTINUATION_WORDS.has(word)) return continuationMs;
-  return silenceMs;
-}
-
-/**
- * Detects end-of-utterance from a streaming partial transcript. Feed it each
- * partial; it fires `onUtteranceEnd(finalText)` exactly once per utterance after
- * the transcript goes quiet for the adaptive pause (base, or longer when the
- * text trails off mid-thought). After firing it resets, so the next burst of
- * speech starts a fresh utterance.
- */
-export class UtteranceDetector {
-  private readonly silenceMs: number;
-  private readonly continuationMs: number;
-  private readonly onEnd: (text: string) => void;
-  private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
-  private readonly clearTimer: (h: TimerHandle) => void;
-  private timer: TimerHandle | null = null;
-  private lastText = "";
-
-  constructor(opts: UtteranceDetectorOpts) {
-    this.silenceMs = opts.silenceMs ?? DEFAULT_VAD_SILENCE_MS;
-    // Default the continuation window relative to the base if only the base was
-    // overridden, so a caller that sets a custom `silenceMs` still gets a longer
-    // mid-thought grace period.
-    this.continuationMs =
-      opts.continuationMs ??
-      Math.max(this.silenceMs, DEFAULT_VAD_CONTINUATION_MS, Math.round(this.silenceMs * 1.8));
-    this.onEnd = opts.onUtteranceEnd;
-    this.setTimer =
-      opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms) as TimerHandle);
-    this.clearTimer =
-      opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
-  }
-
-  /** Feed a streaming partial transcript. Growth pushes the deadline out (by an
-   *  amount that depends on whether the text sounds finished); a stretch with no
-   *  growth ends the utterance. Empty/blank and unchanged partials don't re-arm
-   *  the timer, so the silence after speech runs out. */
-  feed(text: string): void {
-    const trimmed = (text || "").trim();
-    if (!trimmed) return; // ignore pre-speech silence / blank partials
-    if (trimmed === this.lastText) return; // no new speech — let silence elapse
-    this.lastText = trimmed;
-    this.arm(endpointSilenceMs(trimmed, this.silenceMs, this.continuationMs));
-  }
-
-  private arm(ms: number): void {
-    if (this.timer !== null) this.clearTimer(this.timer);
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      const text = this.lastText;
-      this.lastText = "";
-      if (text) this.onEnd(text);
-    }, ms);
-  }
-
-  /** Cancel any pending end and forget the current utterance. Call when
-   *  (re)arming a new listen or when stopping hands-free. */
-  reset(): void {
-    if (this.timer !== null) {
-      this.clearTimer(this.timer);
-      this.timer = null;
-    }
-    this.lastText = "";
-  }
-
-  /** True while an utterance is in progress (speech seen, pause not yet hit). */
-  get pending(): boolean {
-    return this.timer !== null;
-  }
+/** Whether `text` sounds like the speaker is mid-thought. */
+export function looksUnfinished(text: string): boolean {
+  // Closing quotes and brackets hide the real last character.
+  const core = text.trim().replace(/["'”’)\]]+$/, "").trimEnd();
+  if (!core) return false;
+  // A trailing ellipsis, or sentence-internal punctuation: more is coming.
+  if (/(\.\.\.|…|[,;:—–-])$/.test(core)) return true;
+  if (/[?!]$/.test(core)) return false;
+  // Otherwise the last words decide, with or without a full stop after them.
+  const words = core.toLowerCase().replace(/’/g, "'").match(/[a-z']+/g);
+  if (!words) return false;
+  const last = words[words.length - 1];
+  if (DANGLING.has(last)) return true;
+  const before = words[words.length - 2];
+  return CARRY_ON.has(last) && before !== undefined && CONJUNCTION.has(before);
 }

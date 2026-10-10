@@ -23,6 +23,8 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     // open, exactly like dictation.rs, so a test sees a re-arm that never armed.
     micOpen: false,
     armed: 0,
+    // Where the reply plays (`dictation_status`).
+    route: { kind: "speakers", transport: "builtin" } as { kind: string; transport: string },
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -64,6 +66,17 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "dictation_kill_all":
         script.micOpen = false;
         return null;
+      case "dictation_cycle":
+        return "";
+      case "dictation_status":
+        return {
+          holder: null,
+          engine: "auto",
+          whisperModel: "base",
+          whisperActive: null,
+          whisperModels: [],
+          outputRoute: script.route,
+        };
       case "delete_comment":
         return true;
       default:
@@ -151,6 +164,27 @@ async function summarize() {
   await wait();
 }
 
+/** `ms` of the mic's level windows at `rms` dBFS (a voice at -26, the room at
+ *  -62), one at a time, as they arrive: what a window sets off lands first. */
+async function levels(rms: number, ms: number) {
+  for (let i = 0; i < ms / 50; i++) {
+    await act(async () => {
+      for (const fn of handlers.get("dictation-level") ?? []) fn({ payload: { owner: "default", rms, peak: rms + 11, ms: 0 } });
+    });
+  }
+}
+/** Hands-free: say `text` for `ms`, the recognizer writing it as it goes. */
+async function speak(text: string, ms = 1000) {
+  await levels(-26, ms);
+  await emit("dictation-partial", { text });
+}
+const room = (ms: number) => levels(-62, ms);
+async function handsFreeOn() {
+  await act(async () => button("🎧 Hands-free: off").click());
+  await wait(350);
+  await room(500);
+}
+
 /** Hold the talk button, say `text` (heard live unless told otherwise), let go. */
 async function holdToTalk(text: string, opts: { heard?: boolean; holdMs?: number } = {}) {
   script.dictated = text;
@@ -180,6 +214,7 @@ beforeEach(() => {
   script.status = { up: true, inFlight: false, generation: 1, turn: 0 };
   script.micOpen = false;
   script.armed = 0;
+  script.route = { kind: "speakers", transport: "builtin" };
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -698,25 +733,90 @@ describe("hands-free", () => {
     expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
   });
 
-  it("re-arms from the turn's end and the audio finishing, not a speech flag", async () => {
+  it("ends the turn on real silence, keeps the mic on the same capture, and closes it while the reply plays on speakers", async () => {
     await mount();
-    await act(async () => button("🎧 Hands-free: off").click());
-    await wait(350);
-    // An utterance ends (the detector's silence), and goes out as a turn.
-    script.dictated = "Is the replay safe?";
-    await emit("dictation-partial", { text: "is the replay safe" });
-    await wait(1900);
+    await handsFreeOn();
+    expect(script.armed).toBe(1);
+    // The words stop growing well before the voice does: still talking.
+    await speak("is the replay safe", 400);
+    await levels(-26, 1600);
+    expect(sends()).toEqual([]);
+    await emit("dictation-partial", { text: "Is the replay safe?" });
+    // Then real silence: 700 ms of the room ends the turn.
+    await room(650);
+    expect(sends()).toEqual([]);
+    await room(50);
     expect(sends().map((s) => s.text)).toEqual(["Is the replay safe?"]);
+    expect(names()).toContain("dictation_cycle");
+    expect(names()).not.toContain("dictation_stop");
+    expect(names()).toContain("dictation_status");
+    expect(script.micOpen).toBe(true);
     await emit("voice-delta", { ...of(1), text: "Mostly." });
     await emit("voice-done", { ...of(1), body: "Mostly.", messageId: "m1" });
     await wait(400);
-    // Still playing: the mic stays closed.
-    expect(named("dictation_start")).toHaveLength(1);
+    // Its voice sounds through the speakers: the mic closes, so it never hears it.
+    expect(named("dictation_kill_all").map(([, a]) => a)).toEqual([{ owner: "default" }]);
+    expect(script.micOpen).toBe(false);
     await finishSpeech();
     await wait(400);
     expect(named("dictation_start")).toHaveLength(2);
     expect(script.armed).toBe(2);
     // Re-armed just after the agent's voice: the pre-roll would hold its end.
     expect(named("dictation_start").map(([, a]) => a)).toEqual([{ preroll: true }, { preroll: false }]);
+  });
+
+  it("carries a turn on when they speak again before the reply is heard", async () => {
+    await mount();
+    await handsFreeOn();
+    await speak("rename the panel");
+    await room(700);
+    expect(sends().map((s) => s.text)).toEqual(["rename the panel"]);
+    // They weren't done: the reply is stopped before a word of it is heard…
+    await room(600);
+    await levels(-26, 200);
+    expect(names()).toContain("voice_interrupt");
+    await emit("voice-interrupted", { ...of(1), text: "", streamedChars: 0, messageId: null, killed: false });
+    await speak("to TalkPanel", 600);
+    await room(700);
+    // …and the whole of it goes out as one turn, shown as the rest of the last.
+    expect(sends().map((s) => s.text)).toEqual(["rename the panel", "rename the panel to TalkPanel"]);
+    expect(named("voice_send")[1][1]).toMatchObject({ label: "to TalkPanel" });
+    expect(sends()[1].context).toContain('carries on from their last one ("rename the panel")');
+    expect(host.textContent).not.toContain("(interrupted)");
+    expect(host.textContent).not.toContain("You were interrupted");
+  });
+
+  it("on wired headphones keeps listening through the reply, where two words interrupt it", async () => {
+    script.route = { kind: "headphones", transport: "builtin" };
+    await mount();
+    await handsFreeOn();
+    await speak("summarize the rollout");
+    await room(700);
+    await emit("voice-delta", { ...of(1), text: "Rollout goes in two waves. Then the flag flips." });
+    await wait();
+    expect(utterances).not.toHaveLength(0);
+    expect(named("dictation_kill_all")).toEqual([]);
+    expect(names()).not.toContain("voice_interrupt");
+    // A "yeah" under the reply is let go.
+    await speak("yeah", 300);
+    await room(700);
+    expect(names()).not.toContain("voice_interrupt");
+    await speak("wait which flag", 800);
+    expect(names()).toContain("voice_interrupt");
+    expect(utterances).toHaveLength(0);
+    await room(700);
+    await emit("voice-interrupted", { ...of(1), text: "Rollout goes in two waves.", streamedChars: 26, messageId: "m1", killed: false });
+    await wait();
+    expect(sends().map((s) => s.text)).toEqual(["summarize the rollout", "wait which flag"]);
+  });
+
+  it("on a Bluetooth headset closes the mic as soon as the turn is over", async () => {
+    script.route = { kind: "headphones", transport: "bluetooth" };
+    await mount();
+    await handsFreeOn();
+    await speak("summarize the rollout");
+    await room(700);
+    expect(sends().map((s) => s.text)).toEqual(["summarize the rollout"]);
+    expect(named("dictation_kill_all").map(([, a]) => a)).toEqual([{ owner: "default" }]);
   });
 });

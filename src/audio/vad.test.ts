@@ -1,192 +1,97 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { describe, expect, it, vi } from "vitest";
-import {
-  UtteranceDetector,
-  DEFAULT_VAD_SILENCE_MS,
-  DEFAULT_VAD_CONTINUATION_MS,
-  endpointSilenceMs,
-  type TimerHandle,
-} from "./vad";
+import { describe, expect, it } from "vitest";
 
-/** A controllable clock so the silence-timer logic is deterministic (no real
- *  setTimeout). `advance(ms)` runs every job whose deadline has elapsed. */
-function fakeClock() {
-  let now = 0;
-  let seq = 1;
-  let jobs: { id: number; at: number; fn: () => void }[] = [];
-  const setTimer = (fn: () => void, ms: number) => {
-    const id = seq++;
-    jobs.push({ id, at: now + ms, fn });
-    return id;
-  };
-  const clearTimer = (h: TimerHandle) => {
-    jobs = jobs.filter((j) => j.id !== (h as number));
-  };
-  const advance = (ms: number) => {
-    now += ms;
-    const due = jobs.filter((j) => j.at <= now).sort((a, b) => a.at - b.at);
-    for (const j of due) {
-      jobs = jobs.filter((x) => x !== j);
-      j.fn();
-    }
-  };
-  return { setTimer, clearTimer, advance };
+import { VoiceActivity, looksUnfinished } from "./vad";
+
+/** `n` windows at `rms` dBFS (peak a typical 11 dB above). */
+const windows = (n: number, rms: number) =>
+  Array.from({ length: n }, () => ({ rms, peak: Math.min(0, rms + 11) }));
+
+function run(vad: VoiceActivity, levels: { rms: number; peak: number }[]): boolean[] {
+  return levels.map((l) => vad.push(l));
 }
 
-function detector(onEnd: (t: string) => void, silenceMs = 1000) {
-  const clock = fakeClock();
-  const d = new UtteranceDetector({
-    silenceMs,
-    onUtteranceEnd: onEnd,
-    setTimer: clock.setTimer,
-    clearTimer: clock.clearTimer,
-  });
-  return { d, clock };
-}
-
-describe("UtteranceDetector", () => {
-  it("ends the utterance after a silent pause, with the latest transcript", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("hello");
-    d.feed("hello there");
-    d.feed("hello there friend");
-    clock.advance(999); // still within the pause window
-    expect(onEnd).not.toHaveBeenCalled();
-    clock.advance(1); // pause elapses
-    expect(onEnd).toHaveBeenCalledTimes(1);
-    expect(onEnd).toHaveBeenCalledWith("hello there friend");
+describe("VoiceActivity", () => {
+  it("never hears a voice in a quiet room, nor in digital silence", () => {
+    const vad = new VoiceActivity();
+    expect(run(vad, windows(40, -100))).not.toContain(true);
+    expect(run(vad, windows(100, -62))).not.toContain(true);
   });
 
-  it("keeps pushing the deadline out while speech is still growing", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("one");
-    clock.advance(800);
-    d.feed("one two"); // new speech before the pause → re-arm
-    clock.advance(800);
-    expect(onEnd).not.toHaveBeenCalled(); // 1600ms total, but never 1000ms quiet
-    clock.advance(200);
-    expect(onEnd).toHaveBeenCalledWith("one two");
+  it("hears speech from its second loud window on, and its pauses as silence", () => {
+    const vad = new VoiceActivity();
+    run(vad, windows(20, -62));
+    expect(run(vad, windows(4, -28))).toEqual([false, true, true, true]);
+    expect(run(vad, windows(3, -61))).toEqual([false, false, false]);
   });
 
-  it("ignores empty / blank partials so pre-speech silence never fires", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("");
-    d.feed("   ");
-    clock.advance(5000);
-    expect(onEnd).not.toHaveBeenCalled();
-    expect(d.pending).toBe(false);
+  it("does not take a lone click for a voice", () => {
+    const vad = new VoiceActivity();
+    run(vad, windows(20, -62));
+    expect(run(vad, [...windows(1, -20), ...windows(5, -62), ...windows(1, -18)])).not.toContain(true);
   });
 
-  it("does not re-arm on an unchanged partial (silence still elapses)", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("steady");
-    clock.advance(500);
-    d.feed("steady"); // identical → must NOT reset the timer
-    clock.advance(500);
-    expect(onEnd).toHaveBeenCalledWith("steady");
+  it("learns a fan's hum as the room within a few seconds, and still hears speech over it", () => {
+    const vad = new VoiceActivity();
+    run(vad, windows(20, -62));
+    // The fan comes on: loud enough to read as a voice at first…
+    const fan = run(vad, windows(400, -46));
+    expect(fan[5]).toBe(true);
+    // …and as the room once the floor has climbed to it.
+    expect(fan.slice(-100)).not.toContain(true);
+    expect(vad.noiseFloor).toBeGreaterThan(-48);
+    expect(run(vad, windows(4, -30)).slice(1)).toEqual([true, true, true]);
   });
 
-  it("reset cancels a pending utterance", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("about to be cancelled");
-    expect(d.pending).toBe(true);
-    d.reset();
-    expect(d.pending).toBe(false);
-    clock.advance(5000);
-    expect(onEnd).not.toHaveBeenCalled();
-  });
-
-  it("fires once per utterance, then starts a fresh one on new speech", () => {
-    const onEnd = vi.fn();
-    const { d, clock } = detector(onEnd);
-    d.feed("first utterance");
-    clock.advance(1000);
-    expect(onEnd).toHaveBeenCalledTimes(1);
-    clock.advance(5000); // no new speech → no extra fires
-    expect(onEnd).toHaveBeenCalledTimes(1);
-    d.feed("second utterance");
-    clock.advance(1000);
-    expect(onEnd).toHaveBeenCalledTimes(2);
-    expect(onEnd).toHaveBeenLastCalledWith("second utterance");
-  });
-
-  it("defaults to the shared silence constant when none is given", () => {
-    const onEnd = vi.fn();
-    const clock = fakeClock();
-    const d = new UtteranceDetector({
-      onUtteranceEnd: onEnd,
-      setTimer: clock.setTimer,
-      clearTimer: clock.clearTimer,
-    });
-    d.feed("hi");
-    clock.advance(DEFAULT_VAD_SILENCE_MS - 1);
-    expect(onEnd).not.toHaveBeenCalled();
-    clock.advance(1);
-    expect(onEnd).toHaveBeenCalledTimes(1);
-  });
-
-  it("waits the longer window when the transcript ends mid-thought", () => {
-    const onEnd = vi.fn();
-    const clock = fakeClock();
-    const d = new UtteranceDetector({
-      silenceMs: 1000,
-      continuationMs: 3000,
-      onUtteranceEnd: onEnd,
-      setTimer: clock.setTimer,
-      clearTimer: clock.clearTimer,
-    });
-    // Ends on a dangling conjunction → not done yet.
-    d.feed("change the timeout and");
-    clock.advance(1000); // the base window would have fired here — must not
-    expect(onEnd).not.toHaveBeenCalled();
-    // The speaker continues; now it sounds finished → base window applies.
-    d.feed("change the timeout and make it configurable");
-    clock.advance(1000);
-    expect(onEnd).toHaveBeenCalledTimes(1);
-    expect(onEnd).toHaveBeenCalledWith("change the timeout and make it configurable");
-  });
-
-  it("does not fire on a brief pause after a trailing article/preposition", () => {
-    const onEnd = vi.fn();
-    const clock = fakeClock();
-    const d = new UtteranceDetector({
-      silenceMs: 1000,
-      continuationMs: 3000,
-      onUtteranceEnd: onEnd,
-      setTimer: clock.setTimer,
-      clearTimer: clock.clearTimer,
-    });
-    d.feed("rename the section to"); // ends on "to"
-    clock.advance(2999);
-    expect(onEnd).not.toHaveBeenCalled();
-    clock.advance(1);
-    expect(onEnd).toHaveBeenCalledWith("rename the section to");
+  it("keeps hearing a long sentence: the floor never climbs into it", () => {
+    const vad = new VoiceActivity();
+    run(vad, windows(20, -62));
+    // Six seconds of speech with a short dip every half second.
+    const sentence = Array.from({ length: 12 }, () => [...windows(8, -27), ...windows(2, -45)]).flat();
+    const heard = run(vad, sentence);
+    expect(heard.filter((v, i) => sentence[i].rms === -27 && !v).length).toBeLessThanOrEqual(12);
+    expect(vad.noiseFloor).toBeLessThan(-50);
   });
 });
 
-describe("endpointSilenceMs", () => {
-  const base = 1000;
-  const cont = 3000;
-  it("uses the base window for a finished-sounding utterance", () => {
-    expect(endpointSilenceMs("make the timeout configurable", base, cont)).toBe(base);
-    expect(endpointSilenceMs("do that.", base, cont)).toBe(base);
-    expect(endpointSilenceMs("are you sure?", base, cont)).toBe(base);
-    expect(endpointSilenceMs('say "hello"', base, cont)).toBe(base); // content word under quotes
+describe("looksUnfinished", () => {
+  it("is mid-thought on a conjunction, an article, a filler or a trailing comma", () => {
+    for (const text of [
+      "rename the panel and",
+      "move it into the",
+      "check the build um",
+      "Rename the panel,",
+      "first we should, uh",
+      "the problem is",
+      "open the Drafter and then",
+      "Open the drafter and start a...",
+      "Whisper hallucinates when the…",
+      "I think we need to",
+    ]) {
+      expect(looksUnfinished(text), text).toBe(true);
+    }
   });
-  it("uses the longer window when it ends mid-thought", () => {
-    expect(endpointSilenceMs("change the timeout and", base, cont)).toBe(cont);
-    expect(endpointSilenceMs("rename the section to", base, cont)).toBe(cont);
-    expect(endpointSilenceMs("first, ", base, cont)).toBe(cont); // trailing comma
-    expect(endpointSilenceMs("I want the", base, cont)).toBe(cont); // trailing article
-    expect(endpointSilenceMs("um", base, cont)).toBe(cont); // filler
+
+  it("does not trust a full stop the recognizer put after a dangling word", () => {
+    expect(looksUnfinished("The Kokoro sidecar in the.")).toBe(true);
+    expect(looksUnfinished("Rename the panel and.")).toBe(true);
   });
-  it("default continuation constant is longer than the base", () => {
-    expect(DEFAULT_VAD_CONTINUATION_MS).toBeGreaterThan(DEFAULT_VAD_SILENCE_MS);
+
+  it("is finished on a content word, a question, or words that often end a request", () => {
+    for (const text of [
+      "rename VoicePanel to TalkPanel",
+      "Rename the panel.",
+      "what is this used for?",
+      "where does it come from?",
+      "do it",
+      "fix that",
+      "turn it on",
+      "I think so",
+      "",
+      'say "hello"',
+    ]) {
+      expect(looksUnfinished(text), text).toBe(false);
+    }
   });
 });

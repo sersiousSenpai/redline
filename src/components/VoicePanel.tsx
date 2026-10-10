@@ -23,9 +23,14 @@ import {
   type VoicePrefs,
 } from "../audio/speech";
 import { cloudTtsDriver } from "../audio/cloudTts";
-import { UtteranceDetector, DEFAULT_VAD_SILENCE_MS } from "../audio/vad";
+import { Endpointer, listenThrough, type EndpointerEvents } from "../audio/endpoint";
 import { Playback, type NarrationMark } from "../audio/playback";
-import { PREROLL_CLEAR_MS } from "../audio/dictationTypes";
+import {
+  DEFAULT_OWNER,
+  PREROLL_CLEAR_MS,
+  type DictationLevel,
+  type DictationStatus,
+} from "../audio/dictationTypes";
 import { splitReply, spokenPause } from "../audio/voiceStream";
 import {
   IDLE_TURN,
@@ -696,34 +701,47 @@ function VoicePanelBase({
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keyHeldRef = useRef(false);
 
-  // Hands-free (Step 3): converse without holding a button. The mic listens, a
-  // silence pause ends the utterance (VAD), the transcript auto-sends, the reply
-  // is spoken, then it listens again. It's HALF-DUPLEX on purpose: the mic is
-  // only armed while the agent is idle and is torn down the moment an utterance
-  // ends, so it can't transcribe the agent's own TTS (acoustic echo). Push-to-
-  // talk is suspended while hands-free is on (one mic owner, no races) and is the
-  // fallback when it's off. `hfArmedRef` = the mic is currently live for
-  // hands-free; `handsFreeRef` mirrors the toggle for sync reads in callbacks.
+  // Hands-free (Step 3): converse without holding a button. The mic listens,
+  // the endpointer (endpoint.ts) hears from its level and words when the turn
+  // is over, the turn is sent, the reply is spoken, then it listens again.
+  // After a turn the mic keeps listening on the same capture — speaking again
+  // before the reply is heard carries the turn on, and talking over a running
+  // reply interrupts it — for as long as the reply's route allows: through the
+  // reply on wired headphones, until it starts on speakers (so it never
+  // transcribes the agent's own voice), not past the turn on Bluetooth.
+  // Push-to-talk is suspended while hands-free is on (one mic owner, no races)
+  // and is the fallback when it's off. `hfArmedRef` = the mic is currently live
+  // for hands-free; `handsFreeRef` mirrors the toggle for sync reads in
+  // callbacks.
   const [handsFree, setHandsFree] = useState(false);
   const handsFreeRef = useRef(false);
   handsFreeRef.current = handsFree;
   const hfArmedRef = useRef(false);
-  // An utterance has ended and is being transcribed: the mic must not re-arm
-  // under it.
-  const [utterancePending, setUtterancePending] = useState(false);
   // Re-arming after a benign recognizer error waits a beat longer, so a silent
   // room doesn't spin the recognizer.
   const rearmDelayRef = useRef(300);
-  // End-of-utterance detector, fed by the `dictation-partial` stream. Built once;
-  // its callback dispatches through a ref so it always runs the latest handler.
-  const onUtteranceRef = useRef<(text: string) => void>(() => {});
-  const vadRef = useRef<UtteranceDetector | null>(null);
-  if (!vadRef.current) {
-    vadRef.current = new UtteranceDetector({
-      silenceMs: DEFAULT_VAD_SILENCE_MS,
-      onUtteranceEnd: (text) => onUtteranceRef.current(text),
+  // The endpointer, fed `dictation-level` and `dictation-partial`. Built once;
+  // its events dispatch through a ref so they always run the latest handlers.
+  const endpointEventsRef = useRef<EndpointerEvents>({
+    end: () => {},
+    resume: () => {},
+    barge: () => {},
+    drop: () => {},
+  });
+  const endpointRef = useRef<Endpointer | null>(null);
+  if (!endpointRef.current) {
+    endpointRef.current = new Endpointer({
+      end: (text, reason, resumed) => endpointEventsRef.current.end(text, reason, resumed),
+      resume: () => endpointEventsRef.current.resume(),
+      barge: () => endpointEventsRef.current.barge(),
+      drop: () => endpointEventsRef.current.drop(),
     });
   }
+  const endpoint = endpointRef.current;
+  // The last spoken turn, while speaking again may carry it on, and whether
+  // the reply it interrupted is being let go without a note.
+  const carriedRef = useRef<{ id: string; text: string } | null>(null);
+  const carryingRef = useRef(false);
 
   // Walkthrough cursor. It's an opt-in starter ("Walk me through it") that
   // explains one section at a time and waits — the user taps "Next section" to
@@ -739,12 +757,13 @@ function VoicePanelBase({
   const discardSpeechRef = useRef(false);
 
   // What is actually being heard (playback.ts). Its callbacks dispatch through
-  // a ref, like the VAD's, so they always run the latest handlers.
+  // a ref, like the endpointer's, so they always run the latest handlers.
   const playbackEventsRef = useRef<{
+    start: () => void;
     point: (marks: NarrationMark[]) => void;
     idle: () => void;
     stall: () => void;
-  }>({ point: () => {}, idle: () => {}, stall: () => {} });
+  }>({ start: () => {}, point: () => {}, idle: () => {}, stall: () => {} });
   const playbackRef = useRef<Playback | null>(null);
   // When the agent's voice last went quiet (Infinity while it sounds): the
   // warm mic's pre-roll, the moment before a capture starts, holds its end
@@ -755,6 +774,7 @@ function VoicePanelBase({
       onClipStart: () => {
         quietAtRef.current = Infinity;
         setAudioBusy(true);
+        playbackEventsRef.current.start();
       },
       onPoint: (marks) => playbackEventsRef.current.point(marks),
       onIdle: () => playbackEventsRef.current.idle(),
@@ -1327,18 +1347,26 @@ function VoicePanelBase({
   );
 
   // Something the user said: an answer to an offer, or a turn — which goes out
-  // first, ahead of anything typed, the moment nothing is running.
+  // first, ahead of anything typed, the moment nothing is running. The turn's
+  // id, when it is one.
   const submitSpoken = useCallback(
-    (text: string) => {
-      if (answerOffers(text)) return;
-      setOutbox([{ id: outgoingId(), text, label: text, spoken: true }, ...outboxRef.current]);
+    (text: string, label = text): string | null => {
+      if (answerOffers(text)) return null;
+      const id = outgoingId();
+      setOutbox([{ id, text, label, spoken: true }, ...outboxRef.current]);
       drain();
+      return id;
     },
     [answerOffers, drain, setOutbox],
   );
 
   // --- Playback events -------------------------------------------------------
   playbackEventsRef.current = {
+    // The reply started to sound: on speakers, from here the mic would hear it.
+    start: () => {
+      endpoint.agentAudible(true);
+      if (hfArmedRef.current && !endpoint.listening) closeMic();
+    },
     // A section the narration reached: light it (never scroll to it), and
     // remember where read-aloud is.
     point: (marks) => {
@@ -1354,6 +1382,7 @@ function VoicePanelBase({
     },
     idle: () => {
       setAudioBusy(false);
+      endpoint.agentAudible(false);
       if (quietAtRef.current === Infinity) quietAtRef.current = Date.now();
       readingRef.current = null;
       if (autoAddArmedRef.current) runAutoAdd();
@@ -1456,12 +1485,18 @@ function VoicePanelBase({
           const messageId = e.payload.messageId ?? undefined;
           rawRef.current = "";
           setStreaming("");
-          setTranscript((t) => [
-            ...t,
-            text
-              ? { role: "agent", text, id: messageId, interrupted: true }
-              : { role: "note", text: "(interrupted)", interrupted: true },
-          ]);
+          // A reply let go because the user carried their turn on had said
+          // nothing yet: there is nothing to mark.
+          const carried = carryingRef.current;
+          carryingRef.current = false;
+          if (text || !carried) {
+            setTranscript((t) => [
+              ...t,
+              text
+                ? { role: "agent", text, id: messageId, interrupted: true }
+                : { role: "note", text: "(interrupted)", interrupted: true },
+            ]);
+          }
           if (messageId) {
             setOffers((list) =>
               list.map((o) => (o.messageId ? o : { ...o, messageId })),
@@ -1685,15 +1720,24 @@ function VoicePanelBase({
 
   // --- Hands-free turn-taking (Step 3) -------------------------------------
 
+  // Where the reply plays decides how long the mic listens after a turn
+  // (`listenThrough`): asked per turn, since headphones come and go.
+  const refreshRoute = useCallback(() => {
+    void invoke<DictationStatus>("dictation_status")
+      .then((s) => endpoint.setListenThrough(listenThrough(s.outputRoute)))
+      .catch(() => {});
+  }, [endpoint]);
+
   // Arm the mic for the next hands-free utterance. No-op unless hands-free is on
   // and not already armed. Reuses the push-to-talk capture (`dictation_start`)
-  // and feeds its partial stream into the VAD detector.
+  // and feeds its levels and partials to the endpointer.
   const armHandsFree = useCallback(() => {
     if (!handsFreeRef.current || hfArmedRef.current) return;
     hfArmedRef.current = true;
     rearmDelayRef.current = 300;
     captureRef.current = { startedAt: Date.now(), heard: false };
-    vadRef.current?.reset();
+    endpoint.reset();
+    refreshRoute();
     setError(null);
     setListening(true);
     setPartial("");
@@ -1707,44 +1751,75 @@ function VoicePanelBase({
       setListening(false);
       setError(String(e));
     });
+  }, [endpoint, refreshRoute]);
+
+  // Close the mic while the reply is heard on speakers (or once a turn is
+  // over on a Bluetooth headset); the re-arm effect opens it again after.
+  const closeMic = useCallback(() => {
+    hfArmedRef.current = false;
+    setListening(false);
+    setPartial("");
+    void invoke("dictation_kill_all", { owner: DEFAULT_OWNER }).catch(() => {});
   }, []);
 
   // Tear the mic down and stop detecting (toggle off, error, or unmount).
   const disarmHandsFree = useCallback(() => {
     hfArmedRef.current = false;
-    vadRef.current?.reset();
+    endpoint.reset();
+    carriedRef.current = null;
     setListening(false);
     setPartial("");
     void invoke("dictation_kill_all").catch(() => {});
-  }, []);
+  }, [endpoint]);
 
-  // VAD says the user paused → this is the end of an utterance. Close the mic
-  // (half-duplex: it stays off through the agent's reply so it can't transcribe
-  // the TTS) and send it — unless it was no speech at all, in which case the
-  // re-arm effect simply listens again.
-  const handleUtteranceEnd = useCallback(
-    (vadText: string) => {
+  endpointEventsRef.current = {
+    // The turn is over: send it. The mic stays on the same capture —
+    // `dictation_cycle` only starts the recognizer on the next utterance —
+    // unless the reply's route says it must close.
+    end: (text, _reason, resumed) => {
       if (!handsFreeRef.current) return;
-      hfArmedRef.current = false;
-      setListening(false);
-      setUtterancePending(true);
-      void invoke<string>("dictation_stop")
-        .then((finalText) => {
-          setPartial("");
-          const text = ((finalText || vadText) || "").trim();
-          const capture = { text, heldMs: null, heard: captureRef.current.heard };
-          if (!isNonSpeech(capture)) submitSpoken(text);
-        })
-        .catch((e) => {
-          handsFreeRef.current = false;
-          setHandsFree(false);
-          setError(String(e));
-        })
-        .finally(() => setUtterancePending(false));
+      void invoke("dictation_cycle").catch(() => {});
+      setPartial("");
+      captureRef.current = { startedAt: Date.now(), heard: false };
+      // Carrying the last turn on: it goes out again with the rest, and the
+      // transcript shows the rest under it.
+      const carried = resumed ? carriedRef.current : null;
+      const whole = carried && text ? `${carried.text} ${text}` : (carried?.text ?? text);
+      carriedRef.current = null;
+      const id =
+        whole && !isNonSpeech({ text: whole, heldMs: null, heard: true })
+          ? submitSpoken(whole, carried && text ? text : whole)
+          : null;
+      if (id) carriedRef.current = { id, text: whole };
+      else endpoint.replyOver();
+      if (!endpoint.listening) closeMic();
+      refreshRoute();
     },
-    [submitSpoken],
-  );
-  onUtteranceRef.current = handleUtteranceEnd;
+    // They weren't done: the reply to the turn is let go before a word of it
+    // is heard, and the turn goes out again with what they say now.
+    resume: () => {
+      const carried = carriedRef.current;
+      if (!carried) return;
+      carryingRef.current = true;
+      setOutbox(outboxRef.current.filter((o) => o.id !== carried.id));
+      contextNotesRef.current.push(
+        `They paused mid-thought: this message carries on from their last one ("${clip(carried.text, 160)}") and is meant as one`,
+      );
+      stopSpeech();
+      if (turnRef.current.phase === "idle") return;
+      interruptWantedRef.current = true;
+      if (turnRef.current.interrupting) return;
+      dispatch({ type: "interrupt" });
+      sendInterrupt();
+    },
+    // Talking over the reply stops it in place, as the talk button does.
+    barge: () => stopReply(),
+    // A "yeah" under the reply: forgotten, so the next words start clean.
+    drop: () => {
+      void invoke("dictation_cycle").catch(() => {});
+      setPartial("");
+    },
+  };
 
   // Toggle hands-free. Turning it off tears the mic down; turning it on lets the
   // re-arm effect open the mic once the agent is idle.
@@ -1757,35 +1832,35 @@ function VoicePanelBase({
     });
   }, [disarmHandsFree]);
 
-  // The hands-free status button doubles as manual barge-in: since the mic is
-  // half-duplex, a tap stops the agent, and the re-arm effect drops back to
-  // listening once the turn has ended.
+  // The hands-free status button: a tap while the agent answers interrupts it
+  // (the re-arm effect drops back to listening once the turn has ended); a
+  // tap while they talk sends what they have said now.
   const onHandsFreeButton = useCallback(() => {
     if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
-  }, [playback, stopReply]);
+    else endpoint.sendNow();
+  }, [playback, stopReply, endpoint]);
 
-  // Re-arm the mic once the turn is over and nothing is left to hear. Driven by
-  // the turn and by what is actually playing — never by the speech queue's own
-  // flag, which a clip that never ends could hold at "speaking" for good (the
-  // stall watchdog ends such a clip instead). The short delay leaves a natural
-  // beat before listening resumes.
+  // While a reply runs or waits, the floor is the agent's; once it is over
+  // and nothing is left to hear, the user's — and the mic re-arms if the
+  // reply's route had closed it. Driven by the turn and by what is actually
+  // playing — never by the speech queue's own flag, which a clip that never
+  // ends could hold at "speaking" for good (the stall watchdog ends such a
+  // clip instead). The short delay leaves a natural beat before listening
+  // resumes.
   const turnBusy = turn.phase !== "idle";
   useEffect(() => {
-    if (
-      !handsFree ||
-      hfArmedRef.current ||
-      turnBusy ||
-      outbox.length > 0 ||
-      utterancePending ||
-      audioBusy
-    ) {
+    if (!handsFree) return;
+    if (turnBusy || outbox.length > 0 || audioBusy) {
+      endpoint.replyStarted();
       return;
     }
+    endpoint.replyOver();
+    if (hfArmedRef.current) return;
     const t = setTimeout(() => armHandsFree(), rearmDelayRef.current);
     return () => clearTimeout(t);
-  }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, armHandsFree]);
+  }, [handsFree, listening, turnBusy, outbox.length, audioBusy, armHandsFree, endpoint]);
 
-  // Live partial transcript + dictation errors from the native mic.
+  // Live partial transcript, levels and dictation errors from the native mic.
   useEffect(() => {
     let disposed = false;
     const unlisteners: UnlistenFn[] = [];
@@ -1798,10 +1873,15 @@ function VoicePanelBase({
         await listen<DictationTextEvent>("dictation-partial", (e) => {
           setPartial(e.payload.text);
           if (e.payload.text.trim()) captureRef.current.heard = true;
-          // In hands-free, the partial stream drives end-of-utterance detection.
+          // In hands-free, the words and the level together end the turn.
           if (handsFreeRef.current && hfArmedRef.current) {
-            vadRef.current?.feed(e.payload.text);
+            endpointRef.current?.partial(e.payload.text);
           }
+        }),
+      );
+      add(
+        await listen<DictationLevel>("dictation-level", (e) => {
+          if (handsFreeRef.current && hfArmedRef.current) endpointRef.current?.level(e.payload);
         }),
       );
       add(
@@ -1814,7 +1894,7 @@ function VoicePanelBase({
             if (handsFreeRef.current && hfArmedRef.current) {
               hfArmedRef.current = false;
               rearmDelayRef.current = 1000;
-              vadRef.current?.reset();
+              endpointRef.current?.reset();
               setListening(false);
               setPartial("");
               // The task is over but its capture is still open, and
@@ -1833,7 +1913,7 @@ function VoicePanelBase({
           hfArmedRef.current = false;
           handsFreeRef.current = false;
           setHandsFree(false);
-          vadRef.current?.reset();
+          endpointRef.current?.reset();
           setListening(false);
           setPartial("");
           setError(e.payload.error);
@@ -1853,7 +1933,7 @@ function VoicePanelBase({
         holdTimerRef.current = null;
       }
       hfArmedRef.current = false;
-      vadRef.current?.reset();
+      endpointRef.current?.reset();
     };
   }, []);
 
@@ -2058,6 +2138,10 @@ function VoicePanelBase({
   const stick = useStickToBottom<HTMLDivElement>([transcript, streaming, turn.phase, trayHeight]);
 
   const busy = turnBusy || outbox.length > 0;
+  // The mic is open for the user's turn. Hands-free keeps it open through the
+  // agent's turn too (to carry a turn on, or to be talked over), but then the
+  // agent's state is the one to show.
+  const hearing = listening && !(handsFree && (busy || audioBusy));
   // Drives the spinning-logo pulse in the header: a steady working spin while
   // thinking or speaking, a slow receptive spin while the mic is open, still
   // otherwise.
@@ -2065,10 +2149,10 @@ function VoicePanelBase({
     ? "thinking"
     : turn.phase === "streaming" || speechState === "speaking"
       ? "streaming"
-      : listening
+      : hearing
         ? "listening"
         : "idle";
-  const indicator: { label: string; color: string } = listening
+  const indicator: { label: string; color: string } = hearing
     ? { label: "Listening…", color: "var(--color-danger, #c0392b)" }
     : waiting
     ? { label: caption.text, color: "var(--color-warn, #b8860b)" }
@@ -2486,22 +2570,22 @@ function VoicePanelBase({
               <button
                 type="button"
                 onClick={onHandsFreeButton}
-                title="Hands-free — tap to interrupt and listen"
+                title="Hands-free — tap to send what you've said, or to interrupt"
                 aria-label="Hands-free status"
                 className="w-full rounded-md px-3 py-2.5 select-none"
                 style={{
                   fontSize: "14px",
                   fontWeight: 600,
                   border: "1px solid var(--color-rule)",
-                  background: listening
+                  background: hearing
                     ? "var(--color-danger, #c0392b)"
                     : "var(--color-anchor-bg)",
-                  color: listening ? "#fff" : "var(--color-anchor-text)",
+                  color: hearing ? "#fff" : "var(--color-anchor-text)",
                   cursor: "pointer",
                   transition: "background 120ms ease",
                 }}
               >
-                {listening
+                {hearing
                   ? "● Listening — just talk"
                   : waiting
                     ? `${caption.text} (tap to interrupt)`

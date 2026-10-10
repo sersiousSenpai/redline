@@ -43,6 +43,10 @@ export const PREROLL_CLEAR_MS = 500;
 
 export type DictationOwner = string;
 
+/** The owner of a capture started without one (`DEFAULT_OWNER` in
+ *  dictation.rs): every caller written before owners shares it. */
+export const DEFAULT_OWNER: DictationOwner = "default";
+
 export interface DictationGrant {
   /** The caller holds the mic: it just took it, or already had it. */
   granted: boolean;
