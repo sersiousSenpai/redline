@@ -134,8 +134,8 @@ const PROGRESS_STEP: u64 = 1_000_000;
 pub(crate) const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
 
 /// What `tts_synth` answers for a request whose generation was cancelled. The
-/// driver expects it and never reports it.
-const CANCELLED: &str = "cancelled";
+/// driver expects it and never reports it. Also how a cancelled download ends.
+pub(crate) const CANCELLED: &str = "cancelled";
 /// How many cancelled generations to remember. The driver keeps at most a few
 /// requests in flight, so only the last few cancels can still have any queued.
 const CANCELS_KEPT: usize = 32;
@@ -977,7 +977,7 @@ pub(crate) async fn ensure_uv(
     http: &reqwest::Client,
     data_dir: &Path,
     root: &Path,
-    progress: &(dyn Fn(u64, u64) + Sync),
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> Result<PathBuf, String> {
     let uv = root.join("bin").join("uv");
     for found in [&uv, &data_dir.join("kokoro/bin/uv"), &data_dir.join("voice-studio/bin/uv")] {
@@ -1107,7 +1107,8 @@ pub(crate) async fn build_venv(
 /// it. Emits `kokoro-setup` phase events.
 async fn ensure_kokoro_venv(tts: &TtsState, app: &AppHandle) -> Result<(), String> {
     let uv = ensure_uv(&tts.http, &tts.data_dir, &tts.kokoro_dir, &|received, total| {
-        emit_setup(app, "uv", received, total)
+        emit_setup(app, "uv", received, total);
+        true
     })
     .await?;
     // uv's resolver installs kokoro-onnx (which pulls its own bundled
@@ -1228,7 +1229,8 @@ async fn download_if_missing(
     }
     let what = format!("the Kokoro {phase}");
     fetch_checked(&tts.http, url, dest, &what, check, DOWNLOAD_STALL, &|received, total| {
-        emit_setup(app, phase, received, total)
+        emit_setup(app, phase, received, total);
+        true
     })
     .await
 }
@@ -1245,6 +1247,9 @@ async fn download_if_missing(
 /// 2.4 GB. What arrived before is hashed from disk, so the check still covers
 /// every byte. Each attempt asks for `url` itself, never a URL it was once
 /// redirected to: a model host redirects to a signed link that expires.
+///
+/// `progress` returning false stops it the same way, with exactly `CANCELLED`:
+/// an install the user cancelled, to resume later.
 pub(crate) async fn fetch_checked(
     http: &reqwest::Client,
     url: &str,
@@ -1252,7 +1257,7 @@ pub(crate) async fn fetch_checked(
     what: &str,
     check: FileCheck,
     stall: Duration,
-    progress: &(dyn Fn(u64, u64) + Sync),
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> Result<(), String> {
     let mut tmp = dest.as_os_str().to_owned();
     tmp.push(".part");
@@ -1308,7 +1313,9 @@ pub(crate) async fn fetch_checked(
                 received += chunk.len() as u64;
                 if received - last_emit >= PROGRESS_STEP {
                     last_emit = received;
-                    progress(received, check.bytes);
+                    if !progress(received, check.bytes) {
+                        return Err(CANCELLED.to_string());
+                    }
                 }
             }
             Ok::<(), String>(())
@@ -1713,7 +1720,7 @@ done
             "the Kokoro upgrade",
             KOKORO_MODEL_CHECK,
             DOWNLOAD_STALL,
-            &|_, _| {},
+            &|_, _| true,
         )
         .await
         .unwrap_err();
@@ -1737,7 +1744,7 @@ done
             "the Kokoro upgrade",
             KOKORO_MODEL_CHECK,
             Duration::from_millis(300),
-            &|_, _| {},
+            &|_, _| true,
         )
         .await
         .unwrap_err();
@@ -1760,7 +1767,7 @@ done
         };
         let dest = dir.join(KOKORO_MODEL_FILE);
         let url = serve_once(BODY);
-        fetch_checked(&tts.http, &url, &dest, "the Kokoro upgrade", check, DOWNLOAD_STALL, &|_, _| {})
+        fetch_checked(&tts.http, &url, &dest, "the Kokoro upgrade", check, DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -1816,7 +1823,7 @@ done
         let http_client = reqwest::Client::new();
 
         let check = check_for(body);
-        let err = fetch_checked(&http_client, &url, &dest, "the model", check, DOWNLOAD_STALL, &|_, _| {})
+        let err = fetch_checked(&http_client, &url, &dest, "the model", check, DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap_err();
         assert!(err.contains("failed"), "{err}");
@@ -1826,7 +1833,10 @@ done
 
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let saw = seen.clone();
-        let note = move |received, total| saw.lock().unwrap().push((received, total));
+        let note = move |received, total| {
+            saw.lock().unwrap().push((received, total));
+            true
+        };
         fetch_checked(&http_client, &url, &dest, "the model", check_for(body), DOWNLOAD_STALL, &note)
         .await
         .unwrap();
@@ -1846,7 +1856,7 @@ done
         std::fs::write(part(&dest), &body[..20_000]).unwrap();
         let client = reqwest::Client::new();
         let url = format!("{base}/f");
-        fetch_checked(&client, &url, &dest, "the vocabulary", check_for(body), DOWNLOAD_STALL, &|_, _| {})
+        fetch_checked(&client, &url, &dest, "the vocabulary", check_for(body), DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1865,7 +1875,7 @@ done
         std::fs::write(part(&dest), vec![7u8; 1_000]).unwrap();
         let client = reqwest::Client::new();
         let url = format!("{base}/f");
-        let err = fetch_checked(&client, &url, &dest, "the config", check_for(body), DOWNLOAD_STALL, &|_, _| {})
+        let err = fetch_checked(&client, &url, &dest, "the config", check_for(body), DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
@@ -1882,7 +1892,7 @@ done
         let client = reqwest::Client::new();
         // Nothing listens there: the bytes on disk are enough.
         let check = check_for(&body);
-        fetch_checked(&client, "http://127.0.0.1:9/f", &dest, "the config", check, DOWNLOAD_STALL, &|_, _| {})
+        fetch_checked(&client, "http://127.0.0.1:9/f", &dest, "the config", check, DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1940,7 +1950,7 @@ done
         std::fs::create_dir_all(data.join("kokoro/bin")).unwrap();
         std::fs::write(data.join("kokoro/bin/uv"), b"#!/bin/sh\n").unwrap();
         let client = reqwest::Client::new();
-        let uv = ensure_uv(&client, &data, &data.join("voice-studio"), &|_, _| {}).await.unwrap();
+        let uv = ensure_uv(&client, &data, &data.join("voice-studio"), &|_, _| true).await.unwrap();
         assert_eq!(uv, data.join("kokoro/bin/uv"), "no second download");
     }
 }

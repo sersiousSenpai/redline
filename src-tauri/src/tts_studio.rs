@@ -52,6 +52,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -61,7 +62,9 @@ use sha2::{Digest, Sha256};
 use tauri::ipc::{Channel, JavaScriptChannelId, Response};
 
 use crate::db::Database;
-use crate::tts::{build_venv, ensure_uv, fetch_checked, FileCheck, TtsState, DOWNLOAD_STALL};
+use crate::tts::{
+    build_venv, ensure_uv, fetch_checked, FileCheck, TtsState, CANCELLED as STOPPED, DOWNLOAD_STALL,
+};
 
 const SETTING_MODEL: &str = "tts_studio_model";
 const SETTING_VOICE: &str = "tts_studio_voice";
@@ -479,6 +482,8 @@ struct Inner {
     core: StdMutex<Core>,
     events: StdMutex<Option<Events>>,
     last_progress: StdMutex<Option<Instant>>,
+    /// The install in progress was cancelled; it stops at its next step.
+    stop_install: AtomicBool,
     timing: Timing,
     pressure: fn() -> Option<u64>,
 }
@@ -531,6 +536,7 @@ impl Studio {
             core: StdMutex::new(core),
             events: StdMutex::new(None),
             last_progress: StdMutex::new(None),
+            stop_install: AtomicBool::new(false),
             timing,
             pressure,
         }))
@@ -640,9 +646,14 @@ impl Studio {
         self.0.flush(out);
     }
 
-    /// Load the model ahead of the first sentence (pre-warm on intent).
-    pub(crate) fn warm(&self) -> Result<(), String> {
+    /// Load the model ahead of the first sentence (pre-warm on intent): only
+    /// when the studio voice is the engine, unless `always` (a settings
+    /// preview, before the engine is saved).
+    pub(crate) fn warm(&self, always: bool) -> Result<(), String> {
         let inner = &self.0;
+        if !always && inner.db.get_setting("tts_engine").as_deref() != Some("studio") {
+            return Ok(());
+        }
         let mut out = Out::default();
         let warmed = {
             let mut core = inner.lock();
@@ -734,6 +745,7 @@ impl Studio {
                 return;
             }
             core.installing = true;
+            self.0.stop_install.store(false, Ordering::Relaxed);
             // Installing again is the way back from a crash-disabled engine.
             core.disabled = false;
             core.exits.clear();
@@ -754,6 +766,12 @@ impl Studio {
             };
             inner.emit("studio-setup", done);
         }));
+    }
+
+    /// Stop the install at its next step: mid-download, or between steps.
+    /// What it fetched stays, so installing again resumes it.
+    pub(crate) fn cancel_install(&self) {
+        self.0.stop_install.store(true, Ordering::Relaxed);
     }
 
     /// Stop the process and delete everything under `voice-studio/`.
@@ -1202,19 +1220,26 @@ impl Inner {
         );
     }
 
-    /// Download progress, at most five times a second.
-    fn progress(&self, phase: &str, received: u64, total: u64) {
+    /// Download progress, at most five times a second; false once the
+    /// install is cancelled.
+    fn progress(&self, phase: &str, received: u64, total: u64) -> bool {
         let now = Instant::now();
         {
             let mut last = self.last_progress.lock().unwrap_or_else(|p| p.into_inner());
-            if last.is_some_and(|at| now.duration_since(at) < Duration::from_millis(200))
-                && received < total
+            if last.is_none_or(|at| now.duration_since(at) >= Duration::from_millis(200))
+                || received >= total
             {
-                return;
+                *last = Some(now);
+                drop(last);
+                self.setup(phase, received, total);
             }
-            *last = Some(now);
         }
-        self.setup(phase, received, total);
+        self.going()
+    }
+
+    /// Whether the install is still wanted.
+    fn going(&self) -> bool {
+        !self.stop_install.load(Ordering::Relaxed)
     }
 
     fn preflight(&self, v: &Variant) -> Value {
@@ -1288,6 +1313,9 @@ impl Inner {
             self.flush(out);
             self.install_runtime().await?;
             self.record(&|r| r["lock"] = lock.as_str().into())?;
+        }
+        if !self.going() {
+            return Err(STOPPED.into());
         }
         self.fetch_model(v, &SHARED, HF).await?;
         self.record(&|r| r["models"][model] = json!({}))?;
@@ -1373,7 +1401,13 @@ impl Inner {
                 )
                 .await;
                 match fetched {
-                    Err(e) if tries < 2 && !e.contains("wasn't the published file") => tries += 1,
+                    Err(e)
+                        if tries < 2
+                            && self.going()
+                            && !e.contains("wasn't the published file") =>
+                    {
+                        tries += 1
+                    }
                     other => break other?,
                 }
             }
@@ -1493,8 +1527,9 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   it.
 /// - `status`, `preflight`: the queries.
 /// - `prefs`: save `args` `{model?, voice?, style?}`.
-/// - `install`: progress and the outcome on `studio-setup`.
-/// - `warm`: pre-warm on intent.
+/// - `install`: progress and the outcome on `studio-setup`; `cancel` stops it
+///   (its outcome is the error `cancelled`), and installing again resumes.
+/// - `warm`: pre-warm on intent, `args` `{always?}`.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
 /// - `remove`.
 ///
@@ -1529,7 +1564,8 @@ pub fn tts_studio(
         "preflight" => return Ok(studio.preflight()),
         "prefs" => studio.set_prefs(&args)?,
         "install" => studio.install(),
-        "warm" => studio.warm()?,
+        "warm" => studio.warm(args["always"] == true)?,
+        "cancel" => studio.cancel_install(),
         "surface" => studio.surface(
             args["surface"].as_str().unwrap_or_default(),
             args["open"] == true,
@@ -1748,7 +1784,7 @@ for line in sys.stdin:
     }
 
     async fn warmed(studio: &Studio) {
-        studio.warm().unwrap();
+        studio.warm(true).unwrap();
         until("the model to be ready", || {
             studio.status()["state"] == "ready"
         })
@@ -1889,13 +1925,13 @@ for line in sys.stdin:
     async fn speech_behind_a_warm_up_waits_for_the_model_but_not_forever() {
         let (studio, _, _) = fake_studio("behind-warm", FAST, normal_pressure);
         studio.0.lock().voice = "WARM800".into();
-        studio.warm().unwrap();
+        studio.warm(true).unwrap();
         let soon = finished(&say(&studio, "Right after the panel opened.", 1)).await;
         assert_eq!(outcome(soon.last().unwrap())["type"], "end");
 
         let (studio, _, _) = fake_studio("behind-long-warm", FAST, normal_pressure);
         studio.0.lock().voice = "WARM3000".into();
-        studio.warm().unwrap();
+        studio.warm(true).unwrap();
         let started = Instant::now();
         let waited = finished(&say(&studio, "During a first-ever load.", 1)).await;
         assert_eq!(outcome(&waited[0])["code"], "stalled");
@@ -1977,7 +2013,7 @@ for line in sys.stdin:
                 .unwrap_err(),
             PRESSURE
         );
-        assert_eq!(studio.warm().unwrap_err(), PRESSURE);
+        assert_eq!(studio.warm(true).unwrap_err(), PRESSURE);
         LEVEL.store(1, Ordering::SeqCst);
         let back = finished(&say(&studio, "Pressure's gone.", 3)).await;
         assert_eq!(outcome(back.last().unwrap())["type"], "end");
@@ -2173,6 +2209,71 @@ for line in sys.stdin:
         assert!(pins.iter().any(|p| p.starts_with("mlx-audio==0.5.8 ")));
     }
 
+    /// A warm on intent (the Discuss pill's hover, a voice surface opening)
+    /// loads 4 GB only for someone who speaks with the studio voice; a
+    /// settings preview asks for one regardless.
+    #[tokio::test]
+    async fn a_warm_on_intent_loads_the_model_only_for_the_studio_engine() {
+        let (studio, dir, _) = fake_studio("warm-engine", FAST, normal_pressure);
+        studio.warm(false).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            log_lines(&dir, "spawns.log").is_empty(),
+            "Kokoro's user pays nothing"
+        );
+        studio.0.db.set_setting("tts_engine", "studio").unwrap();
+        studio.warm(false).unwrap();
+        until("the model to be ready", || {
+            studio.status()["state"] == "ready"
+        })
+        .await;
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1);
+    }
+
+    /// Cancel stops an install inside a download: no retry, and what came is
+    /// kept for the next install to resume.
+    #[tokio::test]
+    async fn a_cancelled_install_stops_mid_download_and_keeps_what_came() {
+        let body: Vec<u8> = (0..3_000_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let big = pin(
+            body.len() as u64,
+            Box::leak(format!("{:x}", Sha256::digest(&body)).into_boxed_str()),
+        );
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = crate::tts::tests::serve({
+            let hits = hits.clone();
+            move |_| {
+                hits.fetch_add(1, Ordering::SeqCst);
+                crate::tts::tests::http("200 OK", "", &body)
+            }
+        });
+        let small = pin(1, "0");
+        let v = Variant {
+            id: "v",
+            repo: "v",
+            revision: "rev",
+            own: [("a", small), ("b", small), ("c", small)],
+            memory: 0,
+        };
+        let (studio, _, _) = fake_studio("cancel", FAST, normal_pressure);
+        studio.cancel_install();
+        let shared = [("speech_tokenizer/model.safetensors", big)];
+        let err = studio
+            .0
+            .fetch_model(&v, &shared, &format!("{base}/"))
+            .await
+            .unwrap_err();
+        assert_eq!(err, STOPPED);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "not retried");
+        let part = studio
+            .0
+            .dir
+            .join("models/shared/speech_tokenizer/model.safetensors.part");
+        assert!(std::fs::metadata(part).unwrap().len() >= 1_000_000);
+    }
+
     /// Two variants from a loopback "model host": the shared files are fetched
     /// once and hard-linked into both, each variant's own files land in its
     /// own directory, and progress goes out as `studio-setup` "model".
@@ -2340,7 +2441,7 @@ for line in sys.stdin:
     async fn real_sidecar_first_audio_speed_and_cancel() {
         let studio = scratch_install("sidecar");
         let started = Instant::now();
-        studio.warm().unwrap();
+        studio.warm(true).unwrap();
         patiently("the warm-up", || studio.0.lock().queue.is_empty()).await;
         assert_eq!(studio.status()["state"], "ready");
         println!("spawn to warm: {:?}", started.elapsed());
@@ -2495,6 +2596,7 @@ for line in sys.stdin:
         let from = resumed_from.clone();
         let note = move |r, _| {
             from.fetch_min(r, Ordering::SeqCst);
+            true
         };
         fetch_checked(
             &reqwest::Client::new(),
