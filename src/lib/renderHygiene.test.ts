@@ -51,6 +51,7 @@ describe("polling", () => {
     "src/components/BrowserPane.tsx",
     "src/hooks/usePush.ts",
     "src/hooks/useReview.ts",
+    "src/hooks/useRunGraph.ts",
   ];
   it.each(migrated)("%s polls only through usePoll", (path) => {
     const source = read(path);

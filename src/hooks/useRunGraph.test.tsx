@@ -84,3 +84,74 @@ describe("one view call per refresh", () => {
     expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["runner_graph_view"]);
   });
 });
+
+describe("reads through the shared poll", () => {
+  const events = new Map<string, (event: { payload: unknown }) => void>();
+  let visibility: DocumentVisibilityState;
+  let renders = 0;
+  function CountedList() { renders++; list = useRunGraphList(true); return null; }
+  const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  const setVisibility = (next: DocumentVisibilityState) => act(async () => { visibility = next; document.dispatchEvent(new Event("visibilitychange")); });
+  beforeEach(() => {
+    events.clear(); renders = 0; visibility = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    listenMock.mockImplementation(async (name: string, handler: (event: { payload: unknown }) => void) => { events.set(name, handler); return vi.fn(); });
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+  it("runs one view read at a time, and a refresh asked mid-read once it lands", async () => {
+    const first = deferred<ReturnType<typeof view>>();
+    invokeMock.mockReturnValueOnce(first.promise).mockImplementation(async () => view(fixture));
+    await act(async () => root.render(createElement(Probe, { runId: fixture.runId })));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    for (const rev of [7, 8, 9]) await act(async () => events.get("run-graph")!({ payload: { runId: fixture.runId, rev } }));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve(view(fixture)));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops the clock while the window is hidden and reads the moment it is shown", async () => {
+    vi.useFakeTimers();
+    invokeMock.mockImplementation(async () => view(fixture));
+    await act(async () => root.render(createElement(Probe, { runId: fixture.runId })));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    await advance(4000);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    await setVisibility("hidden");
+    await advance(12_000);
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    await setVisibility("visible");
+    expect(invokeMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("shows a failed read, but not one from a run it has left", async () => {
+    const left = deferred<never>();
+    let fail = true;
+    invokeMock.mockImplementation((_command: string, args: { runId: string }) =>
+      args.runId === fixture.runId ? left.promise : fail ? Promise.reject(new Error("view unavailable")) : Promise.resolve(view({ ...fixture, runId: "run-other" })));
+    await act(async () => root.render(createElement(Probe, { runId: fixture.runId })));
+    await act(async () => root.render(createElement(Probe, { runId: "run-other" })));
+    expect(state.error).toBe("Error: view unavailable");
+    fail = false;
+    await act(async () => state.refresh());
+    expect(state.error).toBeNull();
+    await act(async () => { left.resolve(undefined as never); });
+    expect(state.error).toBeNull();
+  });
+
+  it("a run list that didn't change costs the surface no render", async () => {
+    vi.useFakeTimers();
+    let rows = [fixture];
+    invokeMock.mockImplementation(async () => rows.map((row) => ({ ...row })));
+    await act(async () => root.render(createElement(CountedList)));
+    expect(list.runs).toHaveLength(1);
+    const settled = renders;
+    await advance(8000);
+    expect(invokeMock).toHaveBeenCalledTimes(3);
+    expect(renders).toBe(settled);
+    rows = [fixture, { ...fixture, runId: "run-other" }];
+    await act(async () => events.get("run-finished")!({ payload: {} }));
+    expect(list.runs.map((run) => run.runId)).toEqual([fixture.runId, "run-other"]);
+    expect(renders).toBe(settled + 1);
+  });
+});
