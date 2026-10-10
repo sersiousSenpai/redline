@@ -27,9 +27,10 @@
 //! is up with no capture on it (no timer task). A capture started while warm
 //! opens at once and begins with that ring — what the mic heard since the last
 //! capture finished, never that capture's own end — so a first syllable
-//! spoken as the key goes down is never clipped. Each start checks the warm
-//! engine is still running on the same input format, and rebuilds it if sleep
-//! or a device change stopped it.
+//! spoken as the key goes down is never clipped. A start passes
+//! `preroll: false` when that audio was Redline itself speaking. Each start
+//! checks the warm engine is still running on the same input format, and
+//! rebuilds it if sleep or a device change stopped it.
 //!
 //! **Levels.** While capturing, the tap emits `dictation-level` once per 50 ms
 //! of audio (20 Hz), RMS and peak in dBFS: the waveform of a dictation strip,
@@ -779,7 +780,9 @@ impl DictationState {
 /// ranked `vocab`. Emits `dictation-partial` and `dictation-level` as the user
 /// speaks, and `dictation-error` if recognition can't start. A repeated start
 /// by the holder is a no-op; see the module docs for who takes the mic from
-/// whom. On first use this triggers the speech-recognition and microphone
+/// whom. A warm start begins with the pre-roll unless `preroll` is false — the
+/// caller's to say when what the mic heard just before was Redline itself
+/// speaking. On first use this triggers the speech-recognition and microphone
 /// permission prompts.
 #[tauri::command]
 pub fn dictation_start(
@@ -789,9 +792,11 @@ pub fn dictation_start(
     owner: Option<String>,
     kind: Option<String>,
     vocab: Option<Vec<String>>,
+    preroll: Option<bool>,
 ) -> Result<DictationGrant, String> {
     let owner = owner.unwrap_or_else(|| DEFAULT_OWNER.to_string());
     let kind = Kind::parse(kind.as_deref());
+    let preroll = preroll.unwrap_or(true);
     let inner = &dictation.inner;
     let (grant, seq) = inner.take_mic(&owner, kind);
     let Some(seq) = seq else {
@@ -829,7 +834,7 @@ pub fn dictation_start(
             if takeover {
                 retire_capture(&state, false, None);
             }
-            authorize_then_capture(app_main, state, seq)
+            authorize_then_capture(app_main, state, seq, preroll)
         })
         .map_err(|e| {
             inner.release(Some(&owner));
@@ -840,7 +845,7 @@ pub fn dictation_start(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = &app;
+        let _ = (&app, preroll);
         inner.release(Some(&owner));
         Err("dictation is only available on macOS".to_string())
     }
@@ -1058,11 +1063,11 @@ pub fn dictation_status(
 
 /// Gate capture behind speech-recognition authorization. On the main thread.
 #[cfg(target_os = "macos")]
-fn authorize_then_capture(app: AppHandle, state: Arc<DictationInner>, seq: u64) {
+fn authorize_then_capture(app: AppHandle, state: Arc<DictationInner>, seq: u64, preroll: bool) {
     // SAFETY: on the main thread; `authorizationStatus` is a pure class read.
     let status = unsafe { SFSpeechRecognizer::authorizationStatus() };
     if status.0 == SFSpeechRecognizerAuthorizationStatus::Authorized.0 {
-        begin_capture(&app, &state, seq);
+        begin_capture(&app, &state, seq, preroll);
         return;
     }
     let denied = move |app: &AppHandle, state: &DictationInner, message: &str| {
@@ -1082,7 +1087,7 @@ fn authorize_then_capture(app: AppHandle, state: Arc<DictationInner>, seq: u64) 
             let authorized = granted.0 == SFSpeechRecognizerAuthorizationStatus::Authorized.0;
             let _ = app_cb.run_on_main_thread(move || {
                 if authorized {
-                    begin_capture(&app_main, &state_main, seq);
+                    begin_capture(&app_main, &state_main, seq, preroll);
                 } else {
                     denied(
                         &app_main,
@@ -1108,10 +1113,11 @@ fn authorize_then_capture(app: AppHandle, state: Arc<DictationInner>, seq: u64) 
 }
 
 /// Open the capture for claim `seq`: warm the mic (or reuse it), arm the
-/// recognition with the pre-roll, and start the engine if it was cold. On the
-/// main thread; on a failure it releases the mic and emits `dictation-error`.
+/// recognition (with the pre-roll, if `preroll`), and start the engine if it
+/// was cold. On the main thread; on a failure it releases the mic and emits
+/// `dictation-error`.
 #[cfg(target_os = "macos")]
-fn begin_capture(app: &AppHandle, state: &Arc<DictationInner>, seq: u64) {
+fn begin_capture(app: &AppHandle, state: &Arc<DictationInner>, seq: u64, preroll: bool) {
     // A stop, a cancel or another start got here first.
     let Some(owner) = state.owner_of(seq) else {
         return;
@@ -1126,7 +1132,7 @@ fn begin_capture(app: &AppHandle, state: &Arc<DictationInner>, seq: u64) {
     };
     let guard = state.mic.lock().unwrap();
     let mic = guard.as_ref().expect("ensure_mic left a mic");
-    arm_capture(app, state, mic, &owner, seq, true);
+    arm_capture(app, state, mic, &owner, seq, preroll);
     if !cold {
         return;
     }

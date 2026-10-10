@@ -2,16 +2,22 @@
 // Copyright 2026 Yusuf Al-Bazian
 //
 // The native dictation contract (src-tauri/src/dictation.rs and
-// dictation_whisper.rs), as types. Types only, so importing it costs no bundle.
+// dictation_whisper.rs), as types and one timing constant, so importing it
+// costs next to nothing.
 //
 // Commands:
-// - `dictation_start({ owner?, kind?, vocab? })` → `DictationGrant`. `owner`
-//   names the surface capturing (callers that pass none share "default");
-//   `kind` is "hold" (push-to-talk: takes the mic from anyone, who then hears
-//   `dictation-preempted`) or "open" (the default: refused while another owner
-//   holds the mic); `vocab` is the ranked list from `buildVocab` (vocab.ts).
+// - `dictation_start({ owner?, kind?, vocab?, preroll? })` → `DictationGrant`.
+//   `owner` names the surface capturing (callers that pass none share
+//   "default"); `kind` is "hold" (push-to-talk: takes the mic from anyone, who
+//   then hears `dictation-preempted`) or "open" (the default: refused while
+//   another owner holds the mic); `vocab` is the ranked list from `buildVocab`
+//   (vocab.ts); `preroll: false` starts without the pre-roll — pass it while
+//   Redline is speaking or has just stopped (`PREROLL_CLEAR_MS`), or the
+//   capture begins with the end of Redline's own voice.
 // - `dictation_stop({ owner? })` → the final text, from Whisper when it is
 //   installed, else Apple. "" from an owner that no longer holds the mic.
+//   Await it before starting the same owner again: a start that reaches the
+//   mic before the stop does is the holder's repeat press, a no-op.
 // - `dictation_cycle({ owner? })` → the utterance so far; the mic stays open.
 // - `dictation_kill_all({ owner? })`: with an owner, cancels that owner's
 //   capture (text discarded); without, closes every capture and the warm mic.
@@ -25,10 +31,15 @@
 // (`DictationLevel`, 20 a second of audio while capturing),
 // `dictation-preempted`.
 //
-// After a capture the mic stays warm for 5 s, and a capture started while it
-// is warm begins with the 300 ms heard before the press.
+// After a capture the mic stays warm for 5 s (not on a Bluetooth headset's
+// mic), and a capture started while it is warm begins with up to 300 ms heard
+// before the press: never the last capture's own end.
 
 import type { DictationError } from "./utterance";
+
+/** How long after Redline's voice goes quiet the pre-roll can still hold its
+ *  end: the 300 ms ring, plus the time the sound takes to leave the speakers. */
+export const PREROLL_CLEAR_MS = 500;
 
 export type DictationOwner = string;
 
