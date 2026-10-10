@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 import { strip } from "../components/DictationStrip";
 import { useDictationComposer, type ComposerSpec } from "../lib/dictationComposer";
 import { DictationBroker } from "./dictationBroker";
-import { DICTATION_OWNER, DictationHost, type TalkContext, type TurnTaker } from "./dictationHost";
+import { BACKGROUND_WARM_MS, DICTATION_OWNER, DictationHost, type TalkContext, type TurnTaker } from "./dictationHost";
 import { getVoiceAway, setVoiceAway } from "./voiceAway";
 import { APP_KEYS, HOLD_MS, type HotkeyEvent } from "./voiceHotkey";
 
@@ -479,6 +479,35 @@ describe("with nothing that takes text focused", () => {
     expect(strip.get()).toMatchObject({ phase: "notice", text: "Sent to the discussion" });
   });
 
+  it("lets the conversation it woke go once the reply has been idle a while, never under its open panel", async () => {
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    let inFlight = true;
+    appInvoke.mockImplementation(async (cmd: string) => (cmd === "voice_session_status" ? { inFlight } : null));
+    const wait = vi.spyOn(globalThis, "setTimeout");
+    await hold("is the replay safe on remote");
+    const sleep = () => {
+      const call = wait.mock.calls.filter(([, ms]) => ms === BACKGROUND_WARM_MS).pop()!;
+      return act(async () => {
+        (call[0] as () => void)();
+        for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+      });
+    };
+    const stops = () => voiceCalls().filter(([cmd]) => cmd === "voice_session_stop");
+    // Still answering: it stays up, and looks again later.
+    await sleep();
+    expect(stops()).toEqual([]);
+    // Its panel is open now: the panel lets it go when it closes.
+    inFlight = false;
+    taker = { key: "plan-1", start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
+    await sleep();
+    expect(stops()).toEqual([]);
+    // Another turn, the panel closed again: idle, it goes.
+    taker = null;
+    await hold("and on a slow network");
+    await sleep();
+    expect(stops()).toEqual([["voice_session_stop", { sessionId: "plan-1" }]]);
+  });
+
   it("interrupts a reply still running instead of refusing the turn", async () => {
     talk = { key: "drafter:d1", markdown: () => "draft", cwd: "/tmp/p" };
     let refused = false;
@@ -501,7 +530,7 @@ describe("with nothing that takes text focused", () => {
   });
 
   it("hands the turn to the open voice panel's own push-to-talk", async () => {
-    taker = { start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
+    taker = { key: "plan-1", start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
     await hold("what does section two do");
     expect(taker.start).toHaveBeenCalledWith(now - 1500);
     expect(taker.stop).toHaveBeenCalledOnce();

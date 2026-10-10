@@ -1999,8 +1999,8 @@ function VoicePanelBase({
   // The hold-to-dictate key, with nothing that takes text focused (or focus
   // in this panel), is a turn here: the panel's own push-to-talk.
   useEffect(
-    () => registerTurnTaker({ start: startTalk, stop: stopTalk, cancel: cancelTalk }),
-    [startTalk, stopTalk, cancelTalk],
+    () => registerTurnTaker({ key: sessionId, start: startTalk, stop: stopTalk, cancel: cancelTalk }),
+    [sessionId, startTalk, stopTalk, cancelTalk],
   );
 
   // While this panel's own capture listens, the dictation strip over its

@@ -69,6 +69,8 @@ export interface TalkContext {
 /** The open voice panel: it takes a turn as its own push-to-talk, so the
  *  turn interrupts a reply in place and the answer is spoken. */
 export interface TurnTaker {
+  /** The conversation it shows (its voice key). */
+  key: string;
   start(since: number): void;
   stop(): void;
   cancel(): void;
@@ -104,6 +106,10 @@ export interface HostDeps {
 
 /** How long the memory index's names are reused before they are read again. */
 const MEMORY_FRESH_MS = 10 * 60_000;
+/** How long a conversation a background turn woke stays up for the next
+ *  one once its reply is done: then its child is let go, as closing its
+ *  panel lets it go (its memory stays, and the next turn resumes it). */
+export const BACKGROUND_WARM_MS = 2 * 60_000;
 
 export class DictationHost {
   readonly hotkey: VoiceHotkey;
@@ -116,6 +122,8 @@ export class DictationHost {
   private memory: string[] = [];
   private memoryAt = -Infinity;
   private levels: number[] = [];
+  /** Conversations a background turn woke, each with its timer to sleep. */
+  private woken = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly deps: HostDeps) {
     this.hotkey = new VoiceHotkey({
@@ -398,9 +406,32 @@ export class DictationHost {
       }
       setVoiceAway({ key: talk.key, state: "thinking" });
       this.notice("Sent to the discussion");
+      this.sleepLater(talk.key);
     } catch (e) {
       this.nowhere(text, `Couldn't reach the discussion (${String(e)})`);
     }
+  }
+
+  /** Let a conversation a background turn woke go once its reply is done
+   *  and nothing has used it for `BACKGROUND_WARM_MS` — never while its
+   *  panel is open (closing the panel lets it go). Without this, every
+   *  plan talked to with the panel closed kept a child running until quit. */
+  private sleepLater(key: string): void {
+    clearTimeout(this.woken.get(key));
+    this.woken.set(
+      key,
+      setTimeout(() => {
+        this.woken.delete(key);
+        if (this.deps.taker()?.key === key) return;
+        void this.deps
+          .invoke<{ inFlight: boolean }>("voice_session_status", { sessionId: key })
+          .then((status) => {
+            if (status.inFlight) this.sleepLater(key);
+            else if (this.deps.taker()?.key !== key) return this.deps.invoke("voice_session_stop", { sessionId: key });
+          })
+          .catch(() => {});
+      }, BACKGROUND_WARM_MS),
+    );
   }
 
   /** Words that found no home are never lost: offered for copying. */
