@@ -1568,6 +1568,58 @@ mod tests {
         assert_eq!(grant, serde_json::json!({ "granted": true, "holder": "door" }));
     }
 
+    /// A warm capture's hand-over, against Apple's on-device recognizer: the
+    /// pre-roll as one buffer in the tap's format (two channels here, as many
+    /// Mac inputs have), then live-sized buffers, with a vocabulary and
+    /// punctuation on. The clip's first word is spoken inside the pre-roll, so
+    /// hearing it proves the pre-roll buffer reached the recognizer.
+    /// `REDLINE_DICTATION_WAV` is a 16 kHz mono clip and
+    /// `REDLINE_DICTATION_FIRST_WORD` its first word. Needs speech
+    /// recognition permission for the process running the tests.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "runs Apple's on-device recognizer"]
+    fn a_preroll_buffer_then_live_buffers_are_heard_from_the_first_word() {
+        let path = std::env::var("REDLINE_DICTATION_WAV").expect("set REDLINE_DICTATION_WAV");
+        let first = std::env::var("REDLINE_DICTATION_FIRST_WORD").expect("set REDLINE_DICTATION_FIRST_WORD");
+        let mono = crate::dictation_whisper::read_wav_16k(&path);
+        let preroll = (16_000.0 * PREROLL_MS / 1000.0) as usize;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        unsafe {
+            let format =
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(AVAudioFormat::alloc(), 16_000.0, 2).unwrap();
+            let recognizer = SFSpeechRecognizer::new();
+            // No main run loop in a test: deliver results on a queue of their own.
+            recognizer.setQueue(&objc2_foundation::NSOperationQueue::new());
+            let request = SFSpeechAudioBufferRecognitionRequest::new();
+            request.setRequiresOnDeviceRecognition(true);
+            request.setContextualStrings(&NSArray::from_retained_slice(&[NSString::from_str("Kokoro")]));
+            request.setAddsPunctuation(true);
+            let handler = RcBlock::new(move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
+                if let Some(r) = result.as_ref() {
+                    if r.isFinal() {
+                        let _ = tx.send(r.bestTranscription().formattedString().to_string());
+                    }
+                } else if let Some(e) = error.as_ref() {
+                    let _ = tx.send(format!("error: {}", e.localizedDescription()));
+                }
+            });
+            let _task = recognizer.recognitionTaskWithRequest_resultHandler(&request, &handler);
+            request.appendAudioPCMBuffer(&preroll_buffer(&format, &mono[..preroll]).unwrap());
+            for chunk in mono[preroll..].chunks(1024) {
+                request.appendAudioPCMBuffer(&preroll_buffer(&format, chunk).unwrap());
+            }
+            request.endAudio();
+            let text = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("a final result");
+            println!("heard: {text}");
+            assert!(!text.starts_with("error"), "{text}");
+            assert!(
+                text.to_lowercase().starts_with(&first.to_lowercase()),
+                "the pre-roll's first word is missing: {text}"
+            );
+        }
+    }
+
     /// The tap's own buffer step against the real microphone for ~1.2 s:
     /// CoreAudio's buffers fill the 300 ms ring and the meter yields ~20
     /// levels a second. Prints the levels and the output route. Needs

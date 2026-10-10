@@ -537,6 +537,28 @@ pub async fn whisper_install(
     Ok(())
 }
 
+/// A 16 kHz, 16-bit mono WAV as `f32` samples (skips any chunk but `data`).
+#[cfg(test)]
+pub(crate) fn read_wav_16k(path: &str) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        if &bytes[at..at + 4] == b"fmt " {
+            let rate = u32::from_le_bytes(bytes[at + 12..at + 16].try_into().unwrap());
+            assert_eq!(rate, WHISPER_SAMPLE_RATE, "{path}");
+        }
+        if &bytes[at..at + 4] == b"data" {
+            return bytes[at + 8..(at + 8 + len).min(bytes.len())]
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                .collect();
+        }
+        at += 8 + len + (len & 1);
+    }
+    panic!("no data chunk in {path}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -715,7 +737,9 @@ mod tests {
     /// each model bare (no gate, guards or prompt — the old path), gated and
     /// guarded without a prompt, and with the vocabulary prompt too (the
     /// shipping path). `REDLINE_WHISPER_ONLY` and `REDLINE_WHISPER_VARIANTS`
-    /// (comma lists) narrow the models and variants.
+    /// (comma lists) narrow the models and variants, and
+    /// `REDLINE_WHISPER_PROMPT_FILE` replaces the built prompt with a file's
+    /// text, to compare prompt formats.
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "needs the Whisper models and a spoken test set"]
@@ -729,7 +753,10 @@ mod tests {
         let models = PathBuf::from(env("REDLINE_WHISPER_MODELS"));
         let mut out = std::fs::File::create(env("REDLINE_WHISPER_OUT")).unwrap();
         let listed = |k: &str, v: &str| std::env::var(k).map_or(true, |l| l.split(',').any(|x| x == v));
-        let prompt = vocab_prompt(&vocab);
+        let prompt = match std::env::var("REDLINE_WHISPER_PROMPT_FILE") {
+            Ok(path) => Some(std::fs::read_to_string(path).unwrap()),
+            Err(_) => vocab_prompt(&vocab),
+        };
         for model in MODELS {
             if !listed("REDLINE_WHISPER_ONLY", model.id) {
                 continue;
@@ -764,27 +791,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// A 16 kHz, 16-bit mono WAV as `f32` samples (skips any chunk but `data`).
-    #[cfg(target_os = "macos")]
-    fn read_wav_16k(path: &str) -> Vec<f32> {
-        let bytes = std::fs::read(path).unwrap();
-        let mut at = 12;
-        while at + 8 <= bytes.len() {
-            let len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
-            if &bytes[at..at + 4] == b"fmt " {
-                let rate = u32::from_le_bytes(bytes[at + 12..at + 16].try_into().unwrap());
-                assert_eq!(rate, WHISPER_SAMPLE_RATE, "{path}");
-            }
-            if &bytes[at..at + 4] == b"data" {
-                return bytes[at + 8..(at + 8 + len).min(bytes.len())]
-                    .chunks_exact(2)
-                    .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
-                    .collect();
-            }
-            at += 8 + len + (len & 1);
-        }
-        panic!("no data chunk in {path}");
     }
 }
