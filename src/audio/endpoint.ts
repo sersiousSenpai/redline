@@ -172,9 +172,21 @@ export class Endpointer {
     this.through = through;
   }
 
-  /** The reply started or stopped sounding. */
+  /** The reply started or stopped sounding. One that sounds while the floor
+   *  is the user's (read-aloud, a replay, a typed turn's reply) takes it:
+   *  where the mic would hear it, what they have said so far goes out as
+   *  their turn first; with nothing said, there's no turn of theirs to carry
+   *  on. */
   agentAudible(audible: boolean): void {
     this.audible = audible;
+    if (audible && this.floor === "user") {
+      if (words(this.text) === 0 && !this.resumed) {
+        this.floor = "agent";
+        this.endedAt = -Infinity;
+      } else if (this.through !== "reply") {
+        this.finish("send-now");
+      }
+    }
     if (audible && this.deaf()) this.clear();
   }
 
@@ -193,9 +205,10 @@ export class Endpointer {
   }
 
   /** "Send now" from a tap: the turn ends at once if they have said
-   *  anything. */
+   *  anything — heard, if not yet written (the turn goes out as the
+   *  recognizer's final transcript, which has it). */
   sendNow(): void {
-    if (this.floor === "user" && words(this.text) > 0) this.finish("send-now");
+    if (this.floor === "user" && (words(this.text) > 0 || this.lastVoice !== null)) this.finish("send-now");
   }
 
   /** Whether the mic should still be open: false once the reply plays on
@@ -234,6 +247,10 @@ export class Endpointer {
   /** The live transcript of the current utterance. */
   partial(text: string): void {
     if (this.deaf()) return;
+    // The agent's floor, and no voice since: the recognizer rewriting the
+    // turn that just ended (a full stop, a capital) before the next starts,
+    // never someone talking over the reply.
+    if (this.floor === "agent" && this.lastVoice === null) return;
     const next = text.trim();
     if (next === this.text) return;
     this.text = next;

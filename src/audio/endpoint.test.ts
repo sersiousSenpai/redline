@@ -155,6 +155,15 @@ describe("the user's turn ends", () => {
     tap.say(600, "rename it and");
     tap.ep.sendNow();
     expect(tap.ends.map((e) => [e.text, e.reason])).toEqual([["rename it and", "send-now"]]);
+    // Before anything is said, a tap does nothing; once a voice is heard it
+    // sends, though the recognizer hasn't written a word of it yet.
+    const early = harness();
+    early.quiet(300);
+    early.ep.sendNow();
+    expect(early.ends).toEqual([]);
+    early.say(500);
+    early.ep.sendNow();
+    expect(early.ends.map((e) => [e.text, e.reason])).toEqual([["", "send-now"]]);
   });
 
   it(`at the cap when the words stop changing under a mic that never goes quiet`, () => {
@@ -227,6 +236,26 @@ describe("after the turn ends", () => {
     expect(stop.log.slice(1)).toEqual([`barge@${stop.now()}`]);
   });
 
+  it("a late rewrite of the words just sent is not someone talking over the reply", () => {
+    const h = harness();
+    h.say(1000, "rename the panel");
+    h.quiet(END_SILENCE_MS);
+    // The recognizer re-punctuates the finished utterance a beat after it
+    // ended, before the next one starts: no voice came with it.
+    h.ep.partial("Rename the panel.");
+    h.quiet(300);
+    expect(h.log).toEqual([`end@${h.now() - 300}`]);
+    // So speaking again still carries the turn on.
+    h.say(150);
+    expect(h.log.slice(1)).toEqual([`resume@${h.now()}`]);
+    h.say(600, "to TalkPanel");
+    h.quiet(END_SILENCE_MS);
+    expect(h.ends.map((e) => [e.text, e.resumed])).toEqual([
+      ["rename the panel", false],
+      ["to TalkPanel", true],
+    ]);
+  });
+
   it("a typed turn's reply has no turn of theirs to carry on", () => {
     const h = harness();
     h.ep.replyStarted();
@@ -282,6 +311,44 @@ describe("where the reply plays", () => {
     h.quiet(END_SILENCE_MS);
     h.say(500, "Actually no");
     expect(h.log.slice(1)).toEqual([`drop@${h.now() - 500}`, `barge@${h.now()}`]);
+  });
+
+  it("a reply that sounds while the floor is theirs takes it: read-aloud, a replay, a typed turn's", () => {
+    // Nothing said (a cough at most): on speakers, deaf at once.
+    for (const before of [() => {}, (h: ReturnType<typeof harness>) => h.say(300)]) {
+      const h = harness();
+      h.ep.setListenThrough("thinking");
+      h.quiet(500);
+      before(h);
+      h.quiet(200);
+      h.ep.agentAudible(true);
+      expect(h.ep.listening).toBe(false);
+      h.say(2000, "Here is the plan, section by section");
+      h.quiet(END_SILENCE_MS);
+      expect(h.log).toEqual([]);
+    }
+    // Mid-sentence on speakers: what they said goes out before the mic would
+    // hear the reply.
+    const mid = harness();
+    mid.ep.setListenThrough("thinking");
+    mid.say(1000, "rename the panel");
+    mid.ep.agentAudible(true);
+    expect(mid.ends.map((e) => e.text)).toEqual(["rename the panel"]);
+    expect(mid.ep.listening).toBe(false);
+    // On wired headphones the mic can't hear it: nothing said, two words
+    // interrupt it; mid-sentence, they carry on.
+    const quiet = harness();
+    quiet.ep.setListenThrough("reply");
+    quiet.ep.agentAudible(true);
+    quiet.say(600, "wait what");
+    expect(quiet.log).toEqual([`barge@${quiet.now()}`]);
+    const talking = harness();
+    talking.ep.setListenThrough("reply");
+    talking.say(1000, "rename the panel");
+    talking.ep.agentAudible(true);
+    talking.say(500, "rename the panel to TalkPanel");
+    talking.quiet(END_SILENCE_MS);
+    expect(talking.ends.map((e) => e.text)).toEqual(["rename the panel to TalkPanel"]);
   });
 
   it("on a Bluetooth headset: not past the turn", () => {

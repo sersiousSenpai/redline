@@ -806,6 +806,24 @@ describe("hands-free", () => {
     expect(host.textContent).not.toContain("You were interrupted");
   });
 
+  it("closes the mic on speakers when read-aloud starts while it listens, and opens it again after", async () => {
+    await mount();
+    await handsFreeOn();
+    expect(script.micOpen).toBe(true);
+    await act(async () => button("▸ Read it to me").click());
+    await wait();
+    expect(utterances).not.toHaveLength(0);
+    // From the reading's first sound the mic is closed: it never hears it.
+    expect(script.micOpen).toBe(false);
+    await levels(-26, 2000);
+    await emit("dictation-partial", { text: "Plan. Body." });
+    await room(1000);
+    expect(sends()).toEqual([]);
+    await finishSpeech();
+    await wait(400);
+    expect(script.micOpen).toBe(true);
+  });
+
   it("on wired headphones keeps listening through the reply, where two words interrupt it", async () => {
     script.route = { kind: "headphones", transport: "builtin" };
     await mount();
