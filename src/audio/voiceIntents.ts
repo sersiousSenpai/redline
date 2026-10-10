@@ -64,9 +64,13 @@ const SENTENCE_END = /[.!?]["')\]]?\s+|\n+/g;
 
 /** "Bullet fix the tray. Bullet fix the pin." → two list items. A bullet
  *  opens a sentence; what follows it, up to the next bullet or break, is its
- *  item. List items drop the period a recognizer puts on them. */
+ *  item. Once a list has begun, a later "bullet" opens the next item wherever
+ *  the recognizer put it — after a comma, or with no punctuation at all —
+ *  unless it is the noun ("the bullet points"). List items drop the period
+ *  (or comma) a recognizer puts on them. */
 function bullets(text: string): string {
   if (!/(?:^|[.!?\n]\s*)bullet\b/i.test(text)) return text;
+  text = text.replace(/([^\s.!?])[\s,;:]+(bullet\b(?!\s+points?\b|\s+list\b))/gi, "$1. $2");
   const pieces: string[] = [];
   let last = 0;
   for (const m of text.matchAll(SENTENCE_END)) {
@@ -87,7 +91,7 @@ function bullets(text: string): string {
       out += (out ? "\n" : "") + "- ";
       inItem = true;
     }
-    if (inItem) piece = piece.replace(/\.(\s*)$/, "$1");
+    if (inItem) piece = piece.replace(/[.,;:](\s*)$/, "$1");
     out += piece;
     if (breaks) inItem = false;
   }
@@ -105,6 +109,8 @@ export function layoutCommands(text: string): string {
     .replace(/\u0001(\p{Ll})?/gu, (_, c?: string) => (c ? c.toUpperCase() : ""));
   // The sentence before keeps its period; the one the recognizer put after
   // the command goes.
+  // A recognizer that fuses the command onto the word after it: "BulletFix".
+  t = t.replace(/\bBullet(?=\p{Lu}\p{Ll})/gu, "Bullet ");
   t = t.replace(/[\s,;:]*\bnew paragraph\b[\s,.;:]*/gi, "\n\n");
   t = t.replace(/[\s,;:]*\bnew ?line\b[\s,.;:]*/gi, "\n");
   t = t.replace(/\n(\p{Ll})/gu, (_, c: string) => "\n" + c.toUpperCase());

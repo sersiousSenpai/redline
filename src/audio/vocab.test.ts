@@ -103,6 +103,13 @@ describe("buildVocab", () => {
   });
 });
 
+describe("a code name the prose also says as words", () => {
+  it("is left out, so \"the browser chat\" is never joined into the identifier", () => {
+    const plan = "The browser chat gets a panel. Its layer lives in `src/lib/browserChat/` beside `useStickToBottom`.";
+    expect(planVocab(plan).code).toEqual(["useStickToBottom"]);
+  });
+});
+
 describe("the memory index's names", () => {
   it("keeps what a class title capitalizes for its own sake, ranked after everything else", () => {
     const memory = memoryVocab(["Voice agent and Kokoro warm-up", "Front Door return", "Polis extraction via MCP", "useStickToBottom pins"]);

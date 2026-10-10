@@ -33,7 +33,7 @@ import { DictationStrip, STRIP_BARS, levelHeight, strip, type StripAnchor, type 
 import { composerGone, setDictationLive } from "../lib/dictationComposer";
 import { quietFor } from "./audible";
 import { broker as appBroker, type DictationBroker } from "./dictationBroker";
-import { cleanupDictation, fitToContext } from "./dictationCleanup";
+import { cleanupDictation, fitToContext, spokenBreaks } from "./dictationCleanup";
 import { cleanupChild, polished, polishEnabled, POLISH_SETTLE_MS, wantsPolish, type PolishEngine } from "./dictationPolish";
 import {
   canSend,
@@ -227,7 +227,7 @@ export class DictationHost {
       }
     }
     try {
-      await this.place(s, text.trim());
+      await this.place(s, text);
     } finally {
       this.end(s);
     }
@@ -311,10 +311,11 @@ export class DictationHost {
     this.end(s);
   }
 
-  private async place(s: Session, text: string): Promise<void> {
+  private async place(s: Session, said: string): Promise<void> {
     const heldMs = s.mode === "hold" ? Date.now() - s.since : null;
+    const text = said.trim();
     // A tap, a cough, a breath: the transcriber's filler is not words.
-    if (isNonSpeech({ text, heldMs, heard: s.heard })) return this.notice("Didn't catch that");
+    if (isNonSpeech({ text: spokenBreaks(said).trim(), heldMs, heard: s.heard })) return this.notice("Didn't catch that");
     if (s.target.kind === "turn") {
       if (s.talk) return this.sendTurn(s.talk, text);
       return this.nowhere(text, "No text box to type into");
@@ -324,7 +325,8 @@ export class DictationHost {
     // them (the door's draft), else offered for copying.
     const keep = el && !el.isConnected ? s.composer?.spec.keep : undefined;
     if (el && !el.isConnected && !keep) return this.nowhere(text, "The text box closed");
-    const intents = readIntents(text, { canSend: !keep && canSend(s.target) });
+    // Breaks the recognizer wrote itself go through as the commands they are.
+    const intents = readIntents(spokenBreaks(said).trim(), { canSend: !keep && canSend(s.target) });
     // "Scratch that" and "undo" act on the last dictation into this field.
     for (const edit of intents.edits) if (this.last && this.last.el === el) this.last.takeBack(edit === "undo");
     const cleaned = cleanupDictation(intents.text, { vocab: s.vocab, pairs: this.store.pairs });

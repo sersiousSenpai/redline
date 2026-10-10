@@ -61,6 +61,16 @@ describe("layoutCommands", () => {
     expect(layoutCommands("Two things. Bullet point, the tray. Bullet the pin.")).toBe("Two things.\n- The tray\n- The pin");
   });
 
+  it("opens the next item wherever a recognizer put the next bullet (the shared set's p34)", () => {
+    const items = "- Fix the queue tray\n- Fix the scroll pin";
+    expect(layoutCommands("Bullet fix the queue tray, Bullet fix the scroll pin.")).toBe(items);
+    expect(layoutCommands("BulletFix the queue tray, BulletFix the scroll pin,")).toBe(items);
+    expect(layoutCommands("Bullet fix the queue tray bullet fix the scroll pin")).toBe(items);
+    // The noun is no command.
+    expect(layoutCommands("Bullet make the bullet points smaller.")).toBe("- Make the bullet points smaller");
+    expect(layoutCommands("Fix the bullet list, and the bullet spacing.")).toBe("Fix the bullet list, and the bullet spacing.");
+  });
+
   it("drops the clause before a mid-utterance scratch that (p32's correction, said in one go)", () => {
     expect(layoutCommands("Make it three hundred milliseconds, scratch that, make it seven hundred.")).toBe(
       "Make it seven hundred.",

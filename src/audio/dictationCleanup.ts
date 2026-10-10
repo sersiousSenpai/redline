@@ -299,9 +299,16 @@ function tidy(text: string): string {
     .replace(/\n(- )?(\p{Ll})/gu, (_, dash = "", c: string) => "\n" + dash + c.toUpperCase());
 }
 
+/** Breaks a recognizer wrote itself (the on-device one writes "new
+ *  paragraph" as one), said back as the commands that make them, so the
+ *  rules below keep them where they were. */
+export function spokenBreaks(raw: string): string {
+  return raw.replace(/[ \t]*\n{2,}[ \t]*/g, " new paragraph ").replace(/[ \t]*\n[ \t]*/g, " new line ");
+}
+
 /** The first tier: rules only (see the top of the file). */
 export function cleanupDictation(raw: string, opts: CleanupOptions = {}): string {
-  let t = raw.replace(/\s+/g, " ").trim();
+  let t = spokenBreaks(raw).replace(/\s+/g, " ").trim();
   for (const { heard, meant } of opts.pairs ?? []) {
     const words = heard.trim().split(/\s+/);
     if (words[0]) t = replacePhrase(t, words, () => meant);

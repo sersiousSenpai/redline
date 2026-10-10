@@ -187,6 +187,13 @@ describe("dictating into a composer", () => {
     expect(shown()).toBe("The Front Door keeps Kokoro warm");
   });
 
+  it("keeps a paragraph break the recognizer wrote itself", async () => {
+    const { shown } = await composer();
+    await hold("The first phase ships the door.");
+    await hold("\n\nThe second phase adds the studio voice");
+    expect(shown()).toBe("The first phase ships the door.\n\nThe second phase adds the studio voice");
+  });
+
   it("writes nothing for a tap's worth of nothing", async () => {
     const { shown } = await composer();
     await hold("you", { heard: false });

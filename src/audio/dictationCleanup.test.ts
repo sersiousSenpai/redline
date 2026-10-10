@@ -2,13 +2,13 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 
-import { cleanupDictation, fitToContext } from "./dictationCleanup";
+import { cleanupDictation, fitToContext, spokenBreaks } from "./dictationCleanup";
 import { readIntents } from "./voiceIntents";
 import { buildVocab, VOCAB_CAP } from "./vocab";
 
 /** What a release writes into a field with `before` ahead of the caret. */
 const dictate = (said: string, before = "", vocab: string[] = []) =>
-  fitToContext(cleanupDictation(readIntents(said, { canSend: false }).text, { vocab }), before);
+  fitToContext(cleanupDictation(readIntents(spokenBreaks(said), { canSend: false }).text, { vocab }), before);
 
 describe("the spoken forms of the shared test set", () => {
   it("p32: a correction in digits", () => {
@@ -20,6 +20,11 @@ describe("the spoken forms of the shared test set", () => {
       "\n\nThe second phase adds the studio voice.",
     );
     expect(dictate("New paragraph. The second phase adds the studio voice.")).toBe("The second phase adds the studio voice.");
+    // The on-device recognizer writes the break itself.
+    expect(dictate("\n\nThe second phase adds the studio voice", "The first phase ships the door.")).toBe(
+      "\n\nThe second phase adds the studio voice",
+    );
+    expect(dictate("first line\nsecond line")).toBe("First line\nSecond line");
   });
 
   it("p34: list items on their own lines", () => {

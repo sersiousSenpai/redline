@@ -173,6 +173,14 @@ export function planVocab(markdown: string): PlanVocab {
   for (const key of named.keys()) if (!midSentence.has(key)) named.delete(key);
   // "SIZE", "USER": a heading's capitals, not an acronym.
   for (const key of acronyms.keys()) if (ordinary(key)) acronyms.delete(key);
+  // `browserChat` where the prose also says "browser chat": the words are how
+  // people talk, and a recognizer (or the rules) told the name would join
+  // them into it.
+  const spoken = prose.toLowerCase();
+  for (const [key, { term }] of code) {
+    const words = term.split(/(?=[A-Z])/).map((w) => w.toLowerCase());
+    if (/^[a-z]/.test(term) && words.length > 1 && new RegExp(`\\b${words.join("\\s+")}\\b`).test(spoken)) code.delete(key);
+  }
   return { names: ranked(named), code: ranked(code), acronyms: ranked(acronyms), files: ranked(files) };
 }
 
