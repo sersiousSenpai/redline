@@ -95,7 +95,8 @@ it, that's the discussion to have before merging.
    `#[tauri::command(async)]` (or a genuinely `async fn`) also works, but it
    builds a tokio task for each command's own future type, about **11 KB of
    release binary per command** (measured 2026-10-09: 29 commands cost
-   331,248 B), and the binary has no room for that. Either way, two calls can finish out of
+   331,248 B; 2026-10-10: moving the 18 Bookshelf commands to the pool saved
+   149,024 B), and the binary has no room for that. Either way, two calls can finish out of
    order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
    instead: each call takes a ticket as it arrives and runs on the pool when
    its turn comes, one at a time (`save_workspace`: every gesture saves

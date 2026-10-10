@@ -95,8 +95,14 @@ fn remove_source_dir(app: &tauri::AppHandle, draft_id: &str) {
 // ---------------------------------------------------------------------------
 // Documents
 // ---------------------------------------------------------------------------
+//
+// Every command below touches SQLite (the two deletes cascade across five
+// tables, the source imports read and copy files), so none may run on the
+// WebView main thread. They are sync in shape and run on the blocking pool by
+// name: each is listed in `OFF_MAIN_COMMANDS` (lib.rs), which costs a string
+// where `(async)` cost ~11 KB of release binary a command.
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_list(store: tauri::State<'_, SessionStore>) -> Result<Shelf, String> {
     let db = store.database();
     Ok(Shelf {
@@ -116,7 +122,7 @@ pub fn bookshelf_list(store: tauri::State<'_, SessionStore>) -> Result<Shelf, St
 /// are deliberately NOT copied — a template yields a clean document. Block ids
 /// (`blk-…`) copy as-is: they are scoped per draft, and `DraftBlockIds`
 /// only mints ids that are missing.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_new_draft(
     store: tauri::State<'_, SessionStore>,
     folder_id: Option<String>,
@@ -160,7 +166,7 @@ pub fn bookshelf_new_draft(
 }
 
 /// Flip a document's template flag (the shelf's ★ toggle).
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_set_template(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -175,7 +181,7 @@ pub fn bookshelf_set_template(
 /// Count one open of a document — the documents dropdown's FREQUENT signal.
 /// Called once per open, never per keystroke and never on activation-switch
 /// of an already-open document.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_touch_draft(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -186,7 +192,7 @@ pub fn bookshelf_touch_draft(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_rename_draft(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -202,7 +208,7 @@ pub fn bookshelf_rename_draft(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_move_draft(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -216,7 +222,7 @@ pub fn bookshelf_move_draft(
 
 /// What deleting this document would destroy — the numbers the confirm dialog
 /// names before anything goes.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_draft_impact(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -230,7 +236,7 @@ pub fn bookshelf_draft_impact(
 /// Delete a document and its cascade. Not idempotent, no undo, and it destroys
 /// the only copy of the document — the caller gates it behind a typed-title
 /// confirm naming exactly what goes.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_delete_draft(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -267,7 +273,7 @@ pub struct MigrationOutcome {
 /// and is left untouched, so the TipTap JSON is the only thing at risk, and it
 /// is written before the flag is set. A failure part-way leaves the flag unset
 /// and the next launch retries.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_migrate_local(
     store: tauri::State<'_, SessionStore>,
     draft_id: Option<String>,
@@ -313,7 +319,7 @@ pub fn bookshelf_migrate_local(
 // Folders
 // ---------------------------------------------------------------------------
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_create_folder(
     store: tauri::State<'_, SessionStore>,
     parent_id: Option<String>,
@@ -331,7 +337,7 @@ pub fn bookshelf_create_folder(
     Ok(folder_id)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_rename_folder(
     store: tauri::State<'_, SessionStore>,
     folder_id: String,
@@ -349,7 +355,7 @@ pub fn bookshelf_rename_folder(
 
 /// Reparent a folder. Rejects a move into the folder's own subtree — see
 /// `db::folder_move_rejection`, where the rule is a pure, tested function.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_move_folder(
     store: tauri::State<'_, SessionStore>,
     folder_id: String,
@@ -360,7 +366,7 @@ pub fn bookshelf_move_folder(
         .move_folder(&folder_id, parent_id.as_deref())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_folder_impact(
     store: tauri::State<'_, SessionStore>,
     folder_id: String,
@@ -371,7 +377,7 @@ pub fn bookshelf_folder_impact(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn bookshelf_delete_folder(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -393,7 +399,7 @@ pub fn bookshelf_delete_folder(
 
 /// Attach a non-file source: a captured `browse_events` page, a
 /// `mission_findings` row, a bare URL, or a digest the agent wrote.
-#[tauri::command(async)]
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn draft_source_add(
     store: tauri::State<'_, SessionStore>,
@@ -431,7 +437,7 @@ pub fn draft_source_add(
 /// Reuses `fsbrowse`'s attachment discipline: copy at capture time (a source
 /// the user later moves or trashes would break silently), sanitize the
 /// basename, and refuse anything over the 16 MB cap.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn draft_source_import_file(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -488,7 +494,7 @@ pub fn draft_source_import_file(
         .ok_or_else(|| "the source vanished on write".to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn draft_source_list(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -502,7 +508,7 @@ pub fn draft_source_list(
 /// Detach a source. A file-backed one takes its file with it — orphaned bytes
 /// under app data are exactly the sync surface the "documents only" rule exists
 /// to avoid.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn draft_source_delete(
     app: tauri::AppHandle,
     store: tauri::State<'_, SessionStore>,

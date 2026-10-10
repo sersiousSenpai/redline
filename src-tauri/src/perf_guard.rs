@@ -185,22 +185,28 @@ mod tests {
     }
 
     /// Every Bookshelf command touches SQLite, and the two delete commands
-    /// cascade across five tables. None may run on the WebView main thread.
+    /// cascade across five tables. None may run on the WebView main thread:
+    /// each is sync in shape and runs on the blocking pool by name.
     #[test]
-    fn bookshelf_commands_stay_async() {
+    fn bookshelf_commands_stay_off_the_main_thread() {
         let src = include_str!("bookshelf.rs");
-        for func in [
-            "bookshelf_list",
-            "bookshelf_migrate_local",
-            "bookshelf_new_draft",
-            "bookshelf_set_template",
-            "bookshelf_touch_draft",
-            "bookshelf_delete_draft",
-            "bookshelf_delete_folder",
-            "draft_source_import_file",
-        ] {
-            assert_async_command(src, "bookshelf.rs", func);
+        let off_main = crate::codehealth::off_main_commands(include_str!("lib.rs"));
+        let commands: Vec<&str> = src
+            .split("#[tauri::command]")
+            .skip(1)
+            .filter_map(|after| after.split("pub fn ").nth(1)?.split('(').next())
+            .collect();
+        for known in ["bookshelf_list", "bookshelf_delete_folder", "draft_source_import_file"] {
+            assert!(commands.contains(&known), "bookshelf.rs: the command scan missed `{known}`");
         }
+        for func in commands {
+            assert!(
+                off_main.iter().any(|name| name == func),
+                "bookshelf.rs: `{func}` must be in OFF_MAIN_COMMANDS — it must not run on \
+                 the WebView main thread (see docs/perf-budget.md)"
+            );
+        }
+        assert!(!src.contains("#[tauri::command(async)]"), "bookshelf.rs: the pool route costs a string, `(async)` ~11 KB");
     }
 
     /// `memory_status` backs the memory pill: a 60s poll, plus a re-read on

@@ -12542,10 +12542,29 @@ fn install_skill() -> Result<SkillStatus, String> {
 /// doesn't belong here or in `(async)`: two calls can finish out of order.
 /// It goes in `IN_ORDER_COMMANDS`.
 const OFF_MAIN_COMMANDS: &[&str] = &[
+    // The Bookshelf: every command touches SQLite, and the deletes cascade.
+    "bookshelf_create_folder",
+    "bookshelf_delete_draft",
+    "bookshelf_delete_folder",
+    "bookshelf_draft_impact",
+    "bookshelf_folder_impact",
+    "bookshelf_list",
+    "bookshelf_migrate_local",
+    "bookshelf_move_draft",
+    "bookshelf_move_folder",
+    "bookshelf_new_draft",
+    "bookshelf_rename_draft",
+    "bookshelf_rename_folder",
+    "bookshelf_set_template",
+    "bookshelf_touch_draft",
     "build_plan_snapshot",
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    "draft_source_add",
+    "draft_source_delete",
+    "draft_source_import_file",
+    "draft_source_list",
     // A launch handoff polls it until the run leaves `orchestrating`.
     "get_run_state",
     "get_session",
