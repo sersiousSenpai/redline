@@ -1427,6 +1427,11 @@ function VoicePanelBase({
               autoAddArmedRef.current = true;
               if (!playbackRef.current?.busy()) streamRef.current.runAutoAdd();
             }
+          } else if (explicitRef.current.size) {
+            // Its speech was silenced (settings opened over it): nobody heard
+            // the read-back, so the item waits for a tap — and must not ride
+            // along with the next reply's.
+            setExplicit(new Set());
           }
           dispatch({ type: "end", id });
         }),

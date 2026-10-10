@@ -600,6 +600,22 @@ describe("feedback captures", () => {
     expect(button("＋ Add as item")).toBeTruthy();
   });
 
+  it("never adds an explicit capture whose read-back was silenced, not even after the next reply", async () => {
+    await mount();
+    await summarize();
+    await emit("comment-offer", offer("o1", true));
+    // Settings opened mid-turn silence the reply, read-back included.
+    await act(async () => button("Voice settings").click());
+    await emit("voice-done", { ...of(1), body: "Adding a configurable timeout to Rollout.", messageId: "m1" });
+    await act(async () => button("Voice settings").click());
+    await type("And the risks?");
+    await submit();
+    await emit("voice-done", { ...of(2), body: "Mainly replay.", messageId: "m2" });
+    await finishSpeech();
+    expect(named("comment_offer_add")).toEqual([]);
+    expect(button("＋ Add as item")).toBeTruthy();
+  });
+
   it("takes a spoken yes to an offered item without making it a turn", async () => {
     await mount();
     await summarize();
