@@ -4111,7 +4111,8 @@ function App() {
             showing: doorLaunchRef.current,
             draft: getFrontDoorText(),
             attachments: frontDoorAttachmentsRef.current.length,
-          }, payload.launchId),
+            typedAt: typedAtRef.current,
+          }, payload.launchId, Date.now()),
         });
         if (focus === "handoff") {
           // The plan you launched with ⏎ from the door you are still in: that
@@ -7494,6 +7495,7 @@ function App() {
     setFrontDoorAttachments([]);
     setFrontDoorCombine([]);
     setCombinePreview(null);
+    return r.launchId;
   };
 
   // ── What the island attaches ───────────────────────────────────────────
@@ -7569,7 +7571,9 @@ function App() {
     // on top of them rather than the thing being launched. The plans are its
     // context, so the chips sit this one out.
     if (mode === "plan" && frontDoorCombine.length > 0) {
-      await launchCombine(projectOverride);
+      const launchId = await launchCombine(projectOverride);
+      // Launched from the open door, it is handed off into like any plan.
+      if (launchId && frontDoorOpenRef.current) doorLaunchRef.current = launchId;
       return;
     }
     const text = getFrontDoorText(), attachments = frontDoorAttachments;

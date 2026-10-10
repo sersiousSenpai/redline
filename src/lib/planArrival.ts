@@ -61,14 +61,18 @@ export interface DoorAtArrival {
   /** What is in its composer now. */
   draft: string;
   attachments: number;
+  /** When a key was last typed into a text field (`isWritingKey`). */
+  typedAt: number;
 }
 
 /** Whether a plan arriving as `launchId` is the user's own launch from the
  *  door, which is still open on it with nothing new begun: no sentence or
- *  attachment put in the composer since. A new draft keeps the door, and the
+ *  attachment put in the composer since, and no key typed there in the last
+ *  WRITING_MS — someone who typed and cleared a sentence, or is mid-word in
+ *  an input method, is still composing. A new draft keeps the door, and the
  *  plan flashes like any other. */
-export function ownDoorLaunch(door: DoorAtArrival, launchId: string | null | undefined): boolean {
-  return door.open && !!launchId && door.showing === launchId && !door.draft.trim() && door.attachments === 0;
+export function ownDoorLaunch(door: DoorAtArrival, launchId: string | null | undefined, now: number): boolean {
+  return door.open && !!launchId && door.showing === launchId && !door.draft.trim() && door.attachments === 0 && now - door.typedAt >= WRITING_MS;
 }
 
 /** How long a keystroke keeps someone writing, as far as an arrival goes. */

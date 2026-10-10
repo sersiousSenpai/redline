@@ -35,7 +35,7 @@ describe("a plan arriving while you are busy flashes", () => {
   it("hands off into the plan you launched from the door you are still in, and only that one", () => {
     // The rule is planArrival's (`ownDoorLaunch`), read at the moment it lands.
     const focus = arrival.slice(arrival.indexOf("const focus = arrivalFocus({"), arrival.indexOf('if (focus === "handoff")'));
-    expect(focus).toMatch(/ownDoorLaunch: ownDoorLaunch\(\{\s*open: frontDoorOpenRef\.current,\s*showing: doorLaunchRef\.current,\s*draft: getFrontDoorText\(\),\s*attachments: frontDoorAttachmentsRef\.current\.length,\s*\}, payload\.launchId\)/);
+    expect(focus).toMatch(/ownDoorLaunch: ownDoorLaunch\(\{\s*open: frontDoorOpenRef\.current,\s*showing: doorLaunchRef\.current,\s*draft: getFrontDoorText\(\),\s*attachments: frontDoorAttachmentsRef\.current\.length,\s*typedAt: typedAtRef\.current,\s*\}, payload\.launchId, Date\.now\(\)\)/);
     // The door closes into the plan, which springs out of its composer, and
     // says so; nothing else of the door's is touched.
     const block = handoff();
@@ -46,9 +46,13 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(block).toContain("focusIntercepted();");
     expect(block).toContain("announceDoor(arrivalMessage(title));");
     expect(block).not.toMatch(/setDoorCompact\(|tripDoor\(|setFrontDoorText\(/);
-    // Only ⏎ in the OPEN door marks its launch, and a chat taken up there
-    // since lets the plan land like any other.
-    expect(between("const launchFromFrontDoor = async", "} finally {")).toContain('if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;');
+    // Only ⏎ in the OPEN door marks its launch — a combination of plans as
+    // much as a sentence — and a chat taken up there since lets the plan land
+    // like any other.
+    const launch = between("const launchFromFrontDoor = async", "} finally {");
+    expect(launch).toContain('if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;');
+    expect(launch).toMatch(/const launchId = await launchCombine\(projectOverride\);\s*(\/\/.*\s*)*if \(launchId && frontDoorOpenRef\.current\) doorLaunchRef\.current = launchId;/);
+    expect(between("const launchCombine = async", "\n  };")).toContain("return r.launchId;");
     expect(between("const openChat = (id: string) => {", "};")).toContain("doorLaunchRef.current = null;");
     expect(between("const chatFromFrontDoor = async () => {", "setFrontDoorOpen(true);")).toContain("doorLaunchRef.current = null;");
     expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).toContain("handoff={doorHandoff}");
