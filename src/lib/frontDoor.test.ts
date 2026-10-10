@@ -392,8 +392,9 @@ describe("the room's chat is carried, never closed", () => {
     expect(carry).toContain("if (frontDoorOpen || !chatInRoom) return;");
     expect(carry).toContain('setConversationPin("companion");');
     expect(carry).toContain("openDock();");
-    // Never over the surface's own conversation already in the dock.
-    expect(carry).toContain("if (!chatId || dockOpen) return;");
+    // Never over the surface's own conversation already in the dock, and
+    // never as a pin on a surface with no dock to show it.
+    expect(carry).toContain("if (!chatId || dockOpen || !dockScopeRef.current) return;");
     // Nor lost when the door shut while the chat was still being minted.
     expect(carry).toContain("}, [frontDoorOpen, chatInRoom]);");
   });
@@ -401,6 +402,15 @@ describe("the room's chat is carried, never closed", () => {
   it("putting the dock away hands the column back to the surface's own conversation", () => {
     const close = app.slice(app.indexOf("const closeDock = useCallback("), app.indexOf("const openDock = useCallback("));
     expect(close).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
+  });
+
+  it("the Discuss pill opens the plan's own discussion, never a carried chat", () => {
+    // The carry's pin outlives a home dock shut by walking to a plan; voice
+    // stays first-class, so the pill drops it before it opens the column.
+    const discuss = app.slice(app.indexOf("const openDiscussion = useCallback("), app.indexOf("}, [setConversationPin, openDock]);"));
+    expect(discuss).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
+    expect(discuss).toContain("openDock();");
+    expect(app).toMatch(/<DiscussPill\s+onClick=\{openDiscussion\}/);
   });
 });
 

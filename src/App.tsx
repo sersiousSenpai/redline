@@ -4885,6 +4885,13 @@ function App() {
     setConversationPin(pin => (pin === "companion" ? null : pin));
   }, [setConversationPin]);
   const openDock = useCallback(() => setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true)), []);
+  // The Discuss pill opens the plan's own discussion — its voice — never a
+  // chat carried out of the door's room that rides along beside it. A pin
+  // left by that carry (the home dock shut by walking to a plan) is dropped.
+  const openDiscussion = useCallback(() => {
+    setConversationPin(pin => (pin === "companion" ? null : pin));
+    openDock();
+  }, [setConversationPin, openDock]);
   // Which of the browser pane's four panels the dock is showing, in the pane's
   // own vocabulary. Null whenever the column is closed or holding another
   // surface's conversation — which is exactly when the pane must not portal.
@@ -8171,7 +8178,8 @@ function App() {
   useEffect(() => {
     if (frontDoorOpen || !chatInRoom) return;
     setChatInRoom(false);
-    if (!chatId || dockOpen) return;
+    // A surface with no dock has nowhere to show it: no pin is left behind.
+    if (!chatId || dockOpen || !dockScopeRef.current) return;
     setConversationPin("companion");
     openDock();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9431,7 +9439,7 @@ function App() {
             !dockOpen &&
             dockReachable && (
               <DiscussPill
-                onClick={openDock}
+                onClick={openDiscussion}
                 // Only a plan has an article to stand clear of; the file
                 // viewer has none, and a stale ref would stow the pill against
                 // a column that isn't on screen.
