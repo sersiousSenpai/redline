@@ -151,6 +151,8 @@ pub fn run(app: AppHandle) {
                 crate::mission_capture::resume(app.clone(), store.database());
             }
         }
+        // Log it if the page's renderer bloats (docs/perf-budget.md rule 7).
+        crate::renderer_memory::watch(app);
     });
 }
 

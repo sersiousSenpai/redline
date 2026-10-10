@@ -681,9 +681,9 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         method: "GET",
         path: "/v1/perf",
         class: RouteClass::Open,
-        purpose: "The responsiveness probe's rolling input-latency and frame-gap summary, read from the main webview (docs/perf-budget.md \"Responsiveness\")",
+        purpose: "The responsiveness probe's rolling input-latency and frame-gap summary, read from the main webview (docs/perf-budget.md \"Responsiveness\"), and the renderer's footprint read from outside it (rule 7)",
         request: "query: windowMs (1000-120000, default 60000)",
-        response: "JSON {running: false}, or {running: true, snapshot: {windowMs, coveredMs, supported, input, frames, longTasks, longAnimationFrames}}",
+        response: "JSON {running: false, renderer}, or {running: true, snapshot: {windowMs, coveredMs, supported, input, frames, longTasks, longAnimationFrames}, renderer}; renderer is {pid, footprintBytes} or null. 502 {error, renderer} when the page can't answer",
     },
 ];
 

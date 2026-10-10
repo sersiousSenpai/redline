@@ -123,6 +123,7 @@ mod git_human;
 mod git_test_support;
 mod query;
 mod queue;
+mod renderer_memory;
 mod repoicon;
 mod resolutions;
 mod restore_context;
@@ -3313,7 +3314,9 @@ fn perf_probe_script(window_ms: Option<u64>) -> String {
 
 /// GET `/v1/perf?windowMs=` — the responsiveness probe's rolling input-latency
 /// and frame-gap summary (docs/perf-budget.md "Responsiveness"), read out of
-/// the main webview's `window.__rlPerf`. A release build has no Web
+/// the main webview's `window.__rlPerf`, plus the renderer's footprint read
+/// from outside it (`renderer`, rule 7) — that one even when the page can't
+/// answer, which is when it matters most. A release build has no Web
 /// Inspector, so this is how a release baseline is read;
 /// `scripts/perf-idle.sh` prints it beside the GPU and renderer samples.
 /// Pull-only: the probe runs only when switched on (always in dev, ⌘K in a
@@ -3322,9 +3325,27 @@ async fn handle_perf(
     State(app_state): State<AppState>,
     Query(q): Query<PerfQ>,
 ) -> axum::response::Response {
-    eval_json_response(
-        daemon_eval(&app_state.app_handle, "main", &perf_probe_script(q.window_ms)).await,
-    )
+    let renderer = renderer_memory::current();
+    if let Some(reading) = renderer {
+        renderer_memory::note(reading);
+    }
+    let probe = daemon_eval(&app_state.app_handle, "main", &perf_probe_script(q.window_ms))
+        .await
+        .and_then(|raw| match serde_json::from_str::<Value>(&raw) {
+            Ok(Value::Object(probe)) => Ok(probe),
+            _ => Err("the page returned no usable result".to_string()),
+        });
+    match probe {
+        Ok(mut probe) => {
+            probe.insert("renderer".into(), json!(renderer));
+            Json(probe).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error, "renderer": renderer })),
+        )
+            .into_response(),
+    }
 }
 
 /// POST `/v1/admin/shutdown` — gracefully retire this instance: answer, then

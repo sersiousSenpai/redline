@@ -429,6 +429,25 @@ mod tests {
         );
     }
 
+    /// Rule 7's readout: the renderer's footprint is watched for the life of
+    /// the app and served on `/v1/perf`. Each is one line to lose in a
+    /// refactor, and losing it is silent: the warning simply never comes.
+    #[test]
+    fn renderer_footprint_is_watched_and_served() {
+        let postboot = include_str!("postboot.rs");
+        assert!(
+            postboot.contains("crate::renderer_memory::watch(app)"),
+            "postboot.rs: start the renderer footprint watch after the reveal"
+        );
+        let lib = include_str!("lib.rs");
+        let body = &lib[lib.find("async fn handle_perf(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            body.contains("renderer_memory::current()") && body.contains("renderer_memory::note("),
+            "lib.rs: `/v1/perf` must serve the renderer footprint and note a crossing"
+        );
+    }
+
     /// PTY output must stay batched over a per-terminal raw-byte Channel — never
     /// a per-read global event (`pty-output`), which is the firehose that froze
     /// the whole app. Guard the structural markers so a refactor can't silently

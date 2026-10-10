@@ -10,7 +10,8 @@
 #     process in flushAndCollectHandles — every keystroke's frame commits
 #     behind that backlog;
 #   - each process's physical footprint;
-#   - the responsiveness probe's own numbers from GET /v1/perf, if it is on.
+#   - the responsiveness probe's own numbers from GET /v1/perf, if it is on,
+#     and the renderer footprint Redline reads for itself (`renderer`).
 #
 # Take the idle reading with the probe OFF: its frame sampler wakes the
 # renderer every frame. Touch nothing while it samples.
@@ -135,7 +136,7 @@ echo "Responsiveness probe (GET :$PORT/v1/perf, last ${SECONDS_TO_SAMPLE}s)"
 WINDOW_MS=$(( SECONDS_TO_SAMPLE * 1000 ))
 if PROBE=$(curl -s --max-time 4 "http://127.0.0.1:$PORT/v1/perf?windowMs=$WINDOW_MS"); then
   if command -v jq >/dev/null 2>&1; then
-    echo "$PROBE" | jq -c 'if .running then .snapshot | {input: .input.all, frames: (.frames | del(.histogram)), histogram: [.frames.histogram[] | "\(.upToMs // "more"):\(.n)"]} else . end'
+    echo "$PROBE" | jq -c 'if .running then {renderer} + (.snapshot | {input: .input.all, frames: (.frames | del(.histogram)), histogram: [.frames.histogram[] | "\(.upToMs // "more"):\(.n)"]}) else . end'
   else
     echo "    $PROBE"
   fi
