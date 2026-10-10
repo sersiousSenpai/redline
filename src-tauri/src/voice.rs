@@ -511,6 +511,14 @@ fn kill_proc(mut proc: VoiceProc, reason: &str) {
     let _ = proc.child.start_kill();
 }
 
+/// Kill a child whose conversation is being forgotten. A turn it was in the
+/// middle of is dropped, not kept as an interrupted reply: its reader would
+/// write that line back after `voice_forget` has wiped the transcript.
+fn forget_proc(proc: VoiceProc) {
+    proc.live.in_flight.store(false, Ordering::SeqCst);
+    kill_proc(proc, "forget");
+}
+
 /// Where a voice reader's events go: the app in production, a recorder in the
 /// fixture tests below.
 pub(crate) trait VoiceSink: Clone + Send + Sync + 'static {
@@ -1498,7 +1506,7 @@ pub fn voice_forget(
 ) -> Result<(), String> {
     let proc = { voice.procs.lock().unwrap().remove(&session_id) };
     if let Some(proc) = proc {
-        kill_proc(proc, "forget");
+        forget_proc(proc);
     }
     voice
         .db
@@ -2739,6 +2747,21 @@ mod tests {
         f.read(&[INIT, &delta("Adding that to Rollout."), TOOL, &result("")]).await;
         assert!(f.events.all("voice-error").is_empty(), "{:?}", f.events.all("voice-error"));
         assert_eq!(f.events.all("voice-done")[0]["body"], "Adding that to Rollout.");
+    }
+
+    #[tokio::test]
+    async fn forgetting_drops_the_turn_in_flight() {
+        // `voice_forget` wipes the transcript right after the kill; the dying
+        // reader must not write the half-reply back into it.
+        let f = Fixture::new();
+        f.start_turn();
+        let mut proc = fake_proc(1);
+        proc.live = f.live.clone();
+        forget_proc(proc);
+        f.run(&[INIT, &delta("Half a tho")]).await;
+        assert!(f.events.all("voice-interrupted").is_empty());
+        assert!(f.db.list_voice_messages("plan-1").unwrap().is_empty());
+        assert_eq!(f.events.all("voice-exit")[0]["deliberate"], true);
     }
 
     #[tokio::test]
