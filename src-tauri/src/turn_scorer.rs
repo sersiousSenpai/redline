@@ -10,10 +10,15 @@
 //! capture's audio. It runs in a Python process of its own on the Kokoro
 //! runtime's interpreter, which already has numpy and onnxruntime, so a
 //! question never waits behind a sentence being synthesized, and the binary
-//! carries only this glue and the small script. On the dictation test set a
-//! question takes 14.5 ms here, p95 (20–32 ms with Kokoro synthesizing beside
-//! it), and as the endpointer uses it, it took the turns ended early by a
-//! one-second pause mid-thought from 67% to 16%.
+//! carries only this glue and the small script. The script computes the
+//! model's input — Whisper's 80-bin log-mel over an 8 s window, zero-padded
+//! at the start and normalized — in numpy, matching the reference code's
+//! transformers feature extractor to 1e-5, so transformers isn't needed.
+//!
+//! On the dictation test set a question takes 14.5 ms here, p95 (20–32 ms
+//! with Kokoro synthesizing beside it), and as the endpointer uses it, it
+//! took the turns ended early by a one-second pause mid-thought from 67% to
+//! 16%.
 //!
 //! It is downloaded on demand, pinned by revision, size and SHA-256
 //! (`pinned_fetch`). With no Kokoro runtime, no model, or a process that
@@ -28,10 +33,9 @@
 //! - `score`: the probability that the live capture's speaker has finished;
 //! - `stop`: end the process and stop keeping audio.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -59,12 +63,13 @@ const ANSWER_TIMEOUT: Duration = Duration::from_millis(300);
 /// A download that goes this long without a byte is given up.
 const DOWNLOAD_STALL: Duration = Duration::from_secs(30);
 
-/// The running model process: its stdin, and its stdout's lines as a reader
-/// thread hands them over.
+/// The running model process: its stdin, its stdout, and what has been read
+/// from that of a line not yet ended.
 struct Scorer {
     child: Child,
     stdin: ChildStdin,
-    lines: Receiver<String>,
+    stdout: ChildStdout,
+    pending: Vec<u8>,
     next: u32,
 }
 
@@ -85,31 +90,41 @@ impl Scorer {
             let _ = child.kill();
             return Err("the end-of-turn model has no pipes".to_string());
         };
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if line.ok().and_then(|l| tx.send(l).ok()).is_none() {
-                    break;
-                }
-            }
-        });
-        let scorer = Self {
+        let mut scorer = Self {
             child,
             stdin,
-            lines,
+            stdout,
+            pending: Vec::new(),
             next: 0,
         };
-        match scorer.lines.recv_timeout(LOAD_TIMEOUT) {
+        match scorer.line(Instant::now() + LOAD_TIMEOUT) {
             Ok(line) if line.trim() == "ready" => Ok(scorer),
             Ok(line) => Err(format!(
                 "the end-of-turn model didn't load: {}",
                 line.trim().trim_start_matches("error").trim()
             )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("the end-of-turn model's runtime couldn't load it".to_string())
+            Err(true) => Err("the end-of-turn model's runtime couldn't load it".to_string()),
+            Err(false) => Err("the end-of-turn model didn't load in time".to_string()),
+        }
+    }
+
+    /// The next line from the model's stdout, waiting until `deadline`:
+    /// `Err(true)` once it has closed, `Err(false)` at the deadline. Read on
+    /// the asking thread, with `poll` for the deadline: no reader thread.
+    fn line(&mut self, deadline: Instant) -> Result<String, bool> {
+        loop {
+            if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                return Ok(String::from_utf8_lossy(&line[..end]).into_owned());
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err("the end-of-turn model didn't load in time".to_string())
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !readable(&self.stdout, left)? {
+                return Err(false);
+            }
+            let mut chunk = [0u8; 512];
+            match self.stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => return Err(true),
+                Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
             }
         }
     }
@@ -134,14 +149,16 @@ impl Scorer {
             .ok()?;
         let deadline = Instant::now() + ANSWER_TIMEOUT;
         loop {
-            let line = self
-                .lines
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .ok()?;
+            let line = self.line(deadline).ok()?;
             // An answer to a question given up on, or a library's chatter.
             if let Some((rid, p)) = line.split_once(' ') {
                 if rid.parse() == Ok(id) {
-                    return p.trim().parse::<f32>().ok().filter(|p| p.is_finite());
+                    // In thousandths: a float parser costs the binary more.
+                    return p
+                        .trim()
+                        .parse::<u16>()
+                        .ok()
+                        .map(|p| f32::from(p.min(1000)) / 1000.0);
                 }
             }
         }
@@ -153,6 +170,33 @@ impl Drop for Scorer {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Whether `stdout` has something to read (or has closed) within `wait`;
+/// `Err(true)` when it can't be waited on.
+#[cfg(unix)]
+fn readable(stdout: &ChildStdout, wait: Duration) -> Result<bool, bool> {
+    use std::os::fd::AsRawFd;
+    let ms = wait.as_millis().min(i32::MAX as u128) as i32;
+    loop {
+        let mut fd = libc::pollfd {
+            fd: stdout.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd for a descriptor `stdout` keeps open for the call.
+        match unsafe { libc::poll(&mut fd, 1, ms) } {
+            0 => return Ok(false),
+            n if n > 0 => return Ok(true),
+            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return Err(true),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn readable(_stdout: &ChildStdout, _wait: Duration) -> Result<bool, bool> {
+    Err(true)
 }
 
 /// The capture's kept audio as the model reads it: 16 kHz mono 16-bit.
@@ -312,9 +356,9 @@ mod tests {
 
     /// A stand-in for the model's process, speaking its protocol from a shell
     /// script run in the interpreter's place: it reads each question's header
-    /// line and samples, and answers by its `mode` file — `0.97` (the
+    /// line and samples, and answers by its `mode` file — 0.97 (the
     /// default), `stale` (an answer to the question before, then this one's),
-    /// `nan`, or `hang` (never). With `broken` beside it, it fails to load
+    /// `nan` (it could not score), or `hang` (never). With `broken` beside it, it fails to load
     /// and says so; with `dead`, it exits without a word.
     const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
@@ -325,10 +369,10 @@ while read -r id n; do
   dd bs=1 count=$((2 * n)) of=/dev/null 2>/dev/null
   echo "$id $n" >> "$dir/asked.log"
   case "$(cat "$dir/mode" 2>/dev/null)" in
-    stale) echo "$((id - 1)) 0.10"; echo "$id 0.80" ;;
-    nan) echo "$id nan" ;;
+    stale) echo "$((id - 1)) 100"; echo "$id 800" ;;
+    nan) echo "$id -" ;;
     hang) ;;
-    *) echo "$id 0.97" ;;
+    *) echo "$id 970" ;;
   esac
 done
 "#;

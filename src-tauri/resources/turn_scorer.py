@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Yusuf Al-Bazian
-"""Redline's end-of-turn scorer: has the speaker finished?
+"""Redline's end-of-turn model: has the speaker finished? See turn_scorer.rs.
 
-Smart Turn v3 (BSD-2-Clause, Daily; a Whisper-tiny encoder with a linear head,
-int8 ONNX) on the last 8 s of the user's audio. Run by turn_scorer.rs on the
-Kokoro runtime's interpreter, which already has numpy and onnxruntime:
-
-    python -I -B turn_scorer.py <model.onnx>
-
-Protocol: once loaded it prints `ready` (or `error <why>`). Then each request
-is a line `<id> <samples>` followed by that many 16 kHz mono samples as
-little-endian int16, answered by one line `<id> <probability>` (`nan` when it
-could not score).
-
-The input features are Whisper's 80-bin log-mel spectrogram over an 8 s window,
-computed here in numpy exactly as the model's reference code computes them
-with the transformers feature extractor (zero-padded at the start, normalized
-to zero mean and unit variance, n_fft 400, hop 160, slaney mel to 8 kHz), so
-transformers is not needed.
+Smart Turn v3 (BSD-2-Clause, Daily) on 16 kHz mono audio, with Whisper's
+log-mel features computed in numpy exactly as its reference code does. Prints
+`ready` (or `error <why>`) once loaded; then answers each line `<id> <n>`,
+followed by n little-endian int16 samples, with `<id> <probability in
+thousandths>` (`-` when it could not score).
 """
 
 import sys
@@ -72,8 +61,7 @@ def main():
         opts = ort.SessionOptions()
         opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         opts.inter_op_num_threads = 1
-        # Four threads answer in ~13 ms (p95) without crowding a voice being
-        # synthesized beside it; two take ~22 ms.
+        # 13 ms a question (p95) without crowding the voice synthesized beside it.
         opts.intra_op_num_threads = 4
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         session = ort.InferenceSession(sys.argv[1], sess_options=opts, providers=["CPUExecutionProvider"])
@@ -96,9 +84,9 @@ def main():
         try:
             pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
             p = float(session.run(None, {"input_features": features(pcm)})[0].reshape(-1)[0])
-            out.write(f"{rid} {p:.4f}\n")
+            out.write(f"{rid} {round(p * 1000)}\n")
         except Exception:  # noqa: BLE001 - one bad request is not the process's end
-            out.write(f"{rid} nan\n")
+            out.write(f"{rid} -\n")
         out.flush()
 
 

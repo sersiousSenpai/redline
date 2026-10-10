@@ -702,9 +702,12 @@ struct DictationInner {
     #[cfg(target_os = "macos")]
     capture: Mutex<Option<CaptureTask>>,
     /// A `dictation_cycle` waiting on the final transcript of the task it
-    /// finished: that task's number, and where the text goes.
+    /// finished: that task's number, and the text once it comes, which
+    /// `final_ready` announces.
     #[cfg(target_os = "macos")]
-    final_for: Mutex<Option<(u64, std::sync::mpsc::Sender<String>)>>,
+    final_for: Mutex<Option<(u64, Option<String>)>>,
+    #[cfg(target_os = "macos")]
+    final_ready: std::sync::Condvar,
 }
 
 impl DictationInner {
@@ -760,13 +763,13 @@ impl DictationInner {
     }
 
     /// Hand recognition task `task`'s final transcript (`None`: it ended
-    /// without one) to the cycle waiting on it, if one is.
+    /// without one, "" to the cycle) to the cycle waiting on it, if one is.
     #[cfg(target_os = "macos")]
     fn deliver_final(&self, task: u64, text: Option<String>) {
-        let mut waiting = self.final_for.lock().unwrap();
-        if waiting.as_ref().is_some_and(|(t, _)| *t == task) {
-            if let (Some((_, tx)), Some(text)) = (waiting.take(), text) {
-                let _ = tx.send(text);
+        if let Some((t, heard @ None)) = self.final_for.lock().unwrap().as_mut() {
+            if *t == task {
+                *heard = Some(text.unwrap_or_default());
+                self.final_ready.notify_all();
             }
         }
     }
@@ -805,6 +808,8 @@ impl DictationState {
                 capture: Mutex::new(None),
                 #[cfg(target_os = "macos")]
                 final_for: Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                final_ready: std::sync::Condvar::new(),
             }),
         }
     }
@@ -1042,8 +1047,9 @@ pub fn dictation_cycle(
 
     #[cfg(target_os = "macos")]
     {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let state = dictation.inner.clone();
+        let inner = &dictation.inner;
+        *inner.final_for.lock().unwrap() = None;
+        let state = inner.clone();
         let app_main = app.clone();
         let scheduled = app.run_on_main_thread(move || {
             if state.owner_of(seq).is_none() {
@@ -1052,15 +1058,22 @@ pub fn dictation_cycle(
             // Finalize this utterance's recognition — its final transcript
             // comes to this cycle — then listen for the next on the same
             // engine, from its first buffer on.
-            *state.final_for.lock().unwrap() = Some((state.armed.load(Ordering::SeqCst), tx));
+            *state.final_for.lock().unwrap() = Some((state.armed.load(Ordering::SeqCst), None));
             retire_capture(&state, true, Some(seq));
             if let Some(mic) = state.mic.lock().unwrap().as_ref() {
                 arm_capture(&app_main, &state, mic, &owner, seq, false);
             }
         });
         if scheduled.is_ok() {
-            if let Some(heard) = rx.recv_timeout(FINAL_WAIT).ok().filter(|t| !t.trim().is_empty()) {
-                return Ok(heard);
+            let waiting = inner.final_for.lock().unwrap();
+            let (mut waiting, _) = inner
+                .final_ready
+                .wait_timeout_while(waiting, FINAL_WAIT, |w| !matches!(w, Some((_, Some(_)))))
+                .unwrap();
+            if let Some((_, Some(heard))) = waiting.take() {
+                if !heard.trim().is_empty() {
+                    return Ok(heard);
+                }
             }
         }
     }
@@ -1675,20 +1688,21 @@ mod tests {
     #[test]
     fn a_cycle_gets_the_final_transcript_of_the_task_it_finished_and_no_other() {
         let state = DictationState::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        *state.inner.final_for.lock().unwrap() = Some((7, tx));
+        let waiting = || state.inner.final_for.lock().unwrap().clone();
+        *state.inner.final_for.lock().unwrap() = Some((7, None));
         // The task armed after it, and a late final of one before it: not its.
         state.inner.deliver_final(8, Some("next".into()));
         state.inner.deliver_final(6, Some("before".into()));
-        assert!(rx.try_recv().is_err());
+        assert_eq!(waiting(), Some((7, None)));
         state.inner.deliver_final(7, Some("rename the panel to TalkPanel".into()));
-        assert_eq!(rx.try_recv().unwrap(), "rename the panel to TalkPanel");
-        assert!(state.inner.final_for.lock().unwrap().is_none(), "handed over once");
-        // A task that ends in an error lets its cycle go at once.
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        *state.inner.final_for.lock().unwrap() = Some((9, tx));
+        assert_eq!(waiting(), Some((7, Some("rename the panel to TalkPanel".into()))));
+        // Its first final is the one; a repeat changes nothing.
+        state.inner.deliver_final(7, Some("again".into()));
+        assert_eq!(waiting(), Some((7, Some("rename the panel to TalkPanel".into()))));
+        // A task that ends in an error lets its cycle go at once, with nothing.
+        *state.inner.final_for.lock().unwrap() = Some((9, None));
         state.inner.deliver_final(9, None);
-        assert_eq!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+        assert_eq!(waiting(), Some((9, Some(String::new()))));
     }
 
     #[test]
