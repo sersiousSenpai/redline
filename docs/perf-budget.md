@@ -205,6 +205,29 @@ it, that's the discussion to have before merging.
    > ranked. `docs/renderer-memory-2026-10-09.md` has the investigation and
    > before/after numbers from `scripts/memory-soak.mjs`.
 
+8. **A reply settles where it streamed, and the thread holds still through a
+   turn.** A chat reply is one skeleton in both phases: the streamed text and
+   the settled row are the same markup (`MarkdownView` renders a body with no
+   diagram on its plain path, and `StreamingText`'s two halves render as one
+   full render), and nothing above or around the text arrives or leaves when
+   the turn ends. The thread's viewport keeps its height from send to settle:
+   a strip, tray or notice that takes height from the thread moves every line
+   in it. A reader parked at the bottom stays pinned through any resize
+   (`useStickToBottom`), and a reader scrolled up into a reply is never moved.
+   A turn shows one status line and no caret glyph. The Layout Instability API
+   cannot see this kind of jank: a settle *replaces* the streamed nodes, and
+   layout-shift entries only count nodes that moved, so CLS reads about zero
+   through a 66 px jump. Measure text positions instead.
+
+   > **What it cost before it was a rule (2026-10-10).** In the chat card, a
+   > bordered progress strip took 53 px of the thread at send and left at
+   > settle, so the pinned transcript jumped 66 px as every reply finished.
+   > On every surface the settled row wrapped the body in one more `<div>`,
+   > which dropped the lead paragraph from 13.5 px/450 to 12.5 px/400 (the
+   > text rewrapped) and gave a heading-first reply a top margin, and a reader
+   > scrolled up into a reply was moved 18.7 px when it settled. A queued
+   > message's tray hid the reply's newest 52 px until the next token.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:
@@ -255,6 +278,15 @@ These are cheap regression nets, not a substitute for the rules above:
   once-per-crossing warning, and `perf_guard.rs` pins that the watch starts and
   `/v1/perf` serves it. `scripts/memory-soak.mjs` is the manual counterpart (it
   needs Chrome): run it before merging anything that keeps state across mounts.
+- Rule 8 — `scripts/chat-stream-visual-qa.mjs` (needs Chrome) drives every
+  chat surface through a turn on the production components and checks text
+  positions at settle, viewport heights, status lines, streaming-only boxes,
+  code frames and the composer. Known violations sit in its `EXPECTED_FAIL`
+  with their reasons; one that starts passing fails the run until its entry
+  goes. `src/components/chatStatus.test.tsx` pins one status line and no
+  caret on each surface, `MarkdownView.test.ts` the rich-equals-plain markup
+  and the stylesheet's frame and flush rules, and `useStickToBottom.test.tsx`
+  the re-pin on resize.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
   shells out, or reaches SQLite (`.database()`, a store's `db` handle, called
