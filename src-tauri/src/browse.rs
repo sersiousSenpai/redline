@@ -1024,6 +1024,12 @@ fn validate_harness(
     })
 }
 
+/// How a turn's tail names its scope: a tab's own chat is pinned to its page,
+/// a shared chat follows the tab on screen (`contract.json` `scopePhrases`).
+fn scope_phrase(following_tabs: bool) -> &'static str {
+    if following_tabs { "following tabs (same conversation)" } else { "pinned page" }
+}
+
 /// Everything a turn needs after its user row is persisted: prompt framing,
 /// ledger capture, args, spawn, attach, reader. Runs on the direct send path
 /// AND on the reader's queue drain — which is why the session resume is read
@@ -1073,7 +1079,7 @@ fn start_browse_turn(
 
         if let Some(label) = target_label {
             let target = serde_json::to_string(&label).unwrap_or_default();
-            prompt.push_str(&format!("\n\nBrowser context captured when this message was sent: target label {target}; conversation scope: {}. This remains the action target if the user changes tabs during this turn. Resolve this stable label against /v1/browser/tabs before acting; do not fall back to the globally active tab. Use explicit ?tab= selectors for reads and POST /v1/browser/action for mutations with operationId, label, expectedRevision, operation. Supported kinds: navigate, click, fill, key, scroll, select, wait. Check the returned status and observed state. Never replay an uncertain side effect automatically.\n", if following_tabs { "following tabs (same conversation)" } else { "pinned page" }));
+            prompt.push_str(&format!("\n\nBrowser context captured when this message was sent: target label {target}; conversation scope: {}. This remains the action target if the user changes tabs during this turn. Resolve this stable label against /v1/browser/tabs before acting; do not fall back to the globally active tab. Use explicit ?tab= selectors for reads and POST /v1/browser/action for mutations with operationId, label, expectedRevision, operation. Supported kinds: navigate, click, fill, key, scroll, select, wait. Check the returned status and observed state. Never replay an uncertain side effect automatically.\n", scope_phrase(following_tabs)));
             if let Some(id) = &mission_id {
                 prompt.push_str(&format!("Captured mission/workspace ID: {id}. Read its goal and findings through GET /v1/missions/{id} and /v1/missions/{id}/findings. Do not substitute the globally active mission during this turn.\n"));
             } else {
@@ -2517,5 +2523,101 @@ mod tests {
             assert_eq!(out.session.as_deref(), Some("thread-9"));
             assert_eq!(out.errored.as_deref(), Some("Codex ended before completing the response"));
         });
+    }
+}
+
+/// The Rust half of the browser chat's structure layer
+/// (`src/lib/browserChat`): the values both languages, the prompt and the
+/// skill must agree on, read from the same `contract.json`. Test-only, so the
+/// contract and the skill text it checks never reach the release binary.
+#[cfg(test)]
+mod contract {
+    use serde_json::{json, Value};
+
+    const CONTRACT: &str = include_str!("../../src/lib/browserChat/contract.json");
+
+    fn contract() -> Value {
+        serde_json::from_str(CONTRACT).expect("contract.json parses")
+    }
+
+    fn strings(v: &Value) -> Vec<String> {
+        v.as_array()
+            .expect("a list")
+            .iter()
+            .map(|s| s.as_str().expect("a string").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn scope_phrases_are_the_contracts() {
+        let c = contract();
+        assert_eq!(c["scopePhrases"]["pinned-page"], super::scope_phrase(false));
+        assert_eq!(c["scopePhrases"]["following-tabs"], super::scope_phrase(true));
+    }
+
+    /// Every kind the contract names parses as an `Operation` and serializes
+    /// back under the same tag, and the enum has no kind the contract lacks.
+    #[test]
+    fn action_kinds_are_the_operation_enum() {
+        use crate::browser_actions::Operation;
+        let kinds = strings(&contract()["actionKinds"]);
+        let samples = [
+            json!({"kind": "navigate", "url": "https://a.test"}),
+            json!({"kind": "click", "selector": "a"}),
+            json!({"kind": "fill", "selector": "input", "value": "x"}),
+            json!({"kind": "key", "key": "Enter"}),
+            json!({"kind": "scroll", "x": 0.0, "y": 10.0}),
+            json!({"kind": "select", "selector": "select", "value": "x"}),
+            json!({"kind": "wait", "selector": "main"}),
+        ];
+        let tags: Vec<String> = samples
+            .iter()
+            .map(|sample| {
+                let op: Operation = serde_json::from_value(sample.clone()).expect("a known kind");
+                // Exhaustive: a new variant fails to compile here until the
+                // contract and this list name it.
+                match op {
+                    Operation::Navigate { .. }
+                    | Operation::Click { .. }
+                    | Operation::Fill { .. }
+                    | Operation::Key { .. }
+                    | Operation::Scroll { .. }
+                    | Operation::Select { .. }
+                    | Operation::Wait { .. } => {}
+                }
+                serde_json::to_value(op).unwrap()["kind"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(tags, kinds);
+    }
+
+    #[test]
+    fn queue_and_project_caps_are_the_contracts() {
+        let c = contract();
+        assert_eq!(c["queueCap"].as_u64().unwrap() as usize, crate::turn::QUEUE_CAP);
+        assert_eq!(c["maxProjects"].as_u64().unwrap() as usize, crate::code::MAX_PROJECTS);
+    }
+
+    /// Regular browsing and every Mosaic are workspaces with no mission, so a
+    /// send from one neither fails nor inherits the active mission.
+    #[test]
+    fn a_no_mission_workspace_is_captured_as_no_mission() {
+        let c = contract();
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.insert_mission(&crate::state::Mission {
+            mission_id: "active".into(),
+            title: "Active".into(),
+            goal: "A goal".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+        let exact = strings(&c["noMissionWorkspaces"]["exact"]);
+        let mosaics = strings(&c["noMissionWorkspaces"]["prefixes"]).into_iter().map(|p| format!("{p}grid"));
+        for id in exact.into_iter().chain(mosaics) {
+            let captured = super::captured_browse_mission(&db, Some(&id), Some("active"));
+            assert!(captured.unwrap().is_none(), "{id} must be captured as no mission");
+        }
     }
 }

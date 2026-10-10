@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "comment": "The browser chat's cross-language contract. Read by the TypeScript structure layer (src/lib/browserChat) and by Rust tests (include_str! from #[cfg(test)] only, so it never reaches the release binary). Change a value here and both sides' tests say what else must move.",
+  "sendParams": [
+    "browseId",
+    "text",
+    "snapshot",
+    "cwd",
+    "queue",
+    "targetLabel",
+    "followingTabs",
+    "workspaceId"
+  ],
+  "scopePhrases": {
+    "pinned-page": "pinned page",
+    "following-tabs": "following tabs (same conversation)"
+  },
+  "noMissionWorkspaces": {
+    "exact": ["regular"],
+    "prefixes": ["mosaic:"]
+  },
+  "readRoutes": [
+    "/v1/browser/snapshot",
+    "/v1/browser/active",
+    "/v1/browser/tabs",
+    "/v1/browser/thread"
+  ],
+  "actionRoute": "/v1/browser/action",
+  "actionKinds": ["navigate", "click", "fill", "key", "scroll", "select", "wait"],
+  "tabRoutes": ["/v1/browser/open", "/v1/browser/focus"],
+  "writeRoute": "/v1/browser/download",
+  "legacyRoutes": [
+    "/v1/browser/navigate",
+    "/v1/browser/click",
+    "/v1/browser/query"
+  ],
+  "capturedMissionRoutes": ["/v1/missions/{id}", "/v1/missions/{id}/findings"],
+  "globalMissionRoutes": ["/v1/mission/active", "/v1/mission/findings"],
+  "codeRoutes": ["/v1/code/projects", "/v1/code/map", "/v1/code/git"],
+  "queueCap": 5,
+  "maxProjects": 15,
+  "selectionIntents": {
+    "ask": { "autoSend": false },
+    "define": { "autoSend": true },
+    "explain": { "autoSend": true },
+    "research": { "autoSend": true }
+  },
+  "replyActions": ["copy", "add-to-task-list", "add-to-mission", "continue-as"],
+  "pillComposerDestinations": {
+    "browser": ["plan", "run"]
+  },
+  "skill": {
+    "name": "browse",
+    "mustMention": [
+      "/v1/browser/action",
+      "shared chat",
+      "captured",
+      "/v1/missions/"
+    ],
+    "mustNotMention": [
+      "Tandem agent mode",
+      "rl-sources",
+      "each of the user's browser tabs has its own discussion agent",
+      "/v1/mission/active",
+      "/v1/mission/findings"
+    ]
+  },
+  "consultMustNotMention": ["LINKED DISCUSSION"],
+  "activityLabels": {
+    "/v1/browser/snapshot": "reading the page…",
+    "/v1/browser/active": "checking the tab on screen…",
+    "/v1/browser/tabs": "looking over your tabs…",
+    "/v1/browser/thread": "reading a tab's chat…",
+    "/v1/browser/action": "acting on the page…",
+    "/v1/browser/open": "opening a tab…",
+    "/v1/browser/focus": "switching tabs…",
+    "/v1/browser/download": "saving a file…",
+    "/v1/browser/navigate": "navigating…",
+    "/v1/browser/click": "clicking…",
+    "/v1/browser/query": "extracting from the page…",
+    "/v1/missions/{id}": "reading the mission…",
+    "/v1/missions/{id}/findings": "reading pinned findings…",
+    "/v1/mission/active": "reading the mission…",
+    "/v1/mission/findings": "reading pinned findings…",
+    "/v1/code/projects": "finding your projects…",
+    "/v1/code/map": "mapping a project…",
+    "/v1/code/git": "reading a project's git…"
+  },
+  "actionLabels": {
+    "navigate": "navigating…",
+    "click": "clicking…",
+    "fill": "typing into the page…",
+    "key": "pressing a key…",
+    "scroll": "scrolling the page…",
+    "select": "choosing an option…",
+    "wait": "waiting for the page…"
+  },
+  "tabActivityLabels": {
+    "/v1/browser/snapshot": "reading tab {n}…",
+    "/v1/browser/thread": "reading tab {n}'s chat…",
+    "/v1/browser/focus": "switching to tab {n}…"
+  },
+  "retiredRoutes": ["/v1/linked/consult"]
+}
