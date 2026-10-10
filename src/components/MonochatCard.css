@@ -9,7 +9,10 @@
    classic-scrollbar Mac then grows a horizontal scrollbar under the composer,
    lifting it on the first keystroke. */
 .rl-monochat-float { position:absolute; bottom:44px; left:50%; width:min(640px,calc(100vw - 40px)); margin-left:calc(min(640px,calc(100vw - 40px)) / -2); max-height:min(420px,calc(100dvh - 96px)); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; padding:10px 14px 14px; border:1px solid var(--color-rule); border-radius:14px; background:var(--color-bg-elevated); color:var(--color-ink); box-shadow:0 12px 48px #0005; transform-origin:top left; pointer-events:auto; }
+/* On its way back into the pill: it already let go. */
+.rl-monochat-float[data-leaving] { pointer-events:none; }
 .rl-float-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; color:var(--color-ink-muted); font-size:11px; }
+.rl-float-heading h2 { margin:0; font:inherit; }
 .rl-float-heading button { display:grid; place-items:center; width:24px; height:24px; border:0; border-radius:5px; background:none; color:inherit; cursor:pointer; }
 .rl-float-heading button:hover, .rl-float-heading button:focus-visible { color:var(--color-ink); background:color-mix(in srgb, var(--color-ink) 7%, transparent); outline:none; }
 .rl-monochat-float textarea { max-height:120px; }

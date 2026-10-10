@@ -52,7 +52,7 @@ const ALLOWLIST: Record<string, { maxMs: number; reason: string }> = {
   springInKeyframes: {
     maxMs: 620,
     reason:
-      "the island-to-surface spring (SpringSwap, the pill's compact card): once per swap, the corners ease 18 → 24 → 14 px while the transform carries the motion",
+      "the island-to-surface spring (SpringSwap): once per swap, the corners ease 18 → 24 → 14 px while the transform carries the motion",
   },
 };
 
@@ -456,10 +456,7 @@ describe("paint guard (perf rule 6)", () => {
       (u) => u.where === "element.animate()",
     );
     const spring = waapi.filter((u) => u.name === "springInKeyframes");
-    expect(spring.map((u) => u.rel).sort()).toEqual([
-      "components/MonochatCard.tsx",
-      "components/SpringSwap.tsx",
-    ]);
+    expect(spring.map((u) => u.rel).sort()).toEqual(["components/SpringSwap.tsx"]);
     for (const u of spring) {
       expect(u.props).toEqual(new Set(["transform", "opacity", "border-radius"]));
       expect(u.ms).toBe(620);
@@ -472,6 +469,21 @@ describe("paint guard (perf rule 6)", () => {
     // An exemption outlives its reason only until the call it excused is gone.
     for (const rel of Object.keys(NOT_WAAPI)) {
       expect(sources.find((s) => s.rel === rel)?.text, `${rel} no longer calls .animate(`).toContain(".animate(");
+    }
+  });
+
+  it("the island's flights move by transform and opacity alone; its corners settle inside 300 ms", () => {
+    // The 10/10 motion spec: the card's 420 ms spring, the door's 380 ms grow
+    // and 260 ms fall back toward the pill. Nothing in them is allowlisted.
+    const waapi = parseUsages(sources, parseKeyframes(sources)).filter(
+      (u) => u.where === "element.animate()" && /components\/Monochat(Card|Island)\.tsx$/.test(u.rel),
+    );
+    expect(waapi.length).toBeGreaterThanOrEqual(10);
+    for (const u of waapi) {
+      const paint = [...(u.props ?? [])].filter((p) => !COMPOSITOR.has(p));
+      if (paint.length) expect(u.ms, `${u.rel}:${u.line} repaints ${paint.join(", ")}`).not.toBeNull();
+      if (paint.length) expect(u.ms!, `${u.rel}:${u.line}`).toBeLessThanOrEqual(PAINT_MS);
+      expect(ALLOWLIST[u.name], `${u.rel}:${u.line} leans on the allowlist`).toBeUndefined();
     }
   });
 

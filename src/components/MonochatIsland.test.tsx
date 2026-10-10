@@ -7,6 +7,7 @@ import { MonochatIsland, landingFit } from "./MonochatIsland";
 import "./MonochatCard";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
+import { DOOR_CLOSE_MS, DOOR_GROW_MS, inverseTransform, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_SPRING } from "../lib/springSwap";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement, root: Root;
@@ -24,22 +25,25 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); vi.unstubAllGlobals();
   writeSharedDraft(FRONT_DOOR_TEXT_KEY, "");
+  delete (HTMLElement.prototype as { animate?: unknown }).animate;
+  vi.restoreAllMocks();
 });
 
-function Harness({ landing = false, busy = false, onOpen, onNewChat, children }: {
-  landing?: boolean; busy?: boolean; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
+function Harness({ landing = false, busy = false, announce, onOpen, onNewChat, children }: {
+  landing?: boolean; busy?: boolean; announce?: string; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [compact, setCompact] = useState(false);
   const [surface, setSurface] = useState("document");
   return <>
-    <article><button id="document-focus">Document</button><button id="navigate" onClick={() => setSurface("browser")}>Browser</button>
+    <header className="rl-app-header"><button id="header-surface">Review</button></header>
+    <article className="rl-doc-column"><button id="document-focus">Document</button><button id="navigate" onClick={() => setSurface("browser")}>Browser</button>
       {/* A recent: the owner closes the door and goes there in one batch. */}
       <button id="open-recent" onClick={() => { setOpen(false); setSurface("plan"); }}>Recent</button></article>
     <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }}
       compactOpen={compact} onCompactChange={setCompact} compact={<div className="rl-fd-island"><textarea aria-label="Compact reply" defaultValue=""/></div>}
-      context="Plan" busy={busy} onNewChat={onNewChat}>
-      {children ?? <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div>}
+      context="Plan" busy={busy} announce={announce} onNewChat={onNewChat}>
+      {children ?? <div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
     </MonochatIsland>
   </>;
 }
@@ -59,6 +63,25 @@ const key = async (target: EventTarget, init: KeyboardEventInit) => {
 };
 // A pointer resting on the pill for the dwell, then the card's chunk.
 const rest = async () => { await pointer(pill(), "pointerover"); await advance(150); await act(async () => { await Promise.resolve(); }); };
+const main_ = () => host.querySelector<HTMLElement>(".rl-doc-column")!;
+const last = <T,>(list: T[]) => list[list.length - 1];
+/** Web Animations, recorded: who animated what, and how. */
+function flights() {
+  const calls: Array<{ element: Element; frames: Keyframe[]; options: KeyframeAnimationOptions }> = [];
+  (HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element, frames: Keyframe[], options: number | KeyframeAnimationOptions) {
+    calls.push({ element: this, frames, options: typeof options === "number" ? { duration: options } : options });
+    return { cancel() {}, onfinish: null };
+  };
+  return calls;
+}
+/** Boxes for the elements that fly, since jsdom lays nothing out. */
+function boxes(rects: Record<string, [number, number, number, number]>) {
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    const hit = Object.entries(rects).find(([selector]) => this.matches(selector));
+    const [left, top, width, height] = hit?.[1] ?? [0, 0, 0, 0];
+    return { left, top, width, height, x: left, y: top, right: left + width, bottom: top + height, toJSON() {} } as DOMRect;
+  });
+}
 
 describe("the door", () => {
   it("moves the native window from every outer edge without dismissing the front door", async () => {
@@ -176,14 +199,19 @@ describe("the door", () => {
     expect(main()).toBe(draft);
   });
 
-  it("an owner that closes the door and navigates in one go is navigation too", async () => {
+  it("an owner that closes the door and navigates in one go is navigation too: focus lands in the new surface's main area", async () => {
     await render();
     await click('[aria-label="Open front door"]');
     expect(document.activeElement).toBe(main());
     // The recents swallow mousedown, so the caret is still in the composer.
     await click("#open-recent");
     expect(pose()).toBe("notch");
-    expect(document.activeElement).toBe(document.body);
+    expect(document.activeElement).toBe(main_());
+    // Focusable only for as long as it holds focus: a later click on the
+    // page's plain text focuses nothing.
+    expect(main_().getAttribute("tabindex")).toBe("-1");
+    await act(async () => host.querySelector<HTMLButtonElement>("#document-focus")!.focus());
+    expect(main_().hasAttribute("tabindex")).toBe(false);
   });
 
   it("keeps a live layer of its own — the tour — out of the inert sweep", async () => {
@@ -491,12 +519,12 @@ describe("the compact card", () => {
     expect(document.activeElement).toBe(page);
   });
 
-  it("navigation closes it and lets go of the caret", async () => {
+  it("navigation closes it and hands the caret to the new surface's main area, never to nothing", async () => {
     await render(); await rest();
     await act(async () => host.querySelector<HTMLTextAreaElement>('[aria-label="Compact reply"]')!.focus());
     await act(async () => host.querySelector<HTMLButtonElement>("#navigate")!.click());
     expect(card()).toBeNull();
-    expect(document.activeElement).toBe(document.body);
+    expect(document.activeElement).toBe(main_());
   });
 });
 
@@ -531,5 +559,178 @@ describe("the pill", () => {
     expect(pill().getAttribute("aria-label")).toBe("Open front door, draft saved");
     await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "  "));
     expect(host.querySelector(".rl-monochat-draft")).toBeNull();
+  });
+});
+
+// The motion spec and the focus rules that ride on it (10/10): the door comes
+// out of the card or the pill and goes back toward the pill; on the plate the
+// composer never moves; the paper and the caret follow.
+describe("the door's flights", () => {
+  const CARD: [number, number, number, number] = [400, 700, 640, 180];
+  const COMPOSER: [number, number, number, number] = [320, 300, 800, 140];
+  const PILL: [number, number, number, number] = [648, 900, 144, 32];
+  const rect = ([left, top, width, height]: number[]) => ({ left, top, width, height });
+  const room = () => host.querySelector<HTMLElement>(".rl-monochat")!;
+  const welcomeDoor = <div className="rl-frontdoor"><div className="rl-fd-welcome"/><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>;
+
+  it("a click puts the caret at the end of the draft", async () => {
+    await render();
+    main().setSelectionRange(0, 0);
+    await click('[aria-label="Open front door"]');
+    expect(document.activeElement).toBe(main());
+    expect([main().selectionStart, main().selectionEnd]).toEqual([15, 15]);
+  });
+
+  it("grows out of the card: from the card's own box, solid, with its field's selection", async () => {
+    const calls = flights();
+    boxes({ ".rl-monochat-float": CARD, ".rl-frontdoor": COMPOSER, ".rl-monochat": [320, 100, 800, 760], ".rl-portal-membrane": PILL });
+    await render(<Harness>{welcomeDoor}</Harness>);
+    await rest();
+    const field = host.querySelector<HTMLTextAreaElement>('[aria-label="Compact reply"]')!;
+    await act(async () => { field.value = "Keep this draft"; field.focus(); field.setSelectionRange(5, 9); });
+    calls.length = 0;
+    await click(".rl-monochat-notch");
+    expect(pose()).toBe("conversation");
+    const flight = calls.filter(call => call.element === room());
+    expect(flight).toHaveLength(1);
+    expect(flight[0].frames[0].transform).toBe(inverseTransform(rect(CARD), rect(COMPOSER)));
+    expect(flight[0].options).toEqual({ duration: DOOR_GROW_MS, easing: SWAP_SPRING });
+    // The FLIP is aimed at the composer: the box you type in is what flies.
+    expect(room().style.transformOrigin).toBe("0px 200px");
+    // The headline and recents follow once it is under way.
+    const welcome = calls.find(call => call.element.classList.contains("rl-fd-welcome"));
+    // One keyframe at 0: from nothing up to whatever the stylesheet rests it at.
+    expect(welcome?.frames).toEqual([{ opacity: 0, offset: 0 }]);
+    expect(welcome?.options).toMatchObject({ delay: 120, fill: "backwards" });
+    expect(document.activeElement).toBe(main());
+    expect([main().selectionStart, main().selectionEnd]).toEqual([5, 9]);
+  });
+
+  it("out of the pill it springs from the membrane, its squeezed text a blur until the shape is mostly there", async () => {
+    const calls = flights();
+    boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
+    await render();
+    await click('[aria-label="Open front door"]');
+    const flight = calls.filter(call => call.element === room());
+    expect(flight[0].frames[0].transform).toBe(inverseTransform(rect(PILL), rect(COMPOSER)));
+    expect(flight[1].frames).toEqual([{ opacity: 0.35 }, { opacity: 1, offset: 0.35 }]);
+  });
+
+  it("closing, it falls back toward the pill: still painted, already inert, until it is there", async () => {
+    const calls = flights();
+    boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
+    await render(<Harness>{welcomeDoor}</Harness>);
+    await click('[aria-label="Open front door"]');
+    calls.length = 0;
+    await key(main(), { key: "Escape" });
+    const layer = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+    expect(pose()).toBe("notch");
+    expect(layer.hasAttribute("data-closing")).toBe(true);
+    expect(layer.hasAttribute("inert")).toBe(true);
+    expect(calls[0].element).toBe(room());
+    expect(last(calls[0].frames)).toEqual({ transform: inverseTransform(rect(PILL), rect(COMPOSER)), opacity: 0 });
+    expect(calls[0].options).toEqual({ duration: DOOR_CLOSE_MS, easing: ISLAND_EASE_IN, fill: "forwards" });
+    expect(DOOR_CLOSE_MS).toBe(260);
+    // The welcome is out of the way first, not shrinking over the work.
+    const welcome = calls.find(call => call.element.classList.contains("rl-fd-welcome"));
+    expect(welcome?.frames).toEqual([{ opacity: 0, offset: 1 }]);
+    expect(welcome?.options).toMatchObject({ duration: 100, fill: "forwards" });
+    // The pill is already back under it, to land on.
+    expect(pill().dataset.hidden).toBe("false");
+    await advance(DOOR_CLOSE_MS);
+    expect(layer.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("on the empty plate the composer never moves: engaging and leaving only bring the paper", async () => {
+    const calls = flights();
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    expect(pose()).toBe("conversation");
+    await key(main(), { key: "Escape" });
+    expect(pose()).toBe("entry");
+    expect(calls.filter(call => call.element === room())).toEqual([]);
+    expect(host.querySelector(".rl-frontdoor-focus")!.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("a room holding a chat rises, and leaves without carrying anything back", async () => {
+    const calls = flights();
+    await render(<Harness onNewChat={() => {}}/>);
+    await click('[aria-label="Open front door"]');
+    expect(calls[0].frames[0]).toMatchObject({ transform: "translate3d(0, 16px, 0) scale(.985)", opacity: 0 });
+    expect(Number(calls[0].options.duration)).toBeLessThanOrEqual(300);
+    await key(main(), { key: "Escape" });
+    expect(last(calls).frames).toEqual([{ opacity: 0 }, { opacity: 0 }]);
+  });
+
+  it("under reduced motion it crossfades in 120 ms, both ways", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const calls = flights();
+    await render();
+    await click('[aria-label="Open front door"]');
+    expect(calls.map(call => call.frames)).toEqual([[{ opacity: 0 }, { opacity: 1 }]]);
+    expect(calls[0].options.duration).toBe(ISLAND_FADE_MS);
+    await key(main(), { key: "Escape" });
+    expect(last(calls).frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    await advance(ISLAND_FADE_MS);
+    expect(host.querySelector(".rl-frontdoor-focus")!.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("the pill springs no card while the door is on its way back into it", async () => {
+    await render();
+    await click('[aria-label="Open front door"]');
+    await key(main(), { key: "Escape" });
+    await rest();
+    expect(card()).toBeNull();
+  });
+});
+
+describe("modal manners", () => {
+  it("Esc closes the door with the caret nowhere at all", async () => {
+    await render();
+    await click('[aria-label="Open front door"]');
+    await act(async () => main().blur());
+    await key(document.body, { key: "Escape" });
+    expect(pose()).toBe("notch");
+  });
+
+  it("a Space typed or pressed in the door never reaches a window listener behind it", async () => {
+    const behind = vi.fn();
+    window.addEventListener("keydown", behind); window.addEventListener("keyup", behind);
+    try {
+      await render();
+      await click('[aria-label="Open front door"]');
+      const space = await key(main(), { key: " ", code: "Space" });
+      await act(async () => { main().dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true })); });
+      expect(behind).not.toHaveBeenCalled();
+      // The space itself still goes in.
+      expect(space.defaultPrevented).toBe(false);
+      await key(main(), { key: "Escape" });
+      await key(host.querySelector("#document-focus")!, { key: " ", code: "Space" });
+      expect(behind).toHaveBeenCalledOnce();
+    } finally { window.removeEventListener("keydown", behind); window.removeEventListener("keyup", behind); }
+  });
+
+  it("a press on bare title bar is a window drag, not a dismissal — a press on its controls is", async () => {
+    await render(); await rest();
+    await pointer(host.querySelector(".rl-app-header")!, "pointerdown");
+    expect(card()).not.toBeNull();
+    await pointer(host.querySelector("#header-surface")!, "pointerdown");
+    expect(card()).toBeNull();
+  });
+
+  it("says a launch or an arrival politely, and the door's inert sweep leaves it heard", async () => {
+    await render(<Harness announce="Plan launched. Redline is planning it in the terminal."/>);
+    const status = host.querySelector<HTMLElement>('[role="status"]')!;
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe("Plan launched. Redline is planning it in the terminal.");
+    await click('[aria-label="Open front door"]');
+    expect(status.inert).toBeFalsy();
+    expect(host.querySelector("article")!.inert).toBe(true);
+  });
+
+  it("a chat in the room is titled by a heading", async () => {
+    await render(<Harness onNewChat={() => {}}/>);
+    await click('[aria-label="Open front door"]');
+    expect(host.querySelector(".rl-monochat-heading h2")?.textContent).toBe("Plan");
   });
 });

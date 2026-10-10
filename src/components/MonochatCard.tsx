@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { ChevronDown } from "lucide-react";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
-import { springInKeyframes, SWAP_MS, SWAP_SPRING } from "../lib/springSwap";
+import { flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, ISLAND_SPRING_MS, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
+import { isTitleBarPress } from "../lib/windowDrag";
 import "./MonochatCard.css";
 
 // The island's compact pose: the small composer that springs out of the footer
@@ -16,54 +17,149 @@ import "./MonochatCard.css";
 // nothing: the sentence is kept either way. Anything outside dismisses it,
 // pinned or not, and the press still lands where it was aimed: a press
 // anywhere else in Redline, a press inside the web page, Esc with the caret
-// or the pointer on it. A menu the card opened is dismissed first, on its own.
+// or the pointer on it. A menu the card opened is dismissed first, on its own;
+// a press on bare title bar is a window drag, not a dismissal.
+//
+// It moves like an object coming out of the pill and going back into it: a
+// FLIP spring from the pill's box (transform only, past 300 ms), the content
+// fading in behind the shell, the corners settling from the pill's to its own;
+// closing, the same path back, quick and accelerating. The cut-out in the
+// native page follows it every frame. Under reduced motion it crossfades.
 
 /** The grace for the pointer to cross between the pill and the card. */
 const LEAVE_CLOSE_MS = 350;
+/** Back into the pill: quick — it is putting itself away. */
+const CARD_CLOSE_MS = 220;
+/** The content (chips, field, tools) waits this long behind the shell... */
+const CONTENT_DELAY_MS = 80;
+/** ...and is gone in this much of the way back. */
+const CONTENT_OUT_MS = 100;
+/** The corners are paint: they settle inside the 300 ms budget, while the
+ *  spring is still on its way in. */
+const CORNER_MS = 300;
 
 /** A menu, picker or dialog layered over the card owns the pointer and Esc. */
 const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"], dialog[open]');
+const box = (r: DOMRect): SwapRect => ({ left: r.left, top: r.top, width: r.width, height: r.height });
 
-export default function MonochatCard({ pill, hovered, onClose, onRelease, children }: {
-  /** The footer pill: the card springs out of it, and the pointer resting on
-   *  it is resting on the card. */
+/** The card's last word on its way out — back into the pill, or into the door
+ *  growing out of it. */
+export interface CardRelease {
+  /** It held the caret. */
+  caret: boolean;
+  /** Where it was on screen: a door growing out of it starts here. */
+  rect: SwapRect;
+  /** Its field's selection, once it had been in use: the door picks it up. */
+  selection: [number, number, "forward" | "backward" | "none"] | null;
+}
+
+/** The shell's corners between the pill and the card, counter-scaled so on
+ *  screen they read as the pill's while the transform squeezes the box. */
+function cornerKeyframes(pill: SwapRect, card: SwapRect, pillRadius: number, radius: number): Keyframe[] {
+  return [{ borderRadius: pillCorners(pill, card, pillRadius) }, { borderRadius: `${radius}px` }];
+}
+function pillCorners(pill: SwapRect, card: SwapRect, radius: number): string {
+  const r = Math.min(radius, pill.width / 2, pill.height / 2);
+  return `${Math.round(r * card.width / pill.width)}px / ${Math.round(r * card.height / pill.height)}px`;
+}
+
+export default function MonochatCard({ pill, open, growing = false, hovered, onClose, onRelease, onGone, children }: {
+  /** The footer pill: the card springs out of it, goes back into it, and the
+   *  pointer resting on it is resting on the card. */
   pill: RefObject<HTMLElement | null>;
+  /** False: on its way back into the pill. It stays mounted for that, then
+   *  calls `onGone`; true again on the way turns it round where it is. */
+  open: boolean;
+  /** The door is opening out of it: it hands over its box and selection and
+   *  is gone at once — the door is the motion. */
+  growing?: boolean;
   /** Whether the pointer is on the pill right now. The card's chunk can land
    *  after the pointer has already moved on. */
   hovered: () => boolean;
   onClose: () => void;
-  /** The card's last word as it leaves: whether it held the caret. */
-  onRelease: (focusInside: boolean) => void;
+  /** Said as it starts to leave — back into the pill, or into a door growing
+   *  out of it — before anything moves or the caret goes anywhere. */
+  onRelease: (release: CardRelease) => void;
+  onGone: () => void;
   children: ReactNode;
 }) {
-  const box = useRef<HTMLDivElement>(null);
-  const [springing, setSpringing] = useState(false);
+  const shell = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const heading = useId();
+  const [moving, setMoving] = useState(false);
   const pinned = useRef(false), over = useRef(false), leave = useRef(0);
+  // Its field was used this opening: a door growing out of it takes the
+  // selection along, rather than putting the caret at the end.
+  const used = useRef(false);
+  const opened = useRef(false);
+  const flight = useRef<Animation[]>([]);
   const close = useRef(onClose); close.current = onClose;
   const release = useRef(onRelease); release.current = onRelease;
-  // The hole in the native webview tracks the spring frame by frame.
-  useNativeOverlayRegion(box, true, springing);
+  const gone = useRef(onGone); gone.current = onGone;
+  // The hole in the native webview tracks the flight frame by frame.
+  useNativeOverlayRegion(shell, true, moving);
 
   useLayoutEffect(() => {
-    const card = box.current;
-    if (!card) return;
-    const from = (pill.current?.querySelector(".rl-portal-membrane") ?? pill.current)?.getBoundingClientRect();
-    let animation: Animation | undefined;
-    if (from && card.animate && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
-      setSpringing(true);
-      animation = card.animate(springInKeyframes(from, card.getBoundingClientRect()), { duration: SWAP_MS, easing: SWAP_SPRING });
-      animation.onfinish = () => setSpringing(false);
+    const card = shell.current, inner = content.current;
+    if (!card || !inner) return;
+    // Turned round mid-flight: on from wherever it has got to.
+    const now = flight.current.length ? box(card.getBoundingClientRect()) : null;
+    const shown = flight.current.length ? Number(getComputedStyle(inner).opacity) : 0;
+    if (!open) {
+      const field = card.querySelector("textarea");
+      release.current({
+        caret: card.contains(document.activeElement),
+        rect: now ?? box(card.getBoundingClientRect()),
+        selection: field && used.current ? [field.selectionStart, field.selectionEnd, field.selectionDirection] : null,
+      });
     }
-    // Before the node leaves the document, while the caret can still be
-    // found inside it.
-    return () => { animation?.cancel(); release.current(card.contains(document.activeElement)); };
+    for (const animation of flight.current) animation.cancel();
+    flight.current = [];
+    // Closed before its chunk even landed: nothing to put away.
+    if (growing || !open && !opened.current) { gone.current(); return; }
+    opened.current = true;
+    const membrane = pill.current?.querySelector<HTMLElement>(".rl-portal-membrane") ?? pill.current;
+    if (!card.animate || !membrane) { if (!open) gone.current(); return; }
+    const home = box(membrane.getBoundingClientRect()), own = box(card.getBoundingClientRect());
+    const corner = parseFloat(getComputedStyle(membrane).borderTopLeftRadius) || 0;
+    const radius = parseFloat(getComputedStyle(card).borderTopLeftRadius) || 0;
+    // Read live, so a change of the system setting applies from the next flight.
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    if (reduced) {
+      flight.current = [card.animate([{ opacity: open ? 0 : 1 }, { opacity: open ? 1 : 0 }], { duration: ISLAND_FADE_MS, fill: "forwards" })];
+    } else if (open) {
+      flight.current = [
+        card.animate(flipKeyframes(now ?? home, own), { duration: ISLAND_SPRING_MS, easing: SWAP_SPRING }),
+        card.animate(cornerKeyframes(now ?? home, own, corner, radius), { duration: CORNER_MS, easing: SWAP_SPRING }),
+        inner.animate([{ opacity: shown }, { opacity: 1 }], { duration: ISLAND_SPRING_MS - CONTENT_DELAY_MS, delay: now ? 0 : CONTENT_DELAY_MS, fill: "backwards" }),
+      ];
+    } else {
+      flight.current = [
+        card.animate(flipBackKeyframes(home, own), { duration: CARD_CLOSE_MS, easing: ISLAND_EASE_IN, fill: "forwards" }),
+        card.animate(cornerKeyframes(home, own, corner, radius).reverse(), { duration: CARD_CLOSE_MS, easing: ISLAND_EASE_IN, fill: "forwards" }),
+        inner.animate([{ opacity: 1 }, { opacity: 0 }], { duration: CONTENT_OUT_MS, fill: "forwards" }),
+      ];
+    }
+    setMoving(true);
+    flight.current[0].onfinish = () => {
+      if (!open) return gone.current();
+      for (const animation of flight.current) animation.cancel();
+      flight.current = [];
+      setMoving(false);
+    };
     // The pill is a stable ref.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, growing]);
+  useLayoutEffect(() => () => {
+    for (const animation of flight.current) animation.cancel();
+    flight.current = [];
   }, []);
 
   useEffect(() => {
-    const card = box.current, button = pill.current;
-    if (!card) return;
+    const card = shell.current, button = pill.current;
+    if (!card || !open) return;
+    pinned.current = false;
+    used.current = false;
     const inside = (target: EventTarget | null) => target instanceof Node && (card.contains(target) || !!button?.contains(target));
     const enter = () => { over.current = true; window.clearTimeout(leave.current); };
     const exit = (event?: PointerEvent) => {
@@ -75,12 +171,14 @@ export default function MonochatCard({ pill, hovered, onClose, onRelease, childr
       }, LEAVE_CLOSE_MS);
     };
     const pin = () => { pinned.current = true; window.clearTimeout(leave.current); };
+    const focus = (event: FocusEvent) => { pin(); if (event.target instanceof HTMLTextAreaElement) used.current = true; };
     // Arriving after the pointer already left: the leave starts now.
     if (hovered()) over.current = true;
     else exit();
     // A press anywhere else. Not consumed: it lands on what it was aimed at.
+    // Bare title bar is the start of a window drag, which is not "elsewhere".
     const outside = (event: PointerEvent) => {
-      if (inside(event.target) || hasChildOverlay()) return;
+      if (inside(event.target) || hasChildOverlay() || isTitleBarPress(event.target)) return;
       close.current();
     };
     // A press inside the web page, which never reaches this document.
@@ -103,7 +201,7 @@ export default function MonochatCard({ pill, hovered, onClose, onRelease, childr
       node?.addEventListener("pointerout", exit);
     }
     card.addEventListener("pointerdown", pin, true);
-    card.addEventListener("focusin", pin);
+    card.addEventListener("focusin", focus);
     card.addEventListener("keydown", pin, true);
     document.addEventListener("pointerdown", outside, true);
     window.addEventListener("redline:page-press", page);
@@ -111,12 +209,13 @@ export default function MonochatCard({ pill, hovered, onClose, onRelease, childr
     window.addEventListener("keydown", escapeOver, true);
     return () => {
       window.clearTimeout(leave.current);
+      over.current = false;
       for (const node of [card, button]) {
         node?.removeEventListener("pointerover", enter);
         node?.removeEventListener("pointerout", exit);
       }
       card.removeEventListener("pointerdown", pin, true);
-      card.removeEventListener("focusin", pin);
+      card.removeEventListener("focusin", focus);
       card.removeEventListener("keydown", pin, true);
       document.removeEventListener("pointerdown", outside, true);
       window.removeEventListener("redline:page-press", page);
@@ -124,13 +223,15 @@ export default function MonochatCard({ pill, hovered, onClose, onRelease, childr
       window.removeEventListener("keydown", escapeOver, true);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [open]);
 
-  return <div ref={box} id="rl-monochat-card" className="rl-monochat-float" role="region" aria-label="Redline" data-drop-cover>
-    <div className="rl-float-heading">
-      <span>Redline</span>
-      <button type="button" aria-label="Collapse Redline" title="Collapse (Esc)" onClick={() => close.current()}><ChevronDown size={16}/></button>
+  return <div ref={shell} id="rl-monochat-card" className="rl-monochat-float" role="region" aria-labelledby={heading} data-drop-cover data-leaving={!open || undefined}>
+    <div ref={content}>
+      <div className="rl-float-heading">
+        <h2 id={heading}>Redline</h2>
+        <button type="button" aria-label="Collapse Redline" title="Collapse (Esc)" onClick={() => close.current()}><ChevronDown size={16}/></button>
+      </div>
+      {children}
     </div>
-    {children}
   </div>;
 }

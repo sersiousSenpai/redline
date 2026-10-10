@@ -8,7 +8,9 @@ import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
 import { isFrontDoorKey } from "../lib/keymap";
 import { isEditableTarget } from "../lib/landing";
 import { SHELL_EDGE } from "../lib/paneLayout";
+import { DOOR_CLOSE_MS, DOOR_GROW_MS, flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
+import type { CardRelease } from "./MonochatCard";
 import "./MonochatIsland.css";
 
 // One Redline island on every surface, in two poses.
@@ -20,6 +22,12 @@ import "./MonochatIsland.css";
 // composer. On the document's empty plate the door also RESTS, unengaged, in
 // the plate's free area: headline, composer and recents, and no pill, because
 // the door itself is the way in.
+//
+// Both poses come out of the pill and go back into it. The door springs from
+// the card it grows out of (draft, caret and selection carried over), else
+// from the pill; the paper fades in behind it, the welcome a beat later.
+// Closing, it falls back toward the pill while the paper fades. On the empty
+// plate the composer never moves at all — engaging it only brings the paper.
 
 export type LandingFit = "full" | "pills" | "bare" | "none";
 
@@ -41,6 +49,13 @@ const MIN_LANDING_WIDTH = 360;
 /** A pointer RESTING on the pill, not one crossing the footer on its way to
  *  the terminal under it. */
 const HOVER_OPEN_MS = 150;
+/** The welcome waits for the door to be under way before it fades in... */
+const WELCOME_DELAY_MS = 120;
+const WELCOME_FADE_MS = 260;
+/** ...and is gone first when the door goes back. */
+const WELCOME_OUT_MS = 100;
+/** The gentle rise of a room holding a chat: no composer box to spring. */
+const ROOM_RISE_MS = 260;
 
 // The compact card is its own chunk: nothing on the boot path needs it until
 // a pointer rests on the pill, and the dwell is long enough to fetch it.
@@ -49,15 +64,36 @@ const MonochatCard = lazy(loadCard);
 
 /** A menu, picker or dialog layered over the island owns the pointer and Esc. */
 const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]');
+/** Not in the chat slot while it is folded away (`hidden`). */
+const shown = (element: Element) => !element.closest("[hidden]");
 /** The composer the door puts the caret in — a chat's own when it holds one. */
-const composerIn = (root: HTMLElement | null) =>
-  root?.querySelector<HTMLElement>("[data-chat-composer] textarea") ?? root?.querySelector<HTMLElement>("textarea") ?? null;
+const composerIn = (root: HTMLElement | null) => {
+  const fields = Array.from(root?.querySelectorAll<HTMLTextAreaElement>("textarea") ?? []).filter(shown);
+  return fields.find(field => field.closest("[data-chat-composer]")) ?? fields[0] ?? null;
+};
+const box = (element: Element): SwapRect => {
+  const r = element.getBoundingClientRect();
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+};
+/** Where focus goes when where it was is gone: the surface's own main area,
+ *  never nothing (WCAG 2.4.3). Focusable only until focus moves on, so a
+ *  click on the page's plain text still focuses nothing. */
+const focusMain = () => {
+  const main = document.querySelector<HTMLElement>(".rl-doc-column");
+  if (!main) return (document.activeElement as HTMLElement | null)?.blur();
+  if (!main.hasAttribute("tabindex")) {
+    main.tabIndex = -1;
+    main.addEventListener("blur", () => main.removeAttribute("tabindex"), { once: true });
+  }
+  main.focus({ preventScroll: true });
+};
 
-export function MonochatIsland({ open, onOpenChange, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The compact card. Its content is rendered only while it is open. */
+  /** The compact card. Its content is rendered while it is open, and held as
+   *  it last was while the card goes back into the pill. */
   compactOpen?: boolean;
   onCompactChange?: (open: boolean) => void;
   compact?: ReactNode;
@@ -66,6 +102,9 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   onVisibilityChange?: (visible: boolean) => void;
   context: string;
   busy: boolean;
+  /** Said politely to a screen reader: a launch handed off, a plan arrived.
+   *  The pill only shows "Working", and a label change is never read out. */
+  announce?: string;
   /** The room is holding a chat. Its heading names it and carries the one
    *  New, back to the composer. */
   onNewChat?: () => void;
@@ -111,6 +150,18 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   const inset = landed && !onNewChat;
   const live = useRef({ open, compactOpen }); live.current = { open, compactOpen };
   useNativeOverlayRegion(launcher, !visible);
+  // The door on its way back toward the pill: still painted, already inert.
+  const [closing, setClosing] = useState(false);
+  const flight = useRef<Animation[]>([]);
+  // The card a door is growing out of: where to spring from, and the
+  // selection its field had.
+  const growFrom = useRef<Pick<CardRelease, "rect" | "selection"> | null>(null);
+  // The card stays mounted on its way back into the pill, showing what it
+  // held as it left; it is gone at once when the door grows out of it.
+  const [cardOut, setCardOut] = useState(false);
+  const cardOpen = compactOpen && !visible;
+  const cardContent = useRef<ReactNode>(null);
+  if (cardOpen) cardContent.current = compact;
 
   /** Where the caret was before the island took it, to hand it back. */
   const remember = (active = document.activeElement) => {
@@ -118,7 +169,10 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     if (layer.current?.contains(active) || active.closest(".rl-monochat-float")) return;
     returnFocus.current = active;
   };
+  // Every opening starts clean: a navigation nothing was open for leaves
+  // no mark on the next one.
   const openCompact = () => {
+    navigated.current = false;
     remember();
     compactChange.current?.(true);
   };
@@ -126,21 +180,25 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   // compact card grows into it, draft and all.
   const engage = () => {
     window.clearTimeout(dwell.current);
+    if (!live.current.open) navigated.current = false;
     remember();
     if (live.current.compactOpen) compactChange.current?.(false);
     close.current(true);
   };
-  // The card's last word as it leaves. Growing into the door keeps the
-  // caret for the door; otherwise a card that held it hands it back.
-  const releaseCard = (focusInside: boolean) => {
-    if (live.current.open) return;
-    const back = returnFocus.current?.isConnected ? returnFocus.current : null;
+  // The card's last word as it leaves. Growing into the door, it hands over
+  // its box and selection and the door keeps the caret; otherwise a card that
+  // held the caret hands it back — to where it was, or after navigation (or
+  // with that gone) to the new surface's main area.
+  const releaseCard = ({ caret, rect, selection }: CardRelease) => {
+    if (live.current.open) { growFrom.current = { rect, selection }; return; }
+    const remembered = returnFocus.current;
     returnFocus.current = null;
     const away = navigated.current;
     navigated.current = false;
-    if (!focusInside) return;
-    if (away || !back) (document.activeElement as HTMLElement | null)?.blur();
-    else back.focus({ preventScroll: true });
+    if (!caret) return;
+    if (away || remembered && !remembered.isConnected) focusMain();
+    else if (remembered) remembered.focus({ preventScroll: true });
+    else (document.activeElement as HTMLElement | null)?.blur();
   };
 
   useEffect(() => {
@@ -219,6 +277,7 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   useEffect(() => { onVisibilityChange?.(visible); }, [visible, onVisibilityChange]);
   // The door coming up takes the card's place; it never comes back by itself.
   useEffect(() => { if (visible && compactOpen) compactChange.current?.(false); }, [visible, compactOpen]);
+  useLayoutEffect(() => { if (cardOpen) setCardOut(true); }, [cardOpen]);
   useEffect(() => {
     const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
     const update = () => setReduced(media?.matches ?? false);
@@ -243,12 +302,13 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     // Keep the workspace mounted (including native browser state), but make
     // its controls unavailable while the opaque front door owns the screen.
     // A modal layer of its own — a dialog, or the tour that wraps one — stays
-    // live above it.
+    // live above it, and so does a status line: it has nothing to press, and
+    // silencing it would swallow what it says.
     const restored: Array<[HTMLElement, boolean]> = [];
     let branch: HTMLElement | null = layer.current;
     while (branch && branch !== document.body) {
       for (const sibling of Array.from(branch.parentElement?.children ?? [])) {
-        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer]')) {
+        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer], [role="status"]')) {
           restored.push([sibling, sibling.inert]); sibling.inert = true;
         }
       }
@@ -256,33 +316,112 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     }
     return () => { for (const [element, inert] of restored) element.inert = inert; };
   }, [open]);
+  // The door's flights (see the note at the top). The paper is a CSS
+  // transition on the layer's backdrop; these move the room — transform and
+  // opacity only, since they run past 300 ms (perf rule 6).
+  const settle = () => {
+    for (const animation of flight.current) animation.cancel();
+    flight.current = [];
+    if (room.current) room.current.style.transformOrigin = "";
+  };
+  // Lines the room's transform up on its composer, so a FLIP of the room is
+  // a FLIP of the box you type in.
+  const aim = (shell: HTMLElement, composer: Element) => {
+    const target = box(composer), frame = shell.getBoundingClientRect();
+    shell.style.transformOrigin = `${target.left - frame.left}px ${target.top - frame.top}px`;
+    return target;
+  };
+  // Whether the room was holding a chat when it was last open: leaving, the
+  // chat goes to the dock on its own, and the room has nothing to carry back.
+  const heldChat = useRef(false);
+  if (open) heldChat.current = !!onNewChat;
   useLayoutEffect(() => {
-    if (!open || inset || reduced || !room.current?.animate) return;
-    // On the plate the composer is already in place: engaging it only fades
-    // the backdrop in. From elsewhere the room rises gently, without squashing
-    // its text down to the dimensions of the footer pill or measuring layout.
-    const animation = room.current.animate([
-      { transform: "translate3d(0, 16px, 0) scale(.985)", opacity: 0 },
-      { transform: "none", opacity: 1 },
-    ], { duration: 260, easing: "cubic-bezier(.2,.8,.2,1)" });
-    return () => animation.cancel();
-    // Only an opening rises; settling into a chat mid-visit does not replay it.
+    const shell = room.current;
+    settle();
+    const composer = shell && !heldChat.current ? Array.from(shell.querySelectorAll(".rl-frontdoor")).find(shown) : null;
+    const from = growFrom.current?.rect ?? (membrane.current ? box(membrane.current) : null);
+    if (open) {
+      setClosing(false);
+      // On the plate the composer is already in place: engaging it only fades
+      // the paper in, and the box you clicked or typed into never moves.
+      if (inset || !shell?.animate) return;
+      if (reduced) {
+        flight.current = [shell.animate([{ opacity: 0 }, { opacity: 1 }], ISLAND_FADE_MS)];
+      } else if (!composer || !from) {
+        // A chat has no composer box to spring from the pill: it rises.
+        flight.current = [shell.animate([
+          { transform: "translate3d(0, 16px, 0) scale(.985)", opacity: 0 },
+          { transform: "none", opacity: 1 },
+        ], { duration: ROOM_RISE_MS, easing: "cubic-bezier(.2,.8,.2,1)" })];
+      } else {
+        flight.current = [
+          shell.animate(flipKeyframes(from, aim(shell, composer)), { duration: DOOR_GROW_MS, easing: SWAP_SPRING }),
+          // The headline and recents follow once the box is on its way — up
+          // to whatever they rest at (a sentence in the box keeps them out):
+          // one keyframe at 0, the end left to the stylesheet.
+          ...Array.from(shell.querySelectorAll<HTMLElement>(".rl-fd-welcome"), (welcome) =>
+            welcome.animate([{ opacity: 0, offset: 0 }], { duration: WELCOME_FADE_MS, delay: WELCOME_DELAY_MS, fill: "backwards" })),
+        ];
+        // Out of the pill the box starts pill-sized, and its squeezed text
+        // stays a blur until the shape is mostly there. Out of a card it is
+        // the composer you were just typing in, solid all the way.
+        if (!growFrom.current) flight.current.push(shell.animate([{ opacity: 0.35 }, { opacity: 1, offset: 0.35 }], DOOR_GROW_MS));
+        flight.current[0].onfinish = settle;
+      }
+      return;
+    }
+    // Shut back to rest on the plate: only the paper goes.
+    if (!previousOpen.current || landed) return;
+    setClosing(true);
+    const timer = window.setTimeout(() => setClosing(false), reduced ? ISLAND_FADE_MS : DOOR_CLOSE_MS);
+    if (shell?.animate) {
+      flight.current = [
+        reduced ? shell.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ISLAND_FADE_MS, fill: "forwards" })
+          : !composer || !from ? shell.animate([{ opacity: 0 }, { opacity: 0 }], { duration: DOOR_CLOSE_MS, fill: "forwards" })
+          : shell.animate(flipBackKeyframes(from, aim(shell, composer)), { duration: DOOR_CLOSE_MS, easing: ISLAND_EASE_IN, fill: "forwards" }),
+      ];
+      // Only the box goes back into the pill: the headline and recents are
+      // out of the way in its first moments, not shrinking over the work.
+      if (!reduced) {
+        for (const welcome of shell.querySelectorAll<HTMLElement>(".rl-fd-welcome")) {
+          flight.current.push(welcome.animate([{ opacity: 0, offset: 1 }], { duration: WELCOME_OUT_MS, fill: "forwards" }));
+        }
+      }
+    }
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, reduced]);
+  }, [open]);
+  // Back at the pill: the layer goes, and its flight with it, in one frame.
+  useLayoutEffect(() => {
+    if (!closing && !live.current.open) settle();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closing]);
   useEffect(() => {
     if (open && !previousOpen.current) {
       remember();
       // However it was summoned — a click, a key, ⌘J — the caret goes into
-      // the composer: the door is for typing. The welcome stays until you do.
-      composerIn(body.current)?.focus({ preventScroll: true });
+      // the composer, at the end of the draft: the door is for typing. The
+      // welcome stays until you do. Grown out of a card whose field was in
+      // use, the caret (or selection) lands where the card had it.
+      const field = composerIn(body.current);
+      field?.focus({ preventScroll: true });
+      if (field) {
+        const end = field.value.length, [start, stop, direction] = growFrom.current?.selection ?? [end, end, "none"];
+        field.setSelectionRange(Math.min(start, end), Math.min(stop, end), direction);
+      }
+      growFrom.current = null;
     } else if (!open && previousOpen.current) {
       // A chat carried out to the dock took its focused composer with it,
-      // which leaves the caret nowhere: that is the door's to hand back too.
+      // which leaves the caret nowhere: that is the door's to hand back too —
+      // to where it was, else the pill; after navigation, or with where it
+      // was gone, to the new surface's main area.
       const active = document.activeElement;
       if (!active || active === document.body || layer.current?.contains(active)) {
-        const back = returnFocus.current?.isConnected ? returnFocus.current : visible ? null : launcher.current;
-        if (navigated.current || !back) (document.activeElement as HTMLElement | null)?.blur();
-        else back.focus({ preventScroll: true });
+        const remembered = returnFocus.current;
+        if (navigated.current || remembered && !remembered.isConnected) focusMain();
+        else if (remembered) remembered.focus({ preventScroll: true });
+        else if (!visible) launcher.current?.focus({ preventScroll: true });
+        else (active as HTMLElement | null)?.blur();
       }
       returnFocus.current = null;
       navigated.current = false;
@@ -345,7 +484,7 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   const hoverIn = (event: ReactPointerEvent) => {
     overPill.current = true;
     void loadCard();
-    if (event.pointerType === "touch" || event.buttons || visible || compactOpen || !onCompactChange) return;
+    if (event.pointerType === "touch" || event.buttons || visible || closing || compactOpen || !onCompactChange) return;
     window.clearTimeout(dwell.current);
     dwell.current = window.setTimeout(() => {
       if (hasChildOverlay() || document.documentElement.hasAttribute(BOOT_ATTR)) return;
@@ -374,20 +513,28 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   }, [open]);
   useEffect(() => {
     if (!open) return;
+    // Modal for keys too: a window-level listener behind the door (the voice
+    // panel's hold-to-talk) must never hear a Space typed or pressed in it.
+    // Its default — the space in the composer, a button's press — stands.
+    const space = (event: KeyboardEvent) => { if (event.code === "Space") event.stopPropagation(); };
     const onKey = (event: KeyboardEvent) => {
+      space(event);
       // Saved chats are App-owned portals. Follow DOM containment after
-      // child handlers have run, rather than relying on React ancestry.
-      if (!(event.target instanceof Node) || !layer.current?.contains(event.target) || event.defaultPrevented || event.isComposing || hasChildOverlay()) return;
+      // child handlers have run, rather than relying on React ancestry. With
+      // the caret nowhere at all, the door is all there is to act on.
+      const target = event.target, root = layer.current;
+      if (!root || !(target instanceof Node) || !(target === document.body || root.contains(target)) || event.defaultPrevented || event.isComposing || hasChildOverlay()) return;
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close.current(false); }
       if (event.key === "Tab") {
-        const focusable = Array.from(layer.current.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex="0"]')).filter(element => element.getClientRects().length && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
+        const focusable = Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), input:not([disabled]), [href], [tabindex="0"]')).filter(element => element.getClientRects().length && !element.closest('[hidden], [inert], [aria-hidden="true"]'));
         const first = focusable[0], last = focusable[focusable.length - 1];
         if (event.shiftKey && (document.activeElement === first || document.activeElement === body.current)) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && (document.activeElement === last || document.activeElement === body.current)) { event.preventDefault(); first?.focus(); }
       }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("keyup", space);
+    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("keyup", space); };
   }, [open]);
 
   // Resting, the door engages on a press in its composer or a keystroke
@@ -412,11 +559,15 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   return <>
     <div ref={dock} className="rl-frontdoor-dock">
       {entrance}
-      {compactOpen && !visible && <Suspense fallback={null}>
-        <MonochatCard pill={launcher} hovered={() => overPill.current} onClose={() => compactChange.current?.(false)} onRelease={releaseCard}>{compact}</MonochatCard>
+      {(cardOpen || cardOut) && <Suspense fallback={null}>
+        <MonochatCard pill={launcher} open={cardOpen} growing={visible} hovered={() => overPill.current}
+          onClose={() => compactChange.current?.(false)} onRelease={releaseCard} onGone={() => setCardOut(false)}>{cardContent.current}</MonochatCard>
       </Suspense>}
     </div>
-    <div ref={layer} className="rl-frontdoor-focus" data-open={open} data-visible={visible} data-reduced={reduced}
+    {/* Outside the door, and spared by its inert sweep, so a launch from the
+        card and one from the door are both heard. */}
+    <div className="sr-only" role="status" aria-live="polite">{announce}</div>
+    <div ref={layer} className="rl-frontdoor-focus" data-open={open} data-visible={visible} data-closing={closing || undefined} data-reduced={reduced}
       data-rest={inset ? fit : undefined}
       role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label={open ? "Front door" : undefined}
       inert={!visible} aria-hidden={!visible}
@@ -439,7 +590,7 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
       <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced}>
         <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} {...restingEngage}>
           {open && onNewChat && <div className="rl-monochat-heading">
-            <span className="rl-monochat-title">{context}</span>
+            <h2 className="rl-monochat-title">{context}</h2>
             <button type="button" className="rl-monochat-new" onClick={onNewChat} title="A blank composer; this conversation stays in History">New</button>
           </div>}
           <div ref={conversation} className="rl-monochat-conversation">{children}</div>

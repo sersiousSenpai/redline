@@ -5248,6 +5248,12 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-doc-column {
   contain: layout paint;
 }
+/* Where focus lands after navigation from the door or its card (the
+   surface's main area, never nothing — MonochatIsland's focusMain): a
+   landmark, not a control to ring. */
+.rl-doc-column:focus {
+  outline: none;
+}
 
 /* The post-release settle transitions must never fight a live drag: a width
    animating toward last frame's value while the pointer is already elsewhere

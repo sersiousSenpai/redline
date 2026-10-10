@@ -17,13 +17,16 @@
 /* A sentence is waiting in the composer. */
 .rl-monochat-draft { position: absolute; top: 6px; right: 12px; width: 5px; height: 5px; border-radius: 50%; background: var(--color-info); }
 .rl-frontdoor-focus { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center; pointer-events: none; visibility: hidden; }
-.rl-frontdoor-focus[data-visible="true"] { visibility: visible; }
+/* Closing, the door stays painted while it goes back toward the pill — inert
+   and see-through to the pointer from its first frame (MonochatIsland). */
+.rl-frontdoor-focus[data-visible="true"], .rl-frontdoor-focus[data-closing] { visibility: visible; }
 /* The paper always covers the WINDOW, even while the door keeps the plate's
    insets: engaging the door spreads the backdrop, never the box. A press on
-   it lands on the layer, which is what closes the door. */
-.rl-frontdoor-focus::before { content: ""; position: fixed; inset: 0; background: var(--color-paper); opacity: 0; pointer-events: none; transition: opacity 220ms ease-out; }
+   it lands on the layer, which is what closes the door. In over 240 ms as the
+   door springs; out over 200, a beat ahead of the room. */
+.rl-frontdoor-focus::before { content: ""; position: fixed; inset: 0; background: var(--color-paper); opacity: 0; pointer-events: none; transition: opacity 200ms ease-in; }
 .rl-frontdoor-focus[data-open="true"] { pointer-events: auto; }
-.rl-frontdoor-focus[data-open="true"]::before { opacity: 1; pointer-events: auto; }
+.rl-frontdoor-focus[data-open="true"]::before { opacity: 1; pointer-events: auto; transition: opacity 240ms ease-out; }
 .rl-monochat { position: relative; width: min(800px, calc(100vw - 48px)); height: min(760px, calc(100dvh - 100px)); color: var(--color-ink); pointer-events: auto; }
 .rl-frontdoor-focus[data-visible="false"] .rl-monochat { pointer-events: none; }
 /* Entry and focused chat share geometry so a click cannot move the caret. */
@@ -33,7 +36,7 @@
 .rl-frontdoor-return:hover, .rl-frontdoor-return:focus-visible { color: var(--color-ink); border-color: var(--color-info); }
 /* A chat in the room: its heading replaces the chat's own toolbar. */
 .rl-monochat-heading { display: flex; align-items: center; gap: 2px; flex-shrink: 0; padding: 0 8px 8px; color: var(--color-ink-muted); font-size: 11px; }
-.rl-monochat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-monochat-title { flex: 1; min-width: 0; margin: 0; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-monochat-heading button { display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 7px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; cursor: pointer; }
 .rl-monochat-heading button:hover, .rl-monochat-heading button:focus-visible { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 7%, transparent); outline: none; }
 .rl-monochat-heading + .rl-monochat-conversation { height: auto; flex: 1; }
@@ -43,8 +46,11 @@
 .rl-monochat [data-chat-composer] { flex-shrink: 0; }
 @keyframes rl-portal-work { 50% { opacity: .35; } }
 @media (max-width: 640px) { .rl-monochat { width: calc(100vw - 24px); height: calc(100dvh - 88px); } }
-@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus::before, .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
-.rl-frontdoor-focus[data-reduced="true"]::before, .rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
+/* Reduced motion: nothing travels. The paper still comes and goes, as a
+   120 ms crossfade (the room fades with it); everything else is instant. */
+@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
+.rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
+.rl-frontdoor-focus[data-reduced="true"]::before { transition: opacity 120ms linear; }
 .rl-monochat-observability { font-size: 10px; }
 .rl-monochat-trace-toggle { display: flex; gap: 5px; align-items: center; border: 0; background: none; color: var(--color-ink-muted); cursor: pointer; }
 .rl-monochat-traces { position: absolute; inset: 45px 12px 12px; z-index: 3; padding: 15px; border: 1px solid var(--color-rule); border-radius: 14px; background: var(--color-bg-elevated); box-shadow: 0 12px 40px #0004; overflow: auto; }
