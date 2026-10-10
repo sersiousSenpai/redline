@@ -65,6 +65,11 @@ const ELEVEN_MODEL: &str = "eleven_turbo_v2_5";
 /// trips the limit. 2 stays within every tier while still pipelining a clip
 /// ahead; the sequential playback model hides it.
 const ELEVEN_MAX_CONCURRENCY: usize = 2;
+/// How long one cloud synthesis may take, connect to last byte. A sentence
+/// takes a few seconds at worst; a request that stalls past this is given up
+/// so the system voice reads that sentence, rather than holding the reply's
+/// audio until Stop and an ElevenLabs permit for as long as it stalls.
+const CLOUD_TIMEOUT: Duration = Duration::from_secs(20);
 
 // The Kokoro sidecar script is compiled into the binary and written to disk on
 // first use — no Tauri resource-path / dev-vs-bundle ambiguity to chase.
@@ -102,6 +107,11 @@ const KOKORO_VOICES_CHECK: FileCheck = FileCheck {
 /// Emit a setup-progress event roughly every megabyte, so the download bar moves
 /// without flooding the IPC channel with thousands of tiny updates.
 const KOKORO_PROGRESS_STEP: u64 = 1_000_000;
+/// A download that goes this long without a response or a byte is given up.
+/// The background upgrade runs unattended under the one-download lock, so a
+/// stalled connection would otherwise hold it, and every later attempt, for
+/// the rest of the session.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(60);
 
 /// What `tts_synth` answers for a request whose generation was cancelled. The
 /// driver expects it and never reports it.
@@ -437,6 +447,7 @@ async fn synth_openai(tts: &TtsState, text: &str) -> Result<TtsAudio, String> {
     let resp = tts
         .http
         .post("https://api.openai.com/v1/audio/speech")
+        .timeout(CLOUD_TIMEOUT)
         .bearer_auth(key.trim())
         .json(&serde_json::json!({
             "model": "gpt-4o-mini-tts",
@@ -499,6 +510,7 @@ async fn synth_eleven(tts: &TtsState, text: &str, generation: u64) -> Result<Tts
             "https://api.elevenlabs.io/v1/text-to-speech/{}",
             voice.trim()
         ))
+        .timeout(CLOUD_TIMEOUT)
         .header("xi-api-key", key.trim())
         .json(&serde_json::json!({
             "text": text,
@@ -1143,7 +1155,7 @@ async fn download_if_missing(
     if dest.exists() {
         return Ok(());
     }
-    fetch_checked(&tts.http, url, dest, phase, check, |received, total| {
+    fetch_checked(&tts.http, url, dest, phase, check, DOWNLOAD_STALL, |received, total| {
         emit_setup(app, phase, received, total)
     })
     .await
@@ -1152,22 +1164,24 @@ async fn download_if_missing(
 /// Stream `url` into a `.part` sibling of `dest`, then rename it into place —
 /// a crash mid-download never leaves a truncated file that looks complete.
 /// With a `check`, the file is hashed as it arrives and only the exact
-/// published file is renamed in. Any failure deletes the `.part`, so `dest`
-/// (and whatever model sits beside it) is left as it was.
+/// published file is renamed in. Any failure, including `stall` passing with
+/// nothing received, deletes the `.part`, so `dest` (and whatever model sits
+/// beside it) is left as it was.
 async fn fetch_checked(
     http: &reqwest::Client,
     url: &str,
     dest: &Path,
     phase: &str,
     check: Option<FileCheck>,
+    stall: Duration,
     progress: impl Fn(u64, u64),
 ) -> Result<(), String> {
     let tmp = dest.with_extension("part");
+    let stalled = || format!("downloading the Kokoro {phase} stalled — try again");
     let fetched = async {
-        let mut resp = http
-            .get(url)
-            .send()
+        let mut resp = tokio::time::timeout(stall, http.get(url).send())
             .await
+            .map_err(|_| stalled())?
             .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?;
         if !resp.status().is_success() {
             return Err(format!(
@@ -1183,9 +1197,9 @@ async fn fetch_checked(
         let mut received: u64 = 0;
         let mut last_emit: u64 = 0;
         progress(0, total);
-        while let Some(chunk) = resp
-            .chunk()
+        while let Some(chunk) = tokio::time::timeout(stall, resp.chunk())
             .await
+            .map_err(|_| stalled())?
             .map_err(|e| format!("downloading the Kokoro {phase} failed: {e}"))?
         {
             file.write_all(&chunk)
@@ -1366,6 +1380,24 @@ done
         format!("http://{addr}/kokoro-v1.0.onnx")
     }
 
+    /// Serve the start of a body on a loopback port, then go quiet with the
+    /// connection open, as a stalled download does.
+    fn serve_then_stall() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut req = [0u8; 2048];
+                let _ = s.read(&mut req);
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+                let _ = s.write_all(&[0u8; 10]);
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        });
+        format!("http://{addr}/kokoro-v1.0.onnx")
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_cancelled_generation_never_reaches_the_sidecar() {
@@ -1515,14 +1547,45 @@ done
         let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
         let dest = dir.join(KOKORO_MODEL_FILE);
         let url = serve_once(b"cut off mid-download");
-        let err = fetch_checked(&tts.http, &url, &dest, "upgrade", Some(KOKORO_MODEL_CHECK), |_, _| {})
-            .await
-            .unwrap_err();
+        let err = fetch_checked(
+            &tts.http,
+            &url,
+            &dest,
+            "upgrade",
+            Some(KOKORO_MODEL_CHECK),
+            DOWNLOAD_STALL,
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
         assert!(!dest.exists());
         assert!(!dest.with_extension("part").exists(), "no half file left behind");
         assert!(tts.model_present());
         assert!(tts.model_path().ends_with(KOKORO_LEGACY_MODEL_FILE), "the int8 model still loads");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_download_is_given_up_and_leaves_nothing_behind() {
+        let data = scratch_dir("stalled-download");
+        let dest = data.join("kokoro").join(KOKORO_MODEL_FILE);
+        let http = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        let err = fetch_checked(
+            &http,
+            &serve_then_stall(),
+            &dest,
+            "upgrade",
+            Some(KOKORO_MODEL_CHECK),
+            Duration::from_millis(300),
+            |_, _| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("stalled"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(4), "not held until the server gave up");
+        assert!(!dest.exists());
+        assert!(!dest.with_extension("part").exists());
     }
 
     #[cfg(unix)]
@@ -1537,7 +1600,8 @@ done
             sha256: Box::leak(format!("{:x}", Sha256::digest(BODY)).into_boxed_str()),
         };
         let dest = dir.join(KOKORO_MODEL_FILE);
-        fetch_checked(&tts.http, &serve_once(BODY), &dest, "upgrade", Some(check), |_, _| {})
+        let url = serve_once(BODY);
+        fetch_checked(&tts.http, &url, &dest, "upgrade", Some(check), DOWNLOAD_STALL, |_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
