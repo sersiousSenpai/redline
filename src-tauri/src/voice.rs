@@ -1695,6 +1695,17 @@ fn resets_conversation(error: &str) -> bool {
     crate::claude_proc::is_missing_conversation(error) || crate::claude_proc::is_context_overflow(error)
 }
 
+/// What separates the text on either side of a tool call in a reply.
+const PARAGRAPH: &str = "\n\n";
+
+/// Whether a stream line opens a tool call (the agent's own, or a server-run
+/// one such as a web search).
+fn starts_tool(v: &Value) -> bool {
+    v["type"] == "stream_event"
+        && v["event"]["type"] == "content_block_start"
+        && matches!(v["event"]["content_block"]["type"].as_str(), Some("tool_use" | "server_tool_use"))
+}
+
 /// Drive a voice child for its whole lifetime: stream stdout JSONL →
 /// `voice-delta` per text chunk, `voice-done` on each turn's `result`,
 /// `voice-interrupted` for a turn the user stopped, `voice-error` on a failed
@@ -1754,6 +1765,15 @@ async fn read_voice<R: AsyncBufRead + Unpin, E: VoiceSink>(mut reader: Lines<R>,
                 live.interrupt_acked.store(true, Ordering::SeqCst);
             }
             continue;
+        }
+        // A tool call ends what was said before it ("Let me check the plan.").
+        // Keep it its own paragraph instead of running into the answer that
+        // follows the tool, and release it now, so the panel can speak it
+        // while the tool runs — ahead of the meter naming the tool.
+        if starts_tool(&v) && !streamed.is_empty() && !streamed.ends_with('\n') {
+            deltas.push(PARAGRAPH, &emit_delta);
+            deltas.flush(&emit_delta);
+            streamed.push_str(PARAGRAPH);
         }
         // Second pass over the same value — the meter reads what
         // `classify_line` throws away.
@@ -1819,7 +1839,11 @@ async fn read_voice<R: AsyncBufRead + Unpin, E: VoiceSink>(mut reader: Lines<R>,
                 // An interrupt that lost the race to the turn's own end: the
                 // reply is whole, so it is a reply.
                 let interrupted = live.interrupt_pending.swap(false, Ordering::SeqCst);
-                let body = text.trim().to_string();
+                // The reply is everything the turn said, as it was heard and
+                // shown. The CLI's `result` is only its last message, which
+                // drops whatever came before a tool call — and is empty when
+                // the agent spoke only before its last one.
+                let body = if streamed.trim().is_empty() { text.trim() } else { streamed.trim() }.to_string();
                 if body.is_empty() && interrupted {
                     finish_interrupted(&events, &db, &session_id, generation, &live, &streamed, false);
                 } else if body.is_empty() {
@@ -2678,6 +2702,43 @@ mod tests {
         assert_eq!((done[1]["turn"].as_u64(), done[1]["body"].as_str()), (Some(2), Some("Three four.")));
         assert!(done[1]["timing"]["sendToDoneMs"].is_u64());
         assert!(done.iter().all(|d| d["generation"] == 1));
+    }
+
+    const TOOL: &str = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}"#;
+
+    #[tokio::test]
+    async fn a_reply_settles_with_everything_said_around_its_tools() {
+        // The CLI's `result` is only the last message (probe-verified on
+        // 2.1.296): "Checking it now." <tool> "Done." reports just "Done.".
+        // The reply the panel spoke and showed is the whole turn.
+        let f = Fixture::new();
+        f.read(&[INIT, &delta("Let me check the plan."), TOOL, &delta("It has three phases."), &result("It has three phases.")])
+            .await;
+        let whole = "Let me check the plan.\n\nIt has three phases.";
+        let done = f.events.all("voice-done");
+        assert_eq!(done[0]["body"], whole);
+        let rows = f.db.list_voice_messages("plan-1").unwrap();
+        assert_eq!(rows.last().map(|r| r.text.as_str()), Some(whole));
+        // The sentence before the tool is released, paragraph break and all,
+        // before the meter names the tool — so it can be spoken while the
+        // tool runs instead of after it.
+        let events = f.events.0.lock().unwrap().clone();
+        let tool_at = events
+            .iter()
+            .position(|(n, v)| n == "voice-meter" && v["activity"]["kind"] == "tool")
+            .expect("the tool is announced");
+        let said: String = events[..tool_at]
+            .iter()
+            .filter(|(n, _)| n == "voice-delta")
+            .map(|(_, v)| v["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(said, "Let me check the plan.\n\n");
+
+        // A turn that spoke only before its last tool is a reply, not an error.
+        let f = Fixture::new();
+        f.read(&[INIT, &delta("Adding that to Rollout."), TOOL, &result("")]).await;
+        assert!(f.events.all("voice-error").is_empty(), "{:?}", f.events.all("voice-error"));
+        assert_eq!(f.events.all("voice-done")[0]["body"], "Adding that to Rollout.");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 
-import { splitReply } from "./voiceStream";
+import { splitReply, spokenPause } from "./voiceStream";
 
 const REPLY =
   "Mostly. The risk is a double apply when the panel comes back mid-turn. ⟦§A.2⟧ " +
@@ -73,5 +73,16 @@ describe("splitReply", () => {
 
   it("renders a reply stored raw exactly as it rendered live", () => {
     expect(splitReply(REPLY.trim())).toEqual(splitReply(REPLY));
+  });
+});
+
+describe("spokenPause", () => {
+  it("is a line break the stream rests on, or the detail having begun", () => {
+    // Where the agent stops to use a tool, the backend leaves a paragraph break.
+    expect(spokenPause("Let me check the code.\n\n")).toBe(true);
+    expect(spokenPause("Gate it on the turn id.\n⟦screen⟧\n| Case |")).toBe(true);
+    // Mid-sentence, or a sentence that may yet go on: not a pause.
+    expect(spokenPause("Let me check the code.")).toBe(false);
+    expect(spokenPause("First line.\nSecond")).toBe(false);
   });
 });

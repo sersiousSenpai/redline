@@ -25,7 +25,7 @@ import {
 import { cloudTtsDriver } from "../audio/cloudTts";
 import { UtteranceDetector, DEFAULT_VAD_SILENCE_MS } from "../audio/vad";
 import { Playback, type NarrationMark } from "../audio/playback";
-import { splitReply } from "../audio/voiceStream";
+import { splitReply, spokenPause } from "../audio/voiceStream";
 import {
   IDLE_TURN,
   accepts,
@@ -776,11 +776,13 @@ function VoicePanelBase({
   );
 
   /** Speak whatever of the live reply's spoken part is new — never the
-   *  ⟦screen⟧ detail, never a marker. `final` speaks the held-back tail. */
+   *  ⟦screen⟧ detail, never a marker. The held-back tail is spoken at the
+   *  end (`final`), and as soon as the spoken part pauses (`spokenPause`). */
   const speakLive = useCallback(
     (final: boolean) => {
       if (discardSpeechRef.current) return;
-      const reply = splitReply(rawRef.current);
+      const raw = rawRef.current;
+      const reply = splitReply(raw);
       const base = spokenLenRef.current;
       const fresh = reply.spoken.slice(base);
       const marks = reply.marks.slice(markedRef.current);
@@ -796,7 +798,7 @@ function VoicePanelBase({
         spokenLenRef.current = reply.spoken.length;
         markedRef.current = reply.marks.length;
       }
-      if (final) queueRef.current?.flush();
+      if (final || spokenPause(raw)) queueRef.current?.flush();
     },
     [say],
   );

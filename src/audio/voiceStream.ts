@@ -66,6 +66,16 @@ export function splitReply(raw: string): VoiceReply {
   return { spoken: text, screen: screen.text.trim(), marks, sections };
 }
 
+/**
+ * Whether the spoken text streamed so far ends a thought, so a sentence the
+ * speech queue is holding back (it waits for what follows a period) can be
+ * said now: the ⟦screen⟧ line has begun, or the stream rests at a line break
+ * — which is where the agent stops to use a tool, often for seconds.
+ */
+export function spokenPause(raw: string): boolean {
+  return raw.includes(SCREEN_MARKER) || /\n\s*$/.test(raw);
+}
+
 /** Cut a marker that opened and has not closed: mid-stream it is still
  *  arriving, and in a finished reply it is malformed and never worth saying. */
 function withoutOpenMarker(text: string): string {

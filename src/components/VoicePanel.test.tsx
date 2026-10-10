@@ -475,6 +475,24 @@ describe("spoken and on-screen parts", () => {
     expect(scrolled).toEqual([document.querySelector("[data-anchor-id='A.1']")]);
   });
 
+  it("says the sentence before a tool while the tool runs, and the last spoken one once the detail begins", async () => {
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "The plan has three parts. Let me check the code." });
+    expect(spoken()).toBe("The plan has three parts.");
+    // The backend's paragraph break where the agent stopped to use a tool:
+    // the held sentence is heard now, not after the tool comes back.
+    await emit("voice-delta", { ...of(1), text: "\n\n" });
+    expect(spoken()).toBe("The plan has three parts. Let me check the code.");
+    await emit("voice-delta", { ...of(1), text: "Rollout is the risk. Gate it on the turn id." });
+    expect(spoken()).not.toContain("Gate it");
+    // Everything after ⟦screen⟧ is for the eye, so the last spoken sentence
+    // need not wait for the table to finish streaming.
+    await emit("voice-delta", { ...of(1), text: "\n⟦screen⟧\n| Case | Fix |" });
+    expect(spoken()).toContain("Gate it on the turn id.");
+    expect(spoken()).not.toContain("Case");
+  });
+
   it("renders a stored raw reply through the same reader when the transcript reloads", async () => {
     script.thread = [{ id: "m1", sessionKey: SID, role: "agent", text: REPLY, createdAt: 1 }];
     await mount();
