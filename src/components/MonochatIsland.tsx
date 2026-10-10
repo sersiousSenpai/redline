@@ -62,8 +62,9 @@ const ROOM_RISE_MS = 260;
 const loadCard = () => import("./MonochatCard");
 const MonochatCard = lazy(loadCard);
 
-/** A menu, picker or dialog layered over the island owns the pointer and Esc. */
-const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]');
+/** A menu, picker or dialog layered over the island owns the pointer and Esc.
+ *  Not one the open door's sweep left inert behind it: that one is under. */
+const hasChildOverlay = () => Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]')).some(overlay => !overlay.closest("[inert]"));
 /** Not in the chat slot while it is folded away (`hidden`). */
 const shown = (element: Element) => !element.closest("[hidden]");
 /** The composer the door puts the caret in — a chat's own when it holds one. */
@@ -293,7 +294,12 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     previousSurface.current = surfaceKey;
     // An owner that closes the door on its way somewhere (a recent) is going
     // somewhere all the same: this runs before the close below, which reads it.
-    if (!open && !previousOpen.current && !compactOpen) return;
+    if (!open && !previousOpen.current && !compactOpen) {
+      // A recent taken from the resting door by keyboard: the caret was on
+      // it, and the door it rested in is going.
+      if (layer.current?.contains(document.activeElement)) focusMain();
+      return;
+    }
     navigated.current = true;
     if (open) close.current(false);
     if (compactOpen) compactChange.current?.(false);
@@ -542,10 +548,12 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
 
   // Resting, the door engages on a press in its composer or a keystroke
   // typed into it — never on focus alone, so tabbing across the plate opens
-  // nothing (WCAG 3.2.1), and a press on a recent goes where the recent goes.
+  // nothing (WCAG 3.2.1), and a press or a key on a recent goes where the
+  // recent goes.
+  const inBox = (target: EventTarget) => !!(target as Element).closest?.(".rl-fd-island");
   const restingEngage = landed && !open ? {
-    onPointerDownCapture: (event: ReactPointerEvent) => { if (event.button === 0 && (event.target as Element).closest?.(".rl-fd-island")) engage(); },
-    onKeyDownCapture: (event: ReactKeyboardEvent) => { if (!event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing && (event.key.length === 1 || event.key === "Enter" || event.key === "Backspace" || event.key === "Delete")) engage(); },
+    onPointerDownCapture: (event: ReactPointerEvent) => { if (event.button === 0 && inBox(event.target)) engage(); },
+    onKeyDownCapture: (event: ReactKeyboardEvent) => { if (inBox(event.target) && !event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing && (event.key.length === 1 || event.key === "Enter" || event.key === "Backspace" || event.key === "Delete")) engage(); },
   } : {};
 
   const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible} data-busy={busy} data-reduced={reduced}

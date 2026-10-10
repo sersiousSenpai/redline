@@ -1,7 +1,7 @@
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createPortal } from "react-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { MonochatIsland, landingFit } from "./MonochatIsland";
 // The compact card is a lazy chunk; loaded up front, it resolves in a tick.
 import "./MonochatCard";
@@ -292,6 +292,39 @@ describe("the resting door", () => {
     expect(pose()).toBe("entry");
     await key(main(), { key: "w" });
     expect(pose()).toBe("conversation");
+  });
+
+  it("a key on one of its recents goes where the recent goes: it engages nothing", async () => {
+    const onOpen = vi.fn();
+    await render(<Harness landing onOpen={onOpen}>
+      <div className="rl-frontdoor">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div>
+        <div className="rl-fd-welcome rl-fd-recents"><button id="recent-plan">Earlier plan</button></div>
+      </div>
+    </Harness>);
+    const recent = host.querySelector<HTMLButtonElement>("#recent-plan")!;
+    await act(async () => recent.focus());
+    for (const name of ["Enter", " ", "w"]) await key(recent, { key: name });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(pose()).toBe("entry");
+    // The box itself still engages on its first key.
+    await act(async () => main().focus());
+    await key(main(), { key: "w" });
+    expect(pose()).toBe("conversation");
+  });
+
+  it("a recent taken from it by keyboard hands the caret to the new place's main area", async () => {
+    await render(<Harness landing>
+      <div className="rl-frontdoor">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div>
+        <div className="rl-fd-welcome rl-fd-recents"><button id="recent-page" onClick={() => host.querySelector<HTMLButtonElement>("#navigate")!.click()}>A page</button></div>
+      </div>
+    </Harness>);
+    const recent = host.querySelector<HTMLButtonElement>("#recent-page")!;
+    await act(async () => recent.focus());
+    await click("#recent-page");
+    expect(document.activeElement).toBe(main_());
+    expect(pose()).toBe("entry");
   });
 
   it("a chat lets go of the plate's insets: it needs the whole room", async () => {
@@ -697,6 +730,28 @@ describe("the door's flights", () => {
 });
 
 describe("modal manners", () => {
+  it("a dialog left open behind the door is under it, not over it: Esc and the paper stay the door's", async () => {
+    // `inert` as a browser has it: reflected to the attribute (jsdom lacks it).
+    Object.defineProperty(HTMLElement.prototype, "inert", { configurable: true,
+      get(this: HTMLElement) { return this.hasAttribute("inert"); },
+      set(this: HTMLElement, value: boolean) { this.toggleAttribute("inert", value); } });
+    onTestFinished(() => { delete (HTMLElement.prototype as { inert?: boolean }).inert; });
+    await render(<>
+      <Harness/>
+      {/* An inline editor that calls itself a dialog, open in the work behind. */}
+      <section><div role="dialog" aria-label="Annotation"><textarea aria-label="Annotation body"/></div></section>
+    </>);
+    await click('[aria-label="Open front door"]');
+    expect(host.querySelector("section")!.inert).toBe(true);
+    await key(main(), { key: "Escape" });
+    expect(pose()).toBe("notch");
+    await click('[aria-label="Open front door"]');
+    const paper = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+    await pointer(paper, "pointerdown", { button: 0 });
+    await pointer(paper, "click", { button: 0 });
+    expect(pose()).toBe("notch");
+  });
+
   it("Esc closes the door with the caret nowhere at all", async () => {
     await render();
     await click('[aria-label="Open front door"]');
