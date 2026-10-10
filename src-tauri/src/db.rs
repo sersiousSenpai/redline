@@ -4603,6 +4603,27 @@ impl Database {
         Ok(())
     }
 
+    /// Every message body, across every conversation's thread table, that
+    /// contains `pattern` (a LIKE pattern). For a sweep that must never delete
+    /// what a message still names, such as a chat's screenshot.
+    pub fn texts_mentioning(&self, pattern: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.read_conn();
+        let like = format!("%{pattern}%");
+        let mut seen = Vec::new();
+        let mut out = Vec::new();
+        for kind in ["browse", "linked", "mission", "companion", "voice", "drafter", "memchat", "session"] {
+            let Some((table, _, body, _)) = Self::thread_table(kind) else { continue };
+            if seen.contains(&table) {
+                continue;
+            }
+            seen.push(table);
+            let mut stmt = conn.prepare(&format!("SELECT {body} FROM {table} WHERE {body} LIKE ?1"))?;
+            let rows = stmt.query_map(params![like], |row| row.get::<_, String>(0))?;
+            out.extend(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+        Ok(out)
+    }
+
     /// Resolve a thread kind to its `(table, key column, body column, status
     /// column)`. The one place the generic thread routes map the app's
     /// disjoint id-spaces; `session`/`fork` reads a plan session's comment
