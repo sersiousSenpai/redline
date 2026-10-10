@@ -2,7 +2,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
+const { turn, calls, contextReply, markdownRenders, readAloud } = vi.hoisted(() => ({
+  readAloud: { onFallback: null as ((note: string | null) => void) | null },
   turn: { messages: [] as { id: string; role: string; body: string; status: string }[], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), meter: null, activity: [], meters: {} },
   calls: [] as { cmd: string; args: Record<string, unknown> }[],
@@ -11,7 +12,12 @@ const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
 }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
-vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => ({ speaking: false, stop: () => {} }) }));
+vi.mock("../audio/useReadAloud", () => ({
+  useReadAloud: (o: { onFallback?: (note: string | null) => void }) => {
+    readAloud.onFallback = o.onFallback ?? null;
+    return { speaking: false, stop: () => {} };
+  },
+}));
 vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args: Record<string, unknown>) => {
@@ -144,5 +150,23 @@ describe("the chat as a brainstorm room", () => {
     calls.length = 0;
     await render({ harness: { backend: "codex", model: null, effort: null } });
     expect(calls.some(c => c.cmd === "companion_prewarm")).toBe(false);
+  });
+  // A read-aloud reply the studio voice's stand-in reads says why on the
+  // notice line, and only until the studio voice reads again.
+  it("clears the studio voice's stand-in note when it speaks again, and no other notice", async () => {
+    await render();
+    const note = () => host.querySelector(".rl-thread-note")?.textContent ?? null;
+    await act(async () => readAloud.onFallback!("Studio voice warming · Kokoro reading"));
+    expect(note()).toBe("Studio voice warming · Kokoro reading");
+    await act(async () => readAloud.onFallback!(null));
+    expect(note()).toBeNull();
+    await act(async () => readAloud.onFallback!("Memory tight · Kokoro reading"));
+    const steered = "Interrupted the previous turn and sent your instruction next";
+    Object.assign(turn, { steerNotice: steered });
+    await render();
+    // Another notice took its place: the studio voice speaking leaves it.
+    await act(async () => readAloud.onFallback!(null));
+    expect(note()).toBe(steered);
+    Object.assign(turn, { steerNotice: undefined });
   });
 });
