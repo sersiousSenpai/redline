@@ -98,7 +98,6 @@ mod tests {
         assert_off_main_command(src, "fsbrowse.rs", "save_text_file");
         assert_off_main_command(src, "fsbrowse.rs", "save_attachment");
         assert_off_main_command(src, "fsbrowse.rs", "import_attachment");
-        assert_off_main_command(src, "fsbrowse.rs", "ensure_dir");
     }
 
     /// A tab's repo mark walks ancestors looking for `.git`, then reads and
@@ -456,6 +455,47 @@ mod tests {
             handler.contains("IN_ORDER_COMMANDS\n            .contains(&command)") && handler.contains("in_turn(ticket, "),
             "lib.rs: off_main must ticket IN_ORDER_COMMANDS as they arrive and run each in its turn"
         );
+    }
+
+    /// `(async)` on a sync body, or an `async fn` command that never awaits,
+    /// builds a tokio task type for that one command: ~11 KB of release binary
+    /// each (docs/perf-budget.md rule 4). A sync body goes in
+    /// OFF_MAIN_COMMANDS instead, for the cost of a string, so an async
+    /// command is one that awaits.
+    #[test]
+    fn sync_commands_ride_the_pool_not_async_tasks() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let (mut async_commands, mut offenders) = (0, Vec::new());
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !matches!(line.trim(), "#[tauri::command(async)]" | "#[tauri::command]") {
+                    continue;
+                }
+                let Some(at) = lines[i + 1..].iter().position(|l| l.contains("fn ")) else { continue };
+                let signature = lines[i + 1 + at];
+                let file = path.file_name().unwrap().to_string_lossy();
+                if !signature.contains("async fn ") {
+                    if line.trim() != "#[tauri::command]" {
+                        offenders.push(format!("{file}: `(async)` on a sync body: {}", signature.trim()));
+                    }
+                    continue;
+                }
+                async_commands += 1;
+                // The body runs to the function's closing brace at column 0.
+                let body: String = lines[i + 1 + at..].iter().take_while(|l| **l != "}").copied().collect();
+                if !body.contains(".await") {
+                    offenders.push(format!("{file}: an async fn that never awaits: {}", signature.trim()));
+                }
+            }
+        }
+        assert!(async_commands > 10, "the scan found almost no async commands: it is not reading the sources");
+        assert!(offenders.is_empty(), "name these in OFF_MAIN_COMMANDS as plain sync commands: {offenders:#?}");
     }
 
     /// The handler routes `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS` to the

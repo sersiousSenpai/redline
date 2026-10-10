@@ -147,17 +147,6 @@ pub fn list_harnesses() -> Vec<HarnessFileEntry> {
     list_harnesses_under(&config_root())
 }
 
-/// Tauri command (A5a): link-install a harness pack from a local folder.
-/// The returned identity feeds the confirmation toast; the folder the user
-/// picked is the consent — a harness composes UI, it holds no scopes and
-/// can call nothing.
-#[tauri::command(async)]
-pub fn harness_install_from_folder(
-    path: String,
-) -> Result<crate::local_install::HarnessInstall, String> {
-    crate::local_install::install_harness_folder(&config_root(), std::path::Path::new(&path))
-}
-
 /// Tauri command (A5a): remove a link-installed harness. Guarded to links —
 /// a hand-authored directory is named, never deleted.
 #[tauri::command]

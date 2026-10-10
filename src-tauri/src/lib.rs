@@ -4166,6 +4166,11 @@ async fn browser_create_tab(app: AppHandle, label: String, url: String, css: Opt
     configure_browser_tab(&app, &setup_label, css.as_deref().unwrap_or(""), website.as_deref().unwrap_or("default"), zoom.unwrap_or(1.0), selection_actions.unwrap_or(true))
 }
 
+/// Set a freshly created or woken tab up: gestures, autoresize, the floating
+/// overlays' cut-outs, Redline's user scripts, and the new-window UI delegate
+/// (installed here, once per webview, NOT from `install_user_scripts`, which
+/// re-runs on every view-filter swap and would otherwise churn the delegate
+/// and drop any open popups).
 fn configure_browser_tab(app: &AppHandle, label: &str, css: &str, website: &str, zoom: f64, selection_actions: bool) -> Result<(), String> {
     let view = app.get_webview(label).ok_or("Browser view unavailable")?;
     browser_enable_gestures(app.clone(), label.to_owned())?;
@@ -9866,7 +9871,6 @@ fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
 /// `setAllowsBackForwardNavigationGestures` nor `setAllowsMagnification`
 /// (both default off), so we reach the native WKWebView through
 /// `with_webview()` and send the selectors with objc2. No-op on non-macOS.
-#[tauri::command]
 fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9915,7 +9919,6 @@ fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> 
 /// the delta and the webview still takes it all, so one mask serves both cases.)
 /// `syncBounds` still sets the exact rect at settle and on split/divider changes.
 /// macOS-only; a no-op elsewhere.
-#[tauri::command]
 fn browser_enable_autoresize(
     app: AppHandle,
     label: String,
@@ -10702,43 +10705,6 @@ fn browser_set_view(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (wv, css, selection_actions);
-    }
-    Ok(())
-}
-
-/// Install Redline's always-on browser user scripts (the in-window fullscreen
-/// shim, the new-tab interceptor, and — when the toggle is on — the
-/// highlight-to-chat selection bar) on a freshly created tab, with no view
-/// filter. Invoked at tab creation AND on every wake from suspension, so video
-/// fullscreen and the selection bar work before any "View" filter is applied;
-/// `browser_set_view` later re-installs the same set alongside its CSS.
-/// Also installs the new-window UI delegate here (once per webview, NOT from
-/// `install_user_scripts`, which re-runs on every view-filter swap and would
-/// otherwise churn the delegate and drop any open popups). macOS-only; a no-op
-/// elsewhere.
-#[tauri::command(async)]
-fn browser_install_shims(
-    app: AppHandle,
-    label: String,
-    selection_actions: Option<bool>,
-) -> Result<(), String> {
-    let wv = app
-        .get_webview(&label)
-        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
-    #[cfg(target_os = "macos")]
-    {
-        browser_events::install(app.clone(), &wv)?;
-        install_user_scripts(&wv, "", selection_actions.unwrap_or(true))?;
-        // Give this webview OAuth/SSO popup support (window.open with features →
-        // a real popup window with a live opener). Best-effort: a failure here
-        // must not block the tab from working.
-        if let Err(e) = browser_popup::install_new_window_delegate(&wv) {
-            eprintln!("browser_popup: failed to install new-window delegate: {e}");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (wv, selection_actions);
     }
     Ok(())
 }
@@ -11618,40 +11584,6 @@ async fn shipwright_agent(
     })
 }
 
-/// Every finding the Shipwright has ever produced, for the review strip.
-#[tauri::command(async)]
-fn shipwright_findings(
-    store: tauri::State<'_, SessionStore>,
-    include_dismissed: bool,
-) -> Result<Vec<db::ShipwrightFinding>, String> {
-    store
-        .database()
-        .list_shipwright_findings(include_dismissed)
-        .map_err(|e| e.to_string())
-}
-
-/// Record what the user did with a finding: `accepted` (it survived the trim
-/// into the launched document) or `dismissed` (it never comes back under the
-/// same wording). `shipped` is NOT settable here — it is detected.
-#[tauri::command(async)]
-fn shipwright_resolve(
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-    status: String,
-    draft_id: Option<String>,
-) -> Result<(), String> {
-    if !matches!(status.as_str(), "accepted" | "dismissed" | "pending") {
-        return Err(format!(
-            "`{status}` is not a user verdict — `shipped` is detected from the \
-             files a later commit touched, never self-declared"
-        ));
-    }
-    store
-        .database()
-        .resolve_shipwright_finding(&id, &status, draft_id.as_deref())
-        .map_err(|e| e.to_string())
-}
-
 /// Flip accepted findings to `shipped` when a later commit touched a file their
 /// `files` array named. **Detection, not self-declaration** — self-declared
 /// success is the one number an agent will always report favourably. Returns
@@ -12118,24 +12050,6 @@ fn memory_restore(
         );
     }
     Ok(restored)
-}
-
-/// Rebuild the semantic index from scratch: drop every vector for the current
-/// model and let the keeper's watch re-embed. The escape hatch for a corrupt or
-/// half-built index — the whole thing is DERIVED, so throwing it away costs
-/// nothing but time and can never touch the record.
-#[tauri::command(async)]
-fn memory_reindex(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-) -> Result<serde_json::Value, String> {
-    let db = store.database();
-    let dropped = db.clear_embeddings().map_err(|e| e.to_string())?;
-    let _ = app.emit("memory-changed", ());
-    Ok(serde_json::json!({
-        "dropped": dropped,
-        "provider": embed::provider_kind().as_str(),
-    }))
 }
 
 /// Explicit forget: release a prompt's words now (a manual compaction). The
@@ -12891,7 +12805,6 @@ pub fn run() {
             hook_conflicts::unwatch_hook_conflicts,
             browser_events::browser_inspect,
             browser_events::browser_set_appearance,
-            browser_overlay::browser_overlay_attach,
             browser_overlay::browser_overlay_regions,
             browser_actions::browser_action,
             browser_workspace::browser_protect_tabs,
@@ -13016,7 +12929,6 @@ pub fn run() {
             userconfig::save_workspace,
             userconfig::list_harnesses,
             userconfig::harness_flavor,
-            userconfig::harness_install_from_folder,
             userconfig::harness_uninstall,
             get_relay_config,
             set_relay_config,
@@ -13069,7 +12981,6 @@ pub fn run() {
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
             fsbrowse::save_text_file,
-            fsbrowse::ensure_dir,
             fsbrowse::save_attachment,
             fsbrowse::import_attachment,
             fsbrowse::home_dir,
@@ -13332,10 +13243,7 @@ pub fn run() {
             draft_suggestion_resolve,
             draft_suggestion_unresolve,
             parse_markdown_sections,
-            browser_enable_gestures,
-            browser_enable_autoresize,
             browser_set_view,
-            browser_install_shims,
             ledger_list_events,
             ledger_query,
             ledger_verify,
@@ -13361,7 +13269,6 @@ pub fn run() {
             memory_catalog_health,
             memory_status,
             memory_forget,
-            memory_reindex,
             memory_restore,
             memory_set_embed_provider,
             memory_embed_settings,
@@ -13370,8 +13277,6 @@ pub fn run() {
             memory_notes_list,
             librarian_agent,
             shipwright_agent,
-            shipwright_findings,
-            shipwright_resolve,
             shipwright_detect_shipped,
             export_context_bundle,
             mirror_status,

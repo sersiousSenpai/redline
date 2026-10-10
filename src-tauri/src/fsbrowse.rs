@@ -366,15 +366,6 @@ pub fn rekey_session_attachments(app: &tauri::AppHandle, old_id: &str, new_id: &
     }
 }
 
-/// Create a directory (and any missing parents), returning its absolute path.
-/// Lets the clipping flow ensure `<vault>/<clippings-subdir>` exists before
-/// listing it for filename de-duplication.
-#[tauri::command(async)]
-pub fn ensure_dir(path: String) -> Result<String, String> {
-    fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
-    Ok(Path::new(&path).to_string_lossy().into_owned())
-}
-
 /// The user's home directory — where new shells spawn (see `pty_spawn`). The
 /// explorer uses it to avoid surfacing a terminal sitting in $HOME as a
 /// "project" folder. Returns `None` if $HOME is unset.
