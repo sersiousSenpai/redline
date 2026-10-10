@@ -202,6 +202,45 @@ describe("SpeechQueue", () => {
   });
 });
 
+describe("SpeechQueue and a driver's optional hooks", () => {
+  it("tells the driver a reply began and that its text is all in, and hands it the tone", () => {
+    const calls: string[] = [];
+    const spoken: { text: string; tone?: string | null }[] = [];
+    const driver: SpeechDriver = {
+      speak: (text, opts) => spoken.push({ text, tone: opts.tone }),
+      cancel: () => calls.push("cancel"),
+      pause: () => {},
+      resume: () => {},
+      beginTurn: () => calls.push("begin"),
+      flush: () => calls.push("flush"),
+    };
+    const q = new SpeechQueue({ driver, prefs: { voiceURI: null, rate: 1 } });
+    q.primeTurn();
+    q.setTone("calm");
+    q.enqueue("Mostly, yes. The replay is safe on a remount. ");
+    q.flush();
+    expect(calls).toEqual(["begin", "flush"]);
+    expect(spoken.map((s) => s.tone)).toEqual(["calm", "calm"]);
+    // The tone is the reply's: the next one starts without it, as does a Stop.
+    q.primeTurn();
+    q.enqueue("Next. ");
+    q.setTone("upbeat");
+    q.cancel();
+    q.enqueue("After stop. ");
+    expect(spoken.slice(2).map((s) => s.tone)).toEqual([null, null]);
+  });
+
+  it("works with a driver that has none of them", () => {
+    const driver: SpeechDriver = { speak: () => {}, cancel: () => {}, pause: () => {}, resume: () => {} };
+    const q = new SpeechQueue({ driver, prefs: { voiceURI: null, rate: 1 } });
+    expect(() => {
+      q.primeTurn();
+      q.enqueue("Hello there. ");
+      q.flush();
+    }).not.toThrow();
+  });
+});
+
 describe("readAloudStep", () => {
   const on = { enabled: true };
 
