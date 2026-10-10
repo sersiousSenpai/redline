@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { MessageSquare } from "lucide-react";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import { useTextClearance } from "../hooks/useTextClearance";
+import { setVoiceAway, useVoiceAway } from "../audio/voiceAway";
 
 // The floating "Discuss" pill on the document and drafter panes. One compact
 // button, one destination: the voice panel — the app's discussion surface
@@ -17,6 +20,10 @@ import { useTextClearance } from "../hooks/useTextClearance";
 // pane edge — so even a 28px gutter keeps it off the text. Each stage climbs
 // back up with the same anti-flap hysteresis. Without `textRef` it just sits
 // flat, as it always did.
+//
+// It also carries the state of a voice turn left running when the panel
+// closed (`voiceAway`): a breathing mark while the agent works, a dot once its
+// reply is waiting. States, never segments — one click still opens the panel.
 
 /** The flat/stowed poses' left offset (also in .rl-discuss-pill CSS). */
 const FULL_LEFT = 16;
@@ -51,6 +58,47 @@ export function DiscussPill({
   measureKey?: unknown;
 }) {
   const pillRef = useRef<HTMLButtonElement | null>(null);
+  const away = useVoiceAway();
+  const awayKey = away?.state === "thinking" ? away.key : null;
+
+  // A turn still running: its end — whenever it lands — means a reply is
+  // waiting. One that ended while the pill was off screen is caught by asking.
+  useEffect(() => {
+    if (!awayKey) return;
+    let alive = true;
+    const ended = () => {
+      if (alive) setVoiceAway({ key: awayKey, state: "waiting" });
+    };
+    // A failure persists nothing to come back to, so it clears the mark.
+    const gone = () => {
+      if (alive) setVoiceAway(null);
+    };
+    const subs = [
+      listen<{ sessionId: string }>("voice-done", (e) => e.payload.sessionId === awayKey && ended()),
+      listen<{ sessionId: string; text: string }>(
+        "voice-interrupted",
+        (e) => e.payload.sessionId === awayKey && (e.payload.text ? ended() : gone()),
+      ),
+      listen<{ sessionId: string }>("voice-error", (e) => e.payload.sessionId === awayKey && gone()),
+      listen<{ sessionId: string }>("voice-exit", (e) => e.payload.sessionId === awayKey && gone()),
+    ];
+    void invoke<{ inFlight: boolean }>("voice_session_status", { sessionId: awayKey })
+      .then((s) => {
+        if (!s.inFlight) ended();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      for (const p of subs) void p.then((un) => un());
+    };
+  }, [awayKey]);
+
+  const label =
+    away?.state === "waiting"
+      ? `${title} · a reply is waiting`
+      : away?.state === "thinking"
+        ? `${title} · Claude is working on a reply`
+        : title;
 
   useTextClearance({
     ctrlRef: pillRef,
@@ -85,8 +133,8 @@ export function DiscussPill({
       ref={pillRef}
       type="button"
       onClick={onClick}
-      title={title}
-      aria-label={title}
+      title={label}
+      aria-label={label}
       className="rl-discuss-pill absolute flex items-center gap-1.5 rounded-full"
       /* `left` lives in the stylesheet — the icon stage moves it, and an
          inline value would out-specific the stage rule. */
@@ -104,6 +152,7 @@ export function DiscussPill({
     >
       <MessageSquare size={14} strokeWidth={2} />
       <span className="rl-discuss-label">Discuss</span>
+      {away && <span className="rl-discuss-badge" data-state={away.state} aria-hidden />}
     </button>
   );
 }
