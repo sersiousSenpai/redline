@@ -4966,8 +4966,10 @@ function App() {
   }, [joinedRoom, joinedPresence]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
-  // returned Comment), focus and expand its card inside the discussion pane.
-  // The pane stays closed until the user opens it.
+  // returned Comment), expand its card inside the discussion pane. The pane
+  // stays closed until the user opens it, and the plan stays where the user
+  // is reading: focusing the comment would scroll to it mid-conversation. The
+  // voice panel's confirmation offers Show for that.
   useEffect(() => {
     const sid = session?.sessionId ?? null;
     const prev = seenCommentsRef.current;
@@ -4980,10 +4982,7 @@ function App() {
       }
     }
     seenCommentsRef.current = { sid, ids };
-    if (fresh) {
-      setAutoOpenCommentId(fresh.id);
-      setFocusedCommentId(fresh.id);
-    }
+    if (fresh) setAutoOpenCommentId(fresh.id);
   }, [paneComments, session?.sessionId]);
   // Own-era diff for a viewed historical revision: what changed when *it*
   // arrived, i.e. against its predecessor in the session. Thread starts diff
