@@ -468,9 +468,10 @@ export const BrowserChat = memo(function BrowserChat({
 
   // Speaking into the box is one press away: the mic is the round button's
   // face on an empty box. What is heard lands in the box, at its caret; it
-  // stands down, its words kept, when another surface takes the mic.
+  // stands down, its words kept, when another surface takes the mic or the
+  // panel closes.
   const capsuleRef = useRef<HTMLDivElement>(null);
-  const dictation = useDictationComposer(capsuleRef, { send: true, polish: true }, composerRef);
+  const dictation = useDictationComposer(capsuleRef, { send: true, polish: true, keep: setDraft }, composerRef);
 
   const attach = {
     onScreenshot: () => {

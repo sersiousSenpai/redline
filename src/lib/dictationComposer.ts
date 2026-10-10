@@ -26,8 +26,8 @@ export interface ComposerSpec {
    *  typed then (the Front Door's, while it shows). */
   fallback?: boolean;
   /** It closed while a capture was writing into it: the words are added to
-   *  this draft (the door's shared one) instead of being offered for
-   *  copying. Called with the change to make to it. */
+   *  this draft (its shared one: the door's, a reply's) instead of being
+   *  offered for copying. Called with the change to make to it. */
   keep?: (add: (draft: string) => string) => void;
 }
 

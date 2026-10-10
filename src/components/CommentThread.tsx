@@ -976,8 +976,9 @@ function Composer({
 }) {
   const [draft, setDraft] = useSharedDraft(draftKey);
   const files = useAttachmentCapture(sessionId);
-  // Dictated into (the hold key): "send it" sends the reply, as Enter does.
-  useDictationComposer(files.hostRef, { send: true, polish: true }, inputRef);
+  // Dictated into (the hold key): "send it" sends the reply, as Enter does,
+  // and words said as the box folds away are kept in its draft.
+  useDictationComposer(files.hostRef, { send: true, polish: true, keep: setDraft }, inputRef);
   const submit = () => {
     onSend(draft, files.attachments);
     setDraft("");

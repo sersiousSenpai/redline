@@ -484,7 +484,7 @@ export function ChatRoom({
   // Its own composer, when no launch composer is supplied: a chat box —
   // "send it" sends, and kept words get the polish.
   const composerFrameRef = useRef<HTMLDivElement>(null);
-  const dictation = useDictationComposer(composerFrameRef, { send: true, polish: true }, taRef);
+  const dictation = useDictationComposer(composerFrameRef, { send: true, polish: true, keep: setDraft }, taRef);
 
   const attach = async () => {
     try {
