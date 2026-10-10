@@ -48,7 +48,7 @@ describe("Home chat containment", () => {
   it("leaves New to a host that offers its own", async () => {
     await act(async () => root.render(<ChatRoom companionId="saved-chat" cwd={null} hostOffersNew
       onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
-      composer={{ text: "", onTextChange: () => {}, render: actions => <div data-chat-composer>{actions}</div> }}/>));
+      composer={{ draftKey: "test.hostNewDraft", render: actions => <div data-chat-composer>{actions}</div> }}/>));
     expect(host.querySelector("[data-chat-composer] button")).not.toBeNull();
     expect(Array.from(host.querySelectorAll("[data-chat-composer] button")).some(button => button.textContent === "New chat")).toBe(false);
   });
