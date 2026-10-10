@@ -128,6 +128,22 @@ describe("the user's turn ends", () => {
     expect(h.ends.map((e) => e.text)).toEqual(["now the real question"]);
   });
 
+  it("by the words alone when the mic is too quiet for its level to tell the voice from the room", () => {
+    const h = harness();
+    h.quiet(500);
+    // Recognized, yet never a voice on the meter.
+    h.ep.partial("rename the panel");
+    h.quiet(600);
+    h.ep.partial("rename the panel to TalkPanel");
+    const said = h.now();
+    h.quiet(UNFINISHED_SILENCE_MS - 50);
+    expect(h.ends).toEqual([]);
+    h.quiet(50);
+    expect(h.ends.map((e) => [e.text, e.reason, e.at - said])).toEqual([
+      ["rename the panel to TalkPanel", "silence", UNFINISHED_SILENCE_MS],
+    ]);
+  });
+
   it(`at the ${CAP_MS / 1000} s cap after "hold on", without the command`, () => {
     const h = harness();
     h.say(1200, "Rename the panel, hold on.");

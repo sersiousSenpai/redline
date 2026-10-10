@@ -13,7 +13,9 @@
 // - 2.5 s when it trails off mid-thought ("…and", "…the", "um", a comma);
 // - 6 s, the cap, after "hold on" — or when words stop changing although the
 //   mic never goes quiet (a room the floor can't tell from a voice);
-// - 250 ms after "send now".
+// - 250 ms after "send now";
+// - 2.5 s after the words stop changing, when the mic is too quiet ever to
+//   hear a voice in them.
 // It waits up to 300 ms more for the transcript to catch up with the audio,
 // so the words it judges include the last one.
 // An optional scorer (a small end-of-turn model, `turn_scorer` in Rust) can
@@ -287,7 +289,15 @@ export class Endpointer {
   }
 
   private check(): void {
-    if (this.lastVoice === null) return;
+    if (this.lastVoice === null) {
+      // Words, and never a voice: a mic too quiet for its level to tell them
+      // from the room. The words alone end the turn, once they have stopped
+      // changing for as long as a pause mid-thought may run.
+      if (this.floor === "user" && words(this.text) > 0 && this.t - this.textAt >= UNFINISHED_SILENCE_MS) {
+        this.finish("silence");
+      }
+      return;
+    }
     const silent = this.t - this.lastVoice;
     if (words(this.text) === 0) {
       // Breath, a cough, a tap — or words the recognizer hasn't written yet
