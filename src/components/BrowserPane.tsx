@@ -2475,20 +2475,25 @@ function BrowserPaneBase({
                   onAddToCart={addReplyToCart}
                   onAddToMission={
                     mission.activeMission
-                      ? (body) => {
-                          // The page the reply was about is the turn's
-                          // target, the tab on screen, not the tab the
-                          // conversation is anchored to (BC-24). The pin is
+                      ? (body, targetBrowseId) => {
+                          // The page the reply was about is the tab its turn
+                          // targeted, which the message keeps — in a shared
+                          // chat that is not the tab on screen once you have
+                          // moved on, and never the tab the conversation is
+                          // anchored to (BC-24). A row from before that was
+                          // kept falls back to the page on screen. The pin is
                           // keyed by that page's tab, which is what a jump
                           // and the page capture both read.
-                          const page = tabs.find((t) => t.label === conversation.targetLabel);
+                          const page = targetBrowseId
+                            ? tabs.find((t) => t.browseId === targetBrowseId)
+                            : tabs.find((t) => t.label === conversation.targetLabel);
                           // Returns whether the pin reached the DB, so the
                           // button can say "Pin failed" instead of lying.
                           return mission.addFinding({
                             body,
-                            browseId: page?.browseId ?? null,
+                            browseId: page?.browseId ?? targetBrowseId ?? null,
                             sourceUrl: page?.url ?? null,
-                            sourceTitle: conversation.targetTitle,
+                            sourceTitle: page?.title ?? null,
                           });
                         }
                       : undefined

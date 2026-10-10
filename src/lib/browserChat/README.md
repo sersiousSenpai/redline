@@ -47,7 +47,11 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   never sets the anchor, the flip or a shared thread itself.
 - A turn's target page, scope and workspace are captured when the user sends.
   The backend never reads the globally active tab or mission for a turn that
-  carries a target.
+  carries a target. Both of the turn's rows keep the targeted tab
+  (`browse_messages.target_browse_id`, `targetBrowseId`): a mission pin of a
+  reply records that page, however long ago it was written, and
+  `/v1/browser/thread?tab=` returns the shared-chat turns about a tab beside
+  its own thread.
 - The agent changes a page only through `POST /v1/browser/action` on the
   captured label. The older `/navigate`, `/click` and `/query` routes, and
   the `/active` read that `/tabs` replaced, still answer, but the prompt and
@@ -71,23 +75,13 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
 
 ## Open
 
-- **Which page and thread a mission pin came from.** A pin records the page
-  the conversation targets when you pin (the tab on screen, not the tab it is
-  anchored to) under that page's tab, which is what the jump to a finding and
-  the page capture read. For the reply just written that is the page it was
-  about; an older reply in a shared chat, pinned after you moved to another
-  tab, is filed under the tab you are on, because a message does not keep
-  the tab its turn targeted (the column below). The thread is not recorded
-  either: a finding has no column for it, so a pin from a shared chat jumps
-  back to its page, not to that chat.
+- **Which thread a mission pin came from.** A pin records the page its reply
+  was about, under that page's tab, which is what the jump to a finding and
+  the page capture read. The thread is not recorded: a finding has no column
+  for it, so a pin from a shared chat jumps back to its page, not to that
+  chat. Replies from before the target was kept are filed under the tab on
+  screen.
 
-- **Which tab a shared chat's message was about.** The user's card shows the
-  context the message carried, but not the tab a shared chat's turn
-  targeted: that is not stored with the message (the same column the
-  check-ins below need).
-
-- **Shared-chat check-ins.** `/v1/browser/thread?tab=` returns the tab's own
-  thread. In linked mode the discussion about that tab is in the shared chat,
-  so the check-in reads an empty thread. The fix needs the target tab stored
-  on each browse message, which is a schema decision (`it.todo` in
-  `wiring.test.ts`).
+- **Which tab a shared chat's message was about, on screen.** Each message
+  keeps it now, but the user's card shows only the context the message
+  carried, not the tab its turn targeted.

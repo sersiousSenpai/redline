@@ -17,7 +17,7 @@ import contract from "./contract.json";
 // Each title starts with the rule it pins.
 
 const conv = (over: Partial<ResolvedConversation> = {}): ResolvedConversation => ({
-  kind: "tab", browseId: "one", title: "one.test", targetLabel: "browser-t-one", targetTitle: "Docs", targetNumber: 1,
+  kind: "tab", browseId: "one", title: "one.test", targetLabel: "browser-t-one", targetBrowseId: "one", targetTitle: "Docs", targetNumber: 1,
   scope: "pinned-page", anchoredFrom: null, exception: false, ...over,
 });
 

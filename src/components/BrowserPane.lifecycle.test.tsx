@@ -23,12 +23,13 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
+vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string, targetBrowseId?: string | null) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
   mocks.chatRenders.push(`${props.conversation.kind}:${props.conversation.browseId}`);
   const action = props.pageActions?.get(props.conversation.targetLabel);
   return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}
     data-page-action={action ? `${action.kind}:${action.tab}` : undefined} data-mission={props.mission?.title} data-can-pick={props.onPickElement ? "yes" : "no"}><button onClick={props.onToggleTabChat}>Tab toggle</button><button onClick={props.onToggleLinkedMode}>Mode toggle</button>
     <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button>
+    <button onClick={() => void props.onAddToMission?.("An older finding", document.body.dataset.pinTarget)}>Pin older reply</button>
     <button onClick={props.taskList?.onOpen}>Open task list</button><button onClick={props.mission?.onSynthesize}>Synthesize</button></div>;
 } }));
 import { BrowserPane } from "./BrowserPane";
@@ -302,6 +303,24 @@ describe("linked mode decides tab chat vs shared chat", () => {
     await clickDock("Pin reply");
     const opened = dock.querySelector("[data-label]")!.getAttribute("data-label")!.replace("browser-t-", "");
     expect(addFinding).toHaveBeenCalledWith({ body: "A finding", browseId: opened, sourceUrl: "https://three.test/", sourceTitle: "three.test" });
+  });
+
+  it("pins an older shared-chat reply to the page its turn targeted, not the tab on screen now", async () => {
+    linkedModeOn();
+    const addFinding = vi.fn(async () => true);
+    mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits" }, addFinding };
+    await mount();
+    await clickTab("two");
+    expect(dock.querySelector("[data-label]")!.getAttribute("data-label")).toBe("browser-t-two");
+    // The reply was written about tab one, before the switch.
+    document.body.dataset.pinTarget = "one";
+    await clickDock("Pin older reply");
+    expect(addFinding).toHaveBeenLastCalledWith({ body: "An older finding", browseId: "one", sourceUrl: "https://one.test", sourceTitle: "one" });
+    // A tab since closed is still the page it was about, by its thread key.
+    document.body.dataset.pinTarget = "gone";
+    await clickDock("Pin older reply");
+    expect(addFinding).toHaveBeenLastCalledWith({ body: "An older finding", browseId: "gone", sourceUrl: null, sourceTitle: null });
+    delete document.body.dataset.pinTarget;
   });
 });
 

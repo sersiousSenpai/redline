@@ -69,7 +69,7 @@ function Scene() {
     case "card": return <DoorChat room={false}/>;
     case "room": return <DoorChat room/>;
     // With a mission running, as the dock wires it: the most actions a reply's tail carries.
-    case "browser": case "browser-zoom": return <Panel width={380}><BrowserChat conversation={{ kind: "tab", browseId: "b-1", title: "LiDAR-GS", targetLabel: "browser-b1", targetTitle: "LiDAR-GS", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }} workspace="regular" onClose={noop} onAddToMission={async () => true} onAddToCart={async () => true}/></Panel>;
+    case "browser": case "browser-zoom": return <Panel width={380}><BrowserChat conversation={{ kind: "tab", browseId: "b-1", title: "LiDAR-GS", targetLabel: "browser-b1", targetBrowseId: "b-1", targetTitle: "LiDAR-GS", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }} workspace="regular" onClose={noop} onAddToMission={async () => true} onAddToCart={async () => true}/></Panel>;
     case "mission": return <Panel width={380}><MissionChat mission={mission} findings={[]} onClose={noop} onRemoveFinding={noop} onEditGoal={noop}/></Panel>;
     case "memory": return <div data-qa-scene className="qa-full"><MemoryAsk onCite={noop}/></div>;
     case "review": return <Panel width={420} scroll><ReviewThread reviewId="r-1" annotationId="a-1"/></Panel>;

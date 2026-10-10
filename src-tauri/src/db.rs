@@ -749,7 +749,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 8;
+    const SCHEMA_VERSION: i64 = 9;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -772,6 +772,7 @@ impl Database {
             (6, Self::migrate_v6),
             (7, Self::migrate_v7),
             (8, Self::migrate_v8),
+            (9, Self::migrate_v9),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -823,13 +824,14 @@ impl Database {
             // and carry on. Only a forward stamp whose schema is genuinely
             // missing something we need is refused.
             //
-            // Except what v5–v8 add, which is applied first: nullable columns
+            // Except what v5–v9 add, which is applied first: nullable columns
             // and new tables this build owns, all idempotent. A foreign
             // lineage has never heard of them, and refusing over them would
             // brick a database that is otherwise perfectly usable.
             Self::migrate_v5(conn)?;
             Self::migrate_v6(conn)?;
             Self::migrate_v8(conn)?;
+            Self::migrate_v9(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -946,7 +948,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"]), (8, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (8, "browse_messages", &["backend"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"]), (8, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (8, "browse_messages", &["backend"]), (9, "browse_messages", &["target_browse_id"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -1143,6 +1145,32 @@ impl Database {
                 conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
             }
         }
+        Ok(())
+    }
+
+    /// v8 → v9: `browse_messages.target_browse_id`, the tab a turn was sent
+    /// against. A shared chat's thread belongs to no tab, so without it a
+    /// message could not say which page it was about: a mission pin of an
+    /// older reply was filed under whatever tab was on screen, and
+    /// `/v1/browser/thread?tab=` could not find the shared-chat turns about a
+    /// tab. NULL on every earlier row, which then reads as "the page the
+    /// conversation targets now", as before. Idempotent, so it is also safe
+    /// on the forward-stamp path.
+    fn migrate_v9(conn: &Connection) -> rusqlite::Result<()> {
+        let mut stmt = conn.prepare("PRAGMA table_info(browse_messages)")?;
+        let columns = stmt.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // No table at all is a foreign schema; `verify_schema` names it.
+        if columns.is_empty() {
+            return Ok(());
+        }
+        if !columns.iter().any(|name| name == "target_browse_id") {
+            conn.execute("ALTER TABLE browse_messages ADD COLUMN target_browse_id TEXT", [])?;
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_browse_messages_target
+                 ON browse_messages (target_browse_id, created_at)",
+            [],
+        )?;
         Ok(())
     }
 
@@ -6097,8 +6125,8 @@ impl Database {
         let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_messages
-                (id, browse_id, role, body, status, created_at, backend)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, browse_id, role, body, status, created_at, backend, target_browse_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.browse_id,
@@ -6107,19 +6135,32 @@ impl Database {
                 msg.status,
                 msg.created_at,
                 msg.backend,
+                msg.target_browse_id,
             ],
         )?;
         Ok(())
     }
 
     pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
+        self.browse_messages_where("browse_id = ?1", browse_id)
+    }
+
+    /// What was discussed about a tab: its own thread, and every turn a shared
+    /// chat (or a conversation anchored elsewhere) sent against it — the
+    /// `/v1/browser/thread?tab=` check-in, which in linked mode would
+    /// otherwise read an empty thread (BC-22). Oldest first, interleaved.
+    pub fn load_browse_thread_about(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
+        self.browse_messages_where("browse_id = ?1 OR target_browse_id = ?1", browse_id)
+    }
+
+    fn browse_messages_where(&self, filter: &str, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
         let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, browse_id, role, body, status, created_at, backend
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, browse_id, role, body, status, created_at, backend, target_browse_id
              FROM browse_messages
-             WHERE browse_id = ?1
-             ORDER BY created_at, id",
-        )?;
+             WHERE {filter}
+             ORDER BY created_at, id"
+        ))?;
         let rows = stmt.query_map(params![browse_id], |row| {
             Ok(BrowseMessage {
                 id: row.get(0)?,
@@ -6129,6 +6170,7 @@ impl Database {
                 status: row.get(4)?,
                 created_at: row.get(5)?,
                 backend: row.get(6)?,
+                target_browse_id: row.get(7)?,
             })
         })?;
         rows.collect()
@@ -11675,6 +11717,7 @@ mod tests {
             status: "complete".into(),
             created_at: 10,
             backend: None,
+            target_browse_id: None,
         })
         .unwrap();
         db.insert_browse_message(&BrowseMessage {
@@ -11685,6 +11728,7 @@ mod tests {
             status: "complete".into(),
             created_at: 20,
             backend: None,
+            target_browse_id: None,
         })
         .unwrap();
         let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
@@ -11713,6 +11757,7 @@ mod tests {
             status: status.into(),
             created_at: at,
             backend: None,
+            target_browse_id: None,
         };
         db.insert_browse_message(&msg("b1", "user", "hello", "complete", 10)).unwrap();
         db.insert_browse_message(&msg("b2", "assistant", "error_during_execution", "error", 20))
@@ -15873,6 +15918,91 @@ body.
         let _ = std::fs::remove_file(path);
     }
 
+    /// The tab a browse message was about is a v9 column: a database at v8
+    /// gains it, its rows read as "not kept", and the step replays safely.
+    #[test]
+    fn a_v8_database_gains_the_browse_message_target() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "INSERT INTO browse_messages (id, browse_id, role, body, status, created_at)
+                     VALUES ('reply', 'tab', 'assistant', 'hi', 'complete', 1);
+                 DROP INDEX idx_browse_messages_target;
+                 ALTER TABLE browse_messages DROP COLUMN target_browse_id;
+                 PRAGMA user_version=8;",
+            )
+            .unwrap();
+            Database::verify_schema_at(&conn, 8).unwrap();
+            assert!(Database::verify_schema_at(&conn, 9).is_err());
+        }
+        let db = Database::open(&path).expect("a v8 database must open");
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        assert_eq!(db.load_browse_thread("tab").unwrap()[0].target_browse_id, None);
+        Database::migrate_v9(&db.lock_conn()).unwrap(); // replay-safe
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A foreign lineage's forward stamp never ran v9: the column is added
+    /// anyway (the schema is the authority), and the stamp is left alone.
+    #[test]
+    fn a_forward_stamp_gains_the_browse_message_target_without_a_restamp() {
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        let foreign = Database::SCHEMA_VERSION + 3;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "DROP INDEX idx_browse_messages_target;
+                 ALTER TABLE browse_messages DROP COLUMN target_browse_id;",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", foreign).unwrap();
+        }
+        let db = Database::open(&path).expect("a forward stamp missing only our additive column must open");
+        assert!(db.load_browse_thread("tab").unwrap().is_empty());
+        drop(db);
+        assert_eq!(user_version(&path), foreign);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// `/v1/browser/thread?tab=` reads what was discussed about a tab: its own
+    /// thread and the shared chat's turns sent against it, in time order —
+    /// never another tab's (BC-22). The shared chat's own thread is unchanged.
+    #[test]
+    fn a_tabs_thread_includes_the_shared_chat_turns_about_it() {
+        let db = Database::open_in_memory().unwrap();
+        let msg = |id: &str, thread: &str, target: Option<&str>, at: i64| BrowseMessage {
+            id: id.into(),
+            browse_id: thread.into(),
+            role: if id.starts_with('u') { "user" } else { "assistant" }.into(),
+            body: id.into(),
+            status: "complete".into(),
+            created_at: at,
+            backend: None,
+            target_browse_id: target.map(Into::into),
+        };
+        for row in [
+            msg("u-own", "tab-a", Some("tab-a"), 10),
+            msg("u-shared-a", "shared", Some("tab-a"), 20),
+            msg("a-shared-a", "shared", Some("tab-a"), 30),
+            msg("u-shared-b", "shared", Some("tab-b"), 40),
+            msg("a-own", "tab-a", Some("tab-a"), 50),
+            msg("u-old", "shared", None, 5),
+        ] {
+            db.insert_browse_message(&row).unwrap();
+        }
+        let about: Vec<String> = db.load_browse_thread_about("tab-a").unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(about, ["u-own", "u-shared-a", "a-shared-a", "a-own"]);
+        let b: Vec<String> = db.load_browse_thread_about("tab-b").unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(b, ["u-shared-b"]);
+        let shared = db.load_browse_thread("shared").unwrap();
+        assert_eq!(shared.len(), 4);
+        assert_eq!(shared[1].target_browse_id.as_deref(), Some("tab-a"), "a row keeps the page it was about");
+    }
+
     /// The browse branch's own build stamped its columns as v7, without the
     /// thread mode. Such a database must still open: v8 re-runs v7.
     #[test]
@@ -15959,6 +16089,7 @@ body.
             status: "complete".into(),
             created_at: 1,
             backend: Some("codex".into()),
+            target_browse_id: None,
         })
         .unwrap();
         assert_eq!(db.load_browse_thread("tab").unwrap()[0].backend.as_deref(), Some("codex"));
@@ -16320,6 +16451,7 @@ body.
             status: "queued".to_string(),
             created_at: 10,
             backend: None,
+            target_browse_id: None,
         })
         .unwrap();
         db.insert_linked_message(&crate::state::LinkedMessage {
@@ -16404,6 +16536,7 @@ body.
             status: "complete".to_string(),
             created_at: 20,
             backend: None,
+            target_browse_id: None,
         })
         .unwrap();
         assert_eq!(db.sweep_queued_to_unsent().unwrap(), 4);
@@ -16434,6 +16567,7 @@ body.
                 status: status.to_string(),
                 created_at: ts,
                 backend: None,
+                target_browse_id: None,
             })
             .unwrap();
         }
