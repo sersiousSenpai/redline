@@ -825,12 +825,14 @@ function VoicePanelBase({
   // synthesized in Rust via `tts_synth` and played through the same Web-Audio
   // driver — the engine choice is resolved server-side per call.
   // Surface a synthesis failure (e.g. a bad key, a 429, an out-of-credits error
-  // from a cloud engine) into the transcript so a silent voice has a visible
-  // reason. Deduped on the message itself: a streamed reply fails the SAME way on
-  // every sentence over many seconds, so we show one note per DISTINCT error and
-  // suppress repeats of it (no time window — a long turn must still collapse to
-  // one). Every occurrence is still logged by the driver (console) and Rust
-  // (`error` level, with the provider's full response).
+  // from a cloud engine, a wedged Kokoro) into the transcript so a change of
+  // voice has a visible reason: the driver hands every sentence the engine
+  // failed on to the system voice, so the reply keeps talking. Deduped on the
+  // message itself: a streamed reply fails the SAME way on every sentence over
+  // many seconds, so we show one note per DISTINCT error and suppress repeats
+  // of it (no time window — a long turn must still collapse to one). Every
+  // occurrence is still logged by the driver (console) and Rust (`error`
+  // level, with the provider's full response).
   const lastSynthErrRef = useRef<string>("");
   const reportSynthError = useCallback((msg: string) => {
     if (lastSynthErrRef.current === msg) return;
@@ -838,11 +840,11 @@ function VoicePanelBase({
     const short = msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
     // Deliberately NOT persisted (unlike the other transcript lines): this is a
     // diagnostic about the audio session that's live right now, not part of the
-    // conversation. Replaying "🔇 Voice synthesis failed" on every reopen — long
-    // after a key was fixed — would just be a stale alarm.
+    // conversation. Replaying "🔇 … the system voice is reading" on every
+    // reopen — long after a key was fixed — would just be a stale alarm.
     setTranscript((t) => [
       ...t,
-      { role: "note", text: `🔇 Voice synthesis failed — ${short}` },
+      { role: "note", text: `🔇 The voice engine failed, so the system voice is reading — ${short}` },
     ]);
   }, [setTranscript]);
 

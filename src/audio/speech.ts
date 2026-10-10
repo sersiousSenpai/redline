@@ -53,28 +53,6 @@ export function clampRate(rate: number): number {
   return Math.min(2, Math.max(0.5, Math.round(rate * 100) / 100));
 }
 
-/** Whether to run raw dictation through the AI cleanup pass before sending.
- * Defaults to on (the whole point is polished text, not a raw transcript);
- * persisted separately so toggling it never disturbs the speech prefs blob. */
-const CLEANUP_KEY = "redline.voice.cleanup";
-
-export function loadCleanupEnabled(): boolean {
-  try {
-    // Absent key → default on.
-    return localStorage.getItem(CLEANUP_KEY) !== "0";
-  } catch {
-    return true;
-  }
-}
-
-export function saveCleanupEnabled(enabled: boolean): void {
-  try {
-    localStorage.setItem(CLEANUP_KEY, enabled ? "1" : "0");
-  } catch {
-    /* private mode / quota — best-effort */
-  }
-}
-
 /**
  * Pull every *complete* sentence off the front of a streaming buffer, leaving
  * the trailing partial sentence behind for the next chunk. Boundaries are
