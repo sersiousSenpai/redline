@@ -15,12 +15,15 @@ vi.mock("@tauri-apps/api/core", () => ({
 import {
   addWord,
   buildVocab,
+  forgetPair,
   learnPair,
   loadVocabStore,
+  memoryVocab,
+  onVocabStore,
   parseVocabStore,
   planVocab,
   removeWord,
-  saveVocabStore,
+  updateVocabStore,
   VOCAB_CAP,
   type VocabStore,
 } from "./vocab";
@@ -100,6 +103,21 @@ describe("buildVocab", () => {
   });
 });
 
+describe("the memory index's names", () => {
+  it("keeps what a class title capitalizes for its own sake, ranked after everything else", () => {
+    const memory = memoryVocab(["Voice agent and Kokoro warm-up", "Front Door return", "Polis extraction via MCP", "useStickToBottom pins"]);
+    expect(memory).toEqual(["Kokoro", "Front Door", "useStickToBottom", "MCP"]);
+    expect(buildVocab({ plan: "Keep Tauri warm.", memory, store: { words: ["Redline"], pairs: [] } })).toEqual([
+      "Redline",
+      "Tauri",
+      "Kokoro",
+      "Front Door",
+      "useStickToBottom",
+      "MCP",
+    ]);
+  });
+});
+
 describe("the vocabulary store", () => {
   beforeEach(() => {
     invoked.length = 0;
@@ -127,13 +145,25 @@ describe("the vocabulary store", () => {
     expect(removeWord(s, "kokoro").words).toEqual(["Tauri"]);
   });
 
-  it("loads and saves through the voiceVocab ui pref", async () => {
+  it("loads and saves through the voiceVocab ui pref, and tells whoever listens", async () => {
     stored = JSON.stringify({ words: ["Kokoro"], pairs: [] });
     expect(await loadVocabStore()).toEqual({ words: ["Kokoro"], pairs: [] });
-    await saveVocabStore({ words: ["Tauri"], pairs: [] });
+    const heard = vi.fn();
+    const off = onVocabStore(heard);
+    // Read fresh: a change made elsewhere since is kept.
+    stored = JSON.stringify({ words: ["Kokoro"], pairs: [{ heard: "civ core", meant: "Kokoro", at: 1 }] });
+    const next = await updateVocabStore((s) => addWord(s, "Tauri"));
+    off();
+    expect(next).toEqual({ words: ["Tauri", "Kokoro"], pairs: [{ heard: "civ core", meant: "Kokoro", at: 1 }] });
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "set_ui_pref",
-      args: { key: "voiceVocab", value: JSON.stringify({ words: ["Tauri"], pairs: [] }) },
+      args: { key: "voiceVocab", value: JSON.stringify(next) },
     });
+    expect(heard).toHaveBeenCalledWith(next);
+  });
+
+  it("forgets a learned pair by what was heard", () => {
+    const s: VocabStore = { words: [], pairs: [{ heard: "civ core", meant: "Kokoro", at: 1 }, { heard: "tory", meant: "Tauri", at: 2 }] };
+    expect(forgetPair(s, "Civ Core").pairs).toEqual([{ heard: "tory", meant: "Tauri", at: 2 }]);
   });
 });
