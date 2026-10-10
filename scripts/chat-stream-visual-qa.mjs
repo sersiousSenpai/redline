@@ -167,6 +167,35 @@ function measure(ask, first, last) {
   };
 }
 const measureTurn = (ask, first, last) => cdp.evaluate(`(${measure})(${JSON.stringify(ask)}, ${JSON.stringify(first)}, ${JSON.stringify(last)})`);
+/** The chat chrome (design decision 12): the reply's byline, steps line and
+ *  tail row, the turn notes, the queue tray, the composers' footers, and the
+ *  page chat's header and rail. Their texts are swept, not the prose. */
+const CHROME = [".rl-reply-head", ".rl-reply-tail", ".rl-reply-steplist", ".rl-turn-note", ".rl-thread-note", ".rl-user-turn", ".rl-queue-anchor", ".rb-rail", "[data-browser-chat-header]", ".rl-fd-tools", ".rb-capsule-foot"];
+/** Every visible chrome text in the scene, with its WCAG contrast on what it
+ *  is painted on (the paper under everything). */
+function chromeContrast(chrome) {
+  const scene = document.querySelector("[data-qa-scene]");
+  const probe = document.createElement("i"); document.body.append(probe);
+  const rgba = (css) => { probe.style.color = ""; probe.style.color = css; const c = getComputedStyle(probe).color; let m = /^rgba?\(([^)]+)\)$/.exec(c); if (m) { const p = m[1].split(/[\s,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1]; } m = /^color\(srgb ([^)]+)\)$/.exec(c); if (m) { const p = m[1].split(/[\s/]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p.length > 3 ? p[3] : 1]; } return [0, 0, 0, 0]; };
+  const over = (t, u) => { const a = t[3] + u[3] * (1 - t[3]); return a === 0 ? [0, 0, 0, 0] : [0, 1, 2].map((i) => (t[i] * t[3] + u[i] * u[3] * (1 - t[3])) / a).concat(a); };
+  const lin = (c) => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const lum = (c) => 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2]);
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  const paper = rgba("var(--color-paper)");
+  const background = (el) => { const layers = []; for (let n = el; n && n !== document.documentElement; n = n.parentElement) { const c = rgba(getComputedStyle(n).backgroundColor); if (c[3] > 0) { layers.push(c); if (c[3] >= 1) break; } } let bg = paper; for (const l of layers.reverse()) bg = over(l, bg); return bg; };
+  const out = [];
+  for (const el of scene.querySelectorAll(chrome.flatMap((s) => [s, `${s} *`]).join(","))) {
+    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+    if (!r.width || !r.height || s.visibility !== "visible" || el.closest("[aria-hidden=true], [disabled], [hidden]")) continue;
+    let o = 1; for (let n = el; n; n = n.parentElement) o *= Number(getComputedStyle(n).opacity); if (o < 0.99) continue;
+    const own = [...el.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).map((n) => n.textContent.trim()).join(" ");
+    const bg = background(el);
+    if (own) out.push({ text: own.slice(0, 32), ratio: +ratio(over(rgba(s.color), bg), bg).toFixed(2) });
+  }
+  probe.remove();
+  return out;
+}
+
 /** Scrolled to the end, how far the thread's lowest line sits above the
  *  queue's pill (negative: under it). `legacyWebKit` drops the scroller's own
  *  padding-bottom first, as a WebKit that leaves a flex scroller's end padding
@@ -268,6 +297,21 @@ async function runScene(scene) {
     await screenshot(`${scene}-9-queued-at-end`);
     await setTurn({ queue: [] }); await settle();
   }
+  // The chrome at 4.5:1 in every theme: settled, with a message queued
+  // where the surface queues, so the tray's pill is swept too.
+  await setTurn({ messages: [...before, c.a4], liveText: "", status: "idle", meter: null, activity: [], queue: queued ? [c.queued] : [] }); await settle();
+  const themes = await cdp.evaluate("import('/src/theme/themes.ts').then((m) => m.THEMES.map((t) => t.name))");
+  const short = [];
+  let swept = 0;
+  for (const theme of themes) {
+    await cdp.evaluate(`import('/src/theme/applyTheme.ts').then((m) => m.applyTheme(${JSON.stringify(theme)}))`); await settle();
+    const texts = await cdp.evaluate(`(${chromeContrast})(${JSON.stringify(CHROME)})`);
+    swept += texts.length;
+    for (const t of texts) if (t.ratio < 4.5) short.push(`${theme} ${t.text}: ${t.ratio}`);
+  }
+  await cdp.evaluate("import('/src/theme/applyTheme.ts').then((m) => m.applyTheme('aurora'))");
+  await setTurn({ queue: [] }); await settle();
+  rec.chromeContrast = { themes: themes.length, swept, short };
 
   // ── Checks ──
   const delta = (a, b) => (a == null || b == null ? null : +(b - a).toFixed(1));
@@ -312,6 +356,7 @@ async function runScene(scene) {
   check(scene, "list-markers", "keeps list bullets", settled.listStyle === "disc", settled.listStyle);
   check(scene, "tail-height", "holds the reply's tail row at one height", mid.tail != null && mid.tail === full.tail && full.tail === settled.tail, [mid.tail, full.tail, settled.tail]);
   check(scene, "tail-reachable", "keeps every control in a settled reply's tail within reach", settled.tailOutOfReach != null && settled.tailOutOfReach.length === 0, settled.tailOutOfReach);
+  check(scene, "chrome-contrast", "reads every chrome text at 4.5:1 in all 15 themes", rec.chromeContrast.themes === 15 && rec.chromeContrast.swept > 0 && rec.chromeContrast.short.length === 0, rec.chromeContrast);
 }
 
 try {
