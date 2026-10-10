@@ -347,6 +347,16 @@ describe("the island never moves on its own", () => {
     expect(app).toMatch(/const islandSurfaceKey = `[^`]*activeId[^`]*`;/);
   });
 
+  it("tells a screen reader when a launch is handed off and a plan arrives", () => {
+    // The pill only shows "Working", and the plate quietly becomes the plan:
+    // neither is ever read out. The island's status line says both.
+    const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
+    expect(island).toContain("announce={doorNews}");
+    const launch = app.slice(app.indexOf("const launchFromFrontDoor = async"), app.indexOf("const drafterFromFrontDoor = () =>"));
+    expect(launch).toMatch(/setDoorCompact\(false\);\s*announceDoor\(/);
+    expect(app).toContain("announceDoor(arrivalMessage(title));");
+  });
+
   it("builds the in-flight launch once per launch, not per render", () => {
     const flight = app.slice(app.indexOf("const frontDoorFlight ="), app.indexOf("const frontDoorFlight =") + 400);
     expect(flight).toMatch(/^const frontDoorFlight = useMemo\(/);

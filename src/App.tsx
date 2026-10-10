@@ -751,6 +751,10 @@ function App() {
   // Only opening a chat puts the chat in the door; any other summons is the
   // door's home, its own composer.
   const [chatInRoom, setChatInRoom] = useState(false);
+  // The island's polite status line: a launch handed off, a plan arrived. The
+  // same words twice are nudged apart so a screen reader reads them again.
+  const [doorNews, setDoorNews] = useState("");
+  const announceDoor = useCallback((text: string) => setDoorNews(news => news === text ? `${text}\u00a0` : text), []);
   // One launch through the card at a time: a context read can make the
   // hand-off take a beat, and a second ⏎ inside it must not launch twice.
   const [frontDoorLaunching, setFrontDoorLaunching] = useState(false);
@@ -4007,7 +4011,9 @@ function App() {
         if (focus === "focus" && !paneMaskedRef.current) {
           // On the document surface: on screen now. From the Front Door the
           // plate turns into the plan, which is the point of launching one.
+          // No toast says so, so the island does, to a screen reader.
           focusIntercepted();
+          announceDoor(arrivalMessage(title));
           return;
         }
         if (focus === "focus") {
@@ -7497,6 +7503,7 @@ function App() {
       // Handed off: the compact card shrinks back into the pill, which shows
       // the work. The open door shows it in place.
       setDoorCompact(false);
+      announceDoor(mode === "run" ? "Run started in the terminal." : "Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
       setFrontDoorLaunching(false);
@@ -10656,6 +10663,7 @@ function App() {
         compact={doorCompact && renderMonochatComposer("card")}
         context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
         busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
+        announce={doorNews}
         // A chat in the room: its heading's New goes back to a blank
         // composer, the conversation kept in History.
         onNewChat={roomChat ? () => { setChatId(null); setChatSeed(null); setChatInRoom(false); refreshChats(); } : undefined}
