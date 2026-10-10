@@ -42,14 +42,14 @@ import {
  *  have, it's a fork). `theme` is RESERVED: carried through untouched, not
  *  read — theme stays a user preference on its own persistence track (open
  *  decision 8, deferred). Unknown keys survive round-trips, like the
- *  workspace manifest itself. */
+ *  workspace manifest itself — an older manifest's `hero` among them, which
+ *  nothing shows since the Front Door hero went. */
 export interface HarnessManifest {
   id: string;
   name: string;
   version?: number;
   workspace: Workspace;
   labels?: Record<string, { label?: string; title?: string }>;
-  hero?: { eyebrow?: string; title?: string; sub?: string };
   [key: string]: unknown;
 }
 
@@ -106,18 +106,12 @@ export function parseHarnessManifest(
     typeof rawLabels === "object" && rawLabels !== null && !Array.isArray(rawLabels)
       ? (rawLabels as HarnessManifest["labels"])
       : undefined;
-  const rawHero = obj.hero;
-  const hero: HarnessManifest["hero"] =
-    typeof rawHero === "object" && rawHero !== null && !Array.isArray(rawHero)
-      ? (rawHero as HarnessManifest["hero"])
-      : undefined;
   return {
     ...obj,
     id: id.trim(),
     name: name.trim(),
     workspace,
     labels,
-    hero,
   } as HarnessManifest;
 }
 
@@ -127,8 +121,8 @@ export function parseHarnessManifest(
  *  ("ships first as a build of the Redline codebase with its content
  *  compiled in as a first-party default"; the installable-pack retrofit is
  *  A5a's). The Writing Desk is the mechanism's living fixture: it removes
- *  surfaces, reorders and relabels the header, moves the landing, and swaps
- *  the hero — every axis a real vertical will pull on. */
+ *  surfaces, reorders and relabels the header, and moves the landing —
+ *  every axis a real vertical will pull on. */
 export const FIRST_PARTY_HARNESSES: readonly HarnessManifest[] = [
   {
     id: "writing-desk",
@@ -148,11 +142,6 @@ export const FIRST_PARTY_HARNESSES: readonly HarnessManifest[] = [
     },
     labels: {
       drafter: { label: "Desk", title: "Your writing desk" },
-    },
-    hero: {
-      eyebrow: "Writing Desk",
-      title: "Every document starts as a draft.",
-      sub: "Draft it. Redline it. Then send it.",
     },
   },
 ];

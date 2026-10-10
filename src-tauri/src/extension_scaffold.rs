@@ -255,9 +255,8 @@ pub fn seed(dir: &Path, slug: &str) -> Result<(), String> {
 
 /// Seed a harness-pack project: one `harness.json`, no toolchain, no build
 /// step — the pack is data the shell composes (A5). The manifest ships with
-/// every axis visibly pulled (surfaces, header order, landing, labels,
-/// hero) so the file teaches its own edit loop; the hero's sub says out
-/// loud how to see a change land.
+/// every axis visibly pulled (surfaces, header order, landing, labels) so
+/// the file teaches its own edit loop.
 pub fn seed_harness(dir: &Path, slug: &str, display_name: &str) -> Result<(), String> {
     let id = extension_name_from_slug(slug);
     let name = display_name.trim();
@@ -273,12 +272,6 @@ pub fn seed_harness(dir: &Path, slug: &str, display_name: &str) -> Result<(), St
         },
         "labels": {
             "drafter": { "label": "Desk", "title": format!("The {name} desk") },
-        },
-        "hero": {
-            "eyebrow": name,
-            "title": "Say what this harness is for.",
-            "sub": "Edit harness.json — surfaces, labels, landing, this hero — \
-                    then refocus Redline: the change is live.",
         },
     });
     let text = format!(
@@ -439,7 +432,7 @@ mod tests {
         let identity = crate::local_install::read_harness_identity(&dir).unwrap();
         assert_eq!(identity.id, "closing-desk");
         // Every axis a manifest can pull is visibly pulled.
-        for key in ["workspace", "labels", "hero"] {
+        for key in ["workspace", "labels"] {
             assert!(parsed.get(key).is_some(), "scaffold missing {key}");
         }
         let _ = std::fs::remove_dir_all(&dir);

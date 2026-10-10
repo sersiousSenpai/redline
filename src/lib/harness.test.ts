@@ -84,10 +84,8 @@ describe("the first-party fixture", () => {
       ["document", "Document"],
       ["drafter", "Desk"],
     ]);
-    // …landing…
+    // …and landing.
     expect(initialSurface(ws, "document")).toBe("drafter");
-    // …and the hero.
-    expect(desk.hero?.eyebrow).toBe("Writing Desk");
   });
 });
 

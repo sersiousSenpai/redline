@@ -1464,7 +1464,7 @@ function NewProjectOffer({
             "build.sh — plus a README and a fresh git repo. Plan sessions in " +
             "it can read Redline's extension ABI and the worked template."
           : kind === "harness"
-            ? "A data-only harness pack — surfaces, labels, landing, hero in " +
+            ? "A data-only harness pack — surfaces, labels and landing in " +
               "one harness.json — linked live into this Redline: ⌘K can " +
               "enter it now, and edits land on refocus."
             : "A folder with a README and a fresh git repo. Redline won't " +
