@@ -32,6 +32,8 @@ const SCENES = [
   { name: "page-chat", field: "[data-browser-chat-composer] textarea", landed: "Rename the voice panel to talk panel" },
   { name: "comment", field: "textarea[placeholder=\"What's the feedback?\"]", landed: "Rename the voice panel to talk panel" },
   { name: "reply", field: ".qa-panel textarea", landed: "Rename the voice panel to talk panel" },
+  // A turn: the panel's own push-to-talk, sent on release, never written.
+  { name: "voice", field: "input[aria-label='Type a message to the voice agent']", owner: "voice", turn: true },
   { name: "drafter", field: ".rl-page .ProseMirror", rich: true, landed: "Plan the queue tray. Rename the voice panel to talk panel" },
 ];
 let server, chrome, cdp;

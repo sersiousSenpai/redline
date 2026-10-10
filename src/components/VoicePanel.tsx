@@ -43,7 +43,8 @@ import {
   offerAnswer,
 } from "../audio/utterance";
 import { broker } from "../audio/dictationBroker";
-import { registerTurnTaker } from "../audio/dictationHost";
+import { mountStrip, registerTurnTaker } from "../audio/dictationHost";
+import { loadHoldKey } from "../audio/voiceHotkey";
 import { useDictationComposer } from "../lib/dictationComposer";
 import {
   holdPoint,
@@ -70,6 +71,7 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
+import { levelHeight, STRIP_BARS, strip } from "./DictationStrip";
 import { StreamingText } from "./StreamingText";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
@@ -266,6 +268,23 @@ function isTalkZone(target: EventTarget | null, panel: HTMLElement): boolean {
 }
 
 const MUTED = "var(--color-ink-muted, #888)";
+
+/** The input row's mic: a 30 px target, red while it listens. */
+const MIC_BUTTON: React.CSSProperties = {
+  width: "30px",
+  height: "30px",
+  flexShrink: 0,
+  fontSize: "14px",
+  border: "1px solid var(--color-rule)",
+  background: "var(--color-anchor-bg)",
+  color: "var(--color-anchor-text)",
+  cursor: "pointer",
+  transition: "background 120ms ease",
+};
+const MIC_HOT: React.CSSProperties = { background: "var(--color-danger, #c0392b)", color: "#fff" };
+
+/** The dictation key's glyph, for the input's hint; none when it is off. */
+const TALK_KEY_GLYPH: Record<string, string> = { AltRight: "⌥", MetaRight: "⌘", ControlRight: "⌃" };
 
 const BYLINE: React.CSSProperties = {
   fontSize: "10px",
@@ -695,6 +714,9 @@ function VoicePanelBase({
   // short beat so it finishes transcribing the tail of speech (the last word
   // lags the audio); re-pressing within that window cancels it and keeps going.
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The input row the strip sits over, and the waveform's latest levels.
+  const inputRowRef = useRef<HTMLFormElement | null>(null);
+  const levelsRef = useRef<number[]>([]);
   // A key-held talk (Space in the panel, or on the talk button): the timer is
   // the hold not yet long enough to count; `keyHeldRef` is one that counted.
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1803,6 +1825,12 @@ function VoicePanelBase({
   // a composer never paints here or feeds the end-of-utterance detector.
   useEffect(() => {
     const detach = broker.attach(VOICE_OWNER, {
+      // The strip's waveform: drawn straight onto it, never through a render.
+      level: (l) => {
+        if (strip.get()?.owner !== VOICE_OWNER) return;
+        levelsRef.current = [...levelsRef.current.slice(1 - STRIP_BARS), levelHeight(l.rms)];
+        strip.update({ levels: levelsRef.current });
+      },
       partial: (text) => {
         setPartial(text);
         if (text.trim()) captureRef.current.heard = true;
@@ -1975,6 +2003,33 @@ function VoicePanelBase({
     [startTalk, stopTalk, cancelTalk],
   );
 
+  // While this panel's own capture listens, the dictation strip over its
+  // input row shows it — the waveform and the words so far — and nothing in
+  // the panel moves. It never clears another capture's strip.
+  useEffect(() => {
+    if (!listening) {
+      levelsRef.current = [];
+      if (strip.get()?.owner === VOICE_OWNER) strip.set(null);
+      return;
+    }
+    mountStrip();
+    const next = {
+      owner: VOICE_OWNER,
+      phase: "listening" as const,
+      text: partial,
+      anchor: inputRowRef.current,
+      hint: handsFreeRef.current ? "pause to send" : "release to send",
+    };
+    if (strip.get()?.owner === VOICE_OWNER) strip.update(next);
+    else strip.set({ ...next, levels: levelsRef.current });
+  }, [listening, partial]);
+  useEffect(
+    () => () => {
+      if (strip.get()?.owner === VOICE_OWNER) strip.set(null);
+    },
+    [],
+  );
+
   // A key-held talk: Space with focus in the panel (off its controls), or on
   // the talk button itself. It counts once held KEY_HOLD_MS; released sooner,
   // it was a tap and nothing happened.
@@ -2127,6 +2182,12 @@ function VoicePanelBase({
       ? "stop"
       : "send";
   const titlesForReplies = isDrafter ? null : titles;
+  const heldKey = TALK_KEY_GLYPH[loadHoldKey()];
+  const talkPlaceholder = handsFree
+    ? "Just talk, or type…"
+    : heldKey
+      ? `Ask, or hold ${heldKey} to talk…`
+      : "Ask, or hold 🎙️ to talk…";
 
   return (
     // A docked column, not a drawer: the panel fills the width its host dock
@@ -2485,12 +2546,21 @@ function VoicePanelBase({
             className="px-4 py-3 flex flex-col gap-2"
             style={{ borderTop: "1px solid var(--color-rule)" }}
           >
-            {/* Hands-free toggle — converse without holding a button. */}
-            <div className="flex items-center justify-between">
+            {/* Hands-free toggle — converse without holding a button — and
+                what the conversation is doing. */}
+            <div className="flex items-center justify-between gap-2">
               <span style={{ fontSize: "12px", color: MUTED }}>
-                {handsFree
-                  ? "Hands-free — just talk; it sends on a pause"
-                  : "Hold to talk, or go hands-free"}
+                {!handsFree
+                  ? "Hold to talk, or go hands-free"
+                  : listening
+                    ? "Hands-free — just talk; it sends on a pause"
+                    : waiting
+                      ? `${caption.text} (tap 🎙️ to interrupt)`
+                      : turn.phase === "streaming"
+                        ? "Answering… (tap 🎙️ to interrupt)"
+                        : speechState === "speaking" || speechState === "paused"
+                          ? "Speaking… (tap 🎙️ to interrupt)"
+                          : "Hands-free — getting ready to listen"}
               </span>
               <button
                 type="button"
@@ -2500,6 +2570,7 @@ function VoicePanelBase({
                 title="Toggle hands-free conversation"
                 className="rounded-full px-2.5 py-1 select-none"
                 style={{
+                  flexShrink: 0,
                   fontSize: "12px",
                   fontWeight: 600,
                   border: "1px solid var(--color-rule)",
@@ -2516,92 +2587,13 @@ function VoicePanelBase({
               </button>
             </div>
 
-            {/* Primary control: hands-free status (tap to interrupt) when on,
-                else the push-to-talk hold button. */}
-            {handsFree ? (
-              <button
-                type="button"
-                onClick={onHandsFreeButton}
-                title="Hands-free — tap to interrupt and listen"
-                aria-label="Hands-free status"
-                className="w-full rounded-md px-3 py-2.5 select-none"
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: listening
-                    ? "var(--color-danger, #c0392b)"
-                    : "var(--color-anchor-bg)",
-                  color: listening ? "#fff" : "var(--color-anchor-text)",
-                  cursor: "pointer",
-                  transition: "background 120ms ease",
-                }}
-              >
-                {listening
-                  ? "● Listening — just talk"
-                  : waiting
-                    ? `${caption.text} (tap to interrupt)`
-                    : turn.phase === "streaming"
-                      ? "Answering… (tap to interrupt)"
-                      : speechState === "speaking" || speechState === "paused"
-                        ? "🔊 Speaking… (tap to interrupt)"
-                        : "🎧 Hands-free on — getting ready to listen"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onMouseDown={() => startTalk()}
-                onMouseUp={stopTalk}
-                onMouseLeave={stopTalk}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startTalk();
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopTalk();
-                }}
-                // Space held on the button itself is a hold too — the key aimed
-                // at the thing. Its own press is left alone.
-                onKeyDown={(e) => {
-                  if (e.code === "Space" && !e.repeat) beginKeyHold();
-                }}
-                title="Hold to talk (or hold Space with the panel focused)"
-                aria-label="Hold to talk"
-                aria-pressed={listening}
-                className="w-full rounded-md px-3 py-2.5 select-none"
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: listening
-                    ? "var(--color-danger, #c0392b)"
-                    : "var(--color-anchor-bg)",
-                  color: listening ? "#fff" : "var(--color-anchor-text)",
-                  cursor: "pointer",
-                  transition: "background 120ms ease",
-                }}
-              >
-                {listening ? "● Listening — release to send" : "🎙️ Hold to talk"}
-              </button>
-            )}
-            {listening && (
-              <p
-                style={{
-                  fontSize: "12px",
-                  fontStyle: "italic",
-                  color: MUTED,
-                  minHeight: "1.2em",
-                }}
-              >
-                {partial || "Listening…"}
-              </p>
-            )}
-
-            {/* Typed turn — chat into the same conversation when you don't
-                want to talk. Enter sends (or queues, while a reply runs); the
-                reply is spoken as usual. Never disabled. */}
+            {/* One input row: type, or hold the mic (or Space, or the
+                dictation key) and talk — released, it sends. Enter sends a
+                typed turn (or queues it while a reply runs); the reply is
+                spoken as usual. Never disabled. While the mic listens, the
+                dictation strip floats over this row with the words so far. */}
             <form
+              ref={inputRowRef}
               className="flex items-center gap-1.5"
               onSubmit={(e) => {
                 e.preventDefault();
@@ -2611,7 +2603,7 @@ function VoicePanelBase({
               <input
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
-                placeholder={busy ? "Type to queue a follow-up…" : "Or type instead…"}
+                placeholder={busy ? "Type to queue a follow-up…" : talkPlaceholder}
                 aria-label="Type a message to the voice agent"
                 spellCheck={false}
                 className="flex-1 rounded-md px-2.5 py-1.5"
@@ -2624,6 +2616,46 @@ function VoicePanelBase({
                   minWidth: 0,
                 }}
               />
+              {handsFree ? (
+                <button
+                  type="button"
+                  onClick={onHandsFreeButton}
+                  title="Hands-free — tap to interrupt and listen"
+                  aria-label="Hands-free status"
+                  aria-pressed={listening}
+                  className="rounded-md select-none"
+                  style={{ ...MIC_BUTTON, ...(listening ? MIC_HOT : null) }}
+                >
+                  🎙️
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onMouseDown={() => startTalk()}
+                  onMouseUp={stopTalk}
+                  onMouseLeave={stopTalk}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    startTalk();
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    stopTalk();
+                  }}
+                  // Space held on the button itself is a hold too — the key
+                  // aimed at the thing. Its own press is left alone.
+                  onKeyDown={(e) => {
+                    if (e.code === "Space" && !e.repeat) beginKeyHold();
+                  }}
+                  title="Hold to talk (or hold Space with the panel focused)"
+                  aria-label="Hold to talk"
+                  aria-pressed={listening}
+                  className="rounded-md select-none"
+                  style={{ ...MIC_BUTTON, ...(listening ? MIC_HOT : null) }}
+                >
+                  🎙️
+                </button>
+              )}
               <button
                 // Keyed by role: a stop that turns into a send must not be
                 // the same element mid-click.

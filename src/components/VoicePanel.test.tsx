@@ -73,6 +73,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { VoicePanel } from "./VoicePanel";
+import { strip } from "./DictationStrip";
+import { composerAt } from "../audio/dictationTarget";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import type { Section } from "../types";
 
@@ -216,6 +218,52 @@ afterEach(async () => {
 });
 
 // --- Space ---------------------------------------------------------------------
+
+describe("the input row", () => {
+  it("is one row: the box, the mic and the send button, and the panel is where what is said becomes a turn", async () => {
+    await mount();
+    const row = input().form!;
+    expect([...row.children].map((c) => c.getAttribute("aria-label") ?? c.textContent)).toEqual([
+      "Type a message to the voice agent",
+      "Hold to talk",
+      "Send",
+    ]);
+    expect(input().placeholder).toBe("Ask, or hold ⌥ to talk…");
+    // The hold-to-dictate key, even from the typed box, is a turn here.
+    expect(composerAt(input())?.spec.turn).toBe(true);
+  });
+
+  it("shows its own capture on the dictation strip over the row, the waveform and the words, and takes it down after", async () => {
+    await mount();
+    script.dictated = "is the replay safe";
+    const talk = button("Hold to talk");
+    await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    expect(strip.get()).toMatchObject({ owner: "voice", phase: "listening", text: "", hint: "release to send" });
+    expect(strip.get()?.anchor).toBe(input().form);
+    await emit("dictation-partial", { owner: "voice", text: "is the replay" });
+    await emit("dictation-level", { owner: "voice", rms: -20, peak: -6, ms: 50 });
+    expect(strip.get()?.text).toBe("is the replay");
+    expect(strip.get()?.levels).toHaveLength(1);
+    // Another capture's level never draws here.
+    await emit("dictation-level", { owner: "dictation", rms: -20, peak: -6, ms: 100 });
+    expect(strip.get()?.levels).toHaveLength(1);
+    await wait(320);
+    await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
+    await wait(400);
+    expect(strip.get()).toBeNull();
+    expect(sends().map((s) => s.text)).toEqual(["is the replay safe"]);
+  });
+
+  it("never takes down a strip that is not its own", async () => {
+    await mount();
+    const other = { owner: "dictation", phase: "listening" as const, text: "into a comment", levels: [], anchor: null, hint: "" };
+    strip.set(other);
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    expect(strip.get()).toBe(other);
+    strip.set(null);
+  });
+});
 
 describe("Space to talk", () => {
   it("does nothing with focus outside the panel, and never blocks Space there", async () => {
