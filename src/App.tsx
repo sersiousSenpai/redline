@@ -7615,11 +7615,12 @@ function App() {
       // composer would relaunch on the next ⏎.
       setFrontDoorText("");
       setFrontDoorAttachments([]);
-      // Handed off: the compact card shrinks back into the pill, which shows
-      // the work. The open door shows it in place, and hands off into the
-      // plan when it lands.
-      setDoorCompact(false);
+      // A plan launched from the open door: the door shows it in place, and
+      // hands off into the plan when it lands (`doorLaunchRef`).
       if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
+      // Handed off: the compact card shrinks back into the pill, which shows
+      // the work. The open door shows it in place.
+      setDoorCompact(false);
       announceDoor(mode === "run" ? "Run started in the terminal." : "Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
