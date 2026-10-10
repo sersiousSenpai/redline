@@ -22,7 +22,7 @@
 /* The composer's one primary button (SendStopButton): send ↑, queue ↑ or
    stop ■ in one fixed slot, so the field beside it never changes width. */
 .rl-send { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 999px; background: var(--color-info); color: var(--color-on-accent); cursor: pointer; }
-.rl-send:disabled { opacity: .45; cursor: default; }
+.rl-send[aria-disabled="true"] { opacity: .45; cursor: default; }
 .rl-send[data-send="stop"] { background: var(--color-ink); color: var(--color-paper); }
 .rl-chat-mode-picker button, .rl-changes-card button { color: var(--color-ink); border: 1px solid var(--color-rule); background: var(--color-paper); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
 .rl-chat-mode-picker { position: relative; }

@@ -15,15 +15,22 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Comment, Mission } from "../types";
 
-const { turn, handlers } = vi.hoisted(() => ({
+const { turn, handlers, turnStore } = vi.hoisted(() => ({
   handlers: new Map<string, (e: { payload: unknown }) => void>(),
+  /** Re-renders every surface reading `turn`, memoized ones included — what a
+   *  state change in the real hook does. */
+  turnStore: { version: 0, listeners: new Set<() => void>() },
   turn: {
     messages: [] as Array<Record<string, unknown>>, queue: [] as Array<Record<string, unknown>>, liveText: "", status: "streaming", startedAt: 1_000, loaded: true,
     meter: null, activity: [] as unknown[], meters: {}, retrying: false, steerNotice: null,
     send: () => {}, cancel: () => {}, unqueue: async (id: string) => (id === "q-9" ? "and one more thing" : null), clear: () => {}, steer: async () => {}, promote: async () => {},
   },
 }));
-vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
+vi.mock("../hooks/useAgentTurn", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (fn: () => void) => { turnStore.listeners.add(fn); return () => { turnStore.listeners.delete(fn); }; };
+  return { useAgentTurn: () => { useSyncExternalStore(subscribe, () => turnStore.version); return turn; } };
+});
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => [] }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: async (event: string, fn: (e: { payload: unknown }) => void) => {
@@ -133,6 +140,18 @@ describe.each(SURFACES)("$name", ({ render, setup, queues, mode }) => {
     expect(stop).not.toBeNull();
     expect(stop!.disabled).toBe(false);
     expect(Array.from(host.querySelectorAll("button")).filter((b) => b.textContent?.trim() === "Stop")).toEqual([]);
+    // Stopped from the keyboard, the reply ends on an empty box: the same
+    // button turns into a Send with nothing to send, and the focus stays in
+    // the composer. A `disabled` button would drop it to the document.
+    stop!.focus();
+    turn.status = "idle";
+    await act(async () => { turnStore.version++; turnStore.listeners.forEach((fn) => fn()); });
+    const send = host.querySelector<HTMLButtonElement>(".rl-send")!;
+    expect(send).toBe(stop);
+    expect(send.dataset.send).toBe("send");
+    expect(send.disabled).toBe(false);
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect([send, field()]).toContain(document.activeElement);
   });
 
   it("settles a reply through the anatomy, under the question as a card with no You", async () => {

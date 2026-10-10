@@ -268,14 +268,15 @@ export const CommentThread = memo(function CommentThread({
   });
 
   // Chat is rapid-fire: when a reply settles, the next question is a
-  // keystroke away — unless the reviewer has moved elsewhere in the app.
+  // keystroke away — while the reviewer is still in this thread. With focus
+  // elsewhere, or on nothing (they clicked away to read), a turn end never
+  // takes the caret (design decision 1).
   const wasStreaming = useRef(false);
   useEffect(() => {
     const was = wasStreaming.current;
     wasStreaming.current = status === "streaming";
     if (!was || status === "streaming" || view !== "chat" || !expanded) return;
-    const active = document.activeElement;
-    if (active && active !== document.body && !hostRef.current?.contains(active)) return;
+    if (!hostRef.current?.contains(document.activeElement)) return;
     composerRef.current?.focus();
   }, [status, view, expanded]);
 

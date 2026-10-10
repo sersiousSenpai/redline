@@ -34,13 +34,17 @@ export function SendStopButton({
   state: SendState;
   onSend: () => void;
   onStop: () => void;
-  /** Send and queue only: there is nothing to send. Stop is never disabled. */
+  /** Send and queue only: there is nothing to send. Stop never is. */
   disabled?: boolean;
   /** What sending is called here ("Send", "Ask"). */
   label?: string;
 }) {
   const stop = state === "stop";
   const name = stop ? "Stop" : state === "queue" ? "Queue" : label;
+  // Nothing to send is `aria-disabled`, never `disabled`: Stop pressed from
+  // the keyboard ends the reply on an empty box, and a focused button that
+  // turned `disabled` would drop the focus to the document.
+  const idle = !stop && disabled;
   return (
     <button
       type="button"
@@ -48,8 +52,8 @@ export function SendStopButton({
       data-send={state}
       aria-label={name}
       title={state === "send" ? `${label} ${TITLES.send}` : TITLES[state]}
-      disabled={!stop && disabled}
-      onClick={stop ? onStop : onSend}
+      aria-disabled={idle || undefined}
+      onClick={stop ? onStop : idle ? undefined : onSend}
     >
       {stop ? <Square size={10} fill="currentColor" aria-hidden /> : <ArrowUp size={15} aria-hidden />}
     </button>

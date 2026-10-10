@@ -436,9 +436,13 @@ describe("the floating replacement composer", () => {
     expect(go().dataset.state).toBe("stop");
     expect(go().disabled).toBe(false);
     expect(go().getAttribute("aria-label")).toBe("Stop");
+    composer()?.blur();
     await act(async () => go().click());
     expect(onStop).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
+    // Like a send from the same key, a Stop leaves the caret in the box — not
+    // on a key that is about to read "nothing to send".
+    expect(document.activeElement).toBe(composer());
     // The same button in the same slot, and the field stays open.
     await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "and then?"));
     expect(go()).toBe(before);

@@ -953,7 +953,7 @@ export function FrontDoor(props: FrontDoorProps) {
                 it never changes width. */}
             <button
               type="button"
-              onClick={stopping ? workbench?.onStop : () => { taRef.current?.focus(); send(liveDestination); }}
+              onClick={() => { taRef.current?.focus(); if (stopping) workbench?.onStop(); else send(liveDestination); }}
               disabled={!stopping && (!canSubmit || (liveDestination === "chat" && chatPending))}
               data-state={workbench ? (stopping ? "stop" : workbench.streaming ? "queue" : "send") : undefined}
               aria-label={stopping ? "Stop" : undefined}

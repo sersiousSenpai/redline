@@ -364,11 +364,24 @@ describe("report and chat views", () => {
     expect(live?.textContent).not.toContain("▌");
     await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-r", body: "Because it re-renders." } }));
     expect(host.querySelector('[data-reply="settled"]')?.textContent).toContain("Because it re-renders.");
+    // The reviewer moved elsewhere (nothing focused): a turn end never takes
+    // the caret (design decision 1).
+    expect(document.activeElement).toBe(document.body);
+    // Their last gesture in the thread — the composer's one button — hands
+    // the box back once the next reply settles.
+    await act(async () => type(ta, "And on remount?"));
+    await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    host.querySelector<HTMLButtonElement>(".rl-send")!.focus();
+    await act(async () => {
+      handlers["fork-delta"]({ payload: { sessionId: SESSION, commentId: ITEM, text: "Yes", seq: 1 } });
+      await new Promise((r) => requestAnimationFrame(r));
+    });
+    await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-r2", body: "Yes, it does." } }));
     expect(document.activeElement).toBe(host.querySelector("textarea"));
     // The report keeps the whole exchange behind one chip.
     await act(async () => clickWith("← Report"));
     expect(text()).not.toContain("Because it re-renders.");
-    expect(text()).toContain("💬 Chatted · 2 messages");
+    expect(text()).toContain("💬 Chatted · 4 messages");
   });
 
   it("folds chat turns into a chip in the report, with Write it up after the latest", async () => {
