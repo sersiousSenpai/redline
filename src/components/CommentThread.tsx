@@ -476,7 +476,16 @@ export const CommentThread = memo(function CommentThread({
         >
           Chat
         </button>
-        <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
+        {/* While the row only holds its place, a stand-in of the chip's
+            first-render size: the real one reads its pick and the seats,
+            which a thread with history would throw away. */}
+        {loaded ? (
+          <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
+        ) : (
+          <span className="rl-fd-model-chip-wrap" style={{ display: "inline-flex", marginLeft: 6 }}>
+            <button type="button" className="rl-fd-model-chip" disabled tabIndex={-1}>Default (CLI default) ▾</button>
+          </span>
+        )}
         {sidecar && <p style={{ color: "var(--color-ink-muted)", fontSize: "10px", marginTop: 5 }}>A separate read-only discussion seeded with this {author} plan.</p>}
       </div>
     );

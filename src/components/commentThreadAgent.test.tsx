@@ -626,11 +626,17 @@ describe("the thread loads without a jump", () => {
     expect(row, "the row renders before get_thread resolves").not.toBeNull();
     expect(row!.style.visibility).toBe("hidden");
     expect(row!.getAttribute("aria-hidden")).toBe("true");
+    // The chip's place is held without its reads: a thread with history
+    // would throw them away.
+    expect(row!.querySelector(".rl-fd-model-chip")).not.toBeNull();
+    const chipReads = () => invokeMock.mock.calls.filter(([cmd]) => cmd === "fork_thread_model" || cmd === "get_agent_seats");
+    expect(chipReads()).toEqual([]);
     await act(async () => release([]));
     await flush();
     const loaded = host.querySelector<HTMLElement>(".rl-thread-entry")!;
     expect(loaded.style.visibility).toBe("");
     expect(loaded.hasAttribute("aria-hidden")).toBe(false);
     expect(text()).toContain("Discuss with Claude");
+    expect(chipReads().map(([cmd]) => cmd).sort()).toEqual(["fork_thread_model", "get_agent_seats"]);
   });
 });
