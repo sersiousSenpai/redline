@@ -875,7 +875,11 @@ function App() {
   const [setupBackend, setSetupBackend] = useState<Backend | null>(null);
   const [setupProject, setSetupProject] = useState<string | null>(null);
   const [setupReviewInTerminal, setSetupReviewInTerminal] = useState(false);
-  const [dismissedSetup, setDismissedSetup] = useState<string | null>(null);
+  // The setup dialog opens by itself once, on a true first run; set aside
+  // ("Later", "Done"), it never pops again. Later faults wait in the
+  // composer as a fix-it chip, and the dialog comes back when ⏎ is blocked
+  // on one or the chip is pressed.
+  const [setupDismissed, setSetupDismissed] = usePersistedState("redline.setupDismissed", false);
   const setupContinuation = useRef<((ready: boolean) => void) | null>(null);
   const requestSetup = useCallback((backend: Backend, projectPath: string | null = null): Promise<boolean> => {
     if (setupContinuation.current || installBusyRef.current) return Promise.resolve(false);
@@ -7011,22 +7015,21 @@ function App() {
   // A native child webview paints on top of all React DOM, so when a
   // full-pane overlay is up the browser must be hidden underneath it. Mirrors
   // the setup-modal / tour gating used in the JSX below.
-  // The unskippable first-run modal. `integrationReady` leads deliberately:
-  // the two null checks after it are TypeScript narrowing, but the reason the
-  // modal is withheld is that the probe has not answered yet — not that two
-  // variables happen to be null. Withholding is the whole point: integration
-  // health now resolves AFTER the reveal, so without this the modal would
-  // flash on every launch in the beat before the answer arrives.
+  // The first-run modal. `integrationReady` leads deliberately: the reason
+  // the modal is withheld is that the probe has not answered yet — not that
+  // a variable happens to be null. Withholding is the whole point:
+  // integration health resolves AFTER the reveal, so without this the modal
+  // would flash in the beat before the answer arrives. It shows by itself
+  // only on a true first run — nothing reviewed on this machine yet and the
+  // dialog never set aside — and otherwise only when asked for
+  // (`setupBackend`: a blocked ⏎, the composer's fix-it chip).
   const selectedSetupBackend = setupBackend ?? frontDoorBackend.backend;
-  const setupFingerprint = JSON.stringify([selectedSetupBackend, preflight?.codex?.identity,
-    preflight?.codex?.authState, preflight?.codex?.usable,
-    preflight?.hook, preflight?.skill, preflight?.codexHook, preflight?.codexSkill, preflight?.codex?.profile,
-    preflight?.providers?.[selectedSetupBackend]?.hook, preflight?.providers?.[selectedSetupBackend]?.skill]);
+  const firstRun = !setupDismissed && !planEverArrived && summaries.length === 0;
   const setupModalActive = !setupReviewInTerminal && (!!setupBackend || integrationReady &&
-    (setupPhase === "done" || (dismissedSetup !== setupFingerprint && integrationNeedsRepair(selectedSetupBackend, preflight))));
+    (setupPhase === "done" || (firstRun && integrationNeedsRepair(selectedSetupBackend, preflight))));
   const dismissSetup = () => {
     if (installBusyRef.current) return;
-    setDismissedSetup(setupFingerprint); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
+    setSetupDismissed(true); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
     const continuation = setupContinuation.current; setupContinuation.current = null; continuation?.(false);
   };
   // First-run auto-start waits for the doors to finish — the tour's spotlight

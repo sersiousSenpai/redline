@@ -50,6 +50,7 @@ class StubResizeObserver {
 import { FrontDoor, type FrontDoorProps } from "./FrontDoor";
 import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
+import type { ReadinessItem } from "../lib/readiness";
 import { readSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
 
 const flush = () =>
@@ -338,6 +339,61 @@ describe("FrontDoor — a launch in flight leaves the door usable", () => {
     });
     expect(host.querySelector(".rl-fd-strip")).not.toBeNull();
     expect(host.textContent).toContain("The plan hook may not be approved yet");
+  });
+});
+
+// Setup faults after the first run wait in the composer (10/10): one chip,
+// never a dialog popping up mid-task. Its press is what opens the setup.
+describe("the composer's fix-it chip", () => {
+  const INTEGRATION: ReadinessItem = {
+    id: "hook-missing",
+    state: "blocked",
+    label: "The plan hook was removed",
+    detail: "Plans won't come back to Redline until it is installed again.",
+    fix: { label: "Install integration", kind: "install-integration" },
+  };
+  const chip = () => host.querySelector<HTMLButtonElement>(".rl-fd-setup");
+
+  it("shows the setup a launch needs as one chip, out of the strip, and its press runs the fix", async () => {
+    const onFix = vi.fn(() => Promise.resolve(true));
+    const other: ReadinessItem = { id: "mode-paused", state: "blocked", label: "Redline is paused", detail: "Nothing you launch would come back for review." };
+    await mount({ readiness: [INTEGRATION, other], onFix });
+    expect(chip()?.textContent).toBe("Install integration");
+    expect(chip()?.getAttribute("aria-label")).toBe("The plan hook was removed: Install integration");
+    // Said once: the strip keeps the rest, not this.
+    expect(host.querySelector(".rl-fd-strip")?.textContent).not.toContain("The plan hook was removed");
+    expect(host.querySelector(".rl-fd-strip")?.textContent).toContain("Redline is paused");
+    await act(async () => chip()!.click());
+    expect(onFix).toHaveBeenCalledWith(INTEGRATION);
+  });
+
+  it("is absent on a well machine", async () => {
+    await mount({ readiness: [] });
+    expect(chip()).toBeNull();
+  });
+
+  it("a ⏎ it blocks opens the setup, and a setup that completes carries the ⏎ through", async () => {
+    const onLaunch = vi.fn();
+    let finish: (ok: boolean) => void = () => {};
+    const onFix = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    await mount({ text: "Ship the auth rewrite", readiness: [INTEGRATION], onFix, onLaunch });
+    await pressEnter();
+    expect(onFix).toHaveBeenCalledWith(INTEGRATION);
+    expect(onLaunch).not.toHaveBeenCalled();
+    await act(async () => finish(true));
+    expect(onLaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("set aside, the setup launches nothing, and other blockers never open it", async () => {
+    const onLaunch = vi.fn(), onFix = vi.fn(() => Promise.resolve(false));
+    await mount({ text: "Ship the auth rewrite", readiness: [INTEGRATION], onFix, onLaunch });
+    await pressEnter();
+    await flush();
+    expect(onLaunch).not.toHaveBeenCalled();
+    onFix.mockClear();
+    await mount({ text: "Ship the auth rewrite", readiness: [{ id: "mode-paused", state: "blocked", label: "Redline is paused", detail: "", fix: { label: "Resume interception", kind: "resume-mode" } }], onFix, onLaunch });
+    await pressEnter();
+    expect(onFix).not.toHaveBeenCalled();
   });
 });
 

@@ -96,6 +96,19 @@ describe("the decision countdown never brings Redline forward", () => {
   });
 });
 
+describe("the setup dialog opens by itself only on a true first run", () => {
+  it("first run, unless it was ever set aside — and setting it aside is remembered", () => {
+    expect(app).toContain('const [setupDismissed, setSetupDismissed] = usePersistedState("redline.setupDismissed", false);');
+    expect(app).toContain("const firstRun = !setupDismissed && !planEverArrived && summaries.length === 0;");
+    const modal = between("const setupModalActive =", "const dismissSetup =");
+    expect(modal).toContain("firstRun && integrationNeedsRepair(");
+    // Otherwise only on request: a blocked ⏎ or the composer's chip.
+    expect(modal).toContain("!!setupBackend ||");
+    expect(between("const dismissSetup = () => {", "};")).toContain("setSetupDismissed(true);");
+    expect(app).not.toContain("dismissedSetup");
+  });
+});
+
 describe("boot takes no caret", () => {
   it("the door rests on the empty plate alone; every other restored surface shows only the pill", () => {
     expect(app).toContain('const plateAtRest = mainSurface === "document" && plateMode === "door";');

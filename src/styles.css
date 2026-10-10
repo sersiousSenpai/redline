@@ -4188,6 +4188,35 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   font-size: 11px;
   white-space: nowrap;
 }
+/* Setup that needs finishing, in the composer's chip row rather than a
+   dialog that pops up mid-task: its press opens the setup. Shaped like the
+   row's menus (ComposerMenu.css), marked by its warning edge and dot. */
+.rl-fd-setup {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  min-height: 32px;
+  padding: 0 11px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 55%, transparent);
+  background: transparent;
+  color: var(--color-ink);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rl-fd-setup:hover {
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+}
+.rl-fd-setup:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 3px;
+}
+.rl-fd-setup .rl-fd-dot {
+  margin-top: 0;
+}
 .rl-fd-runmode.is-unsafe {
   border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);

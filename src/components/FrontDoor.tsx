@@ -34,6 +34,7 @@ import {
   attemptLaunch as gateLaunch,
   attemptRun as gateRun,
   MIN_COMBINE,
+  nextBlocker,
   resolveLaunchProject,
   type ProjectChoice,
 } from "../lib/launch";
@@ -510,8 +511,19 @@ export function FrontDoor(props: FrontDoorProps) {
     }
     const gate = gateLaunch(readiness);
     if (gate.kind === "blocked") {
-      setBlocked(gate.item);
+      const item = gate.item;
+      setBlocked(item);
       refuse();
+      // Setup left to finish: the ⏎ it blocks is when its dialog opens —
+      // never by itself — and a setup that completes carries the ⏎ through,
+      // as the blocker's own fix button does (BlockedLaunch).
+      if (item.fix?.kind === "install-integration") {
+        void onFix(item).then((ok) => {
+          if (!ok || nextBlocker(readiness, item.id)) return;
+          setBlocked(null);
+          onLaunch();
+        });
+      }
       return;
     }
     if (projectOptions.length === 0 && !choice) {
@@ -530,6 +542,7 @@ export function FrontDoor(props: FrontDoorProps) {
     choice,
     text,
     onLaunch,
+    onFix,
     refuse,
     combinePreview,
   ]);
@@ -682,6 +695,11 @@ export function FrontDoor(props: FrontDoorProps) {
     // whole reason to exist.
     if (launchAfter) (offer.run ? onRun : onLaunch)(path);
   };
+
+  // Setup that needs finishing waits here, in the composer, as one chip —
+  // never a dialog popping up mid-task. Its press opens the setup, and so
+  // does a ⏎ the fault blocks. A chat's composer leaves it to the strip.
+  const setupItem = workbench ? null : readiness.find((item) => item.fix?.kind === "install-integration") ?? null;
 
   // `new-project` is the one fix App can't answer on its own — it needs a
   // name, and asking for one is this surface's job.
@@ -941,6 +959,18 @@ export function FrontDoor(props: FrontDoorProps) {
             )}
 
 
+            {setupItem && (
+              <button
+                type="button"
+                className="rl-fd-setup"
+                onClick={() => void handleFix(setupItem)}
+                title={`${setupItem.label}. ${setupItem.detail}`}
+                aria-label={`${setupItem.label}: ${setupItem.fix!.label}`}
+              >
+                <span aria-hidden className="rl-fd-dot is-blocked" />
+                {setupItem.fix!.label}
+              </button>
+            )}
             {floating && !accessories && chats.length > 0 && onOpenChat && <ComposerMenu
               label="Conversation history" options={chats.map(chat => ({ value: chat.id, label: chat.title }))}
               onChange={onOpenChat}>History</ComposerMenu>}
@@ -1136,7 +1166,7 @@ export function FrontDoor(props: FrontDoorProps) {
         );
       })()}
 
-      <ReadinessStrip items={readiness} onFix={handleFix} />
+      <ReadinessStrip items={setupItem ? readiness.filter((item) => item !== setupItem) : readiness} onFix={handleFix} />
     </div>
   );
 }

@@ -100,6 +100,7 @@ const TEXTS: Array<{ what: string; color: Rule; opacity?: Rule; background?: Rul
   { what: "the sentence being typed", color: [APP, ".rl-fd-input"], on: "color-bg-elevated" },
   { what: "the door's placeholder, on its composer box", color: [ISLAND, ".rl-monochat .rl-fd-input::placeholder"], background: [ISLAND, ".rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island"], on: "color-paper" },
   { what: "the card's placeholder", color: [APP, ".rl-fd-input::placeholder"], on: "color-bg-elevated" },
+  { what: "the composer's fix-it chip", color: [APP, ".rl-fd-setup"], background: [APP, ".rl-fd-setup"], on: "color-bg-elevated" },
   { what: "a composer menu, in the door", color: [MENU, ".rl-composer-chip"], background: [ISLAND, ".rl-monochat .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
   { what: "a composer menu, in the card", color: [MENU, ".rl-composer-chip"], background: [CARD, ".rl-monochat-float .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
   { what: "the card's heading", color: [CARD, ".rl-float-heading"], on: "color-bg-elevated" },
