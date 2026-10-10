@@ -2022,6 +2022,24 @@ fn finish_done<E: VoiceSink>(events: &E, db: &Database, session_id: &str, genera
     );
 }
 
+/// Ends a stored reply the user cut off, on a line of its own, so the panel
+/// that reloads it shows it as interrupted (`VoicePanel`'s `toTranscriptLine`
+/// strips it). A mark in the text rather than a new column keeps the schema
+/// as it is, and the panel already reads its replies' markers out of the text.
+const INTERRUPTED_MARK: &str = "⟦interrupted⟧";
+
+/// What is stored for a reply cut off after `streamed`: the words, then the
+/// mark. Nothing at all for one cut off before it said anything — that is a
+/// note on screen, not a reply.
+fn interrupted_line(streamed: &str) -> String {
+    let words = streamed.trim();
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!("{words}\n{INTERRUPTED_MARK}")
+    }
+}
+
 /// A turn the user stopped. What had streamed is kept as the reply — it was on
 /// screen, and the agent remembers saying it — and anything it offered binds
 /// to it. Never an error, and the conversation is untouched.
@@ -2036,7 +2054,7 @@ fn finish_interrupted<E: VoiceSink>(
 ) {
     let turn = live.turn();
     let timing = live.timing();
-    let message_id = persist_line(db, session_id, "agent", streamed);
+    let message_id = persist_line(db, session_id, "agent", &interrupted_line(streamed));
     if let Some(msg_id) = &message_id {
         bind_offers(db, session_id, msg_id);
     }
@@ -2676,8 +2694,11 @@ mod tests {
         assert!(f.live.interrupt_acked.load(Ordering::SeqCst));
         // The conversation is untouched and the partial reply is on record.
         assert_eq!(f.db.get_voice_fork_session("plan-1").as_deref(), Some("conv-1"));
+        // Marked as cut off, so a reload still says so; the event carries the
+        // words alone.
         let rows = f.db.list_voice_messages("plan-1").unwrap();
-        assert_eq!(rows.last().map(|r| r.text.as_str()), Some("We could shard the queue"));
+        assert_eq!(rows.last().map(|r| r.text.as_str()), Some("We could shard the queue\n⟦interrupted⟧"));
+        assert_eq!(stopped["messageId"].as_str(), rows.last().map(|r| r.id.as_str()));
         assert!(f.db.friction_summary(60_000).unwrap().is_empty(), "no error was described");
     }
 
@@ -2762,6 +2783,12 @@ mod tests {
         assert!(f.events.all("voice-interrupted").is_empty());
         assert!(f.db.list_voice_messages("plan-1").unwrap().is_empty());
         assert_eq!(f.events.all("voice-exit")[0]["deliberate"], true);
+    }
+
+    #[test]
+    fn an_interruption_before_any_words_stores_no_reply() {
+        assert_eq!(interrupted_line("  "), "");
+        assert_eq!(interrupted_line("Half a tho "), "Half a tho\n⟦interrupted⟧");
     }
 
     #[tokio::test]

@@ -207,16 +207,18 @@ const INTERRUPT_CHECK_MS = 6_000;
 /** How long a selection in the plan stays "what they selected". */
 const SELECTION_FRESH_MS = 120_000;
 
+/** The line `voice.rs` ends a stored reply the user cut off with. */
+const INTERRUPTED_MARK = "\n⟦interrupted⟧";
+
 /** Narrow a persisted row back to a transcript line. An unrecognized role
- *  (a row from a newer build) renders as a plain note rather than vanishing. */
+ *  (a row from a newer build) renders as a plain note rather than vanishing.
+ *  A reply stored as cut off comes back with its "(interrupted)" tag. */
 function toTranscriptLine(m: VoiceMessage): TranscriptLine {
-  return {
-    role: TRANSCRIPT_ROLES.has(m.role)
-      ? (m.role as TranscriptLine["role"])
-      : "note",
-    text: m.text,
-    id: m.id,
-  };
+  const role = TRANSCRIPT_ROLES.has(m.role) ? (m.role as TranscriptLine["role"]) : "note";
+  if (role === "agent" && m.text.endsWith(INTERRUPTED_MARK)) {
+    return { role, text: m.text.slice(0, -INTERRUPTED_MARK.length), id: m.id, interrupted: true };
+  }
+  return { role, text: m.text, id: m.id };
 }
 
 const lineKey = (l: TranscriptLine) => `${l.role} ${l.text}`;
