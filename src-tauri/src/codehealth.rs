@@ -322,12 +322,13 @@ const HEAVY_MARKERS: &[&str] = &[
     // sync command waiting on it waits on the main thread (the 2026-09-29
     // memory beach ball was exactly this, in `get_work_graph`). A command
     // reaches the database through a store handle as often as through
-    // `.database()`, and a read connection is still disk I/O.
+    // `.database()`, called or lent to the helper that queries it
+    // (`&companion.db`), and a read connection is still disk I/O.
     ".database()",
     "polis_handle()",
-    "state.db.",
-    "settings.db.",
-    "companion.db.",
+    "state.db",
+    "settings.db",
+    "companion.db",
     "lock_conn",
     "read_conn",
 ];
@@ -1188,14 +1189,17 @@ mod tests {
     }
 
     /// Every way a sync command reaches SQLite is flagged: a store's own
-    /// handle (`state.db.`, `settings.db.`, `companion.db.`) and the
-    /// connection itself, writer or reader.
+    /// handle (`state.db`, `settings.db`, `companion.db`), called or lent to
+    /// a helper, and the connection itself, writer or reader.
     #[test]
     fn command_hygiene_flags_every_way_a_sync_command_reaches_sqlite() {
         for (handle, body) in [
-            ("state.db.", "state.db.runner_list()"),
-            ("settings.db.", "settings.db.get_setting(\"k\")"),
-            ("companion.db.", "companion.db.list_companions()"),
+            ("state.db", "state.db.runner_list()"),
+            ("settings.db", "settings.db.get_setting(\"k\")"),
+            ("companion.db", "companion.db.list_companions()"),
+            // Lent to a helper, which is where the query runs.
+            ("companion.db", "crate::monochat::recent(&companion.db, \"c\")"),
+            ("settings.db", "agent_seats_view(&settings.db)"),
             ("lock_conn", "mission.db.lock_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
             ("read_conn", "mission.db.read_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
         ] {

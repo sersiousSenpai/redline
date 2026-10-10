@@ -12582,6 +12582,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    // A launch handoff polls it until the run leaves `orchestrating`.
+    "get_run_state",
     "get_session",
     "get_ui_prefs",
     "get_workspace",
@@ -12595,6 +12597,9 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "list_sessions",
     "memory_note_get",
     "memory_notes_list",
+    // Its lazy schema check takes the writer, so on the main thread the
+    // activity panel waited out whatever held the database.
+    "monochat_traces",
     "orchestration_agent_tail",
     "orchestration_snapshot",
     "plan_session_meter",

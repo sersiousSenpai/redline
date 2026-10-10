@@ -205,11 +205,11 @@ These are cheap regression nets, not a substitute for the rules above:
   needs Chrome): run it before merging anything that keeps state across mounts.
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
-  shells out, or reaches SQLite (`.database()`, a store's `db.` handle,
-  `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS`
-  runs it off the main thread anyway. It is a digest signal, not a test, so it
-  never fails a build: the
-  Shipwright surfaces it and you decide. When you act on one, add it to
+  shells out, or reaches SQLite (`.database()`, a store's `db` handle, called
+  or lent to a helper, `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` or
+  `IN_ORDER_COMMANDS` runs it off the main thread anyway. It is a digest
+  signal, not a test, so it never fails a build: the Shipwright surfaces it
+  and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
 - `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers,
