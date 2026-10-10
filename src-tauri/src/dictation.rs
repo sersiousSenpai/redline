@@ -20,10 +20,12 @@
 //!
 //! **A warm mic with pre-roll.** The audio engine keeps running for `WARM`
 //! after a capture ends, its one permanent tap filling a ring with the last
-//! `PREROLL_MS` of audio. A capture started while warm opens at once and
-//! begins with that ring, so a first syllable spoken as the key goes down is
-//! never clipped. Each start checks the warm engine is still running on the
-//! same input format, and rebuilds it if sleep or a device change stopped it.
+//! `PREROLL_MS` of audio, and the tap itself closes the mic once that time is
+//! up with no capture on it (no timer task). A capture started while warm
+//! opens at once and begins with that ring, so a first syllable spoken as the
+//! key goes down is never clipped. Each start checks the warm engine is still
+//! running on the same input format, and rebuilds it if sleep or a device
+//! change stopped it.
 //!
 //! **Levels.** While capturing, the tap emits `dictation-level` once per 50 ms
 //! of audio (20 Hz), RMS and peak in dBFS: the waveform of a dictation strip,
@@ -51,7 +53,6 @@
 //! (ownership, the pre-roll ring, the level windows, the output route), and one
 //! opt-in test runs the tap's own buffer step against the real microphone.
 
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -197,11 +198,13 @@ enum Kind {
 }
 
 impl Kind {
-    fn parse(kind: Option<&str>) -> Result<Self, String> {
-        match kind {
-            None | Some("open") => Ok(Kind::Open),
-            Some("hold") => Ok(Kind::Hold),
-            Some(other) => Err(format!("unknown capture kind '{other}'")),
+    /// `"hold"` is push-to-talk; anything else is an open mic, the kind that
+    /// never takes the mic from anyone.
+    fn parse(kind: Option<&str>) -> Self {
+        if kind == Some("hold") {
+            Kind::Hold
+        } else {
+            Kind::Open
         }
     }
 }
@@ -257,14 +260,12 @@ pub const VOCAB_CAP: usize = 150;
 const VOCAB_TERM_MAX: usize = 64;
 
 /// The vocabulary a start passed, made safe for both recognizers: trimmed,
-/// without blanks, control characters or overlong entries, de-duplicated
-/// ignoring case (the first, highest-ranked spelling wins), and capped.
+/// without blanks, control characters or overlong entries, and capped, in the
+/// order given. (`vocab.ts` sends it ranked and without repeats.)
 fn clean_vocab(raw: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
     raw.into_iter()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty() && t.len() <= VOCAB_TERM_MAX && !t.chars().any(char::is_control))
-        .filter(|t| seen.insert(t.to_lowercase()))
         .take(VOCAB_CAP)
         .collect()
 }
@@ -386,8 +387,10 @@ struct TapShared {
     /// Whisper captures only: the utterance so far, at `rate`, from the
     /// pre-roll on.
     pcm: Option<Vec<f32>>,
-    /// The live capture's level meter.
+    /// The live capture's level meter; set exactly while a capture is live.
     meter: Option<LevelMeter>,
+    /// When the warm mic closes, if no capture starts first.
+    cool_at: Option<std::time::Instant>,
     /// The live capture's recognition request.
     #[cfg(target_os = "macos")]
     request: Option<TapRequest>,
@@ -397,6 +400,16 @@ impl TapShared {
     fn reset(&mut self, rate: f64) {
         self.rate = rate;
         self.preroll.reset(rate);
+    }
+
+    /// Whether the warm mic's time is up at `now`: no capture is live and the
+    /// deadline the last one left has passed. True once per deadline.
+    fn cooled(&mut self, now: std::time::Instant) -> bool {
+        let due = self.meter.is_none() && self.cool_at.is_some_and(|at| now >= at);
+        if due {
+            self.cool_at = None;
+        }
+        due
     }
 
     /// One mic buffer, downmixed to mono: into the live capture, then the ring.
@@ -585,10 +598,6 @@ struct DictationInner {
     /// The live capture's vocabulary, ranked.
     vocab: Mutex<Vec<String>>,
     tap: Mutex<TapShared>,
-    /// Bumped by every start and stop, so a cool-down timer knows a newer one
-    /// has superseded it.
-    #[cfg(target_os = "macos")]
-    warm_epoch: AtomicU64,
     /// Bumped each time a recognition task is armed or retired, so a task's
     /// late callback can tell it is no longer the live one.
     #[cfg(target_os = "macos")]
@@ -678,8 +687,6 @@ impl DictationState {
                 vocab: Mutex::new(Vec::new()),
                 tap: Mutex::new(TapShared::default()),
                 #[cfg(target_os = "macos")]
-                warm_epoch: AtomicU64::new(0),
-                #[cfg(target_os = "macos")]
                 armed: AtomicU64::new(0),
                 #[cfg(target_os = "macos")]
                 mic: Mutex::new(None),
@@ -717,7 +724,7 @@ pub fn dictation_start(
     vocab: Option<Vec<String>>,
 ) -> Result<DictationGrant, String> {
     let owner = owner.unwrap_or_else(|| DEFAULT_OWNER.to_string());
-    let kind = Kind::parse(kind.as_deref())?;
+    let kind = Kind::parse(kind.as_deref());
     let inner = &dictation.inner;
     let (grant, seq) = inner.take_mic(&owner, kind);
     let Some(seq) = seq else {
@@ -737,11 +744,12 @@ pub fn dictation_start(
 
     #[cfg(target_os = "macos")]
     {
-        inner.warm_epoch.fetch_add(1, Ordering::SeqCst);
         if engine == Engine::Whisper {
-            // Load the model while the user speaks, not after they let go.
+            // Load the model while the user speaks, not after they let go. A
+            // plain thread: a runtime task would build its own task type into
+            // the binary for a call that is a no-op once the model is in.
             let whisper = whisper.inner().clone();
-            tauri::async_runtime::spawn_blocking(move || {
+            std::thread::spawn(move || {
                 if let Err(e) = whisper.warm() {
                     tracing::warn!(target: "dictation", "Whisper warm-up failed: {e}");
                 }
@@ -772,18 +780,21 @@ pub fn dictation_start(
 }
 
 /// Stop `owner`'s capture and return the final transcript, emitting
-/// `dictation-final`. The mic stays warm for `WARM`. A stop from an owner
+/// `dictation-final`. The mic stays warm for a while. A stop from an owner
 /// that doesn't hold the mic returns "" and touches nothing.
 ///
 /// - **Apple engine:** returns the latest partial immediately (push-to-talk
 ///   shouldn't wait for the recognizer's lagging final pass).
 /// - **Whisper engine:** drains the accumulated PCM, resamples it to 16 kHz,
-///   and runs local whisper.cpp with the capture's vocabulary (off the async
-///   runtime via `spawn_blocking`). If inference fails or yields nothing, it
-///   falls back to whatever Apple heard. This is why the command is `async` —
-///   the (short) inference completes before the return value the UI reads.
+///   and runs local whisper.cpp with the capture's vocabulary. If inference
+///   fails or yields nothing, it falls back to whatever Apple heard.
+///
+/// It runs on the blocking pool (`OFF_MAIN_COMMANDS`): it waits for the main
+/// thread to end the capture, then for the (short) inference, before the UI
+/// reads its answer — work an `async` command would do for the price of a
+/// task type of its own in the binary.
 #[tauri::command]
-pub async fn dictation_stop(
+pub fn dictation_stop(
     dictation: tauri::State<'_, DictationState>,
     whisper: tauri::State<'_, WhisperState>,
     app: AppHandle,
@@ -802,18 +813,16 @@ pub async fn dictation_stop(
         let engine = *dictation.inner.engine.lock().unwrap();
         let vocab = std::mem::take(&mut *dictation.inner.vocab.lock().unwrap());
         let state = dictation.inner.clone();
-        let app_main = app.clone();
         // End the capture on the UI thread and get its PCM back: once the tap
         // has let go of it, no late buffer can race the drain.
         let (tx, rx) = tokio::sync::oneshot::channel::<(Vec<f32>, f64)>();
         let scheduled = app.run_on_main_thread(move || {
-            let drained = retire_capture(&state, true);
-            schedule_cooldown(&app_main, &state);
-            let _ = tx.send(drained);
+            let _ = tx.send(retire_capture(&state, true));
         });
         // If scheduling failed the session is reclaimed on next start / exit;
         // don't hang waiting for a signal that will never come.
-        let (pcm, src_rate) = if scheduled.is_ok() { rx.await.unwrap_or_default() } else { Default::default() };
+        let (pcm, src_rate) =
+            if scheduled.is_ok() { rx.blocking_recv().unwrap_or_default() } else { Default::default() };
 
         if engine == Engine::Whisper {
             // Surfaces whether the mic tee actually accumulated (0 samples ⇒ the
@@ -831,7 +840,7 @@ pub async fn dictation_stop(
             // words must still land, and Apple's always-on recognizer
             // already heard them. Never return "" when Apple has text.
             let whisper_text =
-                match transcribe_utterance(whisper.inner().clone(), pcm, src_rate as u32, vocab).await {
+                match transcribe_utterance(&whisper, &pcm, src_rate as u32, &vocab) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::warn!(target: "dictation", "Whisper failed, using Apple: {e}");
@@ -853,24 +862,20 @@ pub async fn dictation_stop(
     Ok(apple_text)
 }
 
-/// Resample one accumulated utterance to 16 kHz and run Whisper on it, off the
-/// async runtime (`spawn_blocking`) since inference is CPU/GPU-bound.
+/// Resample one accumulated utterance to 16 kHz and run Whisper on it.
+/// Blocking: inference is CPU/GPU-bound.
 #[cfg(target_os = "macos")]
-async fn transcribe_utterance(
-    whisper: WhisperState,
-    pcm: Vec<f32>,
+fn transcribe_utterance(
+    whisper: &WhisperState,
+    pcm: &[f32],
     src_rate: u32,
-    vocab: Vec<String>,
+    vocab: &[String],
 ) -> Result<String, String> {
     if pcm.is_empty() || src_rate == 0 {
         return Ok(String::new());
     }
-    tokio::task::spawn_blocking(move || {
-        let mono_16k = dictation_whisper::resample_to_16k(&pcm, src_rate)?;
-        whisper.transcribe(&mono_16k, &vocab)
-    })
-    .await
-    .map_err(|e| format!("transcription task failed: {e}"))?
+    let mono_16k = dictation_whisper::resample_to_16k(pcm, src_rate)?;
+    whisper.transcribe(&mono_16k, vocab)
 }
 
 /// Commit `owner`'s current utterance and immediately re-arm a fresh
@@ -932,10 +937,8 @@ pub fn dictation_kill_all(
         #[cfg(target_os = "macos")]
         {
             let state = dictation.inner.clone();
-            let app_main = app.clone();
             let _ = app.run_on_main_thread(move || {
                 retire_capture(&state, false);
-                schedule_cooldown(&app_main, &state);
             });
         }
     }
@@ -1103,9 +1106,18 @@ fn ensure_mic(app: &AppHandle, state: &Arc<DictationInner>) -> Result<bool, Stri
     let tap = RcBlock::new(
         move |buffer: NonNull<AVAudioPCMBuffer>, _when: NonNull<AVAudioTime>| {
             // SAFETY: CoreAudio passes a live, non-null PCM buffer per tap call.
-            let levels = unsafe { on_buffer(&state_tap, buffer.as_ref()) };
+            let (levels, cooled) = unsafe { on_buffer(&state_tap, buffer.as_ref()) };
             for level in levels {
                 let _ = app_tap.emit("dictation-level", level);
+            }
+            if cooled {
+                // A start that got in first keeps the mic.
+                let state_main = state_tap.clone();
+                let _ = app_tap.run_on_main_thread(move || {
+                    if !state_main.active.load(Ordering::SeqCst) {
+                        teardown_mic(&state_main);
+                    }
+                });
             }
         },
     );
@@ -1119,12 +1131,13 @@ fn ensure_mic(app: &AppHandle, state: &Arc<DictationInner>) -> Result<bool, Stri
 /// The tap's work for one mic buffer, on CoreAudio's thread: hand it to the
 /// live recognition request, then feed its mono samples to the capture (the
 /// Whisper accumulator, the level meter) and the pre-roll ring. Returns the
-/// levels to emit, so no event is sent while the lock is held.
+/// levels to emit, so no event is sent while the lock is held, and whether
+/// the warm mic's time is up.
 ///
 /// SAFETY: `buffer` must be a live `AVAudioPCMBuffer` for the duration of the
 /// call (CoreAudio guarantees this inside the tap block).
 #[cfg(target_os = "macos")]
-unsafe fn on_buffer(state: &DictationInner, buffer: &AVAudioPCMBuffer) -> Vec<DictationLevel> {
+unsafe fn on_buffer(state: &DictationInner, buffer: &AVAudioPCMBuffer) -> (Vec<DictationLevel>, bool) {
     let mut levels = Vec::new();
     let mut tap = state.tap.lock().unwrap();
     if let Some(request) = &tap.request {
@@ -1133,7 +1146,7 @@ unsafe fn on_buffer(state: &DictationInner, buffer: &AVAudioPCMBuffer) -> Vec<Di
     if let Some(mono) = extract_mono_f32(buffer) {
         tap.feed(&mono, &mut levels);
     }
-    levels
+    (levels, tap.cooled(std::time::Instant::now()))
 }
 
 /// Arm a fresh recognition for `owner` on the warm mic: a request carrying the
@@ -1212,12 +1225,14 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
         tap.pcm = whisper.then_some(ring);
         tap.meter = Some(LevelMeter::new(owner.to_string(), tap.rate));
         tap.request = Some(TapRequest(request.clone()));
+        tap.cool_at = None;
     }
     *state.capture.lock().unwrap() = Some(CaptureTask { request, task, _result_handler: result_handler });
 }
 
 /// End the live capture's recognition — `finish` keeps what it heard,
-/// otherwise it is cancelled — and detach it from the tap. Returns its Whisper
+/// otherwise it is cancelled — and detach it from the tap, which then closes
+/// the mic `WARM` later unless another capture starts. Returns its Whisper
 /// PCM (empty for an Apple capture) and the rate it was taken at. Main thread.
 #[cfg(target_os = "macos")]
 fn retire_capture(state: &DictationInner, finish: bool) -> (Vec<f32>, f64) {
@@ -1226,6 +1241,7 @@ fn retire_capture(state: &DictationInner, finish: bool) -> (Vec<f32>, f64) {
         let mut tap = state.tap.lock().unwrap();
         tap.request = None;
         tap.meter = None;
+        tap.cool_at = Some(std::time::Instant::now() + WARM);
         (tap.pcm.take().unwrap_or_default(), tap.rate)
     };
     if let Some(capture) = state.capture.lock().unwrap().take() {
@@ -1256,24 +1272,9 @@ fn teardown_mic(state: &DictationInner) {
             mic.input.removeTapOnBus(0);
         }
     }
-    state.tap.lock().unwrap().preroll = PreRoll::default();
-}
-
-/// Close the warm mic `WARM` after this stop, unless a capture has started (or
-/// another stop has re-armed the timer) by then.
-#[cfg(target_os = "macos")]
-fn schedule_cooldown(app: &AppHandle, state: &Arc<DictationInner>) {
-    let epoch = state.warm_epoch.fetch_add(1, Ordering::SeqCst) + 1;
-    let app = app.clone();
-    let state = state.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(WARM).await;
-        let _ = app.run_on_main_thread(move || {
-            if state.warm_epoch.load(Ordering::SeqCst) == epoch && !state.active.load(Ordering::SeqCst) {
-                teardown_mic(&state);
-            }
-        });
-    });
+    let mut tap = state.tap.lock().unwrap();
+    tap.preroll = PreRoll::default();
+    tap.cool_at = None;
 }
 
 /// The pre-roll as one buffer in the tap's own format, so the recognizer
@@ -1414,7 +1415,7 @@ mod tests {
     #[test]
     fn callers_without_an_owner_share_one_capture_as_before() {
         let inner = inner();
-        let (_, seq) = inner.take_mic(DEFAULT_OWNER, Kind::parse(None).unwrap());
+        let (_, seq) = inner.take_mic(DEFAULT_OWNER, Kind::parse(None));
         assert!(seq.is_some());
         assert_eq!(inner.take_mic(DEFAULT_OWNER, Kind::Open).1, None, "a second start is a no-op");
         assert!(inner.release(Some(DEFAULT_OWNER)));
@@ -1422,10 +1423,11 @@ mod tests {
     }
 
     #[test]
-    fn a_capture_kind_is_hold_or_open() {
-        assert_eq!(Kind::parse(Some("hold")), Ok(Kind::Hold));
-        assert_eq!(Kind::parse(Some("open")), Ok(Kind::Open));
-        assert!(Kind::parse(Some("toggle")).is_err());
+    fn a_capture_kind_is_hold_or_else_open() {
+        assert_eq!(Kind::parse(Some("hold")), Kind::Hold);
+        assert_eq!(Kind::parse(Some("open")), Kind::Open);
+        assert_eq!(Kind::parse(None), Kind::Open);
+        assert_eq!(Kind::parse(Some("toggle")), Kind::Open, "an unknown kind never takes the mic");
     }
 
     #[test]
@@ -1496,6 +1498,22 @@ mod tests {
     }
 
     #[test]
+    fn the_warm_mic_cools_once_its_time_is_up_with_no_capture_on_it() {
+        let now = std::time::Instant::now();
+        let later = |ms| now + std::time::Duration::from_millis(ms);
+        let mut tap = TapShared::default();
+        assert!(!tap.cooled(later(10_000)), "no capture has ended yet");
+        tap.cool_at = Some(later(5_000));
+        assert!(!tap.cooled(later(4_999)));
+        assert!(tap.cooled(later(5_000)));
+        assert!(!tap.cooled(later(6_000)), "once per deadline");
+        // A capture that started in the window keeps the mic open.
+        tap.cool_at = Some(later(5_000));
+        tap.meter = Some(LevelMeter::new("door".into(), 16_000.0));
+        assert!(!tap.cooled(later(9_000)));
+    }
+
+    #[test]
     fn dbfs_floors_digital_silence() {
         assert_eq!(dbfs(1.0), 0.0);
         assert_eq!(dbfs(0.0), -100.0);
@@ -1503,10 +1521,9 @@ mod tests {
     }
 
     #[test]
-    fn the_vocabulary_is_trimmed_deduplicated_and_capped_in_rank_order() {
+    fn the_vocabulary_is_trimmed_filtered_and_capped_in_rank_order() {
         let raw = vec![
             "  Kokoro ".to_string(),
-            "kokoro".to_string(),
             String::new(),
             "Tauri".to_string(),
             "line\nbreak".to_string(),
@@ -1643,7 +1660,7 @@ mod tests {
             }
             let (s, l) = (state.clone(), levels.clone());
             let tap = RcBlock::new(move |buffer: NonNull<AVAudioPCMBuffer>, _when: NonNull<AVAudioTime>| {
-                l.lock().unwrap().extend(on_buffer(&s, buffer.as_ref()));
+                l.lock().unwrap().extend(on_buffer(&s, buffer.as_ref()).0);
             });
             input.installTapOnBus_bufferSize_format_block(0, 1024, Some(&format), RcBlock::as_ptr(&tap));
             engine.prepare();

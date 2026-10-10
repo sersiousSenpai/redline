@@ -12569,6 +12569,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "companion_build_activity",
     // Reads the settings and checks the model files on disk.
     "dictation_status",
+    // Waits for the main thread to end the capture, then for Whisper.
+    "dictation_stop",
     "draft_source_add",
     "draft_source_delete",
     "draft_source_import_file",
@@ -12601,6 +12603,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "runner_review",
     "term_attention_snapshot",
     "thread_meters",
+    // Drives a model download to its end.
+    "whisper_install",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls

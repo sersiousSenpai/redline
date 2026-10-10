@@ -529,16 +529,24 @@ fn model_by_id(id: &str) -> Result<&'static WhisperModel, String> {
 /// dir — idempotent, and resuming an interrupted download. Emits
 /// `whisper-setup` progress events. Downloading turbo is the opt-in, so it
 /// also becomes the model dictation runs.
+///
+/// It runs on the blocking pool (`OFF_MAIN_COMMANDS`) and drives the download
+/// to its end there, rather than as an `async` command with a task type of
+/// its own in the binary.
 #[tauri::command]
-pub async fn whisper_install(
+pub fn whisper_install(
     whisper: tauri::State<'_, WhisperState>,
     app: AppHandle,
     model: Option<String>,
 ) -> Result<(), String> {
     let model = model_by_id(model.as_deref().unwrap_or(BASE_EN.id))?;
+    tauri::async_runtime::block_on(install(&whisper, &app, model))
+}
+
+/// The download behind `whisper_install`, one at a time.
+async fn install(whisper: &WhisperState, app: &AppHandle, model: &'static WhisperModel) -> Result<(), String> {
     let _one_at_a_time = whisper.download.lock().await;
-    tokio::fs::create_dir_all(&whisper.whisper_dir)
-        .await
+    std::fs::create_dir_all(&whisper.whisper_dir)
         .map_err(|e| format!("could not create the Whisper directory: {e}"))?;
     let dest = whisper.path_of(model);
     if !dest.exists() {
@@ -554,7 +562,7 @@ pub async fn whisper_install(
             &dest,
             "the Whisper model",
             DOWNLOAD_STALL,
-            |received, total| emit("model", received, total),
+            &|received, total| emit("model", received, total),
         )
         .await?;
         emit("done", 0, 0);

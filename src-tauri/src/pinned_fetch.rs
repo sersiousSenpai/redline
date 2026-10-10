@@ -12,14 +12,19 @@
 //! for the rest with an HTTP `Range` request. A server that ignores the range
 //! starts the file over, and a `.part` that can't be the published file (too
 //! long, or wrong once complete) is deleted, so a bad half file never sticks.
+//!
+//! The file work is plain `std::fs`, not the runtime's async files: writing a
+//! received chunk takes microseconds, and each async file operation would
+//! build a blocking task of its own type into the binary. The one long call is
+//! hashing a half file on resume, once per attempt.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// What a download must come to before it replaces anything: where it is
 /// published, its size, and the SHA-256 the host publishes for it.
@@ -46,23 +51,22 @@ pub fn part_path(dest: &Path) -> PathBuf {
 /// Download `pin` to `dest`, resuming a `.part` left by an earlier attempt.
 /// `what` names the file in errors ("the Whisper model"). `stall` gives up an
 /// attempt that goes that long without a response or a byte. `progress` gets
-/// `(received, total)`, counting bytes resumed from disk as received.
+/// `(received, total)`, counting bytes resumed from disk as received. It is a
+/// `dyn` callback so every caller shares one copy of this state machine.
 pub async fn fetch_pinned(
     http: &reqwest::Client,
     pin: &Pinned,
     dest: &Path,
     what: &str,
     stall: Duration,
-    progress: impl Fn(u64, u64),
+    progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<(), String> {
     let part = part_path(dest);
     let mut last = String::new();
     for _ in 0..ATTEMPTS {
-        match attempt(http, pin, &part, what, stall, &progress).await {
+        match attempt(http, pin, &part, what, stall, progress).await {
             Ok(()) => {
-                return tokio::fs::rename(&part, dest)
-                    .await
-                    .map_err(|e| format!("finalizing {what} failed: {e}"));
+                return std::fs::rename(&part, dest).map_err(|e| format!("finalizing {what} failed: {e}"));
             }
             // Not the published file: it was discarded, and fetching the same
             // bytes again won't change that.
@@ -86,11 +90,11 @@ async fn attempt(
     part: &Path,
     what: &str,
     stall: Duration,
-    progress: &impl Fn(u64, u64),
+    progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<(), Failure> {
     let retry = |e: String| Failure::Retry(e);
     let stalled = || Failure::Retry(format!("downloading {what} stalled — try again"));
-    let (mut hasher, mut have) = resume_point(pin, part).await.map_err(retry)?;
+    let (mut hasher, mut have) = resume_point(pin, part).map_err(retry)?;
 
     if have < pin.bytes {
         let mut req = http.get(pin.url);
@@ -106,7 +110,7 @@ async fn attempt(
             && range_start(&resp) == Some(have);
         if have > 0 && !resumed {
             if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                let _ = tokio::fs::remove_file(part).await;
+                let _ = std::fs::remove_file(part);
                 return Err(retry(format!("downloading {what} has to start over — try again")));
             }
             // The server sent the whole file instead of the rest: start over.
@@ -116,13 +120,12 @@ async fn attempt(
         if !resp.status().is_success() {
             return Err(retry(format!("downloading {what} failed: HTTP {}", resp.status())));
         }
-        let mut file = tokio::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .append(resumed)
             .truncate(!resumed)
             .open(part)
-            .await
             .map_err(|e| retry(format!("creating the file for {what} failed: {e}")))?;
         let mut last_report = have;
         progress(have, pin.bytes);
@@ -133,10 +136,9 @@ async fn attempt(
         {
             if have + chunk.len() as u64 > pin.bytes {
                 drop(file);
-                return Err(discard(part, what, have + chunk.len() as u64).await);
+                return Err(discard(part, what, have + chunk.len() as u64));
             }
             file.write_all(&chunk)
-                .await
                 .map_err(|e| retry(format!("writing {what} failed: {e}")))?;
             hasher.update(&chunk);
             have += chunk.len() as u64;
@@ -145,9 +147,6 @@ async fn attempt(
                 progress(have, pin.bytes);
             }
         }
-        file.flush()
-            .await
-            .map_err(|e| retry(format!("flushing {what} failed: {e}")))?;
         progress(have, pin.bytes);
     }
 
@@ -156,7 +155,7 @@ async fn attempt(
         return Err(retry(format!("downloading {what} was cut off — try again")));
     }
     if format!("{:x}", hasher.finalize()) != pin.sha256 {
-        return Err(discard(part, what, have).await);
+        return Err(discard(part, what, have));
     }
     Ok(())
 }
@@ -164,15 +163,15 @@ async fn attempt(
 /// Where a download picks up: the hash and length of a `.part` an earlier
 /// attempt left, or a fresh start. A `.part` longer than the published file
 /// can't be resumed into it, so it is deleted.
-async fn resume_point(pin: &Pinned, part: &Path) -> Result<(Sha256, u64), String> {
+fn resume_point(pin: &Pinned, part: &Path) -> Result<(Sha256, u64), String> {
     let mut hasher = Sha256::new();
-    let Ok(mut file) = tokio::fs::File::open(part).await else {
+    let Ok(mut file) = std::fs::File::open(part) else {
         return Ok((hasher, 0));
     };
-    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     if len > pin.bytes {
         drop(file);
-        let _ = tokio::fs::remove_file(part).await;
+        let _ = std::fs::remove_file(part);
         return Ok((Sha256::new(), 0));
     }
     let mut buf = vec![0u8; 1 << 20];
@@ -180,7 +179,6 @@ async fn resume_point(pin: &Pinned, part: &Path) -> Result<(Sha256, u64), String
     loop {
         let n = file
             .read(&mut buf)
-            .await
             .map_err(|e| format!("reading the partial download failed: {e}"))?;
         if n == 0 {
             break;
@@ -197,8 +195,8 @@ fn range_start(resp: &reqwest::Response) -> Option<u64> {
     value.strip_prefix("bytes ")?.split('-').next()?.trim().parse().ok()
 }
 
-async fn discard(part: &Path, what: &str, received: u64) -> Failure {
-    let _ = tokio::fs::remove_file(part).await;
+fn discard(part: &Path, what: &str, received: u64) -> Failure {
+    let _ = std::fs::remove_file(part);
     Failure::Wrong(format!(
         "the downloaded {what} wasn't the published file ({received} bytes), so it was \
          discarded — try again"
@@ -208,7 +206,6 @@ async fn discard(part: &Path, what: &str, received: u64) -> Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
     const BODY: &[u8] = b"weights for a model that is exactly this long, nothing more";
@@ -301,7 +298,7 @@ mod tests {
         let dest = scratch("fresh");
         let (url, seen) = serve(BODY, vec![Answer::Ranged]);
         let reports = Mutex::new(Vec::new());
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, |r, t| {
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|r, t| {
             reports.lock().unwrap().push((r, t))
         })
         .await
@@ -319,7 +316,7 @@ mod tests {
         std::fs::write(part_path(&dest), &BODY[..20]).unwrap();
         let (url, seen) = serve(BODY, vec![Answer::Ranged]);
         let first = Mutex::new(None);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, |r, _| {
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|r, _| {
             first.lock().unwrap().get_or_insert(r);
         })
         .await
@@ -333,7 +330,7 @@ mod tests {
     async fn a_dropped_connection_keeps_its_bytes_and_the_retry_resumes_them() {
         let dest = scratch("dropped");
         let (url, seen) = serve(BODY, vec![Answer::CutAt(25), Answer::Ranged]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, |_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -345,7 +342,7 @@ mod tests {
         let dest = scratch("ignored-range");
         std::fs::write(part_path(&dest), &BODY[..20]).unwrap();
         let (url, _) = serve(BODY, vec![Answer::IgnoreRange]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, |_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY, "not the kept bytes plus a second copy");
@@ -357,7 +354,7 @@ mod tests {
         let (url, seen) = serve(BODY, vec![Answer::Ranged, Answer::Ranged]);
         let mut pin = pin_for(url, BODY);
         pin.sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
-        let err = fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, |_, _| {})
+        let err = fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| {})
             .await
             .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
@@ -371,7 +368,7 @@ mod tests {
         let dest = scratch("too-long");
         std::fs::write(part_path(&dest), [BODY, b"and then some"].concat()).unwrap();
         let (url, seen) = serve(BODY, vec![Answer::Ranged]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, |_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -383,7 +380,7 @@ mod tests {
         let dest = scratch("complete-part");
         std::fs::write(part_path(&dest), BODY).unwrap();
         let pin = pin_for("http://127.0.0.1:9/never".to_string(), BODY);
-        fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, |_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| {})
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
