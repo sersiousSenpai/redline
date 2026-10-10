@@ -11,6 +11,8 @@
 // The synth is injected (`SpeechDriver`) so the buffering / sentence-splitting
 // logic is unit-testable under node, where `window.speechSynthesis` is absent.
 
+import { noteSounding } from "./audible";
+
 /** Spoken state, surfaced to the UI ("speaking" lights the indicator). */
 export type SpeechState = "idle" | "speaking" | "paused";
 
@@ -277,6 +279,7 @@ export class SpeechQueue {
 
   private setState(s: SpeechState): void {
     if (s === this.state) return;
+    if (s === "speaking" || this.state === "speaking") noteSounding(s === "speaking");
     this.state = s;
     this.onState?.(s);
   }
