@@ -16,7 +16,7 @@ import { captureSnapshotOrCached } from "../lib/domSnapshot";
 import type { BrowseMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
-import { usePersistedState } from "../theme/usePersistedState";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter, { ThreadMeterStrip } from "./TurnFooter";
@@ -65,9 +65,9 @@ interface BrowserChatProps {
    *  highlight intents; see lib/browseSelection.ts).
    *
    *  A prop with a nonce, not a direct write to the persisted draft key: the
-   *  draft lives in `usePersistedState`, and writing that localStorage key
-   *  from outside would desync its in-memory copy whenever the panel is
-   *  already mounted. Same shape as `openRequest`/`onOpenRequestConsumed` in
+   *  draft lives in `useSharedDraft`'s memory first, and writing that
+   *  localStorage key from outside would never reach a panel already
+   *  mounted. Same shape as `openRequest`/`onOpenRequestConsumed` in
    *  BrowserPane and `consumeSeed` on the Front Door. */
   seed?: { text: string; nonce: number; autoSend?: boolean } | null;
   onSeedConsumed?: () => void;
@@ -127,7 +127,7 @@ export const BrowserChat = memo(function BrowserChat({
 }: BrowserChatProps) {
   // Composer draft survives tab switches and app restarts (the component is
   // keyed by browseId, so each tab's discussion keeps its own).
-  const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.browse.${browseId}`, "");
+  const [draft, setDraft] = useSharedDraft(`rl.chatDraft.browse.${browseId}`);
   const [zoom, setZoom] = useState(loadZoom);
   const [conversationPanel, setConversationPanel] = useState<"menu" | null>(null);
   const moreRef = useRef<HTMLButtonElement>(null);

@@ -73,6 +73,21 @@ describe("polling", () => {
   });
 });
 
+describe("chat drafts", () => {
+  // A keystroke writes memory and re-renders the box's subscribers; the disk
+  // copy trails on a debounce. A synchronous localStorage.setItem per key is
+  // what Phase 2 took off the Front Door.
+  it.each([
+    ["src/components/BrowserChat.tsx", "rl.chatDraft.browse."],
+    ["src/components/MissionChat.tsx", "rl.chatDraft.mission."],
+    ["src/components/MemoryAsk.tsx", "rl.chatDraft.memchat"],
+  ])("%s keeps its draft in the shared draft store", (path, key) => {
+    const source = read(path);
+    expect(source).toMatch(new RegExp(`useSharedDraft\\([\`"]${key.replace(/\./g, "\\.")}`));
+    expect(source).not.toContain("usePersistedState");
+  });
+});
+
 describe("content-visibility", () => {
   const ROWS = [".rl-session-row", ".rl-revision-row", ".rl-file-row"];
   const css = (dir: string): string[] =>

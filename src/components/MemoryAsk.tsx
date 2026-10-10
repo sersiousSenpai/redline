@@ -10,7 +10,7 @@ import type { TimelineFocus } from "../lib/timeline";
 import { extractCitations } from "../lib/memcite";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
-import { usePersistedState } from "../theme/usePersistedState";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
@@ -32,7 +32,7 @@ interface MemoryAskProps {
 export function MemoryAsk({ onCite }: MemoryAskProps) {
   // Composer draft survives surface switches and app restarts (the Ask
   // thread is a singleton, so one key).
-  const [draft, setDraft] = usePersistedState<string>("rl.chatDraft.memchat", "");
+  const [draft, setDraft] = useSharedDraft("rl.chatDraft.memchat");
   const [notice, setNotice] = useState<string | null>(null);
   // The accepted class tree, loaded lazily on the first class-chip click and
   // cached for the session — chip resolution, not a browsing surface.

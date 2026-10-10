@@ -5,7 +5,7 @@ import { Copy, Pin, Target, X } from "lucide-react";
 import type { Mission, MissionFinding, MissionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
-import { usePersistedState } from "../theme/usePersistedState";
+import { useSharedDraft } from "../hooks/useSharedDraft";
 import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
@@ -52,7 +52,7 @@ export function MissionChat({
   const missionId = mission.missionId;
   // Composer draft survives surface switches and app restarts (the component
   // is keyed by missionId, so each mission keeps its own).
-  const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.mission.${missionId}`, "");
+  const [draft, setDraft] = useSharedDraft(`rl.chatDraft.mission.${missionId}`);
   const [showFindings, setShowFindings] = useState(true);
   const [editingGoal, setEditingGoal] = useState(false);
   // The synthesize handoff itself lives at App level (`mission-synthesize-done`
