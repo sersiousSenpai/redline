@@ -364,7 +364,9 @@ describe("the island never moves on its own", () => {
     expect(island).toContain("announce={doorNews}");
     const launch = app.slice(app.indexOf("const launchFromFrontDoor = async"), app.indexOf("const drafterFromFrontDoor = () =>"));
     expect(launch).toMatch(/setDoorCompact\(false\);\s*announceDoor\(/);
-    expect(app).toContain("announceDoor(arrivalMessage(title));");
+    expect(app).toContain("announceDoor(arrivalMessage(title, revision));");
+    // A new version of the plan already selected says so, wherever it lands.
+    expect(app).toContain("const revision = payload.sessionId === activeId;\n        const focus = arrivalFocus({");
   });
 
   it("builds the in-flight launch once per launch, not per render", () => {

@@ -4085,6 +4085,8 @@ function App() {
           }
           return;
         }
+        // A new version of the plan already selected is news of its own.
+        const revision = payload.sessionId === activeId;
         const focus = arrivalFocus({
           activeId,
           sessionId: payload.sessionId,
@@ -4098,7 +4100,7 @@ function App() {
           // plate turns into the plan, which is the point of launching one.
           // No toast says so, so the island does, to a screen reader.
           focusIntercepted();
-          announceDoor(arrivalMessage(title));
+          announceDoor(arrivalMessage(title, revision));
           return;
         }
         if (focus === "focus") {
@@ -4108,7 +4110,7 @@ function App() {
           setActiveId(payload.sessionId);
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
-          notice(arrivalMessage(title), "Review");
+          notice(arrivalMessage(title, revision), "Review");
           return;
         }
         // flash — you are in the middle of something else. Nothing moves:
@@ -4116,7 +4118,6 @@ function App() {
         // notice offers the switch we declined. A new version of the plan
         // already selected is not a new row: its data refreshes under the
         // version you are on, and the row only glows.
-        const revision = payload.sessionId === activeId;
         if (revision) void loadSession(payload.sessionId);
         else setUnseenPlanIds((prev) => {
           if (prev.has(payload.sessionId)) return prev;

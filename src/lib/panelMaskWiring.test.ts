@@ -22,7 +22,7 @@ describe("panel mask wiring", () => {
     expect(maskedArrival.length).toBeGreaterThan(0);
     expect(arrival).toContain("paneMaskedRef.current");
     expect(maskedArrival).not.toContain("selectSurface");
-    expect(maskedArrival).toContain('notice(arrivalMessage(title), "Review")');
+    expect(maskedArrival).toContain('notice(arrivalMessage(title, revision), "Review")');
     const open = arrival.slice(arrival.indexOf("const openArrival = () => {"), arrival.indexOf("const notice ="));
     expect(open).toContain('selectSurfaceRef.current("document")');
     expect(open).toContain("focusIntercepted()");
