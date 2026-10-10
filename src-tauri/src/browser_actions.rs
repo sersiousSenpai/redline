@@ -21,6 +21,20 @@ pub enum Operation {
     Select { selector: String, value: String },
     Wait { selector: String, text: Option<String>, visible: Option<bool> },
 }
+impl Operation {
+    /// The wire tag, so an acknowledgement says what the action did.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Navigate { .. } => "navigate",
+            Self::Click { .. } => "click",
+            Self::Fill { .. } => "fill",
+            Self::Key { .. } => "key",
+            Self::Scroll { .. } => "scroll",
+            Self::Select { .. } => "select",
+            Self::Wait { .. } => "wait",
+        }
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionRequest {
@@ -35,6 +49,11 @@ pub struct ActionRequest {
 pub struct ActionResult {
     pub operation_id: String,
     pub label: String,
+    /// The operation's kind and the target's tab number when the action was
+    /// accepted, so the chat can show "clicked · tab 2" (`None`: a tab outside
+    /// the workspace on screen).
+    pub kind: &'static str,
+    pub tab: Option<usize>,
     pub status: String,
     pub elapsed_ms: u64,
     pub observed: Value,
@@ -75,7 +94,8 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
     let queue_revision = queue.interrupted.load(Ordering::SeqCst);
     let input_revision = crate::browser_events::input_revision(&request.label);
     let start = Instant::now();
-    let mut result = ActionResult { operation_id: request.operation_id.clone(), label: request.label.clone(), status: "accepted".into(), elapsed_ms: 0, observed: Value::Null, error: None };
+    let tab = app.try_state::<crate::BrowserTabs>().and_then(|tabs| tabs.get().iter().position(|t| t.label == request.label)).map(|i| i + 1);
+    let mut result = ActionResult { operation_id: request.operation_id.clone(), label: request.label.clone(), kind: request.operation.kind(), tab, status: "accepted".into(), elapsed_ms: 0, observed: Value::Null, error: None };
     let _ = app.emit("browser-action", &result);
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000).clamp(100, 30_000));
     let deadline = tokio::time::Instant::now() + timeout;
@@ -182,6 +202,13 @@ mod tests {
         let script = operation_script(&Operation::Fill { selector: "#name".into(), value: "');window.pwned=true;//".into() }).unwrap();
         assert!(script.contains(r#""value":"');window.pwned=true;//""#));
         assert!(script.contains("setter.call(e,op.value)"));
+    }
+    #[test] fn acknowledgements_say_what_ran_and_on_which_tab() {
+        let request = parse_request(json!({ "operationId": "op", "label": "browser-t2", "operation": { "kind": "select", "selector": "s", "value": "v" } })).unwrap();
+        assert_eq!(request.operation.kind(), "select");
+        let ack = ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind: request.operation.kind(), tab: Some(2), status: "running".into(), elapsed_ms: 0, observed: Value::Null, error: None };
+        let wire = serde_json::to_value(&ack).unwrap();
+        assert_eq!((wire["kind"].as_str(), wire["tab"].as_u64(), wire["label"].as_str()), (Some("select"), Some(2), Some("browser-t2")));
     }
     #[test] fn huge_actions_are_rejected() { assert!(operation_script(&Operation::Click { selector: "a".repeat(40_000) }).is_err()); }
     #[test] fn navigation_needs_a_new_document_or_the_requested_location() {

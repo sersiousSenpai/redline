@@ -126,12 +126,12 @@ describe("the skill and the prompt teach what the backend does", () => {
 });
 
 describe("the activity line names what the agent is doing", () => {
-  it.fails("BC-34 KNOWN VIOLATION: a page action is named in the activity line, not as a bare 'Bash…'", () => {
+  it("BC-34 a page action is named in the activity line, not as a bare 'Bash…'", () => {
     const phrases = [...Object.values(contract.activityLabels), ...Object.values(contract.actionLabels), ...Object.values(contract.tabActivityLabels)];
     for (const phrase of phrases) expect(procRs, `claude_proc.rs has no "${phrase}"`).toContain(phrase);
     for (const route of contract.retiredRoutes) expect(procRs, `dead branch for ${route}`).not.toContain(route);
   });
-  it.fails("BC-34 KNOWN VIOLATION: a page action's acknowledgement says what it did and on which tab", () => {
+  it("BC-34 a page action's acknowledgement says what it did and on which tab", () => {
     const result = actionsRs.slice(actionsRs.indexOf("pub struct ActionResult"), actionsRs.indexOf("}\n", actionsRs.indexOf("pub struct ActionResult")));
     expect(result).toMatch(/pub kind: /);
     expect(result).toMatch(/pub tab: /);

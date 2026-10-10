@@ -2644,6 +2644,41 @@ mod contract {
         }
     }
 
+    /// Every route the page agent can call names what it does in the
+    /// activity line, a numbered tab by its number and an action by its kind,
+    /// and a retired route has no phrase at all.
+    #[test]
+    fn every_bridge_route_has_an_activity_phrase() {
+        use crate::claude_proc::retrieval_status_label;
+        let c = contract();
+        let label = |cmd: String| retrieval_status_label("Bash", &json!({ "command": cmd }));
+        let phrases = c["activityLabels"].as_object().unwrap();
+        let mut routes = vec![c["actionRoute"].clone(), c["writeRoute"].clone()];
+        for list in ["readRoutes", "tabRoutes", "legacyRoutes", "capturedMissionRoutes", "globalMissionRoutes", "codeRoutes"] {
+            routes.extend(c[list].as_array().unwrap().iter().cloned());
+        }
+        for route in &routes {
+            assert!(phrases.contains_key(route.as_str().unwrap()), "{route} has no activity phrase");
+        }
+        for (route, phrase) in phrases {
+            let url = route.replace("{id}", "m-1");
+            assert_eq!(label(format!("curl -s 'http://127.0.0.1:7676{url}'")), phrase.as_str().unwrap(), "{route}");
+        }
+        for (route, phrase) in c["tabActivityLabels"].as_object().unwrap() {
+            let want = phrase.as_str().unwrap().replace("{n}", "2");
+            assert_eq!(label(format!("curl -s 'http://127.0.0.1:7676{route}?tab=2'")), want, "{route}?tab=2");
+        }
+        let action = c["actionRoute"].as_str().unwrap();
+        for kind in strings(&c["actionKinds"]) {
+            let body = format!(r#"{{"operationId":"op-1","label":"browser-t1","operation":{{"kind":"{kind}"}}}}"#);
+            let want = c["actionLabels"][&kind].as_str().unwrap();
+            assert_eq!(label(format!("curl -s http://127.0.0.1:7676{action} -X POST -d '{body}'")), want, "{kind}");
+        }
+        for route in strings(&c["retiredRoutes"]) {
+            assert_eq!(label(format!("curl -s -X POST http://127.0.0.1:7676{route}")), "Bash…", "{route}");
+        }
+    }
+
     #[test]
     fn a_consult_is_framed_for_its_real_caller() {
         let framed = super::consult_framing("  what's the pricing?  ");
@@ -2673,18 +2708,12 @@ mod contract {
             .iter()
             .map(|sample| {
                 let op: Operation = serde_json::from_value(sample.clone()).expect("a known kind");
-                // Exhaustive: a new variant fails to compile here until the
-                // contract and this list name it.
-                match op {
-                    Operation::Navigate { .. }
-                    | Operation::Click { .. }
-                    | Operation::Fill { .. }
-                    | Operation::Key { .. }
-                    | Operation::Scroll { .. }
-                    | Operation::Select { .. }
-                    | Operation::Wait { .. } => {}
-                }
-                serde_json::to_value(op).unwrap()["kind"].as_str().unwrap().to_string()
+                // The acknowledgement's kind is the wire tag. `kind()` is an
+                // exhaustive match, so a new variant cannot compile without
+                // naming one.
+                let tag = serde_json::to_value(&op).unwrap()["kind"].as_str().unwrap().to_string();
+                assert_eq!(op.kind(), tag);
+                tag
             })
             .collect();
         assert_eq!(tags, kinds);

@@ -696,6 +696,9 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
         .or_else(|| input.get("url"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if let Some(phrase) = page_status_label(text) {
+        return phrase;
+    }
     // A consult spawns a real CHILD `claude` on another surface's seat. The
     // child books its own burn (correct, and new) — but there is no precise
     // parent→child cost edge: the consult request carries no caller identity,
@@ -705,8 +708,6 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
     // follow-on work.
     let phrase = if text.contains("/v1/global/consult") {
         "checking in with a colleague…"
-    } else if text.contains("/v1/linked/consult") {
-        "checking in with a tab's agent…"
     } else if text.contains("/v1/memory/answer-pack") {
         "searching your memory…"
     } else if text.contains("/v1/memory/tree") {
@@ -732,6 +733,77 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
         };
     };
     phrase.to_string()
+}
+
+/// The page agent's bridge calls, named for what they do to the page the user
+/// is watching: a page action by its kind (read off the `/v1/browser/action`
+/// body), a read or switch aimed at a numbered tab by that tab. Mission and
+/// code reads ride along, being the same agent's. `None` for anything else.
+fn page_status_label(text: &str) -> Option<String> {
+    let tab = text
+        .split("tab=")
+        .nth(1)
+        .map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next().unwrap_or(""))
+        .filter(|n| !n.is_empty());
+    let phrase = if let Some(at) = text.find("/v1/browser/") {
+        let route = text[at + "/v1/browser/".len()..]
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .next()
+            .unwrap_or("");
+        match (route, tab) {
+            ("snapshot", Some(n)) => return Some(format!("reading tab {n}…")),
+            ("thread", Some(n)) => return Some(format!("reading tab {n}'s chat…")),
+            ("focus", Some(n)) => return Some(format!("switching to tab {n}…")),
+            ("snapshot", None) => "reading the page…",
+            ("thread", None) => "reading a tab's chat…",
+            ("focus", None) => "switching tabs…",
+            ("active", _) => "checking the tab on screen…",
+            ("tabs", _) => "looking over your tabs…",
+            ("action", _) => action_status_label(text),
+            ("navigate", _) => "navigating…",
+            ("click", _) => "clicking…",
+            ("query", _) => "extracting from the page…",
+            ("open", _) => "opening a tab…",
+            ("download", _) => "saving a file…",
+            _ => return None,
+        }
+    } else if text.contains("/v1/mission") {
+        if text.contains("/findings") {
+            "reading pinned findings…"
+        } else {
+            "reading the mission…"
+        }
+    } else if text.contains("/v1/code/projects") {
+        "finding your projects…"
+    } else if text.contains("/v1/code/map") {
+        "mapping a project…"
+    } else if text.contains("/v1/code/git") {
+        "reading a project's git…"
+    } else {
+        return None;
+    };
+    Some(phrase.to_string())
+}
+
+/// A `/v1/browser/action` call by its operation's `kind`: the first word after
+/// a "kind" that names one, however the agent quoted the JSON body.
+fn action_status_label(text: &str) -> &'static str {
+    text.split("kind")
+        .skip(1)
+        .find_map(|rest| {
+            let rest = rest.trim_start_matches(|c: char| !c.is_ascii_alphabetic());
+            Some(match rest.split(|c: char| !c.is_ascii_alphabetic()).next()? {
+                "navigate" => "navigating…",
+                "click" => "clicking…",
+                "fill" => "typing into the page…",
+                "key" => "pressing a key…",
+                "scroll" => "scrolling the page…",
+                "select" => "choosing an option…",
+                "wait" => "waiting for the page…",
+                _ => return None,
+            })
+        })
+        .unwrap_or("acting on the page…")
 }
 
 #[cfg(test)]
@@ -842,6 +914,17 @@ mod tests {
             ("curl -s 'http://127.0.0.1:7676/v1/context/browse/search?q=x'", "searching pages…"),
             ("curl -s http://127.0.0.1:7676/v1/context/stats", "counting the record…"),
             ("curl -s http://127.0.0.1:7676/v1/context/sessions/s1/history", "reading a plan's history…"),
+            // The page agent's own bridge: the page, a numbered tab, an action
+            // by its kind however the body is quoted.
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=browser-t3'", "reading the page…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=2'", "reading tab 2…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=3'", "reading tab 3's chat…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=4' -X POST", "switching to tab 4…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d '{"operationId":"op-1","label":"browser-t3","operation":{"kind":"click","selector":"a"}}'"#, "clicking…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d "{\"operation\": {\"kind\": \"fill\", \"value\": \"x\"}}""#, "typing into the page…"),
+            (r#"curl -s http://127.0.0.1:7676/v1/browser/action -d '{"operationId":"kind-1","operation":{"kind":"scroll","x":0,"y":9}}'"#, "scrolling the page…"),
+            ("curl -s http://127.0.0.1:7676/v1/missions/m-1/findings", "reading pinned findings…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/code/git?repo=/r&op=log'", "reading a project's git…"),
         ];
         for (cmd, want) in cases {
             assert_eq!(retrieval_status_label("Bash", &bash(cmd)), want, "for {cmd}");
