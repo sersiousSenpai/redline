@@ -33,7 +33,7 @@ import { useSharedDraft } from "../hooks/useSharedDraft";
 import { useDictation } from "../lib/useDictation";
 import { ReplyBlock, UserTurn } from "./ReplyBlock";
 import { ThreadMeterStrip } from "./TurnFooter";
-import { contextResets, type TurnMeter } from "../lib/turnMeter";
+import { contextResets, type Activity, type TurnMeter } from "../lib/turnMeter";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
 import { BrowserChatComposer } from "./BrowserChatComposer";
@@ -114,6 +114,21 @@ function lastReplyBackend(messages: readonly BrowseMessage[]): string | null {
     const m = messages[i];
     if (m.role === "assistant" && m.status === "complete") return m.backend ?? "claude-code";
   }
+  return null;
+}
+
+/** A send as it went out: the provider it ran on and the page it was about. */
+interface SentTurn {
+  agent: string;
+  targetLabel: string;
+}
+
+/** One step of the live turn, the same whichever copy of the ring it is read from. */
+const stepKey = (step: Activity) => `${step.at}\u0000${step.kind}\u0000${step.label}`;
+
+/** The newest of the user's messages in the thread. */
+function lastUserId(messages: readonly BrowseMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") return messages[i].id;
   return null;
 }
 
@@ -209,10 +224,15 @@ export const BrowserChat = memo(function BrowserChat({
   // This chat's provider/model/effort, which the next turn reads at start.
   const harness = useBrowseHarness(browseId);
   const agent = backendLabel(harness.pick.backend);
-  // Who the turn in flight runs on and the page it was sent against, read as
-  // it went out: a pick changed while it streams applies to the next
-  // message, and a tab switched to meanwhile is not the page it acts on.
-  const sentAgent = useRef<{ browseId: string; agent: string; targetLabel: string } | null>(null);
+  // Who each send ran on and the page it was sent against, read as it went
+  // out: a pick changed while a reply streams applies to the next message,
+  // and a tab switched to meanwhile is not the page it acts on (BC-12,
+  // BC-26). A send that starts at once is the turn in flight from the
+  // moment it is built; one queued behind a reply is kept by its row's id
+  // until its own turn starts, so it never re-signs the reply in flight.
+  const builtFor = useRef(new WeakMap<object, SentTurn>());
+  const sentFor = useRef(new Map<string, SentTurn>());
+  const lastStarted = useRef<SentTurn | null>(null);
   const {
     messages,
     queue,
@@ -241,7 +261,8 @@ export const BrowserChat = memo(function BrowserChat({
         const target = conversation;
         // A chat showing an inherited pick stores it before its first turn.
         const runsOn = (await harness.commit()).backend;
-        sentAgent.current = { browseId, agent: backendLabel(runsOn), targetLabel: target.targetLabel };
+        const sent = { agent: backendLabel(runsOn), targetLabel: target.targetLabel };
+        if (status !== "streaming") lastStarted.current = sent;
         // The opening turn embeds a DOM snapshot so the agent is grounded
         // without a round-trip, and so does a turn on a page the conversation
         // has not grounded on; follow-ups rely on its /snapshot tool. The
@@ -253,7 +274,9 @@ export const BrowserChat = memo(function BrowserChat({
         const snapshot = needsSnapshot(target, { lastReplyBackend: lastReplyBackend(messages), runsOn, lastGroundedLabel: lastGroundedLabel.current })
           ? await captureSnapshotOrCached(target.targetLabel)
           : undefined;
-        return { ...turnEnvelope(target, workspace, text, projectDir ?? null, snapshot) };
+        const args = { ...turnEnvelope(target, workspace, text, projectDir ?? null, snapshot) };
+        builtFor.current.set(args, sent);
+        return args;
       },
       makeMessage: ({ id, role, body, status, backend }) => ({
         id,
@@ -265,11 +288,17 @@ export const BrowserChat = memo(function BrowserChat({
         backend: backend ?? null,
       }),
       // The backend has the turn, so the page it carried is grounded.
-      onSent: (args) => {
+      onSent: (args, outcome) => {
         if ("snapshot" in args) lastGroundedLabel.current = String(args.targetLabel);
+        const sent = builtFor.current.get(args);
+        if (sent && outcome?.messageId) sentFor.current.set(outcome.messageId, sent);
       },
     });
   const streaming = status === "streaming";
+  // The turn in flight answers the newest of your messages in the thread
+  // (a queued one joins it as its turn starts). After a remount nothing is
+  // known of it, and the chat's own pick and page stand in.
+  const inFlight = streaming ? (sentFor.current.get(lastUserId(messages) ?? "") ?? lastStarted.current) : null;
 
   // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
   // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
@@ -313,19 +342,21 @@ export const BrowserChat = memo(function BrowserChat({
     stick();
   }, [browseId]);
 
-  // When the live reply last grew: a step it was running is finished once
-  // text comes after it. Kept off state, as ReplyBlock keeps its own.
-  const output = useRef({ length: 0, at: 0 });
-  if (streaming && liveText.length !== output.current.length) {
-    output.current = { length: liveText.length, at: liveText ? Date.now() : 0 };
-  }
-  const live = streaming ? liveSteps(activity ?? [], output.current.at) : null;
-  const sentTarget = sentAgent.current?.browseId === browseId ? sentAgent.current.targetLabel : conversation.targetLabel;
-  const action = (streaming && pageActions?.get(sentTarget)) || null;
+  // How long the reply's text was when each step was first seen: a step is
+  // finished once the reply has written past it. Measured in text, not in
+  // time, so a step that lands in the same render as the text before it, or
+  // a remount that restores both at once, still reads as running. By what
+  // the step is, not by object, since the self-heal probe hands the same
+  // steps back as new ones. Kept off state, as ReplyBlock keeps its own.
+  const seenAt = useRef(new Map<string, number>());
+  if (!streaming) seenAt.current.clear();
+  for (const step of activity ?? []) if (!seenAt.current.has(stepKey(step))) seenAt.current.set(stepKey(step), liveText.length);
+  const live = streaming ? liveSteps(activity ?? [], (step) => liveText.length > (seenAt.current.get(stepKey(step)) ?? 0)) : null;
+  const action = (streaming && pageActions?.get(inFlight?.targetLabel ?? conversation.targetLabel)) || null;
   // The turn's one live line (ReplyBlock's tail) names the step running now;
   // without one it says what the turn is doing otherwise (BC-34, BC-41).
   const liveStatus = live?.running || action
-    ? { label: liveStepLabel(live?.running?.label ?? "", action), at: Math.max(live?.running?.at ?? 0, action?.at ?? 0) }
+    ? { label: liveStepLabel(live?.running?.label ?? "", action), at: Math.max(live?.running?.at ?? 0, action?.at ?? 0), running: true }
     : null;
 
   // A reply the reader has been following parks at its start once it is
@@ -579,7 +610,7 @@ export const BrowserChat = memo(function BrowserChat({
           <ReplyBlock
             phase="live"
             stepsLine={false}
-            byline={sentAgent.current?.browseId === browseId ? sentAgent.current.agent : agent}
+            byline={inFlight?.agent ?? agent}
             seat={harness.pick.model}
             text={liveText}
             meter={meter}

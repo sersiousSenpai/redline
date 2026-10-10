@@ -70,15 +70,16 @@ describe("work rows", () => {
 
   it("BC-34 a live step becomes its past-tense row once anything comes after it", () => {
     const ring = [{ at: 1, kind: "thinking", label: "Thinking…" }, { at: 5, kind: "tool", label: "reading the page…" }];
-    expect(liveSteps(ring, 0)).toEqual({ finished: [], running: ring[1] });
+    const quiet = () => false;
+    expect(liveSteps(ring, quiet)).toEqual({ finished: [], running: ring[1] });
     // Text arrived after the step: it is done.
-    expect(liveSteps(ring, 6)).toEqual({ finished: [ring[1]], running: null });
+    expect(liveSteps(ring, (step) => step === ring[1])).toEqual({ finished: [ring[1]], running: null });
     // So did a thought.
     const thought = [...ring, { at: 7, kind: "thinking", label: "Thinking…" }];
-    expect(liveSteps(thought, 0)).toEqual({ finished: [ring[1]], running: null });
+    expect(liveSteps(thought, quiet)).toEqual({ finished: [ring[1]], running: null });
     // An outcome is never running: the action already has one.
     const acted = [...ring, { at: 8, kind: "tool", label: "Clicked “Buy” · tab 2" }];
-    expect(liveSteps(acted, 0).running).toBeNull();
+    expect(liveSteps(acted, quiet).running).toBeNull();
   });
 
   it("BC-41 the live line names the step running now, a page action by its kind and tab", () => {

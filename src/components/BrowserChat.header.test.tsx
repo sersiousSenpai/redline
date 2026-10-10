@@ -7,7 +7,7 @@ const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
   dictation: { listening: false, toggle: vi.fn(), onFinal: (_text: string) => {} },
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
-    onSent?: (args: Record<string, unknown>) => void;
+    onSent?: (args: Record<string, unknown>, outcome?: { started: boolean; queued: boolean; messageId: string }) => void;
     makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
   } },
   captureMock: vi.fn(async (label: string) => `snapshot:${label}`),
@@ -239,7 +239,7 @@ describe("page conversation header", () => {
 
   it("bylines the streaming reply with the provider it was sent to, not a pick made since", async () => {
     await show();
-    await act(async () => { await config.current!.buildSendArgs("Question"); });
+    await act(async () => { await sendTurn("Question"); });
     // A pick changed mid-reply applies to the next message.
     await click("Chat model and effort");
     const codex = [...document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Provider"] button')][1];
@@ -316,6 +316,34 @@ describe("page conversation header", () => {
       turn.status = "idle";
     }
   });
+
+  it("BC-26 keeps the reply in flight signed by its provider when a message queued behind it went to another", async () => {
+    await show();
+    turn.messages = [{ id: "u1", browseId: "thread", role: "user", body: "Question", status: "complete", createdAt: 1 }];
+    await act(async () => { config.current!.onSent?.(await config.current!.buildSendArgs("Question"), { started: true, queued: false, messageId: "u1" }); });
+    await click("Chat model and effort");
+    const codex = [...document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Provider"] button')][1];
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
+    await act(async () => codex.click());
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
+    turn.status = "streaming";
+    try {
+      await show();
+      // The follow-up is typed and queued on Codex while Claude still writes.
+      await act(async () => { config.current!.onSent?.(await config.current!.buildSendArgs("Follow-up"), { started: false, queued: true, messageId: "u2" }); });
+      turn.queue = [{ id: "u2", browseId: "thread", role: "user", body: "Follow-up", status: "queued", createdAt: 2 }];
+      await show();
+      const byline = () => host.querySelector('[data-reply="live"] .rl-reply-byline')?.textContent;
+      expect(byline()).toBe("Claude");
+      // Its own turn, once it starts, is Codex's.
+      turn.messages = [...turn.messages, { id: "a1", browseId: "thread", role: "assistant", body: "Answer", status: "complete", createdAt: 3 }, { id: "u2", browseId: "thread", role: "user", body: "Follow-up", status: "complete", createdAt: 4 }];
+      turn.queue = [];
+      await show();
+      expect(byline()).toBe("Codex");
+    } finally {
+      turn.status = "idle";
+    }
+  });
 });
 
 describe("the thread", () => {
@@ -347,6 +375,26 @@ describe("the thread", () => {
     expect([...host.querySelectorAll("[role=status]")].map((el) => el.textContent?.trim())).toEqual(["Clicking · tab 2"]);
     // A running step is the live line, not yet a row.
     expect(rows()).toEqual([]);
+  });
+
+  it("keeps a step running until the reply writes past it, however the text and the step arrive", async () => {
+    // A remount restores the text and the step together, a beat after both
+    // happened: the step is still the one running.
+    Object.assign(turn, { status: "streaming", startedAt: 1, liveText: "Let me check the page.", activity: [{ at: Date.now() - 2000, kind: "tool", label: "reading the page…" }] });
+    turn.messages = [{ id: "q", browseId: "thread", role: "user", body: "Is it in stock?", status: "complete", createdAt: 1 }];
+    await show();
+    const status = () => [...host.querySelectorAll("[role=status]")].map((el) => el.textContent?.trim());
+    expect(status()).toEqual(["Reading the page"]);
+    expect(rows()).toEqual([]);
+    // More text: the step is done, and reads as its row.
+    turn.liveText += " It is in stock.";
+    await show();
+    expect(rows()).toEqual(["Read the page"]);
+    expect(status()).not.toContain("Reading the page");
+    // The self-heal probe hands back the same steps as new objects: still done.
+    turn.activity = turn.activity!.map((step) => ({ ...step }));
+    await show();
+    expect(rows()).toEqual(["Read the page"]);
   });
 
   it("shows the context a message carried as chips in its card, after a reload too", async () => {

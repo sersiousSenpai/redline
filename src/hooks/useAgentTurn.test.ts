@@ -491,8 +491,8 @@ describe("send", () => {
     await flush();
     ctl.send("queued behind a reply");
     await flush();
-    // Queued counts: the backend has it.
-    expect(onSent).toHaveBeenCalledWith({ browseId: "L1", text: "queued behind a reply" });
+    // Queued counts: the backend has it, and says which row it is.
+    expect(onSent).toHaveBeenCalledWith({ browseId: "L1", text: "queued behind a reply" }, { started: false, queued: true, messageId: "q-db" });
     reject = true;
     ctl.send("lost");
     await flush();

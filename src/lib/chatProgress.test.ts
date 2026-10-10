@@ -32,6 +32,14 @@ describe("a live reply's progress phrase", () => {
     expect(chatProgress([...activity, { at: 46_000, kind: "tool", label: "Read…" }], null, null, 1_000, 47_000, 44_000).label).toBe("Reading files");
   });
 
+  it("keeps a step the surface knows is still running ahead of the text written before it", () => {
+    // The step's clock is the backend's and the text's is the render's, so a
+    // step that fired a beat after the text can look older than it.
+    const activity = [{ at: 43_000, kind: "tool", label: "reading the page…" }];
+    expect(chatProgress(activity, null, { at: 43_000, label: "Reading the page" }, 1_000, 45_000, 44_000).label).toBe("Writing the reply");
+    expect(chatProgress(activity, null, { at: 43_000, label: "Reading the page", running: true }, 1_000, 45_000, 44_000).label).toBe("Reading the page");
+  });
+
   it("prioritizes rate limits", () => {
     const p = chatProgress([{ at: 1, kind: "tool", label: "Read 1" }], { ...emptyMeter(), rateLimited: { status: "limited", resetsAt: null, kind: "usage" } }, { at: 11, label: "Fetching" }, 0, 12);
     expect(p.label).toContain("Rate limited");

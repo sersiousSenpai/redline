@@ -215,11 +215,12 @@ export function liveStepLabel(label: string, action: PageAction | null = null): 
 /** Splits a live turn's tool steps into the finished ones (drawn as rows)
  *  and the one running now (drawn as the live line), so a step becomes its
  *  past-tense row only once something has come after it: another step, an
- *  outcome, a thought, or text. */
-export function liveSteps(activity: readonly Activity[], lastOutputAt: number): { finished: Activity[]; running: Activity | null } {
+ *  outcome, a thought, or text (`wroteSince`: the reply has written more
+ *  since the step was first seen). */
+export function liveSteps(activity: readonly Activity[], wroteSince: (step: Activity) => boolean): { finished: Activity[]; running: Activity | null } {
   const tools = activity.filter((a) => a.kind === "tool");
   const last = activity[activity.length - 1];
-  const running = last && last.kind === "tool" && last.at >= lastOutputAt && !outcome(last.label) ? last : null;
+  const running = last && last.kind === "tool" && !wroteSince(last) && !outcome(last.label) ? last : null;
   return { finished: running ? tools.slice(0, -1) : tools, running };
 }
 
