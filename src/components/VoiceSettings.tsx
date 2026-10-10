@@ -518,6 +518,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <select
             value={whisperModel}
             onChange={(e) => setWhisperModel(e.target.value as WhisperModelId)}
+            // A download in flight belongs to the model it started for.
+            disabled={whisperInstalling}
             aria-label="Whisper model"
             style={field}
           >

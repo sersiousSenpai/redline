@@ -11,6 +11,9 @@ import { createRoot, type Root } from "react-dom/client";
 
 const invoked: { cmd: string; args: Record<string, unknown> }[] = [];
 let savedVoice = "am_adam";
+// Set to hold `whisper_install` open until `finishInstall` is called.
+let holdInstall = false;
+let finishInstall: () => void = () => {};
 let whisperModels = [
   { id: "base", present: true, bytes: 147_964_211, partial: 0 },
   { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
@@ -34,6 +37,10 @@ vi.mock("@tauri-apps/api/core", () => ({
         pythonReady: true,
         pythonPath: "/venv/bin/python3",
         detail: "Natural voice is ready.",
+      });
+    if (cmd === "whisper_install" && holdInstall)
+      return new Promise<void>((resolve) => {
+        finishInstall = resolve;
       });
     if (cmd === "dictation_status")
       return Promise.resolve({
@@ -84,6 +91,7 @@ let root: Root;
 beforeEach(() => {
   invoked.length = 0;
   samples.length = 0;
+  holdInstall = false;
   whisperModels = [
     { id: "base", present: true, bytes: 147_964_211, partial: 0 },
     { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
@@ -212,6 +220,22 @@ describe("Whisper model choice", () => {
       engine: "auto",
       whisperModel: "turbo",
     });
+  });
+
+  it("holds the model choice still while its download runs", async () => {
+    holdInstall = true;
+    await mount();
+    await pick("turbo");
+    await act(async () => button("Download Whisper large turbo (574.0 MB)").click());
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Whisper model"]')!;
+    expect(select.disabled).toBe(true);
+    await act(async () => fire("whisper-setup", { phase: "model", model: "turbo", received: 287_000_000, total: 574_041_195 }));
+    expect(host.textContent).toContain("287.0 MB / 574.0 MB");
+    whisperModels = [whisperModels[0], { ...whisperModels[1], present: true }];
+    await act(async () => finishInstall());
+    await flush();
+    expect(select.disabled).toBe(false);
+    expect(host.textContent).toContain("Whisper large turbo installed");
   });
 
   it("resumes a download an interruption left half done", async () => {
