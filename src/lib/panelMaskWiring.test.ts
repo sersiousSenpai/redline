@@ -37,12 +37,14 @@ describe("panel mask wiring", () => {
     expect(plateChange).toContain('pane: false');
     expect(plateChange).toContain('[plateMode]');
   });
-  it("voice comments focus their card without opening the pane", () => {
+  it("voice comments expand their card without opening the pane or moving the plan", () => {
     const voice = app.slice(app.indexOf('// When a voice-authored comment'), app.indexOf('// Own-era diff'));
     expect(voice).not.toContain('setPaneCollapsed(false)');
     expect(voice).not.toContain('revealPane()');
     expect(voice).toContain('setAutoOpenCommentId(fresh.id)');
-    expect(voice).toContain('setFocusedCommentId(fresh.id)');
+    // Focusing a comment scrolls the plan to it: a capture landing mid-
+    // conversation must not move the reader (the panel's Show does, on a click).
+    expect(voice).not.toMatch(/setFocusedCommentId|focusComment\(/);
   });
   it("loading a draft's comments cannot open its sidecar", () => {
     const load = drafter.slice(drafter.indexOf('void invoke<DraftComment[]>("draft_comment_list"'), drafter.indexOf('// Project the comments'));

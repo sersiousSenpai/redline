@@ -81,6 +81,22 @@ pub struct OfferFeedbackRequest {
     /// A ≤60-char chip line. Falls back to a truncated `body` in the UI.
     #[serde(default)]
     pub label: Option<String>,
+    /// The user explicitly asked for this capture ("add that as feedback"),
+    /// so the discussion panel adds it once the agent's read-back has played
+    /// instead of waiting for a tap.
+    #[serde(default)]
+    pub explicit: bool,
+}
+
+/// A feedback comment as written, plus the title of the section it landed in:
+/// what a capture is confirmed from ("added to §4 Rollout"), so the
+/// confirmation names the write that actually happened.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandedFeedback {
+    #[serde(flatten)]
+    pub comment: Comment,
+    pub section_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -308,6 +324,22 @@ pub fn resolve_block_anchor(
                 "no block {block_id} in the latest revision — re-read the plan"
             ))
         })
+}
+
+/// The title of the section a block belongs to in the session's latest
+/// revision: the heading itself for a heading block, the enclosing heading for
+/// a paragraph. `None` when the block is gone.
+pub fn section_title_for(store: &SessionStore, session_id: &str, block_id: &str) -> Option<String> {
+    fn find(sections: &[Section], block_id: &str) -> Option<String> {
+        sections.iter().find_map(|s| {
+            if s.block_id == block_id || s.paragraphs.iter().any(|p| p.block_id == block_id) {
+                return Some(s.title.clone());
+            }
+            find(&s.children, block_id)
+        })
+    }
+    let session = store.get(session_id)?;
+    find(&session.revisions.last()?.sections, block_id)
 }
 
 /// Land a directive `[feedback]` comment on a block, anchored by id. Mirrors a
@@ -656,8 +688,24 @@ mod tests {
                 status: "pending".to_string(),
                 created_at: 100,
                 stale: false,
+                explicit: false,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_block_names_the_section_it_belongs_to() {
+        let store = make_store();
+        let blocks = get_latest_plan_core(&store, "sess-1").unwrap().blocks;
+        let title = |b: &BlockInfo| section_title_for(&store, "sess-1", &b.block_id);
+        // A heading is its own section; a paragraph belongs to its heading.
+        let sub = blocks.iter().find(|b| b.markdown == "## Sub").unwrap();
+        assert_eq!(title(sub).as_deref(), Some("Sub"));
+        let body = blocks.iter().find(|b| b.markdown == "Sub body.").unwrap();
+        assert_eq!(title(body).as_deref(), Some("Sub"));
+        let intro = blocks.iter().find(|b| b.markdown == "Intro paragraph.").unwrap();
+        assert_eq!(title(intro).as_deref(), Some("Alpha"));
+        assert_eq!(section_title_for(&store, "sess-1", "blk-gone"), None);
     }
 
     #[test]

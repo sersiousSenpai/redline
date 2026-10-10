@@ -30,7 +30,7 @@
 //! only be exercised by a signed run on a real machine — see the Phase 2
 //! verification notes. The unit tests below cover only the plain-Rust glue.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -68,6 +68,13 @@ struct DictationText {
 #[serde(rename_all = "camelCase")]
 struct DictationErr {
     error: String,
+    /// The recognizer's `NSError` domain and code, when the error is one — so
+    /// a listener can tell "no speech detected" from a real failure without
+    /// matching on localized text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<i64>,
 }
 
 fn emit_partial(app: &AppHandle, text: String) {
@@ -83,8 +90,24 @@ fn emit_error(app: &AppHandle, error: impl Into<String>) {
         "dictation-error",
         DictationErr {
             error: error.into(),
+            domain: None,
+            code: None,
         },
     );
+}
+
+/// Recognizer errors that only mean a task ended without (more) speech: "No
+/// speech detected" (`kAFAssistantErrorDomain` 1110, which macOS 27 also
+/// reports for a cancel), its 216 sibling, and "Request was canceled"
+/// (`kLSRErrorDomain` 301). From a task Redline itself finished or cancelled,
+/// or with no capture armed, they are noise — surfacing one turned hands-free
+/// off for nothing.
+#[cfg(any(target_os = "macos", test))]
+fn is_benign_recognizer_error(domain: &str, code: i64) -> bool {
+    matches!(
+        (domain, code),
+        ("kAFAssistantErrorDomain", 1110 | 216) | ("kLSRErrorDomain", 301)
+    )
 }
 
 // --- Engine ----------------------------------------------------------------
@@ -153,6 +176,11 @@ struct DictationInner {
     latest: Mutex<String>,
     /// Engine resolved once per capture in `dictation_start`.
     engine: Mutex<Engine>,
+    /// Bumped each time a recognition task is armed, so a task's late callback
+    /// can tell it has been retired (finished by `dictation_stop`/`_cycle` or
+    /// cancelled) from being the live one.
+    #[cfg(target_os = "macos")]
+    armed: AtomicU64,
     /// Whisper only: the mic tap tees hardware-rate mono `f32` PCM here for the
     /// whole utterance; `dictation_stop` drains and transcribes it. Cleared on
     /// each new capture / cycle / kill.
@@ -187,6 +215,8 @@ impl DictationState {
                 active: AtomicBool::new(false),
                 latest: Mutex::new(String::new()),
                 engine: Mutex::new(Engine::Apple),
+                #[cfg(target_os = "macos")]
+                armed: AtomicU64::new(0),
                 #[cfg(target_os = "macos")]
                 whisper_pcm: Mutex::new(Vec::new()),
                 #[cfg(target_os = "macos")]
@@ -515,6 +545,7 @@ fn arm_recognition(
     // `dictation_stop`/`dictation_cycle` can return it) and push a partial.
     let app_res = app.clone();
     let state_res = state.clone();
+    let mine = state.armed.fetch_add(1, Ordering::SeqCst) + 1;
     let result_handler = RcBlock::new(
         move |result: *mut SFSpeechRecognitionResult, error: *mut NSError| {
             // SAFETY: the recognizer hands back a valid result or error pointer.
@@ -523,7 +554,25 @@ fn arm_recognition(
                 *state_res.latest.lock().unwrap() = text.clone();
                 emit_partial(&app_res, text);
             } else if let Some(error) = unsafe { error.as_ref() } {
-                emit_error(&app_res, error.localizedDescription().to_string());
+                let domain = error.domain().to_string();
+                let code = error.code() as i64;
+                let message = error.localizedDescription().to_string();
+                // The live task of an armed capture, or one Redline has since
+                // finished or cancelled (whose last word is often 1110).
+                let live = state_res.active.load(Ordering::SeqCst)
+                    && state_res.armed.load(Ordering::SeqCst) == mine;
+                tracing::warn!(target: "dictation", domain = %domain, code, live, "recognizer error: {message}");
+                if !live && is_benign_recognizer_error(&domain, code) {
+                    return;
+                }
+                let _ = app_res.emit(
+                    "dictation-error",
+                    DictationErr {
+                        error: message,
+                        domain: Some(domain),
+                        code: Some(code),
+                    },
+                );
             }
         },
     );
@@ -680,6 +729,32 @@ mod tests {
         state.inner.active.store(true, Ordering::SeqCst);
         state.kill_all();
         assert!(!state.inner.active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn only_end_of_speech_errors_are_benign() {
+        assert!(is_benign_recognizer_error("kAFAssistantErrorDomain", 1110));
+        assert!(is_benign_recognizer_error("kAFAssistantErrorDomain", 216));
+        assert!(is_benign_recognizer_error("kLSRErrorDomain", 301));
+        // Real failures still reach the panel: the speech service crashing or
+        // going unreachable, a refused request.
+        assert!(!is_benign_recognizer_error("kAFAssistantErrorDomain", 1101));
+        assert!(!is_benign_recognizer_error("kAFAssistantErrorDomain", 1107));
+        assert!(!is_benign_recognizer_error("kLSRErrorDomain", 300));
+        assert!(!is_benign_recognizer_error("NSCocoaErrorDomain", 1110));
+    }
+
+    #[test]
+    fn an_error_payload_names_its_domain_and_code_only_when_it_has_them() {
+        let v = serde_json::to_value(DictationErr {
+            error: "No speech detected".into(),
+            domain: Some("kAFAssistantErrorDomain".into()),
+            code: Some(1110),
+        })
+        .unwrap();
+        assert_eq!((v["domain"].as_str(), v["code"].as_i64()), (Some("kAFAssistantErrorDomain"), Some(1110)));
+        let plain = serde_json::to_value(DictationErr { error: "x".into(), domain: None, code: None }).unwrap();
+        assert_eq!(plain, serde_json::json!({ "error": "x" }));
     }
 
     #[test]

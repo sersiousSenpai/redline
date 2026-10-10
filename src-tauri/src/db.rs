@@ -7761,8 +7761,9 @@ impl Database {
     // until `claim_comment_offer` wins and `add_feedback_from_offer` writes the
     // comment.
 
-    /// `stale` is not a column — it is computed against the current plan by
-    /// `comment_offers_pending`, so every row reads back as fresh.
+    /// `stale` and `explicit` are not columns — staleness is computed against
+    /// the current plan by `comment_offers_pending`, and `explicit` only rides
+    /// the live event — so every row reads back as fresh and tap-to-add.
     fn map_comment_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentOffer> {
         Ok(CommentOffer {
             id: row.get(0)?,
@@ -7775,6 +7776,7 @@ impl Database {
             status: row.get(7)?,
             created_at: row.get(8)?,
             stale: false,
+            explicit: false,
         })
     }
 
@@ -14564,6 +14566,7 @@ mod tests {
             status: "pending".to_string(),
             created_at: at,
             stale: false,
+            explicit: false,
         }
     }
 
