@@ -40,6 +40,58 @@ function cssEscape(s: string): string {
   return s.replace(/["\\\n]/g, "\\$&");
 }
 
+/** The nearest scrollable ancestor of the rendered plan, or null when the
+ *  window itself scrolls. */
+export function scrollContainerOf(scope: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = scope;
+  while (node && node !== document.body) {
+    const oy = getComputedStyle(node).overflowY;
+    if (oy === "auto" || oy === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/** The heading the reader is under, by scroll-position math rather than
+ *  IntersectionObserver's rootMargin trick (which can never activate the last
+ *  heading once there is no scroll left to push it into the band): the last
+ *  heading whose top has crossed an activation line just below the pane top —
+ *  and, with the pane scrolled to the very bottom, the last heading outright,
+ *  so scrolling to the end always reaches the final section. Null when none of
+ *  `anchorIds` is rendered. Also what the voice panel sends as the section in
+ *  view, so "this section" means the one the contents highlight. */
+export function activeAnchorIn(
+  scope: HTMLElement,
+  anchorIds: readonly string[],
+  container: HTMLElement | null = scrollContainerOf(scope),
+): string | null {
+  const rows = anchorIds
+    .map((id) => ({
+      id,
+      el: scope.querySelector<HTMLElement>(`[data-anchor-id="${cssEscape(id)}"]`),
+    }))
+    .filter((r): r is { id: string; el: HTMLElement } => !!r.el);
+  if (rows.length === 0) return null;
+
+  // At the bottom of the scroll region, the last heading is active.
+  const atBottom = container
+    ? container.scrollTop + container.clientHeight >= container.scrollHeight - 4
+    : window.innerHeight + window.scrollY >=
+      document.documentElement.scrollHeight - 4;
+  if (atBottom) return rows[rows.length - 1].id;
+
+  // Otherwise: the last heading whose top has passed the activation line
+  // (a little below the pane's top edge).
+  const paneTop = container ? container.getBoundingClientRect().top : 0;
+  const activationLine = paneTop + 96;
+  let active = rows[0].id;
+  for (const { id, el } of rows) {
+    if (el.getBoundingClientRect().top <= activationLine) active = id;
+    else break;
+  }
+  return active;
+}
+
 interface PlanTocProps {
   sections: Section[];
   /** Container holding the rendered plan (where `data-anchor-id` lives).
@@ -90,65 +142,22 @@ export function PlanToc({
     [],
   );
 
-  // Scrollspy: highlight the heading the reader is currently under. Driven by
-  // scroll-position math (not IntersectionObserver's rootMargin trick, which
-  // can never activate the last heading once you reach the bottom — there's no
-  // more scroll left to push it into the "active" band). The active heading is
-  // the last one whose top has crossed an activation line just below the pane
-  // top; and when the pane is scrolled to the very bottom we force the LAST
-  // heading active, so scrolling to the end always lights up the final section.
+  // Scrollspy: highlight the heading the reader is currently under
+  // (`activeAnchorIn` has the rule).
   useEffect(() => {
     if (items.length === 0) return;
     if (typeof window === "undefined") return; // SSR / test env
     const scope = document.querySelector<HTMLElement>(scopeSelector);
     if (!scope) return;
 
-    // Find the nearest scrollable ancestor of the rendered plan.
-    let node: HTMLElement | null = scope;
-    let container: HTMLElement | null = null;
-    while (node && node !== document.body) {
-      const oy = getComputedStyle(node).overflowY;
-      if (oy === "auto" || oy === "scroll") {
-        container = node;
-        break;
-      }
-      node = node.parentElement;
-    }
+    const container = scrollContainerOf(scope);
     const target: HTMLElement | Window = container ?? window;
+    const anchorIds = items.map((it) => it.anchorId);
 
     const compute = () => {
       if (lockedRef.current) return; // a click-scroll owns the highlight
-      const rows = items
-        .map((it) => ({
-          id: it.anchorId,
-          el: scope.querySelector<HTMLElement>(
-            `[data-anchor-id="${cssEscape(it.anchorId)}"]`,
-          ),
-        }))
-        .filter((r): r is { id: string; el: HTMLElement } => !!r.el);
-      if (rows.length === 0) return;
-
-      // At the bottom of the scroll region, the last heading is active.
-      const atBottom = container
-        ? container.scrollTop + container.clientHeight >=
-          container.scrollHeight - 4
-        : window.innerHeight + window.scrollY >=
-          document.documentElement.scrollHeight - 4;
-      if (atBottom) {
-        setActiveId(rows[rows.length - 1].id);
-        return;
-      }
-
-      // Otherwise: the last heading whose top has passed the activation line
-      // (a little below the pane's top edge).
-      const paneTop = container ? container.getBoundingClientRect().top : 0;
-      const activationLine = paneTop + 96;
-      let active = rows[0].id;
-      for (const { id, el } of rows) {
-        if (el.getBoundingClientRect().top <= activationLine) active = id;
-        else break;
-      }
-      setActiveId(active);
+      const active = activeAnchorIn(scope, anchorIds, container);
+      if (active) setActiveId(active);
     };
 
     // Coalesce scroll bursts to one measure per frame.
