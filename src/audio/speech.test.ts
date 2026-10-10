@@ -180,6 +180,26 @@ describe("SpeechQueue", () => {
     expect(driver.resume).toHaveBeenCalled();
     expect(q.getState()).toBe("speaking");
   });
+
+  it("▶ on a reply that finished while paused goes idle, not speaking", () => {
+    // A sentence can finish under the pause (a silent clip, one that couldn't
+    // play). Nothing is left to report idle later, so resuming must, or
+    // hands-free would never re-arm.
+    const finishers: (() => void)[] = [];
+    const driver: SpeechDriver = {
+      speak: (_text, _opts, onDone) => finishers.push(onDone),
+      cancel: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    };
+    const q = new SpeechQueue({ driver, prefs: { voiceURI: null, rate: 1 } });
+    q.enqueue("Only one. ");
+    q.pause();
+    finishers[0]();
+    expect(q.getState()).toBe("paused");
+    q.resume();
+    expect(q.getState()).toBe("idle");
+  });
 });
 
 describe("readAloudStep", () => {

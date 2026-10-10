@@ -220,11 +220,20 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
   // Whether this generation has asked Rust for anything, i.e. whether a cancel
   // has anything there to drop.
   let requested = false;
-  // The generation whose run loop is live (0 = none), and the signal that
-  // wakes that loop out of an await when its generation is cancelled.
+  // The generation whose run loop is live (0 = none).
   let loop = 0;
-  let halt = () => {};
-  let halted = new Promise<void>((resolve) => (halt = resolve));
+  // What wakes that loop out of an await when its generation is cancelled: one
+  // per await, dropped once the awaited thing settles. A single long-lived
+  // "cancelled" promise raced against each await would keep everything ever
+  // raced with it reachable until the next cancel, and a long read is
+  // hundreds of decoded clips with no cancel in between.
+  const wakers = new Set<() => void>();
+  const unlessCancelled = <T>(p: Promise<T>) =>
+    new Promise<T | null>((resolve) => {
+      const wakeUp = () => resolve(null);
+      wakers.add(wakeUp);
+      void p.then(resolve, () => resolve(null)).finally(() => wakers.delete(wakeUp));
+    });
   let current: Playing | null = null;
   let paused = false;
   let lastError = "";
@@ -278,14 +287,13 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
   const run = async () => {
     if (loop === generation) return;
     const gen = (loop = generation);
-    const stopped = halted.then(() => null);
     const live = () => gen === generation;
     try {
       while (live() && queue.length) {
         const item = queue.shift()!;
         const pending = (item.clip ??= synth(item.text, item.rate, gen));
         fill();
-        const clip = await Promise.race([pending, stopped]);
+        const clip = await unlessCancelled(pending);
         if (!live()) return;
         let playing: Playing | null = null;
         try {
@@ -296,7 +304,7 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
           current = playing;
           if (playing) {
             if (paused) playing.hold();
-            await Promise.race([playing.done, stopped]);
+            await unlessCancelled(playing.done);
           }
         } catch (e) {
           // A clip that can't be played costs that one sentence, never the queue.
@@ -322,8 +330,8 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
       const cancelled = generation;
       generation = nextGeneration();
       queue = [];
-      halt();
-      halted = new Promise((resolve) => (halt = resolve));
+      for (const wakeUp of wakers) wakeUp();
+      wakers.clear();
       current?.stop();
       current = null;
       // ⏸ then Stop must not leave the context suspended: every later clip
@@ -335,12 +343,14 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
     },
     pause() {
       paused = true;
-      void ctx?.suspend();
+      // Made here if no clip has needed one yet: a clip still synthesizing
+      // must start on a suspended context, not play under ⏸.
+      void audioCtx().suspend().catch(() => {});
       current?.hold();
     },
     resume() {
       paused = false;
-      void ctx?.resume();
+      wake();
       current?.release();
     },
   };

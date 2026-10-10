@@ -54,8 +54,8 @@ export function clampRate(rate: number): number {
 }
 
 /** Whether to run raw dictation through the AI cleanup pass before sending.
- * Defaults to on (the whole point is Wispr-style polish); persisted separately
- * so toggling it never disturbs the speech prefs blob. */
+ * Defaults to on (the whole point is polished text, not a raw transcript);
+ * persisted separately so toggling it never disturbs the speech prefs blob. */
 const CLEANUP_KEY = "redline.voice.cleanup";
 
 export function loadCleanupEnabled(): boolean {
@@ -270,7 +270,8 @@ export class SpeechQueue {
   resume(): void {
     if (this.state !== "paused") return;
     this.driver.resume();
-    this.setState("speaking");
+    // Whatever finished under the pause left nothing to report idle later.
+    this.setState(this.outstanding > 0 ? "speaking" : "idle");
   }
 
   private speakNow(sentence: string): void {

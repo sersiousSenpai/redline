@@ -7,6 +7,8 @@
 // dropping a queued request when its turn comes. The context models WebKit: a
 // suspended context's clock stands still, so a started source never ends, and
 // a source stopped while suspended reports 'ended' only on resume.
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CLIP_GRACE_MS, cloudTtsDriver, playVoiceSample, READ_AHEAD } from "./cloudTts";
@@ -77,6 +79,12 @@ const started = () => log.filter((e) => e.what === "start").map((e) => e.tag);
 const finished = () => log.filter((e) => e.what === "end").map((e) => e.tag);
 let startThrows = 0;
 let neverEnds = false;
+/** Every clip the context has decoded, held weakly: which ones is the driver
+ *  still keeping alive? (`WeakRef` is ES2021; the app's lib stops at ES2020.) */
+const { WeakRef: Weak } = globalThis as unknown as {
+  WeakRef: new (target: object) => { deref(): object | undefined };
+};
+const decoded: InstanceType<typeof Weak>[] = [];
 
 class FakeSource {
   buffer: { tag: string } | null = null;
@@ -139,7 +147,9 @@ class FakeCtx {
   async decodeAudioData(ab: ArrayBuffer) {
     const tag = new TextDecoder().decode(new Uint8Array(ab));
     const data = new Float32Array(Math.max(2, tag.length * 10)).fill(0.5);
-    return { tag, sampleRate: 1000, getChannelData: () => data };
+    const audio = { tag, sampleRate: 1000, getChannelData: () => data };
+    decoded.push(new Weak(audio));
+    return audio;
   }
   async suspend() {
     this.state = "suspended";
@@ -169,6 +179,7 @@ beforeEach(() => {
     fail: null,
   });
   log.length = 0;
+  decoded.length = 0;
   FakeCtx.all.length = 0;
   startThrows = 0;
   neverEnds = false;
@@ -238,6 +249,22 @@ describe("cloudTtsDriver: nothing wedges", () => {
     expect(warn).toHaveBeenCalled();
     await advance(500);
     expect(done).toEqual(["stuck", "next"]);
+  });
+
+  it("⏸ before the first clip has its audio holds that clip too", async () => {
+    // A fresh driver has no context until its first clip decodes, so there
+    // was nothing for ⏸ to suspend: the clip then played under "paused".
+    const d = cloudTtsDriver();
+    const done: string[] = [];
+    d.speak("Held from the start.", opts, () => done.push("clip"));
+    await advance(10); // still synthesizing
+    d.pause();
+    await advance(5000);
+    expect(finished()).toEqual([]);
+    d.resume();
+    await advance(1000);
+    expect(finished()).toEqual(["Held from the start."]);
+    expect(done).toEqual(["clip"]);
   });
 
   it("paused time doesn't count against the watchdog", async () => {
@@ -356,6 +383,50 @@ describe("cloudTtsDriver: read-ahead", () => {
     // behind every sentence of the plan.
     expect(waited).toBeLessThanOrEqual(2 * rust.synthMs + 10);
     expect(rust.calls.length).toBeLessThanOrEqual(1 + READ_AHEAD + 1);
+  });
+
+  it("seven ▶ Read presses then Summarize: the reply is heard at once, and nothing of the plan after it", async () => {
+    // The sequence from the user's history (gaps scaled down 10×): each press
+    // queued the whole plan behind the last, and the Summarize reply was
+    // first heard about two and a half hours after its text.
+    rust.synthMs = 100;
+    const { q } = queue();
+    for (const gap of [0, 1710, 2080, 1480, 420, 770, 1500]) {
+      await advance(gap);
+      q.cancel();
+      q.enqueue(plan(200));
+      q.flush();
+    }
+    await advance(1840);
+    q.cancel(); // Summarize
+    q.primeTurn();
+    const asked = Date.now();
+    q.enqueue("Here is the short version. ");
+    q.flush();
+    await advance(2000);
+    const after = log.filter((e) => e.what === "start" && e.at >= asked);
+    expect(after.map((e) => e.tag)).toEqual(["Here is the short version."]);
+    expect(after[0].at - asked).toBeLessThanOrEqual(2 * rust.synthMs + 10);
+    expect(q.getState()).toBe("idle");
+  });
+
+  it("lets go of each clip once it has played, with no cancel to wait for", async () => {
+    // A long read is hundreds of clips and never a cancel: a clip kept alive
+    // until the next Stop is the whole plan's decoded audio held in memory.
+    const { q } = queue();
+    q.enqueue(plan(12));
+    await advance(6000);
+    expect(finished()).toHaveLength(12);
+    for (const ctx of FakeCtx.all) ctx.sources.length = 0; // the fake's own record
+    vi.useRealTimers();
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      gc();
+    }
+    expect(decoded.filter((r) => r.deref()).length).toBeLessThanOrEqual(1);
+    q.cancel();
   });
 });
 
