@@ -125,9 +125,12 @@ html[data-theme="aurora"] .rl-plate::after {
   --color-info: #5b9fe4;
   --color-warning: #d6c060;
   --color-success: #5dc585;
+  --color-info-text: #5b9fe4;
+  --color-warning-text: #d6c060;
 
   --color-bg-elevated: #29292e;
   --color-on-accent: #ffffff;
+  --color-on-info: #1a1a1f;
   --color-code-bg: #303034;
   --color-code-fg: #fafafa;
   /* Syntax-highlight (highlight.js) token palette — Studio's dark-surface
@@ -140,6 +143,7 @@ html[data-theme="aurora"] .rl-plate::after {
   --color-hl-title: #82aaf0;
   --color-hl-variable: #d59a78;
   --color-hl-deletion: #e08b86;
+  --color-hover-wash: rgba(250, 250, 250, 0.07);
   --color-commented-bg: rgba(232, 85, 61, 0.22);
   --color-commented-bar: rgba(232, 85, 61, 0.85);
   --color-selection: rgba(232, 85, 61, 0.55);
