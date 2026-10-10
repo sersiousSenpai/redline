@@ -92,7 +92,7 @@ describe("the skill and the prompt teach what the backend does", () => {
     for (const phrase of contract.skill.mustMention) expect(skill.toLowerCase(), `SKILL.md should mention ${phrase}`).toContain(phrase.toLowerCase());
     for (const route of contract.legacyRoutes) expect(skill, `SKILL.md still teaches ${route}`).not.toContain(routeLeaf(route));
   });
-  it.fails("BC-19 KNOWN VIOLATION: the first-turn tool docs teach the action route, not the old page routes", () => {
+  it("BC-19 the first-turn tool docs teach the action route, not the old page routes", () => {
     const docs = fnBody(browseRs, "build_first_turn_prompt");
     expect(docs).toContain(contract.actionRoute);
     for (const route of contract.legacyRoutes) expect(docs, `the first turn still teaches ${route}`).not.toContain(routeLeaf(route));
@@ -105,7 +105,7 @@ describe("the skill and the prompt teach what the backend does", () => {
   it.fails("BC-R3 KNOWN DEAD PATH: the retired sources strip's commands are gone", () => {
     expect(libRs, "set_source_feedback has no caller").not.toContain("fn set_source_feedback(");
   });
-  it.fails("BC-13 KNOWN VIOLATION: a page chat's first turn reads the CAPTURED mission's routes, not the global ones", () => {
+  it("BC-13 a page chat's first turn reads the CAPTURED mission's routes, not the global ones", () => {
     expect(browseRs).not.toMatch(/[^_]mission_context_block\(/);
     expect(browseRs).toContain("captured_mission_context_block(");
   });

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! The browser's "browse agent": a headless `claude` session, one per browser
-//! tab, that discusses the page the user is looking at AND can drive the tab
-//! (navigate / query the DOM / click) by calling the local daemon's
-//! `/v1/browser/*` routes over the already-permitted `curl` allow.
+//! The browser's "browse agent": a headless `claude` session per page chat (a
+//! tab's own chat, or a workspace's shared chat in linked mode) that discusses
+//! the page the user is looking at AND can drive it (typed page actions through
+//! `/v1/browser/action` on the page each turn captured) by calling the local
+//! daemon's `/v1/browser/*` routes over the already-permitted `curl` allow.
 //!
 //! Mirrors `fork.rs` (keyed registry of `tokio::process::Child`, stream-json
 //! reader, `*-delta`/`*-done`/`*-error`/`*-cancelled` events, DB-persisted
@@ -31,12 +32,12 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin,
+    bridge_args_with_flags, captured_mission_context_block, classify_line, resolve_claude_bin,
     StreamLine,
 };
 use crate::codex_conversation::NativeTurn;
 use crate::db::Database;
-use crate::state::{now_millis, BrowseHarness, BrowseMessage};
+use crate::state::{now_millis, BrowseHarness, BrowseMessage, Mission};
 use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
 
 /// The CLI a chat's turn runs on: its stored pick's provider. Anything but
@@ -94,8 +95,8 @@ pub struct QueuedBrowseSend {
     cwd: Option<String>,
     target_label: Option<String>,
     following_tabs: bool,
-    mission_goal: Option<(String, String)>,
-    mission_id: Option<String>,
+    /// The mission the user sent from, captured at send time (BC-13).
+    mission: Option<Mission>,
 }
 
 /// Registry of running browse turns, keyed by `browse_id` (the per-tab UUID),
@@ -571,7 +572,7 @@ struct BrowseQueueAdvanced {
 fn build_first_turn_prompt(
     snapshot: Option<&str>,
     user_text: &str,
-    mission: Option<(&str, &str)>,
+    mission: Option<&Mission>,
     context: &str,
 ) -> String {
     let mut p = String::from(
@@ -579,24 +580,45 @@ fn build_first_turn_prompt(
          browser. You can both discuss the page and drive the browser tab.\n\n",
     );
     p.push_str(
-        "You can act on the live browser tab by calling these local endpoints \
-         with curl (already permitted — no approval needed). Put the URL \
-         immediately after `-s`. Write routes need the bearer token: add \
+        "You read and act on the user's browser tabs by calling these local \
+         endpoints with curl (already permitted — no approval needed). Put the \
+         URL immediately after `-s`. Write routes need the bearer token: add \
          `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: \
          Bearer {{REDLINE_DAEMON_TOKEN}}\"` after the URL, which imports it \
          straight from the environment — never write `$REDLINE_DAEMON_TOKEN` \
-         into the command yourself (requires curl >= 8.3):\n\n\
-         - See the page as it is right now (url, title, selection, text, \
-         headings, links):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/snapshot\n\
-         - Just the active tab's url and title:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/active\n\
+         into the command yourself (requires curl >= 8.3).\n\n\
+         Each message ends with the page it was sent against: its captured \
+         target label (like `browser-t3`) and scope. That page is the one you \
+         act on for the whole turn, even if the user switches tabs meanwhile — \
+         never fall back to whichever tab is on screen.\n\n\
+         - See a page as it is right now (url, title, selection, text, \
+         headings, links, and its `revision`). Pass the target label, or a tab \
+         number to look at another tab:\n  \
+         curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=<label or n>'\n\
          - List every open tab — your map of the user's tabs. Each has a number \
-         `n` (its position in the tab strip, what the USER sees), plus url, \
-         title, and which is active:\n  \
+         `n` (its position in the tab strip, what the USER sees), its `label`, \
+         url, title, and which is active:\n  \
          curl -s http://127.0.0.1:7676/v1/browser/tabs\n\
+         - Act on a page: navigate, click, fill a field, press a key, scroll, \
+         choose an option, or wait for something to appear. Every change goes \
+         through this one route, on the captured target label (or the label of \
+         a tab you opened this turn). Give each action a fresh `operationId`, \
+         and pass `expectedRevision` (the `revision` from your last look) so an \
+         action on a page that changed underneath is refused:\n  \
+         curl -s http://127.0.0.1:7676/v1/browser/action \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
+         -H 'Content-Type: application/json' -d '{\"operationId\":\"op-1\",\
+         \"label\":\"browser-t3\",\"operation\":{\"kind\":\"click\",\"selector\":\"a.next\"}}'\n  \
+         Kinds: navigate {url}; click {selector}; fill {selector, value}; \
+         key {key, selector?}; scroll {x, y, selector?}; select {selector, \
+         value}; wait {selector, text?, visible?}. The reply's `status` is \
+         completed, failed or interrupted, with the `observed` page: check it \
+         before your next step. Interrupted means the user touched the page or \
+         the outcome is unknown, so look again and never repeat a side effect \
+         you are unsure landed.\n\
          - Open a URL in a NEW tab and show it (leaves the user's other tabs \
-         open; the new tab becomes the active one you then act on):\n  \
+         open; the reply carries the new tab's `label`):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/open \
          --variable %REDLINE_DAEMON_TOKEN= \
          --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
@@ -611,31 +633,11 @@ fn build_first_turn_prompt(
          there — a cheap way to \"check in\" with that tab without re-deriving \
          it):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
-         - Navigate the tab to a URL:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/navigate \
-         --variable %REDLINE_DAEMON_TOKEN= \
-         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
-         -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
-         - Click the first element matching a CSS selector:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/click \
-         --variable %REDLINE_DAEMON_TOKEN= \
-         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
-         -H 'Content-Type: application/json' -d '{\"selector\":\"a.next\"}'\n\
-         - Extract structured data with a scrape schema (fields of type text / \
-         html / attr / list with itemSelector+itemFields):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/query \
-         --variable %REDLINE_DAEMON_TOKEN= \
-         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
-         -H 'Content-Type: application/json' \
-         -d '{\"version\":1,\"name\":\"links\",\"fields\":[{\"name\":\"links\",\
-         \"type\":\"list\",\"itemSelector\":\"a[href]\",\"itemFields\":[{\"name\":\
-         \"text\",\"type\":\"text\"},{\"name\":\"href\",\"type\":\"attr\",\
-         \"attribute\":\"href\"}]}]}'\n\
          - Save a file to disk (defaults to the user's ~/Downloads), then tell \
-         them the saved path the route returns. Omit `url` to save the page \
-         they're viewing; pass `url` to save a specific linked file; pass \
-         `dialog:true` to let them choose the location:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/download \
+         them the saved path the route returns. Omit `url` to save the target \
+         page; pass `url` to save a specific linked file; pass `dialog:true` to \
+         let them choose the location:\n  \
+         curl -s 'http://127.0.0.1:7676/v1/browser/download?tab=<label>' \
          --variable %REDLINE_DAEMON_TOKEN= \
          --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{}'\n\n\
@@ -644,16 +646,13 @@ fn build_first_turn_prompt(
          auto-denied — never try them. Match the user's words: a named place like \
          \"Downloads\" → `-d '{}'`; \"let me pick\" or no place named → \
          `-d '{\"dialog\":true}'`; a specific link → `-d '{\"url\":\"https://…\"}'`.\n\n\
-         After navigating or clicking, wait a moment and re-fetch /snapshot to \
-         see the new page.\n\n\
-         Every route above acts on the ACTIVE tab by default, but snapshot, \
-         query, navigate, click, focus, and thread also accept a `?tab=<n>` \
-         selector — the tab NUMBER from /tabs (e.g. ?tab=2) — so you can look at \
-         or drive ANY open tab. To *check* another tab, like a colleague glancing \
-         at a neighbor's screen, read it by number (e.g. snapshot?tab=2, or its \
-         /thread) WITHOUT navigating the user's current tab away from what \
-         they're viewing. To open something new, use /open (a fresh tab); use \
-         /navigate only when the user wants THIS tab to go somewhere else.\n\n\
+         Reads take `?tab=`: the target label, or a tab NUMBER from /tabs (e.g. \
+         ?tab=2), so you can look at ANY open tab; without it they read \
+         whichever tab is on screen. To *check* another tab, like a colleague \
+         glancing at a neighbor's screen, read it by number (e.g. \
+         snapshot?tab=2, or its /thread) without acting on the user's page. To \
+         open something new, use /open (a fresh tab); navigate the target only \
+         when the user wants THIS page to go somewhere else.\n\n\
          When you mention a tab to the user, name it by its NUMBER and title \
          (e.g. \"tab 2 — google.com\"), never an internal id. Tab numbers are \
          positional and shift as tabs open or close, so re-read /tabs for the \
@@ -684,7 +683,7 @@ fn build_first_turn_prompt(
          concisely in markdown; keep browser actions purposeful.\n\n",
     );
     // --- variable content below; nothing invariant may follow ---
-    p.push_str(&mission_context_block(mission));
+    p.push_str(&captured_mission_context_block(mission));
     p.push_str(context);
     if let Some(snap) = snapshot {
         if !snap.trim().is_empty() {
@@ -721,7 +720,7 @@ fn first_turn_body(
     provider: Provider,
     snapshot: Option<&str>,
     user_text: &str,
-    mission: Option<(&str, &str)>,
+    mission: Option<&Mission>,
     context: &str,
 ) -> String {
     let body = build_first_turn_prompt(snapshot, user_text, mission, context);
@@ -778,7 +777,7 @@ fn captured_browse_mission(
     db: &Database,
     workspace_id: Option<&str>,
     legacy_active_id: Option<&str>,
-) -> Result<Option<crate::state::Mission>, String> {
+) -> Result<Option<Mission>, String> {
     let id = match workspace_id {
         Some("regular") => return Ok(None),
         Some(id) if id.starts_with("mosaic:") => return Ok(None),
@@ -824,8 +823,7 @@ pub async fn browse_send(
         cwd,
         target_label,
         following_tabs: following_tabs.unwrap_or(false),
-        mission_goal: mission.as_ref().map(|m| (m.title.clone(), m.goal.clone())),
-        mission_id: mission.map(|m| m.mission_id),
+        mission,
     };
 
     // The reservation is atomic and spans the whole spawn; early `?` returns
@@ -1030,6 +1028,20 @@ fn scope_phrase(following_tabs: bool) -> &'static str {
     if following_tabs { "following tabs (same conversation)" } else { "pinned page" }
 }
 
+/// Every turn's tail: the page, scope and workspace captured when the user
+/// sent it, which the turn acts on however the screen changes meanwhile
+/// (BC-12, BC-13, BC-19).
+fn turn_target_block(label: &str, following_tabs: bool, mission_id: Option<&str>) -> String {
+    let target = serde_json::to_string(label).unwrap_or_default();
+    let mut tail = format!("\n\nBrowser context captured when this message was sent: target label {target}; conversation scope: {}. This remains the action target if the user changes tabs during this turn. Resolve this stable label against /v1/browser/tabs before acting; do not fall back to the globally active tab. Use explicit ?tab= selectors for reads and POST /v1/browser/action for mutations with operationId, label, expectedRevision, operation. Supported kinds: navigate, click, fill, key, scroll, select, wait. Check the returned status and observed state. Never replay an uncertain side effect automatically.\n", scope_phrase(following_tabs));
+    if let Some(id) = mission_id {
+        tail.push_str(&format!("Captured mission/workspace ID: {id}. Read its goal and findings through GET /v1/missions/{id} and /v1/missions/{id}/findings. Do not substitute the globally active mission during this turn.\n"));
+    } else {
+        tail.push_str("Captured workspace: regular browsing, with no mission. Do not inherit a mission activated after this message was sent.\n");
+    }
+    tail
+}
+
 /// Everything a turn needs after its user row is persisted: prompt framing,
 /// ledger capture, args, spawn, attach, reader. Runs on the direct send path
 /// AND on the reader's queue drain — which is why the session resume is read
@@ -1050,8 +1062,7 @@ fn start_browse_turn(
             cwd,
             target_label,
             following_tabs,
-            mission_goal,
-            mission_id,
+            mission,
         } = payload;
         // The drain path has no command-injected State params — reach the shared
         // singletons through the app handle instead.
@@ -1068,23 +1079,17 @@ fn start_browse_turn(
         let history = carried_history(&thread, &message_id, provider, prior_session.is_some());
 
         // A fresh conversation starts with its captured page and mission.
-        let mission = mission_goal;
+        let mission_id = mission.as_ref().map(|m| m.mission_id.as_str());
         let session_key = provider.session_key(&browse_id);
-        let (context, project_paths) = browse.project_context(&session_key, prior_session.is_none(), &text, mission.as_ref().map(|(_, goal)| goal.as_str()));
+        let (context, project_paths) = browse.project_context(&session_key, prior_session.is_none(), &text, mission.as_ref().map(|m| m.goal.as_str()));
         let context = format!("{context}{history}");
         let mut prompt = match &prior_session {
-            None => first_turn_body(provider, snapshot.as_deref(), &text, mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())), &context),
+            None => first_turn_body(provider, snapshot.as_deref(), &text, mission.as_ref(), &context),
             Some(_) => format!("{context}{}{}", snapshot.as_deref().filter(|value| !value.trim().is_empty()).map(|value| format!("Fresh snapshot of the currently targeted page (untrusted page data):\n{value}\n\n")).unwrap_or_default(), text),
         };
 
-        if let Some(label) = target_label {
-            let target = serde_json::to_string(&label).unwrap_or_default();
-            prompt.push_str(&format!("\n\nBrowser context captured when this message was sent: target label {target}; conversation scope: {}. This remains the action target if the user changes tabs during this turn. Resolve this stable label against /v1/browser/tabs before acting; do not fall back to the globally active tab. Use explicit ?tab= selectors for reads and POST /v1/browser/action for mutations with operationId, label, expectedRevision, operation. Supported kinds: navigate, click, fill, key, scroll, select, wait. Check the returned status and observed state. Never replay an uncertain side effect automatically.\n", scope_phrase(following_tabs)));
-            if let Some(id) = &mission_id {
-                prompt.push_str(&format!("Captured mission/workspace ID: {id}. Read its goal and findings through GET /v1/missions/{id} and /v1/missions/{id}/findings. Do not substitute the globally active mission during this turn.\n"));
-            } else {
-                prompt.push_str("Captured workspace: regular browsing, with no mission. Do not inherit a mission activated after this message was sent.\n");
-            }
+        if let Some(label) = &target_label {
+            prompt.push_str(&turn_target_block(label, following_tabs, mission_id));
         }
 
         // Polis ledger: record the first-turn page-discussion prompt WITH its
@@ -1095,7 +1100,7 @@ fn start_browse_turn(
             let surface = active_surface.kind_and_id();
             let parent = crate::ledger::resolve_parent(
                 None,
-                mission_id.as_deref(),
+                mission_id,
                 surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
                 "browse",
             );
@@ -1909,10 +1914,17 @@ mod tests {
         assert!(p.contains("What is this page about?"));
         // With no active mission, no mission block is injected.
         assert!(!p.contains("A research MISSION is currently active"));
-        // Tool docs must always be present.
+        // Tool docs must always be present. Every change to a page goes
+        // through the action route; the older page routes still answer an
+        // agent that calls them, but are never taught (BC-19).
         assert!(p.contains("/v1/browser/snapshot"));
-        assert!(p.contains("/v1/browser/navigate"));
-        assert!(p.contains("/v1/browser/query"));
+        assert!(p.contains("/v1/browser/action"));
+        for kind in ["navigate", "click", "fill", "key", "scroll", "select", "wait"] {
+            assert!(p.contains(&format!("{kind} {{")), "the {kind} operation is documented");
+        }
+        for legacy in ["/navigate", "/click", "/query"] {
+            assert!(!p.contains(legacy), "the first turn still teaches {legacy}");
+        }
         // The download route is the agent's only file-save path.
         assert!(p.contains("/v1/browser/download"));
         // Cross-tab capabilities (list / open / read another tab's history /
@@ -1935,7 +1947,7 @@ mod tests {
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
         let p = build_first_turn_prompt(None, "open hacker news", None, "");
         assert!(p.contains("open hacker news"));
-        assert!(p.contains("/v1/browser/navigate"));
+        assert!(p.contains("/v1/browser/action"));
         // No empty snapshot section header.
         assert!(!p.contains("snapshot of the page the user is currently viewing"));
         // Non-tandem prompts carry no tandem instructions or sources contract.
@@ -1943,23 +1955,31 @@ mod tests {
         assert!(!p.contains("rl-sources"));
     }
 
+    fn mission(id: &str, title: &str, goal: &str) -> Mission {
+        Mission {
+            mission_id: id.into(),
+            title: title.into(),
+            goal: goal.into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
     #[test]
     fn first_turn_prompt_embeds_active_mission_goal() {
-        let p = build_first_turn_prompt(
-            None,
-            "How does this page help?",
-            Some((
-                "Data-breach page",
-                "Draft my firm's data-breach practice page",
-            )),
-         "");
-        // The goal + mission title are baked in so the per-tab agent orients to it.
+        let breach = mission("m-breach", "Data-breach page", "Draft my firm's data-breach practice page");
+        let p = build_first_turn_prompt(None, "How does this page help?", Some(&breach), "");
+        // The goal + mission title are baked in so the page agent orients to it.
         assert!(p.contains("A research MISSION is currently active"));
         assert!(p.contains("Data-breach page"));
         assert!(p.contains("Draft my firm's data-breach practice page"));
-        // And the re-read routes are documented for a mid-conversation change.
-        assert!(p.contains("/v1/mission/active"));
-        assert!(p.contains("/v1/mission/findings"));
+        // The re-read routes name the mission the message was sent from, so a
+        // mission started later never answers for this one (BC-13).
+        assert!(p.contains("/v1/missions/m-breach\n"));
+        assert!(p.contains("/v1/missions/m-breach/findings"));
+        assert!(!p.contains("/v1/mission/active"));
+        assert!(!p.contains("/v1/mission/findings"));
     }
 
     #[test]
@@ -2049,19 +2069,24 @@ mod tests {
             "first question",
             None,
          "");
+        let goal = mission("m-two", "Mission", "a goal");
         let b = build_first_turn_prompt(
             Some(r#"{"url":"https://two.example","title":"Two"}"#),
             "second question, entirely different",
-            Some(("Mission", "a goal")),
+            Some(&goal),
          "");
         let shared = common_prefix(&a, &b);
         // The shared prefix must reach the END of the invariant block — the
-        // skill reference is its last line.
+        // skill reference is its last line — and carries the whole tool doc,
+        // the action route included.
+        assert!(shared.contains("/v1/browser/action"));
         assert!(shared.contains("Follow the `browse` skill"));
         assert!(shared.contains("keep browser actions purposeful."));
-        // And every variable section sits after it.
+        // And every variable section sits after it: the mission block and the
+        // captured mission's own routes most of all.
         assert!(!shared.contains("first question"));
         assert!(!shared.contains("MISSION is currently active"));
+        assert!(!shared.contains("/v1/missions/"));
     }
 
     /// A chat's pick rides both spawns (turn and consult share the builder):
@@ -2553,6 +2578,44 @@ mod contract {
         let c = contract();
         assert_eq!(c["scopePhrases"]["pinned-page"], super::scope_phrase(false));
         assert_eq!(c["scopePhrases"]["following-tabs"], super::scope_phrase(true));
+    }
+
+    /// Each turn's tail names the captured page and mission, teaches the
+    /// action route, and never points at the globally active mission; the
+    /// first turn's mission block reads the same captured routes.
+    #[test]
+    fn a_turn_teaches_the_action_route_and_its_captured_mission() {
+        let c = contract();
+        let captured = |id: &str| -> Vec<String> {
+            strings(&c["capturedMissionRoutes"]).iter().map(|r| r.replace("{id}", id)).collect()
+        };
+        let tail = super::turn_target_block("browser-t-1", true, Some("m-1"));
+        assert!(tail.contains(c["actionRoute"].as_str().unwrap()));
+        assert!(tail.contains(c["scopePhrases"]["following-tabs"].as_str().unwrap()));
+        let goal = crate::state::Mission {
+            mission_id: "m-1".into(),
+            title: "Rate limits".into(),
+            goal: "Compare token buckets".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let first = super::build_first_turn_prompt(None, "hi", Some(&goal), "");
+        for text in [&tail, &first] {
+            for route in captured("m-1") {
+                assert!(text.contains(&route), "a captured turn reads {route}");
+            }
+            for global in strings(&c["globalMissionRoutes"]) {
+                assert!(!text.contains(&global), "a captured turn must not point at {global}");
+            }
+        }
+        for legacy in strings(&c["legacyRoutes"]) {
+            let leaf = &legacy[legacy.rfind('/').unwrap()..];
+            assert!(!first.contains(leaf), "the first turn still teaches {legacy}");
+        }
+        let regular = super::turn_target_block("browser-t-1", false, None);
+        assert!(regular.contains(c["scopePhrases"]["pinned-page"].as_str().unwrap()));
+        assert!(!regular.contains("/v1/missions/"));
     }
 
     /// Every kind the contract names parses as an `Operation` and serializes

@@ -364,15 +364,39 @@ pub fn assert_read_only_argv(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// A first-turn prompt fragment that makes a browse or linked agent aware of the
-/// active research **mission**, when one is running. Both the per-tab page
-/// discussion and the linked (spanning) discussion can run inside a mission
-/// workspace, but neither is told what the user is researching — so they answer
-/// blind to the goal. This bakes the goal in so they orient their help toward it.
-/// The mission orchestrator (`mission.rs`) embeds the goal natively and needs
-/// none of this. Returns an empty string when no mission is active or the goal is
-/// blank, so callers can push it unconditionally.
+/// A first-turn prompt fragment that makes a discussion agent aware of the
+/// active research **mission**, when one is running. An agent that runs beside
+/// a mission is otherwise never told what the user is researching, so it
+/// answers blind to the goal. This bakes the goal in so it orients its help
+/// toward it. The mission orchestrator (`mission.rs`) embeds the goal natively
+/// and needs none of this. Returns an empty string when no mission is active or
+/// the goal is blank, so callers can push it unconditionally.
 pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
+    mission_block(
+        mission,
+        "  curl -s http://127.0.0.1:7676/v1/mission/active\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/findings\n",
+    )
+}
+
+/// `mission_context_block` for a page chat, whose turn is CAPTURED under one
+/// mission when the user sends it: the re-read routes name that mission, so a
+/// mission the user starts later never answers for this conversation.
+pub fn captured_mission_context_block(mission: Option<&crate::state::Mission>) -> String {
+    let Some(m) = mission else {
+        return String::new();
+    };
+    let id = &m.mission_id;
+    mission_block(
+        Some((&m.title, &m.goal)),
+        &format!(
+            "  curl -s http://127.0.0.1:7676/v1/missions/{id}\n  \
+             curl -s http://127.0.0.1:7676/v1/missions/{id}/findings\n"
+        ),
+    )
+}
+
+fn mission_block(mission: Option<(&str, &str)>, reread: &str) -> String {
     let Some((title, goal)) = mission else {
         return String::new();
     };
@@ -398,10 +422,10 @@ pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
     p.push_str(
         "\nThe user may refine the goal or pin more findings as they browse, so \
          re-read the current mission and its pins whenever you need them (already \
-         permitted — no approval needed):\n  \
-         curl -s http://127.0.0.1:7676/v1/mission/active\n  \
-         curl -s http://127.0.0.1:7676/v1/mission/findings\n\n",
+         permitted — no approval needed):\n",
     );
+    p.push_str(reread);
+    p.push('\n');
     p
 }
 
@@ -874,6 +898,28 @@ mod tests {
         // Re-read routes so a mid-conversation goal/pin change stays reachable.
         assert!(b.contains("/v1/mission/active"));
         assert!(b.contains("/v1/mission/findings"));
+    }
+
+    #[test]
+    fn captured_mission_block_reads_that_mission_never_the_active_one() {
+        assert_eq!(captured_mission_context_block(None), "");
+        let m = crate::state::Mission {
+            mission_id: "m-7".into(),
+            title: "Breach page".into(),
+            goal: "Draft my breach page".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let b = captured_mission_context_block(Some(&m));
+        assert!(b.contains("Mission: Breach page"));
+        assert!(b.contains("> Draft my breach page"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/m-7\n"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/m-7/findings\n"));
+        assert!(!b.contains("/v1/mission/"));
+        // The global block's text is unchanged apart from its routes.
+        let global = mission_context_block(Some(("Breach page", "Draft my breach page")));
+        assert_eq!(global.replace("/v1/mission/active", "/v1/missions/m-7").replace("/v1/mission/findings", "/v1/missions/m-7/findings"), b);
     }
 
     #[test]
