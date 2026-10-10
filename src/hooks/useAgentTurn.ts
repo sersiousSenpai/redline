@@ -92,7 +92,7 @@ export interface AgentTurnConfig<M extends TurnMessage> {
   cancelArgs?: Record<string, unknown>;
   /** False for a registry that rejects-when-busy rather than queueing
    *  (`Turns::begin` in `fork.rs`). Sends then never carry `queue: true`, a
-   *  send attempted mid-turn is dropped instead of drawn as a queued bubble,
+   *  send attempted mid-turn is dropped instead of shown in a queue tray,
    *  and `unqueue` is a no-op. Defaults to true. */
   queueing?: boolean;
   /** Error-bubble prefix for a send that never reached the backend,
@@ -152,7 +152,7 @@ export interface AgentTurn<M extends TurnMessage> {
   loaded: boolean;
   send: (text: string, opts?: SendOpts) => void;
   cancel: () => void;
-  /** Pull a queued send back out (the bubble's ×). Resolves to its text so
+  /** Pull a queued send back out (the tray's ×). Resolves to its text so
    *  the composer can restore it; null when it already advanced. */
   unqueue: (messageId: string) => Promise<string | null>;
   /** Wipe the local thread after a backend-side discard/clear. */
@@ -355,8 +355,8 @@ export class AgentTurnController<M extends TurnMessage> {
 
   send(text: string, opts?: SendOpts): void {
     // Sending while a turn streams is type-ahead: the backend queues it
-    // behind the in-flight turn (`queue: true` below) and the reducer shows
-    // the bubble with a "Queued" chip.
+    // behind the in-flight turn (`queue: true` below) and the reducer files
+    // the row under `queue`, which the surface's tray shows.
     const trimmed = text.trim();
     if (!trimmed || !this.alive) return;
     const cfg = this.cfg();
@@ -587,7 +587,10 @@ export function useAgentTurn<M extends TurnMessage>(
   const clear = useCallback(() => ctl?.clear(), [ctl]);
 
   return {
-    messages: config.surface === "companion" ? state.messages : [...state.messages, ...state.queue],
+    // Queued sends are not transcript: every queueing surface shows `queue`
+    // in its tray above the composer (`QueueTray`), and a row joins
+    // `messages` when it advances into the streaming turn.
+    messages: state.messages,
     queue: state.queue,
     steerNotice: state.steerNotice,
     steer: (id: string) => ctl?.steer(id) ?? Promise.resolve(false),

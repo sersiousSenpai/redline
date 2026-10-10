@@ -1,0 +1,159 @@
+/* One reply anatomy (ReplyBlock): byline, an optional steps line, the text,
+   and a tail row of one fixed height — the same boxes while a reply streams
+   and once it settles, so nothing moves when it does (perf rule 8). No
+   border, no fill: a reply is prose, not a bubble. */
+.rl-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  /* A reply that repaints every frame must not invalidate layout for the
+     thread above it. Paint containment clips, so the tail's focus rings sit
+     inside their buttons. */
+  contain: content;
+}
+.rl-reply-byline {
+  font-family: var(--font-sans);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-info);
+}
+.rl-reply[data-room] .rl-reply-byline { font-size: 11px; }
+.rl-reply-byline[data-error] { color: var(--color-ink-muted); }
+
+.rl-reply-steps {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  max-width: 100%;
+  height: calc(16px * var(--rl-discussion-zoom, 1));
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: calc(10.5px * var(--rl-discussion-zoom, 1));
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rl-reply[data-room] .rl-reply-steps { height: 18px; font-size: 12px; }
+.rl-reply-steps:disabled { cursor: default; }
+.rl-reply-steps:hover:not(:disabled), .rl-reply-steps:focus-visible { color: var(--color-ink); }
+.rl-reply-steps:focus-visible { outline-offset: -1px; }
+.rl-reply-steps-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rl-reply-steplist {
+  margin: 0 0 4px;
+  padding: 0 0 0 14px;
+  list-style: none;
+  font-size: calc(10.5px * var(--rl-discussion-zoom, 1));
+  line-height: 1.6;
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.rl-reply-text { min-width: 0; }
+.rl-reply-error {
+  font-size: calc(12.5px * var(--rl-discussion-zoom, 1));
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--color-warning);
+}
+
+/* The tail: one height whatever it holds — the live status and clock, or the
+   settled actions and meter. */
+.rl-reply-tail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 24px;
+  min-width: 0;
+  font-size: calc(10.5px * var(--rl-discussion-zoom, 1));
+  color: var(--color-ink-muted);
+}
+.rl-reply[data-room] .rl-reply-tail { height: 28px; font-size: 12px; }
+.rl-reply-status { min-width: 0; overflow: hidden; white-space: nowrap; }
+.rl-reply-status[data-stalled] { color: var(--color-warning); }
+.rl-reply-meter {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(9.5px * var(--rl-discussion-zoom, 1));
+  font-variant-numeric: tabular-nums;
+}
+.rl-reply[data-room] .rl-reply-meter { font-size: 11px; }
+.rl-reply-truncated { color: var(--color-warning); font-weight: 600; }
+.rl-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.rl-reply:hover .rl-reply-actions,
+.rl-reply:focus-within .rl-reply-actions,
+.rl-reply:last-child .rl-reply-actions { opacity: 1; }
+.rl-reply-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  min-width: 24px;
+  justify-content: center;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--color-ink-muted);
+  font-size: calc(11px * var(--rl-discussion-zoom, 1));
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rl-reply[data-room] .rl-reply-action { font-size: 12px; }
+.rl-reply-action:hover:not(:disabled),
+.rl-reply-action:focus-visible {
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+}
+.rl-reply-action:focus-visible { outline-offset: -2px; }
+.rl-reply-action:disabled { opacity: 0.45; cursor: default; }
+.rl-reply-action[data-tone="info"] { color: var(--color-info); }
+
+/* The user's turn: a compact card, no byline. */
+.rl-user-turn {
+  align-self: flex-end;
+  max-width: 88%;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-info) 9%, var(--color-paper));
+  border: 1px solid color-mix(in srgb, var(--color-info) 16%, transparent);
+}
+.rl-user-turn[data-room] { padding: 10px 14px; border-radius: 14px; }
+
+/* A quiet note at the end of the thread — never a bar inserted above it,
+   which would take height from the thread mid-turn. */
+.rl-thread-note {
+  margin: 0;
+  font-size: calc(11.5px * var(--rl-discussion-zoom, 1));
+  line-height: 1.5;
+  color: var(--color-warning);
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-reply-actions { transition: none; }
+}
+
+/* The plan comment's other view is where its reply is streaming: one quiet,
+   shimmering line says so (CommentThread). */
+.rl-thread-elsewhere {
+  align-self: flex-start;
+  font-size: calc(11px * var(--rl-discussion-zoom, 1));
+  color: var(--color-ink-muted);
+}

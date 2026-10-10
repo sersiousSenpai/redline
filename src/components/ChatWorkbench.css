@@ -1,12 +1,32 @@
-.rl-queue-tray { margin: 4px 12px 0; padding: 5px 8px; border: 1px solid var(--color-rule); border-radius: 10px 10px 0 0; background: var(--color-paper); font-size: 12px; }
-.rl-queue-tray-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; }
+/* The queue tray (QueueTray): a pill above the composer, hung from a
+   zero-height anchor so it overlays the thread's reserved bottom instead of
+   taking height from it; its rows open upward. */
+.rl-queue-anchor { position: relative; height: 0; z-index: 5; }
+.rl-queue-tray { position: absolute; left: 12px; right: 12px; bottom: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; pointer-events: none; font-size: 12px; }
+.rl-queue-tray > * { pointer-events: auto; }
+.rl-queue-pill { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; height: 24px; padding: 0 8px 0 10px; border: 1px solid var(--color-rule); border-radius: 999px; background: var(--color-bg-elevated); color: var(--color-ink-muted); font-size: 11px; cursor: pointer; box-shadow: 0 4px 14px -6px #0004; }
+.rl-queue-pill:hover, .rl-queue-pill:focus-visible { color: var(--color-ink); }
+.rl-queue-count { flex: none; font-weight: 600; color: var(--color-ink); }
+.rl-queue-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-queue-chevron { flex: none; transition: transform 120ms; }
+.rl-queue-pill[aria-expanded="true"] .rl-queue-chevron { transform: rotate(180deg); }
+.rl-queue-list { align-self: stretch; margin: 0; padding: 4px; list-style: none; max-height: 40vh; overflow-y: auto; border: 1px solid var(--color-rule); border-radius: 10px; background: var(--color-bg-elevated); box-shadow: 0 8px 24px -8px #0004; }
+.rl-queue-row { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 2px 4px; }
+.rl-queue-mode { flex: none; color: var(--color-ink-muted); }
 .rl-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-queue-text:hover, .rl-queue-text:focus { white-space: pre-wrap; overflow-wrap: anywhere; }
-.rl-queue-tray button, .rl-chat-mode-picker button, .rl-changes-card button { color: var(--color-ink); border: 1px solid var(--color-rule); background: var(--color-paper); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
-.rl-queue-tray button:disabled { opacity: .4; cursor: default; }
-.rl-queue-more, .rl-chat-mode-picker { position: relative; }
-.rl-queue-more [role=menu], .rl-chat-mode-menu { position: absolute; bottom: 100%; right: 0; z-index: 100; min-width: 180px; padding: 10px; background: var(--color-paper); border: 1px solid var(--color-rule); border-radius: 9px; box-shadow: 0 8px 24px #0002; }
-.rl-chat-mode-menu { right: auto; left: 0; min-width: 265px; }
+.rl-queue-row button { flex: none; min-height: 24px; padding: 0 7px; border: 0; border-radius: 6px; background: none; color: var(--color-ink-muted); font-size: 11px; cursor: pointer; }
+.rl-queue-row button:hover:not(:disabled), .rl-queue-row button:focus-visible { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 7%, transparent); }
+.rl-queue-row button:disabled { opacity: .4; cursor: default; }
+.rl-queue-row .rl-queue-x { min-width: 24px; font-size: 14px; }
+/* The composer's one primary button (SendStopButton): send ↑, queue ↑ or
+   stop ■ in one fixed slot, so the field beside it never changes width. */
+.rl-send { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 999px; background: var(--color-info); color: var(--color-on-accent); cursor: pointer; }
+.rl-send:disabled { opacity: .45; cursor: default; }
+.rl-send[data-send="stop"] { background: var(--color-ink); color: var(--color-paper); }
+.rl-chat-mode-picker button, .rl-changes-card button { color: var(--color-ink); border: 1px solid var(--color-rule); background: var(--color-paper); border-radius: 5px; padding: 3px 7px; cursor: pointer; }
+.rl-chat-mode-picker { position: relative; }
+.rl-chat-mode-menu { position: absolute; bottom: 100%; left: 0; z-index: 100; min-width: 265px; padding: 10px; background: var(--color-paper); border: 1px solid var(--color-rule); border-radius: 9px; box-shadow: 0 8px 24px #0002; }
 .rl-chat-mode-menu fieldset { border: 0; padding: 8px 0; margin: 0; display: flex; gap: 6px; flex-wrap: wrap; }
 .rl-chat-mode-menu legend { font-size: 10px; text-transform: uppercase; color: var(--color-ink-muted); }
 .rl-chat-mode-menu label { display: flex; width: 100%; justify-content: space-between; gap: 8px; font-size: 12px; }

@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const { turn, calls, contextReply, markdownRenders } = vi.hoisted(() => ({
-  turn: { messages: [] as { id: string; role: string; body: string; status: string }[], liveText: "", status: "idle", startedAt: null, loaded: true,
+  turn: { messages: [] as { id: string; role: string; body: string; status: string }[], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), meter: null, activity: [], meters: {} },
   calls: [] as { cmd: string; args: Record<string, unknown> }[],
   contextReply: { value: null as unknown },
@@ -27,7 +27,7 @@ vi.mock("./MarkdownView", () => ({
     return <div data-md data-room={String(!!room)} data-compact={String(!!compact)}>{body}</div>;
   },
 }));
-vi.mock("./StreamingBubble", () => ({ default: ({ text, room }: { text: string; room?: boolean }) => <div data-streaming data-room={String(!!room)}>{text}</div> }));
+vi.mock("./StreamingText", () => ({ StreamingText: ({ text, room }: { text: string; room?: boolean }) => <div data-streaming data-room={String(!!room)}>{text}</div> }));
 import { ChatRoom, type ChatRoomProps } from "./ChatRoom";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 
@@ -62,11 +62,15 @@ describe("the chat as a brainstorm room", () => {
     await render({ expanded: true });
     expect(Array.from(host.querySelectorAll("[data-md]")).map(el => el.getAttribute("data-room"))).toEqual(["true", "true"]);
     expect(host.querySelector("[data-chat-room]")!.getAttribute("data-room")).toBe("true");
-    // The user's turn is a right-aligned tinted block; the reply is prose.
-    const user = host.querySelector<HTMLElement>('[data-chat-turn="user"]')!;
-    const reply = host.querySelector<HTMLElement>('[data-chat-turn="assistant"]')!;
-    expect(user.style.alignSelf).toBe("flex-end");
-    expect(reply.style.alignSelf).toBe("");
+    // The user's turn is a card with no byline; the reply is prose under its
+    // provider's name, both at plate scale.
+    const user = host.querySelector<HTMLElement>("[data-user-turn]")!;
+    const reply = host.querySelector<HTMLElement>('[data-reply="settled"]')!;
+    expect(user.className).toBe("rl-user-turn");
+    expect(user.getAttribute("data-room")).toBe("true");
+    expect(user.textContent).not.toMatch(/\bYou\b/);
+    expect(reply.getAttribute("data-room")).toBe("true");
+    expect(reply.querySelector(".rl-reply-byline")?.textContent).toBe("Claude");
     expect(host.querySelector<HTMLElement>("[data-chat-messages] > div")!.style.maxWidth).toBe("820px");
     expect(host.querySelector<HTMLTextAreaElement>("[data-chat-composer] textarea")!.style.fontSize).toBe("15px");
 

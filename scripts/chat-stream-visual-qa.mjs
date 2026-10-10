@@ -38,22 +38,10 @@ const SCENES = ["card", "room", "browser", "mission", "memory", "review", "comme
 const scenes = process.argv[3]?.split(",") ?? SCENES;
 /** Surfaces where Enter during a reply queues the message. */
 const QUEUEING = new Set(["card", "room", "browser", "mission", "memory"]);
-const BUBBLE = ["card", "room", "browser", "mission", "memory", "comment", "drafter"];
-const STEP2 = "lane C step 2 (one reply anatomy)";
-const EXPECTED_FAIL = {
-  "one-status": { scenes: ["card", "room"], reason: `${STEP2}: the chat room's progress strip is a second status beside the bubble's; it goes, with Stop in the composer's primary button` },
-  "viewport-send": { scenes: ["card", "room"], reason: `${STEP2}: the progress strip takes 53 px of the thread at send and grows at the first tool` },
-  "viewport-settle": { scenes: ["card", "room", "browser"], reason: `${STEP2}: the progress strip leaves at settle (card, room); the thread meter strip arrives above the composer (browser)` },
-  "viewport-queue": { scenes: ["card", "room"], reason: `${STEP2}: the queue tray takes height from the thread instead of overlaying it (design decision 6)` },
-  "queue-visible": { scenes: ["browser", "mission", "memory"], reason: `${STEP2}: type-ahead goes to the turn's queue, which only the chat room renders (since 4b2097e)` },
-  "settle-first-line": { scenes: [...BUBBLE], reason: `${STEP2}: the bubble's activity line, badge byline, caret-free tail and the row's actions/footer differ between phases (and the strip leaves, card/room)` },
-  "settle-last-line": { scenes: [...BUBBLE], reason: `${STEP2}: as the first line` },
-  "settle-heading-first": { scenes: [...BUBBLE], reason: `${STEP2}: the activity line above a heading-first reply leaves at settle (and the strip, card/room)` },
-  "reader-up": { scenes: [...BUBBLE], reason: `${STEP2}: the activity line above the text leaves at settle, moving a reader parked mid-reply` },
-  "streaming-only-boxes": { scenes: [...BUBBLE, "review"], reason: `${STEP2}: the inspector chip, the context meter track, the progress strip and an inserted Stop button exist only while streaming` },
-  "composer-steady": { scenes: ["browser", "mission", "memory", "review"], reason: `${STEP2}: a Stop inserted beside Send narrows the field (browser, mission, memory); the review's Stop and Send swap at different widths` },
-  "tail-height": { scenes: [...SCENES], reason: `${STEP2}: no reply renders the fixed-height tail row yet` },
-};
+/** Known violations, by check id: `{ scenes: [...], reason }`. Empty since
+ *  the reply anatomy (ReplyBlock) landed; a regression found later goes here
+ *  with its reason only while its fix is in flight. */
+const EXPECTED_FAIL = {};
 const temporary = await mkdtemp(path.join(tmpdir(), "redline-chat-stream-qa-"));
 const service = path.join(root, "fixtures/chat-stream-qa/services.ts");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -156,7 +144,7 @@ function measure(ask, first, last) {
     composerWidth: composer ? +composer.getBoundingClientRect().width.toFixed(1) : null,
     first: line(first), last: line(last), boxes,
     statuses: [...scene.querySelectorAll("[role=status]")].map((e) => e.textContent.replace(/\s+/g, " ").trim().slice(0, 48)),
-    workingWords: (scene.textContent.match(/working…|Thinking/g) ?? []).length,
+    workingWords: (scene.textContent.match(/working…|Thinking|Preparing your reply/g) ?? []).length,
     caret: scene.textContent.includes("▌"),
     queued: scene.innerText.includes("QA-QUEUED"),
     tail: tail ? Math.round(tail.getBoundingClientRect().height) : null,
@@ -239,6 +227,7 @@ async function runScene(scene) {
   }
   check(scene, "one-status", "shows one status line while the reply waits", sent.statuses.length === 1 && tool.statuses.length === 1 && sent.workingWords === 1, { sent: sent.statuses, tool: tool.statuses, workingWords: sent.workingWords });
   check(scene, "no-caret", "streams with no caret glyph", !mid.caret && !full.caret, { mid: mid.caret, full: full.caret });
+  check(scene, "settled-quiet", "says nothing is running once the reply settles", settled.statuses.length === 0, settled.statuses);
   check(scene, "viewport-send", "keeps the thread viewport at send and at the first tool", idle.scroller.clientHeight === sent.scroller.clientHeight && sent.scroller.clientHeight === tool.scroller.clientHeight, [idle, sent, tool].map((s) => s.scroller.clientHeight));
   check(scene, "viewport-settle", "keeps the thread viewport at settle", full.scroller.clientHeight === settled.scroller.clientHeight, [full.scroller.clientHeight, settled.scroller.clientHeight]);
   check(scene, "follow-streaming", "follows every streamed frame while parked", gaps.every((gap) => gap <= 2), { notPinned: gaps.filter((gap) => gap > 2).length, gaps });
@@ -261,7 +250,7 @@ async function runScene(scene) {
 
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/components/StreamingBubble.tsx", "src/components/MarkdownView.tsx", "src/components/ChatRoom.tsx", "src/components/ChatTurnProgress.tsx", "src/components/BrowserChat.tsx", "src/components/MissionChat.tsx", "src/components/MemoryAsk.tsx", "src/components/ReviewThread.tsx", "src/components/CommentThread.tsx", "src/components/DrafterSidecar.tsx", "src/components/FrontDoor.tsx", "src/hooks/useStickToBottom.ts", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
+  for (const file of ["src/components/ReplyBlock.tsx", "src/components/ReplyBlock.css", "src/components/StreamingText.tsx", "src/components/MarkdownView.tsx", "src/components/QueueTray.tsx", "src/components/SendStopButton.tsx", "src/components/ChatWorkbench.css", "src/components/ChatRoom.tsx", "src/components/BrowserChat.tsx", "src/components/MissionChat.tsx", "src/components/MemoryAsk.tsx", "src/components/ReviewThread.tsx", "src/components/CommentThread.tsx", "src/components/DrafterSidecar.tsx", "src/components/FrontDoor.tsx", "src/hooks/useStickToBottom.ts", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   server = await createServer({ configFile: false, root, cacheDir: path.join(temporary, "vite-cache"), optimizeDeps: { entries: ["fixtures/chat-stream-qa/index.html"], include: ["@tauri-apps/plugin-deep-link", "@tauri-apps/api/dpi"] }, plugins: [react(), tailwindcss()], resolve: { alias: [
     { find: /^.*\/hooks\/useAgentTurn$/, replacement: service }, { find: /^.*\/audio\/useReadAloud$/, replacement: service }, { find: /^.*\/lib\/useDictation$/, replacement: service },
     ...["@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/api/window", "@tauri-apps/api/webview", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener"].map((find) => ({ find, replacement: service })),

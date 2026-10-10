@@ -6,11 +6,10 @@ import type { Mission, MissionFinding, MissionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useSharedDraft } from "../hooks/useSharedDraft";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
-import TurnFooter from "./TurnFooter";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
+import { QueueTray } from "./QueueTray";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
-import { QueuedChip, UnsentNote } from "./QueuedChip";
 
 interface MissionChatProps {
   mission: Mission;
@@ -26,6 +25,10 @@ interface MissionChatProps {
   /** Hand a synthesized brief (markdown) to the Prompt Drafter. */
   onSynthesize?: (markdown: string) => void;
 }
+
+/** The orchestrator runs on Claude, and a reply is signed by its provider
+ *  (BC-26) — the same name streaming and settled. */
+const BYLINE = "Claude";
 
 const SYNTHESIZE_PROMPT =
   "Produce the mission synthesis brief now: a clean, Drafter-ready document " +
@@ -60,7 +63,7 @@ export function MissionChat({
 
   // The turn lifecycle — persisted thread, live stream, mid-turn remount
   // restore (partial text + spinner), self-heal — lives in the shared hook.
-  const { messages, liveText, status, loaded, send, cancel, unqueue, meter, activity, meters } =
+  const { messages, queue, liveText, status, startedAt, loaded, send, cancel, unqueue, meter, activity, meters } =
     useAgentTurn<MissionMessage>({
       surface: "mission",
       key: missionId,
@@ -119,7 +122,6 @@ export function MissionChat({
         editing={editingGoal}
         setEditing={setEditingGoal}
         onEditGoal={onEditGoal}
-        streaming={status === "streaming"}
         onClose={onClose}
         tabCount={findings.length}
       />
@@ -135,7 +137,9 @@ export function MissionChat({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex-1 min-h-0 overflow-y-auto rl-thin-scroll-y flex flex-col gap-2.5 px-3 py-3"
+        // The bottom padding keeps the queue tray's pill clear of the newest
+        // line: the tray overlays the thread rather than shrinking it.
+        className="flex-1 min-h-0 overflow-y-auto rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 pb-9"
       >
         {!loaded ? null : messages.length === 0 && status === "idle" ? (
           <div style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
@@ -152,11 +156,6 @@ export function MissionChat({
               contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
               onSynthesize={onSynthesize}
-              onUnqueue={() => {
-                void unqueue(m.id).then((text) => {
-                  if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
-                });
-              }}
               onResend={() => {
                 stick();
                 send(m.body);
@@ -165,22 +164,28 @@ export function MissionChat({
           ))
         )}
         {status === "streaming" && (
-          <>
-            {/* The badge and the activity line fill the wait the blank
-                ticker used to — so the bubble renders from the first line of
-                the stream, not the first token. */}
-            <StreamingBubble
-              text={liveText}
-              agent="Orchestrator"
-              inspect={{ surface: "mission", key: missionId }}
-              meter={meter}
-              activity={activity}
-              onOpenLink={onOpenLink}
-            />
-          </>
+          // From the first line of the stream, not the first token: its tail
+          // is the turn's one status line, filling the wait.
+          <ReplyBlock
+            phase="live"
+            byline={BYLINE}
+            text={liveText}
+            meter={meter}
+            activity={activity}
+            startedAt={startedAt}
+            onOpenLink={onOpenLink}
+          />
         )}
       </div>
 
+      <QueueTray
+        rows={queue.map((row) => ({ id: row.id, text: row.body }))}
+        onRemove={(id) => {
+          void unqueue(id).then((text) => {
+            if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+          });
+        }}
+      />
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
         <button
           type="button"
@@ -225,7 +230,6 @@ function GoalHeader({
   editing,
   setEditing,
   onEditGoal,
-  streaming,
   onClose,
   tabCount,
 }: {
@@ -233,7 +237,6 @@ function GoalHeader({
   editing: boolean;
   setEditing: (v: boolean) => void;
   onEditGoal: (title: string, goal: string) => void;
-  streaming: boolean;
   onClose: () => void;
   tabCount: number;
 }) {
@@ -320,7 +323,6 @@ function GoalHeader({
         </span>
         <span style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}>
           {tabCount} pin{tabCount === 1 ? "" : "s"}
-          {streaming ? " · thinking…" : ""}
         </span>
       </div>
       <button
@@ -432,7 +434,6 @@ function MessageBubble({
   msg,
   onOpenLink,
   onSynthesize,
-  onUnqueue,
   onResend,
   meter,
   contextReset,
@@ -440,46 +441,28 @@ function MessageBubble({
   msg: MissionMessage;
   onOpenLink?: (url: string) => void;
   onSynthesize?: (markdown: string) => void;
-  onUnqueue?: () => void;
   onResend?: () => void;
-  /** This row's settled meter — the badge and footer that outlive the turn. */
+  /** This row's settled meter — the byline, steps line and tail it keeps. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
 }) {
-  const isUser = msg.role === "user";
+  if (msg.role === "user") {
+    return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} />;
+  }
   const isError = msg.status === "error";
-  const isQueued = isUser && msg.status === "queued";
-  const isUnsent = isUser && msg.status === "unsent";
-  const showActions = !isUser && !isError && msg.body.trim().length > 0;
   return (
-    <div
-      className="flex flex-col gap-0.5 group/msg"
-      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
-    >
-      <span
-        style={{
-          fontSize: "9px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
-        }}
-      >
-        {isUser ? "You" : "Orchestrator"}
-      </span>
-      {isError ? (
-        <div style={{ fontSize: "12.5px", lineHeight: 1.5, whiteSpace: "pre-wrap", color: "var(--color-warning)" }}>
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={msg.body} compact rich onLinkClick={onOpenLink} />
-      )}
-      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
-      {isUnsent && <UnsentNote onResend={onResend} />}
-      {showActions && <MessageActions body={msg.body} onSynthesize={onSynthesize} />}
-      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
-    </div>
+    <ReplyBlock
+      phase="settled"
+      byline={BYLINE}
+      text={msg.body}
+      error={isError}
+      meter={meter}
+      contextReset={contextReset}
+      inspect={{ surface: "mission", key: msg.missionId }}
+      onOpenLink={onOpenLink}
+      actions={!isError && msg.body.trim() ? <MessageActions body={msg.body} onSynthesize={onSynthesize} /> : undefined}
+    />
   );
 }
 
@@ -497,38 +480,17 @@ function MessageActions({
       window.setTimeout(() => setCopied(false), 1200);
     });
   };
-  const actionStyle: React.CSSProperties = {
-    fontSize: "10px",
-    lineHeight: 1,
-    padding: "2px 6px",
-    border: "1px solid var(--color-rule)",
-    borderRadius: "5px",
-    background: "var(--color-paper)",
-    color: "var(--color-ink-muted)",
-    cursor: "pointer",
-  };
   return (
-    <div className="flex items-center gap-1.5 mt-0.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
-      <button type="button" onClick={copy} title="Copy this reply" style={actionStyle}>
-        {copied ? (
-          "Copied ✓"
-        ) : (
-          <span className="inline-flex items-center gap-1">
-            <Copy size={10} strokeWidth={2} /> Copy
-          </span>
-        )}
+    <span data-reply-actions className="contents">
+      <button type="button" className="rl-reply-action" onClick={copy} title="Copy this reply">
+        {copied ? "Copied ✓" : <><Copy size={11} strokeWidth={2} aria-hidden /> Copy</>}
       </button>
       {onSynthesize && (
-        <button
-          type="button"
-          onClick={() => onSynthesize(body)}
-          title="Open this in the Prompt Drafter to draft from it"
-          style={{ ...actionStyle, color: "var(--color-info)" }}
-        >
+        <button type="button" className="rl-reply-action" data-tone="info" onClick={() => onSynthesize(body)} title="Open this in the Prompt Drafter to draft from it">
           Open in Drafter ▶
         </button>
       )}
-    </div>
+    </span>
   );
 }
 
@@ -586,27 +548,7 @@ function Composer({
           overflow: "hidden",
         }}
       />
-      {streaming && (
-        <button
-          type="button"
-          onClick={onStop}
-          title="Stop the current reply (queued messages still send)"
-          className="rounded px-2 py-1 font-medium"
-          style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--color-rule)", color: "var(--color-ink)", fontSize: "11px" }}
-        >
-          Stop
-        </button>
-      )}
-      <button
-        type="button"
-        onClick={onSend}
-        disabled={!draft.trim()}
-        title={streaming ? "Queue this message — it sends when the reply finishes" : undefined}
-        className="rounded px-2 py-1 font-medium"
-        style={{ background: "var(--color-info)", color: "var(--color-on-accent)", fontSize: "11px", opacity: draft.trim() ? 1 : 0.5 }}
-      >
-        Send
-      </button>
+      <SendStopButton state={sendState(streaming, !!draft.trim())} onSend={onSend} onStop={onStop} disabled={!draft.trim()} />
     </div>
   );
 }

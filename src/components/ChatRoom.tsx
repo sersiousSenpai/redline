@@ -25,18 +25,17 @@ import { BrowserDialog } from "./BrowserSurfaces";
 import { ComposerMenu } from "./ComposerMenu";
 import { MonochatTrace } from "./MonochatTrace";
 import { useMenuOverlay } from "./menuOverlay";
-import { MarkdownView } from "./MarkdownView";
-import StreamingBubble from "./StreamingBubble";
-import TurnFooter from "./TurnFooter";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
-import { UnsentNote } from "./QueuedChip";
-import ChatTurnProgress, { type ChatProgressStatus } from "./ChatTurnProgress";
+import { modelInfo } from "../lib/modelInfo";
+import type { ChatProgressStatus } from "../lib/chatProgress";
 import { ChatContextChip } from "./ChatContextChip";
 import { ideaNote, planFromReplyInstruction, type ChatContext } from "../lib/chatRoom";
 import { ChatModePicker, nextChatMode, type ChatMode, type BuildAssignee } from "./ChatModePicker";
 import { QueueTray, type QueueItem } from "./QueueTray";
 import { ChangesCard, type ChatChanges } from "./ChangesCard";
-import { defaultChoice, type BackendChoice, type ModelCatalogs } from "../lib/backendChoice";
+import { backendLabel, defaultChoice, type BackendChoice, type ModelCatalogs } from "../lib/backendChoice";
 import { standaloneNote } from "../lib/notes";
 
 // THE CHAT ROOM — Redline's unbound conversation.
@@ -70,6 +69,9 @@ export interface ChatPlanRequest { harness?: BackendChoice; companionId: string;
 export interface ChatWorkbenchComposer {
   picker: ReactNode; mode: ChatMode; cycleMode: () => void; onSubmit: (steer?: boolean) => void;
   project: ProjectChoice; onProjectChange: (project: ProjectChoice) => void;
+  /** A reply is running: the composer's primary button is Stop while the box
+   *  is empty and Queue once it isn't (design decision 5). */
+  streaming: boolean; onStop: () => void;
 }
 
 export interface ChatRoomProps {
@@ -190,6 +192,7 @@ export function ChatRoom({
   const [assignee, setAssignee] = usePersistedState<BuildAssignee>(`rl.chatAssignee.${companionId}`, "chat");
   const [localHarness, setLocalHarness] = usePersistedState<BackendChoice>(`rl.chatHarness.${companionId}`, defaultChoice());
   const selectedHarness = harness ?? localHarness;
+  const provider = backendLabel(selectedHarness.backend);
   const changeHarness = (next: BackendChoice) => { setLocalHarness(next); onHarnessChange?.(next); };
   const [project, setBoundProject] = useState<ProjectChoice>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
@@ -455,12 +458,13 @@ export function ChatRoom({
   const queueRows: QueueItem[] = queue.map(row => ({ id: row.id, text: row.body, mode: row.mode ?? "chat", assignee: "chat" }));
   if (armedInstruction !== null) queueRows.push({ id: "armed-plan", text: armedInstruction, mode: "plan" });
   if (armedRun) queueRows.push({ id: "armed-run", text: armedRun.instruction, mode: "build", assignee: "agent" });
-  const removeQueue = async (id: string, edit: boolean) => {
+  /** × on a queued row: out of the queue, its text back in the composer. */
+  const removeQueue = async (id: string) => {
     let text: string | null = null;
     if (id === "armed-plan") { text = armedInstruction; setArmedPlan(null); onCancelQueuedPlan?.(); }
     else if (id === "armed-run") { text = armedRun?.instruction ?? null; setArmedRun(null); }
     else { text = await unqueue(id); if (text !== null) onContextLost?.("unsent"); }
-    if (edit && text) setDraft(previous => previous.trim() ? `${text}\n\n${previous}` : text);
+    if (text) setDraft(previous => previous.trim() ? `${text}\n\n${previous}` : text);
   };
   const picker = <ChatModePicker mode={mode} onModeChange={setMode} assignee={assignee} onAssigneeChange={setAssignee} harness={selectedHarness} onHarnessChange={changeHarness} catalogs={modelCatalogs} onOpen={onNeedModels} warning={buildConflict ? "Another agent is building here" : null} />;
   const continueAs = (destination: ContinueDestination) => {
@@ -650,21 +654,6 @@ export function ChatRoom({
         <ToolbarButton label={compact ? <X size={13} strokeWidth={2} /> : "Close"} title="Close chat" onClick={onClose} />
       </div>
 
-      {notice && (
-        <div
-          className="font-sans shrink-0 px-4 py-1.5"
-          style={{
-            fontSize: 12,
-            color: "var(--color-warning)",
-            borderBottom: "1px solid var(--color-rule)",
-            maxHeight: 72,
-            overflowY: "auto",
-          }}
-        >
-          {notice}
-        </div>
-      )}
-
       {context && <ChatContextChip context={context} onOpenPlan={onOpenPlan} maxWidth={columnWidth} />}
 
       {/* Thread */}
@@ -679,7 +668,9 @@ export function ChatRoom({
           style={{
             maxWidth: columnWidth,
             margin: "0 auto",
-            padding: roomy ? "22px 24px 28px" : "18px 20px 20px",
+            // The bottom keeps the queue tray's pill clear of the newest line:
+            // the tray overlays the thread rather than shrinking it.
+            padding: roomy ? "22px 24px 40px" : "18px 20px 36px",
             display: "flex",
             flexDirection: "column",
             gap: roomy ? 22 : 14,
@@ -695,6 +686,9 @@ export function ChatRoom({
                 meter={meters[m.id]}
                 contextReset={resets.has(m.id)}
                 room={roomy}
+                provider={provider}
+                seat={selectedHarness.model}
+                inspectKey={companionId}
                 onPlan={canPlan ? planFromReply : undefined}
                 onDraft={onDraft}
                 onSaveIdea={saveIdea}
@@ -708,30 +702,31 @@ export function ChatRoom({
           </div>}
           {graduations.filter(item => item.sessionId !== receipt?.sessionId).map(item => <div key={item.sessionId} className="rl-fd-planning-prompt">Became a plan: {item.title} <button type="button" onClick={() => onOpenPlan?.(item.sessionId)}>Open →</button></div>)}
           {streaming && (
-            <>
-              {/* One shared bubble now. Note the change of behaviour here: the
-                  chat room was the ONE surface that streamed with `rich`, so a
-                  half-written ```mermaid fence reached MermaidView mid-stream
-                  and flashed a "Diagram error" card. The shared bubble streams
-                  plain and the settled row below renders rich. */}
-              <StreamingBubble
-                text={liveText}
-                agent="Redline"
-                inspect={{ surface: "companion", key: companionId }}
-                meter={meter}
-                activity={activity}
-                room={roomy}
-              />
-            </>
+            // The reply as it will settle: the same skeleton, and its tail is
+            // the turn's one status line. It streams plain; the settled row
+            // draws a diagram the stream showed as its fence.
+            <ReplyBlock
+              phase="live"
+              byline={providerByline(meter, provider)}
+              seat={selectedHarness.model}
+              text={liveText}
+              meter={meter}
+              activity={activity}
+              startedAt={startedAt}
+              status={retrieving}
+              room={roomy}
+            />
           )}
+          {/* In-turn notices end the thread, quietly: a bar above it would
+              take height from the thread mid-turn. */}
+          {notice && <p className="rl-thread-note" aria-live="polite">{notice}</p>}
         </div>
       </div>
 
-      {streaming && <ChatTurnProgress startedAt={startedAt} activity={activity} meter={meter} status={retrieving} textLength={liveText.length} onStop={cancel} />}
-
+      {/* Over the thread's reserved bottom, never taking height from it. */}
+      <QueueTray rows={queueRows} onRemove={id => { void removeQueue(id); }} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
       {/* The floating launch composer owns input when supplied. */}
-      <QueueTray rows={queueRows} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onDelete={id => { void removeQueue(id, false); }} onEdit={id => { void removeQueue(id, true); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
-      {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject }) : <div
+      {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel }) : <div
         data-chat-composer
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
@@ -828,29 +823,13 @@ export function ChatRoom({
             {conversationActions}
 
             {picker}
-            <button
-              type="button"
-              className="font-sans"
-              onClick={() => submit(mode)}
+            <SendStopButton
+              state={sendState(streaming, !!draft.trim())}
+              label={mode === "plan" ? "Plan" : "Send"}
+              onSend={() => submit(mode)}
+              onStop={cancel}
               disabled={mode === "chat" ? !draft.trim() : !canPlan || receipt?.status === "starting" || (receipt?.status === "planning" && receipt.kind !== "run")}
-              title={
-                streaming
-                  ? "Queue this — it sends when the reply finishes"
-                  : "Send (⏎)"
-              }
-              style={{
-                fontSize: 11,
-                padding: "6px 14px",
-                borderRadius: 8,
-                cursor: "pointer",
-                border: "none",
-                background: "var(--color-info)",
-                color: "var(--color-on-accent)",
-                opacity: draft.trim() ? 1 : 0.5,
-              }}
-            >
-              {mode === "plan" ? "Plan" : "Send"}
-            </button>
+            />
           </div>
         </div>
       </div>}
@@ -859,22 +838,12 @@ export function ChatRoom({
   );
 }
 
-function RoleTag({ role, room = false }: { role: string; room?: boolean }) {
-  const isUser = role === "user";
-  return (
-    <span
-      className="font-sans"
-      style={{
-        fontSize: room ? "11px" : "9px",
-        fontWeight: 600,
-        textTransform: "uppercase",
-        letterSpacing: "0.07em",
-        color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
-      }}
-    >
-      {isUser ? "You" : "Redline"}
-    </span>
-  );
+/** The provider a reply is signed with (BC-26): the family of the model that
+ *  answered once the meter has seen it, otherwise the one it was sent to. The
+ *  live reply and its settled row read the same meter, so the same name. */
+function providerByline(meter: TurnMeter | null | undefined, sentTo: string): string {
+  const family = modelInfo(meter?.model)?.family;
+  return family === "gpt" ? "Codex" : family === "claude" ? "Claude" : sentTo;
 }
 
 // Memoized: every prop is stable while the composer is being typed in, so the
@@ -885,89 +854,72 @@ const ChatBubble = memo(function ChatBubble({
   meter,
   contextReset,
   room = false,
+  provider,
+  seat,
+  inspectKey,
   onPlan,
   onDraft,
   onSaveIdea,
 }: {
   msg: CompanionMessage;
   onResend: (body: string) => void;
-  /** This row's settled meter — the badge and footer that outlive the turn. */
+  /** This row's settled meter — the byline, steps line and tail it keeps. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
-  /** Plate scale: the user's turn is a right-aligned tinted block, the
-   *  reply full-width prose with no bubble, like a desktop chat app. */
+  /** Plate scale: roomier prose and cards, larger meta text. */
   room?: boolean;
+  /** The chat's provider, for a reply whose meter names no model. */
+  provider: string;
+  /** The model this chat asked for, if it named one. */
+  seat: string | null;
+  /** The conversation's raw-wire key, for the reply's ⋯. */
+  inspectKey: string;
   /** The reply's capture row (Copy · → Plan · → Draft · Save idea), each
    *  handed the reply's body. */
   onPlan?: (body: string) => void;
   onDraft?: (body: string) => void;
   onSaveIdea: (body: string) => Promise<void>;
 }) {
-  const isUser = msg.role === "user";
+  if (msg.role === "user") {
+    return <UserTurn body={msg.body} room={room} unsent={msg.status === "unsent"} onResend={() => onResend(msg.body)} />;
+  }
   const isError = msg.status === "error";
-  const isQueued = isUser && msg.status === "queued";
-  const isUnsent = isUser && msg.status === "unsent";
-  const userBlock = room && isUser;
   return (
-    <div
-      data-chat-turn={msg.role}
-      className="flex flex-col gap-0.5"
-      style={{
-        ...(isQueued || isUnsent ? { opacity: 0.65 } : null),
-        ...(userBlock
-          ? {
-              alignSelf: "flex-end",
-              maxWidth: "85%",
-              padding: "10px 14px",
-              borderRadius: 14,
-              background: "color-mix(in srgb, var(--color-info) 9%, var(--color-paper))",
-              border: "1px solid color-mix(in srgb, var(--color-info) 16%, transparent)",
-            }
-          : null),
-      }}
-    >
-      {!userBlock && <RoleTag role={msg.role} room={room} />}
-      {isError ? (
-        <div
-          style={{
-            fontSize: room ? "13px" : "12.5px",
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            color: "var(--color-warning)",
-          }}
-        >
-          {msg.body}
-        </div>
-      ) : (
-        <MarkdownView body={msg.body} compact room={room} rich={!isUser} />
-      )}
-      {isUnsent && <UnsentNote onResend={() => onResend(msg.body)} />}
-      {msg.role === "assistant" && msg.status === "complete" && !!msg.body.trim() && (
-        <ReplyActions
-          body={msg.body}
-          room={room}
-          onPlan={onPlan && (() => onPlan(msg.body))}
-          onDraft={onDraft && (() => onDraft(msg.body))}
-          onSaveIdea={() => onSaveIdea(msg.body)}
-        />
-      )}
-      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
-    </div>
+    <ReplyBlock
+      phase="settled"
+      // Redline wrote an error row's sentence, not the model.
+      byline={isError ? "Redline" : providerByline(meter, provider)}
+      seat={seat}
+      text={msg.body}
+      error={isError}
+      meter={meter}
+      contextReset={contextReset}
+      room={room}
+      inspect={{ surface: "companion", key: inspectKey }}
+      actions={
+        !isError && msg.body.trim() ? (
+          <ReplyActions
+            body={msg.body}
+            onPlan={onPlan && (() => onPlan(msg.body))}
+            onDraft={onDraft && (() => onDraft(msg.body))}
+            onSaveIdea={() => onSaveIdea(msg.body)}
+          />
+        ) : undefined
+      }
+    />
   );
 });
 
-/** Copy · → Plan · → Draft · Save idea, under a settled reply. Each label
+/** Copy · → Plan · → Draft · Save idea, in a settled reply's tail. Each label
  *  flips to a short confirmation in place rather than raising a toast. */
 function ReplyActions({
   body,
-  room,
   onPlan,
   onDraft,
   onSaveIdea,
 }: {
   body: string;
-  room: boolean;
   onPlan?: () => void;
   onDraft?: () => void;
   onSaveIdea: () => Promise<void>;
@@ -980,28 +932,19 @@ function ReplyActions({
     if (timer.current !== null) window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setDone(null), 1600);
   };
-  const style: React.CSSProperties = {
-    fontSize: room ? 12 : 11,
-    padding: "2px 8px",
-    borderRadius: 999,
-    border: "1px solid transparent",
-    background: "transparent",
-    color: "var(--color-ink-muted)",
-    cursor: "pointer",
-  };
   return (
-    <div data-reply-actions className="font-sans" style={{ display: "flex", flexWrap: "wrap", gap: 2, marginTop: 2, marginLeft: -8 }}>
-      <button type="button" style={style} title="Copy this reply as markdown"
+    <span data-reply-actions className="contents">
+      <button type="button" className="rl-reply-action" title="Copy this reply as markdown"
         onClick={() => void navigator.clipboard?.writeText(body).then(() => flash("copy"), () => {})}>
         {done === "copy" ? "Copied ✓" : "Copy"}
       </button>
-      {onPlan && <button type="button" style={style} title="Plan from this conversation, built around this reply" onClick={onPlan}>→ Plan</button>}
-      {onDraft && <button type="button" style={style} title="Open the Drafter with this reply" onClick={onDraft}>→ Draft</button>}
-      <button type="button" style={style} title="Save this reply to your memory as a note"
+      {onPlan && <button type="button" className="rl-reply-action" title="Plan from this conversation, built around this reply" onClick={onPlan}>→ Plan</button>}
+      {onDraft && <button type="button" className="rl-reply-action" title="Open the Drafter with this reply" onClick={onDraft}>→ Draft</button>}
+      <button type="button" className="rl-reply-action" title="Save this reply to your memory as a note"
         onClick={() => void onSaveIdea().then(() => flash("idea"), () => flash("idea-failed"))}>
         {done === "idea" ? "Saved ✓" : done === "idea-failed" ? "Couldn't save" : "Save idea"}
       </button>
-    </div>
+    </span>
   );
 }
 

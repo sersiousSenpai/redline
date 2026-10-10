@@ -59,7 +59,7 @@ md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   return `<div class="rl-codeblock">${inner}<button class="rl-copy-btn" type="button" title="Copy" aria-label="Copy code">⧉</button></div>\n`;
 };
 
-/** Render the open end of a streaming reply (`StreamingBubble`): exactly
+/** Render the open end of a streaming reply (`StreamingText`): exactly
  *  MarkdownView's markup, except that the code fence starting on line
  *  `openFence` is still being written and so is not highlighted yet. */
 export function renderLiveMarkdown(src: string, openFence: number): string {
@@ -67,7 +67,7 @@ export function renderLiveMarkdown(src: string, openFence: number): string {
 }
 
 /** Whether `src` renders as its closed blocks `head` plus the rest, each on
- *  its own (`StreamingBubble`), exactly as it renders whole — asked of
+ *  its own (`StreamingText`), exactly as it renders whole — asked of
  *  markdown-it's own block parser: `head` must end where a top-level block
  *  starts, and no reference definition may link the halves. */
 export function splitsCleanly(src: string, head: string): boolean {

@@ -26,7 +26,7 @@
 // one as a line break, and this scan counts lines by `\n` alone.
 //
 // The scan reads fences line by line, without their containers, so it can
-// misread one (a fence opened on a list item's own line); `StreamingBubble`
+// misread one (a fence opened on a list item's own line); `StreamingText`
 // has markdown-it confirm each boundary before rendering across it.
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;

@@ -83,11 +83,9 @@ const flush = () =>
 
 const text = () => host.textContent ?? "";
 
-/** The small uppercase speaker labels above each bubble. */
+/** The quiet provider names over the replies. */
 const bylines = () =>
-  [...host.querySelectorAll("span")]
-    .filter((el) => el.style.textTransform === "uppercase")
-    .map((el) => el.textContent);
+  [...host.querySelectorAll(".rl-reply-byline")].map((el) => el.textContent);
 
 /** Types into a React-controlled textarea the way a keystroke would. */
 const type = (ta: HTMLTextAreaElement, value: string) => {
@@ -342,8 +340,8 @@ describe("report and chat views", () => {
     await act(async () => type(ta, "Why there?"));
     await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(sends()[0]?.[1]).toMatchObject({ mode: "chat", text: "Why there?" });
-    // The question shows as a chat bubble straight away, before any reload.
-    expect(host.querySelector(".rl-chat-user")?.textContent).toContain("Why there?");
+    // The question shows as the reviewer's card straight away, before any reload.
+    expect(host.querySelector("[data-user-turn]")?.textContent).toContain("Why there?");
   });
 
   it("files a streamed reply under its question's view and gives the reply box back", async () => {
@@ -354,17 +352,18 @@ describe("report and chat views", () => {
     await act(async () => type(ta, "Why there?"));
     await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     ta.blur();
-    // Streaming, the reply renders in the chat's own bubble — its closed
+    // Streaming, the reply renders in the chat's own reply — its closed
     // paragraph and its open one in one markdown view, and no caret after.
     await act(async () => {
       handlers["fork-delta"]({ payload: { sessionId: SESSION, commentId: ITEM, text: "Because\n\nit re-", seq: 1 } });
       await new Promise((r) => requestAnimationFrame(r));
     });
-    const live = host.querySelector(".rl-chat-agent");
+    const live = host.querySelector('[data-reply="live"]');
     expect(live?.querySelector(".rl-md")?.innerHTML).toBe("<p>Because</p>\n<p>it re-</p>\n");
-    expect(live?.textContent).toMatch(/it re-\s*$/);
+    expect(live?.querySelector(".rl-reply-text")?.textContent).toMatch(/it re-\s*$/);
+    expect(live?.textContent).not.toContain("▌");
     await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-r", body: "Because it re-renders." } }));
-    expect(host.querySelector(".rl-chat-agent")?.textContent).toContain("Because it re-renders.");
+    expect(host.querySelector('[data-reply="settled"]')?.textContent).toContain("Because it re-renders.");
     expect(document.activeElement).toBe(host.querySelector("textarea"));
     // The report keeps the whole exchange behind one chip.
     await act(async () => clickWith("← Report"));
@@ -397,10 +396,11 @@ describe("report and chat views", () => {
     expect(text()).toContain(asked.body);
     expect(text()).toContain(answered.body);
     expect(text()).not.toContain(reply.body);
-    expect(host.querySelector(".rl-chat-user")?.textContent).toContain(asked.body);
-    expect(host.querySelector(".rl-chat-agent")?.textContent).toContain(answered.body);
-    // Plain chat: no bylines.
-    expect(bylines()).toEqual([]);
+    expect(host.querySelector("[data-user-turn]")?.textContent).toContain(asked.body);
+    expect(host.querySelector("[data-reply]")?.textContent).toContain(answered.body);
+    // The reply anatomy here too: the reply under its provider's quiet name,
+    // the reviewer's turn a card with none.
+    expect(bylines()).toEqual(["Claude"]);
     expect(text()).toContain("← Report");
   });
 
@@ -588,12 +588,14 @@ describe("the discussion reads like a discussion", () => {
     expect(text()).not.toContain("read-only");
   });
 
-  it("bylines every bubble: You, then the agent", async () => {
+  it("bylines the agent's replies, and shows the reviewer's turns as cards with no You", async () => {
     const followUp: ThreadMessage = { ...seed, id: "m-3", body: "And the reader?", createdAt: 4 };
     history = [seed, reply, followUp];
     await mount(null);
     await act(async () => clickWith("Discussion"));
-    expect(bylines()).toEqual(["Claude", "You"]);
+    expect(bylines()).toEqual(["Claude"]);
+    expect([...host.querySelectorAll("[data-user-turn]")].map((el) => el.textContent?.trim())).toEqual(["And the reader?"]);
+    expect(text()).not.toMatch(/\bYou\b/);
   });
 
   it("shows the reply box without a click", async () => {
@@ -616,7 +618,8 @@ describe("the discussion reads like a discussion", () => {
     await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(sends()).toHaveLength(0);
     expect(ta.value).toBe("Next question");
-    expect(text()).toContain("Stop");
+    // The fork can't queue: the one button stays Stop with text in the box.
+    expect(host.querySelector<HTMLButtonElement>(".rl-send")?.dataset.send).toBe("stop");
   });
 });
 

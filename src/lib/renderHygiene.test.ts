@@ -91,6 +91,53 @@ describe("chat drafts", () => {
   });
 });
 
+describe("one reply anatomy", () => {
+  // Design decision 4: every chat surface draws a reply through `ReplyBlock`,
+  // whose tail row is the turn's one status line — so no surface keeps a
+  // progress strip, a second working indicator, or a bubble of its own.
+  const SURFACES = [
+    "src/components/ChatRoom.tsx",
+    "src/components/BrowserChat.tsx",
+    "src/components/MissionChat.tsx",
+    "src/components/MemoryAsk.tsx",
+    "src/components/CommentThread.tsx",
+    "src/components/ReviewThread.tsx",
+    "src/components/DrafterSidecar.tsx",
+  ];
+
+  it.each(SURFACES)("%s streams and settles its replies through ReplyBlock", (path) => {
+    const source = read(path);
+    expect(source).toMatch(/<ReplyBlock[^>]*\n?[^>]*phase="live"/);
+    expect(source).toMatch(/<ReplyBlock[^>]*\n?[^>]*phase="settled"/);
+    // The old bubble, footer and per-surface markdown rows are gone.
+    expect(source).not.toMatch(/StreamingBubble|<TurnFooter|<MarkdownView|<StreamingText/);
+  });
+
+  it.each(SURFACES)("%s draws no working indicator in its thread", (path) => {
+    const source = read(path);
+    const uses = source.match(/<WorkingIndicator\b/g) ?? [];
+    if (!path.endsWith("CommentThread.tsx")) return expect(uses).toEqual([]);
+    // The plan comment's one: the collapsed heading's badge, shown only
+    // while the thread (and so its reply's status line) is folded away.
+    expect(uses).toHaveLength(1);
+    const at = source.indexOf("<WorkingIndicator");
+    expect(source.slice(at - 300, at)).toContain('status === "streaming" && !expanded');
+  });
+
+  it("the chat room has no progress strip: Stop is the composer's, status the reply's", () => {
+    const room = read("src/components/ChatRoom.tsx");
+    expect(room).not.toContain("ChatTurnProgress");
+    expect(room).not.toContain("data-chat-progress");
+    expect(room).toMatch(/streaming, onStop: cancel/);
+  });
+
+  it("every queueing surface shows its queue in the tray, and no surface shows it in the transcript", () => {
+    for (const path of SURFACES.slice(0, 4)) expect(read(path), path).toMatch(/<QueueTray\b/);
+    expect(read("src/hooks/useAgentTurn.ts")).toMatch(/messages: state\.messages,/);
+    for (const path of SURFACES) expect(read(path), path).not.toMatch(/QueuedChip|status === "queued"/);
+  });
+});
+
 describe("content-visibility", () => {
   const ROWS = [".rl-session-row", ".rl-revision-row", ".rl-file-row"];
   const css = (dir: string): string[] =>

@@ -8,7 +8,7 @@ import { flushSync } from "react-dom";
 import * as Y from "yjs";
 import { useAgentTurn } from "../../src/hooks/useAgentTurn";
 import { MarkdownView } from "../../src/components/MarkdownView";
-import StreamingBubble from "../../src/components/StreamingBubble";
+import { ReplyBlock } from "../../src/components/ReplyBlock";
 import { createCollabProvider } from "../../src/collab/provider";
 import { useRepoIcons } from "../../src/hooks/useRepoIcons";
 import { deliver, knobs, listenerCount } from "./services";
@@ -37,7 +37,7 @@ function mount(node: React.ReactNode): () => void {
   };
 }
 
-// --- A chat surface: the shared turn hook, settled bubbles, a live bubble ---
+// --- A chat surface: the shared turn hook, settled rows, a live reply ---
 
 function Chat({ id }: { id: string }) {
   const turn = useAgentTurn({
@@ -57,7 +57,7 @@ function Chat({ id }: { id: string }) {
           <MarkdownView body={m.body} rich />
         </div>
       ))}
-      {turn.status === "streaming" && <StreamingBubble text={turn.liveText} agent="Claude" />}
+      {turn.status === "streaming" && <ReplyBlock phase="live" byline="Claude" text={turn.liveText} />}
     </div>
   );
 }

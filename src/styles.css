@@ -3320,22 +3320,6 @@ html[data-rl-tile-drag] * {
   border-top: 1px solid var(--color-rule);
   padding-top: 6px;
 }
-.rl-review-thread-msg[data-role="user"] {
-  align-self: flex-end;
-  max-width: 90%;
-}
-.rl-review-thread-user {
-  padding: 4px 8px;
-  border-radius: 8px;
-  background: var(--color-anchor-bg);
-  color: var(--color-anchor-text);
-  white-space: pre-wrap;
-}
-.rl-review-thread-error {
-  font-size: 12px;
-  color: var(--color-warning);
-  white-space: pre-wrap;
-}
 .rl-review-thread-composer {
   display: flex;
   gap: 6px;
@@ -4090,6 +4074,13 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 }
 .rl-fd-go.is-armed:hover {
   filter: brightness(1.08);
+}
+/* A chat's reply is running and the box is empty: the same key is Stop. */
+.rl-fd-go[data-state="stop"] {
+  border-color: transparent;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  cursor: pointer;
 }
 
 .rl-fd-menu {
@@ -5480,13 +5471,11 @@ html[data-rl-resizing] [data-rl-pane] {
 /* Under the always-open composer: escalation left, Discard right. */
 .rl-discussion-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .rl-discard-thread { margin-left: auto; }
-/* Chat beside the report: the heading's Chat / ← Report switch, plain
-   bubbles (the reviewer's right-aligned and tinted, the agent's borderless),
-   and the report's one-line stand-in for a run of chat turns. */
+/* Chat beside the report: the heading's Chat / ← Report switch, and the
+   report's one-line stand-in for a run of chat turns. Its turns are the
+   shared reply anatomy (ReplyBlock.css). */
 .rl-chat-toggle { flex-shrink: 0; padding: 1px 7px; border: 1px solid var(--color-rule); border-radius: 999px; color: var(--color-info); font-size: 10.5px; line-height: 1.5; }
 .rl-chat-toggle:hover { background: var(--color-bg-elevated); }
-.rl-chat-user { align-self: flex-end; max-width: 85%; padding: 9px 12px; border-radius: 10px; background: color-mix(in srgb, var(--color-info) 18%, var(--color-paper)); }
-.rl-chat-agent { align-self: flex-start; max-width: 100%; }
 .rl-chat-empty { color: var(--color-ink-muted); font-size: 11px; }
 .rl-chatted-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .rl-chatted-chip { padding: 3px 10px; border-radius: 999px; background: var(--color-bg-elevated); color: var(--color-ink-muted); font-size: 11px; }

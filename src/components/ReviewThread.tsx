@@ -6,13 +6,13 @@ import { useSharedDraft } from "../hooks/useSharedDraft";
 
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { priorUserBody } from "../lib/agentTurn";
-import { RetryNote } from "./QueuedChip";
+import { backendLabel } from "../lib/backendChoice";
+import { RetryNote } from "./TurnNotes";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 
 import type { ThreadMessage } from "../types";
-import { MarkdownView } from "./MarkdownView";
-import { StreamingText } from "./StreamingBubble";
-import { WorkingIndicator } from "./WorkingIndicator";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, sendState } from "./SendStopButton";
 
 // Per-annotation discussion thread for the Code Review surface. The compact
 // sibling of CommentThread: same `fork-*` streaming contract and
@@ -45,6 +45,10 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
     // The fork events name the scope `sessionId` for every family; here that
     // scope is the review, and the item is the annotation or question.
     idFields: { sessionId: reviewId, commentId: annotationId },
+    // Rows are stored under the review, so their meters are too: a reload
+    // keeps each reply's steps line and tail.
+    meterKind: "fork",
+    meterThreadId: reviewId,
     historyCmd: "get_thread",
     historyArgs: { sessionId: reviewId, commentId: annotationId },
     commands: {
@@ -76,6 +80,10 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
   });
   const { messages, liveText } = turn;
   const streaming = turn.status === "streaming";
+  // The provider the thread runs on signs its replies (BC-26), streaming and
+  // settled alike; Redline signs the error rows it wrote.
+  const provider = backendLabel(monochat?.harness.backend ?? "claude-code");
+  const seat = monochat?.harness.model ?? null;
   useEffect(() => { if (turn.loaded) monochat?.reportActivity?.(`${reviewId}:${annotationId}`, streaming); }, [turn.loaded, reviewId, annotationId, streaming, monochat?.reportActivity]);
 
   const send = () => {
@@ -100,41 +108,42 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
 
   return (
     <div className="rl-review-thread">
-      {messages.map((m, i) => (
-        <div key={m.id} className="rl-review-thread-msg" data-role={m.role}>
-          {m.role === "assistant" ? (
-            m.status === "error" ? (
-              // Redline wrote this sentence, not the model.
-              <div className="flex flex-col">
-                <div className="rl-review-thread-error">{m.body}</div>
-                {i === messages.length - 1 &&
-                  (() => {
-                    const onRetry = retryAt(i);
-                    return onRetry ? <RetryNote onRetry={onRetry} /> : null;
-                  })()}
-              </div>
-            ) : (
-              <MarkdownView body={m.body} compact rich />
-            )
-          ) : (
-            <div className="rl-review-thread-user">{m.body}</div>
-          )}
-        </div>
-      ))}
+      {messages.map((m, i) =>
+        m.role === "assistant" ? (
+          <ReplyBlock
+            key={m.id}
+            phase="settled"
+            byline={m.status === "error" ? "Redline" : provider}
+            seat={seat}
+            text={m.body}
+            error={m.status === "error"}
+            meter={turn.meters[m.id]}
+            inspect={{ surface: "fork", key: annotationId }}
+          >
+            {m.status === "error" &&
+              i === messages.length - 1 &&
+              (() => {
+                const onRetry = retryAt(i);
+                return onRetry ? <RetryNote onRetry={onRetry} /> : null;
+              })()}
+          </ReplyBlock>
+        ) : (
+          <UserTurn key={m.id} body={m.body} />
+        ),
+      )}
       {streaming && (
-        <div className="rl-review-thread-msg" data-role="assistant">
-          {turn.retrying ? (
-            <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
-              ⟳ Temporary model error — retrying…
-            </div>
-          ) : liveText ? (
-            <StreamingText text={liveText} />
-          ) : (
-            // Backend clock, so a pane switch mid-turn comes back showing the
-            // true elapsed wait rather than restarting the counter.
-            <WorkingIndicator startedAt={turn.startedAt ?? undefined} />
-          )}
-        </div>
+        // The backend's clock, so a pane switch mid-turn comes back showing
+        // the true elapsed wait rather than restarting it.
+        <ReplyBlock
+          phase="live"
+          byline={provider}
+          seat={seat}
+          text={liveText}
+          meter={turn.meter}
+          activity={turn.activity}
+          startedAt={turn.startedAt}
+          retrying={turn.retrying}
+        />
       )}
       <div className="rl-review-thread-composer">
         <textarea
@@ -151,20 +160,9 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
             }
           }}
         />
-        {streaming ? (
-          <button type="button" className="rl-review-btn" onClick={cancel}>
-            Stop
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="rl-review-btn rl-review-btn-primary"
-            onClick={send}
-            disabled={!input.trim()}
-          >
-            Send
-          </button>
-        )}
+        {/* The review agent can't queue: while it replies, the one button is
+            Stop, and what is typed waits in the box. */}
+        <SendStopButton state={sendState(streaming, !!input.trim(), false)} onSend={send} onStop={cancel} disabled={!input.trim()} />
       </div>
     </div>
   );

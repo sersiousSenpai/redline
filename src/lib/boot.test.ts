@@ -235,7 +235,7 @@ describe("boot-path JS contract", () => {
   });
 
   // The raw-wire inspector is devtools: most turns never open it, and it is
-  // reached from a chip on the turn badge rather than from App. So the guard
+  // reached from a reply's tail rather than from App. So the guard
   // is not "App doesn't import it" — it is "NOTHING imports it statically",
   // which is the property that actually keeps it out of every chunk but its
   // own.
@@ -252,8 +252,9 @@ describe("boot-path JS contract", () => {
         `${file} statically imports StreamInspector`,
       ).toBe(null);
     }
-    const bubble = readFileSync(join(dir, "StreamingBubble.tsx"), "utf8");
-    expect(bubble).toContain('import("./StreamInspector")');
+    // Reached from a settled reply's ⋯, the thing it explains.
+    const reply = readFileSync(join(dir, "ReplyBlock.tsx"), "utf8");
+    expect(reply).toContain('import("./StreamInspector")');
   });
 
   it("the terminal dock is deferred, and its mount is queued not raced", () => {

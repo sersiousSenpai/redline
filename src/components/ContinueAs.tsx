@@ -5,5 +5,6 @@ export const ConversationSourceContext = createContext<ConversationSource | null
 export function ContinueAs({ through, disabled = false }: { through?: string; disabled?: boolean }) {
   const source = useContext(ConversationSourceContext);
   if (!source) return null;
-  return <button type="button" disabled={disabled || !hasContinuationMessages(source, through)} title="Prepare an editable brief with this conversation’s sources" className="rounded border px-2 py-1 text-xs disabled:opacity-40" style={{ borderColor: "var(--color-rule)", color: "var(--color-info)", whiteSpace: "nowrap" }} onClick={() => window.dispatchEvent(new CustomEvent(CONTINUE_EVENT, { detail: prepareConversationPreview(source, through) }))}>Continue as…</button>;
+  // One of a reply's actions, in its tail row (ReplyBlock.css).
+  return <button type="button" disabled={disabled || !hasContinuationMessages(source, through)} title="Prepare an editable brief with this conversation’s sources" className="rl-reply-action" data-tone="info" onClick={() => window.dispatchEvent(new CustomEvent(CONTINUE_EVENT, { detail: prepareConversationPreview(source, through) }))}>Continue as…</button>;
 }

@@ -3,8 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
-const { turn, invokeMock, config, captureMock, bubble } = vi.hoisted(() => ({
-  bubble: { agent: null as string | null },
+const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
     makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
@@ -15,15 +14,14 @@ const { turn, invokeMock, config, captureMock, bubble } = vi.hoisted(() => ({
   invokeMock: vi.fn(async (cmd?: string) => cmd === "preflight_status"
     ? { codex: { found: true, usable: true, signedIn: true, authState: "signed-in" }, hook: {}, skill: {} }
     : []),
-  turn: { messages: [] as BrowseMessage[], liveText: "", status: "idle", startedAt: null, loaded: true,
+  turn: { messages: [] as BrowseMessage[], queue: [], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), clear: vi.fn(), meter: null, activity: null, meters: {} },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
-vi.mock("./StreamingBubble", () => ({ default: ({ agent }: { agent: string }) => { bubble.agent = agent; return null; } }));
-vi.mock("./TurnFooter", () => ({ default: () => null, ThreadMeterStrip: () => null }));
+vi.mock("./StreamingText", () => ({ StreamingText: () => null }));
 import { BrowserChat } from "./BrowserChat";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -180,7 +178,7 @@ describe("page conversation header", () => {
     await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
     // The inherited Codex pick lands once the probe answers.
     await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
-    const bylines = [...host.querySelectorAll("[data-browser-chat-messages] > div > span:first-child")].map(span => span.textContent);
+    const bylines = [...host.querySelectorAll("[data-browser-chat-messages] .rl-reply-byline")].map(span => span.textContent);
     // An error row is Redline's note about this chat's current turn.
     expect(bylines).toEqual(["Claude", "Codex", "Claude", "Codex"]);
     // A reply settling live keeps the provider its done event named.
@@ -201,7 +199,7 @@ describe("page conversation header", () => {
     turn.status = "streaming";
     try {
       await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
-      expect(bubble.agent).toBe("Claude");
+      expect(host.querySelector('[data-reply="live"] .rl-reply-byline')?.textContent).toBe("Claude");
     } finally {
       turn.status = "idle";
     }

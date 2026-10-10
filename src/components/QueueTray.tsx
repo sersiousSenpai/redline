@@ -1,19 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
-import { useState } from "react";
+// Copyright 2026 Yusuf Al-Bazian
+//! What waits behind the running reply (design decision 6): a pill anchored
+//! above the composer — "2 queued", the next one's text, ⌄ — that expands
+//! upward into one row per queued message. × takes a message out of the queue
+//! and puts its text back in the composer; Steer (the chat room only — browse
+//! has no steer route, BC-29) delivers it now.
+//!
+//! It OVERLAYS the thread from a zero-height anchor rather than taking height
+//! from it: the thread's viewport keeps its size whether anything is queued,
+//! and each queueing surface reserves the pill's height at the bottom of its
+//! thread, so the newest line is never under it.
+
+import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import "./ChatWorkbench.css";
-export interface QueueItem { id: string; text: string; mode: "chat" | "plan" | "build"; assignee?: "chat" | "agent" }
-export function QueueTray({ rows, onSteer, onDelete, onEdit, onPromote }: { rows: QueueItem[]; onSteer: (id: string) => void; onDelete: (id: string) => void; onEdit: (id: string) => void; onPromote: (id: string) => void }) {
-  const [menu, setMenu] = useState<string | null>(null);
-  if (!rows.length) return null;
-  return <div className="rl-queue-tray" aria-label="Queued messages">{rows.map(row => {
-    const steerable = row.mode !== "plan" && row.assignee !== "agent";
-    return <div className="rl-queue-tray-row" key={row.id}>
-      <span title={row.mode} aria-label={row.mode}>{row.mode === "plan" ? "◇" : row.mode === "build" ? "⚒" : "◌"}</span>
-      <span className="rl-queue-text" tabIndex={0}>{row.text}</span>
-      <button type="button" disabled={!steerable || row.id.includes("-tmp-")} title={steerable ? "Deliver this instruction now; unavailable transports interrupt and send next" : "Plans and new agents wait for a quiet chat"} onClick={() => onSteer(row.id)}>↪ Steer</button>
-      <button type="button" aria-label={`Delete ${row.text}`} onClick={() => onDelete(row.id)}>×</button>
-      <div className="rl-queue-more"><button type="button" aria-label={`More actions for ${row.text}`} aria-expanded={menu === row.id} onClick={() => setMenu(menu === row.id ? null : row.id)}>⋯</button>
-      {menu === row.id && <div role="menu"><button type="button" role="menuitem" onClick={() => { setMenu(null); onEdit(row.id); }}>Edit</button><button type="button" role="menuitem" onClick={() => { setMenu(null); onPromote(row.id); }}>Send next</button></div>}</div>
-    </div>;
-  })}</div>;
+
+export interface QueueItem { id: string; text: string; mode?: "chat" | "plan" | "build"; assignee?: "chat" | "agent" }
+
+export function QueueTray({ rows, onRemove, onSteer, onPromote }: {
+  rows: QueueItem[];
+  /** × — out of the queue, its text back in the composer. */
+  onRemove: (id: string) => void;
+  /** Deliver it now, where the surface can. */
+  onSteer?: (id: string) => void;
+  /** Send it next, ahead of the rest. */
+  onPromote?: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const empty = rows.length === 0;
+  useEffect(() => { if (empty) setOpen(false); }, [empty]);
+  if (empty) return null;
+  return <div className="rl-queue-anchor">
+    <div className="rl-queue-tray" role="group" aria-label="Queued messages">
+      {open && <ul className="rl-queue-list">{rows.map((row, i) => {
+        // Plans and new agents wait for a quiet chat, and a row the backend
+        // hasn't confirmed has no id to deliver yet.
+        const steerable = row.mode !== "plan" && row.assignee !== "agent" && !row.id.includes("-tmp-");
+        return <li className="rl-queue-row" key={row.id}>
+          {row.mode && row.mode !== "chat" && <span className="rl-queue-mode" title={row.mode}>{row.mode === "plan" ? "◇" : "⚒"}</span>}
+          <span className="rl-queue-text" tabIndex={0}>{row.text}</span>
+          {onSteer && <button type="button" disabled={!steerable} title={steerable ? "Deliver this instruction now; where it can't be injected, the reply is interrupted and this sends next" : "Plans and new agents wait for a quiet chat"} onClick={() => onSteer(row.id)}>↪ Steer</button>}
+          {onPromote && i > 0 && <button type="button" title="Send this one next" onClick={() => onPromote(row.id)}>↑ Next</button>}
+          <button type="button" className="rl-queue-x" aria-label={`Unqueue ${row.text}`} title="Take it out of the queue and put the text back in the composer" onClick={() => onRemove(row.id)}>×</button>
+        </li>;
+      })}</ul>}
+      <button type="button" className="rl-queue-pill" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span className="rl-queue-count">{rows.length} queued</span>
+        <span className="rl-queue-preview">{rows[0].text}</span>
+        <ChevronDown size={13} aria-hidden className="rl-queue-chevron"/>
+      </button>
+    </div>
+  </div>;
 }
