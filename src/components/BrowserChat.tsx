@@ -452,7 +452,7 @@ function MessageBubble({
   contextReset?: boolean;
 }) {
   if (msg.role === "user") {
-    return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} />;
+    return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} onOpenLink={onOpenLink} />;
   }
   const isError = msg.status === "error";
   return (

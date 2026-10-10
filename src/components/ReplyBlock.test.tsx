@@ -252,6 +252,13 @@ describe("the user's turn", () => {
     await act(async () => Array.from(card.querySelectorAll("button")).find((b) => b.textContent === "resend")!.click());
     expect(resend).toHaveBeenCalledOnce();
   });
+
+  it("opens a link the reviewer sent where the surface opens links", async () => {
+    const open = vi.fn();
+    await act(async () => root.render(<UserTurn body="Compare with https://example.com/spec" onOpenLink={open} />));
+    await act(async () => host.querySelector<HTMLAnchorElement>("[data-user-turn] a")!.click());
+    expect(open).toHaveBeenCalledWith("https://example.com/spec");
+  });
 });
 
 describe("the stylesheet", () => {

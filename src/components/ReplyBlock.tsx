@@ -353,6 +353,7 @@ export function UserTurn({
   room = false,
   onResend,
   unsent = false,
+  onOpenLink,
   children,
 }: {
   body: string;
@@ -360,12 +361,14 @@ export function UserTurn({
   /** The send never became a turn: say so, and offer it again. */
   unsent?: boolean;
   onResend?: () => void;
+  /** Where a link in it opens, on a surface that opens links itself. */
+  onOpenLink?: (url: string) => void;
   /** What rode with it (attachments). */
   children?: ReactNode;
 }) {
   return (
     <div className="rl-user-turn" data-user-turn data-room={room || undefined}>
-      <MarkdownView body={body} compact room={room} />
+      <MarkdownView body={body} compact room={room} onLinkClick={onOpenLink} />
       {children}
       {unsent && <UnsentNote onResend={onResend} />}
     </div>

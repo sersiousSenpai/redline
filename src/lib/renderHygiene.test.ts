@@ -124,6 +124,12 @@ describe("one reply anatomy", () => {
     expect(source.slice(at - 300, at)).toContain('status === "streaming" && !expanded');
   });
 
+  it("a surface that opens links in a Redline tab opens the reviewer's links there too", () => {
+    for (const path of ["src/components/BrowserChat.tsx", "src/components/MissionChat.tsx"]) {
+      expect(read(path), path).toMatch(/<UserTurn [^>]*onOpenLink=\{onOpenLink\}/);
+    }
+  });
+
   it("the chat room has no progress strip: Stop is the composer's, status the reply's", () => {
     const room = read("src/components/ChatRoom.tsx");
     expect(room).not.toContain("ChatTurnProgress");
