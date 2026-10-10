@@ -73,10 +73,15 @@
 .rl-monochat .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; max-height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; flex-shrink: 0; margin: 0; padding: 0 16px 14px; opacity: 1; animation: none; justify-content: flex-start; }
 .rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 8px 2px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; transform: none; }
 .rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-input { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
-.rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink) 68%, transparent); }
+/* Between the muted and the full ink, never see-through: a translucent ink
+   fell under 4.5:1 on the low-contrast themes (theme/doorContrast.test.ts). */
+.rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink-muted) 66%, var(--color-ink)); }
 .rl-monochat .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
 .rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
 .rl-monochat .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
+/* A fainter wash than the menus' 6%, which pulls their label under 4.5:1 on
+   Red Sand (theme/doorContrast.test.ts). */
+.rl-monochat .rl-composer-chip:not(:hover, [aria-expanded=true]) { background: color-mix(in srgb, var(--color-ink) 2%, transparent); }
 .rl-monochat .rl-fd-go { width: 34px; height: 34px; border-radius: 50%; }
 .rl-monochat .rl-composer-accessories { display: contents; }
 .rl-monochat .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
@@ -145,7 +150,7 @@
 
 /* What rides along with a send. A pressed chip is attached; nothing else is. */
 .rl-context-chips { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; margin: 0 0 10px; }
-.rl-context-chips button { max-width: 260px; padding: 4px 9px; border: 1px solid var(--color-rule); border-radius: 20px; color: var(--color-ink-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-context-chips button { max-width: 260px; min-height: 24px; padding: 4px 9px; border: 1px solid var(--color-rule); border-radius: 20px; color: var(--color-ink-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-context-chips button[aria-pressed="true"] { color: var(--color-ink); background: var(--color-paper); border-color: var(--color-ink-muted); }
 .rl-monochat .rl-context-chips { margin: 0 8px 10px; }
 
@@ -168,9 +173,11 @@
 .rl-fd-recent-chips .rl-fd-recent { justify-self: start; }
 /* Head → first entry keeps its 20px; first → second keeps its 22px. */
 .rl-fd-recent-chips .rl-fd-recent:nth-child(2) { margin-left: 2px; }
+/* 24px tall for the pointer (WCAG 2.5.8): the room is taken above the text,
+   so the hairline still sits right under it. */
 .rl-monochat .rl-fd-recent.rl-fd-suggestion {
   max-width: min(220px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 0 0 3px; border: 0; border-radius: 0; background: none;
+  min-height: 24px; padding: 6px 0 3px; border: 0; border-radius: 0; background: none;
   border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
   color: var(--color-ink-muted); font-size: 12.5px;
   transition: color 160ms ease, border-color 160ms ease;

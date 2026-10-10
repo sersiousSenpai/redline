@@ -26,4 +26,7 @@
 .rl-monochat-float .rl-fd-tools { flex-wrap:wrap; gap:7px; }
 .rl-monochat-float .rl-fd-tools>div[data-no-drag] { max-width:220px; }
 .rl-monochat-float .rl-fd-strip { margin-top:8px; }
+/* A fainter wash than the menus' 6%: on a low-contrast theme (Red Sand) the
+   heavier tint pulls the label under 4.5:1 (theme/doorContrast.test.ts). */
+.rl-monochat-float .rl-composer-chip:not(:hover, [aria-expanded=true]) { background:color-mix(in srgb, var(--color-ink) 2%, transparent); }
 @media (prefers-reduced-motion: reduce) { .rl-monochat-float * { transition:none !important; animation:none !important; } }

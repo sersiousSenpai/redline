@@ -3939,8 +3939,10 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 @supports (field-sizing: content) {
   .rl-fd-input { field-sizing: content; }
 }
+/* The muted ink itself, not a see-through 78% of it: placeholder text is
+   text, and the fade fell under 4.5:1 on most themes (doorContrast.test). */
 .rl-fd-input::placeholder {
-  color: color-mix(in srgb, var(--color-ink-muted) 78%, transparent);
+  color: var(--color-ink-muted);
 }
 .rl-fd-partial {
   padding: 0 4px;
@@ -4531,17 +4533,18 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   color: var(--color-ink-muted);
   cursor: pointer;
 }
-/* The destination, spelled out. It fades UP on hover rather than appearing —
-   the pill must not change size under the cursor it is being clicked with. */
+/* The destination, spelled out. It lifts to full ink on hover rather than
+   appearing — the pill must not change size under the cursor it is being
+   clicked with — and rests at the muted ink, never fainter: it is text, and
+   a faded rest fell under 4.5:1 (theme/doorContrast.test.ts). */
 .rl-fd-flight-open .rl-fd-detail {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  opacity: 0.75;
-  transition: opacity 160ms ease;
+  transition: color 160ms ease;
 }
 .rl-fd-flight:hover .rl-fd-flight-open .rl-fd-detail {
-  opacity: 1;
+  color: var(--color-ink);
 }
 .rl-fd-flight-open:focus-visible {
   outline: 2px solid var(--color-info);
