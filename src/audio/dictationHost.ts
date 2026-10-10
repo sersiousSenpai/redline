@@ -130,6 +130,9 @@ export class DictationHost {
       start: (mode, since, source) => this.start(mode, since, source),
       finish: () => void this.finish(),
       cancel: () => this.cancel(),
+      // A click during the hold: the key was modifying it (Option-click),
+      // unless words were already heard — those are kept.
+      yield: () => (this.session && (this.session.heard || this.session.taker) ? void this.finish() : this.cancel()),
     });
     deps.broker.attach(DICTATION_OWNER, {
       partial: (text) => this.partial(text),

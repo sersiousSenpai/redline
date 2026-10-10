@@ -53,7 +53,7 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
         "voice" => {
             let v = value.get("value")?.as_str()?;
             let code = v.strip_prefix("down:").or_else(|| v.strip_prefix("field:"));
-            if !matches!(v, "up" | "other" | "escape") && !code.is_some_and(|c| matches!(c, "AltRight" | "MetaRight" | "ControlRight")) { return None; }
+            if !matches!(v, "up" | "other" | "press" | "escape") && !code.is_some_and(|c| matches!(c, "AltRight" | "MetaRight" | "ControlRight")) { return None; }
         }
         "focus" | "interaction" => {}
         _ => return None,
@@ -249,6 +249,7 @@ mod tests {
             r#"{"kind":"voice","value":"down:ControlRight"}"#,
             r#"{"kind":"voice","value":"up"}"#,
             r#"{"kind":"voice","value":"other"}"#,
+            r#"{"kind":"voice","value":"press"}"#,
             r#"{"kind":"voice","value":"escape"}"#,
         ] {
             assert!(signal_for_frame(raw, false).is_some(), "{raw}");
@@ -269,7 +270,7 @@ mod tests {
         assert_eq!(press(r#"{"kind":"voice","value":"down:AltRight"}"#).as_deref(), Some("AltRight"));
         assert_eq!(press(r#"{"kind":"voice","value":"field:MetaRight"}"#).as_deref(), Some("MetaRight"));
         // Ending or cancelling a capture opens nothing.
-        for raw in [r#"{"kind":"voice","value":"up"}"#, r#"{"kind":"voice","value":"other"}"#, r#"{"kind":"voice","value":"escape"}"#, r#"{"kind":"shortcut","value":"new-tab"}"#] {
+        for raw in [r#"{"kind":"voice","value":"up"}"#, r#"{"kind":"voice","value":"other"}"#, r#"{"kind":"voice","value":"press"}"#, r#"{"kind":"voice","value":"escape"}"#, r#"{"kind":"shortcut","value":"new-tab"}"#] {
             assert_eq!(press(raw), None, "{raw}");
         }
     }

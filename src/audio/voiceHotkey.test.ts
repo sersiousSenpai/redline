@@ -58,6 +58,21 @@ describe("stepHotkey", () => {
     expect(holding.state.phase).toBe("idle");
   });
 
+  it("never starts for a click the key modifies, and leaves a click once listening to the capture", () => {
+    // Option-click in the terminal before the hold counts: no capture.
+    const quick = run([down(0), { type: "press", at: 120 }, elapsed(HOLD_MS), up(400)]);
+    expect(quick.effects).toEqual([]);
+    expect(quick.state.phase).toBe("idle");
+    // After: the capture yields — cancelled, or finished if it heard words.
+    const late = run([down(0), elapsed(HOLD_MS), { type: "press", at: 400 }, up(500)]);
+    expect(late.effects).toEqual(["start:hold", "yield"]);
+    expect(late.state.phase).toBe("idle");
+    // A click with the mic locked open is just a click.
+    const locked = run([down(0), up(90), down(200), up(260), { type: "press", at: 900 }]);
+    expect(locked.effects).toEqual(["start:lock"]);
+    expect(locked.state.phase).toBe("locked");
+  });
+
   it("ignores the key pressed with another modifier", () => {
     const r = run([down(0, false), elapsed(HOLD_MS), up(600)]);
     expect(r.effects).toEqual([]);
@@ -130,13 +145,13 @@ describe("soloPress", () => {
 });
 
 describe("VoiceHotkey on the window", () => {
-  let hooks: { start: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> };
+  let hooks: { start: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn>; yield: ReturnType<typeof vi.fn> };
   let key: HoldKey;
   let hotkey: VoiceHotkey;
   let detach: () => void;
   beforeEach(() => {
     vi.useFakeTimers();
-    hooks = { start: vi.fn(), finish: vi.fn(), cancel: vi.fn() };
+    hooks = { start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), yield: vi.fn() };
     key = "AltRight";
     hotkey = new VoiceHotkey(hooks, () => key, () => Date.now());
     detach = hotkey.attach(window);
@@ -191,12 +206,12 @@ describe("VoiceHotkey on the window", () => {
     press("keydown", { code: "AltRight", key: "Alt", altKey: true });
     vi.advanceTimersByTime(HOLD_MS);
     document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, altKey: true }));
-    expect(hooks.cancel).toHaveBeenCalledOnce();
+    expect(hooks.yield).toHaveBeenCalledOnce();
     press("keyup", { code: "AltRight", key: "Alt" });
     expect(hooks.finish).not.toHaveBeenCalled();
     // From a page too.
     hotkey.page("browser-t1", "down:AltRight");
-    hotkey.page("browser-t1", "other");
+    hotkey.page("browser-t1", "press");
     vi.advanceTimersByTime(HOLD_MS);
     expect(hooks.start).toHaveBeenCalledOnce();
   });

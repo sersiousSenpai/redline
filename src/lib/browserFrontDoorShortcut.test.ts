@@ -120,7 +120,7 @@ describe("the dictation key in embedded page frames", () => {
     listeners.get("pointerdown")!({ isTrusted: true });
     listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
     listeners.get("pointerdown")!({ isTrusted: true });
-    expect(voice(postMessage)).toEqual(["down:AltRight", "other", "up"]);
+    expect(voice(postMessage)).toEqual(["down:AltRight", "press", "up"]);
   });
 
   it("reports a modifier held with others as no hold, Esc on its own, and a release lost to a blur", () => {

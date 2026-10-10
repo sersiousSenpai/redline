@@ -17,8 +17,9 @@
   let held = null;
   for (const name of ["pointerdown", "touchstart"]) window.addEventListener(name, (event) => {
     if (!event.isTrusted) return;
-    // With the dictation key down, the key modifies the press: no dictation.
-    if (held) post("voice", "other");
+    // With the dictation key down: the key modifying the press, or a click
+    // while dictating.
+    if (held) post("voice", "press");
     if (window.top !== window) post("interaction", name);
   }, { capture: true, passive: true });
   window.addEventListener("keydown", (event) => {

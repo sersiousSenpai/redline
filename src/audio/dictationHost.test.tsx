@@ -239,6 +239,31 @@ describe("dictating into a composer", () => {
     expect(host.busy()).toBe(false);
   });
 
+  it("drops a hold that a click shows was the key modifying it, but keeps words already said", async () => {
+    const { shown } = await composer();
+    // Option-click: nothing said, the capture goes quietly.
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    press({ type: "press", at: now + 400 });
+    await settle();
+    expect(mic.calls[mic.calls.length - 1]).toEqual(["dictation_kill_all", { owner: DICTATION_OWNER }]);
+    expect(strip.get()).toBeNull();
+    press({ type: "up", at: now + 500 });
+    // Speaking, then a click: what was said lands.
+    now += 1000;
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    mic.say("the tray moves up");
+    now += 1200;
+    press({ type: "press", at: now });
+    await settle();
+    expect(shown()).toBe("The tray moves up");
+    press({ type: "up", at: now + 100 });
+    expect(host.hotkey.state.phase).toBe("idle");
+  });
+
   it("keeps the words heard when another gesture takes the mic", async () => {
     const { shown } = await composer();
     press({ type: "down", at: now, source: APP_KEYS, solo: true });

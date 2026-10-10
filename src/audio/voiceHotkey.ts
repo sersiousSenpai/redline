@@ -9,7 +9,8 @@
 // key that types "@", "€" or "[". So it reacts only to a SOLO hold: a press
 // with no other modifier down that is held `HOLD_MS` with no other key pressed
 // (nor a click: the key modifying one) starts a capture, and any other key
-// during the hold cancels it and goes on to the page untouched. The machine never prevents a default except for the
+// during the hold cancels it and goes on to the page untouched. A click once
+// it listens cancels it too, unless words were heard: then they are kept. The machine never prevents a default except for the
 // Esc that cancels a capture it started.
 //
 // - Hold ≥ `HOLD_MS`, release: dictate (push-to-talk).
@@ -108,6 +109,9 @@ export type HotkeyEvent =
   | { type: "up"; at: number }
   /** Any other key went down. */
   | { type: "other"; at: number }
+  /** A pointer went down: the key modifying a click (Option-click), or a
+   *  click while dictating. */
+  | { type: "press"; at: number }
   | { type: "escape"; at: number }
   /** `HOLD_MS` passed since a pending press. */
   | { type: "elapsed"; at: number }
@@ -122,7 +126,9 @@ export type HotkeyEvent =
 export type HotkeyEffect =
   | { type: "start"; mode: "hold" | "lock"; since: number; source: KeySource }
   | { type: "finish" }
-  | { type: "cancel" };
+  | { type: "cancel" }
+  /** Cancel, unless the capture heard words: then finish, keeping them. */
+  | { type: "yield" };
 
 export interface HotkeyStep {
   state: HotkeyState;
@@ -160,7 +166,7 @@ export function stepHotkey(s: HotkeyState, e: HotkeyEvent): HotkeyStep {
       }
       if (e.type === "locked") return to({ phase: "locked", since: e.at, source: APP_KEYS, tapAt: null, ending: false });
       // Every keystroke in the app passes here: no new state for nothing.
-      if ((e.type === "other" || e.type === "escape") && s.tapAt !== null) return to({ tapAt: null });
+      if ((e.type === "other" || e.type === "escape" || e.type === "press") && s.tapAt !== null) return to({ tapAt: null });
       return stay(s);
     case "pending":
       if (e.type === "elapsed" && e.at - s.since >= HOLD_MS) {
@@ -168,21 +174,23 @@ export function stepHotkey(s: HotkeyState, e: HotkeyEvent): HotkeyStep {
       }
       // A lone tap: maybe the first of two.
       if (e.type === "up") return to({ phase: "idle", tapAt: e.at });
-      if (e.type === "other" || e.type === "escape") return to({ phase: "spent" });
+      if (e.type === "other" || e.type === "escape" || e.type === "press") return to({ phase: "spent" });
       if (e.type === "blur") return to({ phase: "idle" });
       return stay(s);
     case "holding":
       if (e.type === "up" || e.type === "blur") return to({ phase: "busy" }, { type: "finish" });
       // A character typed with the key as AltGr: never a dictation.
       if (e.type === "other") return to({ phase: "spent" }, { type: "cancel" });
+      if (e.type === "press") return to({ phase: "spent" }, { type: "yield" });
       if (e.type === "escape") return to({ phase: "spent" }, { type: "cancel" }, true);
       return stay(s);
     case "locked":
       if (e.type === "escape") return to({ phase: s.ending ? "spent" : "idle", ending: false }, { type: "cancel" }, true);
       if (e.type === "down") return e.solo ? to({ ending: true }) : stay(s);
       if (e.type === "up") return s.ending ? to({ phase: "busy", ending: false }, { type: "finish" }) : stay(s);
-      // Typing while the mic is open is fine; the key as AltGr is not a tap.
-      if (e.type === "other") return to({ ending: false });
+      // Typing (or clicking) while the mic is open is fine; the key as AltGr
+      // is not a tap.
+      if (e.type === "other" || e.type === "press") return to({ ending: false });
       return stay(s);
     case "spent":
       if (e.type === "up" || e.type === "blur") return to({ phase: "idle", tapAt: null });
@@ -203,6 +211,7 @@ export interface HotkeyHooks {
   start(mode: "hold" | "lock", since: number, source: KeySource): void;
   finish(): void;
   cancel(): void;
+  yield(): void;
 }
 
 /** The machine, its hold timer, and the window and page events that feed it. */
@@ -235,6 +244,7 @@ export class VoiceHotkey {
     if (effect?.type === "start") this.hooks.start(effect.mode, effect.since, effect.source);
     else if (effect?.type === "finish") this.hooks.finish();
     else if (effect?.type === "cancel") this.hooks.cancel();
+    else if (effect?.type === "yield") this.hooks.yield();
     return step.swallow;
   }
 
@@ -255,9 +265,7 @@ export class VoiceHotkey {
       if (e.code === this.key()) this.dispatch({ type: "up", at: this.now() });
     };
     const blur = () => this.dispatch({ type: "blur", at: this.now() });
-    // A press with the key down is the key modifying a click or a drag
-    // (Option-click in the terminal, Command-click on a link): another key.
-    const press = () => void this.dispatch({ type: "other", at: this.now() });
+    const press = () => void this.dispatch({ type: "press", at: this.now() });
     win.addEventListener("keydown", down, true);
     win.addEventListener("keyup", up, true);
     win.addEventListener("blur", blur);
@@ -273,7 +281,8 @@ export class VoiceHotkey {
   }
 
   /** A key a web page forwarded (`voice` page signals): `down:<code>` or
-   *  `field:<code>` (the page's focus takes text), `up`, `other`, `escape`. */
+   *  `field:<code>` (the page's focus takes text), `up`, `other`, `press`,
+   *  `escape`. */
   page(label: string, value: string): void {
     const at = this.now();
     const [kind, code] = value.split(":");
@@ -284,5 +293,6 @@ export class VoiceHotkey {
     } else if (kind === "up") this.dispatch({ type: "up", at });
     else if (kind === "escape") this.dispatch({ type: "escape", at });
     else if (kind === "other") this.dispatch({ type: "other", at });
+    else if (kind === "press") this.dispatch({ type: "press", at });
   }
 }
