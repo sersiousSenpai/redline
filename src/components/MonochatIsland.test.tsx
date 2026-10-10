@@ -236,6 +236,14 @@ describe("the door", () => {
     expect(tour.inert).toBeFalsy();
   });
 
+  it("leaves a notice that rises over it — the decision countdown — pressable", async () => {
+    const banner = document.createElement("div"); banner.dataset.rlOverDoor = ""; host.prepend(banner);
+    await render();
+    await click('[aria-label="Open front door"]');
+    expect(host.querySelector("header")!.inert).toBe(true);
+    expect(banner.inert).toBeFalsy();
+  });
+
   it("closes a saved chat mounted through an App-owned portal and restores workspace focus", async () => {
     function SavedChat() {
       const [open, setOpen] = useState(false);

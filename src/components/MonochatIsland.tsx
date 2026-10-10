@@ -312,12 +312,13 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     // its controls unavailable while the opaque front door owns the screen.
     // A modal layer of its own — a dialog, or the tour that wraps one — stays
     // live above it, and so does a status line: it has nothing to press, and
-    // silencing it would swallow what it says.
+    // silencing it would swallow what it says. So does a notice that rises
+    // over the door because it can't wait (the decision countdown).
     const restored: Array<[HTMLElement, boolean]> = [];
     let branch: HTMLElement | null = layer.current;
     while (branch && branch !== document.body) {
       for (const sibling of Array.from(branch.parentElement?.children ?? [])) {
-        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer], [role="status"]')) {
+        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer], [data-rl-over-door], [role="status"]')) {
           restored.push([sibling, sibling.inert]); sibling.inert = true;
         }
       }

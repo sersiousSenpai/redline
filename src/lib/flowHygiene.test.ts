@@ -98,6 +98,14 @@ describe("the decision countdown never brings Redline forward", () => {
     expect(app).not.toMatch(/\.unminimize\(\)|getCurrentWindow\(\)\.setFocus\(\)|w\.setFocus\(\)/);
   });
 
+  it("is never hidden under the open door or the pill's card, and its Open puts them aside", () => {
+    expect(between("<DecisionWindowBanner", "/>")).toContain("raised={frontDoorOpen || doorCompact}");
+    // Open is a press on the banner — a gesture, so a trip like any other.
+    const open = between("const openDecisionForReview = async () => {", "};");
+    expect(open).toContain("tripDoor();");
+    expect(open).toContain('selectSurfaceRef.current("document");');
+  });
+
   it("no webview may bring the window forward at all, nor a web page in the browser", () => {
     const capabilities = ["default", "attention"].map((name) =>
       readFileSync(join(process.cwd(), `src-tauri/capabilities/${name}.json`), "utf8"));

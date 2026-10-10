@@ -6884,6 +6884,11 @@ function App() {
     } catch (err) {
       console.error("claim_review failed", err);
     }
+    // A press on the banner, which rises over the door: a trip the user
+    // asked for, so the door and its card step aside for the plan.
+    tripDoor();
+    selectSurfaceRef.current("document");
+    selectSessions();
     setActiveId(dw.sessionId);
     void loadSession(dw.sessionId);
     setDecisionWindow(null);
@@ -8498,6 +8503,7 @@ function App() {
             onOpen={openDecisionForReview}
             onApprove={approveFromDecision}
             onExpire={dismissDecisionWindow}
+            raised={frontDoorOpen || doorCompact}
           />
         </Suspense>
       )}

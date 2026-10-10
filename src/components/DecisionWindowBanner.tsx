@@ -9,17 +9,29 @@ interface DecisionWindowBannerProps {
   onApprove: () => void;
   /** Fired once the countdown reaches zero (Ambient auto-approves server-side). */
   onExpire: () => void;
+  /** The Front Door or its compact card is out: the banner rises over them. */
+  raised?: boolean;
 }
+
+/** Over the door's paper and the pill's card (both at z-index 55 in
+ *  MonochatIsland.css), level with the door's own setup notice. */
+export const RAISED_Z = 75;
 
 // Ambient-mode prompt: a plan arrived, auto-approving on a countdown unless the
 // reviewer opens it. Because the terminal is co-present, this is visible without
 // any window switch — and it never makes one: from another app, the Dock
 // bounces instead (App's `plan-decision-window` listener).
+//
+// The countdown runs whatever the user is doing, so it is never hidden under
+// the door or its card: raised, it stays in its place under the header but
+// above them, and the door's inert sweep spares it (`data-rl-over-door`) so it
+// can be pressed. It never takes the caret.
 export function DecisionWindowBanner({
   event,
   onOpen,
   onApprove,
   onExpire,
+  raised = false,
 }: DecisionWindowBannerProps) {
   const [remaining, setRemaining] = useState(() =>
     Math.max(0, Math.ceil((event.deadlineMs - Date.now()) / 1000)),
@@ -51,11 +63,13 @@ export function DecisionWindowBanner({
     <div
       role="region"
       aria-label="Plan decision"
+      data-rl-over-door
       className="flex items-center justify-between gap-4 px-6 py-2 border-b font-sans"
       style={{
         borderColor: "var(--color-rule)",
         background: "var(--color-bg-elevated)",
         fontSize: "12px",
+        ...(raised ? { position: "relative", zIndex: RAISED_Z } : null),
       }}
     >
       <span className="sr-only" role="status" aria-live="polite">{said}</span>
