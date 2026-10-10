@@ -12567,6 +12567,9 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    // Waits for the main thread to end the utterance, then for its final
+    // transcript.
+    "dictation_cycle",
     // Reads the settings and checks the model files on disk.
     "dictation_status",
     // Waits for the main thread to end the capture, then for Whisper.

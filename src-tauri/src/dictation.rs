@@ -674,6 +674,10 @@ struct DictationInner {
     mic: Mutex<Option<WarmMic>>,
     #[cfg(target_os = "macos")]
     capture: Mutex<Option<CaptureTask>>,
+    /// A `dictation_cycle` waiting on the final transcript of the task it
+    /// finished: that task's number, and where the text goes.
+    #[cfg(target_os = "macos")]
+    final_for: Mutex<Option<(u64, std::sync::mpsc::Sender<String>)>>,
 }
 
 impl DictationInner {
@@ -727,6 +731,18 @@ impl DictationInner {
             .filter(|h| h.owner == owner)
             .map(|h| h.seq)
     }
+
+    /// Hand recognition task `task`'s final transcript (`None`: it ended
+    /// without one) to the cycle waiting on it, if one is.
+    #[cfg(target_os = "macos")]
+    fn deliver_final(&self, task: u64, text: Option<String>) {
+        let mut waiting = self.final_for.lock().unwrap();
+        if waiting.as_ref().is_some_and(|(t, _)| *t == task) {
+            if let (Some((_, tx)), Some(text)) = (waiting.take(), text) {
+                let _ = tx.send(text);
+            }
+        }
+    }
 }
 
 /// Dictation, managed as Tauri state. Cloneable so it can be moved into
@@ -760,6 +776,8 @@ impl DictationState {
                 mic: Mutex::new(None),
                 #[cfg(target_os = "macos")]
                 capture: Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                final_for: Mutex::new(None),
             }),
         }
     }
@@ -955,11 +973,22 @@ fn transcribe_utterance(
     whisper.transcribe(&mono_16k, vocab)
 }
 
+/// How long a cycle waits for the finished utterance's final transcript
+/// before settling for its last partial. Once its audio ends the recognizer
+/// writes the final in 0.08–0.35 s (the dictation test set, real time).
+#[cfg(target_os = "macos")]
+const FINAL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Commit `owner`'s current utterance and immediately re-arm a fresh
-/// recognition on the SAME running engine, returning the finalized transcript.
-/// Unlike `dictation_stop`, the microphone never closes — the per-utterance
-/// boundary of a continuous conversation. A no-op returning "" unless `owner`
-/// holds the mic.
+/// recognition on the SAME running engine, returning the utterance's final
+/// transcript — the recognizer writes its last word as much as 0.5 s after
+/// the voice stops, so the partials may not have it yet — or its last
+/// partial if the final is slow to come. Unlike `dictation_stop`, the
+/// microphone never closes — the per-utterance boundary of a continuous
+/// conversation. A no-op returning "" unless `owner` holds the mic.
+///
+/// It runs on the blocking pool (`OFF_MAIN_COMMANDS`): it waits for the main
+/// thread to end the utterance, then for the recognizer.
 #[tauri::command]
 pub fn dictation_cycle(
     dictation: tauri::State<'_, DictationState>,
@@ -974,19 +1003,27 @@ pub fn dictation_cycle(
 
     #[cfg(target_os = "macos")]
     {
+        let (tx, rx) = std::sync::mpsc::channel();
         let state = dictation.inner.clone();
         let app_main = app.clone();
-        let _ = app.run_on_main_thread(move || {
+        let scheduled = app.run_on_main_thread(move || {
             if state.owner_of(seq).is_none() {
                 return;
             }
-            // Finalize this utterance's recognition, then listen for the next
-            // on the same engine, from its first buffer on.
+            // Finalize this utterance's recognition — its final transcript
+            // comes to this cycle — then listen for the next on the same
+            // engine, from its first buffer on.
+            *state.final_for.lock().unwrap() = Some((state.armed.load(Ordering::SeqCst), tx));
             retire_capture(&state, true, Some(seq));
             if let Some(mic) = state.mic.lock().unwrap().as_ref() {
                 arm_capture(&app_main, &state, mic, &owner, seq, false);
             }
         });
+        if scheduled.is_ok() {
+            if let Some(heard) = rx.recv_timeout(FINAL_WAIT).ok().filter(|t| !t.trim().is_empty()) {
+                return Ok(heard);
+            }
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1275,6 +1312,12 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
             // SAFETY: the recognizer hands back a valid result or error pointer.
             if let Some(result) = unsafe { result.as_ref() } {
                 if !live {
+                    // A task a cycle finished: its final transcript, with the
+                    // last word the partials may not have caught, goes there.
+                    if unsafe { result.isFinal() } {
+                        let text = unsafe { result.bestTranscription().formattedString() }.to_string();
+                        state_res.deliver_final(mine, Some(text));
+                    }
                     return;
                 }
                 let text = unsafe { result.bestTranscription().formattedString() }.to_string();
@@ -1285,8 +1328,11 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
                 let code = error.code() as i64;
                 let message = error.localizedDescription().to_string();
                 tracing::warn!(target: "dictation", domain = %domain, code, live, "recognizer error: {message}");
-                if !live && is_benign_recognizer_error(&domain, code) {
-                    return;
+                if !live {
+                    state_res.deliver_final(mine, None);
+                    if is_benign_recognizer_error(&domain, code) {
+                        return;
+                    }
                 }
                 let _ = app_res.emit(
                     "dictation-error",
@@ -1586,6 +1632,26 @@ mod tests {
         assert_eq!(tap.preroll.snapshot().len(), 300);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_cycle_gets_the_final_transcript_of_the_task_it_finished_and_no_other() {
+        let state = DictationState::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *state.inner.final_for.lock().unwrap() = Some((7, tx));
+        // The task armed after it, and a late final of one before it: not its.
+        state.inner.deliver_final(8, Some("next".into()));
+        state.inner.deliver_final(6, Some("before".into()));
+        assert!(rx.try_recv().is_err());
+        state.inner.deliver_final(7, Some("rename the panel to TalkPanel".into()));
+        assert_eq!(rx.try_recv().unwrap(), "rename the panel to TalkPanel");
+        assert!(state.inner.final_for.lock().unwrap().is_none(), "handed over once");
+        // A task that ends in an error lets its cycle go at once.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        *state.inner.final_for.lock().unwrap() = Some((9, tx));
+        state.inner.deliver_final(9, None);
+        assert_eq!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+    }
+
     #[test]
     fn the_warm_mic_cools_once_its_time_is_up_with_no_capture_on_it() {
         let now = std::time::Instant::now();
@@ -1651,13 +1717,13 @@ mod tests {
         assert_eq!(warm_for(Some(fourcc(b"blea"))), std::time::Duration::ZERO);
     }
 
-    /// A stop waits for the main thread to end its capture: on the main
-    /// thread itself it would wait forever. An install drives a download of
-    /// hundreds of megabytes to its end, and the status is asked per turn.
+    /// A stop or a cycle waits for the main thread to end its capture: on the
+    /// main thread itself it would wait forever. An install drives a download
+    /// of hundreds of megabytes to its end, and the status is asked per turn.
     #[test]
     fn the_stop_the_install_and_the_status_run_off_the_main_thread() {
         let pool = crate::codehealth::command_list(include_str!("lib.rs"), "OFF_MAIN_COMMANDS");
-        for name in ["dictation_stop", "whisper_install", "dictation_status"] {
+        for name in ["dictation_stop", "dictation_cycle", "whisper_install", "dictation_status"] {
             assert!(pool.iter().any(|n| n == name), "lib.rs: `{name}` must be in OFF_MAIN_COMMANDS");
         }
         let src = include_str!("dictation.rs");

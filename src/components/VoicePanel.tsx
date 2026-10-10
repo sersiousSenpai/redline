@@ -23,7 +23,12 @@ import {
   type VoicePrefs,
 } from "../audio/speech";
 import { cloudTtsDriver } from "../audio/cloudTts";
-import { Endpointer, listenThrough, type EndpointerEvents } from "../audio/endpoint";
+import {
+  Endpointer,
+  listenThrough,
+  stripCommand,
+  type EndpointerEvents,
+} from "../audio/endpoint";
 import { Playback, type NarrationMark } from "../audio/playback";
 import {
   DEFAULT_OWNER,
@@ -738,9 +743,11 @@ function VoicePanelBase({
     });
   }
   const endpoint = endpointRef.current;
-  // The last spoken turn, while speaking again may carry it on, and whether
-  // the reply it interrupted is being let go without a note.
-  const carriedRef = useRef<{ id: string; text: string } | null>(null);
+  // The last spoken turn, while speaking again may carry it on: what was said
+  // (its final transcript, on its way), the send that took it once it went,
+  // and whether speaking again took it back. `carryingRef`: the reply to it
+  // is being let go, which no note marks.
+  const carriedRef = useRef<{ said: Promise<string>; id: string | null; taken: boolean } | null>(null);
   const carryingRef = useRef(false);
 
   // Walkthrough cursor. It's an opt-in starter ("Walk me through it") that
@@ -1774,36 +1781,55 @@ function VoicePanelBase({
 
   endpointEventsRef.current = {
     // The turn is over: send it. The mic stays on the same capture —
-    // `dictation_cycle` only starts the recognizer on the next utterance —
-    // unless the reply's route says it must close.
+    // `dictation_cycle` starts the recognizer on the next utterance — unless
+    // the reply's route says it must close.
     end: (text, _reason, resumed) => {
       if (!handsFreeRef.current) return;
-      void invoke("dictation_cycle").catch(() => {});
       setPartial("");
       captureRef.current = { startedAt: Date.now(), heard: false };
+      // What was said, from the recognizer's final transcript: its last word
+      // can come after the partials the endpointer went by.
+      const part = invoke<string>("dictation_cycle").then(
+        (heard) => stripCommand(heard) || text,
+        () => text,
+      );
       // Carrying the last turn on: it goes out again with the rest, and the
       // transcript shows the rest under it.
-      const carried = resumed ? carriedRef.current : null;
-      const whole = carried && text ? `${carried.text} ${text}` : (carried?.text ?? text);
-      carriedRef.current = null;
-      const id =
-        whole && !isNonSpeech({ text: whole, heldMs: null, heard: true })
-          ? submitSpoken(whole, carried && text ? text : whole)
-          : null;
-      if (id) carriedRef.current = { id, text: whole };
-      else endpoint.replyOver();
-      if (!endpoint.listening) closeMic();
+      const before = resumed ? carriedRef.current : null;
+      const said = before
+        ? Promise.all([before.said, part]).then((both) => both.filter(Boolean).join(" "))
+        : part;
+      const turn = { said, id: null as string | null, taken: false };
+      carriedRef.current = turn;
       refreshRoute();
+      void Promise.all([said, part]).then(([whole, rest]) => {
+        if (turn.taken) return;
+        turn.id =
+          whole && !isNonSpeech({ text: whole, heldMs: null, heard: true })
+            ? submitSpoken(whole, before && rest ? rest : whole)
+            : null;
+        if (!turn.id) {
+          if (carriedRef.current === turn) carriedRef.current = null;
+          endpoint.replyOver();
+        }
+        if (!endpoint.listening) closeMic();
+      });
     },
-    // They weren't done: the reply to the turn is let go before a word of it
-    // is heard, and the turn goes out again with what they say now.
+    // They weren't done: the turn is taken back — its reply, if it went out,
+    // let go before a word of it is heard — and goes out again with what
+    // they say now.
     resume: () => {
-      const carried = carriedRef.current;
-      if (!carried) return;
+      const turn = carriedRef.current;
+      if (!turn) return;
+      turn.taken = true;
+      const sent = turn.id;
+      if (!sent) return;
       carryingRef.current = true;
-      setOutbox(outboxRef.current.filter((o) => o.id !== carried.id));
-      contextNotesRef.current.push(
-        `They paused mid-thought: this message carries on from their last one ("${clip(carried.text, 160)}") and is meant as one`,
+      setOutbox(outboxRef.current.filter((o) => o.id !== sent));
+      void turn.said.then((first) =>
+        contextNotesRef.current.push(
+          `They paused mid-thought: this message carries on from their last one ("${clip(first, 160)}") and is meant as one`,
+        ),
       );
       stopSpeech();
       if (turnRef.current.phase === "idle") return;

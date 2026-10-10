@@ -15,7 +15,7 @@
 //   mic never goes quiet (a room the floor can't tell from a voice);
 // - 250 ms after "send now".
 // It waits up to 300 ms more for the transcript to catch up with the audio,
-// so the last word is never left behind.
+// so the words it judges include the last one.
 // An optional scorer (a small end-of-turn model, `turn_scorer` in Rust) can
 // move the first case: asked after 250 ms of silence, a sure "finished"
 // (≥ 0.95) ends the turn at 600 ms; at 700 ms an unsure one (< 0.5) holds it,
@@ -44,9 +44,10 @@ export const UNFINISHED_SILENCE_MS = 2500;
 export const CAP_MS = 6000;
 /** "Send now" ends the turn as soon as they stop. */
 export const SEND_NOW_SILENCE_MS = 250;
-/** A turn ends early only once the transcript has caught up with the audio,
- *  or this long after the rule's time: the recognizer writes a word 0.1–0.7 s
- *  after it is said, and a turn ended before then goes out without it. */
+/** A turn ends only once the transcript has caught up with the audio, or
+ *  this long after the rule's time: the recognizer writes the last word
+ *  0.27 s after the voice stops (p90 0.47 s, now and then over 0.7 s), and
+ *  until it has, the words being judged may lack the one that trails off. */
 export const CATCH_UP_MS = 300;
 /** Speaking again this soon after a turn ended, before its reply is heard,
  *  carries that turn on. */
@@ -61,9 +62,9 @@ const STOP_WORD = /^\W*(?:stop|wait|pause|quiet|hold on|hang on)\W*$/i;
 /** The scorer is first asked after this much silence… */
 export const SCORE_AFTER_MS = 250;
 /** …and when at least this sure it is finished, ends the turn here, once the
- *  transcript has caught up: no sooner, or the last word could be left
- *  behind (the recognizer wrote it 0.27 s after the voice stopped on the
- *  dictation test set, p90 0.43 s, at most 0.48 s)… */
+ *  transcript has caught up: no sooner, or a trailing "and" not yet written
+ *  could not hold the turn (the recognizer wrote the last word 0.27 s after
+ *  the voice stopped on the dictation test set, p90 0.47 s)… */
 export const SCORE_SURE = 0.95;
 export const EARLY_END_MS = 600;
 /** …and from `END_SILENCE_MS` on, asked every `SCORE_EVERY_MS`, ends it at

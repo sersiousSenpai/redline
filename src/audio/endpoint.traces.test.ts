@@ -9,20 +9,23 @@
 // Each phrase is spoken through the scenarios hands-free must survive — a
 // finished sentence, a pause mid-thought of 0.4–2 s, a trailing "and", comma
 // or "um", a cough, "hold on", "send now" — into a model of the live
-// recognizer (a word not yet written when a turn is cut is lost with it) and
-// of a reply that starts to sound 1.6 s after a turn ends. A cut-off is a
-// phrase that does not arrive whole, as one turn. The bar: at most 5% of them.
+// recognizer (the endpointer goes by its partials, and a turn goes out as its
+// final transcript, with every word said by then; what is said while the mic
+// is closed is lost) and of a reply that starts to sound 1.6 s after a turn
+// ends. A cut-off is a phrase that does not arrive whole, as one turn. The
+// bar: at most 5% of them.
 //
-// The recognizer's timing is measured: the same clips fed in real time to
-// SFSpeechRecognizer set up as dictation.rs sets it up. Its first words came
-// 0.84 s into the audio (p50; 0.52 s after the first word ended, p90 0.65 s);
-// a word followed by a pause was written 0.27 s after the voice stopped (p50;
-// p90 0.43 s, at most 0.48 s); words mid-speech lag more (p50 0.39 s, p90
-// 0.74 s), as the recognizer writes them in bursts.
+// The recognizer's timing is measured: the 150 clips of the set fed in real
+// time to SFSpeechRecognizer set up as dictation.rs sets it up. Its first
+// words came 0.84 s into the audio (p50; 0.52 s after the first word ended,
+// p90 0.65 s); the last word before a pause was written 0.27 s after the
+// voice stopped (p50; p90 0.47 s; 3 of the 150 took longer than 0.7 s);
+// words mid-speech lag more (p50 0.39 s, p90 0.74 s), as the recognizer
+// writes them in bursts.
 import { describe, expect, it } from "vitest";
 
 import fixture from "./fixtures/endpoint-levels.json";
-import { Endpointer, type ListenThrough } from "./endpoint";
+import { Endpointer, stripCommand, type ListenThrough } from "./endpoint";
 import { LEVEL_MS, looksUnfinished, type Level } from "./vad";
 
 interface Clip {
@@ -47,9 +50,10 @@ const ROOM = levels(fixture.room.rms, fixture.room.peak);
 const REPLY_AFTER_MS = 1600;
 const REPLY_MS = 2500;
 /** How long after it is said the live recognizer writes a word: the first of
- *  a capture, one followed by a pause, one mid-speech (measured; see above). */
+ *  a capture, one followed by a pause (the 20 quantiles of the 150 measured),
+ *  one mid-speech (measured; see above). */
 const FIRST_LAGS = [420, 480, 520, 520, 560, 650];
-const PAUSE_LAGS = [150, 220, 270, 270, 300, 350, 400, 430, 480];
+const PAUSE_LAGS = [50, 50, 50, 110, 150, 180, 210, 220, 250, 270, 290, 310, 340, 370, 390, 400, 420, 460, 480, 690];
 const SPEECH_LAGS = [150, 250, 390, 390, 450, 550, 740, 900];
 
 /** A small deterministic hash, for lags and room jitter that don't change
@@ -182,23 +186,29 @@ function play(trace: Trace, through: ListenThrough, withScorer: boolean): Outcom
     }
     return ws;
   };
+  // The task's final transcript: every word said in it by now.
+  const final = () =>
+    trace.words
+      .filter((w, i) => w.end > taskStart && w.end <= now && !lost.has(i))
+      .map((w) => w.text)
+      .join(" ");
   const cycle = () => {
-    // A new recognition task: whatever was said and not yet written is gone.
-    trace.words.forEach((w, i) => {
-      if (w.end > taskStart && w.end <= now && writtenAt(i) > now) lost.add(i);
-    });
     taskStart = now;
     written = 0;
     lastPartial = "";
   };
   const closeMic = () => {
+    // A cancelled task: whatever was said and not yet written is gone.
+    trace.words.forEach((w, i) => {
+      if (w.end > taskStart && w.end <= now && writtenAt(i) > now) lost.add(i);
+    });
     mic = false;
     cycle();
   };
 
   const ep = new Endpointer({
     end(text, _reason, resumed) {
-      const said = text.split(/\s+/).filter(Boolean);
+      const said = (stripCommand(final()) || text).split(/\s+/).filter(Boolean);
       if (resumed && turns.length) turns[turns.length - 1].push(...said);
       else turns.push(said);
       if (trace.waits && now > trace.waits[0] && now <= trace.waits[1]) out.endsInWait += 1;
@@ -388,10 +398,13 @@ describe.each([
     expect(median(k.delays)).toBeLessThanOrEqual(withScorer ? 700 : 800);
   });
 
-  it("never ends in the pause after a trailing conjunction, article, comma or filler", () => {
+  it("waits out the pause after a trailing conjunction, article, comma or filler", () => {
     for (const kind of ["trailing and/the", "trailing comma", "um"] as const) {
-      expect(results.get(kind)!.waited, kind).toBe(0);
-      expect(results.get(kind)!.cut, kind).toBe(0);
+      const k = results.get(kind)!;
+      // Only when the recognizer has not yet written the trailing word does
+      // the pause end the turn, and then the turn carries on whole.
+      expect(k.waited, kind).toBeLessThanOrEqual(Math.ceil(0.05 * k.n));
+      expect(k.cut, kind).toBe(0);
     }
   });
 

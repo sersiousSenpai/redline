@@ -25,6 +25,8 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     armed: 0,
     // Where the reply plays (`dictation_status`).
     route: { kind: "speakers", transport: "builtin" } as { kind: string; transport: string },
+    // The recognizer's final transcript of an utterance `dictation_cycle` ends.
+    final: "",
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -67,7 +69,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         script.micOpen = false;
         return null;
       case "dictation_cycle":
-        return "";
+        return script.final;
       case "dictation_status":
         return {
           holder: null,
@@ -215,6 +217,7 @@ beforeEach(() => {
   script.micOpen = false;
   script.armed = 0;
   script.route = { kind: "speakers", transport: "builtin" };
+  script.final = "";
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -763,6 +766,15 @@ describe("hands-free", () => {
     expect(script.armed).toBe(2);
     // Re-armed just after the agent's voice: the pre-roll would hold its end.
     expect(named("dictation_start").map(([, a]) => a)).toEqual([{ preroll: true }, { preroll: false }]);
+  });
+
+  it("sends the recognizer's final transcript, which has the last word the partials lagged on", async () => {
+    await mount();
+    await handsFreeOn();
+    script.final = "Summarize the rollout plan.";
+    await speak("summarize the rollout");
+    await room(700);
+    expect(sends().map((s) => s.text)).toEqual(["Summarize the rollout plan."]);
   });
 
   it("carries a turn on when they speak again before the reply is heard", async () => {
