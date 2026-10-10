@@ -198,7 +198,15 @@ export const CommentThread = memo(function CommentThread({
   const { messages, liveText, loaded, retrying } = turn;
   rowsRef.current = messages;
   const seed = discussSeed(comment);
-  const visible = messages.filter((m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed));
+  // The opening seed is hidden, and so is a Retry of it after a failed first
+  // reply: each is the comment itself, which the card already shows.
+  let opening = true;
+  const visible = messages.filter((m) => {
+    if (!opening) return true;
+    if (m.role === "user" && m.body.trim() === seed) return false;
+    if (m.status !== "error") opening = false;
+    return true;
+  });
   const hasDiscussion = visible.length > 0 || !!liveText;
   useEffect(() => { if (loaded) onHasDiscussion?.(hasDiscussion); }, [loaded, hasDiscussion, onHasDiscussion]);
   useEffect(() => { if (loaded) monochat?.reportActivity?.(`${sessionId}:${commentId}`, turn.status === "streaming"); }, [loaded, sessionId, commentId, turn.status, monochat?.reportActivity]);
@@ -492,6 +500,9 @@ export const CommentThread = memo(function CommentThread({
   }
 
   const last = visible[visible.length - 1];
+  // Retry is offered on the thread's last row only, hidden ones included: a
+  // re-asked seed in flight follows the error it retries.
+  const lastRow = messages[messages.length - 1];
   const resend = (m: ThreadMessage) => () => send(m.body, isChatRow(m) ? "chat" : "report");
   const summary = last
     ? `${last.role === "user" ? "You" : agent}: ${last.body
@@ -652,7 +663,7 @@ export const CommentThread = memo(function CommentThread({
                   key={m.id}
                   msg={m}
                   onRetry={
-                    m.status === "error" && m === last
+                    m.status === "error" && m === lastRow
                       ? retryAt(chatRows, i)
                       : undefined
                   }
@@ -693,7 +704,7 @@ export const CommentThread = memo(function CommentThread({
                     onRetry={
                       // Against every row, the hidden seed included: a
                       // failed first reply re-asks the comment itself.
-                      item.msg.status === "error" && item.msg === last
+                      item.msg.status === "error" && item.msg === lastRow
                         ? retryAt(messages, messages.length - 1)
                         : undefined
                     }

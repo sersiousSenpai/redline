@@ -497,6 +497,15 @@ describe("report and chat views", () => {
     expect(text()).toContain("Claude stopped early.");
     await act(async () => clickWith("Retry"));
     expect(sends()[0]?.[1]).toMatchObject({ mode: "report", text: comment.body });
+    await flush();
+    // The re-asked seed is the comment itself, hidden like the first, and the
+    // error it retries offers no second Retry while it is out.
+    expect(text()).not.toContain(comment.body);
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent?.includes("Retry"))).toBe(false);
+    await act(async () => handlers["fork-done"]({ payload: { sessionId: SESSION, commentId: ITEM, messageId: "m-ok", body: "Because it re-renders." } }));
+    await flush();
+    expect(text()).toContain("Because it re-renders.");
+    expect(text()).not.toContain(comment.body);
   });
 
   it("keeps the reply box in view as a reply streams, unless the reviewer scrolled it away", async () => {
