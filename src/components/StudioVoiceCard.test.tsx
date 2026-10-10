@@ -133,6 +133,12 @@ describe("StudioVoiceCard", () => {
     rust.calls.length = 0;
     await act(async () => button("Resume install")!.click());
     expect(ops()).toEqual(["install"]);
+    // Paused again, then another model picked: that one starts fresh.
+    await fire("studio-setup", { phase: "error", message: "cancelled" });
+    await act(async () => (host.querySelectorAll("input[name=studio-model]")[1] as HTMLInputElement).click());
+    await render();
+    expect(host.textContent).not.toContain("Install paused");
+    expect(button("Install the studio voice (2.3 GB)")).toBeDefined();
   });
 
   it("puts what this Mac lacks in words, and won't install until it has it", async () => {
@@ -177,14 +183,26 @@ describe("StudioVoiceCard", () => {
     expect(host.textContent).toContain("It spoke at 0.62× real time here");
   });
 
-  it("saves a model pick at once, since the install fetches it", async () => {
+  it("only looks at a model that isn't installed until its install starts, and switches to one that is", async () => {
+    rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {} } };
     await render();
-    const low = host.querySelectorAll("input[name=studio-model]")[1] as HTMLInputElement;
-    await act(async () => low.click());
-    expect(rust.calls).toContainEqual(["tts_studio", { op: "prefs", args: { model: FOUR } }]);
+    const radios = () => host.querySelectorAll("input[name=studio-model]") as NodeListOf<HTMLInputElement>;
+    rust.calls.length = 0;
+    await act(async () => radios()[1].click());
+    await flush();
+    // Saving it would turn the installed voice off until it was installed.
+    expect(ops()).not.toContain("prefs");
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "preflight", args: { model: FOUR } }]);
     expect(prefs.model).toBe(FOUR);
     await render();
     expect(host.textContent).toContain("Studio voice — 2.3 GB download, about 3.4 GB memory while speaking");
+    await act(async () => button("Install the studio voice (2.3 GB)")!.click());
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "install", args: { model: FOUR } }]);
+    // Back to the installed one: switched to at once, so its ▶ plays it.
+    await fire("studio-setup", { phase: "error", message: "cancelled" });
+    await act(async () => radios()[0].click());
+    await flush();
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "prefs", args: { model: EIGHT } }]);
   });
 
   it("offers only tested styles, and removes the install after asking", async () => {

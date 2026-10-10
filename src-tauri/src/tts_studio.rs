@@ -236,6 +236,7 @@ pub(crate) const ERROR: u16 = 4;
 /// Why a request was refused outright; the frontend speaks it in the fallback.
 const NOT_INSTALLED: &str = "studio_not_installed";
 const DISABLED: &str = "studio_disabled";
+const INSTALLING: &str = "the studio voice is still installing";
 /// macOS reports memory pressure at "warn" or worse and the model isn't
 /// loaded: loading 3-4 GB now would only push other apps out.
 const PRESSURE: &str = "memory_pressure";
@@ -558,8 +559,8 @@ impl Studio {
 
     /// Save the studio settings `prefs` names (`model`, `voice`, `style`).
     /// Switching the model stops the sidecar; the next request starts one on
-    /// the new model. A model that doesn't exist is refused before anything
-    /// is saved.
+    /// the new model. A model that doesn't exist, or a switch while an
+    /// install runs, is refused before anything is saved.
     pub(crate) fn set_prefs(&self, prefs: &Value) -> Result<(), String> {
         let model = prefs["model"].as_str();
         if let Some(m) = model.filter(|m| variant(m).is_none()) {
@@ -570,6 +571,9 @@ impl Studio {
             let mut guard = self.0.lock();
             let core = &mut *guard;
             let switched = model.is_some_and(|m| m != core.model_id);
+            if switched && core.installing {
+                return Err(INSTALLING.into());
+            }
             for (key, setting, value) in [
                 ("model", SETTING_MODEL, &mut core.model_id),
                 ("voice", SETTING_VOICE, &mut core.voice),
@@ -725,13 +729,13 @@ impl Studio {
         })
     }
 
-    /// Whether the selected model can be installed here, with the numbers
-    /// behind it. Each of `blockers` is a code the settings card words:
-    /// `unsupported` (not Apple Silicon on macOS 14 or later), `ram` (under
-    /// 16 GB), `disk` (less free than `needDiskBytes`), `memory` (less free
-    /// right now than `needMemoryBytes`, which it uses while speaking).
-    pub(crate) fn preflight(&self) -> Value {
-        let model = self.0.lock().model_id.clone();
+    /// Whether `model` (else the selected one) can be installed here, with
+    /// the numbers behind it. Each of `blockers` is a code the settings card
+    /// words: `unsupported` (not Apple Silicon on macOS 14 or later), `ram`
+    /// (under 16 GB), `disk` (less free than `needDiskBytes`), `memory` (less
+    /// free right now than `needMemoryBytes`, which it uses while speaking).
+    pub(crate) fn preflight(&self, model: Option<&str>) -> Value {
+        let model = model.map_or_else(|| self.0.lock().model_id.clone(), String::from);
         variant(&model).map_or(Value::Null, |v| self.0.preflight(v))
     }
 
@@ -780,7 +784,7 @@ impl Studio {
         {
             let mut core = self.0.lock();
             if core.installing {
-                return Err("the studio voice is still installing".into());
+                return Err(INSTALLING.into());
             }
             core.stop("removed", &mut out);
             core.record = Some(json!({}));
@@ -1525,11 +1529,12 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   at once, so the frontend speaks the piece in its fallback voice, when the
 ///   engine is off, not installed, can't start, or memory is too tight to load
 ///   it.
-/// - `status` (with `kokoro`: whether Kokoro can stand in), `preflight`:
-///   the queries.
+/// - `status` (with `kokoro`: whether Kokoro can stand in), `preflight`
+///   (`args` `{model?}`): the queries.
 /// - `prefs`: save `args` `{model?, voice?, style?}`.
-/// - `install`: progress and the outcome on `studio-setup`; `cancel` stops it
-///   (its outcome is the error `cancelled`), and installing again resumes.
+/// - `install` (`args` `{model?}`, saved first): progress and the outcome on
+///   `studio-setup`; `cancel` stops it (its outcome is the error
+///   `cancelled`), and installing again resumes.
 /// - `warm`: pre-warm on intent, `args` `{always?}`.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
 /// - `remove`.
@@ -1568,9 +1573,14 @@ pub fn tts_studio(
             status["kokoro"] = tts.kokoro_ready().into();
             return Ok(status);
         }
-        "preflight" => return Ok(studio.preflight()),
+        "preflight" => return Ok(studio.preflight(args["model"].as_str())),
         "prefs" => studio.set_prefs(&args)?,
-        "install" => studio.install(),
+        // The model to install is saved as it starts: one picked in the
+        // settings card stays a choice until then.
+        "install" => {
+            studio.set_prefs(&args)?;
+            studio.install()
+        }
         "warm" => studio.warm(args["always"] == true)?,
         "cancel" => studio.cancel_install(),
         "surface" => studio.surface(
@@ -2145,6 +2155,26 @@ for line in sys.stdin:
             false,
             "the 4-bit model was never installed"
         );
+        // An install fetches the model it started with: no switching under it.
+        studio.0.lock().installing = true;
+        let eight = VARIANTS[0].id;
+        assert_eq!(
+            studio.set_prefs(&json!({"model": eight})).unwrap_err(),
+            INSTALLING
+        );
+        studio.set_prefs(&json!({"model": low, "voice": "ryan"})).unwrap();
+        assert_eq!(studio.prefs(), (low, "ryan".into(), String::new()));
+    }
+
+    /// The settings card checks a model the user is only looking at.
+    #[test]
+    fn preflight_answers_for_the_model_asked_about() {
+        let (studio, _, _) = fake_studio("preflight", FAST, normal_pressure);
+        let low = studio.preflight(Some(VARIANTS[1].id));
+        assert_eq!(low["needMemoryBytes"], VARIANTS[1].memory);
+        let selected = studio.preflight(None);
+        assert_eq!(selected["needMemoryBytes"], VARIANTS[0].memory);
+        assert_eq!(studio.preflight(Some("2B-imaginary")), Value::Null);
     }
 
     #[test]

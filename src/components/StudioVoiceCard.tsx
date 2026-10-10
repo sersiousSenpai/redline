@@ -13,7 +13,8 @@ import { listen } from "@tauri-apps/api/event";
 import { playStudioSample, STUDIO_TONES, STUDIO_VOICES } from "../audio/studioTts";
 
 /** What the card edits; saved with the rest of Voice settings, except the
- *  model, which is saved when picked because the install fetches it. */
+ *  model: one already installed is switched to when picked, and any other
+ *  only when its install starts, so looking at one never turns the voice off. */
 export interface StudioPrefs {
   model: string;
   voice: string;
@@ -138,11 +139,11 @@ export function StudioVoiceCard({
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
 
-  const refresh = () => {
+  const refresh = (model = prefsRef.current.model) => {
     void invoke<Status>("tts_studio", { op: "status" })
       .then(setStatus)
       .catch(() => {});
-    void invoke<Preflight>("tts_studio", { op: "preflight" })
+    void invoke<Preflight>("tts_studio", { op: "preflight", args: { model } })
       .then(setPreflight)
       .catch(() => {});
   };
@@ -173,7 +174,7 @@ export function StudioVoiceCard({
         // The install ends warm: say so in the voice the user is choosing.
         if (s.phase === "done") sample(prefsRef.current.voice, READY);
       }),
-      listen("studio-status", refresh),
+      listen("studio-status", () => refresh()),
     ];
     return () => {
       for (const p of subs) void p.then((un) => un());
@@ -192,7 +193,8 @@ export function StudioVoiceCard({
 
   const install = () => {
     setSetup({ phase: "preflight" });
-    void invoke("tts_studio", { op: "install" }).catch((e) => {
+    // The install saves the model it fetches.
+    void invoke("tts_studio", { op: "install", args: { model: model.id } }).catch((e) => {
       setSetup(null);
       onError(String(e));
     });
@@ -200,9 +202,14 @@ export function StudioVoiceCard({
 
   const pickModel = (id: string) => {
     onChange({ ...prefs, model: id });
-    // Saved now: it is what an install fetches, and what the sidecar loads.
+    // How the last install ended belongs to the model it was for.
+    setSetup(null);
+    // An installed model is switched to now, so its ▶ plays it; another is
+    // only looked at until its install starts.
+    const ready = !!status?.runtimeCurrent && !!status.models?.[id];
+    if (!ready) return refresh(id);
     void invoke("tts_studio", { op: "prefs", args: { model: id } })
-      .then(refresh)
+      .then(() => refresh(id))
       .catch((e) => onError(String(e)));
   };
 
@@ -280,7 +287,7 @@ export function StudioVoiceCard({
                 </span>
               ))}
               {preflight.blockers.includes("memory") && (
-                <button type="button" onClick={refresh} style={button}>
+                <button type="button" onClick={() => refresh()} style={button}>
                   Check again
                 </button>
               )}
