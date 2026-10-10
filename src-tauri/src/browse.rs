@@ -220,14 +220,7 @@ impl BrowseState {
         // Synthesis framing: a digest for a colleague, not a fresh answer to the
         // user. First turn embeds the snapshot + tool docs (the colleague may
         // have no prior context); a resumed colleague gets the compact ask.
-        let framed = format!(
-            "A colleague running the user's LINKED DISCUSSION — one conversation \
-             spanning several browser tabs — is checking in with you about THIS \
-             tab. Synthesize what matters here for their question as a tight \
-             DIGEST (not a transcript, and not a fresh reply to the user). Be \
-             concise. Their question:\n\n{}",
-            question.trim()
-        );
+        let framed = consult_framing(&question);
         // The consult already runs under the calling agent's mission-framed
         // question, so it needs no separate mission block of its own.
         let session_key = provider.session_key(&browse_id);
@@ -491,6 +484,19 @@ impl BrowseState {
         };
         Ok((child, io))
     }
+}
+
+/// How a consult's question reaches the page agent: as a digest for the
+/// Companion, the one caller of the consult route (BC-22).
+fn consult_framing(question: &str) -> String {
+    format!(
+        "The user's Companion — the one conversation that follows them \
+         across Redline's surfaces — is checking in with you about THIS \
+         tab. Synthesize what matters here for its question as a tight \
+         DIGEST (not a transcript, and not a fresh reply to the user). Be \
+         concise. Its question:\n\n{}",
+        question.trim()
+    )
 }
 
 /// Link this answer to any research comment waiting on the tab, and tell the
@@ -2616,6 +2622,16 @@ mod contract {
         let regular = super::turn_target_block("browser-t-1", false, None);
         assert!(regular.contains(c["scopePhrases"]["pinned-page"].as_str().unwrap()));
         assert!(!regular.contains("/v1/missions/"));
+    }
+
+    #[test]
+    fn a_consult_is_framed_for_its_real_caller() {
+        let framed = super::consult_framing("  what's the pricing?  ");
+        assert!(framed.contains("Companion"));
+        assert!(framed.ends_with("Its question:\n\nwhat's the pricing?"));
+        for phrase in strings(&contract()["consultMustNotMention"]) {
+            assert!(!framed.contains(&phrase), "the consult still says {phrase}");
+        }
     }
 
     /// Every kind the contract names parses as an `Operation` and serializes

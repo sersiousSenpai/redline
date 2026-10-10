@@ -109,8 +109,9 @@ describe("the skill and the prompt teach what the backend does", () => {
     expect(browseRs).not.toMatch(/[^_]mission_context_block\(/);
     expect(browseRs).toContain("captured_mission_context_block(");
   });
-  it.fails("BC-22 KNOWN VIOLATION: the consult framing names its real caller", () => {
-    for (const phrase of contract.consultMustNotMention) expect(fnBody(browseRs, "consult")).not.toContain(phrase);
+  it("BC-22 the consult framing names its real caller", () => {
+    expect(fnBody(browseRs, "consult_framing")).toContain("Companion");
+    for (const phrase of contract.consultMustNotMention) expect(browseRs).not.toContain(phrase);
   });
   // Open, needs a schema decision: in linked mode the discussion about a tab
   // lives in the shared chat, so this check-in reads that tab's empty thread.
