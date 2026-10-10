@@ -86,9 +86,9 @@ import {
   TerminalView,
   enqueuePtyOp,
   focusTerminalView,
-  tauriHandoffDeps,
 } from "./TerminalView";
 import { deliverToTerminal } from "../lib/terminalHandoff";
+import { tauriHandoffDeps } from "../lib/terminalSeams";
 import {
   TerminalTileHeader,
   type TerminalIdentity,

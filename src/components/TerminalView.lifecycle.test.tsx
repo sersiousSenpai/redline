@@ -66,7 +66,8 @@ vi.mock("../lib/xtermLoader", () => {
   return { xtermMods: () => mods, loadXterm: async () => mods };
 });
 
-import { __resetRevealFocus, suppressTerminalRevealFocus, TerminalView, tauriHandoffDeps, whenPtySpawned } from "./TerminalView";
+import { TerminalView } from "./TerminalView";
+import { __resetRevealFocus, suppressTerminalRevealFocus, tauriHandoffDeps, whenPtySpawned } from "../lib/terminalSeams";
 import { enqueuePtyOp } from "../lib/ptyFence";
 import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 

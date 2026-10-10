@@ -307,6 +307,29 @@ describe("boot-path JS contract", () => {
     expect(violations, "every terminal launch must await the dock").toEqual([]);
   });
 
+  it("the terminal view rides the dock's chunk; the boot path holds only its seams", () => {
+    // App types into terminals and arms the reveal guard, but it never
+    // renders one. Importing those seams from TerminalView put the whole view
+    // (xterm theming, fit scheduling, the PTY pump) on the boot path: 8.3 kB,
+    // measured 2026-10-10. They live in lib/terminalSeams; only the dock
+    // imports the view.
+    const dir = join(process.cwd(), "src");
+    const importers: string[] = [];
+    const walk = (path: string) => {
+      for (const entry of readdirSync(path, { withFileTypes: true })) {
+        const child = join(path, entry.name);
+        if (entry.isDirectory()) walk(child);
+        else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+          const src = readFileSync(child, "utf8");
+          if (/^import (?!type\b)[^;]*from "[./]*(?:components\/)?TerminalView"/m.test(src)) importers.push(child.slice(dir.length + 1));
+        }
+      }
+    };
+    walk(dir);
+    expect(importers).toEqual(["components/TerminalTabs.tsx"]);
+    expect(app).toMatch(/^import \{[^}]*tauriHandoffDeps[^}]*\} from "\.\/lib\/terminalSeams";/m);
+  });
+
   it("the dock is never unmounted by surface navigation", () => {
     // The PTYs and their scrollback die with it. `terminalMounted` is
     // one-way — nothing may set it false.

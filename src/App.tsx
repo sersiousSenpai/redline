@@ -174,7 +174,7 @@ const SessionSidebar = lazy(() =>
 import {
   suppressTerminalRevealFocus,
   tauriHandoffDeps,
-} from "./components/TerminalView";
+} from "./lib/terminalSeams";
 import {
   deliverToTerminal,
   orchestrateHandoff,
