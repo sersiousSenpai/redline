@@ -12618,8 +12618,9 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
 /// turn comes, one at a time. `save_workspace` is here because every
 /// customization gesture fires one without waiting for the last, and two of
 /// them racing on the pool could leave the older layout on disk for the next
-/// launch to load.
-const IN_ORDER_COMMANDS: &[&str] = &["save_workspace"];
+/// launch to load. The comment writes wait on the database writer, and an
+/// edit sent right after its add must not overtake it.
+const IN_ORDER_COMMANDS: &[&str] = &["save_workspace", "add_comment", "update_comment", "delete_comment"];
 
 /// The `IN_ORDER_COMMANDS` turn: the next ticket to hand out, and the ticket
 /// whose call may run now.

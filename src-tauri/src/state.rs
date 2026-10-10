@@ -1885,19 +1885,27 @@ impl SessionStore {
             research: request.research.filter(|_| request.kind == CommentKind::Question),
         };
 
-        let latest = session
+        let version = session
             .revisions
-            .last_mut()
-            .expect("non-empty checked above");
-        if let Err(e) = self
-            .db
-            .insert_comment(session_id, latest.version_number, &comment)
-        {
+            .last()
+            .expect("non-empty checked above")
+            .version_number;
+        // Written on the store's turn, after the map is released: a reader
+        // never waits on SQLite, and no other writer can take the turn (or
+        // the id just minted) before the comment lands in the map below. A
+        // failed insert leaves the map untouched.
+        drop(map);
+        if let Err(e) = self.db.insert_comment(session_id, version, &comment) {
             note_comment_persist_failure(session_id, "comment", &e);
             return Err(format!("failed to persist comment: {e}"));
         }
-        latest.comments.push(comment.clone());
-        session.updated_at = session.updated_at.max(comment.created_at);
+        let mut map = self.inner.lock().unwrap();
+        if let Some(session) = map.get_mut(session_id) {
+            if let Some(revision) = session.revisions.iter_mut().find(|r| r.version_number == version) {
+                revision.comments.push(comment.clone());
+            }
+            session.updated_at = session.updated_at.max(comment.created_at);
+        }
         Ok(comment)
     }
 
@@ -3326,6 +3334,25 @@ mod tests {
         let saved = db.load_session("sess-appr").unwrap().unwrap();
         assert_eq!(saved.revisions.len(), 2);
         assert!(body_of(&Some(saved), &id).is_none());
+    }
+
+    /// A new comment is written after the map is released too, and shows in
+    /// the store only once it is on disk: a failed insert never shows a
+    /// comment that isn't saved.
+    #[test]
+    fn a_new_comment_never_holds_the_store_while_it_is_written() {
+        let store = store_with_plan(PLAN_MD);
+        let db = store.database();
+        let held = db.lock_conn();
+        let writer = store.clone();
+        let add = std::thread::spawn(move || writer.add_comment("sess-appr", feedback(Some("c-new"), "new")));
+        // Long enough for the add to reach the database and wait there.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for_store(&store, |s| s.is_some_and(|s| body_of(&Some(s), "c-new").is_none()));
+        drop(held);
+        assert_eq!(add.join().unwrap().unwrap().id, "c-new");
+        assert_eq!(body_of(&store.get("sess-appr"), "c-new").as_deref(), Some("new"));
+        assert_eq!(body_of(&db.load_session("sess-appr").unwrap(), "c-new").as_deref(), Some("new"));
     }
 
     /// Writes leave the map lock but not the order: while one write is stuck

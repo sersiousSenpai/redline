@@ -354,7 +354,11 @@ mod tests {
         let lib = include_str!("lib.rs");
         let in_order = crate::codehealth::command_list(lib, "IN_ORDER_COMMANDS");
         let pool = crate::codehealth::command_list(lib, "OFF_MAIN_COMMANDS");
-        assert!(in_order.iter().any(|name| name == "save_workspace"), "lib.rs: `save_workspace` must be in IN_ORDER_COMMANDS");
+        // A comment add, edit and delete wait on the database writer, and an
+        // edit sent right after its add must not overtake it.
+        for name in ["save_workspace", "add_comment", "update_comment", "delete_comment"] {
+            assert!(in_order.iter().any(|n| n == name), "lib.rs: `{name}` must be in IN_ORDER_COMMANDS");
+        }
         for name in &in_order {
             assert!(!pool.contains(name), "lib.rs: `{name}` is in IN_ORDER_COMMANDS, so the pool must not run it too");
         }
