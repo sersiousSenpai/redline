@@ -8982,6 +8982,9 @@ struct UiPrefs {
     /// reopening the dialog.
     seat_assign_prefs: Option<String>,
     review_pose: Option<String>,
+    /// The user's dictation vocabulary (their own words and the corrections
+    /// learned from them) — an opaque JSON blob owned by `src/audio/vocab.ts`.
+    voice_vocab: Option<String>,
 }
 
 /// `key` → `app_settings` row; the allowlist keeps this command from becoming
@@ -8994,6 +8997,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
         "lint" => Some("redline.ui.lint"),
         "workspaceNudge" => Some("redline.ui.workspaceNudge"),
         "seatAssignPrefs" => Some("redline.ui.seatAssignPrefs"),
+        "voiceVocab" => Some("redline.ui.voiceVocab"),
         _ => None,
     }
 }
@@ -9007,6 +9011,7 @@ fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
         lint: settings.db.get_setting("redline.ui.lint"),
         workspace_nudge: settings.db.get_setting("redline.ui.workspaceNudge"),
         seat_assign_prefs: settings.db.get_setting("redline.ui.seatAssignPrefs"),
+        voice_vocab: settings.db.get_setting("redline.ui.voiceVocab"),
     }
 }
 
