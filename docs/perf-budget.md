@@ -78,26 +78,30 @@ it, that's the discussion to have before merging.
    > unbounded either. If the meter ever needs per-token resolution, it must
    > move to a `Channel` first.
 
-4. **Heavy Tauri commands MUST be `#[tauri::command(async)]`.** A plain
-   `#[tauri::command]` runs on the **main thread** — any fs read, parse, encode,
-   or other non-trivial work there beach-balls the UI (this bit us: `open_doc`
-   tokenized 57k lines on the main thread → 1–2 s freeze). Any command that reads
-   files, encodes, parses, or otherwise does real work must be `(async)` (or
-   genuinely async). Lightweight commands (a map lookup, a counter decrement like
-   `pty_ack`) may stay sync for lowest latency. A long-running job that runs on
-   its own `std::thread` (the PTY pump) is also fine — the gotcha is *only*
-   synchronous work inside the command body.
+4. **Heavy Tauri commands never run on the main thread.** A plain
+   `#[tauri::command]` runs on the **main thread** — any fs read, SQLite
+   write, parse, encode, or other non-trivial work there beach-balls the UI
+   (this bit us: `open_doc` tokenized 57k lines on the main thread → 1–2 s
+   freeze). Any command that reads files, touches the database, encodes,
+   parses, or otherwise does real work must leave it. Lightweight commands (a
+   map lookup, a counter decrement like `pty_ack`) may stay sync for lowest
+   latency. A long-running job that runs on its own `std::thread` (the PTY
+   pump) is also fine — the gotcha is *only* synchronous work inside the
+   command body.
 
-   For a command with a sync body, the cheaper way off the main thread is its
-   name in `OFF_MAIN_COMMANDS` (lib.rs): the invoke handler hands the whole
-   call to the blocking pool, through one shared closure. `(async)` builds a
-   tokio task for each command's own future type, about **11 KB of release
-   binary per command** (measured 2026-10-09: 29 commands cost 331,248 B), and
-   the binary has no room for that. Either way, two calls can finish out of
+   The default route for a command with a sync body is its name in
+   `OFF_MAIN_COMMANDS` (lib.rs): the invoke handler hands the whole call to
+   the blocking pool, through one shared closure, for the cost of a string.
+   `#[tauri::command(async)]` (or a genuinely `async fn`) also works, but it
+   builds a tokio task for each command's own future type, about **11 KB of
+   release binary per command** (measured 2026-10-09: 29 commands cost
+   331,248 B), and the binary has no room for that. Either way, two calls can finish out of
    order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
    instead: each call takes a ticket as it arrives and runs on the pool when
    its turn comes, one at a time (`save_workspace`: every gesture saves
-   without waiting for the last, and the file is what the next launch loads). `watch_dir`/`unwatch_dir` stay
+   without waiting for the last, and the file is what the next launch loads;
+   `add_comment`/`update_comment`/`delete_comment`: an edit sent right after
+   its add must not overtake it). `watch_dir`/`unwatch_dir` stay
    sync to keep their order with each other, and hand their slow part to a
    thread of their own.
 
@@ -187,6 +191,7 @@ it, that's the discussion to have before merging.
    | A live room's Y.Doc | `collab/provider` `destroy` | released with the room: nothing left that reaches it |
    | Mermaid's measuring nodes | `MermaidView` | none left in `<body>` |
    | Drafts flushed this run | `drafterSessionCache`, `App` | one document per draft; not evicted, because it keeps a remount ahead of a database still retrying its write |
+   | Composer drafts read this run | `drafts`, `hooks/useSharedDraft` | one string per draft key read or typed this run; not evicted, because memory is the draft's source of truth until its debounced write lands |
    | Per-id bookkeeping | terminal titles, cwds and handoff seams, closed-tab ids, workspace revisions, `autoDiscussed` | a few bytes per id seen this run (plus an 8 KB output tail per terminal a handoff watched) |
 
    > **What it cost before it was a rule (2026-10-09).** The renderer had a

@@ -49,7 +49,10 @@ Rust build output is never collected on its own, and Redline's once reached
 ~400 GB across worktrees. The dev profile now sets `split-debuginfo = "off"`
 (macOS otherwise keeps every object of every incremental rebuild —
 rust-lang/rust#161824), and a guard in `src-tauri/tests/size_guard.rs` keeps
-it there. What remains is habit:
+it there. The trade-off: a symbolicated backtrace of the `redline` binary or a
+test executable loses `file:line` for the bin crate's own frames. Panic
+locations, lldb on library code and logging are unaffected, and nothing in
+`src-tauri/src` captures backtraces. What remains is habit:
 
 - **Delete a worktree's `src-tauri/target/` when its branch merges** (or
   remove the worktree). Each worktree builds its own, tens of GB cold.
