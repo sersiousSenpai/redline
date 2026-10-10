@@ -53,7 +53,7 @@ import {
 } from "./lib/landing";
 import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
-import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, writingNow } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
@@ -348,7 +348,7 @@ import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
-import { MonochatIsland, type IslandSize, type SummonVia } from "./components/MonochatIsland";
+import { MonochatIsland } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -375,7 +375,6 @@ const TerminalTabs = lazy(() =>
   })),
 );
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
-import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
@@ -618,6 +617,11 @@ const IntegrationSetupDialog = lazy(() =>
 const HookConflictModal = lazy(() =>
   import("./components/HookConflictModal").then((m) => ({ default: m.HookConflictModal })),
 );
+/** Ambient mode's decision countdown: shown only after a plan arrives in
+ *  that mode, so nothing on the boot path needs it. */
+const DecisionWindowBanner = lazy(() =>
+  import("./components/DecisionWindowBanner").then((m) => ({ default: m.DecisionWindowBanner })),
+);
 
 const BookshelfView = lazy(() =>
   import("./components/BookshelfView").then((m) => ({
@@ -732,16 +736,40 @@ const getFrontDoorText = () => readSharedDraft(FRONT_DOOR_TEXT_KEY);
 const setFrontDoorText = (text: string) => writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
 
 function App() {
-  // Every launch opens the Redline card, on every surface — boot lands on it
-  // with the caret in its composer, which also makes it stay. There is no
-  // resting door on the plate any more: the card is the one way in, and it
-  // closes on ⌄ / Esc / ⌘J or on anything that changes the surface key (a
-  // held plan claiming the plate). The chat-surface seed is still consumed so
-  // its key can't linger.
+  // The Front Door. Every launch starts with it SHUT: on the document's empty
+  // plate it rests there instead — headline, composer and recents in the
+  // plate's free area — without taking the caret (typing with nothing focused
+  // flows into it), and anywhere else there is only the footer pill. Opening
+  // it is always a gesture: the pill, Shift+Enter, ⌘J, ⌘⇧N, a press or a
+  // keystroke in the resting composer. The chat-surface seed is still
+  // consumed so its key can't linger.
   const [frontDoorOpen, setFrontDoorOpen] = useState(() => {
     takeDockSeed(localStorage);
-    return true;
+    return false;
   });
+  // Fresh view of it for listeners: the open door is where you are, caret
+  // or not, so a plan arriving flashes over it.
+  const frontDoorOpenRef = useRef(frontDoorOpen);
+  frontDoorOpenRef.current = frontDoorOpen;
+  // The pill's compact card, sprung out by a hover. Never open at launch and
+  // never re-opened by coming back to a surface.
+  const [doorCompact, setDoorCompact] = useState(false);
+  // A place the user asked for on the surface they already stand on — a plan
+  // from the palette, a recent, a chat's receipt, a notice's Open — is
+  // navigation all the same. It is part of the door's navigation key
+  // (`doorNavKey`), so whatever is open closes behind them and the caret
+  // lands in the main area. A plan merely arriving never counts.
+  const [doorTrip, setDoorTrip] = useState(0);
+  const tripDoor = useCallback(() => setDoorTrip((n) => n + 1), []);
+  // The door is up: open, or resting on the empty plate.
+  const [doorVisible, setDoorVisible] = useState(false);
+  // Only opening a chat puts the chat in the door; any other summons is the
+  // door's home, its own composer.
+  const [chatInRoom, setChatInRoom] = useState(false);
+  // The island's polite status line: a launch handed off, a plan arrived. The
+  // same words twice are nudged apart so a screen reader reads them again.
+  const [doorNews, setDoorNews] = useState("");
+  const announceDoor = useCallback((text: string) => setDoorNews(news => news === text ? `${text}\u00a0` : text), []);
   // One launch through the card at a time: a context read can make the
   // hand-off take a beat, and a second ⏎ inside it must not launch twice.
   const [frontDoorLaunching, setFrontDoorLaunching] = useState(false);
@@ -750,9 +778,6 @@ function App() {
   const [browserIslandPage, setBrowserIslandPage] = useState<BrowserIslandPage | null>(null);
   // The context chips the user flipped, for the surface they flipped them on.
   const [chipPresses, setChipPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  // The chat pose's ⤢. Not persisted: it is how roomy the card should be for
-  // now, not a layout to restore on the next launch.
-  const [islandSize, setIslandSize] = useState<IslandSize>("regular");
   const [monochatBusy, setMonochatBusy] = useState(false);
   const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
   const reportMonochatActivity = useCallback((key: string, active: boolean) => setMonochatForks(previous => {
@@ -813,6 +838,9 @@ function App() {
   const [viewedVersionNumber, setViewedVersionNumber] = useState<number | null>(
     null,
   );
+  // Fresh view of it for the arrival rule, read inside a listener.
+  const viewedVersionRef = useRef(viewedVersionNumber);
+  viewedVersionRef.current = viewedVersionNumber;
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
   const [askModeViolation, setAskModeViolation] = useState<boolean>(false);
   // How far this window's daemon got binding :7676. Three states, not a
@@ -854,7 +882,11 @@ function App() {
   const [setupBackend, setSetupBackend] = useState<Backend | null>(null);
   const [setupProject, setSetupProject] = useState<string | null>(null);
   const [setupReviewInTerminal, setSetupReviewInTerminal] = useState(false);
-  const [dismissedSetup, setDismissedSetup] = useState<string | null>(null);
+  // The setup dialog opens by itself once, on a true first run; set aside
+  // ("Later", "Done"), it never pops again. Later faults wait in the
+  // composer as a fix-it chip, and the dialog comes back when ⏎ is blocked
+  // on one or the chip is pressed.
+  const [setupDismissed, setSetupDismissed] = usePersistedState("redline.setupDismissed", false);
   const setupContinuation = useRef<((ready: boolean) => void) | null>(null);
   const requestSetup = useCallback((backend: Backend, projectPath: string | null = null): Promise<boolean> => {
     if (setupContinuation.current || installBusyRef.current) return Promise.resolve(false);
@@ -970,13 +1002,12 @@ function App() {
   // Derived views of the single surface value — they keep the many read sites
   // below near-diff-free, and make disagreeing pane booleans unrepresentable.
   const browserOpen = mainSurface === "browser";
+  // The chat is ONE mounted room in two places: the door's slot while the
+  // door holds it, the conversation dock's once it was carried out. The host
+  // moves between them; the conversation in it never remounts.
   const [chatHost] = useState(() => createBoundedPortalHost("conversation"));
   const [chatRegularSlot, setChatRegularSlot] = useState<HTMLDivElement | null>(null);
-  useLayoutEffect(() => {
-    const target = chatRegularSlot;
-    if (target) target.appendChild(chatHost); else chatHost.remove();
-    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
-  }, [chatRegularSlot, chatHost]);
+  const [chatDockSlot, setChatDockSlot] = useState<HTMLDivElement | null>(null);
   const [browserHost] = useState(() => createBoundedPortalHost("browser"));
   const [browserMounted, setBrowserMounted] = useState(browserOpen);
   useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
@@ -1328,6 +1359,14 @@ function App() {
   const [unseenPlanIds, setUnseenPlanIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // When the user last typed into a text field (never the terminal): the
+  // arrival rule's writing clock (lib/planArrival's `writingNow`).
+  const typedAtRef = useRef(0);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (isWritingKey(event.target)) typedAtRef.current = Date.now(); };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   // The document itself lives in the DB now (the Bookshelf owns it) — this is
   // just the loaded copy for the open document, TAGGED with the id it belongs
   // to. The tag is the editor's mount gate: TipTap captures `content` once, at
@@ -1458,6 +1497,14 @@ function App() {
   currentChatIdRef.current = chatId;
   const chatTitle =
     chats.find((c) => c.companionId === chatId)?.title ?? null;
+  // The open door is holding the chat rather than its own composer.
+  const roomChat = frontDoorOpen && chatInRoom && !!chatId;
+  const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;
+  useLayoutEffect(() => {
+    const target = chatTarget;
+    if (target) target.appendChild(chatHost); else chatHost.remove();
+    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
+  }, [chatTarget, chatHost]);
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
   // design — a seed that outlived a restart would re-send an old sentence into
   // a conversation that already has it.
@@ -1481,8 +1528,8 @@ function App() {
   // `landing`), and landing on one with no body would show an empty plate.
   useEffect(() => {
     if (mainSurface !== "chat") return;
+    // The document's empty plate is where the door rests.
     selectSurfaceRef.current("document");
-    setFrontDoorOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainSurface]);
 
@@ -1982,36 +2029,73 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // ⌘J opens the front door; surface discussion controls stay local.
+  // ⌘J toggles the front door; surface discussion controls stay local. An
+  // open compact card grows into the door, draft and all.
+  const toggleDoor = useCallback(() => {
+    setDoorCompact(false);
+    setFrontDoorOpen(value => !value);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!isDockKey(e)) return;
       e.preventDefault();
-      setFrontDoorOpen(value => !value);
+      toggleDoor();
     };
-    const toggleFromBrowser = () => setFrontDoorOpen(value => !value);
     window.addEventListener("keydown", onKey);
-    window.addEventListener("redline:toggle-monochat", toggleFromBrowser);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleFromBrowser); };
-  }, []);
+    window.addEventListener("redline:toggle-monochat", toggleDoor);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleDoor); };
+  }, [toggleDoor]);
   const codeReview = useReview();
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
   const devServers = useDevServers(serversOpen);
-  // A `/redline-code-review` curl is holding for feedback → surface the review
-  // pane immediately (the hook itself adopts the repo/source/round).
+  // An agent asking for a code review (a `/redline-code-review` curl holding
+  // for feedback), or a run filing its exit report, is news — never a move.
+  // The review surface waits for you: a notice says so once, a footer chip
+  // holds the way in until you go there (or the agent stops waiting), and
+  // from another app the Dock bounces and a notification says it. The agent
+  // waits either way; the hook itself adopts the repo/source/round.
+  const [reviewNews, setReviewNews] = useState<"review" | "report" | null>(null);
+  const reviewNewsRef = useRef(reviewNews);
+  reviewNewsRef.current = reviewNews;
+  const tellReview = useCallback((kind: "review" | "report") => {
+    const message = kind === "report" ? "Run report ready" : "Review ready";
+    const there = mainSurfaceRef.current === "review";
+    // A report's own review request follows it in: one piece of news.
+    if (!there && reviewNewsRef.current) return;
+    // Already on the review surface, it is on screen: only the OS is told.
+    if (!there) {
+      reviewNewsRef.current = kind;
+      setReviewNews(kind);
+      setToast({
+        message,
+        tone: "info",
+        action: { label: "Open", onAction: () => selectSurfaceRef.current("review") },
+        ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+      });
+    }
+    void import("./lib/osNotice")
+      .then(({ noticeWhenAway }) => noticeWhenAway(message, kind === "report" ? "A run filed its report. Open Redline to review it." : "An agent is waiting for your code review in Redline."))
+      .catch(() => {});
+  }, []);
   useEffect(() => {
     let alive = true;
     const p = listen("review-requested", () => {
-      if (!alive) return;
-      selectSurfaceRef.current("review");
+      if (alive) tellReview("review");
     });
     return () => {
       alive = false;
       void p.then((un) => un());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tellReview]);
+  // Over once you go to the review surface, or once the agent stops
+  // waiting on a review nobody opened. A report waits for you.
+  useEffect(() => {
+    if (mainSurface === "review") setReviewNews(null);
+  }, [mainSurface]);
+  useEffect(() => {
+    if (!codeReview.holdActive) setReviewNews((news) => (news === "review" ? null : news));
+  }, [codeReview.holdActive]);
   // Orchestrated runs: which plan session's RunReport container wraps the
   // review surface (null = the plain review pane). Opened by the exit-report
   // event or by clicking a run chip in the sessions pane.
@@ -2037,19 +2121,19 @@ function App() {
   );
   useEffect(() => {
     let alive = true;
-    // The orchestrator filed its exit report → open the RunReport container
-    // (the review-requested event that follows lands inside it).
+    // The orchestrator filed its exit report → the review surface opens on
+    // the RunReport container (the review-requested event that follows
+    // lands inside it), whenever the user goes there.
     const rep = listen<{ sessionId: string }>("orchestration-report", (e) => {
       if (!alive) return;
       setRunReportFor(e.payload.sessionId);
-      selectSurfaceRef.current("review");
+      tellReview("report");
     });
     return () => {
       alive = false;
       void rep.then((un) => un());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [tellReview]);
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -2305,7 +2389,10 @@ function App() {
       alive = false;
     };
   }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
-  // A chat lives in the Redline card; surface docks remain columns.
+  // The Front Door is the plate at REST — no document, no draft, nothing of
+  // its own to cover — and that is where the door rests instead of the pill.
+  const plateAtRest = mainSurface === "document" && plateMode === "door";
+  // The front door owns its full-screen layer; surface docks remain columns.
   const conversationExpanded = false;
 
 
@@ -2624,14 +2711,15 @@ function App() {
       } else if (anchor === "discussion" && paneCollapsed) {
         revealPane();
         tourRevealRestore.current = () => setPaneCollapsed(true);
-      } else if (anchor === "landing" && !frontDoorOpen) {
-        // The composer is only measurable while the card is open.
+      } else if (anchor === "landing" && !doorVisible) {
+        // The composer is only measurable while the door is up — resting on
+        // the empty plate, or open anywhere else.
         setFrontDoorOpen(true);
         tourRevealRestore.current = () => setFrontDoorOpen(false);
       }
     },
     [
-      frontDoorOpen,
+      doorVisible,
       termCollapsed,
       termFullscreen,
       termHeight,
@@ -2769,6 +2857,7 @@ function App() {
   const jumpToNeedsYou = useCallback(() => {
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
+    setDoorCompact(false);
     revealTerm();
     void ensureTerminalReady().then((dock) => dock?.jumpToNeedsYou());
   }, [revealTerm, ensureTerminalReady]);
@@ -3951,41 +4040,67 @@ function App() {
           }
         }
         // Where a new plan lands is one rule (`arrivalFocus`): it takes focus
-        // unless you are already reading ANOTHER plan. Taking focus never opens
-        // the discussion pane or dock; they stay however the user left them.
+        // unless you are in the middle of something else — writing, or
+        // reading another plan, a file or an older version of this one.
+        // (A new version of the plan already selected lands in place.)
+        // Taking focus never opens the discussion pane or dock, nor the door
+        // or its card, and never closes them: they stay as the user left them.
         const focusIntercepted = () => {
           selectSessions();
           setActiveId(payload.sessionId);
-          // Land on the clean latest, even if the reviewer was parked on a
-          // historical version when the revision arrived.
+          // Land on the clean latest. Someone parked on an older version
+          // gets here only through Open: the arrival itself flashes for them.
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
         };
+        // Open or Review, pressed on the notice: a gesture, so the door and
+        // its card step aside for the plan, as for any trip the user asks for.
+        const openArrival = () => {
+          tripDoor();
+          selectSurfaceRef.current("document");
+          focusIntercepted();
+        };
+        // At the top on the browser, where the native page covers the corner.
+        const notice = (message: string, label: string) => setToast({
+          message,
+          tone: "info",
+          action: { label, onAction: openArrival },
+          ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+        });
+        const writing = frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now());
         const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
           const chatId = arrivingLaunch.chatId;
           const title = list.find(item => item.sessionId === payload.sessionId)?.planTitle ?? "Plan";
           setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
-          if (dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
+          // The chat turns into its plan in place only while you sit idle
+          // in it: the agent picks the moment, minutes later.
+          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
             const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
             if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
             selectSurfaceRef.current("document");
             focusIntercepted();
           } else {
-            setToast({ message: "Your chat became a plan", tone: "info", action: { label: "Open", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
+            notice("Your chat became a plan", "Open");
           }
           return;
         }
+        // A new version of the plan already selected is news of its own.
+        const revision = payload.sessionId === activeId;
         const focus = arrivalFocus({
           activeId,
           sessionId: payload.sessionId,
           mainSurface: mainSurfaceRef.current,
           plateMode: plateModeRef.current,
+          viewedVersion: viewedVersionRef.current,
+          writing,
         });
         if (focus === "focus" && !paneMaskedRef.current) {
           // On the document surface: on screen now. From the Front Door the
           // plate turns into the plan, which is the point of launching one.
+          // No toast says so, so the island does, to a screen reader.
           focusIntercepted();
+          announceDoor(arrivalMessage(title, revision));
           return;
         }
         if (focus === "focus") {
@@ -3995,33 +4110,23 @@ function App() {
           setActiveId(payload.sessionId);
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
-          setToast({
-            message: arrivalMessage(title),
-            tone: "info",
-            action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } },
-          });
+          notice(arrivalMessage(title, revision), "Review");
           return;
         }
-        // flash — you are reading another plan. Nothing moves: the row pulses
-        // (and glows once), and the notice offers the switch we declined.
-        setUnseenPlanIds((prev) => {
+        // flash — you are in the middle of something else. Nothing moves:
+        // the row pulses (and glows once), the pill wears a badge, and the
+        // notice offers the switch we declined. A new version of the plan
+        // already selected is not a new row: its data refreshes under the
+        // version you are on, and the row only glows.
+        if (revision) void loadSession(payload.sessionId);
+        else setUnseenPlanIds((prev) => {
           if (prev.has(payload.sessionId)) return prev;
           const next = new Set(prev);
           next.add(payload.sessionId);
           return next;
         });
         setArrivalGlow({ sessionId: payload.sessionId, nonce: Date.now() });
-        setToast({
-          message: arrivalMessage(title),
-          tone: "info",
-          action: {
-            label: "Open",
-            onAction: () => {
-              selectSurfaceRef.current("document");
-              focusIntercepted();
-            },
-          },
-        });
+        notice(arrivalMessage(title, revision), "Open");
       });
       if (
         payload.sessionId === activeId &&
@@ -4120,18 +4225,13 @@ function App() {
           return;
         }
         setDecisionWindow(e.payload);
-        // Attention-grab: a short window is useless behind other windows.
-        void (async () => {
-          try {
-            const w = getCurrentWindow();
-            if (!(await w.isFocused())) {
-              await w.unminimize();
-              await w.setFocus();
-            }
-          } catch {
-            /* window API unavailable — banner still shows */
-          }
-        })();
+        // A short window is useless unseen, so from another app the Dock
+        // bounces and a notification says so. Never by un-minimizing or
+        // bringing Redline to the front: going there is the user's move.
+        const seconds = Math.max(0, Math.ceil((e.payload.deadlineMs - Date.now()) / 1000));
+        void import("./lib/osNotice")
+          .then(({ noticeWhenAway }) => noticeWhenAway(`Plan v${e.payload.version} ready`, `Auto-approving in ${seconds}s unless you open it in Redline.`))
+          .catch(() => {});
       },
     );
     return () => {
@@ -4778,10 +4878,21 @@ function App() {
   // Putting the conversation away — from the column or from the room. One
   // action, because "close" must not mean two different things depending on
   // the pose: whichever you were in, you end up back where you were without it.
+  // A chat carried into the dock was pinned there; putting the dock away
+  // gives the column back to the surface's own conversation (the Discuss
+  // pill reopens the plan's voice, not the chat — it is still in the door).
   const closeDock = useCallback(() => {
     setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, false));
-  }, []);
+    setConversationPin(pin => (pin === "companion" ? null : pin));
+  }, [setConversationPin]);
   const openDock = useCallback(() => setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true)), []);
+  // The Discuss pill opens the plan's own discussion — its voice — never a
+  // chat carried out of the door's room that rides along beside it. A pin
+  // left by that carry (the home dock shut by walking to a plan) is dropped.
+  const openDiscussion = useCallback(() => {
+    setConversationPin(pin => (pin === "companion" ? null : pin));
+    openDock();
+  }, [setConversationPin, openDock]);
   // Which of the browser pane's four panels the dock is showing, in the pane's
   // own vocabulary. Null whenever the column is closed or holding another
   // surface's conversation — which is exactly when the pane must not portal.
@@ -6365,9 +6476,10 @@ function App() {
       lastLaunchProject;
     setFrontDoorText(markdown);
     setFrontDoorProject({ path: initialProject });
-    // A plan to launch, so the card's composer — not a chat it was holding.
+    // A plan to launch, so the door's composer — not a chat it was holding.
     setFrontDoorDest("plan");
-    setChatId(null);
+    setChatInRoom(false);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(value => value + 1);
   };
@@ -6916,22 +7028,21 @@ function App() {
   // A native child webview paints on top of all React DOM, so when a
   // full-pane overlay is up the browser must be hidden underneath it. Mirrors
   // the setup-modal / tour gating used in the JSX below.
-  // The unskippable first-run modal. `integrationReady` leads deliberately:
-  // the two null checks after it are TypeScript narrowing, but the reason the
-  // modal is withheld is that the probe has not answered yet — not that two
-  // variables happen to be null. Withholding is the whole point: integration
-  // health now resolves AFTER the reveal, so without this the modal would
-  // flash on every launch in the beat before the answer arrives.
+  // The first-run modal. `integrationReady` leads deliberately: the reason
+  // the modal is withheld is that the probe has not answered yet — not that
+  // a variable happens to be null. Withholding is the whole point:
+  // integration health resolves AFTER the reveal, so without this the modal
+  // would flash in the beat before the answer arrives. It shows by itself
+  // only on a true first run — nothing reviewed on this machine yet and the
+  // dialog never set aside — and otherwise only when asked for
+  // (`setupBackend`: a blocked ⏎, the composer's fix-it chip).
   const selectedSetupBackend = setupBackend ?? frontDoorBackend.backend;
-  const setupFingerprint = JSON.stringify([selectedSetupBackend, preflight?.codex?.identity,
-    preflight?.codex?.authState, preflight?.codex?.usable,
-    preflight?.hook, preflight?.skill, preflight?.codexHook, preflight?.codexSkill, preflight?.codex?.profile,
-    preflight?.providers?.[selectedSetupBackend]?.hook, preflight?.providers?.[selectedSetupBackend]?.skill]);
+  const firstRun = !setupDismissed && !planEverArrived && summaries.length === 0;
   const setupModalActive = !setupReviewInTerminal && (!!setupBackend || integrationReady &&
-    (setupPhase === "done" || (dismissedSetup !== setupFingerprint && integrationNeedsRepair(selectedSetupBackend, preflight))));
+    (setupPhase === "done" || (firstRun && integrationNeedsRepair(selectedSetupBackend, preflight))));
   const dismissSetup = () => {
     if (installBusyRef.current) return;
-    setDismissedSetup(setupFingerprint); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
+    setSetupDismissed(true); setSetupPhase("setup"); setSetupBackend(null); setInstallError(null);
     const continuation = setupContinuation.current; setupContinuation.current = null; continuation?.(false);
   };
   // First-run auto-start waits for the doors to finish — the tour's spotlight
@@ -6941,8 +7052,10 @@ function App() {
   // when the user may act.
   const tourActive =
     tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
-  // Not the Redline card: it is cut out of the webview, never laid over it.
+  // The open door hides the page. The compact card does not: it is cut out
+  // of the webview (useNativeOverlayRegion), never laid over it.
   const browserOverlayActive =
+    frontDoorOpen ||
     !!sendConfirm ||
     showReadme ||
     showFeedback ||
@@ -7345,12 +7458,17 @@ function App() {
     setCombinePreview(null);
   };
 
-  // ── What the card attaches ─────────────────────────────────────────────
-  // The key the card closes on, and the one chip presses reset on. The draft
-  // id only names a place while the Drafter is showing. Off it, the id still
-  // changes — a first launch mints one in an effect — and that must not read
-  // as navigation and close the boot card.
+  // ── What the island attaches ───────────────────────────────────────────
+  // Two keys, for two questions. The chips are about WHAT is on screen, so
+  // their presses reset whenever that changes — a plan arriving included.
+  // The door and the card close only when the user goes somewhere — another
+  // surface, or a place on this one they asked for (`doorTrip`): a plan
+  // landing selects itself on every surface, and that must not shut a door
+  // someone is typing in. The draft id only names a place while the Drafter
+  // is showing. Off it, the id still changes — a first launch mints one in an
+  // effect — and that must not read as anything at all.
   const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
+  const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}:${doorTrip}`;
   const viewedPlan = sessionReady && activeId ? viewedRevision ?? null : null;
   const contextChips = surfaceChips(activeSurface, {
     page: browserIslandPage,
@@ -7460,6 +7578,10 @@ function App() {
       // composer would relaunch on the next ⏎.
       setFrontDoorText("");
       setFrontDoorAttachments([]);
+      // Handed off: the compact card shrinks back into the pill, which shows
+      // the work. The open door shows it in place.
+      setDoorCompact(false);
+      announceDoor(mode === "run" ? "Run started in the terminal." : "Plan launched. Redline is planning it in the terminal.");
     } finally {
       frontDoorLaunchingRef.current = false;
       setFrontDoorLaunching(false);
@@ -7483,8 +7605,9 @@ function App() {
     const prompt = composePrompt(getFrontDoorText(), frontDoorAttachments);
     if (!prompt || frontDoorLaunchingRef.current) return;
     // Measured HERE, synchronously, while the island is still on screen — one
-    // render later it is gone. This is the box the Drafter springs out of.
-    const island = document.querySelector(".rl-fd-island");
+    // render later it is gone. This is the box the Drafter springs out of:
+    // the door's composer (a chat's in the dock is not the one sending).
+    const island = document.querySelector(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
     const r = island?.getBoundingClientRect();
     const from = r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
     frontDoorLaunchingRef.current = true;
@@ -7500,7 +7623,7 @@ function App() {
     }).finally(() => { frontDoorLaunchingRef.current = false; });
   };
 
-  // The Front Door's composer opening into a CHAT, inside the same card: the
+  // The Front Door's composer opening into a CHAT, inside the room: the
   // sentence you were typing becomes the first turn of the thread around it.
   //
   // The mint is awaited, but nothing waits on the await: `chatOpening` holds
@@ -7512,7 +7635,7 @@ function App() {
   // stays per-turn. ONE cwd for the pre-warm and the room, or they never match.
   const chatCwd = activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null);
   const chatPrewarmKey =
-    frontDoorOpen && !chatId && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
+    doorVisible && !roomChat && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
       ? JSON.stringify([chatCwd, frontDoorBackend])
       : null;
   useEffect(() => {
@@ -7542,7 +7665,7 @@ function App() {
     frontDoorLaunchingRef.current = true;
     setChatOpening(true);
     setPanelBreaks({ sidebar: false, pane: false });
-    // The card GROWS into the chat in place — the composer you were typing in
+    // The door GROWS into the chat in place — the composer you were typing in
     // is the bottom of the thread you are now inside — and `selectSurface` is
     // deliberately not called, because nothing is being navigated away from.
     setFrontDoorOpen(true);
@@ -7558,6 +7681,7 @@ function App() {
       ]);
       const context = (await chatAttachment(chat.companionId, blocks))?.context;
       setChatId(chat.companionId);
+      setChatInRoom(true);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
       setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface, context });
@@ -7583,6 +7707,8 @@ function App() {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
+    setChatInRoom(true);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setPanelBreaks({ sidebar: false, pane: false });
   };
@@ -7716,10 +7842,11 @@ function App() {
   };
 
   // A4 — the landing's type-to-start handoff. Typing on the empty document
-  // plate, with the card closed, opens it and carries the keystrokes into its
-  // composer: from the first printable key until the composer takes focus,
-  // keydowns buffer here (lib/landing.ts is the pure machine) and the composer
-  // drains the buffer in a LAYOUT effect, so the handoff is lossless.
+  // plate, with nothing focused, engages the door resting there and carries
+  // the keystrokes into its composer: from the first printable key until the
+  // composer takes focus, keydowns buffer here (lib/landing.ts is the pure
+  // machine) and the composer drains the buffer in a LAYOUT effect, so the
+  // handoff is lossless.
   // Eligible only where nothing else owns keys — a modal up, a focused input,
   // or the terminal (isEditableTarget catches xterm's hidden textarea) must
   // never have its typing hijacked.
@@ -7743,8 +7870,9 @@ function App() {
   // anything — it would only ever show on a virgin install. This is that way.
   const openFrontDoor = useCallback(() => {
     setFrontDoorDest("plan");
-    // "New plan" means the composer, even when the card was holding a chat.
-    setChatId(null);
+    // "New plan" means the composer, even when the door was holding a chat.
+    setChatInRoom(false);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(n => n + 1);
   }, []);
@@ -7836,7 +7964,10 @@ function App() {
           // primary way to start one. The Drafter is still one hop away
           // there, behind `Plan ▾ → Draft a document first`.
           draftNewPlan: openFrontDoor,
+          // Each a trip the user asked for, even to where they already
+          // are: the door and its card step aside (`doorTrip`).
           openSession: (id) => {
+            tripDoor();
             selectSessions();
             setActiveId(id);
             selectSurfaceRef.current("document");
@@ -7845,13 +7976,13 @@ function App() {
           // validates and re-types them — no cast, nothing free-typed.
           selectSurface: (id) => {
             const d = headerSurfaceList.find((s) => s.id === id);
-            if (d) selectSurfaceRef.current(d.id);
+            if (d) { tripDoor(); selectSurfaceRef.current(d.id); }
           },
           navigateTo: (t) => {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
-            if (d) navigateTo({ surface: d.id, tab: t.tab });
+            if (d) { tripDoor(); navigateTo({ surface: d.id, tab: t.tab }); }
           },
-          toggleDock: () => setFrontDoorOpen(value => !value),
+          toggleDock: toggleDoor,
           openConversation: (kind) => {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
@@ -7941,9 +8072,8 @@ function App() {
             }}
           />
         ) : (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <button type="button" onClick={() => setFrontDoorOpen(true)}>Open conversation</button>
-          </div>
+          // The chat itself, carried out of the door: its host lands here.
+          <div ref={setChatDockSlot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
         )
       ) : (
       <VoicePanel
@@ -7987,12 +8117,18 @@ function App() {
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
 
   // The door's one flight pill: its own plan launch or its own run, whichever
-  // started last.
-  const frontDoorPlan = (pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island") ? { ...pendingLaunch, kind: "plan" as const } : null;
-  const frontDoorFlight =
-    frontDoorPlan && runFlight
-      ? (runFlight.startedAt > frontDoorPlan.startedAt ? runFlight : frontDoorPlan)
-      : (runFlight ?? frontDoorPlan);
+  // started last. Built once per launch, not per render: the composer reads a
+  // new object as a new launch.
+  const frontDoorFlight = useMemo(() => {
+    const plan = pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? { ...pendingLaunch, kind: "plan" as const } : null;
+    return plan && runFlight ? (runFlight.startedAt > plan.startedAt ? runFlight : plan) : (runFlight ?? plan);
+  }, [pendingLaunch, runFlight]);
+  // The pill's count: plans that arrived unseen and are still in the list —
+  // one deleted unseen is no longer news.
+  const unseenArrivals = useMemo(
+    () => summaries.filter((s) => unseenPlanIds.has(s.sessionId)).length,
+    [summaries, unseenPlanIds],
+  );
 
   // The welcome's pills: the way back into recent plans, chats and browser
   // tabs. Tabs are ranked research-first against the unresolved plans, read
@@ -8007,19 +8143,20 @@ function App() {
   const summariesRef = useRef(summaries);
   summariesRef.current = summaries;
   useEffect(() => {
-    if (!frontDoorOpen) return;
+    if (!doorVisible) return;
     let live = true;
     void loadDoorTabs(invoke, summariesRef.current)
       .then((tabs) => { if (live) setDoorTabs(tabs); })
       .catch(() => {});
     return () => { live = false; };
-  }, [frontDoorOpen, unresolvedKey]);
+  }, [doorVisible, frontDoorOpen, unresolvedKey]);
   const doorRecentItems = useMemo(
     () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
     [summaries, chats, doorTabs],
   );
   const openDoorRecent = (r: DoorRecent) => {
     if (r.kind === "chat") return openChat(r.id);
+    tripDoor();
     setFrontDoorOpen(false);
     if (r.kind === "plan") {
       selectSessions();
@@ -8032,28 +8169,56 @@ function App() {
     setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
     selectSurface("browser");
   };
-  // A hover peek opens the card without reaching for the composer — the caret
-  // stays in whatever you were working in. A click or the shortcut lands it.
-  // Re-summoning returns to whatever the card held, chat included; the
-  // heading's New is the way back to a blank composer.
-  const [doorSummonedQuiet, setDoorSummonedQuiet] = useState(false);
-  const onDoorOpenChange = (open: boolean, via?: SummonVia) => {
-    if (open) setDoorSummonedQuiet(via === "hover");
-    setFrontDoorOpen(open);
-  };
-  // ⌘J and the other direct openers never pass through the line above, so a
-  // quiet bit left by a peek must not outlive the card it was about.
+  // Leaving the room carries its chat into the conversation dock, still
+  // open — however the room was left. Not over a dock already holding the
+  // surface's own conversation: that would end a voice discussion mid-thought,
+  // and the dock's strip has the chat a click away. The door, shut, goes back
+  // to being its own composer for the next summons. A chat minted for a door
+  // shut while it was being made lands in the room late: it is carried too.
   useEffect(() => {
-    if (!frontDoorOpen) setDoorSummonedQuiet(false);
-  }, [frontDoorOpen]);
-  const renderMonochatComposer = (accessories?: React.ReactNode, welcome = false, workbench?: ChatWorkbenchComposer) => (
+    if (frontDoorOpen || !chatInRoom) return;
+    setChatInRoom(false);
+    // A surface with no dock has nowhere to show it: no pin is left behind.
+    if (!chatId || dockOpen || !dockScopeRef.current) return;
+    setConversationPin("companion");
+    openDock();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frontDoorOpen, chatInRoom]);
+  // On screen in the dock's column — the same room, at column scale.
+  const chatDocked = !roomChat && !!chatId && voiceDocked && dockContext?.kind === "companion";
+  // The compact card launches only in place — Plan or Run. Elsewhere than the
+  // browser its menu also offers the Drafter and Chat, and picking either
+  // grows the card into the door, which takes that destination.
+  const cardDestination: LaunchDestination = frontDoorDest === "run" ? "run" : "plan";
+  const growCardTo = (next: LaunchDestination) => {
+    setFrontDoorDest(next);
+    if (next !== "drafter" && next !== "chat") return;
+    setDoorCompact(false);
+    setFrontDoorOpen(true);
+  };
+  // One composer in three places — the door's own (resting or open), the
+  // compact card's, a chat's — and one sentence: each is a FrontDoor on the
+  // same shared draft, so what you typed in one is there in the next.
+  const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
+    const card = where === "card";
+    const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat || chatDocked;
+    const destination = where === "chat" ? "chat" : card ? cardDestination : frontDoorDest;
+    return (
               <FrontDoor
-                visible={shellReady && frontDoorOpen}
+                visible={shellReady && shown}
                 floating
-                welcome={welcome}
+                welcome={where === "door"}
                 recents={doorRecentItems}
                 onOpenRecent={openDoorRecent}
-                autoFocusOnShow={frontDoorOpen && !doorSummonedQuiet}
+                chips={<SurfaceChips
+                  chips={visibleChips(contextChips, destination)}
+                  pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
+                  onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
+                />}
+                // A hover never takes the caret: the card's composer waits
+                // for a click. The door's — or the chat it holds — takes it on
+                // every summons.
+                autoFocusOnShow={where === "door" ? frontDoorOpen : where === "chat" && roomChat}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 workbench={workbench}
@@ -8081,8 +8246,11 @@ function App() {
                 onDrafter={drafterFromFrontDoor}
                 onChat={() => void chatFromFrontDoor()}
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                destination={frontDoorDest}
-                onDestinationChange={setFrontDoorDest}
+                // The browser's card is Plan and Run alone: a page has no
+                // Drafter or Chat of its own to grow into.
+                allowedDestinations={card && mainSurface === "browser" ? ["plan", "run"] : undefined}
+                destination={card ? cardDestination : frontDoorDest}
+                onDestinationChange={card ? growCardTo : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -8102,25 +8270,30 @@ function App() {
                   const p = frontDoorFlight;
                   if (!p) return;
                   setFrontDoorOpen(false);
+                  setDoorCompact(false);
                   revealTerm();
                   terminalsRef.current?.selectTab(p.terminalId);
                   terminalsRef.current?.hailTerminal(p.terminalId);
                 }}
                 onCreateProject={createFrontDoorProject}
-                focusNonce={frontDoorFocus}
+                // The handoff is the door's alone: a card or a chat on the
+                // same sentence must not take the caret or the seed with it.
+                focusNonce={where === "door" ? frontDoorFocus : 0}
                 consumeSeed={consumeLandingSeed}
-                // Recent chats — the contextual way back into a conversation.
-                // Bounded: this is a way in, not an index; the room's own
-                // `Chats ▾` holds the full list.
-                chats={chats
+                // Recent chats — the contextual way back into a conversation,
+                // in the door alone: never in the compact card. Bounded: this
+                // is a way in, not an index; the room's own `Chats ▾` holds the
+                // full list.
+                chats={where === "door" ? chats
                   .slice(0, 4)
-                  .map((c) => ({ id: c.companionId, title: c.title }))}
-                onOpenChat={openChat}
+                  .map((c) => ({ id: c.companionId, title: c.title })) : undefined}
+                onOpenChat={where === "door" ? openChat : undefined}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
-                dictationEnabled={!dockOwnsMic && frontDoorOpen}
+                dictationEnabled={!dockOwnsMic && shown}
               />
-  );
+    );
+  };
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -8319,12 +8492,14 @@ function App() {
       </ChromeSlot>
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
-        <DecisionWindowBanner
-          event={decisionWindow}
-          onOpen={openDecisionForReview}
-          onApprove={approveFromDecision}
-          onExpire={dismissDecisionWindow}
-        />
+        <Suspense fallback={null}>
+          <DecisionWindowBanner
+            event={decisionWindow}
+            onOpen={openDecisionForReview}
+            onApprove={approveFromDecision}
+            onExpire={dismissDecisionWindow}
+          />
+        </Suspense>
       )}
       {joinedActive && joinedPresence && joinedRoom && !joinedRoom.revoked ? (
         <PresenceBar
@@ -9162,8 +9337,8 @@ function App() {
                 </Suspense>
               )
             ) : (
-              // The empty plate shows nothing: the way in is the Redline card,
-              // which floats over every surface instead of resting here.
+              // The empty plate shows nothing of its own: the Front Door rests
+              // over it (MonochatIsland's resting pose).
               null
             )}
           </article>
@@ -9264,7 +9439,7 @@ function App() {
             !dockOpen &&
             dockReachable && (
               <DiscussPill
-                onClick={openDock}
+                onClick={openDiscussion}
                 // Only a plan has an article to stand clear of; the file
                 // viewer has none, and a stale ref would stow the pill against
                 // a column that isn't on screen.
@@ -9383,7 +9558,7 @@ function App() {
                     label: ({ browse: "Page chat", browselist: "Task list", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
                   })) : dockContexts}
                   activeKey={dockContext.key}
-                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); }}
+                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); else setConversationPin(d.kind); }}
                 />
                 <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
                 {dockBody}
@@ -10308,6 +10483,8 @@ function App() {
         termTabCount={termTabCount}
         termNeedYou={termNeedYou}
         onJumpToNeedsYou={jumpToNeedsYou}
+        reviewNews={reviewNews === "report" ? "Run report ready" : reviewNews === "review" ? "Review ready" : null}
+        onOpenReviewNews={() => selectSurface("review")}
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
@@ -10571,30 +10748,28 @@ function App() {
       )}
       <MonochatIsland
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
-        surfaceKey={islandSurfaceKey}
+        landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
+        surfaceKey={doorNavKey}
+        onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
-        onOpenChange={onDoorOpenChange}
-        // The chat lives in the same card: it grows to hold the thread, and
-        // a New in its heading goes back to a blank composer — with the caret
-        // in it, even in a card a hover opened: New is a click, not a glance.
-        pose={chatId ? "chat" : "compose"}
-        size={islandSize}
-        onSizeChange={setIslandSize}
-        onNewChat={() => { setChatId(null); setChatSeed(null); setDoorSummonedQuiet(false); refreshChats(); }}
-        context={chatId ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title)}
-        busy={frontDoorLaunching || monochatBusy || monochatForks.size > 0}
-        chips={<SurfaceChips
-          chips={visibleChips(contextChips, chatId ? "chat" : frontDoorDest)}
-          pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
-          onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
-        />}
+        onOpenChange={setFrontDoorOpen}
+        compactOpen={doorCompact}
+        onCompactChange={setDoorCompact}
+        compact={doorCompact && renderMonochatComposer("card")}
+        context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
+        busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
+        arrivals={unseenArrivals}
+        announce={doorNews}
+        // A chat in the room: its heading's New goes back to a blank
+        // composer, the conversation kept in History.
+        onNewChat={roomChat ? () => { setChatId(null); setChatSeed(null); setChatInRoom(false); refreshChats(); } : undefined}
       >
-        <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
-        {!chatId && renderMonochatComposer(undefined, true)}
+        <div ref={setChatRegularSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
+        {!roomChat && renderMonochatComposer("door")}
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
-              composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer(actions, false, workbench) }}
+              composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer("chat", actions, workbench) }}
               harness={frontDoorBackend}
               modelCatalogs={modelCatalogs}
               onHarnessChange={setFrontDoorBackend}
@@ -10604,7 +10779,6 @@ function App() {
               target={activeSurface}
               modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
               onActivityChange={setMonochatBusy}
-              onSent={() => setFrontDoorOpen(true)}
               // Keyed by the thread: the room's mode and harness
               // are stored per chat and `usePersistedState` reads
               // its key once, so switching conversations is a
@@ -10620,7 +10794,7 @@ function App() {
               queuedInstruction={queuedChatPlans.queued[chatId]?.instruction ?? null}
               onCancelQueuedPlan={() => { queuedChatPlans.cancel(chatId); }}
               onShowTerminal={id => { setFrontDoorOpen(false); void showRawTerminal(id); }}
-              onOpenPlan={id => { selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
+              onOpenPlan={id => { tripDoor(); selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
               onFix={applyReadinessFix}
                             onSelectChat={openChat}
               onEmpty={() => { setChatId(null); setChatSeed(null); refreshChats(); }}
@@ -10628,13 +10802,13 @@ function App() {
               // whatever folder the user is browsing; HOME when
               // there is none.
               cwd={chatCwd}
-              dictationEnabled={!dockOwnsMic && frontDoorOpen}
-              // The roomy reading layout only at the card's ⤢ size.
-              expanded={frontDoorOpen && islandSize === "tall"}
+              dictationEnabled={!dockOwnsMic && (roomChat || chatDocked)}
+              // The room reads at plate scale; the dock's column at its own.
+              expanded={roomChat}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
-              // Collapses the card; the conversation is still in it on the
-              // next open.
-              onClose={() => setFrontDoorOpen(false)}
+              // Its own toolbar shows in the dock alone (the room wears the
+              // door's heading): Close puts the column away, chat and all.
+              onClose={closeDock}
               seed={
                 chatSeed?.companionId === chatId
                   ? chatSeed.text

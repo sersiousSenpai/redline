@@ -15,7 +15,7 @@
 // pointer wins. Non-target overlays are looked through, so a composer that
 // really is on top still wins and the notch never eats a drop. Not looked
 // through: a modal dialog (or the cover behind it), and a floating surface
-// marked `data-drop-cover` (the Redline card). A drop onto one goes nowhere
+// marked `data-drop-cover` (the pill's compact card). A drop onto one goes nowhere
 // rather than into whatever it covers; its own targets still take theirs.
 //
 // Positions are logical AppKit points, which are already CSS pixels: wry

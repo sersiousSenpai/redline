@@ -30,6 +30,12 @@ export function isInteractive(target: EventTarget | null): boolean {
   return false;
 }
 
+/** A press on bare title bar: the start of a window drag, not a click on
+ *  anything — a popover it lands beside stays open. */
+export function isTitleBarPress(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest(".rl-app-header") && !isInteractive(target);
+}
+
 /** mousedown → start the OS window drag. Left button only. */
 export function beginWindowDrag(e: {
   button: number;

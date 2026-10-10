@@ -1508,6 +1508,9 @@ function BrowserPaneBase({
         }
         if (tab.url !== url) { scheduleCacheRef.current(tab.id); applySiteAppearanceRef.current({ ...tab, url }); }
       } else if (event.kind === "interaction" || event.kind === "focus") {
+        // A press in the page never reaches Redline's own document: say so, for
+        // the footer pill's floating card, which closes on a press outside it.
+        if (event.kind === "interaction" && (event.value === "pointerdown" || event.value === "touchstart") && visibleRef.current) window.dispatchEvent(new Event("redline:page-press"));
         if (visibleRef.current && tileIdsRef.current.includes(tab.id) && tab.id !== activeIdRef.current) selectTabRef.current(tab.id);
       } else if (event.kind === "tabs" && typeof event.value === "string" && /^https?:/.test(event.value)) openTabRef.current(event.value);
       else if (event.kind === "selection" && visibleRef.current) parseSelectionEvents([event.value]).forEach((selection, i) => dispatchSelectionRef.current(selection, Date.now() + i));

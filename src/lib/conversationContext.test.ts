@@ -39,28 +39,38 @@ const kinds = (i: ConversationInputs) =>
   conversationContexts(i).map((d) => d.kind);
 
 describe("surface conversations", () => {
-  it("Home alone owns the Companion", () => {
-    expect(kinds(inputs({ plateMode: "door", activeId: null }))).toEqual(["companion"]);
-    expect(kinds(inputs())).toEqual(["voice"]);
-    expect(kinds(inputs({ surface: "drafter", drafterDraftId: "draft" }))).toEqual(["drafter"]);
+  it("Home owns the Companion; elsewhere only an open chat rides along, after the surface's own", () => {
+    const noChat = { companionId: null };
+    expect(kinds(inputs({ plateMode: "door", activeId: null, ...noChat }))).toEqual(["companion"]);
+    expect(kinds(inputs(noChat))).toEqual(["voice"]);
+    expect(kinds(inputs({ surface: "drafter", drafterDraftId: "draft", ...noChat }))).toEqual(["drafter"]);
+    // Carried out of the room: beside the plan, the draft and the browser.
+    expect(kinds(inputs())).toEqual(["voice", "companion"]);
+    expect(kinds(inputs({ surface: "drafter", drafterDraftId: "draft" }))).toEqual(["drafter", "companion"]);
+    expect(kinds(inputs({ surface: "browser", browseId: "tab" }))).toEqual(["browse", "browselist", "companion"]);
+    // A surface with no dock has nowhere to carry it.
     for (const surface of ["memory", "review", "servers", "runs", "unknown"]) expect(kinds(inputs({ surface }))).toEqual([]);
     expect(kinds(inputs({ plateMode: "file" }))).toEqual([]);
     expect(kinds(inputs({ plateMode: "door", chatEnabled: false }))).toEqual([]);
-    expect(kinds(inputs({ voiceEnabled: false }))).toEqual([]);
+    expect(kinds(inputs({ chatEnabled: false }))).toEqual(["voice"]);
+    expect(kinds(inputs({ voiceEnabled: false, ...noChat }))).toEqual([]);
   });
   it("keys plan voice to the session and chat to the Companion", () => {
     expect(conversationContexts(inputs())[0]).toMatchObject({ key: "plan-1", voiceCapable: true });
     expect(conversationContexts(inputs({ plateMode: "door", companionId: null }))[0].key).toBe("companion:");
   });
   it("browser conversations follow its remembered pill", () => {
-    const list = conversationContexts(inputs({ surface: "browser", browseId: "tab", cartId: "cart:workspace", missionId: "mission", browsePill: "mission" }));
+    const list = conversationContexts(inputs({ surface: "browser", browseId: "tab", cartId: "cart:workspace", missionId: "mission", browsePill: "mission", companionId: null }));
     expect(list.map(row => row.kind)).toEqual(["mission", "browse", "browselist"]);
     expect(list.find(row => row.kind === "browselist")?.id).toBe("cart:workspace");
     expect(activeConversation(list, "companion")?.kind).toBe("mission");
     expect(list.find(row => row.kind === "browselist")?.voiceCapable).toBe(false);
   });
   it("a stale pin cannot move a plan conversation", () => {
-    expect(activeConversation(conversationContexts(inputs()), "companion")?.kind).toBe("voice");
+    expect(activeConversation(conversationContexts(inputs({ companionId: null })), "companion")?.kind).toBe("voice");
+    // With a chat carried beside it, the pin is a genuine choice.
+    expect(activeConversation(conversationContexts(inputs()), "companion")?.kind).toBe("companion");
+    expect(activeConversation(conversationContexts(inputs()), null)?.kind).toBe("voice");
     expect(activeConversation([], "companion")).toBeNull();
   });
 });

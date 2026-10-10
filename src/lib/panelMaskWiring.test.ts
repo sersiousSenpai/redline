@@ -16,12 +16,17 @@ describe("panel mask wiring", () => {
     expect(arrival).not.toMatch(/setPaneCollapsed|revealPane|openPane|togglePane|setPanelBreaks/);
     expect(arrival).not.toMatch(/setDockOpenBy|openDock|closeDock|toggleDock/);
     // The masked-surface branch of `arrivalFocus`'s "focus": selects, never
-    // yanks the surface — its Review action does that.
+    // yanks the surface — its Review action does that, and it is the
+    // notices' one way to the plan.
     const maskedArrival = arrival.slice(arrival.indexOf('if (focus === "focus") {'), arrival.indexOf('// flash'));
     expect(maskedArrival.length).toBeGreaterThan(0);
     expect(arrival).toContain("paneMaskedRef.current");
-    expect(arrival).toContain('selectSurfaceRef.current("document")');
-    expect(maskedArrival).toContain("focusIntercepted()");
+    expect(maskedArrival).not.toContain("selectSurface");
+    expect(maskedArrival).toContain('notice(arrivalMessage(title, revision), "Review")');
+    const open = arrival.slice(arrival.indexOf("const openArrival = () => {"), arrival.indexOf("const notice ="));
+    expect(open).toContain('selectSurfaceRef.current("document")');
+    expect(open).toContain("focusIntercepted()");
+    expect(arrival).toContain("action: { label, onAction: openArrival }");
     // The arrival-only opener is gone, so it cannot come back under its name.
     expect(app).not.toContain("openPanePref");
   });

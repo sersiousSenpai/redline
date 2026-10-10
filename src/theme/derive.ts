@@ -114,6 +114,23 @@ export function contrastRatio(a: string, b: string): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+// The WCAG 2 contrast ratio proper, the one a conformance check computes: the
+// channels come out of sRGB gamma before they are weighed. `contrastRatio`
+// skips that step — and stays, because the theme shapes here were tuned on it
+// — so the two disagree, most of all on very dark and mid-grey inks.
+function wcagContrast(a: string, b: string): number {
+  const lum = (hex: string) => {
+    const [r, g, b] = parseHex(hex).map((v) => {
+      const c = v / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const la = lum(a);
+  const lb = lum(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
 /**
  * Muted/secondary ink that stays legible on every theme. We want `ink` blended
  * `maxT` of the way toward `surface` (the design's preferred muting), but never
@@ -123,22 +140,28 @@ export function contrastRatio(a: string, b: string): number {
  * On a well-separated theme (e.g. Studio) the full maxT clears the floor, so the
  * look is unchanged. On a low-contrast theme (Gecko, Silver Aerogel, Grass…)
  * the blend is pulled back toward `ink` only as far as readability requires.
+ *
+ * `onto` names every surface the color is also read on, checked by the WCAG
+ * formula proper: the muted ink sits on raised cards and composers as much as
+ * on the page, and there Homebrew and Terminal fell under the floor.
  */
 function mutedInk(
   ink: string,
   surface: string,
   maxT: number,
   minContrast: number,
+  onto: string[] = [],
 ): string {
-  if (contrastRatio(mix(ink, surface, maxT), surface) >= minContrast) {
-    return mix(ink, surface, maxT);
-  }
+  const legible = (color: string) =>
+    contrastRatio(color, surface) >= minContrast &&
+    onto.every((s) => wcagContrast(color, s) >= minContrast);
+  if (legible(mix(ink, surface, maxT))) return mix(ink, surface, maxT);
   // Binary-search the blend amount; contrast is monotonic in t.
   let lo = 0;
   let hi = maxT;
   for (let i = 0; i < 24; i++) {
     const mid = (lo + hi) / 2;
-    if (contrastRatio(mix(ink, surface, mid), surface) >= minContrast) lo = mid;
+    if (legible(mix(ink, surface, mid))) lo = mid;
     else hi = mid;
   }
   return mix(ink, surface, lo);
@@ -153,6 +176,7 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
   const onAccent = "#ffffff";
 
   const anchorBg = mix(bg, fg, 0.12);
+  const elevated = mix(bg, fg, 0.07);
 
   // highlight.js token palette. Dark themes keep the warm light-on-dark
   // pastels; light themes use a saturated dark "linting" palette so code reads
@@ -182,8 +206,9 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-ink": fg,
     // Secondary text must stay readable on every theme — not a flat 45% fade
     // (that washed out Gecko / Silver Aerogel / Grass, etc.). 4.5:1 is the
-    // WCAG AA floor for body text; well-separated themes are unaffected.
-    "color-ink-muted": mutedInk(fg, bg, 0.45, 4.5),
+    // WCAG AA floor for body text, on the page and on the raised surfaces it
+    // also sits on; well-separated themes are unaffected.
+    "color-ink-muted": mutedInk(fg, bg, 0.45, 4.5, [bg, elevated]),
     "color-rule": mix(fg, bg, 0.82),
     // Dark themes deepen toward black so the paper plates lift off the hull;
     // light themes tint faintly toward ink (going darker would read as a
@@ -199,7 +224,7 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-info": base.blue,
     "color-warning": base.yellow,
     "color-success": base.green,
-    "color-bg-elevated": mix(bg, fg, 0.07),
+    "color-bg-elevated": elevated,
     "color-on-accent": onAccent,
     // Dark themes get a subtly elevated code surface; light themes keep the
     // code surface equal to the page so the code area looks unified with the

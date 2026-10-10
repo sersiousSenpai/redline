@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { tourShortcuts } from "../lib/keymap";
+import { isEditableTarget } from "../lib/landing";
 
 // A first-run guided tour: dim the window, cut a spotlight around the real
 // region being explained, and float a themed tooltip card pointing at it. The
@@ -129,9 +130,9 @@ const STEPS: TourStep[] = [
   {
     id: "landing",
     anchor: "landing",
-    // The composer lives in the Redline card, which floats up from the
-    // footer — so the coachmark sits above it, never on top of it.
-    placement: "top",
+    // The door's composer, resting on the plate or open: the coachmark
+    // sits below it, where the recents would be on a first run.
+    placement: "bottom",
     title: "Type what you want to build",
     lead: (
       <>
@@ -422,12 +423,16 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
     };
   }, [step.anchor, step.placement, index]);
 
-  // Keyboard: Esc skips, arrows / Enter navigate.
+  // Keyboard: Esc skips, arrows / Enter navigate — except in a text field,
+  // where they are the caret's and the newline's (the composer step asks for
+  // a sentence and a ⏎ that sends it, not one that turns the page).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         close();
+      } else if (isEditableTarget(e.target as HTMLElement | null)) {
+        return;
       } else if (e.key === "ArrowRight" || e.key === "Enter") {
         e.preventDefault();
         next();
@@ -444,14 +449,19 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
   const band = (s: React.CSSProperties): React.CSSProperties => ({
     position: "fixed",
     background: "var(--color-overlay)",
+    pointerEvents: "auto",
     ...s,
   });
 
   return (
-    <div className="fixed inset-0" style={{ zIndex: 60 }}>
+    // A modal layer of its own: the open front door's inert sweep leaves it
+    // live (its "type your prompt" step opens the door under it). The layer
+    // itself lets the pointer through, so the lit region is the real thing:
+    // a press in the composer it lights puts the caret there.
+    <div className="fixed inset-0" style={{ zIndex: 60, pointerEvents: "none" }} data-rl-modal-layer>
       {/* Scrim. With a target, dim four bands around it so the region stays
           lit; otherwise dim the whole window. Bands absorb clicks so the app
-          underneath isn't interactable mid-tour. */}
+          around the lit region isn't interactable mid-tour. */}
       {lit ? (
         <>
           <div style={band({ top: 0, left: 0, width: "100vw", height: lit.top })} />
@@ -498,13 +508,20 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
         <div style={band({ inset: 0, width: "100vw", height: "100vh" })} />
       )}
 
+      {/* Each step, said politely once its card is placed: the card never
+          takes the caret, so a screen reader would otherwise never hear it.
+          Empty until then, so even the first step is a change to speak. */}
+      <div className="sr-only" role="status" aria-live="polite">
+        {pos ? `Getting started, step ${index + 1} of ${STEPS.length}: ${step.title}` : ""}
+      </div>
       {/* Tooltip card. */}
       <div
         ref={cardRef}
         role="dialog"
-        aria-label="Getting started"
+        aria-label={`Getting started: ${step.title}`}
         className="fixed rounded-md shadow-xl border p-5 flex flex-col"
         style={{
+          pointerEvents: "auto",
           top: pos?.top ?? -9999,
           left: pos?.left ?? -9999,
           width: `min(${CARD_W}px, calc(100vw - ${MARGIN * 2}px))`,

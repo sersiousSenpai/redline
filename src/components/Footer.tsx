@@ -58,6 +58,10 @@ interface FooterProps {
   termNeedYou?: number;
   /** ⌘⇧J's action: reveal the dock on the next terminal that needs you. */
   onJumpToNeedsYou?: () => void;
+  /** An agent's review request or a run's report, waiting for you on the
+   *  review surface ("Review ready"), or null. */
+  reviewNews?: string | null;
+  onOpenReviewNews?: () => void;
   onExpandTerminal: () => void;
   /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
@@ -83,6 +87,8 @@ export function Footer({
   termTabCount,
   termNeedYou = 0,
   onJumpToNeedsYou,
+  reviewNews = null,
+  onOpenReviewNews,
   onExpandTerminal,
   backend,
 }: FooterProps) {
@@ -143,6 +149,33 @@ export function Footer({
       }}
     >
       <span className="rl-footer-status flex items-center gap-2">
+        {/* The way to a review an agent asked for, instead of being taken
+            there: present only while it waits. First, because a long status
+            is cut off short of the pill, and this is the part that must
+            never be out of sight. */}
+        {reviewNews && onOpenReviewNews && (
+          <>
+            <button
+              type="button"
+              onClick={onOpenReviewNews}
+              title="Open the review surface"
+              className="flex items-center"
+              style={{
+                height: 24,
+                padding: "0 8px",
+                borderRadius: 9999,
+                border: "1px solid color-mix(in srgb, var(--color-info) 60%, var(--color-rule))",
+                color: "var(--color-ink)",
+                fontSize: "var(--rl-text-xs)",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {reviewNews} → Open
+            </button>
+            <span style={{ color: "var(--color-rule)" }}>·</span>
+          </>
+        )}
         <span
           aria-hidden
           style={{

@@ -73,9 +73,12 @@ fn signal_for_pane(raw: &str) -> Option<Value> {
 
 fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
     let value = signal_for_pane(raw)?;
-    // Subframes may summon the front door. All other browser actions and
-    // page-state updates remain restricted to the main frame.
-    (main_frame || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
+    // Subframes may summon the front door, and say they were pressed (the
+    // island's card closes on a press anywhere in the page). All other
+    // browser actions and page-state updates remain restricted to the main
+    // frame.
+    let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart");
+    (main_frame || press || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
 }
 #[cfg(target_os = "macos")]
 mod native {
@@ -105,8 +108,11 @@ mod native {
                 drop(throttle);
                 let body = message.body();
                 let Some(raw) = body.downcast_ref::<NSString>() else { return; };
-                let Some(mut value) = signal_for_frame(&raw.to_string(), message.frameInfo().isMainFrame()) else { return; };
-                if value["kind"] == "interaction" || value["kind"] == "shortcut" { note_input(&self.ivars().label); }
+                let main_frame = message.frameInfo().isMainFrame();
+                let Some(mut value) = signal_for_frame(&raw.to_string(), main_frame) else { return; };
+                // An embed's press puts the island's card away, but never
+                // interrupts the agent's page actions: that stays the page's.
+                if value["kind"] == "shortcut" || (value["kind"] == "interaction" && main_frame) { note_input(&self.ivars().label); }
                 value["label"] = Value::String(self.ivars().label.clone());
                 let _ = self.ivars().app.emit_to("main", "browser-page-event", value);
             }
@@ -182,13 +188,20 @@ mod tests {
     }
 
     #[test]
-    fn subframes_can_only_summon_the_front_door() {
+    fn subframes_can_only_summon_the_front_door_or_say_they_were_pressed() {
         assert!(signal_for_frame(r#"{"kind":"shortcut","value":"open-front-door"}"#, false).is_some());
+        assert!(signal_for_frame(r#"{"kind":"interaction","value":"pointerdown"}"#, false).is_some());
+        assert!(signal_for_frame(r#"{"kind":"interaction","value":"touchstart"}"#, false).is_some());
         for raw in [
             r#"{"kind":"shortcut","value":"close-tab"}"#,
             r#"{"kind":"shortcut","value":"toggle-monochat"}"#,
             r#"{"kind":"tabs","value":"https://example.org"}"#,
             r#"{"kind":"inspect","value":{"command":"read_file"}}"#,
+            // A scroll, a key or focus inside an embed is not a press.
+            r#"{"kind":"interaction","value":"wheel"}"#,
+            r#"{"kind":"interaction","value":"keydown"}"#,
+            r#"{"kind":"interaction"}"#,
+            r#"{"kind":"focus"}"#,
         ] { assert!(signal_for_frame(raw, false).is_none()); }
         assert!(signal_for_frame(r#"{"kind":"shortcut","value":"close-tab"}"#, true).is_some());
     }

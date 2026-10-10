@@ -58,13 +58,22 @@ export function writeSharedDraft(key: string, next: string | ((previous: string)
   notify(key);
 }
 
-export function useSharedDraft(key: string): [string, (next: string | ((previous: string) => string)) => void] {
-  const subscribe = useCallback((listener: () => void) => {
+function useSubscription(key: string) {
+  return useCallback((listener: () => void) => {
     const set = listeners.get(key) ?? new Set<() => void>();
     listeners.set(key, set.add(listener));
     return () => { set.delete(listener); if (!set.size) listeners.delete(key); };
   }, [key]);
-  const value = useSyncExternalStore(subscribe, () => readSharedDraft(key));
+}
+
+export function useSharedDraft(key: string): [string, (next: string | ((previous: string) => string)) => void] {
+  const value = useSyncExternalStore(useSubscription(key), () => readSharedDraft(key));
   const update = useCallback((next: string | ((previous: string) => string)) => writeSharedDraft(key, next), [key]);
   return [value, update];
+}
+
+/** Whether `key` holds a sentence, re-rendering only when that answer flips —
+ *  never per keystroke. */
+export function useHasSharedDraft(key: string): boolean {
+  return useSyncExternalStore(useSubscription(key), () => readSharedDraft(key).trim() !== "");
 }

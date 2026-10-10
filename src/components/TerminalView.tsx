@@ -16,6 +16,7 @@ import type { HandoffDeps } from "../lib/terminalHandoff";
 import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
 import { isInterruptInput, terminalInputOrigin } from "../lib/terminalInput";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
+import { isEditableTarget } from "../lib/landing";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -249,6 +250,32 @@ export function awaitPtyOutput(
 let suppressRevealFocusUntil = 0;
 export function suppressTerminalRevealFocus(ms = 1500) {
   suppressRevealFocusUntil = performance.now() + ms;
+}
+
+// Boot hands no terminal the caret: until the user's first press or key, a
+// reveal is the app putting itself back together, not someone asking to
+// type. Every explicit open (the footer, ⇧↓, a tab) starts with one, ahead of
+// the reveal it causes.
+let userActed = false;
+const acted = () => { userActed = true; };
+window.addEventListener("pointerdown", acted, true);
+window.addEventListener("keydown", acted, true);
+/** A fresh launch again, for tests. */
+export function __resetRevealFocus(): void {
+  userActed = false;
+  suppressRevealFocusUntil = 0;
+}
+
+/** Whether a reveal may hand the terminal in `host` the caret. Never at
+ *  boot, never inside a programmatic reveal's window, never under a modal
+ *  (the open front door sweeps everything behind it inert), and never away
+ *  from a text field elsewhere — a composer, an editor, a comment box.
+ *  Another terminal's caret is fair game: a tile switch is a gesture at the
+ *  terminals. */
+export function revealMayFocus(host: Element): boolean {
+  if (!userActed || performance.now() < suppressRevealFocusUntil || host.closest("[inert]")) return false;
+  const active = document.activeElement;
+  return !active || host.contains(active) || !!active.closest(".xterm") || !isEditableTarget(active as HTMLElement);
 }
 
 // The caret, on request. A reveal hands a newly shown terminal the caret
@@ -856,8 +883,10 @@ export const TerminalView = memo(function TerminalView({
         term.refresh(0, term.rows - 1);
       }
       // Explicit user opens (caret, footer, ⇧↓, tab switch) focus the
-      // terminal; programmatic reveals arm the suppress window and don't.
-      if (performance.now() >= suppressRevealFocusUntil) term?.focus();
+      // terminal; programmatic reveals arm the suppress window and don't,
+      // and nothing takes the caret from where the user is writing.
+      const host = hostRef.current;
+      if (host && revealMayFocus(host)) term?.focus();
     });
     return () => cancelAnimationFrame(raf);
   }, [visible, id, drainPending, applyFit]);

@@ -313,19 +313,106 @@ describe("the composer's sentence stays out of App", () => {
   });
 });
 
-// The card's caret (island plan + floating-monochat): only a hover peek opens
-// without reaching for the composer, and nothing deliberate inherits that.
-describe("the card's quiet open", () => {
+// The door's caret and its two keys (10/10 front-door return): nothing that
+// merely happens — a launch, a render, a plan arriving — opens the island,
+// closes it, or moves the caret. Only a gesture does.
+describe("the island never moves on its own", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
-  it("only a hover is quiet, and the bit never outlives the card or a New", () => {
-    const change = app.slice(app.indexOf("const onDoorOpenChange"), app.indexOf("const renderMonochatComposer"));
-    expect(change).toContain('if (open) setDoorSummonedQuiet(via === "hover");');
-    expect(change).toMatch(/if \(!frontDoorOpen\) setDoorSummonedQuiet\(false\);/);
-    expect(app).toMatch(/autoFocusOnShow=\{frontDoorOpen && !doorSummonedQuiet\}/);
-    // New is a click: the blank composer it brings back takes the caret.
+  it("boots shut — resting on the empty plate, never opened over the work", () => {
+    const init = app.slice(app.indexOf("const [frontDoorOpen, setFrontDoorOpen] = useState("), app.indexOf("const [doorCompact"));
+    expect(init).toContain("return false;");
+    expect(app).toMatch(/landing=\{plateAtRest && shellReady/);
+    // The open door hides the native page; the compact card is cut out of it.
+    const overlay = app.slice(app.indexOf("const browserOverlayActive ="), app.indexOf("const browserVisible ="));
+    expect(overlay).toContain("frontDoorOpen ||");
+    expect(overlay).not.toContain("doorCompact");
+  });
+
+  it("a hover never takes the caret; the door, or the chat it holds, takes it on every summons", () => {
+    const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
+    expect(door).toMatch(/autoFocusOnShow=\{where === "door" \? frontDoorOpen : where === "chat" && roomChat\}/);
+    // The type-to-start handoff is the door's alone.
+    expect(door).toContain('focusNonce={where === "door" ? frontDoorFocus : 0}');
+    expect(app).not.toContain("doorSummonedQuiet");
+  });
+
+  it("closes only on navigation the user started — never on a plan arriving", () => {
     const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
-    expect(island).toMatch(/onNewChat=\{\(\) => \{[^}]*setDoorSummonedQuiet\(false\)/);
+    expect(island).toContain("surfaceKey={doorNavKey}");
+    const nav = app.match(/const doorNavKey = `([^`]*)`;/);
+    expect(nav, "the navigation key moved").not.toBeNull();
+    expect(nav![1]).not.toContain("activeId");
+    // The chips still reset on what is on screen, a plan arriving included.
+    expect(app).toMatch(/const islandSurfaceKey = `[^`]*activeId[^`]*`;/);
+  });
+
+  it("a place asked for on the surface already showing is navigation too", () => {
+    // A plan from the palette, a recent or a chat's receipt must not land
+    // under a door left open over it.
+    expect(app.match(/const doorNavKey = `([^`]*)`;/)![1]).toContain("${doorTrip}");
+    const palette = app.slice(app.indexOf("openSession: (id) => {"), app.indexOf("toggleDock: toggleDoor,"));
+    expect(palette.match(/tripDoor\(\);/g)).toHaveLength(3);
+    expect(app.slice(app.indexOf("const openDoorRecent = (r: DoorRecent) => {"), app.indexOf("// Leaving the room carries"))).toContain("tripDoor();");
+    expect(app).toMatch(/onOpenPlan=\{id => \{ tripDoor\(\); selectSurface\("document"\);/);
+  });
+
+  it("tells a screen reader when a launch is handed off and a plan arrives", () => {
+    // The pill only shows "Working", and the plate quietly becomes the plan:
+    // neither is ever read out. The island's status line says both.
+    const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
+    expect(island).toContain("announce={doorNews}");
+    const launch = app.slice(app.indexOf("const launchFromFrontDoor = async"), app.indexOf("const drafterFromFrontDoor = () =>"));
+    expect(launch).toMatch(/setDoorCompact\(false\);\s*announceDoor\(/);
+    expect(app).toContain("announceDoor(arrivalMessage(title, revision));");
+    // A new version of the plan already selected says so, wherever it lands.
+    expect(app).toContain("const revision = payload.sessionId === activeId;\n        const focus = arrivalFocus({");
+  });
+
+  it("builds the in-flight launch once per launch, not per render", () => {
+    const flight = app.slice(app.indexOf("const frontDoorFlight ="), app.indexOf("const frontDoorFlight =") + 400);
+    expect(flight).toMatch(/^const frontDoorFlight = useMemo\(/);
+    expect(flight).toContain("[pendingLaunch, runFlight]");
+  });
+});
+
+// One chat, two places (10/10): the door's room at plate scale, the
+// conversation dock's column once you leave the room. Carried, never closed.
+describe("the room's chat is carried, never closed", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("moves one mounted chat between the room's slot and the dock's", () => {
+    expect(app).toContain("const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;");
+    expect(app).toMatch(/<div ref=\{setChatDockSlot\}/);
+    // One ChatRoom, portalled into the host that moves.
+    expect(app.match(/<ChatRoom\b/g)).toHaveLength(1);
+    expect(app).toContain("</ErrorBoundary></Suspense>, chatHost)}");
+  });
+
+  it("leaving the room, however it was left, carries the chat into the dock", () => {
+    const carry = app.slice(app.indexOf("// Leaving the room carries its chat"), app.indexOf("const chatDocked ="));
+    expect(carry).toContain("if (frontDoorOpen || !chatInRoom) return;");
+    expect(carry).toContain('setConversationPin("companion");');
+    expect(carry).toContain("openDock();");
+    // Never over the surface's own conversation already in the dock, and
+    // never as a pin on a surface with no dock to show it.
+    expect(carry).toContain("if (!chatId || dockOpen || !dockScopeRef.current) return;");
+    // Nor lost when the door shut while the chat was still being minted.
+    expect(carry).toContain("}, [frontDoorOpen, chatInRoom]);");
+  });
+
+  it("putting the dock away hands the column back to the surface's own conversation", () => {
+    const close = app.slice(app.indexOf("const closeDock = useCallback("), app.indexOf("const openDock = useCallback("));
+    expect(close).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
+  });
+
+  it("the Discuss pill opens the plan's own discussion, never a carried chat", () => {
+    // The carry's pin outlives a home dock shut by walking to a plan; voice
+    // stays first-class, so the pill drops it before it opens the column.
+    const discuss = app.slice(app.indexOf("const openDiscussion = useCallback("), app.indexOf("}, [setConversationPin, openDock]);"));
+    expect(discuss).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
+    expect(discuss).toContain("openDock();");
+    expect(app).toMatch(/<DiscussPill\s+onClick=\{openDiscussion\}/);
   });
 });
 

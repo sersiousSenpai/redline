@@ -57,7 +57,8 @@
     if (!event.isTrusted) return;
     if ((name === "wheel" || name === "touchstart") && performance.now() - lastInput < 100) return;
     lastInput = performance.now();
-    post({ kind: "interaction", revision: revision() });
+    // Named, so a press can dismiss the island's card and a scroll cannot.
+    post({ kind: "interaction", value: name, revision: revision() });
   }, { capture: true, passive: true });
   document.addEventListener("focusin", () => post({ kind: "focus" }), true);
   function observeTitle() {

@@ -101,6 +101,20 @@ describe("inspection capture safeguards", () => {
   });
 });
 describe("page signals and inspector", () => {
+  it("says which input a page interaction was, so only a press reads as one outside the island", () => {
+    const page = window as unknown as Record<string, any>;
+    const events: Record<string, any>[] = [];
+    page.webkit = { messageHandlers: { redlineBrowser: { postMessage: (raw: string) => events.push(JSON.parse(raw)) } } };
+    page.__redline_signals_installed = false;
+    // Page input is trusted input; a test's synthetic event is not, so the
+    // listener is called the way the page would call it.
+    const listen = vi.spyOn(document, "addEventListener");
+    window.eval(signals);
+    const press = listen.mock.calls.find(([name]) => name === "pointerdown")![1] as (event: unknown) => void;
+    listen.mockRestore();
+    press({ isTrusted: true });
+    expect(events.filter((event) => event.kind === "interaction").map((event) => event.value)).toEqual(["pointerdown"]);
+  });
   it("emits bounded new-tab actions without host polling and refuses page activation during inspection", () => {
     const page = window as unknown as Record<string, any>;
     const events: Record<string, any>[] = [];

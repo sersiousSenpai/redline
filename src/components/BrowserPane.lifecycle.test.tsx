@@ -381,6 +381,22 @@ it("ignores native and app keyboard shortcuts while another surface is active", 
   expect([...mocks.views.values()].every((view) => !view.visible && !view.log.includes("show"))).toBe(true);
 });
 
+it("tells the island about a press inside the visible page, never a scroll or a hidden page", async () => {
+  const pressed = vi.fn();
+  window.addEventListener("redline:page-press", pressed);
+  try {
+    await mount();
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "wheel" });
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "keydown" });
+    expect(pressed).not.toHaveBeenCalled();
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "pointerdown" });
+    expect(pressed).toHaveBeenCalledOnce();
+    await mount({ visible: false });
+    await event("browser-page-event", { label: "browser-t-two", kind: "interaction", value: "pointerdown" });
+    expect(pressed).toHaveBeenCalledOnce();
+  } finally { window.removeEventListener("redline:page-press", pressed); }
+});
+
 it("finishes hiding a pending native show after the pane unmounts", async () => {
   const shown = deferred();
   mocks.showGates.set("browser-t-two", shown.promise);

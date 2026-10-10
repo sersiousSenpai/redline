@@ -154,7 +154,8 @@ function companionDescriptor(
   };
 }
 
-/** Only conversations owned by the current surface; the Companion lives at Home. */
+/** The conversations owned by the current surface; the Companion lives at
+ *  Home, and an OPEN chat rides along beside any surface's own. */
 export function conversationContexts(
   s: ConversationInputs,
 ): ConversationDescriptor[] {
@@ -221,8 +222,11 @@ export function conversationContexts(
     if (at > 0) own.unshift(...own.splice(at, 1));
   }
 
-  // Home owns its chat. Other surfaces expose only their own conversation.
-  if (s.chatEnabled && s.surface === "document" && s.plateMode === "door")
+  // Home owns its chat. Anywhere else with a dock, an open chat comes after
+  // the surface's own conversation: walking out of the door's room carries it
+  // along, never closes it.
+  const home = s.surface === "document" && s.plateMode === "door";
+  if (s.chatEnabled && (home || (s.companionId && dockScope(s.surface, s.plateMode) !== null)))
     own.push(companionDescriptor(s.companionId, s.companionTitle));
   return own;
 }

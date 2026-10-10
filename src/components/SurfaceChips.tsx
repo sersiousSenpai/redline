@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextChip } from "../lib/surfaceContext";
 
-/** The surface's "this thing" chips in the Redline card. A pressed chip rides
- *  along with whatever the card sends; see lib/surfaceContext.ts. */
+/** The surface's "this thing" chips above the Front Door's composer. A pressed
+ *  chip rides along with whatever it sends; see lib/surfaceContext.ts. */
 export function SurfaceChips({ chips, pressed, onToggle }: {
   chips: ContextChip[];
   pressed: (chip: ContextChip) => boolean;

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 interface FakeChannel { onmessage: (bytes: ArrayBuffer) => void }
 interface FakeTerminal {
   disposed: boolean;
+  focused: number;
   output: string;
   data: (text: string) => void;
   key: () => void;
@@ -36,6 +37,7 @@ vi.mock("../lib/xtermLoader", () => {
     rows = 24;
     options = {};
     disposed = false;
+    focused = 0;
     output = "";
     data = (_text: string) => {};
     key = () => {};
@@ -55,7 +57,7 @@ vi.mock("../lib/xtermLoader", () => {
     writeln(text: string) { this.output += text; }
     resize(cols: number, rows: number) { this.cols = cols; this.rows = rows; }
     refresh() {}
-    focus() {}
+    focus() { this.focused++; }
     dispose() { this.disposed = true; }
   }
   class FitAddon { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } }
@@ -64,7 +66,7 @@ vi.mock("../lib/xtermLoader", () => {
   return { xtermMods: () => mods, loadXterm: async () => mods };
 });
 
-import { TerminalView, tauriHandoffDeps, whenPtySpawned } from "./TerminalView";
+import { __resetRevealFocus, suppressTerminalRevealFocus, TerminalView, tauriHandoffDeps, whenPtySpawned } from "./TerminalView";
 import { enqueuePtyOp } from "../lib/ptyFence";
 import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 
@@ -276,5 +278,69 @@ describe("terminal view lifecycle", () => {
     await mount(true);
     act(() => emit("live\x1b[6n"));
     expect(mocks.invoke).toHaveBeenCalledWith("pty_write", { id, data: "\x1b[1;1R" });
+  });
+});
+
+// The terminal guard (10/10, "never steal focus"): a reveal hands the
+// terminal the caret only when nothing else holds it.
+describe("a revealed terminal takes the caret only when nothing else holds it", () => {
+  const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+  async function reveal() {
+    await mount(false);
+    await mount(true);
+    await frame();
+    return currentTerm().focused;
+  }
+  const press = () => window.dispatchEvent(new Event("pointerdown"));
+  beforeEach(() => __resetRevealFocus());
+  afterEach(() => { document.querySelectorAll("[data-elsewhere]").forEach((element) => element.remove()); });
+
+  it("takes nothing at boot, before the user has pressed or typed anything", async () => {
+    expect(await reveal()).toBe(0);
+  });
+
+  it("takes it on a reveal the user asked for", async () => {
+    press();
+    expect(await reveal()).toBe(1);
+  });
+
+  it("a key counts as asking, too", async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true }));
+    expect(await reveal()).toBe(1);
+  });
+
+  it("never from a text field elsewhere: a composer keeps its caret", async () => {
+    press();
+    const composer = document.createElement("textarea");
+    composer.dataset.elsewhere = "";
+    document.body.appendChild(composer);
+    composer.focus();
+    expect(await reveal()).toBe(0);
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it("another terminal's caret is fair game: a tile switch is aimed at the terminals", async () => {
+    press();
+    const other = document.createElement("div");
+    other.className = "xterm";
+    other.dataset.elsewhere = "";
+    other.appendChild(document.createElement("textarea"));
+    document.body.appendChild(other);
+    other.querySelector("textarea")!.focus();
+    expect(await reveal()).toBe(1);
+  });
+
+  it("never under the open door, which sweeps everything behind it inert", async () => {
+    press();
+    // The attribute `inert` reflects to in the app's webview (jsdom keeps
+    // the property to itself).
+    host.setAttribute("inert", "");
+    expect(await reveal()).toBe(0);
+  });
+
+  it("never inside a programmatic reveal's window", async () => {
+    press();
+    suppressTerminalRevealFocus();
+    expect(await reveal()).toBe(0);
   });
 });

@@ -110,14 +110,14 @@ describe("Home chat containment", () => {
     };
     function Workspace({ surface }: { surface: string }) {
       const [open, setOpen] = useState(true);
-      return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} pose="chat" context={surface} busy={false}>
+      return <><article>{surface}</article><MonochatIsland open={open} onOpenChange={setOpen} onNewChat={() => {}} context={surface} busy={false}>
         <ChatRoom companionId="upgraded-chat" cwd={null} onSelectChat={() => {}} onEmpty={() => {}} dictationEnabled={false} onClose={() => {}}
           composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: accessories => <FrontDoor {...base} accessories={accessories}/> }}/>
       </MonochatIsland></>;
     }
     await act(async () => root.render(<Workspace surface="Document"/>));
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
-    // One way back to compose: the heading's New, not a second composer chip.
+    // One way back to compose: the room's heading New, not a second composer chip.
     expect(host.querySelectorAll(".rl-monochat-new")).toHaveLength(1);
     expect([...host.querySelectorAll("button")].filter(button => /New chat/.test(button.textContent ?? ""))).toEqual([]);
     const input = host.querySelector("textarea")!;
@@ -126,8 +126,8 @@ describe("Home chat containment", () => {
     window.dispatchEvent(new Event("pagehide"));
     expect(localStorage.getItem("rl.chatDraft.upgraded-chat")).toBe('""');
     expect(localStorage.getItem(FRONT_DOOR_TEXT_KEY)).toBe(JSON.stringify("Original launch draft\n\nPrevious chat draft"));
-    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Collapse Redline"]')!.click());
-    expect(host.querySelector<HTMLElement>(".rl-monochat-card")!.hidden).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Return to workspace"]')!.click());
+    expect(host.querySelector<HTMLElement>(".rl-monochat")!.dataset.pose).toBe("notch");
     await act(async () => root.render(<Workspace surface="Browser"/>));
     expect(host.querySelector("textarea")).toBe(input);
     expect(input.value).toContain("Previous chat draft");
