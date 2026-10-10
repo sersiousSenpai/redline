@@ -19,6 +19,10 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     dictated: "",
     thread: [] as unknown[],
     status: { up: true, inFlight: false, generation: 1, turn: 0 },
+    // The native capture: `dictation_start` arms the mic only when none is
+    // open, exactly like dictation.rs, so a test sees a re-arm that never armed.
+    micOpen: false,
+    armed: 0,
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -48,8 +52,18 @@ vi.mock("@tauri-apps/api/core", () => ({
         return [];
       case "tts_get_settings":
         return { engine: "system" };
+      case "dictation_start":
+        if (!script.micOpen) {
+          script.micOpen = true;
+          script.armed += 1;
+        }
+        return null;
       case "dictation_stop":
+        script.micOpen = false;
         return script.dictated;
+      case "dictation_kill_all":
+        script.micOpen = false;
+        return null;
       case "delete_comment":
         return true;
       default:
@@ -164,6 +178,8 @@ beforeEach(() => {
   script.dictated = "";
   script.thread = [];
   script.status = { up: true, inFlight: false, generation: 1, turn: 0 };
+  script.micOpen = false;
+  script.armed = 0;
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -615,12 +631,27 @@ describe("hands-free", () => {
     await mount();
     await act(async () => button("🎧 Hands-free: off").click());
     await wait(350);
-    expect(named("dictation_start")).toHaveLength(1);
+    expect(script.armed).toBe(1);
+    // A quiet room: the recognizer gives up on the live task.
     await emit("dictation-error", { error: "No speech detected", domain: "kAFAssistantErrorDomain", code: 1110 });
     expect(host.querySelector("[role='switch']")!.getAttribute("aria-checked")).toBe("true");
     expect(host.textContent).not.toContain("No speech detected");
     await wait(1100);
-    expect(named("dictation_start")).toHaveLength(2);
+    // The dead capture was closed first, so the mic really listens again.
+    expect(script.armed).toBe(2);
+  });
+
+  it("closes the capture a real recognizer error left open, so the next hold listens", async () => {
+    await mount();
+    const talk = button("Hold to talk");
+    await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    await emit("dictation-error", { error: "Speech service crashed", domain: "kAFAssistantErrorDomain", code: 1101 });
+    expect(host.textContent).toContain("Speech service crashed");
+    await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
+    await wait(400);
+    await holdToTalk("Focus on rollout.");
+    expect(script.armed).toBe(2);
+    expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
   });
 
   it("re-arms from the turn's end and the audio finishing, not a speech flag", async () => {
@@ -640,5 +671,6 @@ describe("hands-free", () => {
     await finishSpeech();
     await wait(400);
     expect(named("dictation_start")).toHaveLength(2);
+    expect(script.armed).toBe(2);
   });
 });

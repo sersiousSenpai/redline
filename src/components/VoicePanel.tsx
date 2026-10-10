@@ -1797,10 +1797,17 @@ function VoicePanelBase({
               vadRef.current?.reset();
               setListening(false);
               setPartial("");
+              // The task is over but its capture is still open, and
+              // `dictation_start` does nothing while one is: close it, so
+              // the re-arm really listens.
+              void invoke("dictation_kill_all").catch(() => {});
             }
             return;
           }
           talkingRef.current = false;
+          // Likewise the capture a failed task leaves open, or the next press
+          // would start nothing.
+          void invoke("dictation_kill_all").catch(() => {});
           // A real mic error can't be auto-recovered cleanly, and re-arming
           // would just loop, so drop out of hands-free and surface it.
           hfArmedRef.current = false;
