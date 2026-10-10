@@ -246,7 +246,13 @@ impl BrowseState {
         // Synthesis framing: a digest for a colleague, not a fresh answer to the
         // user. First turn embeds the snapshot + tool docs (the colleague may
         // have no prior context); a resumed colleague gets the compact ask.
-        let framed = consult_framing(&question);
+        // A consult has no captured tail, so its framing names the page: a
+        // re-read without one would land on whichever tab is on screen.
+        let label = app
+            .try_state::<crate::BrowserTabs>()
+            .and_then(|tabs| tabs.get().into_iter().find(|t| t.browse_id == browse_id))
+            .map(|t| t.label);
+        let framed = consult_framing(&question, label.as_deref());
         // The consult already runs under the calling agent's mission-framed
         // question, so it needs no separate mission block of its own.
         let session_key = provider.session_key(&browse_id);
@@ -513,12 +519,16 @@ impl BrowseState {
 }
 
 /// How a consult's question reaches the page agent: as a digest for the
-/// Companion, the one caller of the consult route (BC-22).
-fn consult_framing(question: &str) -> String {
+/// Companion, the one caller of the consult route (BC-22), about the tab
+/// whose label it names when the tab is open.
+fn consult_framing(question: &str, label: Option<&str>) -> String {
+    let page = label
+        .map(|l| format!(" (target label {}: read it with ?tab={l}, never the tab on screen)", serde_json::to_string(l).unwrap_or_default()))
+        .unwrap_or_default();
     format!(
         "The user's Companion — the one conversation that follows them \
          across Redline's surfaces — is checking in with you about THIS \
-         tab. Synthesize what matters here for its question as a tight \
+         tab{page}. Synthesize what matters here for its question as a tight \
          DIGEST (not a transcript, and not a fresh reply to the user). Be \
          concise. Its question:\n\n{}",
         question.trim()
@@ -2729,14 +2739,19 @@ mod contract {
         }
     }
 
+    /// A consult carries no captured tail, so its framing names the page it
+    /// is about; a re-read without a label would read the tab on screen.
     #[test]
     fn a_consult_is_framed_for_its_real_caller() {
-        let framed = super::consult_framing("  what's the pricing?  ");
+        let framed = super::consult_framing("  what's the pricing?  ", Some("browser-t-2"));
         assert!(framed.contains("Companion"));
+        assert!(framed.contains(r#"about THIS tab (target label "browser-t-2": read it with ?tab=browser-t-2, never the tab on screen)."#));
         assert!(framed.ends_with("Its question:\n\nwhat's the pricing?"));
         for phrase in strings(&contract()["consultMustNotMention"]) {
             assert!(!framed.contains(&phrase), "the consult still says {phrase}");
         }
+        // A tab that closed meanwhile is still asked about, unlabelled.
+        assert!(super::consult_framing("q", None).contains("about THIS tab. Synthesize"));
     }
 
     /// Every kind the contract names parses as an `Operation` and serializes
