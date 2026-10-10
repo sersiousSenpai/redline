@@ -14,10 +14,14 @@
 //      correction learned from them. They are few and explicit, and a learned
 //      correction is proof the recognizer already got that word wrong once,
 //      so a long plan never crowds them out;
-//   2. terms from the open plan: proper names ("Kokoro", "Front Door") and
-//      acronyms, most frequent first;
-//   3. identifiers from the session's project: file names and CamelCase or
-//      snake_case names in the plan, then any the caller adds.
+//   2. names the open plan capitalizes for their own sake ("Kokoro",
+//      "Front Door");
+//   3. the code names it mentions, the project's identifiers (VoicePanel,
+//      dictation_start);
+//   4. its acronyms, which recognizers mostly spell out right unaided;
+//   5. file names, the plan's and then any the caller adds — rarely said
+//      aloud as written.
+// Within each source, the most frequent first.
 //
 // The user's words are stored in the settings database as the `voiceVocab`
 // ui pref, so they survive a cache clear and travel with the database.
@@ -45,7 +49,7 @@ export interface VocabStore {
 export interface VocabSources {
   /** The open plan's (or draft's) markdown. */
   plan?: string;
-  /** More identifiers from the session's project, such as file names. */
+  /** More of the session's project identifiers, such as its file names. */
   identifiers?: string[];
   /** The user's stored words and learned corrections. */
   store?: VocabStore;
@@ -60,11 +64,11 @@ const PAIRS_KEPT = 100;
 /** File names worth hearing: source, docs and config. */
 const FILE_NAME =
   /(?:^|[\s`'"(/])([\w.-]*\w\.(?:rs|tsx?|jsx?|mjs|cjs|json|md|py|swift|toml|ya?ml|css|html|sh|sql))(?=$|[\s`'",;:)!?]|\.(?:\s|$))/gm;
-/** A word with a lowercase letter and an inner capital (VoicePanel,
- *  useStickToBottom, SQLite, macOS). */
-const CAMEL = /\b(?=[A-Za-z0-9]*[a-z])[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b/g;
-/** snake_case names (dictation_start). */
-const SNAKE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+/** Code names: a word with a lowercase letter and an inner capital
+ *  (VoicePanel, useStickToBottom, SQLite, macOS), or snake_case
+ *  (dictation_start). */
+const CODE =
+  /\b(?=[A-Za-z0-9]*[a-z])[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 /** Two to six capitals, maybe with a trailing digit (MLX, PCM, JSON, TTS). */
 const ACRONYM = /\b[A-Z]{2,6}[0-9]?\b/g;
 /** A run of capitalized words (Front Door, Neural Engine, Kokoro). */
@@ -107,19 +111,28 @@ function ranked(counts: Map<string, { term: string; n: number }>): string[] {
     .map((c) => c.term);
 }
 
-/** The vocabulary a plan's text carries: `terms` (proper names, acronyms)
- *  and `identifiers` (file names and the code names in it), each most
- *  frequent first. Fenced code is skipped — its names are usually not what
- *  anyone says aloud — but inline code spans count. */
-export function planVocab(markdown: string): { terms: string[]; identifiers: string[] } {
-  const text = markdown.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, " ");
-  const ids = new Map<string, { term: string; n: number }>();
-  tally(text, FILE_NAME, ids, (m) => m[1].split("/").pop() ?? m[1]);
-  tally(text, CAMEL, ids);
-  tally(text, SNAKE, ids);
+/** The vocabulary a plan's text carries, each kind most frequent first. */
+export interface PlanVocab {
+  /** Names it capitalizes for their own sake ("Kokoro", "Front Door"). */
+  names: string[];
+  /** CamelCase and snake_case names (VoicePanel, dictation_start). */
+  code: string[];
+  /** Acronyms (MLX, PCM). */
+  acronyms: string[];
+  /** File names, without their folders (tts.rs, VoicePanel.tsx). */
+  files: string[];
+}
 
-  const terms = new Map<string, { term: string; n: number }>();
-  tally(text, ACRONYM, terms);
+/** Read a plan's vocabulary. Fenced code is skipped — its names are usually
+ *  not what anyone says aloud — but inline code spans count. */
+export function planVocab(markdown: string): PlanVocab {
+  const text = markdown.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, " ");
+  const files = new Map<string, { term: string; n: number }>();
+  tally(text, FILE_NAME, files, (m) => m[1].split("/").pop() ?? m[1]);
+  const code = new Map<string, { term: string; n: number }>();
+  tally(text, CODE, code);
+  const acronyms = new Map<string, { term: string; n: number }>();
+  tally(text, ACRONYM, acronyms);
   // Prose only: a capitalized run inside a code span is an identifier's piece.
   const prose = text.replace(/`[^`\n]*`/g, " ");
   // Words the text also writes in lowercase are ordinary words, capitalized
@@ -142,7 +155,7 @@ export function planVocab(markdown: string): { terms: string[]; identifiers: str
     const key = run.toLowerCase();
     if (words.some((w) => COMMON.has(w.toLowerCase()))) continue;
     if (words.length === 1 && lower.has(key)) continue;
-    if (ids.has(key)) continue;
+    if (code.has(key) || files.has(key)) continue;
     if (mid) midSentence.add(key);
     const seen = named.get(key);
     if (seen) seen.n += 1;
@@ -151,15 +164,10 @@ export function planVocab(markdown: string): { terms: string[]; identifiers: str
   // A name is capitalized somewhere a sentence doesn't start: "the Front
   // Door", "local Whisper" — not a heading's "Door Rules" or an opening
   // "Describe".
-  for (const [key, c] of named) {
-    if (!midSentence.has(key)) continue;
-    const seen = terms.get(key);
-    if (seen) seen.n += c.n;
-    else terms.set(key, c);
-  }
+  for (const key of named.keys()) if (!midSentence.has(key)) named.delete(key);
   // "SIZE", "USER": a heading's capitals, not an acronym.
-  for (const key of terms.keys()) if (ordinary(key)) terms.delete(key);
-  return { terms: ranked(terms), identifiers: ranked(ids) };
+  for (const key of acronyms.keys()) if (ordinary(key)) acronyms.delete(key);
+  return { names: ranked(named), code: ranked(code), acronyms: ranked(acronyms), files: ranked(files) };
 }
 
 /** The ranked vocabulary for one capture (see the ranking at the top). */
@@ -177,9 +185,8 @@ export function buildVocab(sources: VocabSources, cap = VOCAB_CAP): string[] {
   // Newest corrections first: the freshest evidence of a mishearing.
   for (const p of [...(store?.pairs ?? [])].sort((a, b) => b.at - a.at)) add(p.meant);
   for (const w of store?.words ?? []) add(w);
-  const fromPlan = planVocab(sources.plan ?? "");
-  for (const t of fromPlan.terms) add(t);
-  for (const t of fromPlan.identifiers) add(t);
+  const plan = planVocab(sources.plan ?? "");
+  for (const t of [...plan.names, ...plan.code, ...plan.acronyms, ...plan.files]) add(t);
   for (const t of sources.identifiers ?? []) add(t);
   return out;
 }

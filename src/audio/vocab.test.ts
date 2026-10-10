@@ -40,23 +40,24 @@ const IgnoredInsideFences = notVocabulary_either;
 `;
 
 describe("planVocab", () => {
-  it("finds the code names: file names, CamelCase and snake_case, not fenced code", () => {
-    const { identifiers } = planVocab(PLAN);
-    for (const id of ["VoicePanel.tsx", "tts.rs", "VoicePanel", "TalkPanel", "useStickToBottom", "dictation_start"]) {
-      expect(identifiers, id).toContain(id);
+  it("finds the code names and file names, not in fenced code", () => {
+    const { code, files } = planVocab(PLAN);
+    expect(files).toEqual(["VoicePanel.tsx", "tts.rs"]);
+    for (const id of ["VoicePanel", "TalkPanel", "useStickToBottom", "dictation_start"]) {
+      expect(code, id).toContain(id);
     }
-    expect(identifiers.join(" ")).not.toMatch(/IgnoredInsideFences|notVocabulary_either/);
-    expect(identifiers[0], "the most frequent first").toBe("VoicePanel");
+    expect([...code, ...files].join(" ")).not.toMatch(/IgnoredInsideFences|notVocabulary_either/);
+    expect(code[0], "the most frequent first").toBe("VoicePanel");
   });
 
   it("finds the names a sentence capitalizes for their own sake, and acronyms", () => {
-    const { terms } = planVocab(PLAN);
-    expect(terms.slice(0, 2), "most frequent first").toEqual(["Kokoro", "Front Door"]);
-    expect(terms).toContain("PCM");
+    const { names, acronyms } = planVocab(PLAN);
+    expect(names, "most frequent first").toEqual(["Kokoro", "Front Door"]);
+    expect(acronyms).toEqual(["PCM"]);
     // A heading's title case, a sentence's opening verb, and a heading word
     // in capitals that the plan also writes in lowercase.
     for (const noise of ["Door Interaction Rules", "Interaction", "Describe", "Keep", "Then", "SIZE", "Voice"]) {
-      expect(terms, noise).not.toContain(noise);
+      expect([...names, ...acronyms], noise).not.toContain(noise);
     }
   });
 });
@@ -70,11 +71,22 @@ describe("buildVocab", () => {
     ],
   };
 
-  it("ranks the user's own words first, newest correction first, then the plan's names and code names", () => {
+  it("ranks the user's words, newest correction first, then the plan's names, code names, acronyms and files", () => {
     const vocab = buildVocab({ plan: PLAN, store, identifiers: ["check-size.mjs", "VoicePanel"] });
-    expect(vocab.slice(0, 4)).toEqual(["Tauri", "Kokoro", "Qwen", "Front Door"]);
-    expect(vocab.indexOf("PCM")).toBeLessThan(vocab.indexOf("VoicePanel"));
-    expect(vocab[vocab.length - 1]).toBe("check-size.mjs");
+    expect(vocab).toEqual([
+      "Tauri",
+      "Kokoro",
+      "Qwen",
+      "Front Door",
+      "VoicePanel",
+      "dictation_start",
+      "TalkPanel",
+      "useStickToBottom",
+      "PCM",
+      "VoicePanel.tsx",
+      "tts.rs",
+      "check-size.mjs",
+    ]);
     expect(vocab.filter((t) => t.toLowerCase() === "kokoro"), "no repeats, whatever the case").toHaveLength(1);
   });
 
