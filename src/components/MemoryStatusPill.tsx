@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { usePoll } from "../hooks/usePoll";
 
 import { useMenuOverlay } from "./menuOverlay";
 
@@ -120,29 +121,28 @@ export function MemoryStatusPill({
     }
   }, []);
 
+  // A slow poll keeps the relative time honest even between keeper runs, and
+  // rests while the window is hidden. Every read goes through it.
+  const loadNow = usePoll(load, 60_000, { pauseWhenHidden: true });
   useEffect(() => {
-    void load();
     // Coalesce the change bursts. A browse capture emits `memory-changed` per
     // captured page, so a few seconds of browsing used to fire a status read
     // per page; the pill is ambient, and one read a second is plenty.
     let coalesce: number | undefined;
     const reload = () => {
       window.clearTimeout(coalesce);
-      coalesce = window.setTimeout(() => void load(), 1_000);
+      coalesce = window.setTimeout(loadNow, 1_000);
     };
     const un = listen("memory-changed", reload);
     // Accepting/rejecting a held proposal emits only classmem-changed — the
     // pill's review count must follow it, not just the keeper's heartbeat.
     const unClass = listen("classmem-changed", reload);
-    // A slow poll keeps the relative time honest even between keeper runs.
-    const t = window.setInterval(() => void load(), 60_000);
     return () => {
       window.clearTimeout(coalesce);
-      window.clearInterval(t);
       void un.then((f) => f());
       void unClass.then((f) => f());
     };
-  }, [load]);
+  }, [loadNow]);
 
   useEffect(() => {
     if (!open) return;

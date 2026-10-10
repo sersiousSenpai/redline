@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { usePoll } from "../hooks/usePoll";
 
 /** `inspect::InspectView`. */
 export interface InspectView {
@@ -72,13 +73,15 @@ export default function StreamInspector({
   const [expanded, setExpanded] = useState<number | null>(null);
   const alive = useRef(true);
 
-  const pull = useCallback(() => {
-    void invoke<InspectView>("inspect_read", { surface, key: turnKey })
-      .then((v) => {
-        if (alive.current) setView(v);
-      })
-      .catch(() => {});
-  }, [surface, turnKey]);
+  const pull = useCallback(
+    () =>
+      invoke<InspectView>("inspect_read", { surface, key: turnKey })
+        .then((v) => {
+          if (alive.current) setView(v);
+        })
+        .catch(() => {}),
+    [surface, turnKey],
+  );
 
   // Opening the pane is what turns capture ON; closing it turns it off again
   // and frees the ring. The cleanup runs on unmount too, so navigating away
@@ -86,13 +89,12 @@ export default function StreamInspector({
   useEffect(() => {
     alive.current = true;
     void invoke("inspect_set", { on: true }).then(pull).catch(() => {});
-    const t = setInterval(pull, POLL_MS);
     return () => {
       alive.current = false;
-      clearInterval(t);
       void invoke("inspect_set", { on: false }).catch(() => {});
     };
   }, [pull]);
+  usePoll(pull, POLL_MS, { pauseWhenHidden: true, leading: false }, [pull]);
 
   const lines = view?.lines ?? [];
   return (

@@ -54,6 +54,7 @@ import {
 import { EmptyState } from "./EmptyState";
 import type { TabRequest } from "../lib/navTarget";
 import { useRunGraphList } from "../hooks/useRunGraph";
+import { usePoll } from "../hooks/usePoll";
 import { RunGraphPane } from "./runner/RunGraphPane";
 
 /** Agent Seats' pill chip, copied — `chipStyle(true)` doubles as primary. */
@@ -1158,24 +1159,9 @@ export function OrchestrationSurface({
   // poll while the surface is visible (the tab badge + Work tab both ride it)
   // and immediately on a tab switch.
   const [workGraph, setWorkGraph] = useState<WorkGraph | null>(null);
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const g = await invoke<WorkGraph>("get_work_graph");
-        if (!cancelled) setWorkGraph(g);
-      } catch {
-        /* read-only surface: keep the last snapshot */
-      }
-    };
-    void load();
-    const t = window.setInterval(() => void load(), 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(t);
-    };
-  }, [active, tab]);
+  // A failed read keeps the last snapshot (read-only surface); nobody looking
+  // means nothing to read.
+  usePoll(() => invoke<WorkGraph>("get_work_graph"), active ? 15_000 : null, { pauseWhenHidden: true, onResult: setWorkGraph }, [tab]);
   const workReady = workGraph?.readyIds.length ?? 0;
 
   // The Live tab's run: an explicit pick (while it stays live), else the
@@ -1194,13 +1180,10 @@ export function OrchestrationSurface({
     tab === "live" ? (selectedNative ? null : liveSid) : tab === "history" ? (historyNative ? null : historySid) : null;
   const snapshot = useOrchestration(monitorSid, active);
 
-  // One clock for elapsed/stall rendering — a tick per second while visible.
+  // One clock for elapsed/stall rendering — a tick per second while visible,
+  // and none while the window is hidden.
   const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, [active]);
+  usePoll(() => setNow(Date.now()), active ? 1000 : null, { pauseWhenHidden: true, leading: false });
 
   // The drawer belongs to one run; a run/tab switch closes it.
   useEffect(() => {
