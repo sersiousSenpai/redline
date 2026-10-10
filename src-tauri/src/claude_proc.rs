@@ -987,7 +987,7 @@ mod tests {
     fn captured_mission_block_reads_that_mission_never_the_active_one() {
         assert_eq!(captured_mission_context_block(None), "");
         let m = crate::state::Mission {
-            mission_id: "m-7".into(),
+            mission_id: "mission-7".into(),
             title: "Breach page".into(),
             goal: "Draft my breach page".into(),
             status: "active".into(),
@@ -997,12 +997,12 @@ mod tests {
         let b = captured_mission_context_block(Some(&m));
         assert!(b.contains("Mission: Breach page"));
         assert!(b.contains("> Draft my breach page"));
-        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/m-7\n"));
-        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/m-7/findings\n"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/mission-7\n"));
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/missions/mission-7/findings\n"));
         assert!(!b.contains("/v1/mission/"));
         // The global block's text is unchanged apart from its routes.
         let global = mission_context_block(Some(("Breach page", "Draft my breach page")));
-        assert_eq!(global.replace("/v1/mission/active", "/v1/missions/m-7").replace("/v1/mission/findings", "/v1/missions/m-7/findings"), b);
+        assert_eq!(global.replace("/v1/mission/active", "/v1/missions/mission-7").replace("/v1/mission/findings", "/v1/missions/mission-7/findings"), b);
     }
 
     #[test]

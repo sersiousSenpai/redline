@@ -27,7 +27,7 @@ describe("what rides a turn", () => {
   it("BC-13 only a mission workspace is captured as a mission (mosaics are not)", () => {
     expect(capturedWorkspace("regular")).toBe("regular");
     expect(capturedWorkspace("mosaic:grid")).toBe("regular");
-    expect(capturedWorkspace("m-123")).toBe("m-123");
+    expect(capturedWorkspace("mission-123")).toBe("mission-123");
   });
   it("BC-12 the envelope carries the captured target, scope and workspace", () => {
     expect(turnEnvelope(conv({ kind: "shared", browseId: "s", scope: "following-tabs", targetLabel: "browser-t-two" }), "mosaic:grid", "hi", null))
