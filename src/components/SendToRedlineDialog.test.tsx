@@ -31,3 +31,11 @@ it("rejects an oversized multibyte edited brief before sending it to persistence
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("256 KB");
   expect([...host.querySelectorAll("button")].find(button => button.textContent === "Save and launch plan")?.disabled).toBe(true);
 });
+
+it("sits above the open front door, whose room's chat asks for it", async () => {
+  const { readFileSync } = await import("node:fs");
+  const door = readFileSync("src/components/MonochatIsland.css", "utf8").match(/\.rl-frontdoor-focus \{[^}]*z-index: (\d+)/);
+  expect(door, "the door's layer moved").not.toBeNull();
+  await act(async () => root.render(<SendToRedlineDialog markdown="# Brief" options={[]} initialProject="/repo" onConfirm={() => {}} onCancel={() => {}}/>));
+  expect(Number((host.firstElementChild as HTMLElement).style.zIndex)).toBeGreaterThan(Number(door![1]));
+});

@@ -45,9 +45,11 @@ export function SendToRedlineDialog({
   useEffect(() => { const close = (e: KeyboardEvent) => { if (e.key === "Escape" && !pending) onCancel(); }; window.addEventListener("keydown", close); return () => window.removeEventListener("keydown", close); }, [onCancel, pending]);
 
   return (
+    // Above the open front door (55): a chat in its room asks for this one
+    // ("Continue as…"), and must find it on top, not under the paper.
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,0.4)" }}
+      className="fixed inset-0 flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.4)", zIndex: 57 }}
       onClick={() => { if (!pending) onCancel(); }}
     >
       <div
