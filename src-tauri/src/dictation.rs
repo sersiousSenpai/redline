@@ -34,7 +34,9 @@
 //!
 //! **Levels.** While capturing, the tap emits `dictation-level` once per 50 ms
 //! of audio (20 Hz), RMS and peak in dBFS: the waveform of a dictation strip,
-//! and the silence an end-of-turn detector listens for.
+//! and the silence an end-of-turn detector listens for. While the end-of-turn
+//! model is warm (`turn_scorer.rs`) the tap also keeps the live capture's last
+//! few seconds, which that model is asked about.
 //!
 //! **Vocabulary.** A start may carry the capture's vocabulary, ranked (the
 //! frontend builds it in `vocab.ts`). Apple's recognizer gets it as
@@ -309,10 +311,14 @@ struct PreRoll {
 }
 
 impl PreRoll {
+    /// An empty ring for the last `ms` of a mic at `rate`.
+    fn holding(rate: f64, ms: f64) -> Self {
+        Self { buf: vec![0.0; (rate * ms / 1000.0).round() as usize], next: 0, len: 0 }
+    }
+
     /// Size the ring for a mic at `rate` and empty it.
     fn reset(&mut self, rate: f64) {
-        self.buf = vec![0.0; (rate * PREROLL_MS / 1000.0).round() as usize];
-        self.clear();
+        *self = Self::holding(rate, PREROLL_MS);
     }
 
     /// Forget what the ring holds, keeping its size.
@@ -416,6 +422,10 @@ struct TapShared {
     meter: Option<LevelMeter>,
     /// When the warm mic closes, if no capture starts first.
     cool_at: Option<std::time::Instant>,
+    /// How much of each capture to keep for the end-of-turn model, while it
+    /// is warm, and the live capture's ring of it.
+    keep_tail: Option<f64>,
+    tail: Option<PreRoll>,
     /// The live capture's recognition request.
     #[cfg(target_os = "macos")]
     request: Option<TapRequest>,
@@ -433,6 +443,7 @@ impl TapShared {
         self.seq = Some(seq);
         self.pcm = pcm;
         self.meter = Some(LevelMeter::new(owner.to_string(), self.rate));
+        self.tail = self.keep_tail.map(|ms| PreRoll::holding(self.rate, ms));
         self.cool_at = None;
     }
 
@@ -448,6 +459,7 @@ impl TapShared {
         }
         self.seq = None;
         self.meter = None;
+        self.tail = None;
         #[cfg(target_os = "macos")]
         {
             self.request = None;
@@ -477,7 +489,22 @@ impl TapShared {
         if let Some(meter) = self.meter.as_mut() {
             meter.feed(mono, levels);
         }
+        if let Some(tail) = self.tail.as_mut() {
+            tail.push(mono);
+        }
         self.preroll.push(mono);
+    }
+
+    /// Keep the last `ms` of every capture from now on, the live one
+    /// included (`None`: stop, and let go of what is kept).
+    fn keep(&mut self, ms: Option<f64>) {
+        self.keep_tail = ms;
+        self.tail = match ms {
+            Some(ms) if self.meter.is_some() => {
+                Some(self.tail.take().unwrap_or_else(|| PreRoll::holding(self.rate, ms)))
+            }
+            _ => None,
+        };
     }
 }
 
@@ -780,6 +807,18 @@ impl DictationState {
                 final_for: Mutex::new(None),
             }),
         }
+    }
+
+    /// Keep the last `ms` of each capture's audio for the end-of-turn model
+    /// (`None` stops it).
+    pub fn keep_tail(&self, ms: Option<f64>) {
+        self.inner.tap.lock().unwrap().keep(ms);
+    }
+
+    /// The live capture's kept audio, mono and oldest first, with its rate.
+    pub fn tail(&self) -> Option<(Vec<f32>, f64)> {
+        let tap = self.inner.tap.lock().unwrap();
+        tap.tail.as_ref().map(|t| (t.snapshot(), tap.rate))
     }
 
     /// Tear down any capture and the warm mic — backs `dictation_kill_all`
@@ -1650,6 +1689,35 @@ mod tests {
         *state.inner.final_for.lock().unwrap() = Some((9, tx));
         state.inner.deliver_final(9, None);
         assert_eq!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected));
+    }
+
+    #[test]
+    fn the_tail_holds_the_live_capture_only_and_only_while_the_model_is_warm() {
+        let now = std::time::Instant::now();
+        let mut tap = TapShared::default();
+        tap.reset(1_000.0);
+        tap.attach(1, "voice", None);
+        tap.feed(&[0.1; 100], &mut Vec::new());
+        assert!(tap.tail.is_none(), "nobody asked for it");
+        // Warmed mid-capture: from now on, the last 2 s (2000 samples).
+        tap.keep(Some(2_000.0));
+        tap.feed(&[0.2; 1_500], &mut Vec::new());
+        tap.feed(&[0.3; 1_000], &mut Vec::new());
+        let kept = tap.tail.as_ref().unwrap().snapshot();
+        assert_eq!(kept.len(), 2_000);
+        assert_eq!((kept[0], kept[999], kept[1_000]), (0.2, 0.2, 0.3));
+        // The next capture starts its own, from its first buffer.
+        tap.detach(Some(1), true, now);
+        assert!(tap.tail.is_none());
+        tap.feed(&[0.4; 10], &mut Vec::new());
+        tap.attach(2, "voice", None);
+        tap.feed(&[0.5; 10], &mut Vec::new());
+        assert_eq!(tap.tail.as_ref().unwrap().snapshot(), vec![0.5; 10]);
+        tap.keep(None);
+        assert!(tap.tail.is_none());
+        tap.detach(Some(2), true, now);
+        tap.attach(3, "voice", None);
+        assert!(tap.tail.is_none(), "stopped for good");
     }
 
     #[test]

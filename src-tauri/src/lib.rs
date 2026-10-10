@@ -144,6 +144,7 @@ mod term_attention;
 mod thumbs;
 mod tts;
 mod turn;
+mod turn_scorer;
 mod update;
 mod userconfig;
 mod voice;
@@ -12606,6 +12607,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "runner_review",
     "term_attention_snapshot",
     "thread_meters",
+    // Downloads, loads and asks the end-of-turn model, each waiting on it.
+    "turn_scorer",
     // Drives a model download to its end.
     "whisper_install",
 ];
@@ -13093,6 +13096,7 @@ pub fn run() {
             dictation::dictation_kill_all,
             dictation::dictation_status,
             dictation_whisper::whisper_install,
+            turn_scorer::turn_scorer,
             dictation_whisper::dictation_set_engine,
             devmap::dev_servers_scan,
             devmap::dev_server_stop,
@@ -13506,7 +13510,11 @@ pub fn run() {
             // Voice TTS: engine choice + API key in app_settings, synth made
             // from Rust (cloud OpenAI, or the local Kokoro sidecar). The Kokoro
             // model lives under the app data dir.
-            app.manage(tts::TtsState::new(db.clone(), data_dir.clone()));
+            let tts_state = tts::TtsState::new(db.clone(), data_dir.clone());
+            // The optional end-of-turn model for hands-free voice: a process
+            // of its own on the Kokoro runtime's interpreter.
+            app.manage(turn_scorer::TurnScorerState::new(&data_dir, tts_state.venv_python()));
+            app.manage(tts_state);
 
             // Active browser tab tracker — shared with the daemon's
             // `/v1/browser/*` routes through `AppState`.

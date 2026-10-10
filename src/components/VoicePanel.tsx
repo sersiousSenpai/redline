@@ -29,6 +29,7 @@ import {
   stripCommand,
   type EndpointerEvents,
 } from "../audio/endpoint";
+import { turnModel, warmTurnModel } from "../audio/turnModel";
 import { Playback, type NarrationMark } from "../audio/playback";
 import {
   DEFAULT_OWNER,
@@ -1745,6 +1746,12 @@ function VoicePanelBase({
     captureRef.current = { startedAt: Date.now(), heard: false };
     endpoint.reset();
     refreshRoute();
+    // The end-of-turn model, when it is downloaded and on — stopped again if
+    // hands-free went off while it started.
+    void warmTurnModel().then((scorer) => {
+      if (handsFreeRef.current) endpoint.setScorer(scorer);
+      else if (scorer) void turnModel("stop").catch(() => {});
+    });
     setError(null);
     setListening(true);
     setPartial("");
@@ -1773,10 +1780,12 @@ function VoicePanelBase({
   const disarmHandsFree = useCallback(() => {
     hfArmedRef.current = false;
     endpoint.reset();
+    endpoint.setScorer(null);
     carriedRef.current = null;
     setListening(false);
     setPartial("");
     void invoke("dictation_kill_all").catch(() => {});
+    void turnModel("stop").catch(() => {});
   }, [endpoint]);
 
   endpointEventsRef.current = {
@@ -1960,6 +1969,7 @@ function VoicePanelBase({
       }
       hfArmedRef.current = false;
       endpointRef.current?.reset();
+      void turnModel("stop").catch(() => {});
     };
   }, []);
 

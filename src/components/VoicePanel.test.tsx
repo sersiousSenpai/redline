@@ -23,8 +23,11 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     // open, exactly like dictation.rs, so a test sees a re-arm that never armed.
     micOpen: false,
     armed: 0,
-    // Where the reply plays (`dictation_status`).
+    // Where the reply plays (`dictation_status`), and the end-of-turn model:
+    // downloaded or not, and its answer.
     route: { kind: "speakers", transport: "builtin" } as { kind: string; transport: string },
+    turnModel: false,
+    turnScore: 0.99 as number | null,
     // The recognizer's final transcript of an utterance `dictation_cycle` ends.
     final: "",
   },
@@ -79,6 +82,9 @@ vi.mock("@tauri-apps/api/core", () => ({
           whisperModels: [],
           outputRoute: script.route,
         };
+      case "turn_scorer":
+        if (args?.op === "warm" && !script.turnModel) throw "the end-of-turn model isn't downloaded";
+        return { runtime: true, model: script.turnModel, warm: script.turnModel, score: script.turnScore };
       case "delete_comment":
         return true;
       default:
@@ -217,6 +223,8 @@ beforeEach(() => {
   script.micOpen = false;
   script.armed = 0;
   script.route = { kind: "speakers", transport: "builtin" };
+  script.turnModel = false;
+  script.turnScore = 0.99;
   script.final = "";
   utterances = [];
   setVoiceAway(null);
@@ -830,5 +838,23 @@ describe("hands-free", () => {
     await room(700);
     expect(sends().map((s) => s.text)).toEqual(["summarize the rollout"]);
     expect(named("dictation_kill_all").map(([, a]) => a)).toEqual([{ owner: "default" }]);
+  });
+
+  it("asks the end-of-turn model when it is downloaded, and holds a pause it calls unfinished", async () => {
+    script.turnModel = true;
+    script.turnScore = 0.1;
+    await mount();
+    await handsFreeOn();
+    expect(named("turn_scorer").map(([, a]) => a)).toContainEqual({ op: "warm" });
+    await speak("rename the panel");
+    await room(1000);
+    expect(sends()).toEqual([]);
+    expect(named("turn_scorer").filter(([, a]) => (a as { op: string }).op === "score").length).toBeGreaterThan(1);
+    // Unsure to the end: the pause is cut at 2.5 s.
+    await room(1500);
+    expect(sends().map((s) => s.text)).toEqual(["rename the panel"]);
+    // Turning hands-free off stops the model.
+    await act(async () => button("🎧 Hands-free: on").click());
+    expect(named("turn_scorer").map(([, a]) => a)).toContainEqual({ op: "stop" });
   });
 });
