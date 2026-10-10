@@ -182,7 +182,7 @@ use crate::hook::HookStatus;
 use crate::skill::SkillStatus;
 use crate::state::{
     now_millis, AttachState, Comment, InterceptionMode, NewCommentRequest, ReviewSession,
-    SessionStatus, SessionStore, SessionSummary, SourceFeedback, SubmissionMode,
+    SessionStatus, SessionStore, SessionSummary, SubmissionMode,
     UpdateCommentRequest,
 };
 
@@ -10812,68 +10812,6 @@ async fn browser_eval_result(
     }
 }
 
-/// Record a thumbs verdict (+1 up / -1 down) on a source the tandem agent
-/// surfaced. Upserts on `(browse_id, source_url)`; the domain is derived here so
-/// learning can aggregate by host. Called from the sources strip in BrowserChat.
-#[tauri::command]
-fn set_source_feedback(
-    settings: tauri::State<'_, Settings>,
-    browse_id: String,
-    source_url: String,
-    source_title: Option<String>,
-    verdict: i64,
-) -> Result<(), String> {
-    let now = now_millis();
-    let fb = SourceFeedback {
-        id: uuid::Uuid::new_v4().to_string(),
-        browse_id,
-        domain: crate::db::domain_of(&source_url),
-        source_url,
-        source_title,
-        verdict,
-        created_at: now,
-        updated_at: now,
-    };
-    settings
-        .db
-        .upsert_source_feedback(&fb)
-        .map_err(|e| e.to_string())?;
-    // Polis ledger: a source-trust verdict (thumbs up/down on a source) is a
-    // curation signal.
-    let ph = ledger::decision_payload_hash(&[
-        ("source_feedback", &fb.id),
-        ("domain", &fb.domain),
-        ("verdict", &fb.verdict.to_string()),
-    ]);
-    if let Err(e) = ledger::record_decision(
-        &settings.db,
-        ledger::DecisionInput {
-            kind: ledger::EventKind::SourceTrust,
-            author: None,
-            session_id: None,
-            ref_kind: "source_feedback",
-            ref_id: &fb.id,
-            payload_hash: ph,
-        },
-    ) {
-        tracing::warn!(error = %e, "failed to record source-trust ledger event");
-    }
-    Ok(())
-}
-
-/// Every thumbs verdict recorded on a tab's thread, so the sources strip can
-/// restore its up/down state after a reload.
-#[tauri::command]
-fn get_source_feedback(
-    settings: tauri::State<'_, Settings>,
-    browse_id: String,
-) -> Result<Vec<SourceFeedback>, String> {
-    settings
-        .db
-        .get_source_feedback(&browse_id)
-        .map_err(|e| e.to_string())
-}
-
 // ---------------------------------------------------------------------------
 // Polis ledger commands (Phase 1)
 // ---------------------------------------------------------------------------
@@ -13222,8 +13160,6 @@ pub fn run() {
             browser_enable_autoresize,
             browser_set_view,
             browser_install_shims,
-            set_source_feedback,
-            get_source_feedback,
             ledger_list_events,
             ledger_query,
             ledger_verify,

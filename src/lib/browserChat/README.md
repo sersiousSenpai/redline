@@ -62,6 +62,3 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   so the check-in reads an empty thread. The fix needs the target tab stored
   on each browse message, which is a schema decision (`it.todo` in
   `wiring.test.ts`).
-- **The sources strip's commands.** `set_source_feedback` and
-  `get_source_feedback` have no caller since tandem mode retired. They span
-  `lib.rs`, `db.rs` and `state.rs`, so they go in one deletion of their own.

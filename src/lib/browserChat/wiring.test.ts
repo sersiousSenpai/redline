@@ -108,10 +108,8 @@ describe("the skill and the prompt teach what the backend does", () => {
   it("BC-R3 retired behaviour is gone from the skill", () => {
     for (const phrase of contract.skill.mustNotMention) expect(skill, `SKILL.md still teaches: ${phrase}`).not.toContain(phrase);
   });
-  // Open: the tandem sources strip's commands have no caller. They span
-  // lib.rs, db.rs and state.rs, so they go in one deletion of their own.
-  it.fails("BC-R3 KNOWN DEAD PATH: the retired sources strip's commands are gone", () => {
-    expect(libRs, "set_source_feedback has no caller").not.toContain("fn set_source_feedback(");
+  it("BC-R3 the retired sources strip's commands are gone", () => {
+    for (const command of ["set_source_feedback", "get_source_feedback"]) expect(libRs, `${command} is retired with its strip`).not.toMatch(new RegExp(`\\b${command}\\b`));
   });
   it("BC-13 a page chat's first turn reads the CAPTURED mission's routes, not the global ones", () => {
     expect(browseRs).not.toMatch(/[^_]mission_context_block\(/);
