@@ -92,7 +92,15 @@ export function useDictationComposer(
     entry.current = el ? { frame: el, spec: specRef, field } : null;
     if (entry.current) composers.set(el!, entry.current);
   });
-  useLayoutEffect(() => () => drop(entry.current), []);
+  // Forgotten as well as dropped: a development build mounts, unmounts and
+  // mounts again, and the second mount must register anew.
+  useLayoutEffect(
+    () => () => {
+      drop(entry.current);
+      entry.current = null;
+    },
+    [],
+  );
   const current = useSyncExternalStore(subscribe, getLive, getLive);
   return {
     listening: !!current && !!frame.current?.contains(current),

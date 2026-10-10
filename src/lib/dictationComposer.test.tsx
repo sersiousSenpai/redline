@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { act, useRef } from "react";
+import { act, StrictMode, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -62,6 +62,17 @@ describe("a composer's registration", () => {
     expect(fallbackComposer()).toBeNull();
     await act(async () => root.render(<Composer name="door" spec={{ fallback: true }} />));
     expect(fallbackComposer()?.field).toBe(q("textarea"));
+  });
+
+  it("stays registered through the development build's mount, unmount and mount again", async () => {
+    await act(async () =>
+      root.render(
+        <StrictMode>
+          <Composer name="a" spec={{ send: true }} />
+        </StrictMode>,
+      ),
+    );
+    expect(composerAt(q("textarea"))?.spec.send).toBe(true);
   });
 
   it("says when a composer goes, so a capture into it can stand down", async () => {
