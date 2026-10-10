@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -121,6 +122,12 @@ interface VoiceCapturedEvent {
 /** The panel's captures' owner (dictationBroker.ts): its push-to-talk takes
  *  the mic from anyone; hands-free listening yields to anyone. */
 const VOICE_OWNER = "voice";
+/** Whether another owner (a dictation) holds the mic now. */
+const micTaken = () => {
+  const holder = broker.current();
+  return holder !== null && holder !== VOICE_OWNER;
+};
+const onMicHolder = (fn: () => void) => broker.subscribe(fn);
 
 /** A capture confirmation's handles: Undo for a while, Show for good. */
 interface CaptureNote {
@@ -1818,6 +1825,11 @@ function VoicePanelBase({
   // stall watchdog ends such a clip instead). The short delay leaves a natural
   // beat before listening resumes.
   const turnBusy = turn.phase !== "idle";
+  // A dictation holding the mic (the hold key, a composer's mic) is waited
+  // out, not asked every second: an ask flashed "listening" — over the
+  // dictation's own strip — and a refusal that never rendered left
+  // hands-free deaf for good.
+  const dictating = useSyncExternalStore(onMicHolder, micTaken, micTaken);
   useEffect(() => {
     if (
       !handsFree ||
@@ -1825,13 +1837,14 @@ function VoicePanelBase({
       turnBusy ||
       outbox.length > 0 ||
       utterancePending ||
-      audioBusy
+      audioBusy ||
+      dictating
     ) {
       return;
     }
     const t = setTimeout(() => armHandsFree(), rearmDelayRef.current);
     return () => clearTimeout(t);
-  }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, armHandsFree]);
+  }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, dictating, armHandsFree]);
 
   // Live partial transcript + dictation errors from the native mic: this
   // panel's captures only (the broker routes by owner), so a dictation into

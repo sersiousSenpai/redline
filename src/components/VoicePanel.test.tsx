@@ -23,6 +23,8 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     // open, exactly like dictation.rs, so a test sees a re-arm that never armed.
     micOpen: false,
     armed: 0,
+    // Another owner (a dictation) holds the mic: an open start is refused.
+    taken: null as string | null,
   },
 }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -53,6 +55,8 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "tts_get_settings":
         return { engine: "system" };
       case "dictation_start":
+        // Refused a beat later, as over IPC: the panel renders in between.
+        if (script.taken && args?.kind === "open") return new Promise((r) => setTimeout(() => r({ granted: false, holder: script.taken }), 5));
         if (!script.micOpen) {
           script.micOpen = true;
           script.armed += 1;
@@ -74,6 +78,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { VoicePanel } from "./VoicePanel";
 import { strip } from "./DictationStrip";
+import { broker } from "../audio/dictationBroker";
 import { composerAt } from "../audio/dictationTarget";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import type { Section } from "../types";
@@ -183,6 +188,7 @@ beforeEach(() => {
   script.status = { up: true, inFlight: false, generation: 1, turn: 0 };
   script.micOpen = false;
   script.armed = 0;
+  script.taken = null;
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -750,6 +756,35 @@ describe("hands-free", () => {
     await holdToTalk("Focus on rollout.");
     expect(script.armed).toBe(2);
     expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
+  });
+
+  it("waits out a dictation that took the mic, its strip untouched, then listens again", async () => {
+    await mount();
+    await act(async () => button("🎧 Hands-free: off").click());
+    await wait(350);
+    expect(script.armed).toBe(1);
+    // The hold key, with the caret in a comment box: the dictation takes the
+    // mic and shows its own strip.
+    script.taken = "dictation";
+    await emit("dictation-preempted", { owner: "voice", by: "dictation", text: "" });
+    const dictating = { owner: "dictation", phase: "listening" as const, text: "into the comment", levels: [], anchor: null, hint: "" };
+    act(() => strip.set(dictating));
+    const opens = () => named("dictation_start").filter(([, a]) => a?.kind === "open").length;
+    // A frame at a time, as the app renders: no re-arm flashing "listening"
+    // at it meanwhile, nor over its strip.
+    for (let ms = 0; ms < 2600; ms += 50) {
+      await wait(50);
+      expect(strip.get()).toBe(dictating);
+      expect(button("Hands-free status").getAttribute("aria-pressed")).toBe("false");
+    }
+    expect(opens()).toBe(1);
+    // It lets go: hands-free listens again.
+    script.taken = null;
+    act(() => strip.set(null));
+    await act(async () => void (await broker.stop("dictation")));
+    await wait(1100);
+    expect(opens()).toBe(2);
+    expect(script.armed).toBe(2);
   });
 
   it("re-arms from the turn's end and the audio finishing, not a speech flag", async () => {
