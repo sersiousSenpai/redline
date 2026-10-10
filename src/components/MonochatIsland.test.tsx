@@ -140,6 +140,20 @@ describe("the door", () => {
     expect(host.querySelector(".rl-frontdoor-focus")?.hasAttribute("inert")).toBe(true);
   });
 
+  it("tabbing past the pill leaves no mark: a later click hands the caret back to where it was then", async () => {
+    await render();
+    await act(async () => host.querySelector<HTMLButtonElement>("#document-focus")!.focus());
+    // Tabbed onto the pill, and on past it.
+    await act(async () => pill().focus());
+    const header = host.querySelector<HTMLButtonElement>("#header-surface")!;
+    await act(async () => header.focus());
+    // A click never focuses a button in the app's webview: the pill opens
+    // the door with the caret still on the header.
+    await click('[aria-label="Open front door"]');
+    await key(main(), { key: "Escape" });
+    expect(document.activeElement).toBe(header);
+  });
+
   it("preserves the front door when a menu consumes Escape", async () => {
     await render();
     await click('[aria-label="Open front door"]');
