@@ -52,7 +52,7 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -485,6 +485,9 @@ struct Inner {
     last_progress: StdMutex<Option<Instant>>,
     /// The install in progress was cancelled; it stops at its next step.
     stop_install: AtomicBool,
+    /// Removals still deleting `dir`: an install waits them out, or they
+    /// would take its new files with them.
+    removing: AtomicUsize,
     timing: Timing,
     pressure: fn() -> Option<u64>,
 }
@@ -538,6 +541,7 @@ impl Studio {
             events: StdMutex::new(None),
             last_progress: StdMutex::new(None),
             stop_install: AtomicBool::new(false),
+            removing: AtomicUsize::new(0),
             timing,
             pressure,
         }))
@@ -757,6 +761,9 @@ impl Studio {
         };
         let inner = self.0.clone();
         background(Box::new(move || {
+            while inner.removing.load(Ordering::SeqCst) > 0 {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             let result = tauri::async_runtime::block_on(inner.install(&model));
             inner.lock().installing = false;
             let done = match result {
@@ -778,7 +785,8 @@ impl Studio {
         self.0.stop_install.store(true, Ordering::Relaxed);
     }
 
-    /// Stop the process and delete everything under `voice-studio/`.
+    /// Stop the process and delete everything under `voice-studio/`, in the
+    /// background; an install started meanwhile waits for it to finish.
     pub(crate) fn remove(&self) -> Result<(), String> {
         let mut out = Out::default();
         {
@@ -788,11 +796,14 @@ impl Studio {
             }
             core.stop("removed", &mut out);
             core.record = Some(json!({}));
+            // Counted before this returns, so an install asked for next waits.
+            self.0.removing.fetch_add(1, Ordering::SeqCst);
         }
         self.0.flush(out);
-        let dir = self.0.dir.clone();
+        let inner = self.0.clone();
         background(Box::new(move || {
-            let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(&inner.dir);
+            inner.removing.fetch_sub(1, Ordering::SeqCst);
         }));
         Ok(())
     }
@@ -2175,6 +2186,49 @@ for line in sys.stdin:
         let selected = studio.preflight(None);
         assert_eq!(selected["needMemoryBytes"], VARIANTS[0].memory);
         assert_eq!(studio.preflight(Some("2B-imaginary")), Value::Null);
+    }
+
+    /// Remove deletes in the background; Install pressed right after waits for
+    /// that, or the deletion would take the new install's files with it.
+    #[tokio::test]
+    async fn an_install_right_after_a_removal_waits_for_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (studio, _, seen) = fake_studio("reinstall", FAST, normal_pressure);
+        let data = studio.0.data_dir.clone();
+        let old = studio.0.dir.join("venv/lib/site");
+        std::fs::create_dir_all(&old).unwrap();
+        for i in 0..3000 {
+            std::fs::write(old.join(format!("m{i}.py")), b"x").unwrap();
+        }
+        // The install goes no further than a uv that fails at once (lent from
+        // Kokoro's directory, which a removal leaves alone): no network.
+        let uv = data.join("kokoro/bin/uv");
+        std::fs::create_dir_all(uv.parent().unwrap()).unwrap();
+        std::fs::write(&uv, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let at_start = Arc::new(StdMutex::new(None));
+        let (seen_at_start, venv) = (at_start.clone(), studio.0.dir.join("venv"));
+        let earlier = seen.clone();
+        studio.on_event(move |event, payload| {
+            if payload["phase"] == "preflight" {
+                seen_at_start.lock().unwrap().get_or_insert(venv.exists());
+            }
+            earlier.lock().unwrap().push((event.to_string(), payload));
+        });
+        studio.remove().unwrap();
+        studio.install();
+        until("the install to end", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(e, p)| e == "studio-setup" && p["phase"] == "error")
+        })
+        .await;
+        assert_eq!(
+            *at_start.lock().unwrap(),
+            Some(false),
+            "the install began only once the old files were gone"
+        );
     }
 
     #[test]
