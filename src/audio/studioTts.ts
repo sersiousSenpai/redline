@@ -564,7 +564,8 @@ export function studioTtsDriver(opts: StudioOptions = {}): SpeechDriver {
         });
       }
     }
-    if (!warmFirst()) {
+    // A preview with nothing left to send (it ended, or gave up) never warms.
+    if (pieces.some((p) => p.route === "studio" && !p.sent) && !warmFirst()) {
       let asked = pieces.filter((p) => p.route === "studio" && p.sent).length;
       for (const p of pieces) {
         if (asked > READ_AHEAD) break;
@@ -684,7 +685,8 @@ export function studioTtsDriver(opts: StudioOptions = {}): SpeechDriver {
 
 /** A sample in preset `voice` (the settings ▶, and "Studio voice ready." after
  *  an install), waiting for the model if it is still loading. `onEnd` gets the
- *  failure's code if it failed; never after the returned stop. */
+ *  failure's code if it failed; never after the returned stop. Its driver is
+ *  let go of either way, so no audio context is left running per sample. */
 export function playStudioSample(
   voice: string,
   text: string,
@@ -694,7 +696,10 @@ export function playStudioSample(
   let stopped = false;
   const d = studioTtsDriver({ preview: voice, onError: (e) => (error ??= e) });
   d.speak(text, { rate: 1, voiceURI: null }, () => {
-    if (!stopped) onEnd(error);
+    if (stopped) return;
+    stopped = true;
+    onEnd(error);
+    d.cancel();
   });
   d.flush?.();
   return () => {

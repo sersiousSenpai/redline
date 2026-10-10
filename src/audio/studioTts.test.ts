@@ -530,6 +530,30 @@ describe("playStudioSample", () => {
     expect(ended).toEqual([undefined]);
   });
 
+  it("lets its audio context go once the sample has played", async () => {
+    const ended: (string | undefined)[] = [];
+    studio.playStudioSample("ryan", "Studio voice ready.", (e) => ended.push(e));
+    await advance(0);
+    audio(0, 0.2);
+    end(0);
+    await advance(400);
+    expect(ended).toEqual([undefined]);
+    expect(ctx().state).toBe("closed");
+  });
+
+  it("warms nothing more once a sample has given up on a sidecar that went away", async () => {
+    rust.status.state = "off";
+    const ended: (string | undefined)[] = [];
+    studio.playStudioSample("ryan", "Studio voice ready.", (e) => ended.push(e));
+    await advance(0);
+    expect(named("tts_studio", "warm")).toHaveLength(1);
+    emit("studio-status", { state: "exited", reason: "it closed its output" });
+    await advance(0);
+    expect(ended).toEqual(["sidecar_exited"]);
+    expect(named("tts_studio", "warm")).toHaveLength(1);
+    expect(rust.speaks).toEqual([]);
+  });
+
   it("reports a sample the sidecar couldn't speak", async () => {
     const ended: (string | undefined)[] = [];
     studio.playStudioSample("ryan", "Studio voice ready.", (e) => ended.push(e));
