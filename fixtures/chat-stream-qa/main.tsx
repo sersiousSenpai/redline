@@ -68,7 +68,8 @@ function Scene() {
   switch (scene) {
     case "card": return <DoorChat room={false}/>;
     case "room": return <DoorChat room/>;
-    case "browser": return <Panel width={380}><BrowserChat browseId="b-1" label="browser-b1" title="LiDAR-GS" onClose={noop} onSendToDrafter={noop} onSendToRedline={noop}/></Panel>;
+    // With a mission running, as the dock wires it: the most actions a reply's tail carries.
+    case "browser": case "browser-zoom": return <Panel width={380}><BrowserChat browseId="b-1" label="browser-b1" title="LiDAR-GS" onClose={noop} onSendToDrafter={noop} onSendToRedline={noop} onAddToMission={async () => true} onAddToCart={async () => true}/></Panel>;
     case "mission": return <Panel width={380}><MissionChat mission={mission} findings={[]} onClose={noop} onRemoveFinding={noop} onEditGoal={noop}/></Panel>;
     case "memory": return <div data-qa-scene className="qa-full"><MemoryAsk onCite={noop}/></div>;
     case "review": return <Panel width={420} scroll><ReviewThread reviewId="r-1" annotationId="a-1"/></Panel>;
@@ -80,6 +81,8 @@ function Scene() {
 
 // The plan comment's chat view is a per-comment preference, read on mount.
 if (scene === "comment-chat") localStorage.setItem("redline.sidecarView.s-1.c-1", "chat");
+// Page chat's text size (A−/A+) is per-app, read on mount: the largest step.
+localStorage.setItem("redline.browseZoom", scene === "browser-zoom" ? "1.6" : "1");
 applyTheme("aurora");
 try { createRoot(document.getElementById("root")!).render(<Scene/>); }
 catch (error) { document.body.dataset.qaError = String((error as Error)?.stack ?? error); }

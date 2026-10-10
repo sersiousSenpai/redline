@@ -5,9 +5,10 @@
 //
 // Drives every chat surface (fixtures/chat-stream-qa) through one turn —
 // idle → sent → tools → mid-stream → full stream → queued type-ahead →
-// settled, then a heading-first reply and a reader parked mid-reply — and
-// checks the rule in docs/perf-budget.md: a reply settles without moving, and
-// the thread's viewport holds still through the turn.
+// settled, then a heading-first reply whose first tool fires after its text
+// began, and a reader parked mid-reply — and checks the rule in
+// docs/perf-budget.md: a reply settles without moving, and the thread's
+// viewport holds still through the turn.
 //
 // Measured by text position, not by the Layout Instability API: a settle
 // REPLACES the streamed nodes with the settled row's, and layout-shift entries
@@ -34,10 +35,10 @@ import { createHash } from "node:crypto";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, process.argv[2] ?? "build-analysis/chat-stream-visual-qa");
-const SCENES = ["card", "room", "browser", "mission", "memory", "review", "comment", "comment-chat", "drafter"];
+const SCENES = ["card", "room", "browser", "browser-zoom", "mission", "memory", "review", "comment", "comment-chat", "drafter"];
 const scenes = process.argv[3]?.split(",") ?? SCENES;
 /** Surfaces where Enter during a reply queues the message. */
-const QUEUEING = new Set(["card", "room", "browser", "mission", "memory"]);
+const QUEUEING = new Set(["card", "room", "browser", "browser-zoom", "mission", "memory"]);
 /** Known violations, by check id: `{ scenes: [...], reason }`. Empty since
  *  the reply anatomy (ReplyBlock) landed; a regression found later goes here
  *  with its reason only while its fix is in flight. */
@@ -139,15 +140,24 @@ function measure(ask, first, last) {
   const composer = [...scene.querySelectorAll("textarea")].filter((t) => t.getBoundingClientRect().height > 0).pop();
   const reply = textNode(first)?.parentElement.closest("[data-reply]");
   const tail = reply?.querySelector("[data-reply-tail]");
+  // A tail control is out of reach when it sits past the reply's edge and no
+  // scrolling row carries it back into view.
+  const replyBox = reply?.getBoundingClientRect();
+  const outOfReach = (b) => {
+    const r = b.getBoundingClientRect(), row = b.closest(".rl-reply-actions");
+    const scrolls = row && row.scrollWidth > row.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(row).overflowX);
+    return !scrolls && (r.right > replyBox.right + 0.5 || r.left < replyBox.left - 0.5);
+  };
   return {
     scroller: { clientHeight: scroller.clientHeight, top: +frame.top.toFixed(1), gapToBottom: Math.round(scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight) },
     composerWidth: composer ? +composer.getBoundingClientRect().width.toFixed(1) : null,
-    first: line(first), last: line(last), boxes,
+    ask: question ? +question.getBoundingClientRect().top.toFixed(1) : null, first: line(first), last: line(last), boxes,
     statuses: [...scene.querySelectorAll("[role=status]")].map((e) => e.textContent.replace(/\s+/g, " ").trim().slice(0, 48)),
     workingWords: (scene.textContent.match(/working…|Thinking|Preparing your reply/g) ?? []).length,
     caret: scene.textContent.includes("▌"),
     queued: scene.innerText.includes("QA-QUEUED"),
     tail: tail ? Math.round(tail.getBoundingClientRect().height) : null,
+    tailOutOfReach: tail ? [...tail.querySelectorAll("button")].filter(outOfReach).map((b) => b.getAttribute("aria-label") ?? b.textContent) : null,
     codeFrames: [...scene.querySelectorAll(".rl-md pre")].map((pre) => { let n = 0; for (let e = pre; e && !e.classList.contains("rl-md"); e = e.parentElement) { const cs = getComputedStyle(e); if (parseFloat(cs.borderTopWidth) > 0 && cs.borderTopStyle !== "none") n++; } return n; }),
     listStyle: (() => { const ul = scene.querySelector(".rl-md ul"); return ul ? getComputedStyle(ul).listStyleType : null; })(),
   };
@@ -184,8 +194,12 @@ async function runScene(scene) {
   const queued = QUEUEING.has(scene) ? await state("4q-queued", { queue: [c.queued] }) : null;
   await setTurn({ queue: [] }); await settle();
   const settled = await state("5-settled", { messages: [...c.history, c.q2, c.a2], liveText: "", status: "idle", meter: null, activity: [], meters: { a2: meter(OPEN_FENCE_AT, true) } });
-  // A reply that opens on a heading.
-  await setTurn({ messages: [...c.history, c.q2, c.a2, c.q3], status: "streaming", startedAt: Date.now(), liveText: HEADING_FIRST, meter: meter(20, false), activity: [] }); await settle();
+  // A reply that opens on a heading, written before the turn's first tool —
+  // the agent says what it will check, then checks — so the tool fires under
+  // text already on screen.
+  await setTurn({ messages: [...c.history, c.q2, c.a2, c.q3], status: "streaming", startedAt: Date.now(), liveText: HEADING_FIRST, meter: { ...meter(20, false), toolCalls: 0, lastTool: null, lastToolLabel: null }, activity: [] }); await settle();
+  const textFirst = rec.states["6-head-text-first"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
+  await setTurn({ meter: meter(21, false), activity: [{ at: Date.now(), kind: "tool", label: "Grep(seat_burn)" }] }); await settle();
   const headLive = rec.states["6-head-streaming"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
   await setTurn({ messages: [...c.history, c.q2, c.a2, c.q3, c.a3], liveText: "", status: "idle", meter: null, meters: { a2: meter(OPEN_FENCE_AT, true), a3: meter(20, true) } }); await settle();
   const headSettled = rec.states["7-head-settled"] = await measureTurn("QA-QUESTION-3", "MARKERHEAD", "MARKERTAIL");
@@ -238,14 +252,20 @@ async function runScene(scene) {
   }
   check(scene, "settle-first-line", "settles without moving its first line", still(delta(full.first?.y, settled.first?.y)), { delta: delta(full.first?.y, settled.first?.y) });
   check(scene, "settle-last-line", "settles without moving its last line", still(delta(full.last?.y, settled.last?.y)), { delta: delta(full.last?.y, settled.last?.y) });
+  // The question above it too: parked at the bottom, a line pushed in above
+  // the text moves what is ABOVE the line, not the text under it.
+  const toolShift = { ask: delta(textFirst.ask, headLive.ask), first: delta(textFirst.first?.y, headLive.first?.y), last: delta(textFirst.last?.y, headLive.last?.y) };
+  check(scene, "tool-after-text", "keeps the turn still when a tool fires after the reply has started writing", Object.values(toolShift).every((d) => still(d)), toolShift);
   check(scene, "settle-heading-first", "settles a heading-first reply without moving it", still(delta(headLive.first?.y, headSettled.first?.y)), { delta: delta(headLive.first?.y, headSettled.first?.y), marginTop: [headLive.first?.marginTop, headSettled.first?.marginTop] });
   check(scene, "reader-up", "leaves a reader parked mid-reply where they are", readerBefore != null && delta(readerBefore, readerAfter) === 0, { before: readerBefore, after: readerAfter });
+  check(scene, "lead-scale", "sizes the lead paragraph at or above the reply's text, at any text size", !!settled.first && parseFloat(settled.first.font) >= parseFloat(settled.last?.font), { lead: settled.first?.font, body: settled.last?.font });
   check(scene, "lead-font", "keeps the lead paragraph's type at settle", !!full.first && full.first.font === settled.first?.font && full.first.weight === settled.first?.weight, { streamed: [full.first?.font, full.first?.weight], settled: [settled.first?.font, settled.first?.weight] });
   check(scene, "streaming-only-boxes", "draws no box that exists only while streaming", streamingOnly.size === 0, [...streamingOnly.values()]);
   check(scene, "composer-steady", "keeps the composer's field the same width through the turn", [sent, full, settled].every((s) => still(delta(idle.composerWidth, s.composerWidth))), [idle, sent, full, settled].map((s) => s.composerWidth));
   check(scene, "code-frames", "frames each code block once", settled.codeFrames.length > 0 && settled.codeFrames.every((n) => n === 1), settled.codeFrames);
   check(scene, "list-markers", "keeps list bullets", settled.listStyle === "disc", settled.listStyle);
   check(scene, "tail-height", "holds the reply's tail row at one height", mid.tail != null && mid.tail === full.tail && full.tail === settled.tail, [mid.tail, full.tail, settled.tail]);
+  check(scene, "tail-reachable", "keeps every control in a settled reply's tail within reach", settled.tailOutOfReach != null && settled.tailOutOfReach.length === 0, settled.tailOutOfReach);
 }
 
 try {

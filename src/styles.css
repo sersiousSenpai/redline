@@ -2090,6 +2090,13 @@ p.rl-block-modified {
 .rl-md-compact p {
   margin: 0 0 4px;
 }
+/* The lead scales with a discussion's text size (A−/A+) like the text under
+   it: a fixed 13.5px read smaller than the body at the larger sizes. After
+   the base lead rule, which it ties on specificity. */
+.rl-md-compact > p:first-child,
+.rl-md-compact > div:first-child > p:first-child {
+  font-size: calc(13.5px * var(--rl-discussion-zoom, 1));
+}
 
 /* The chat room at plate scale: roomy prose for a full-width conversation,
  * like a desktop chat app. The docked/compact poses keep .rl-md-compact; the

@@ -207,13 +207,16 @@ it, that's the discussion to have before merging.
 
 8. **A reply settles pixel-identically, and the thread's viewport is constant
    through a turn.** Every chat surface draws a reply with one component,
-   `ReplyBlock`, whose skeleton is the same streaming and settled: a byline
-   that is one string in both phases, a steps line present exactly when the
-   turn used tools, the text (`StreamingText` live, `MarkdownView` settled —
+   `ReplyBlock`, whose skeleton is the same streaming and settled: a head
+   row of one fixed height holding the byline (one string in both phases)
+   and, once the turn has used a tool, its steps — on that row, so a tool
+   that fires after the text has begun never pushes a line in above it —
+   then the text (`StreamingText` live, `MarkdownView` settled —
    byte-identical markup for a body with no diagram), and a tail row of one
-   fixed height. At settle only the steps line's words and the tail's
-   contents change; nothing above, inside or around the text arrives or
-   leaves. A turn shows one status line (the live tail's), no caret glyph,
+   fixed height. At settle only the steps' words and the tail's contents
+   change; nothing above, inside or around the text arrives or leaves. A
+   tail action that doesn't fit scrolls within the row rather than taking a
+   second line. A turn shows one status line (the live tail's), no caret glyph,
    no progress strip and no streaming-only box; Stop is the composer's
    primary button, so the composer keeps its width. The thread's viewport
    keeps its height from send to settle: a queued message waits in a tray
@@ -285,11 +288,13 @@ These are cheap regression nets, not a substitute for the rules above:
   `/v1/perf` serves it. `scripts/memory-soak.mjs` is the manual counterpart (it
   needs Chrome): run it before merging anything that keeps state across mounts.
 - Rule 8 — `scripts/chat-stream-visual-qa.mjs` (needs Chrome) drives every
-  chat surface through a turn on the production components and checks text
-  positions at settle (for a heading-first reply and a reader scrolled up
-  too), viewport heights at send, at settle and with a message queued, one
-  status line live and none settled, streaming-only boxes, the tail row's
-  height, code frames and the composer's width. A known violation goes in
+  chat surface (page chat at its largest text size too) through a turn on
+  the production components and checks text positions at settle (for a
+  heading-first reply and a reader scrolled up too) and when a tool fires
+  after the text began, viewport heights at send, at settle and with a
+  message queued, one status line live and none settled, streaming-only
+  boxes, the tail row's height and its actions in reach, the lead
+  paragraph's size, code frames and the composer's width. A known violation goes in
   its `EXPECTED_FAIL` with a reason, and one that starts passing fails the
   run until its entry goes. `src/components/ReplyBlock.test.tsx` pins the
   skeleton, byline and text markup identical across the phases and the

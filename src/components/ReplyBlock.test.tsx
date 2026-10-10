@@ -168,6 +168,20 @@ describe("the steps line", () => {
     expect(host.querySelector(".rl-reply-text")?.textContent).toContain("Existing items stay attached.");
   });
 
+  it("adds no box when a tool fires after the reply has started writing", async () => {
+    // Text first, then a tool (the agent says what it will check, then
+    // checks): the steps arrive on the byline's row, which was there from
+    // the first frame, never as a line above text being read.
+    const text = "Let me check the seat table first.";
+    await render({ phase: "live", byline: "Claude", text, meter: meter({ toolCalls: 0, lastTool: null, lastToolLabel: null }), activity: [], startedAt: 1_000 });
+    const before = skeleton();
+    expect(host.querySelector("[data-reply-steps]")).toBeNull();
+    await render({ phase: "live", byline: "Claude", text, meter: meter({ toolCalls: 1 }), activity: [{ at: 2_000, kind: "tool", label: "Read…" }], startedAt: 1_000 });
+    expect(skeleton()).toEqual(before);
+    expect(host.querySelector(".rl-reply-head [data-reply-steps]")?.textContent).toBe("▸Used 1 tool · Read…");
+    expect(byline()).toBe("Claude");
+  });
+
   it("is a line that can't open where no steps were kept", async () => {
     await render({ phase: "settled", byline: "Claude", text: REPLY, meter: meter({ durationMs: 900 }) });
     expect(host.querySelector<HTMLButtonElement>("[data-reply-steps]")?.disabled).toBe(true);
@@ -255,6 +269,19 @@ describe("the stylesheet", () => {
   it("holds the tail row at one height in each scale", () => {
     expect(rule(".rl-reply-tail")).toMatch(/\bheight: \d+px;/);
     expect(css).toMatch(/\.rl-reply\[data-room\] \.rl-reply-tail \{ height: \d+px;/);
+  });
+
+  it("holds the head row at one height, so the steps arrive without moving the text", () => {
+    expect(rule(".rl-reply-head")).toMatch(/\bheight: calc\(16px \* var\(--rl-discussion-zoom, 1\)\);/);
+    expect(css).toMatch(/\.rl-reply\[data-room\] \.rl-reply-head \{ height: \d+px; \}/);
+    expect(rule(".rl-reply-steps")).toMatch(/height: 100%;/);
+  });
+
+  it("keeps every tail action in reach: the meter gives way first, then the actions scroll", () => {
+    // The meter takes only the room left over, so it ellipsizes before an
+    // action is pushed off; past that, the actions scroll rather than clip.
+    expect(rule(".rl-reply-meter")).toMatch(/flex: 1 1 0;/);
+    expect(rule(".rl-reply-actions")).toMatch(/min-width: 0;[^}]*overflow-x: auto;/);
   });
 
   it("reveals the actions by opacity, never by taking or giving space", () => {

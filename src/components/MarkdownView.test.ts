@@ -174,4 +174,13 @@ describe("the reply stylesheet", () => {
     expect(css).toContain(".rl-md > p:first-child,\n.rl-md > div:first-child > p:first-child {");
     expect(css).toContain(".rl-md-room > p:first-child,\n.rl-md-room > div:first-child > p:first-child {");
   });
+
+  it("scales a discussion's lead with its text size, after the base lead rule it ties with", () => {
+    // Settled replies take the lead rule now that their markup is the
+    // streamed markup; a fixed size would read smaller than the body at A+.
+    const base = rule(".rl-md > p:first-child,\n.rl-md > div:first-child > p:first-child");
+    const compact = rule(".rl-md-compact > p:first-child,\n.rl-md-compact > div:first-child > p:first-child");
+    expect(compact.body).toContain("font-size: calc(13.5px * var(--rl-discussion-zoom, 1));");
+    expect(compact.at).toBeGreaterThan(base.at);
+  });
 });

@@ -5,8 +5,7 @@
 //! inside or around its text arrives or leaves when the turn ends.
 //!
 //! ```
-//! CLAUDE                                        byline: one string, both phases
-//! ▸ Used 2 tools · 12.4s                        steps line: only when tools ran
+//! CLAUDE  ▸ Used 2 tools · 12.4s                head row: byline, then steps
 //! The seat table already has the columns…      text: StreamingText ≡ MarkdownView
 //! Copy · Save idea · ⋯      34.2k in · 1.4k out  tail row: one fixed height
 //! ```
@@ -18,7 +17,10 @@
 //! - **Steps line.** Present exactly when the turn used tools
 //!   (`replySteps.hasSteps`), in both phases: the current tool while live,
 //!   "Used N tools · 12.4s" settled. It expands to the steps, reads and
-//!   searches folded; anything a reader can act on is never behind it.
+//!   searches folded; anything a reader can act on is never behind it. It
+//!   sits on the byline's row, one fixed height whether or not it is there:
+//!   an agent that writes before its first tool would otherwise push a line
+//!   in above text already being read.
 //! - **Text.** `StreamingText` live, `MarkdownView` settled — byte-identical
 //!   markup for a body with no diagram.
 //! - **Tail row.** One fixed height in both phases. Live it is the turn's one
@@ -134,22 +136,27 @@ export function ReplyBlock({
       data-reply={phase}
       data-room={room || undefined}
     >
-      <div className="rl-reply-byline" data-error={error || undefined} title={meter?.model ?? undefined}>
-        {named}
+      {/* The steps ride the byline's row, which is there from the first
+          frame: a tool that fires after the text has begun adds words to it,
+          never a line above text being read. */}
+      <div className="rl-reply-head">
+        <div className="rl-reply-byline" data-error={error || undefined} title={meter?.model ?? undefined}>
+          {named}
+        </div>
+        {meter && steps && (
+          <button
+            type="button"
+            className="rl-reply-steps"
+            data-reply-steps
+            aria-expanded={stepsOpen}
+            disabled={steps.length === 0}
+            onClick={() => setStepsOpen((open) => !open)}
+          >
+            <span aria-hidden>{stepsOpen ? "▾" : "▸"}</span>
+            <span className="rl-reply-steps-label">{stepsLabel(phase, meter, activity)}</span>
+          </button>
+        )}
       </div>
-      {meter && steps && (
-        <button
-          type="button"
-          className="rl-reply-steps"
-          data-reply-steps
-          aria-expanded={stepsOpen}
-          disabled={steps.length === 0}
-          onClick={() => setStepsOpen((open) => !open)}
-        >
-          <span aria-hidden>{stepsOpen ? "▾" : "▸"}</span>
-          <span className="rl-reply-steps-label">{stepsLabel(phase, meter, activity)}</span>
-        </button>
-      )}
       {steps && stepsOpen && (
         <ul className="rl-reply-steplist">
           {foldSteps(steps).map((row, i) => (
@@ -183,7 +190,7 @@ export function ReplyBlock({
           />
         ) : (
           <>
-            <div className="rl-reply-actions">
+            <div className="rl-reply-actions rl-hide-scroll-x">
               {actions}
               {inspect && <ReplyMore inspecting={inspecting} onInspect={() => setInspecting((on) => !on)} />}
             </div>

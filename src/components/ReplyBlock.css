@@ -12,7 +12,18 @@
      inside their buttons. */
   contain: content;
 }
+/* The head row: the byline, and the steps beside it once the turn has used a
+   tool. One height with or without them, so they arrive in place. */
+.rl-reply-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: calc(16px * var(--rl-discussion-zoom, 1));
+}
+.rl-reply[data-room] .rl-reply-head { height: 18px; }
 .rl-reply-byline {
+  flex: none;
   font-family: var(--font-sans);
   font-size: 9px;
   font-weight: 600;
@@ -28,9 +39,8 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  align-self: flex-start;
-  max-width: 100%;
-  height: calc(16px * var(--rl-discussion-zoom, 1));
+  min-width: 0;
+  height: 100%;
   padding: 0;
   border: 0;
   background: none;
@@ -39,7 +49,7 @@
   white-space: nowrap;
   cursor: pointer;
 }
-.rl-reply[data-room] .rl-reply-steps { height: 18px; font-size: 12px; }
+.rl-reply[data-room] .rl-reply-steps { font-size: 12px; }
 .rl-reply-steps:disabled { cursor: default; }
 .rl-reply-steps:hover:not(:disabled), .rl-reply-steps:focus-visible { color: var(--color-ink); }
 .rl-reply-steps:focus-visible { outline-offset: -1px; }
@@ -77,8 +87,12 @@
 .rl-reply[data-room] .rl-reply-tail { height: 28px; font-size: 12px; }
 .rl-reply-status { min-width: 0; overflow: hidden; white-space: nowrap; }
 .rl-reply-status[data-stalled] { color: var(--color-warning); }
+/* The meter takes only the room the actions leave: it ellipsizes away before
+   an action is pushed out of reach. */
 .rl-reply-meter {
+  flex: 1 1 0;
   min-width: 0;
+  text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -87,11 +101,17 @@
 }
 .rl-reply[data-room] .rl-reply-meter { font-size: 11px; }
 .rl-reply-truncated { color: var(--color-warning); font-weight: 600; }
+/* A narrow panel or a large text size can make the actions wider than the
+   row. The row keeps its height and scrolls sideways instead (its bar
+   hidden: `rl-hide-scroll-x`), so the last action and the ⋯ stay reachable by
+   swipe and by Tab rather than being cut off. */
 .rl-reply-actions {
   display: flex;
   align-items: center;
   gap: 2px;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
   opacity: 0;
   transition: opacity 120ms;
 }
