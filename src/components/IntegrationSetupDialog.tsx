@@ -21,6 +21,7 @@ export function IntegrationSetupDialog({ backend, health, busy, progress, error,
   const codex = backend === "codex";
   const provider = health?.providers?.[backend];
   const hook = codex ? health?.codexHook?.installed : backend === "claude-code" ? health?.hook.installed : provider?.hook.installed;
+  const hookOutdated = codex && hook && health?.codexHook?.outdated;
   const skill = codex ? health?.codexSkill : backend === "claude-code" ? health?.skill : provider?.skill;
   const profile = health?.codex?.profile;
   return <dialog ref={ref} className="rl-integration-dialog" aria-labelledby="integration-title"
@@ -33,7 +34,7 @@ export function IntegrationSetupDialog({ backend, health, busy, progress, error,
     <div className="rl-integration-pieces">
       {codex && <div><span aria-hidden>{health?.codex?.usable ? "✓" : "○"}</span> Codex CLI <small>{health?.codex?.usable ? `Version ${health.codex.version ?? "detected"}` : health?.codex?.found ? "Update required" : "Not installed"}</small></div>}
       {codex && health?.codex?.usable && <div><span aria-hidden>{health.codex.signedIn ? "✓" : "○"}</span> Codex account <small>{health.codex.authState === "signed-out" ? "Sign in required" : health.codex.signedIn ? "Connected" : "Not verified"}</small></div>}
-      <div><span aria-hidden>{hook ? "✓" : "○"}</span> Plan and prompt hooks <small>{hook ? "Installed" : "Needs setup"}</small></div>
+      <div><span aria-hidden>{hook && !hookOutdated ? "✓" : "○"}</span> Plan and prompt hooks <small>{hookOutdated ? "Update available" : hook ? "Installed" : "Needs setup"}</small></div>
       {codex && <div><span aria-hidden>{profile?.installed && !profile.outdated ? "✓" : "○"}</span> Planning instructions and launcher <small>{profile?.outdated ? "Update needed" : profile?.installed ? "Current" : "Needs setup"}</small></div>}
       <div><span aria-hidden>{skill?.installed && !skill.outdated ? "✓" : "○"}</span> Review and collaboration skills <small>{skill?.outdated ? "Update needed" : skill?.installed ? "Current" : "Needs setup"}</small></div>
       {codex && hook && <div><span aria-hidden>{health?.codexHook?.trust === "trusted" ? "✓" : "○"}</span> Hook trust <small>{health?.codexHook?.trust === "trusted" ? "Verified by Codex" : "Needs review"}</small></div>}
@@ -47,7 +48,7 @@ export function IntegrationSetupDialog({ backend, health, busy, progress, error,
       <button type="button" disabled={busy} onClick={onDismiss}>{done ? "Done" : "Later"}</button>
       {codex && onLocate && <button type="button" disabled={busy} onClick={onLocate}>Locate CLI…</button>}
       {codex && health?.codex?.usable && (health.codex.authState === "signed-out" || hook && health?.codexHook?.trust !== "trusted") && onReviewHooks && <button type="button" disabled={busy} onClick={onReviewHooks}>{health.codex.authState === "signed-out" ? "Sign in to Codex" : "Review hooks in Codex"}</button>}
-      {!done && <button type="button" className="primary" disabled={busy} onClick={onInstall}>{busy ? "Working…" : codex && hook && health?.codex?.usable ? "Verify and continue" : pending ? "Install and continue" : error ? "Retry setup" : "Install integration"}</button>}
+      {!done && <button type="button" className="primary" disabled={busy} onClick={onInstall}>{busy ? "Working…" : codex && hook && !hookOutdated && health?.codex?.usable ? "Verify and continue" : pending ? "Install and continue" : error ? "Retry setup" : "Install integration"}</button>}
     </div>
   </dialog>;
 }

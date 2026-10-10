@@ -1200,9 +1200,14 @@ struct ColdSpawn {
     args: Vec<String>,
 }
 
-fn spawn_cold(binary: &str, cwd: &str, args: &[String], codex: bool) -> std::io::Result<tokio::process::Child> {
+/// A turn's own process. Codex's `app-server` comes from
+/// `codex_conversation::bridge_command`, so the daemon token rides its
+/// environment as it rides `claude`'s, and the chat's bridge writes (the
+/// browser dock's actions among them) authenticate. Both carry the
+/// `companion` seat, which labels their captured prompts as machine text.
+fn cold_command(binary: &str, cwd: &str, args: &[String], codex: bool) -> tokio::process::Command {
     let mut cmd = if codex {
-        tokio::process::Command::new(binary)
+        crate::codex_conversation::bridge_command(binary, "companion")
     } else {
         crate::claude_proc::claude_command_for_seat("companion", binary)
     };
@@ -1211,8 +1216,12 @@ fn spawn_cold(binary: &str, cwd: &str, args: &[String], codex: bool) -> std::io:
         .stdin(if codex { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    cmd
+}
+
+fn spawn_cold(binary: &str, cwd: &str, args: &[String], codex: bool) -> std::io::Result<tokio::process::Child> {
+    cold_command(binary, cwd, args, codex).spawn()
 }
 
 /// The last stderr lines of a turn's process: a per-turn drain task for a
@@ -1663,7 +1672,8 @@ fn start_companion_turn(
         let mut native = codex.then(|| crate::codex_conversation::NativeTurn::new(cwd.clone(), prompt.clone(), prior_session.clone(), model.clone(), effort.clone(), baseline).workspace_write(mode == TurnMode::Build));
         let binary = if codex { crate::codex_app_server::resolve_codex_bin() } else { companion.claude_bin().await? };
         let cold_args = if codex {
-            vec!["app-server".to_string()]
+            // `cold_command` starts `app-server` itself.
+            Vec::new()
         } else {
             let mut args = crate::claude_proc::companion_args(prompt.clone(), prior_session.as_deref(), seat_flags.clone(), mode == TurnMode::Build)?;
             args.push("--append-system-prompt".to_string());
@@ -2745,6 +2755,22 @@ mod tests {
     use super::*;
 
     const SELF_ID: &str = "chat-self";
+
+    /// Either harness's turn carries the daemon token in its environment, so
+    /// the chat's bridge writes authenticate, and the companion seat.
+    #[test]
+    fn a_turn_spawns_with_the_daemon_token() {
+        use std::ffi::OsStr;
+        for codex in [true, false] {
+            let cmd = cold_command("/nonexistent/harness", "/", &[], codex);
+            let std = cmd.as_std();
+            let env = |key: &str| std.get_envs().find(|(k, _)| *k == OsStr::new(key)).and_then(|(_, v)| v);
+            assert_eq!(env(crate::auth::ENV_DAEMON_TOKEN), Some(OsStr::new(crate::auth::daemon_token())), "codex: {codex}");
+            assert_eq!(env(crate::claude_proc::ENV_AGENT_SEAT), Some(OsStr::new("companion")), "codex: {codex}");
+        }
+        let codex = cold_command("/nonexistent/codex", "/", &[], true);
+        assert_eq!(codex.as_std().get_args().collect::<Vec<_>>(), ["app-server"]);
+    }
 
     fn surface(kind: &str, label: Option<&str>, detail: Option<&str>) -> SurfaceInfo {
         SurfaceInfo {

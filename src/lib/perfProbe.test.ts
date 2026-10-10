@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EVENT_FLOOR_MS,
+  FRAME_TAIL_MS,
   frameHistogram,
   percentile,
   startPerfProbe,
@@ -14,10 +15,13 @@ import {
 } from "./perfProbe";
 import { PERF_PROBE_KEY, perfProbeWanted } from "./perfProbeSwitch";
 
-/** A scripted platform: a clock, a frame pump, an Event Timing feed. */
+/** A scripted platform: a clock, a frame pump, an Event Timing feed. Frame
+ *  callbacks are one-shot, as in a browser, and every request is counted. */
 function fakeEnv(entryTypes: string[] = ["event"]) {
   let clock = 0;
-  let frameCb: ((t: number) => void) | null = null;
+  let nextFrame = 0;
+  let requested = 0;
+  let due = new Map<number, (t: number) => void>();
   const observers: { type: string; cb: PerformanceObserverCallback; opts: PerformanceObserverInit }[] = [];
   class Observer {
     static supportedEntryTypes = entryTypes;
@@ -36,11 +40,12 @@ function fakeEnv(entryTypes: string[] = ["event"]) {
   const env: ProbeEnv = {
     now: () => clock,
     raf: (cb) => {
-      frameCb = cb;
-      return 1;
+      requested++;
+      due.set(++nextFrame, cb);
+      return nextFrame;
     },
-    cancelRaf: () => {
-      frameCb = null;
+    cancelRaf: (id) => {
+      due.delete(id);
     },
     target,
     doc,
@@ -58,12 +63,22 @@ function fakeEnv(entryTypes: string[] = ["event"]) {
     frames(...gaps: number[]) {
       for (const gap of gaps) {
         clock += gap;
-        frameCb?.(clock);
+        const now = due;
+        due = new Map();
+        now.forEach((cb) => cb(clock));
       }
     },
-    input(type: "keydown" | "pointerdown") {
+    /** Frames asked for so far, and whether one is waiting now. */
+    get requested() {
+      return requested;
+    },
+    get waiting() {
+      return due.size > 0;
+    },
+    input(type: "keydown" | "pointerdown" | "wheel" | "input" | "pointermove", buttons = 0) {
       const ev = new Event(type);
       Object.defineProperty(ev, "timeStamp", { value: clock });
+      Object.defineProperty(ev, "buttons", { value: buttons });
       target.dispatchEvent(ev);
     },
     /** Event Timing reporting one event of an interaction. */
@@ -175,6 +190,7 @@ describe("perf probe", () => {
   it("measures frame gaps while visible and drops the gap across a hide", () => {
     const f = fakeEnv();
     const probe = startPerfProbe(f.env);
+    f.input("keydown");
     f.frames(16.7, 16.7, 16.7, 120, 16.7);
     let frames = probe.snapshot().frames;
     // The first frame only sets the clock; four gaps follow it.
@@ -185,10 +201,63 @@ describe("perf probe", () => {
     f.advance(5000);
     f.frames(16.7); // nothing runs while hidden
     f.show();
+    f.input("keydown");
     f.frames(16.7, 16.7);
     frames = probe.snapshot().frames;
     expect(frames.n).toBe(5);
     expect(frames.max).toBe(120);
+  });
+
+  it("requests no frames while idle, and stops itself after the last input", () => {
+    const f = fakeEnv();
+    const probe = startPerfProbe(f.env);
+    f.advance(60_000);
+    expect(f.requested).toBe(0);
+    f.input("keydown");
+    expect(f.waiting).toBe(true);
+    // Sixty frames a second until the tail runs out, then none.
+    for (let t = 0; t <= FRAME_TAIL_MS; t += 16) f.frames(16);
+    expect(f.waiting).toBe(false);
+    const asked = f.requested;
+    expect(asked).toBeGreaterThan(FRAME_TAIL_MS / 17);
+    f.advance(60_000);
+    f.frames(16, 16);
+    expect(f.requested).toBe(asked);
+    // Every frame it asked for was measured, the first only setting the clock.
+    expect(probe.snapshot(120_000).frames.n).toBe(asked - 1);
+    // A run starts its clock fresh: the idle minute is not a stall.
+    f.input("pointerdown");
+    f.frames(16, 16);
+    expect(probe.snapshot(120_000).frames.max).toBe(16);
+  });
+
+  it("wakes for a drag, a scroll or typed input, never a resting pointer", () => {
+    const f = fakeEnv();
+    startPerfProbe(f.env);
+    f.input("pointermove");
+    expect(f.requested).toBe(0);
+    for (const wake of [() => f.input("pointermove", 1), () => f.input("wheel"), () => f.input("input")]) {
+      wake();
+      expect(f.waiting).toBe(true);
+      f.advance(FRAME_TAIL_MS);
+      f.frames(16);
+      expect(f.waiting).toBe(false);
+    }
+  });
+
+  it("asks for nothing while hidden, and resumes on show only within the tail", () => {
+    const f = fakeEnv();
+    startPerfProbe(f.env);
+    f.hide();
+    f.input("keydown");
+    expect(f.requested).toBe(0);
+    f.show();
+    expect(f.waiting).toBe(true);
+    f.hide();
+    expect(f.waiting).toBe(false);
+    f.advance(FRAME_TAIL_MS);
+    f.show();
+    expect(f.waiting).toBe(false);
   });
 
   it("falls back to an approximate input-to-next-frame time without Event Timing", () => {
@@ -229,8 +298,11 @@ describe("perf probe", () => {
   it("bounds every series however long it runs", () => {
     const f = fakeEnv();
     const probe = startPerfProbe(f.env);
-    for (let i = 0; i < 20_000; i++) f.frames(1);
-    // 20,000 frames inside the window, but the ring keeps the newest 16,384.
+    for (let i = 0; i < 20_000; i++) {
+      if (i % 1000 === 0) f.input("wheel"); // keep the sampler awake
+      f.frames(1);
+    }
+    // ~20,000 frames inside the window, but the ring keeps the newest 16,384.
     expect(probe.snapshot(120_000).frames.n).toBe(16_384);
   });
 });

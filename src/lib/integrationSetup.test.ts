@@ -12,6 +12,11 @@ describe("selected harness setup", () => {
     expect(integrationNeedsRepair("codex", value)).toBe(true);
     expect(integrationNeedsRepair("claude-code", value)).toBe(false);
   });
+  it("leaves an earlier hook that still works to the readiness strip's offer", () => {
+    const value = health(); value.codexHook!.outdated = true;
+    expect(integrationNeedsRepair("codex", value)).toBe(false);
+    expect(integrationVerified("codex", value)).toBe(true);
+  });
   it("does not declare untrusted or unverifiable hooks ready", () => {
     const value = health();
     for (const trust of ["needs-review", "unknown"] as const) { value.codexHook!.trust = trust; expect(integrationVerified("codex", value)).toBe(false); }

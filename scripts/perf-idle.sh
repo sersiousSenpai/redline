@@ -12,8 +12,8 @@
 #   - each process's physical footprint;
 #   - the responsiveness probe's own numbers from GET /v1/perf, if it is on.
 #
-# Take the idle reading with the probe OFF: its frame sampler wakes the
-# renderer every frame. Touch nothing while it samples.
+# The probe can stay on: its frame sampler runs only while you interact.
+# Touch nothing for a few seconds before and while it samples.
 #
 # Usage: scripts/perf-idle.sh [--seconds N] [--app NAME] [--port P] [--keep]
 #                             [--gpu PID] [--renderer PID]

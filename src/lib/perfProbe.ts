@@ -18,9 +18,11 @@
 //     has neither today; the snapshot says which were live, so an absent
 //     instrument never reads as a clean zero).
 //   - A requestAnimationFrame frame-gap histogram: the time between frames
-//     while the page is visible. Gaps over one refresh interval are frames
-//     the main thread was too busy to produce. This loop runs every frame, so
-//     an idle GPU/renderer `sample` is taken with the probe off.
+//     while the user interacts with the visible page. Gaps over one refresh
+//     interval are frames the main thread was too busy to produce. Input
+//     starts the loop and it stops itself FRAME_TAIL_MS after the last one,
+//     so an idle app requests no frames from the probe and an idle GPU /
+//     renderer `sample` can be taken with it on.
 //
 // Bounded by construction: every series is a fixed-capacity ring, and nothing
 // is retained past RETAIN_MS. Nothing leaves the page unless something asks.
@@ -35,6 +37,12 @@ export const EVENT_FLOOR_MS = 16;
 /** Frame-gap histogram bucket ceilings: a 120 Hz frame, a 60 Hz frame, one
  *  and two dropped 60 Hz frames, then the visible stalls. */
 export const FRAME_BUCKETS_MS = [9, 17.5, 34, 50, 100, 250] as const;
+/** How long the frame sampler runs on after the last input. */
+export const FRAME_TAIL_MS = 2_000;
+
+/** Input that wakes the frame sampler. A `pointermove` counts only with a
+ *  button held (a drag): a resting or hovering pointer is not interaction. */
+const ACTIVITY_EVENTS = ["keydown", "pointerdown", "pointermove", "wheel", "input"];
 
 const KEYBOARD_EVENTS = new Set(["keydown", "keyup", "keypress", "beforeinput", "input", "compositionstart", "compositionupdate", "compositionend"]);
 
@@ -240,22 +248,35 @@ export function startPerfProbe(env: ProbeEnv = browserEnv()): PerfProbe {
   env.target.addEventListener("keydown", onInput, listen);
   env.target.addEventListener("pointerdown", onInput, listen);
 
-  // Frame gaps while visible. A hidden page gets no frames, so the gap that
-  // spans a hide is dropped rather than read as a stall.
-  let rafId = 0;
+  // Frame gaps while the user interacts with a visible page: input starts
+  // the loop, and it stops itself FRAME_TAIL_MS after the last input. The
+  // first frame of each run only sets the clock, so the time spent stopped
+  // or hidden is dropped rather than read as a stall.
+  let rafId: number | null = null;
   let last = 0;
+  let lastInput = -Infinity;
   const tick = (t: number) => {
     if (last) frames.push(t, t - last);
-    last = t;
-    rafId = env.raf(tick);
+    const on = t - lastInput < FRAME_TAIL_MS;
+    last = on ? t : 0;
+    rafId = on ? env.raf(tick) : null;
   };
+  const run = () => {
+    if (rafId === null && env.doc.visibilityState === "visible") rafId = env.raf(tick);
+  };
+  const onActivity = (ev: Event) => {
+    if (ev.type === "pointermove" && !(ev as PointerEvent).buttons) return;
+    lastInput = env.now();
+    run();
+  };
+  for (const type of ACTIVITY_EVENTS) env.target.addEventListener(type, onActivity, listen);
   const onVisibility = () => {
-    env.cancelRaf(rafId);
+    if (rafId !== null) env.cancelRaf(rafId);
+    rafId = null;
     last = 0;
-    if (env.doc.visibilityState === "visible") rafId = env.raf(tick);
+    if (env.now() - lastInput < FRAME_TAIL_MS) run();
   };
   env.doc.addEventListener("visibilitychange", onVisibility);
-  onVisibility();
 
   const probe: PerfProbe = {
     snapshot(windowMs = DEFAULT_WINDOW_MS) {
@@ -300,8 +321,9 @@ export function startPerfProbe(env: ProbeEnv = browserEnv()): PerfProbe {
       for (const o of observers) o.disconnect();
       env.target.removeEventListener("keydown", onInput, listen);
       env.target.removeEventListener("pointerdown", onInput, listen);
+      for (const type of ACTIVITY_EVENTS) env.target.removeEventListener(type, onActivity, listen);
       env.doc.removeEventListener("visibilitychange", onVisibility);
-      env.cancelRaf(rafId);
+      if (rafId !== null) env.cancelRaf(rafId);
       if (env.host.__rlPerf === probe) delete env.host.__rlPerf;
     },
   };

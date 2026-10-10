@@ -22,7 +22,12 @@ const HOOK_TIMEOUT_SECS: u32 = 43_200;
 #[serde(rename_all = "camelCase")]
 pub struct CodexHookStatus {
     pub available: bool,
+    /// Both hooks are there in a shape that does the job (current, or one in
+    /// `PREVIOUS_*_COMMANDS`).
     pub installed: bool,
+    /// Installed, with at least one hook in an earlier, still-working shape:
+    /// an update is available, and nothing waits on it.
+    pub outdated: bool,
     pub hooks_path: String,
     pub stop_found: bool,
     pub prompt_capture_found: bool,
@@ -58,6 +63,49 @@ fn capture_command() -> String {
     )
 }
 
+/// Commands an earlier Redline wrote that still do the whole job, frozen
+/// byte for byte as that build installed them. These predate the terminal
+/// header: they hold, return and approve plans and capture prompts, and only
+/// the terminal wall misses a Codex agent's turns. Such an install counts as
+/// installed, so it never blocks a launch or a restore, but reads `outdated`,
+/// and Install rewrites it (Codex then asks for trust once, as for any
+/// changed hook).
+///
+/// A shape is listed only while it works. The Stop commands from before
+/// `X-Redline-Codex-Socket` do not: Approve hands the plan to Codex through
+/// that socket (`codex_app_server::queue_plan_implementation`), so an install
+/// that old still reads as missing.
+const PREVIOUS_STOP_COMMANDS: &[&str] = &[
+    "/usr/bin/curl -sS --max-time 43200 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${REDLINE_PLAN_LAUNCH_ID:-}\" -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" -H \"X-Redline-Codex-Socket: ${REDLINE_CODEX_SOCKET:-}\" --data-binary @- http://127.0.0.1:7676/v1/codex/stop",
+];
+const PREVIOUS_CAPTURE_COMMANDS: &[&str] = &[
+    "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${REDLINE_PLAN_LAUNCH_ID:-}\" -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" --data-binary @- http://127.0.0.1:7676/v1/prompts/ingest >/dev/null 2>&1; exit 0",
+];
+
+/// How current one of our hooks is, ordered so the best of several wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Shape {
+    Missing,
+    Previous,
+    Current,
+}
+
+fn shape_of(command: &str, current: &str, previous: &[&str]) -> Shape {
+    if command == current {
+        Shape::Current
+    } else if previous.contains(&command) {
+        Shape::Previous
+    } else {
+        Shape::Missing
+    }
+}
+
+/// The Stop hook, then the capture hook: the command this build writes and
+/// the earlier ones that still count.
+fn hook_shapes() -> [(String, &'static [&'static str]); 2] {
+    [(stop_command(), PREVIOUS_STOP_COMMANDS), (capture_command(), PREVIOUS_CAPTURE_COMMANDS)]
+}
+
 #[cfg(test)]
 fn entry_targets(entry: &Value, url: &str) -> bool {
     entry
@@ -78,22 +126,26 @@ fn get_status_at(path: &Path) -> CodexHookStatus {
     let root = fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    let stop_found = root
-        .as_ref()
-        .and_then(|v| v.pointer("/hooks/Stop"))
-        .and_then(Value::as_array)
-        .is_some_and(|entries| entries.iter().any(|entry| entry_has_command(entry, &stop_command(), false)));
-    let prompt_capture_found = root
-        .as_ref()
-        .and_then(|v| v.pointer("/hooks/UserPromptSubmit"))
-        .and_then(Value::as_array)
-        .is_some_and(|entries| entries.iter().any(|entry| entry_has_command(entry, &capture_command(), true)));
+    let shape = |event: &str, (current, previous): &(String, &[&str]), asynchronous: bool| {
+        root.as_ref()
+            .and_then(|v| v.pointer(&format!("/hooks/{event}")))
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.iter().map(|entry| entry_shape(entry, current, previous, asynchronous)).max())
+            .unwrap_or(Shape::Missing)
+    };
+    let [stop_shapes, capture_shapes] = hook_shapes();
+    let stop = shape("Stop", &stop_shapes, false);
+    let capture = shape("UserPromptSubmit", &capture_shapes, true);
+    let installed = stop != Shape::Missing && capture != Shape::Missing;
     CodexHookStatus {
         available: crate::codex_app_server::codex_available(),
-        installed: stop_found && prompt_capture_found,
+        installed,
+        // Only an install that works can be merely outdated: half of one is
+        // missing, and says so.
+        outdated: installed && (stop == Shape::Previous || capture == Shape::Previous),
         hooks_path: path.to_string_lossy().into_owned(),
-        stop_found,
-        prompt_capture_found,
+        stop_found: stop != Shape::Missing,
+        prompt_capture_found: capture != Shape::Missing,
         trust: "unknown".into(),
         trust_detail: None,
     }
@@ -105,8 +157,7 @@ pub async fn probe_trust(status: &mut CodexHookStatus, bin: &str, project: Optio
     let cwd = project.filter(|path| Path::new(path).is_dir()).unwrap_or(&home);
     match crate::codex_app_server::inspect_request(bin, "hooks/list", json!({"cwds":[cwd]})).await {
         Ok(value) => {
-            let hooks: Vec<&Value> = value["data"].as_array().into_iter().flatten().flat_map(|entry| entry["hooks"].as_array().into_iter().flatten()).filter(|hook| hook["sourcePath"].as_str() == Some(status.hooks_path.as_str()) && hook["command"].as_str().is_some_and(|command| command == stop_command() || command == capture_command())).collect();
-            let enabled = [stop_command(), capture_command()].iter().all(|command| hooks.iter().any(|hook| hook["command"].as_str() == Some(command) && hook["enabled"] == true && matches!(hook["trustStatus"].as_str(), Some("trusted" | "managed"))));
+            let enabled = hooks_trusted(&value, &status.hooks_path);
             status.trust = if enabled { "trusted" } else { "needs-review" }.into();
             if !enabled { status.trust_detail = Some("Review and enable Redline's Stop and UserPromptSubmit hooks in Codex /hooks.".into()); }
         }
@@ -114,12 +165,31 @@ pub async fn probe_trust(status: &mut CodexHookStatus, bin: &str, project: Optio
     }
 }
 
-fn entry_has_command(entry: &Value, command: &str, asynchronous: bool) -> bool {
-    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| hooks.iter().any(|hook|
-        hook.get("type").and_then(Value::as_str) == Some("command")
-            && hook.get("command").and_then(Value::as_str) == Some(command)
-            && hook.get("async").and_then(Value::as_bool).unwrap_or(false) == asynchronous
+/// Codex's `hooks/list` answer shows both of our hooks, in whichever shape
+/// `hooks.json` holds them, enabled and trusted. Trust is per definition, so
+/// an outdated install that was trusted stays trusted until Install rewrites
+/// it.
+fn hooks_trusted(listed: &Value, hooks_path: &str) -> bool {
+    let hooks: Vec<&Value> = listed["data"].as_array().into_iter().flatten()
+        .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+        .filter(|hook| hook["sourcePath"].as_str() == Some(hooks_path))
+        .collect();
+    hook_shapes().iter().all(|(current, previous)| hooks.iter().any(|hook|
+        hook["command"].as_str().is_some_and(|command| shape_of(command, current, previous) != Shape::Missing)
+            && hook["enabled"] == true
+            && matches!(hook["trustStatus"].as_str(), Some("trusted" | "managed"))
     ))
+}
+
+/// The best shape of our hook among one matcher entry's handlers.
+fn entry_shape(entry: &Value, current: &str, previous: &[&str], asynchronous: bool) -> Shape {
+    entry.get("hooks").and_then(Value::as_array).into_iter().flatten()
+        .filter(|hook| hook.get("type").and_then(Value::as_str) == Some("command")
+            && hook.get("async").and_then(Value::as_bool).unwrap_or(false) == asynchronous)
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .map(|command| shape_of(command, current, previous))
+        .max()
+        .unwrap_or(Shape::Missing)
 }
 
 pub fn install() -> Result<CodexHookStatus, String> {
@@ -201,7 +271,7 @@ mod tests {
             json!({"matcher":"*","hooks":[foreign.clone(),{"type":"command","command":format!("curl --max-time 600 {STOP_URL}")}]}),
             json!({"hooks":[{"type":"command","command":format!("/usr/bin/curl {STOP_URL}")}, {"type":"command","command":"another hook"}]}),
         ];
-        assert!(!entry_has_command(&entries[0], &stop_command(), false));
+        assert_eq!(entry_shape(&entries[0], &stop_command(), PREVIOUS_STOP_COMMANDS, false), Shape::Missing);
         let current = json!({"type":"command","command":stop_command(),"timeout":HOOK_TIMEOUT_SECS});
         upsert_command(&mut entries, STOP_URL, current.clone());
         assert_eq!(entries[0]["hooks"][0], foreign);
@@ -209,43 +279,135 @@ mod tests {
         assert_eq!(entries[0]["matcher"], "*");
         assert_eq!(entries[1]["hooks"].as_array().unwrap().len(), 1);
         assert_eq!(entries[1]["hooks"][0]["command"], "another hook");
-        assert!(entry_has_command(&entries[0], &stop_command(), false));
-        assert!(!entry_has_command(&entries[0], &stop_command(), true));
+        assert_eq!(entry_shape(&entries[0], &stop_command(), PREVIOUS_STOP_COMMANDS, false), Shape::Current);
+        assert_eq!(entry_shape(&entries[0], &stop_command(), PREVIOUS_STOP_COMMANDS, true), Shape::Missing);
         let unchanged = entries.clone();
         upsert_command(&mut entries, STOP_URL, current);
         assert_eq!(entries, unchanged);
     }
 
     /// Both Codex hooks name their dock terminal, through a shell expansion
-    /// (single quotes would ship the literal variable name), and an older
-    /// install without the header is not current.
+    /// (single quotes would ship the literal variable name), and the install
+    /// from before the header is exactly today's command without it.
     #[test]
     fn both_hooks_forward_the_dock_terminal() {
         for command in [stop_command(), capture_command()] {
             assert!(command.contains("-H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID:-}\""), "{command}");
         }
-        let stale = json!({"hooks":[{"type":"command","command":stop_command().replace(&format!("{} ", terminal_header()), ""),"timeout":HOOK_TIMEOUT_SECS}]});
-        assert!(!entry_has_command(&stale, &stop_command(), false), "a pre-attention install is refreshed");
+        let without_header = |command: String| command.replace(&format!("{} ", terminal_header()), "");
+        assert_eq!(PREVIOUS_STOP_COMMANDS, [without_header(stop_command())]);
+        assert_eq!(PREVIOUS_CAPTURE_COMMANDS, [without_header(capture_command())]);
     }
 
+    /// Both commands, byte for byte. Status and trust compare these bytes, so
+    /// a change strands every existing install as "not installed" unless the
+    /// command it replaces joins `PREVIOUS_*_COMMANDS` (when it still works).
     #[test]
-    fn install_preserves_foreign_hooks_and_is_idempotent() {
+    fn commands_are_pinned() {
+        assert_eq!(
+            stop_command(),
+            "/usr/bin/curl -sS --max-time 43200 -X POST -H 'Content-Type: application/json' \
+             -H \"X-Redline-Plan-Launch-Id: ${REDLINE_PLAN_LAUNCH_ID:-}\" -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" \
+             -H \"X-Redline-Codex-Socket: ${REDLINE_CODEX_SOCKET:-}\" -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID:-}\" \
+             --data-binary @- http://127.0.0.1:7676/v1/codex/stop"
+        );
+        assert_eq!(
+            capture_command(),
+            "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' \
+             -H \"X-Redline-Plan-Launch-Id: ${REDLINE_PLAN_LAUNCH_ID:-}\" -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" \
+             -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID:-}\" \
+             --data-binary @- http://127.0.0.1:7676/v1/prompts/ingest >/dev/null 2>&1; exit 0"
+        );
+    }
+
+    fn hooks_file(stop: &str, capture: &str) -> String {
+        json!({"hooks":{
+            "Stop":[{"hooks":[{"type":"command","command":stop,"timeout":HOOK_TIMEOUT_SECS}]}],
+            "UserPromptSubmit":[{"hooks":[{"type":"command","command":capture,"timeout":5,"async":true}]}],
+        }}).to_string()
+    }
+
+    /// A fresh `hooks.json` path per call. The clock alone is not unique:
+    /// tests start in parallel, and macOS reads it to the microsecond.
+    fn temp_hooks() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "redline-codex-hook-{}-{}",
+            "redline-codex-hook-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("hooks.json");
+        dir.join("hooks.json")
+    }
+
+    /// An install from before the terminal header still holds and approves
+    /// plans, so it is installed (a restore is not refused over it) and
+    /// merely outdated; Install brings it current. One from before the
+    /// approval socket, or a command that only resembles ours, is not ours.
+    #[test]
+    fn an_earlier_working_install_is_installed_but_outdated() {
+        let path = temp_hooks();
+        let status = |stop: &str, capture: &str| {
+            fs::write(&path, hooks_file(stop, capture)).unwrap();
+            let status = get_status_at(&path);
+            (status.installed, status.outdated)
+        };
+        let (stop, capture) = (stop_command(), capture_command());
+        let (old_stop, old_capture) = (PREVIOUS_STOP_COMMANDS[0], PREVIOUS_CAPTURE_COMMANDS[0]);
+        assert_eq!(status(&stop, &capture), (true, false));
+        assert_eq!(status(old_stop, old_capture), (true, true));
+        assert_eq!(status(&stop, old_capture), (true, true));
+        assert_eq!(status(old_stop, &capture), (true, true));
+
+        let before_socket = old_stop.replace("-H \"X-Redline-Codex-Socket: ${REDLINE_CODEX_SOCKET:-}\" ", "");
+        assert_ne!(before_socket, old_stop);
+        assert_eq!(status(&before_socket, &capture), (false, false));
+        assert_eq!(status(&format!("/usr/bin/curl {STOP_URL}"), &capture), (false, false));
+        assert_eq!(status(&stop, &format!("{capture} ")), (false, false));
+        assert_eq!(status(old_stop, "echo capture"), (false, false), "half an old install is missing, not outdated");
+        fs::write(&path, "not json").unwrap();
+        assert!(!get_status_at(&path).installed);
+
+        fs::write(&path, hooks_file(old_stop, old_capture)).unwrap();
+        let installed = install_at(&path).unwrap();
+        assert!(installed.installed && !installed.outdated);
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root.pointer("/hooks/Stop/0/hooks/0/command").unwrap(), &json!(stop));
+        assert_eq!(root.pointer("/hooks/UserPromptSubmit/0/hooks/0/command").unwrap(), &json!(capture));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Codex trusts a definition, so an outdated install it trusted stays
+    /// verified; an untrusted, disabled or foreign one does not.
+    #[test]
+    fn trust_follows_whichever_shape_is_installed() {
+        let listed = |stop: &str, capture: &str, trust: &str, enabled: bool| json!({"data":[{"hooks":[
+            {"sourcePath":"/h.json","command":stop,"enabled":enabled,"trustStatus":trust},
+            {"sourcePath":"/h.json","command":capture,"enabled":true,"trustStatus":"trusted"},
+        ]}]});
+        let (stop, capture) = (stop_command(), capture_command());
+        let (old_stop, old_capture) = (PREVIOUS_STOP_COMMANDS[0], PREVIOUS_CAPTURE_COMMANDS[0]);
+        assert!(hooks_trusted(&listed(&stop, &capture, "trusted", true), "/h.json"));
+        assert!(hooks_trusted(&listed(old_stop, old_capture, "managed", true), "/h.json"));
+        assert!(!hooks_trusted(&listed(old_stop, old_capture, "untrusted", true), "/h.json"));
+        assert!(!hooks_trusted(&listed(&stop, &capture, "trusted", false), "/h.json"));
+        assert!(!hooks_trusted(&listed(&stop, &capture, "trusted", true), "/elsewhere.json"));
+        assert!(!hooks_trusted(&listed("echo stop", &capture, "trusted", true), "/h.json"));
+    }
+
+    #[test]
+    fn install_preserves_foreign_hooks_and_is_idempotent() {
+        let path = temp_hooks();
         fs::write(&path, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo foreign"}]}]}}"#).unwrap();
         assert!(install_at(&path).unwrap().installed);
         assert!(install_at(&path).unwrap().installed);
-        let root: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let stops = root.pointer("/hooks/Stop").unwrap().as_array().unwrap();
         assert_eq!(stops.len(), 2);
         assert_eq!(stops.iter().filter(|v| entry_targets(v, STOP_URL)).count(), 1);
         assert!(stops.iter().any(|v| entry_targets(v, "echo foreign")));
-        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
