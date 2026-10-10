@@ -38,7 +38,7 @@ while [ $# -gt 0 ]; do
     --keep) KEEP=1; shift ;;
     --gpu) GPU=$2; shift 2 ;;
     --renderer) RENDERER=$2; shift 2 ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
