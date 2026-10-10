@@ -112,6 +112,8 @@ interface StudioStatus {
   state: string;
   reason: string | null;
   pressure: number | null;
+  /** Kokoro is set up to stand in (its model, and the Python it found). */
+  kokoro?: boolean;
 }
 
 /** From `status`, then `studio-status` events. `squeezed` keeps the
@@ -125,6 +127,8 @@ const studio = {
   waiters: new Set<(state: string, news: boolean) => void>(),
 };
 let watching = false;
+/** The status this window read first: what the stand-in check goes by. */
+let firstStatus: Promise<StudioStatus | null> = Promise.resolve(null);
 
 function noteState(state: string, reason: string | null, news: boolean) {
   studio.state = state === "exited" ? "off" : state;
@@ -136,14 +140,15 @@ function noteState(state: string, reason: string | null, news: boolean) {
   for (const wake of [...studio.waiters]) wake(state, news);
 }
 
-function readStatus() {
-  void invoke<StudioStatus>("tts_studio", { op: "status" })
+function readStatus(): Promise<StudioStatus | null> {
+  return invoke<StudioStatus>("tts_studio", { op: "status" })
     .then((s) => {
       studio.known = true;
       studio.installed = s.installed;
       noteState(s.state, s.reason, false);
+      return s;
     })
-    .catch(() => {});
+    .catch(() => null);
 }
 
 /** Start following the sidecar (once). */
@@ -153,7 +158,7 @@ export function watchStudio(): void {
   void listen<{ state: string; reason: string | null }>("studio-status", (e) =>
     noteState(e.payload.state, e.payload.reason, true),
   ).catch(() => {});
-  readStatus();
+  firstStatus = readStatus();
 }
 
 function squeeze() {
@@ -210,14 +215,12 @@ export function studioSurface(surface: string, open: boolean): void {
 }
 
 /** Kokoro's voice when Kokoro is set up to stand in, else null. Asked once
- *  per window: the check starts a Python, and every chat makes a driver. */
+ *  per window, since every chat makes a driver, and taken from the studio
+ *  voice's status: Kokoro's own starts a login shell and probes Pythons. */
 let kokoroCheck: Promise<string | null> | null = null;
 function kokoroStandin(): Promise<string | null> {
-  kokoroCheck ??= Promise.all([
-    invoke<{ modelPresent: boolean; pythonReady: boolean }>("tts_kokoro_status"),
-    invoke<{ kokoroVoice?: string }>("tts_get_settings"),
-  ])
-    .then(([k, s]) => (k.modelPresent && k.pythonReady ? s.kokoroVoice || "af_heart" : null))
+  kokoroCheck ??= Promise.all([firstStatus, invoke<{ kokoroVoice?: string }>("tts_get_settings")])
+    .then(([s, t]) => (s?.kokoro ? t.kokoroVoice || "af_heart" : null))
     .catch(() => null);
   return kokoroCheck;
 }
@@ -350,7 +353,7 @@ export function studioTtsDriver(opts: StudioOptions = {}): SpeechDriver {
     const why = unready();
     if (why === "warming") void warmStudio().catch(() => {});
     // Installed since this window last asked? The next reply will know.
-    if (why === "missing") readStatus();
+    if (why === "missing") void readStatus();
     turn.standin = why;
     opts.onFallback?.(why && chip(why));
   };

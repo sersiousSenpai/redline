@@ -39,11 +39,9 @@ vi.mock("@tauri-apps/api/core", () => ({
       rust.cancels.push(args.generation as number);
       return null;
     }
-    if (cmd === "tts_kokoro_status")
-      return { modelPresent: rust.kokoro, pythonReady: rust.kokoro };
     if (cmd === "tts_get_settings") return { kokoroVoice: "af_heart" };
     if (cmd !== "tts_studio") return null;
-    if (args.op === "status") return { ...rust.status };
+    if (args.op === "status") return { ...rust.status, kokoro: rust.kokoro };
     if (args.op === "speak") {
       if (rust.refuse) throw rust.refuse;
       rust.speaks.push({ args: args.args as Speak["args"], channel: args.onAudio as Speak["channel"] });
@@ -464,12 +462,16 @@ describe("studioTtsDriver: the stand-in", () => {
     expect(standins.map((s) => s.text)).toEqual([LONG(3), LONG(4)]);
   });
 
-  it("asks whether Kokoro is set up once per window, not once per chat", async () => {
+  it("asks whether Kokoro is set up once per window, not once per chat, and starts nothing to ask", async () => {
     await driver();
     await driver();
     studio.playStudioSample("ryan", "Studio voice ready.", () => {});
     await advance(0);
-    expect(named("tts_kokoro_status")).toHaveLength(1);
+    // Kokoro's own status starts a login shell and probes Pythons; the
+    // studio voice's status says the same from what is on disk.
+    expect(named("tts_kokoro_status")).toEqual([]);
+    expect(named("tts_studio", "status")).toHaveLength(1);
+    expect(named("tts_get_settings")).toHaveLength(1);
   });
 
   it("is the system voice where Kokoro isn't set up, and takes a refused piece", async () => {

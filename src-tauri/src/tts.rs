@@ -215,6 +215,17 @@ impl TtsState {
     fn model_present(&self) -> bool {
         self.model_path().exists() && self.voices_path().exists()
     }
+    /// Kokoro can read without a setup step: its model is here, and so is the
+    /// Python it was set up with. The studio voice's stand-in check, cheap
+    /// enough for every chat that mounts, where `tts_kokoro_status` starts a
+    /// login shell and probes interpreters.
+    pub(crate) fn kokoro_ready(&self) -> bool {
+        self.model_present()
+            && self
+                .db
+                .get_setting(SETTING_PYTHON_PATH)
+                .is_some_and(|p| !p.trim().is_empty())
+    }
     /// Only the int8 model is here: the voice works, and the fp32 one should
     /// be fetched beside it.
     fn needs_model_upgrade(&self) -> bool {
@@ -1702,6 +1713,22 @@ done
         std::fs::write(dir.join(KOKORO_MODEL_FILE), b"fp32").unwrap();
         assert!(tts.model_path().ends_with(KOKORO_MODEL_FILE));
         assert!(!tts.needs_model_upgrade());
+    }
+
+    /// The studio voice asks whether Kokoro can stand in at every chat's
+    /// mount: the model and the Python it was set up with, no probing.
+    #[test]
+    fn kokoro_stands_in_once_its_model_and_python_are_set_up() {
+        let data = scratch_dir("ready");
+        let dir = data.join("kokoro");
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        tts.db.set_setting(SETTING_PYTHON_PATH, "/a/venv/bin/python3").unwrap();
+        assert!(!tts.kokoro_ready(), "no model yet");
+        std::fs::write(dir.join(KOKORO_MODEL_FILE), b"fp32").unwrap();
+        std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
+        assert!(tts.kokoro_ready());
+        tts.db.set_setting(SETTING_PYTHON_PATH, " ").unwrap();
+        assert!(!tts.kokoro_ready(), "a model with no Python found for it");
     }
 
     #[tokio::test]

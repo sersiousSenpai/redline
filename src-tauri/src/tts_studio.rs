@@ -1525,7 +1525,8 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   at once, so the frontend speaks the piece in its fallback voice, when the
 ///   engine is off, not installed, can't start, or memory is too tight to load
 ///   it.
-/// - `status`, `preflight`: the queries.
+/// - `status` (with `kokoro`: whether Kokoro can stand in), `preflight`:
+///   the queries.
 /// - `prefs`: save `args` `{model?, voice?, style?}`.
 /// - `install`: progress and the outcome on `studio-setup`; `cancel` stops it
 ///   (its outcome is the error `cancelled`), and installing again resumes.
@@ -1560,7 +1561,13 @@ pub fn tts_studio(
                 studio.speak(text, generation, &args, on_audio)?;
             }
         }
-        "status" => return Ok(studio.status()),
+        "status" => {
+            // Whether Kokoro can stand in, answered here: its own status
+            // starts a login shell and Pythons, and every chat asks.
+            let mut status = studio.status();
+            status["kokoro"] = tts.kokoro_ready().into();
+            return Ok(status);
+        }
         "preflight" => return Ok(studio.preflight()),
         "prefs" => studio.set_prefs(&args)?,
         "install" => studio.install(),

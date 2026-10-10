@@ -53,14 +53,12 @@ export async function invoke(command: string, args?: unknown) {
         return {
           supported: true, model: "1.7B-CustomVoice-8bit", installed: true, runtimeCurrent: true,
           models: { "1.7B-CustomVoice-8bit": { speedRatio: 0.27 } }, state: "loading", reason: null,
-          installing: false, speedRatio: 0.27, slow: false, pressure: 1,
+          installing: false, speedRatio: 0.27, slow: false, pressure: 1, kokoro: false,
         };
       if (op === "preflight")
         return { blockers: [], ramBytes: 48e9, freeMemoryBytes: 20e9, freeDiskBytes: 200e9, needDiskBytes: 4.5e9, needMemoryBytes: 4.2e9 };
       return null;
     }
-    case "tts_kokoro_status":
-      return { modelPresent: false, pythonReady: false };
     case "dictation_stop":
       return qa.__qaDictated;
     case "delete_comment":
