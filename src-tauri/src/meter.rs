@@ -235,6 +235,11 @@ pub struct TurnMeter {
     /// with `rev <= current` — monotone, the same soundness argument as the
     /// delta `seq` guard.
     pub rev: u64,
+    /// A settled turn's tool calls, oldest first, newest [`STEPS_KEEP`]:
+    /// what the reply's steps line expands to after a relaunch. Filled by
+    /// [`settle`] only, so a live meter event never carries it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Activity>,
     /// `message.id` -> last usage. THE dedupe.
     #[serde(skip)]
     seen: HashMap<String, MsgUsage>,
@@ -733,17 +738,29 @@ pub fn attach(db: &crate::db::Database, kind: &str, message_id: &str, m: &TurnMe
     }
 }
 
+/// Tool steps a settled meter keeps — the frontend's `replySteps.STEPS_KEEP`,
+/// so a reply expands to the same list before and after a relaunch.
+pub const STEPS_KEEP: usize = 40;
+
 /// Take the turn's meter off its buffer and book it. Called ONCE per turn at
 /// the reader's terminal, ABOVE the success/error/cancelled branch — a guard
 /// test (`meter_settle_precedes_every_terminal_branch`) asserts exactly that
 /// at every reader site, because "every exit books" is the kind of invariant
-/// that decays silently one refactor at a time.
+/// that decays silently one refactor at a time. The meter leaves with the
+/// turn's tool steps, so the row it is attached to keeps them.
 pub fn settle(
     db: &crate::db::Database,
     seat: &str,
     buf: &std::sync::Mutex<crate::turn::PartialBuf>,
 ) -> TurnMeter {
-    let m = buf.lock().unwrap().meter.clone();
+    let m = {
+        let b = buf.lock().unwrap();
+        let mut m = b.meter.clone();
+        let tools = b.activity.iter().filter(|a| a.kind == "tool");
+        let skip = tools.clone().count().saturating_sub(STEPS_KEEP);
+        m.steps = tools.skip(skip).cloned().collect();
+        m
+    };
     book(db, seat, &m);
     m
 }
@@ -787,6 +804,39 @@ pub fn plan_session_meter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reply's steps line expands to the same list after a relaunch as it
+    /// did when the turn ended: the settled meter carries the newest tool
+    /// steps (the frontend's reducer keeps the same ones), while a live
+    /// meter event never carries any, and a row stored before steps were
+    /// kept still reads.
+    #[test]
+    fn settle_keeps_the_newest_tool_steps_on_the_stored_meter_only() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let mut buf = crate::turn::PartialBuf::new();
+        buf.meter.tool_calls = 45;
+        buf.meter.rev = 1;
+        let step = |at: i64, kind: &str, label: String| Activity { at, kind: kind.into(), label };
+        buf.activity.push_back(step(0, "thinking", "Thinking…".into()));
+        for i in 0..45 {
+            buf.activity.push_back(step(i + 1, "tool", format!("Read {i}")));
+        }
+        let live = serde_json::to_value(&buf.meter).unwrap();
+        assert!(live.get("steps").is_none(), "a live meter event carries no steps");
+
+        let settled = settle(&db, "browse", &std::sync::Mutex::new(buf));
+        assert_eq!(settled.steps.len(), STEPS_KEEP);
+        assert_eq!(settled.steps[0].label, "Read 5");
+        assert_eq!(settled.steps[STEPS_KEEP - 1].label, "Read 44");
+        assert!(settled.steps.iter().all(|s| s.kind == "tool"));
+        let stored = serde_json::to_value(&settled).unwrap();
+        assert_eq!(stored["steps"].as_array().map(Vec::len), Some(STEPS_KEEP));
+
+        let mut before_steps = stored;
+        before_steps.as_object_mut().unwrap().remove("steps");
+        let old: TurnMeter = serde_json::from_value(before_steps).unwrap();
+        assert!(old.steps.is_empty());
+    }
 
     fn fold_file(path: &str) -> TurnMeter {
         let body = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));

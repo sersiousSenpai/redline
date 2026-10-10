@@ -455,6 +455,23 @@ describe("the meter", () => {
     expect(s.meters["row-1"]?.outputTokens).toBe(40);
   });
 
+  it("keeps the turn's tool steps with the row, as the stored meter does", () => {
+    const tools = Array.from({ length: 45 }, (_, i) => ({ at: i + 10, kind: "tool", label: `Read ${i}` }));
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, toolCalls: 45 }), activity: { at: 1, kind: "thinking", label: "Thinking…" } },
+      ...tools.map((activity, i) => ({ type: "meter" as const, meter: meter({ rev: 5 + i, toolCalls: 45 }), activity })),
+      { type: "done", message: msg({ id: "row-1" }) },
+    ]);
+    // Tool steps only, the newest 40 — the live ring's cap and `meter::settle`'s.
+    expect(s.meters["row-1"]?.steps?.map((step) => step.label)).toEqual(tools.slice(-40).map((step) => step.label));
+    // A turn that used no tools keeps none.
+    const quiet = run([
+      { type: "meter", meter: meter({ rev: 4 }), activity: { at: 1, kind: "thinking", label: "Thinking…" } },
+      { type: "done", message: msg({ id: "row-2" }) },
+    ]);
+    expect(quiet.meters["row-2"]?.steps).toBeUndefined();
+  });
+
   it("keeps a failed turn's economics too", () => {
     const s = run([
       { type: "meter", meter: meter({ rev: 4, inputTokens: 40_000 }) },

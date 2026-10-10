@@ -61,6 +61,11 @@ export interface TurnMeter {
   /** The CLI's own `total_cost_usd`. Never computed from a price table. */
   costUsd: number | null;
   rev: number;
+  /** A settled turn's tool calls, oldest first (`replySteps.toolSteps`):
+   *  stored with the row's meter at settle, so the reply's steps line expands
+   *  to the same list after a relaunch as it did when the turn ended. Absent
+   *  on a live meter and on rows from before steps were kept. */
+  steps?: Activity[];
 }
 
 /** The meter event payload every `{surface}-meter` carries, minus the
