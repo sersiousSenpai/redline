@@ -159,7 +159,7 @@ const SHARED: [(&str, FileCheck); 9] = [
 
 pub(crate) const VARIANTS: [Variant; 2] = [
     // The default. 0 bad reads in 60, number lines included, where 4-bit
-    // garbled 3 number lines in 10 (studio-spike-breaker §5).
+    // garbled 3 number lines in 10 (speech recognition on 60 seeded reads).
     Variant {
         id: "1.7B-CustomVoice-8bit",
         repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
@@ -2274,18 +2274,18 @@ for line in sys.stdin:
 
     // --- Opt-in: the real sidecar and model -------------------------------
     //
-    // These need the studio spike's scratch install (or REDLINE_STUDIO_VENV /
-    // REDLINE_STUDIO_MODELS pointing at a venv and a models root holding
-    // 1.7B-CustomVoice-8bit) and the network for the last one. Run with
+    // REDLINE_STUDIO_VENV names a venv with the locked packages, and
+    // REDLINE_STUDIO_MODELS a models root holding 1.7B-CustomVoice-8bit; the
+    // runtime and resume tests need the network. Run with
     // `cargo test --lib tts_studio -- --ignored --nocapture --test-threads=1`.
 
-    const SPIKE: &str =
-        "/private/tmp/claude-501/-Users-yusufalbazian-redline/3e177f33-bd57-4486-bc94-dc4856a9ed33/scratchpad/qa/studio-spike";
+    fn from_env(name: &str) -> String {
+        std::env::var(name).unwrap_or_else(|_| panic!("set {name} to run this test"))
+    }
 
     fn scratch_install(label: &str) -> Studio {
-        let venv = std::env::var("REDLINE_STUDIO_VENV").unwrap_or_else(|_| format!("{SPIKE}/venv"));
-        let models =
-            std::env::var("REDLINE_STUDIO_MODELS").unwrap_or_else(|_| format!("{SPIKE}/models"));
+        let venv = from_env("REDLINE_STUDIO_VENV");
+        let models = from_env("REDLINE_STUDIO_MODELS");
         let data = std::env::temp_dir().join(format!(
             "redline-studio-real-{label}-{}",
             std::process::id()
@@ -2336,7 +2336,7 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
-    #[ignore = "needs the studio spike's scratch venv and 1.7B-CustomVoice-8bit"]
+    #[ignore = "needs REDLINE_STUDIO_VENV and REDLINE_STUDIO_MODELS"]
     async fn real_sidecar_first_audio_speed_and_cancel() {
         let studio = scratch_install("sidecar");
         let started = Instant::now();
@@ -2472,13 +2472,12 @@ for line in sys.stdin:
     }
 
     /// A real resume through the model host's signed redirect: the first
-    /// 681 MB of the shared speech tokenizer are taken from the scratch copy,
+    /// 681 MB of the shared speech tokenizer are taken from a local copy,
     /// and only the last megabyte crosses the network.
     #[tokio::test]
-    #[ignore = "needs the network and the studio spike's scratch models"]
+    #[ignore = "needs the network and REDLINE_STUDIO_MODELS"]
     async fn real_range_resume_through_the_signed_redirect() {
-        let models =
-            std::env::var("REDLINE_STUDIO_MODELS").unwrap_or_else(|_| format!("{SPIKE}/models"));
+        let models = from_env("REDLINE_STUDIO_MODELS");
         let (path, check) = SHARED[8];
         let local = std::fs::read(Path::new(&models).join(VARIANTS[0].id).join(path)).unwrap();
         let data =
