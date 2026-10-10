@@ -332,10 +332,18 @@ const HEAVY_MARKERS: &[&str] = &[
     "read_conn",
 ];
 
-/// The commands `lib.rs` hands to the blocking pool (`OFF_MAIN_COMMANDS`):
-/// sync in shape, off the main thread in fact.
+/// The commands `lib.rs` runs off the main thread by name, on the blocking
+/// pool (`OFF_MAIN_COMMANDS`) or in order on a thread of their own
+/// (`IN_ORDER_COMMANDS`): sync in shape, off the main thread in fact.
 pub fn off_main_commands(lib_src: &str) -> Vec<String> {
-    let Some(start) = lib_src.find("const OFF_MAIN_COMMANDS: &[&str] = &[") else {
+    let mut names = command_list(lib_src, "OFF_MAIN_COMMANDS");
+    names.extend(command_list(lib_src, "IN_ORDER_COMMANDS"));
+    names
+}
+
+/// The names in one `const <list>: &[&str] = &[...]` of `lib.rs`.
+pub fn command_list(lib_src: &str, list: &str) -> Vec<String> {
+    let Some(start) = lib_src.find(&format!("const {list}: &[&str] = &[")) else {
         return Vec::new();
     };
     let list = &lib_src[start..];
@@ -1204,8 +1212,9 @@ mod tests {
 
     #[test]
     fn the_off_main_list_is_read_from_lib_rs() {
-        let lib = "const OFF_MAIN_COMMANDS: &[&str] = &[\n    \"get_session\",\n    \"list_sessions\",\n];\nconst OTHER: &[&str] = &[\"no\"];\n";
-        assert_eq!(off_main_commands(lib), vec!["get_session", "list_sessions"]);
+        let lib = "const OFF_MAIN_COMMANDS: &[&str] = &[\n    \"get_session\",\n    // A comment.\n    \"list_sessions\",\n];\nconst OTHER: &[&str] = &[\"no\"];\nconst IN_ORDER_COMMANDS: &[&str] = &[\"save_workspace\"];\n";
+        assert_eq!(off_main_commands(lib), vec!["get_session", "list_sessions", "save_workspace"]);
+        assert_eq!(command_list(lib, "IN_ORDER_COMMANDS"), vec!["save_workspace"]);
         assert!(off_main_commands("fn main() {}").is_empty());
     }
 

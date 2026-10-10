@@ -288,9 +288,10 @@ mod tests {
     /// the disk (an agent transcript tail, a restore's transcript scan, the
     /// install steps, the workspace and harness manifests). On the main
     /// thread every one of them waits behind whatever holds the database or
-    /// the disk, and the UI waits with it. They run on the blocking pool by
-    /// name (`OFF_MAIN_COMMANDS`), which costs no binary, where `(async)`
-    /// costs ~11 KB a command.
+    /// the disk, and the UI waits with it. They run off it by name
+    /// (`OFF_MAIN_COMMANDS`, or `IN_ORDER_COMMANDS` when their calls must
+    /// keep their order), which costs no binary, where `(async)` costs ~11 KB
+    /// a command.
     #[test]
     fn polled_and_db_commands_stay_off_the_main_thread() {
         let off_main = crate::codehealth::off_main_commands(include_str!("lib.rs"));
@@ -336,10 +337,32 @@ mod tests {
         }
     }
 
-    /// The handler routes `OFF_MAIN_COMMANDS` to the blocking pool, and every
-    /// name there is a registered command: a name the generated handler
-    /// doesn't know would be answered by nobody, and its caller would wait
-    /// forever.
+    /// Every customization gesture saves the workspace manifest without
+    /// waiting for the last save, and the file is what the next launch loads.
+    /// On the blocking pool two quick saves could land newest-first and leave
+    /// the older layout on disk; on the in-order thread they can't. A command
+    /// whose calls must keep their order is in that list and only that list.
+    #[test]
+    fn workspace_saves_keep_their_order_off_the_main_thread() {
+        let lib = include_str!("lib.rs");
+        let in_order = crate::codehealth::command_list(lib, "IN_ORDER_COMMANDS");
+        let pool = crate::codehealth::command_list(lib, "OFF_MAIN_COMMANDS");
+        assert!(in_order.iter().any(|name| name == "save_workspace"), "lib.rs: `save_workspace` must be in IN_ORDER_COMMANDS");
+        for name in &in_order {
+            assert!(!pool.contains(name), "lib.rs: `{name}` is in IN_ORDER_COMMANDS, so the pool must not run it too");
+        }
+        let handler = &lib[lib.find("fn off_main<").unwrap()..];
+        let handler = &handler[..handler.find("\n}\n").unwrap()];
+        assert!(
+            handler.contains(".name(\"commands-in-order\".into())") && handler.contains("IN_ORDER_COMMANDS.contains(&command)"),
+            "lib.rs: off_main must queue IN_ORDER_COMMANDS to its one in-order thread"
+        );
+    }
+
+    /// The handler routes `OFF_MAIN_COMMANDS` to the blocking pool and
+    /// `IN_ORDER_COMMANDS` to its in-order thread, and every name there is a
+    /// registered command: a name the generated handler doesn't know would be
+    /// answered by nobody, and its caller would wait forever.
     #[test]
     fn off_main_commands_are_registered_and_routed() {
         let lib = include_str!("lib.rs");
@@ -352,7 +375,7 @@ mod tests {
         let off_main = crate::codehealth::off_main_commands(lib);
         assert!(!off_main.is_empty());
         for name in &off_main {
-            assert!(registered.contains(&name.as_str()), "OFF_MAIN_COMMANDS names `{name}`, which is not registered");
+            assert!(registered.contains(&name.as_str()), "lib.rs names `{name}` off the main thread, but it is not registered");
         }
     }
 

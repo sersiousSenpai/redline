@@ -68,8 +68,12 @@ it, that's the discussion to have before merging.
    tokio task for each command's own future type, about **11 KB of release
    binary per command** (measured 2026-10-09: 29 commands cost 331,248 B), and
    the binary has no room for that. Either way, two calls can finish out of
-   order; a command whose calls must keep theirs (`watch_dir`/`unwatch_dir`)
-   stays sync and hands its slow part to a thread of its own, in order.
+   order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
+   instead, which one thread runs one call at a time, oldest first
+   (`save_workspace`: every gesture saves without waiting for the last, and
+   the file is what the next launch loads). `watch_dir`/`unwatch_dir` stay
+   sync to keep their order with each other, and hand their slow part to a
+   thread of their own.
 
    SQLite is heavy whatever the query's size. Every write waits on the one
    writer connection (`Database::lock_conn`), which a backup, the canary or an
@@ -171,7 +175,8 @@ it, that's the discussion to have before merging.
 These are cheap regression nets, not a substitute for the rules above:
 
 - `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`
-  or their place in `OFF_MAIN_COMMANDS` (and that every name there is registered),
+  or their place in `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS` (and that every
+  name there is registered, and `save_workspace` keeps its order),
   that PTY output stays batched over a Channel (no `pty-output` per-read
   emit), that run events carry a run id and revision rather than the
   graph, and that the renderer footprint is watched and served (rule 7).
@@ -201,8 +206,9 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
   shells out, or reaches SQLite (`.database()`, a store's `db.` handle,
-  `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` runs it off the main
-  thread anyway. It is a digest signal, not a test, so it never fails a build: the
+  `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS`
+  runs it off the main thread anyway. It is a digest signal, not a test, so it
+  never fails a build: the
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.

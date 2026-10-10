@@ -12576,6 +12576,7 @@ fn install_skill() -> Result<SkillStatus, String> {
 /// built for its own future type, measured 2026-10-09 across 29 commands);
 /// an entry here costs a string. A command whose calls must keep their order
 /// doesn't belong here or in `(async)`: two calls can finish out of order.
+/// It goes in `IN_ORDER_COMMANDS`.
 const OFF_MAIN_COMMANDS: &[&str] = &[
     "build_plan_snapshot",
     "browse_thread_harness",
@@ -12603,20 +12604,43 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "runner_list",
     "runner_report",
     "runner_review",
-    "save_workspace",
     "term_attention_snapshot",
     "thread_meters",
 ];
 
+/// Sync commands that leave the main thread but keep the order their calls
+/// arrived in: one thread runs them, one at a time, oldest first.
+/// `save_workspace` is here because every customization gesture fires one
+/// without waiting for the last, and on the pool an older layout could land
+/// after a newer one and be what the next launch loads.
+const IN_ORDER_COMMANDS: &[&str] = &["save_workspace"];
+
 /// The invoke handler, with the `OFF_MAIN_COMMANDS` handed to the blocking
-/// pool whole: one shared closure type, so routing a command here adds no
-/// code, where an `(async)` wrapper builds a task per command.
+/// pool whole and the `IN_ORDER_COMMANDS` queued to one thread: one shared
+/// closure type, so routing a command adds no code, where an `(async)`
+/// wrapper builds a task per command.
 fn off_main<R: tauri::Runtime>(
     commands: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     let commands = Arc::new(commands);
+    let (in_order, queue) = std::sync::mpsc::channel::<tauri::ipc::Invoke<R>>();
+    let run = commands.clone();
+    std::thread::Builder::new()
+        .name("commands-in-order".into())
+        .spawn(move || {
+            for invoke in queue {
+                // A panicking call must not take every later one down with it.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(invoke)));
+            }
+        })
+        .expect("failed to start the in-order command thread");
     move |invoke| {
-        if !OFF_MAIN_COMMANDS.contains(&invoke.message.command()) {
+        let command = invoke.message.command();
+        if IN_ORDER_COMMANDS.contains(&command) {
+            let _ = in_order.send(invoke);
+            return true;
+        }
+        if !OFF_MAIN_COMMANDS.contains(&command) {
             return commands(invoke);
         }
         let commands = commands.clone();

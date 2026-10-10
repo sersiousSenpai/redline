@@ -76,13 +76,11 @@ pub fn get_workspace() -> Option<String> {
 
 /// Tauri command: persist the workspace manifest. Every GUI customization
 /// gesture funnels here — the file is the store, the GUI is a lens on it.
-/// Off the main thread (`OFF_MAIN_COMMANDS`), two quick gestures' saves run on
-/// two pool threads, and two overlapping truncate-and-writes can leave a
-/// longer file's tail behind the shorter one's JSON — so they take turns.
+/// Off the main thread, on the one thread that runs `IN_ORDER_COMMANDS`: the
+/// saves never overlap and land in the order the gestures made them, so the
+/// newest layout is the one left on disk.
 #[tauri::command]
 pub fn save_workspace(json: String) -> Result<(), String> {
-    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     write_workspace_under(&config_root(), &json)
 }
 
