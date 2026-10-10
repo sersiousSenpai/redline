@@ -88,7 +88,7 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, arrivals = 0, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -102,6 +102,9 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   onVisibilityChange?: (visible: boolean) => void;
   context: string;
   busy: boolean;
+  /** Plans that arrived while you were busy elsewhere and are still unseen:
+   *  the pill wears their count. Nothing opens for them. */
+  arrivals?: number;
   /** Said politely to a screen reader: a launch handed off, a plan arrived.
    *  The pill only shows "Working", and a label change is never read out. */
   announce?: string;
@@ -547,13 +550,13 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
 
   const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible} data-busy={busy} data-reduced={reduced}
     tabIndex={visible ? -1 : 0} aria-hidden={visible}
-    aria-label={`Open front door${busy ? ", working" : ""}${draft ? ", draft saved" : ""}`}
+    aria-label={`Open front door${busy ? ", working" : ""}${draft ? ", draft saved" : ""}${arrivals ? `, ${arrivals} new plan${arrivals === 1 ? "" : "s"}` : ""}`}
     title="Open front door (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
     aria-expanded={open} aria-controls="rl-monochat-content"
     onFocus={event => { if (event.relatedTarget instanceof HTMLElement && !layer.current?.contains(event.relatedTarget)) remember(event.relatedTarget); }}
     onPointerEnter={hoverIn} onPointerLeave={hoverOut}
     onClick={engage}>
-    <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span>{draft && <span className="rl-monochat-draft"/>}</span>
+    <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span>{draft && <span className="rl-monochat-draft"/>}{arrivals > 0 && <span className="rl-monochat-news">{arrivals}</span>}</span>
   </button>;
 
   return <>

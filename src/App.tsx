@@ -53,7 +53,7 @@ import {
 } from "./lib/landing";
 import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
-import { arrivalFocus, arrivalMessage } from "./lib/planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, writingNow } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
@@ -743,6 +743,10 @@ function App() {
     takeDockSeed(localStorage);
     return false;
   });
+  // Fresh view of it for listeners: the open door is where you are, caret
+  // or not, so a plan arriving flashes over it.
+  const frontDoorOpenRef = useRef(frontDoorOpen);
+  frontDoorOpenRef.current = frontDoorOpen;
   // The pill's compact card, sprung out by a hover. Never open at launch and
   // never re-opened by coming back to a surface.
   const [doorCompact, setDoorCompact] = useState(false);
@@ -823,6 +827,9 @@ function App() {
   const [viewedVersionNumber, setViewedVersionNumber] = useState<number | null>(
     null,
   );
+  // Fresh view of it for the arrival rule, read inside a listener.
+  const viewedVersionRef = useRef(viewedVersionNumber);
+  viewedVersionRef.current = viewedVersionNumber;
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
   const [askModeViolation, setAskModeViolation] = useState<boolean>(false);
   // How far this window's daemon got binding :7676. Three states, not a
@@ -1337,6 +1344,14 @@ function App() {
   const [unseenPlanIds, setUnseenPlanIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // When the user last typed into a text field (never the terminal): the
+  // arrival rule's writing clock (lib/planArrival's `writingNow`).
+  const typedAtRef = useRef(0);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => { if (isWritingKey(event.target)) typedAtRef.current = Date.now(); };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   // The document itself lives in the DB now (the Bookshelf owns it) — this is
   // just the loaded copy for the open document, TAGGED with the id it belongs
   // to. The tag is the editor's mount gate: TipTap captures `content` once, at
@@ -3977,28 +3992,49 @@ function App() {
           }
         }
         // Where a new plan lands is one rule (`arrivalFocus`): it takes focus
-        // unless you are already reading ANOTHER plan. Taking focus never opens
-        // the discussion pane or dock; they stay however the user left them.
+        // unless you are in the middle of something else — writing, or
+        // reading another plan, a file or an older version of this one.
+        // (A new version of the plan already selected lands in place.)
+        // Taking focus never opens the discussion pane or dock, nor the door
+        // or its card, and never closes them: they stay as the user left them.
         const focusIntercepted = () => {
           selectSessions();
           setActiveId(payload.sessionId);
-          // Land on the clean latest, even if the reviewer was parked on a
-          // historical version when the revision arrived.
+          // Land on the clean latest. Someone parked on an older version
+          // gets here only through Open: the arrival itself flashes for them.
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
         };
+        // Open or Review, pressed on the notice: a gesture, so the door and
+        // its card step aside for the plan.
+        const openArrival = () => {
+          setFrontDoorOpen(false);
+          setDoorCompact(false);
+          selectSurfaceRef.current("document");
+          focusIntercepted();
+        };
+        // At the top on the browser, where the native page covers the corner.
+        const notice = (message: string, label: string) => setToast({
+          message,
+          tone: "info",
+          action: { label, onAction: openArrival },
+          ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
+        });
+        const writing = frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now());
         const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
           const chatId = arrivingLaunch.chatId;
           const title = list.find(item => item.sessionId === payload.sessionId)?.planTitle ?? "Plan";
           setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
-          if (dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
+          // The chat turns into its plan in place only while you sit idle
+          // in it: the agent picks the moment, minutes later.
+          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
             const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
             if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
             selectSurfaceRef.current("document");
             focusIntercepted();
           } else {
-            setToast({ message: "Your chat became a plan", tone: "info", action: { label: "Open", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } } });
+            notice("Your chat became a plan", "Open");
           }
           return;
         }
@@ -4007,6 +4043,8 @@ function App() {
           sessionId: payload.sessionId,
           mainSurface: mainSurfaceRef.current,
           plateMode: plateModeRef.current,
+          viewedVersion: viewedVersionRef.current,
+          writing,
         });
         if (focus === "focus" && !paneMaskedRef.current) {
           // On the document surface: on screen now. From the Front Door the
@@ -4023,33 +4061,24 @@ function App() {
           setActiveId(payload.sessionId);
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
-          setToast({
-            message: arrivalMessage(title),
-            tone: "info",
-            action: { label: "Review", onAction: () => { selectSurfaceRef.current("document"); focusIntercepted(); } },
-          });
+          notice(arrivalMessage(title), "Review");
           return;
         }
-        // flash — you are reading another plan. Nothing moves: the row pulses
-        // (and glows once), and the notice offers the switch we declined.
-        setUnseenPlanIds((prev) => {
+        // flash — you are in the middle of something else. Nothing moves:
+        // the row pulses (and glows once), the pill wears a badge, and the
+        // notice offers the switch we declined. A new version of the plan
+        // already selected is not a new row: its data refreshes under the
+        // version you are on, and the row only glows.
+        const revision = payload.sessionId === activeId;
+        if (revision) void loadSession(payload.sessionId);
+        else setUnseenPlanIds((prev) => {
           if (prev.has(payload.sessionId)) return prev;
           const next = new Set(prev);
           next.add(payload.sessionId);
           return next;
         });
         setArrivalGlow({ sessionId: payload.sessionId, nonce: Date.now() });
-        setToast({
-          message: arrivalMessage(title),
-          tone: "info",
-          action: {
-            label: "Open",
-            onAction: () => {
-              selectSurfaceRef.current("document");
-              focusIntercepted();
-            },
-          },
-        });
+        notice(arrivalMessage(title, revision), "Open");
       });
       if (
         payload.sessionId === activeId &&
@@ -10663,6 +10692,7 @@ function App() {
         compact={doorCompact && renderMonochatComposer("card")}
         context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
         busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
+        arrivals={unseenPlanIds.size}
         announce={doorNews}
         // A chat in the room: its heading's New goes back to a blank
         // composer, the conversation kept in History.

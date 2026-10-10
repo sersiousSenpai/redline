@@ -29,8 +29,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function Harness({ landing = false, busy = false, announce, onOpen, onNewChat, children }: {
-  landing?: boolean; busy?: boolean; announce?: string; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
+function Harness({ landing = false, busy = false, arrivals, announce, onOpen, onNewChat, children }: {
+  landing?: boolean; busy?: boolean; arrivals?: number; announce?: string; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [compact, setCompact] = useState(false);
@@ -42,7 +42,7 @@ function Harness({ landing = false, busy = false, announce, onOpen, onNewChat, c
       <button id="open-recent" onClick={() => { setOpen(false); setSurface("plan"); }}>Recent</button></article>
     <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }}
       compactOpen={compact} onCompactChange={setCompact} compact={<div className="rl-fd-island"><textarea aria-label="Compact reply" defaultValue=""/></div>}
-      context="Plan" busy={busy} announce={announce} onNewChat={onNewChat}>
+      context="Plan" busy={busy} arrivals={arrivals} announce={announce} onNewChat={onNewChat}>
       {children ?? <div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
     </MonochatIsland>
   </>;
@@ -559,6 +559,18 @@ describe("the pill", () => {
     expect(pill().getAttribute("aria-label")).toBe("Open front door, draft saved");
     await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "  "));
     expect(host.querySelector(".rl-monochat-draft")).toBeNull();
+  });
+
+  it("counts the plans that arrived while you were busy, and opens nothing for them", async () => {
+    await render(<Harness arrivals={0}/>);
+    expect(host.querySelector(".rl-monochat-news")).toBeNull();
+    await render(<Harness arrivals={2}/>);
+    expect(host.querySelector(".rl-monochat-news")?.textContent).toBe("2");
+    expect(pill().getAttribute("aria-label")).toBe("Open front door, 2 new plans");
+    expect(pose()).toBe("notch");
+    expect(card()).toBeNull();
+    await render(<Harness arrivals={1}/>);
+    expect(pill().getAttribute("aria-label")).toBe("Open front door, 1 new plan");
   });
 });
 

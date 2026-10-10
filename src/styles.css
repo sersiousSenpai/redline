@@ -5351,12 +5351,14 @@ html[data-rl-resizing] [data-rl-pane] {
 
 /* ── Redline toast ───────────────────────────────────────────────────────────
    A quiet paper card, never a coloured pill: the tone only picks the icon.
-   Rises + fades in over 180 ms, fades out; reduced motion keeps the fades. */
+   Rises + fades in over 180 ms, fades out; reduced motion keeps the fades.
+   Above the open front door (55): news that arrives while you write in it
+   is a notice there too, never a reason to close it. */
 .rl-toast {
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 50;
+  z-index: 56;
   display: flex;
   align-items: center;
   gap: 8px;
