@@ -95,3 +95,18 @@ describe("the decision countdown never brings Redline forward", () => {
     expect(app).not.toMatch(/\.unminimize\(\)|getCurrentWindow\(\)\.setFocus\(\)|w\.setFocus\(\)/);
   });
 });
+
+describe("boot takes no caret", () => {
+  it("the door rests on the empty plate alone; every other restored surface shows only the pill", () => {
+    expect(app).toContain('const plateAtRest = mainSurface === "document" && plateMode === "door";');
+    expect(app).toMatch(/landing=\{plateAtRest && shellReady/);
+    // Nothing at boot opens it, so its composer's autofocus never fires.
+    expect(between("const [frontDoorOpen, setFrontDoorOpen] = useState(", "const [doorCompact")).toContain("return false;");
+  });
+
+  it("the terminal hands itself the caret only through the guard", () => {
+    const view = readFileSync(join(process.cwd(), "src/components/TerminalView.tsx"), "utf8");
+    const reveal = view.slice(view.indexOf("// Becoming visible:"), view.indexOf("return (", view.indexOf("// Becoming visible:")));
+    expect(reveal).toMatch(/if \(host && revealMayFocus\(host\)\) term\?\.focus\(\);/);
+  });
+});
