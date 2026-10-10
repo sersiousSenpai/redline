@@ -28,6 +28,7 @@ import "../../src/components/BrowserWorkspace.css";
 import "./fixture.css";
 
 const noop = () => {};
+const pageActions = new Map([["browser-qa-tab-0", { kind: "click", tab: 1, at: Date.now() + 600_000 }]]);
 // The page chat opens shared, under linked mode, as a returning user's would.
 localStorage.setItem(LINKED_MODE_KEY, "true");
 const initialTabs: TilePage[] = ["Research overview", "Evidence and source comparison", "Design notes and decisions", "Implementation reference"].map((title, i) => ({ id: `qa-tab-${i}`, browseId: `qa-page-${i}`, title, url: `https://example.test/source-${i + 1}` }));
@@ -69,15 +70,19 @@ function Fixture() {
   // The same projection BrowserPane hands its stage.
   const stageLayout = layout.grid ? { ...layout, grid: visibleGrid(layout, tabs.map((tab) => tab.browseId), stageWidth) } : layout;
   function select(id: string) { setActiveId(id); dispatchChat({ type: "user-select-tab", tabId: id }); setAddress(tabs.find((tab) => tab.id === id)?.url ?? ""); }
+  // The page chat as the pane mounts it: a running action on the first tab,
+  // the Task list and a mission in the rail. "browser-empty" is a new chat.
+  const pageChat = chatKind === "browser-empty" ? { ...pageConversation, browseId: "qa-empty" } : pageConversation;
   const conversation = chatKind === "room" ? <ChatRoom companionId="qa-carried" cwd={null} dictationEnabled={false} onSelectChat={noop} onEmpty={noop} onClose={noop} presentation={surface === "room" ? "room" : "browser"}/> : <BrowserChat
-    key={pageConversation.browseId} conversation={pageConversation} workspace="regular" onClose={noop}
+    key={pageChat.browseId} conversation={pageChat} workspace="regular" onClose={noop}
     linkedMode={chatWorld.linkedMode} onToggleTabChat={() => dispatchChat({ type: "toggle-tab-chat" })} onToggleLinkedMode={() => dispatchChat({ type: "toggle-linked-mode" })}
-    onResearch={noop}/>;
+    onResearch={noop} pageActions={pageActions} onPickElement={noop} taskList={{ nonce: 0, onOpen: noop }}
+    mission={{ title: "Team plan pricing", goal: "Decide whether the team plan beats paying per seat for a five-person team over a year.", findings: 3, onOpen: noop, onSynthesize: noop }}/>;
   return <div className="qa-shell">
     <div className="qa-shell-heading"><strong>Redline</strong><span>Browser workspace · isolated visual fixture</span><small>Native pages are synthetic images</small></div>
     <main className="qa-plate">
       {surface === "browser" ? <div className="rb-workspace">
-        <BrowserTabRail tabs={tabs} activeId={activeId} onSelect={select} onCloseTab={id => { setTabs(old => old.filter(tab => tab.id !== id)); if (activeId === id) setActiveId(tabs.find(tab => tab.id !== id)!.id); }} onNewTab={() => setShowHome(true)} onResize={noop}
+        <BrowserTabRail tabs={tabs} activeId={activeId} acting={new Set([tabs[0].id])} onSelect={select} onCloseTab={id => { setTabs(old => old.filter(tab => tab.id !== id)); if (activeId === id) setActiveId(tabs.find(tab => tab.id !== id)!.id); }} onNewTab={() => setShowHome(true)} onResize={noop}
           onTabDrag={(event, id) => startTabPointerDrag(event.nativeEvent, event.currentTarget as HTMLElement, { axis:"y", onDragging:noop, onDrop:(over, tile) => flushSync(() => { const tab=tabs.find(tab => tab.id === id)!; if(tile!==null) setLayout(old=>assignVisibleTile(old,ids,tile,tab.browseId)); else if(over && over!==id) setTabs(old=>reorderTabs(old,id,over)); }) })}
           tileBadges={tileBadges(ids)} hoveredTileTab={hoveredTileTab} onHoverTile={setHoveredTileTab} groups={groups} organized={organized} organizing={false} onMode={setOrganized} onOrganize={()=>setGroups(fallbackGroups(tabs))} onToggleGroup={id=>setGroups(old=>old.map(group=>group.id===id?{...group,collapsed:!group.collapsed}:group))}/>
         <div className="rb-workspace-pages">
