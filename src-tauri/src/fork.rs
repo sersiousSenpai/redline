@@ -1026,8 +1026,8 @@ fn monochat_ground(db: &Database, scope: &str, item: &str, conversation: Option<
 /// sidecar's wrapper when the thread runs on one (`sidecar` is the author
 /// backend, the plan and whether its tools are restricted), the monochat
 /// recap, and on a chat turn the chat directive. The directive goes LAST so
-/// the recap can't bury it, and a sidecar gets it through the same rewrite as
-/// the rest of its prompt.
+/// the recap can't bury it, and a restricted sidecar gets it through the same
+/// rewrite as the rest of its prompt.
 fn finish_turn_prompt(
     db: &Database,
     session_id: &str,
@@ -1044,8 +1044,10 @@ fn finish_turn_prompt(
     let prompt = monochat_ground(db, session_id, comment_id, conversation, false, prompt);
     match (mode, sidecar) {
         (TurnMode::Report, _) => prompt,
-        (TurnMode::Chat, None) => format!("{prompt}\n\n{CHAT_DIRECTIVE}"),
-        (TurnMode::Chat, Some(_)) => format!("{prompt}\n\n{}", sidecar_rewrite(CHAT_DIRECTIVE)),
+        // A restricted sidecar has no Skill tool, so the guard is noise to
+        // it; a seeded Claude or Codex sidecar has one, and keeps the guard.
+        (TurnMode::Chat, Some((_, _, true))) => format!("{prompt}\n\n{}", sidecar_rewrite(CHAT_DIRECTIVE)),
+        (TurnMode::Chat, _) => format!("{prompt}\n\n{CHAT_DIRECTIVE}"),
     }
 }
 
@@ -2865,6 +2867,12 @@ mod tests {
         assert!(!sidecar.contains("sidecar skill"));
         assert!(sidecar.find("<current-plan-context>").unwrap() < recap_end(&sidecar));
         assert!(recap_end(&sidecar) < sidecar.rfind("(Chat —").unwrap());
+
+        // A seeded Claude sidecar has the Skill tool, so its chat turns keep
+        // the guard against loading the report skill.
+        let seeded = finish_turn_prompt(&db, "s-1", "c-1", Some("conv-1"), TurnMode::Chat, Some(("claude-code", "# Plan", false)), "Why there?".into());
+        assert!(seeded.ends_with(&format!("\n\n{CHAT_DIRECTIVE}")), "{seeded}");
+        assert!(seeded.find("<current-plan-context>").unwrap() < recap_end(&seeded));
     }
 
     #[test]
