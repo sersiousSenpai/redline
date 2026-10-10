@@ -143,6 +143,9 @@ export const BrowserChat = memo(function BrowserChat({
   // This chat's provider/model/effort, which the next turn reads at start.
   const harness = useBrowseHarness(browseId);
   const agent = backendLabel(harness.pick.backend);
+  // Who the turn in flight runs on, read as it went out: a pick changed
+  // while it streams applies to the next message, not to this byline.
+  const sentAgent = useRef<{ browseId: string; agent: string } | null>(null);
   const {
     messages,
     liveText,
@@ -166,7 +169,8 @@ export const BrowserChat = memo(function BrowserChat({
       sendFailPrefix: "Couldn't reach the browse agent",
       buildSendArgs: async (text): Promise<Record<string, unknown>> => {
         // A chat showing an inherited pick stores it before its first turn.
-        await harness.commit();
+        const runsOn = (await harness.commit()).backend;
+        sentAgent.current = { browseId, agent: backendLabel(runsOn) };
         const targetLabel = label;
         const targetWorkspaceId = workspaceId;
         // The backend treats a turn as "first" until the agent session is
@@ -175,7 +179,7 @@ export const BrowserChat = memo(function BrowserChat({
         // that contract. A provider switch since the last reply counts too:
         // the other side either starts fresh or resumes a session that has not
         // seen the page since.
-        const firstTurn = lastReplyBackend(messages) !== harness.pick.backend;
+        const firstTurn = lastReplyBackend(messages) !== runsOn;
         // First turn embeds a live DOM snapshot so the agent is grounded
         // without a mandatory round-trip; follow-ups rely on its /snapshot
         // tool. Live snapshot if the tab is up; otherwise the cached one (a
@@ -381,7 +385,7 @@ export const BrowserChat = memo(function BrowserChat({
                 fills the wait a blank ticker used to. */}
             <StreamingBubble
               text={liveText}
-              agent={agent}
+              agent={sentAgent.current?.browseId === browseId ? sentAgent.current.agent : agent}
               inspect={{ surface: "browse", key: browseId }}
               meter={meter}
               activity={activity}

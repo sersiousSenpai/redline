@@ -3,7 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
-const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
+const { turn, invokeMock, config, captureMock, bubble } = vi.hoisted(() => ({
+  bubble: { agent: null as string | null },
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
     makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
@@ -21,7 +22,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
-vi.mock("./StreamingBubble", () => ({ default: () => null }));
+vi.mock("./StreamingBubble", () => ({ default: ({ agent }: { agent: string }) => { bubble.agent = agent; return null; } }));
 vi.mock("./TurnFooter", () => ({ default: () => null, ThreadMeterStrip: () => null }));
 import { BrowserChat } from "./BrowserChat";
 
@@ -185,6 +186,25 @@ describe("page conversation header", () => {
     // A reply settling live keeps the provider its done event named.
     expect(config.current!.makeMessage({ id: "live", role: "assistant", body: "Done", status: "complete", backend: "codex" })).toMatchObject({ backend: "codex" });
     expect(config.current!.makeMessage({ id: "mine", role: "user", body: "Hi", status: "complete" })).toMatchObject({ backend: null });
+  });
+
+  it("bylines the streaming reply with the provider it was sent to, not a pick made since", async () => {
+    await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    await act(async () => { await config.current!.buildSendArgs("Question"); });
+    // A pick changed mid-reply applies to the next message.
+    await click("Chat model and effort");
+    const codex = [...document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="Provider"] button')][1];
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
+    await act(async () => codex.click());
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
+    expect(host.querySelector('[aria-label="Chat model and effort"]')?.textContent).toContain("Codex");
+    turn.status = "streaming";
+    try {
+      await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+      expect(bubble.agent).toBe("Claude");
+    } finally {
+      turn.status = "idle";
+    }
   });
 
   it("bounds a long composer without moving it into the scrolling transcript", async () => {

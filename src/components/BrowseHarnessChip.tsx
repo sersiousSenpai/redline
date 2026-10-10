@@ -103,8 +103,9 @@ export interface BrowseHarness {
   error: string | null;
   save: (next: BackendChoice) => Promise<void>;
   /** Run before each send: a chat showing an inherited pick stores it, so the
-   *  turn (which reads the stored pick) runs on what the chip shows. */
-  commit: () => Promise<void>;
+   *  turn (which reads the stored pick) runs on what the chip shows. Resolves
+   *  to the pick the turn runs on. */
+  commit: () => Promise<BackendChoice>;
   /** "Clear history" dropped the chat's row, its pick with it. */
   forget: () => void;
 }
@@ -184,14 +185,17 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
       setSaving(false);
     }
   }, [browseId, store]);
-  const commit = useCallback(async () => {
+  const commit = useCallback(async (): Promise<BackendChoice> => {
     const id = browseId;
     const known = await loaded.current;
     await inheritedKnown.current;
     const pick = inheritedRef.current;
-    if (!known || keyRef.current !== id || ownRef.current || !pick) return;
-    // A failed write must not cost the message: it runs on the default.
-    await store(id, pick).catch(e => setError(String(e)));
+    if (known && keyRef.current === id && !ownRef.current && pick) {
+      // A failed write must not cost the message: it runs on the default.
+      const saved = await store(id, pick).then(() => true, e => { setError(String(e)); return false; });
+      if (!saved) return defaultChoice();
+    }
+    return ownRef.current ?? inheritedRef.current ?? defaultChoice();
   }, [browseId, store]);
   const forget = useCallback(() => {
     ownRef.current = null;
