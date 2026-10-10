@@ -198,9 +198,10 @@ describe("the page chat's UI laws", () => {
     const build = chat.slice(chat.indexOf("buildSendArgs:"), chat.indexOf("makeMessage:"));
     expect(build, "a failed send would skip the next re-snapshot").not.toMatch(/lastGroundedLabel\.current\s*=/);
   });
-  it.fails("BC-31 KNOWN VIOLATION: a tab a running turn TARGETS stays live (a shared chat runs on a thread no tab owns)", () => {
+  it("BC-31 a tab a running turn TARGETS stays live (a shared chat runs on a thread no tab owns)", () => {
     expect(browseRs).toContain("record_target(");
     expect(fnBody(libRs, "browser_can_suspend")).toContain("is_targeted(");
+    pinnedBy("src-tauri/src/browse.rs", "fn a_tab_a_running_turn_targets_stays_live");
   });
   it.fails("BC-37 KNOWN VIOLATION: the browser pill's hover composer launches Plan/Run only", () => {
     const restricted = /pillComposerDestinations\(\s*"browser"\s*\)/.test(door) || /allowedDestinations=\{[^}]*"plan",\s*"run"/.test(door);

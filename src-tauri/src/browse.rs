@@ -112,6 +112,10 @@ pub struct BrowseState {
     /// Project cards already sent, per agent session
     /// (`Provider::session_key`): a provider that never saw a card gets it.
     sent_projects: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    /// The page each started turn was sent against (`browse_id` → its
+    /// captured target label). A shared chat's turn runs on a thread no tab
+    /// owns, so `is_running` alone can't say which tab it is driving.
+    targets: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl BrowseState {
@@ -121,6 +125,7 @@ impl BrowseState {
             db,
             claude_bin: Arc::new(OnceLock::new()),
             sent_projects: Arc::new(Mutex::new(HashMap::new())),
+            targets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -162,6 +167,27 @@ impl BrowseState {
     /// thread. Used to pin a tab live (don't suspend it mid-turn).
     pub fn is_running(&self, browse_id: &str) -> bool {
         self.turns.is_running(browse_id)
+    }
+
+    /// Remember the page a starting turn targets, forgetting the targets of
+    /// turns that have since ended so the map holds only running ones.
+    fn record_target(&self, browse_id: &str, label: Option<&str>) {
+        let mut targets = self.targets.lock().unwrap();
+        targets.retain(|id, _| id != browse_id && self.turns.is_running(id));
+        if let Some(label) = label {
+            targets.insert(browse_id.to_string(), label.to_string());
+        }
+    }
+
+    /// Whether a running turn was sent against this tab, whichever thread it
+    /// runs on. Suspending it would pull the page from under the agent
+    /// mid-turn (BC-31).
+    pub fn is_targeted(&self, label: &str) -> bool {
+        self.targets
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(id, target)| target == label && self.turns.is_running(id))
     }
 
     /// Kill every running browse turn. Backs `browse_kill_all` and app teardown.
@@ -1070,6 +1096,8 @@ fn start_browse_turn(
             following_tabs,
             mission,
         } = payload;
+        // Held live until the turn ends, whether or not it is on screen.
+        browse.record_target(&browse_id, target_label.as_deref());
         // The drain path has no command-injected State params — reach the shared
         // singletons through the app handle instead.
         let active_surface = app.state::<crate::ActiveSurface>();
@@ -2055,6 +2083,28 @@ mod tests {
             assert_eq!(done.partial, None);
             assert_eq!(done.seq, 0);
         });
+    }
+
+    /// A shared chat's turn runs on a thread no tab owns: the tab it was sent
+    /// against stays live while it runs, and only while it runs (BC-31).
+    #[test]
+    fn a_tab_a_running_turn_targets_stays_live() {
+        let state = BrowseState::new(Arc::new(Database::open_in_memory().unwrap()));
+        let shared = state.turns.begin("shared-chat").unwrap();
+        state.record_target("shared-chat", Some("browser-t2"));
+        assert!(state.is_targeted("browser-t2"));
+        assert!(!state.is_targeted("browser-t1"));
+        // The next turn on the same thread retargets it.
+        state.record_target("shared-chat", Some("browser-t1"));
+        assert!(state.is_targeted("browser-t1"));
+        assert!(!state.is_targeted("browser-t2"));
+        // Ended: the page may suspend again, and a later turn elsewhere
+        // forgets the stale entry.
+        drop(shared);
+        assert!(!state.is_targeted("browser-t1"));
+        let _other = state.turns.begin("tab-chat").unwrap();
+        state.record_target("tab-chat", None);
+        assert!(state.targets.lock().unwrap().is_empty());
     }
 
     /// Two first turns with different VARIABLE inputs (snapshot, mission,

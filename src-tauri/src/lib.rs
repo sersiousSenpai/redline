@@ -6804,8 +6804,8 @@ fn browser_cached_snapshot(
 }
 
 /// Whether a background tab may be suspended (its webview destroyed to reclaim
-/// memory). False if the tab is the active one, has a browse turn streaming, or
-/// is playing media — so we never cut off what the user is watching or an
+/// memory). False if the tab is the active one, has a browse turn streaming or
+/// targeting it, or is playing media — so we never cut off what the user is watching or an
 /// in-flight agent reply. The frontend calls this before evicting an LRU tab.
 #[tauri::command(async)]
 async fn browser_can_suspend(app: AppHandle, label: String) -> Result<bool, String> {
@@ -6830,6 +6830,11 @@ async fn browser_can_suspend(app: AppHandle, label: String) -> Result<bool, Stri
         if app.state::<browse::BrowseState>().is_running(&bid) {
             return Ok(false);
         }
+    }
+    // So does a tab a running turn was sent against: a shared chat's turn
+    // runs on a thread no tab owns (BC-31).
+    if app.state::<browse::BrowseState>().is_targeted(&label) {
+        return Ok(false);
     }
     // A tab showing a PDF or a non-http document (blob:, data:, file:) can't
     // be rebuilt from a snapshot + URL, so it stays live like a pinned tab.
