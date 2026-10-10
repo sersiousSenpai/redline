@@ -554,11 +554,11 @@ async fn synth_kokoro(
         *guard = Some(spawn_kokoro(tts).await?);
     }
     // Try once; if the pipe is broken (the sidecar died), respawn and retry once.
-    // A hang isn't retried: that sentence goes to the system voice, and the
-    // next one gets the fresh sidecar.
+    // Nothing else is retried: after a hang that sentence goes to the system
+    // voice and the next one gets the fresh sidecar, and an error the sidecar
+    // reported for this text or voice would only be reported again.
     let b64 = match kokoro_request(&mut guard, tts, &req, limit).await {
-        Err(e) if e != KOKORO_HUNG => {
-            *guard = None;
+        Err(e) if guard.is_none() && e != KOKORO_HUNG => {
             kokoro_request(&mut guard, tts, &req, limit).await?
         }
         result => result?,
@@ -571,9 +571,11 @@ async fn synth_kokoro(
 }
 
 /// One request against the warm sidecar (spawning it if there is none),
-/// bounded by `limit`. A sidecar that doesn't answer in time is killed and
-/// dropped, so the next request spawns a fresh one instead of queueing behind
-/// a hung process forever.
+/// bounded by `limit`. A sidecar whose pipe broke is dropped, and one that
+/// doesn't answer in time is killed and dropped, so the next request spawns a
+/// fresh one instead of queueing behind a hung process forever. One that
+/// reports an error for the request stays: it is healthy, and reloading the
+/// model takes seconds.
 async fn kokoro_request(
     slot: &mut Option<KokoroSidecar>,
     tts: &TtsState,
@@ -584,16 +586,27 @@ async fn kokoro_request(
         Some(sc) => sc,
         None => slot.insert(spawn_kokoro(tts).await?),
     };
-    match tokio::time::timeout(limit, kokoro_roundtrip(sc, req)).await {
-        Ok(result) => result,
+    let msg = match tokio::time::timeout(limit, kokoro_roundtrip(sc, req)).await {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            *slot = None;
+            return Err(e);
+        }
         Err(_) => {
             if let Some(mut hung) = slot.take() {
                 let _ = hung.child.start_kill();
             }
             tracing::warn!(target: "kokoro", "no answer in {limit:?}; killed the sidecar");
-            Err(KOKORO_HUNG.to_string())
+            return Err(KOKORO_HUNG.to_string());
         }
+    };
+    if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
+        return Err(format!("Kokoro synth error: {err}"));
     }
+    msg.get("audio")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Kokoro returned no audio".to_string())
 }
 
 /// Spawn the Python sidecar, materializing the bundled script first, and wait for
@@ -675,8 +688,12 @@ async fn spawn_kokoro(tts: &TtsState) -> Result<KokoroSidecar, String> {
     Ok(sidecar)
 }
 
-/// Send one request line and read back the single response object.
-async fn kokoro_roundtrip(sc: &mut KokoroSidecar, req_json: &str) -> Result<String, String> {
+/// Send one request line and read back the single response object. An `Err`
+/// means the pipe failed, i.e. the sidecar is gone.
+async fn kokoro_roundtrip(
+    sc: &mut KokoroSidecar,
+    req_json: &str,
+) -> Result<serde_json::Value, String> {
     let line = format!("{req_json}\n");
     sc.stdin
         .write_all(line.as_bytes())
@@ -686,14 +703,7 @@ async fn kokoro_roundtrip(sc: &mut KokoroSidecar, req_json: &str) -> Result<Stri
         .flush()
         .await
         .map_err(|e| format!("Kokoro flush failed: {e}"))?;
-    let msg = read_kokoro_msg(&mut sc.stdout).await?;
-    if let Some(err) = msg.get("error").and_then(|v| v.as_str()) {
-        return Err(format!("Kokoro synth error: {err}"));
-    }
-    msg.get("audio")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Kokoro returned no audio".to_string())
+    read_kokoro_msg(&mut sc.stdout).await
 }
 
 /// Read the next protocol message, skipping any non-protocol chatter the Python
@@ -1095,12 +1105,17 @@ pub async fn tts_kokoro_install(
 async fn ensure_current_model(tts: &TtsState, app: &AppHandle, phase: &str) -> Result<(), String> {
     let _one_at_a_time = tts.model_dl.lock().await;
     let dest = tts.kokoro_dir.join(KOKORO_MODEL_FILE);
-    download_if_missing(tts, app, KOKORO_MODEL_URL, &dest, phase, Some(KOKORO_MODEL_CHECK)).await?;
-    retire_legacy_model(tts).await;
+    let fetched =
+        download_if_missing(tts, app, KOKORO_MODEL_URL, &dest, phase, Some(KOKORO_MODEL_CHECK)).await;
+    if fetched.is_ok() {
+        retire_legacy_model(tts).await;
+    }
+    // Nothing awaits the background upgrade to show how it went, so it ends
+    // its own progress line either way (a failure is logged by the caller).
     if phase == "upgrade" {
         emit_setup(app, "done", 0, 0);
     }
-    Ok(())
+    fetched
 }
 
 /// Once the fp32 model is in place, stop a sidecar that may still have the
@@ -1284,16 +1299,22 @@ mod tests {
     /// A stand-in for the Python sidecar. `spawn_kokoro` runs the configured
     /// interpreter as `<python> <script> <model> <voices>`, so a shell script
     /// in the interpreter's place speaks the protocol. It logs each spawn (with
-    /// the model it was given) and each request beside itself, answers every
-    /// request with a tiny clip, and never answers one containing "hang".
+    /// the model it was given) and each request beside itself, and answers
+    /// every request with a tiny clip, except: it never answers one containing
+    /// "hang", reports an error for the voice "zz_nope" as kokoro-onnx does,
+    /// and exits on the first "DIE_ONCE" (answering it after a respawn). With
+    /// a `broken` file beside it, it fails to load, as a bad model does.
     const FAKE_SIDECAR: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 echo "spawn $2" >> "$dir/spawns.log"
+if [ -e "$dir/broken" ]; then echo '{"error":"failed to load Kokoro model: broken"}'; exit 0; fi
 echo '{"ready":true}'
 while IFS= read -r line; do
   echo "$line" >> "$dir/requests.log"
   case "$line" in
     *hang*) read -r _ ;;
+    *zz_nope*) echo '{"error":"Voice zz_nope not found in available voices"}' ;;
+    *DIE_ONCE*) [ -e "$dir/died" ] || { touch "$dir/died"; exit 0; }; echo '{"audio":"UklGRg=="}' ;;
     *) echo '{"audio":"UklGRg=="}' ;;
   esac
 done
@@ -1392,6 +1413,43 @@ done
         assert!(tts.kokoro.lock().await.is_none(), "the hung sidecar was dropped");
         synth(&tts, "The next sentence.", 1, None, None).await.unwrap();
         assert_eq!(log_lines(&dir, "spawns.log").len(), 2, "respawned once");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_warm_sidecar_that_died_is_respawned_and_the_sentence_retried() {
+        let (tts, dir) = fake_kokoro("died", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        synth(&tts, "DIE_ONCE", 1, None, None).await.unwrap();
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sidecar_that_cant_load_is_tried_once_per_sentence() {
+        let (tts, dir) = fake_kokoro("broken", KOKORO_MODEL_FILE);
+        std::fs::write(dir.join("broken"), b"").unwrap();
+        let err = synth(&tts, "One.", 1, None, None).await.err().unwrap();
+        assert!(err.contains("failed to load"), "{err}");
+        // A second spawn would fail the same way, and every sentence waits on
+        // the lock behind it (up to a minute each when the load hangs).
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_error_kokoro_reports_for_a_request_keeps_the_warm_sidecar() {
+        let (tts, dir) = fake_kokoro("synth-error", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        let err = synth(&tts, "A sample.", 1, None, Some("zz_nope".into()))
+            .await
+            .err()
+            .unwrap();
+        assert!(err.contains("zz_nope not found"), "{err}");
+        synth(&tts, "The next sentence.", 1, None, None).await.unwrap();
+        // The sidecar is fine; reloading the model would only repeat the error.
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1);
+        assert_eq!(log_lines(&dir, "requests.log").len(), 3, "the bad one isn't retried");
     }
 
     #[cfg(unix)]
