@@ -236,6 +236,8 @@ export class DictationHost {
     }
     try {
       await this.place(s, text);
+    } catch (e) {
+      this.nowhere(text.trim(), `Couldn't place the words (${String(e)})`);
     } finally {
       this.end(s);
     }
@@ -343,7 +345,14 @@ export class DictationHost {
       return this.notice("Kept in the draft");
     }
     if (cleaned) {
-      const placed = placeText(s.target, cleaned);
+      let placed: Placed | null;
+      try {
+        placed = placeText(s.target, cleaned);
+      } catch {
+        // A box with no caret to write at (an email field): the browser
+        // refuses the write.
+        return this.nowhere(cleaned, "This box can't take dictation");
+      }
       if (placed) {
         this.last = placed;
         // Sent at once by "send it": nothing left to polish or correct.

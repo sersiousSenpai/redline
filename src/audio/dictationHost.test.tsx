@@ -212,6 +212,19 @@ describe("dictating into a composer", () => {
     expect(onSend).toHaveBeenCalledWith("Make it 700 milliseconds.");
   });
 
+  it("offers the words for copying when the box can't take them", async () => {
+    // An email box has no caret to write at: the browser refuses the write.
+    const box = document.createElement("input");
+    box.type = "email";
+    document.body.appendChild(box);
+    box.focus();
+    await hold("yusuf at example dot com");
+    expect(box.value).toBe("");
+    expect(strip.get()).toMatchObject({ phase: "notice", copy: "yusuf at example.com" });
+    expect(host.busy()).toBe(false);
+    expect(host.hotkey.state.phase).toBe("idle");
+  });
+
   it("cancels on Esc: the capture is dropped and nothing is written", async () => {
     const { shown } = await composer();
     press({ type: "down", at: now, source: APP_KEYS, solo: true });
