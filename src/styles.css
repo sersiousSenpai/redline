@@ -1809,12 +1809,6 @@ p.rl-block-modified {
 .rl-md p {
   margin: 0 0 6px;
 }
-.rl-md > :first-child {
-  margin-top: 0;
-}
-.rl-md > :last-child {
-  margin-bottom: 0;
-}
 /* Heading hierarchy: a modest scale gives structured replies real rhythm
    instead of a flat run of same-size bold lines. */
 .rl-md h1,
@@ -1845,15 +1839,25 @@ p.rl-block-modified {
   color: var(--color-ink-muted);
 }
 /* Lead emphasis: the sidecar skill leads with the answer — make the first
-   paragraph carry a touch more weight so that shape is visible at a glance. */
-.rl-md > p:first-child {
+   paragraph carry a touch more weight so that shape is visible at a glance.
+   A body with a diagram renders each markdown run in its own wrapper <div>
+   (MarkdownView's rich path), so the rule reaches through the first one. */
+.rl-md > p:first-child,
+.rl-md > div:first-child > p:first-child {
   font-size: 13.5px;
   font-weight: 450;
 }
+/* Tailwind's base reset strips list markers; a reply's lists keep theirs. */
 .rl-md ul,
 .rl-md ol {
   margin: 4px 0 6px;
   padding-left: 18px;
+}
+.rl-md ul {
+  list-style: disc;
+}
+.rl-md ol {
+  list-style: decimal;
 }
 .rl-md li {
   margin-bottom: 2px;
@@ -1901,9 +1905,20 @@ p.rl-block-modified {
 }
 /* Per-block copy affordance. The fence renderer wraps each code block in
    `.rl-codeblock`; the button floats top-right and is copied via delegation in
-   MarkdownView. Faintly visible always (discoverable), solid on hover/focus. */
+   MarkdownView. Faintly visible always (discoverable), solid on hover/focus.
+   The class is also the editor's code card (border, radius, background):
+   here the <pre> is the one frame, so the wrapper sheds the card and only
+   spaces the block — one box per code block, not a box inside a box. */
 .rl-md .rl-codeblock {
   position: relative;
+  margin: 6px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  overflow: visible;
+}
+.rl-md .rl-codeblock > pre {
+  margin: 0;
 }
 .rl-md .rl-copy-btn {
   position: absolute;
@@ -2053,6 +2068,19 @@ p.rl-block-modified {
   max-width: 100%;
   height: auto;
 }
+/* A reply starts and ends flush, whatever its first and last blocks are, and
+   through a diagram body's segment wrappers. Last among the base rules on
+   purpose: `.rl-md .rl-codeblock` and `.rl-md .rl-callout` tie with these on
+   specificity, and a reply that opens on code or a callout must still sit
+   flush. */
+.rl-md > :first-child,
+.rl-md > div:first-child > :first-child {
+  margin-top: 0;
+}
+.rl-md > :last-child,
+.rl-md > div:last-child > :last-child {
+  margin-bottom: 0;
+}
 .rl-md-compact {
   /* Sidecar discussions set --rl-discussion-zoom on their container to scale
    * this; everywhere else the var is unset and defaults to 1 (unchanged). */
@@ -2071,7 +2099,8 @@ p.rl-block-modified {
   line-height: 1.65;
 }
 .rl-md-room p,
-.rl-md-room > p:first-child {
+.rl-md-room > p:first-child,
+.rl-md-room > div:first-child > p:first-child {
   font-size: 1em;
   font-weight: 400;
   margin: 0 0 0.85em;
@@ -2114,6 +2143,15 @@ p.rl-block-modified {
 .rl-md-room pre {
   font-size: 0.86em;
   margin: 0.4em 0 1em;
+}
+.rl-md-room .rl-codeblock {
+  margin: 0.4em 0 1em;
+}
+/* The base flush rules, again after the room's code-block spacing (which
+   ties with them on specificity). */
+.rl-md-room > :first-child,
+.rl-md-room > div:first-child > :first-child {
+  margin-top: 0;
 }
 .rl-md-room > :last-child,
 .rl-md-room > div:last-child > :last-child {

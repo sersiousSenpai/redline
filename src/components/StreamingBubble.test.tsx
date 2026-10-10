@@ -224,11 +224,16 @@ describe("StreamingBubble", () => {
       await bubble({ text: prefix });
       expect(view().innerHTML, `after ${n} chars`).toBe(serialized(fullRender(prefix)));
     }
-    // The finished reply, against a real full render with the same props.
+    // The finished reply, against a real full render with the same props —
+    // and against the settled row's `rich` render, the same markup for a
+    // body with no diagram: nothing moves when the reply settles. (A diagram
+    // streams as its fence and settles drawn; that one is allowed to differ.)
     const reference = document.createElement("div");
     const referenceRoot = createRoot(reference);
-    await act(async () => referenceRoot.render(<MarkdownView body={text} compact />));
-    expect(view().outerHTML).toBe(reference.firstElementChild?.outerHTML);
+    for (const rich of text.includes(`${FENCE}mermaid`) ? [false] : [false, true]) {
+      await act(async () => referenceRoot.render(<MarkdownView body={text} compact rich={rich} />));
+      expect(view().outerHTML, rich ? "rich" : "plain").toBe(reference.firstElementChild?.outerHTML);
+    }
     await act(async () => referenceRoot.unmount());
   });
 
