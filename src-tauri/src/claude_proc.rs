@@ -738,8 +738,14 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
 /// The page agent's bridge calls, named for what they do to the page the user
 /// is watching: a page action by its kind (read off the `/v1/browser/action`
 /// body), a read or switch aimed at a numbered tab by that tab. Mission and
-/// code reads ride along, being the same agent's. `None` for anything else.
+/// code reads ride along, being the same agent's. `None` for anything else,
+/// including a command that only names a route without calling the bridge
+/// (a search through Redline's own source, a fetched page with a look-alike
+/// path).
 fn page_status_label(text: &str) -> Option<String> {
+    if !text.contains("127.0.0.1:7676/") {
+        return None;
+    }
     let tab = text
         .split("tab=")
         .nth(1)
@@ -767,11 +773,18 @@ fn page_status_label(text: &str) -> Option<String> {
             ("download", _) => "saving a file…",
             _ => return None,
         }
-    } else if text.contains("/v1/mission") {
-        if text.contains("/findings") {
-            "reading pinned findings…"
-        } else {
-            "reading the mission…"
+    } else if let Some(at) = text.find("/v1/mission") {
+        // The mission and its pins, by the captured routes or the global
+        // pair. The orchestrator's tab and foundation routes under the same
+        // prefix open tabs and write, so they are not named as reads.
+        let path = text[at..]
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_')))
+            .next()
+            .unwrap_or("");
+        match path.rsplit('/').next().unwrap_or("") {
+            "findings" => "reading pinned findings…",
+            "tabs" | "foundation" => return None,
+            _ => "reading the mission…",
         }
     } else if text.contains("/v1/code/projects") {
         "finding your projects…"
@@ -924,11 +937,24 @@ mod tests {
             (r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d "{\"operation\": {\"kind\": \"fill\", \"value\": \"x\"}}""#, "typing into the page…"),
             (r#"curl -s http://127.0.0.1:7676/v1/browser/action -d '{"operationId":"kind-1","operation":{"kind":"scroll","x":0,"y":9}}'"#, "scrolling the page…"),
             ("curl -s http://127.0.0.1:7676/v1/missions/m-1/findings", "reading pinned findings…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/missions/mission-1' | head", "reading the mission…"),
             ("curl -s 'http://127.0.0.1:7676/v1/code/git?repo=/r&op=log'", "reading a project's git…"),
+            // Not reads of the goal: the orchestrator opening a mission tab or
+            // writing its foundation keeps the honest fallback.
+            (r#"curl -s http://127.0.0.1:7676/v1/missions/mission-1/tabs -X POST -d '{"url":"https://a.test"}'"#, "Bash…"),
+            ("curl -s http://127.0.0.1:7676/v1/missions/mission-1/foundation -X POST -d '{}'", "Bash…"),
+            // Naming a route is not calling the bridge: an agent searching
+            // Redline's own source for one is not acting on a page.
+            ("grep -rn '/v1/browser/action' src-tauri/src", "Bash…"),
+            ("rg -n '/v1/mission/findings|/v1/code/git' src-tauri", "Bash…"),
         ];
         for (cmd, want) in cases {
             assert_eq!(retrieval_status_label("Bash", &bash(cmd)), want, "for {cmd}");
         }
+        // A fetched page whose path happens to look like a bridge route is
+        // still a fetch.
+        let fetch = serde_json::json!({ "url": "https://api.example.test/v1/missions/42/findings" });
+        assert_eq!(retrieval_status_label("WebFetch", &fetch), "fetching a page…");
         // Non-bridge tools fall back to something honest.
         assert_eq!(retrieval_status_label("Skill", &Value::Null), "loading a skill…");
         assert_eq!(retrieval_status_label("Grep", &Value::Null), "Grep…");
