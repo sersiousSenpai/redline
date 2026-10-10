@@ -347,6 +347,16 @@ describe("the island never moves on its own", () => {
     expect(app).toMatch(/const islandSurfaceKey = `[^`]*activeId[^`]*`;/);
   });
 
+  it("a place asked for on the surface already showing is navigation too", () => {
+    // A plan from the palette, a recent or a chat's receipt must not land
+    // under a door left open over it.
+    expect(app.match(/const doorNavKey = `([^`]*)`;/)![1]).toContain("${doorTrip}");
+    const palette = app.slice(app.indexOf("openSession: (id) => {"), app.indexOf("toggleDock: toggleDoor,"));
+    expect(palette.match(/tripDoor\(\);/g)).toHaveLength(3);
+    expect(app.slice(app.indexOf("const openDoorRecent = (r: DoorRecent) => {"), app.indexOf("// Leaving the room carries"))).toContain("tripDoor();");
+    expect(app).toMatch(/onOpenPlan=\{id => \{ tripDoor\(\); selectSurface\("document"\);/);
+  });
+
   it("tells a screen reader when a launch is handed off and a plan arrives", () => {
     // The pill only shows "Working", and the plate quietly becomes the plan:
     // neither is ever read out. The island's status line says both.
@@ -384,6 +394,8 @@ describe("the room's chat is carried, never closed", () => {
     expect(carry).toContain("openDock();");
     // Never over the surface's own conversation already in the dock.
     expect(carry).toContain("if (!chatId || dockOpen) return;");
+    // Nor lost when the door shut while the chat was still being minted.
+    expect(carry).toContain("}, [frontDoorOpen, chatInRoom]);");
   });
 
   it("putting the dock away hands the column back to the surface's own conversation", () => {

@@ -754,6 +754,13 @@ function App() {
   // The pill's compact card, sprung out by a hover. Never open at launch and
   // never re-opened by coming back to a surface.
   const [doorCompact, setDoorCompact] = useState(false);
+  // A place the user asked for on the surface they already stand on — a plan
+  // from the palette, a recent, a chat's receipt, a notice's Open — is
+  // navigation all the same. It is part of the door's navigation key
+  // (`doorNavKey`), so whatever is open closes behind them and the caret
+  // lands in the main area. A plan merely arriving never counts.
+  const [doorTrip, setDoorTrip] = useState(0);
+  const tripDoor = useCallback(() => setDoorTrip((n) => n + 1), []);
   // The door is up: open, or resting on the empty plate.
   const [doorVisible, setDoorVisible] = useState(false);
   // Only opening a chat puts the chat in the door; any other summons is the
@@ -4047,10 +4054,9 @@ function App() {
           void loadSession(payload.sessionId);
         };
         // Open or Review, pressed on the notice: a gesture, so the door and
-        // its card step aside for the plan.
+        // its card step aside for the plan, as for any trip the user asks for.
         const openArrival = () => {
-          setFrontDoorOpen(false);
-          setDoorCompact(false);
+          tripDoor();
           selectSurfaceRef.current("document");
           focusIntercepted();
         };
@@ -7448,13 +7454,14 @@ function App() {
   // ── What the island attaches ───────────────────────────────────────────
   // Two keys, for two questions. The chips are about WHAT is on screen, so
   // their presses reset whenever that changes — a plan arriving included.
-  // The door and the card close only when the user goes somewhere: a plan
+  // The door and the card close only when the user goes somewhere — another
+  // surface, or a place on this one they asked for (`doorTrip`): a plan
   // landing selects itself on every surface, and that must not shut a door
   // someone is typing in. The draft id only names a place while the Drafter
   // is showing. Off it, the id still changes — a first launch mints one in an
   // effect — and that must not read as anything at all.
   const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
-  const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
+  const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}:${doorTrip}`;
   const viewedPlan = sessionReady && activeId ? viewedRevision ?? null : null;
   const contextChips = surfaceChips(activeSurface, {
     page: browserIslandPage,
@@ -7950,7 +7957,10 @@ function App() {
           // primary way to start one. The Drafter is still one hop away
           // there, behind `Plan ▾ → Draft a document first`.
           draftNewPlan: openFrontDoor,
+          // Each a trip the user asked for, even to where they already
+          // are: the door and its card step aside (`doorTrip`).
           openSession: (id) => {
+            tripDoor();
             selectSessions();
             setActiveId(id);
             selectSurfaceRef.current("document");
@@ -7959,11 +7969,11 @@ function App() {
           // validates and re-types them — no cast, nothing free-typed.
           selectSurface: (id) => {
             const d = headerSurfaceList.find((s) => s.id === id);
-            if (d) selectSurfaceRef.current(d.id);
+            if (d) { tripDoor(); selectSurfaceRef.current(d.id); }
           },
           navigateTo: (t) => {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
-            if (d) navigateTo({ surface: d.id, tab: t.tab });
+            if (d) { tripDoor(); navigateTo({ surface: d.id, tab: t.tab }); }
           },
           toggleDock: toggleDoor,
           openConversation: (kind) => {
@@ -8106,6 +8116,12 @@ function App() {
     const plan = pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? { ...pendingLaunch, kind: "plan" as const } : null;
     return plan && runFlight ? (runFlight.startedAt > plan.startedAt ? runFlight : plan) : (runFlight ?? plan);
   }, [pendingLaunch, runFlight]);
+  // The pill's count: plans that arrived unseen and are still in the list —
+  // one deleted unseen is no longer news.
+  const unseenArrivals = useMemo(
+    () => summaries.filter((s) => unseenPlanIds.has(s.sessionId)).length,
+    [summaries, unseenPlanIds],
+  );
 
   // The welcome's pills: the way back into recent plans, chats and browser
   // tabs. Tabs are ranked research-first against the unresolved plans, read
@@ -8133,6 +8149,7 @@ function App() {
   );
   const openDoorRecent = (r: DoorRecent) => {
     if (r.kind === "chat") return openChat(r.id);
+    tripDoor();
     setFrontDoorOpen(false);
     if (r.kind === "plan") {
       selectSessions();
@@ -8149,7 +8166,8 @@ function App() {
   // open — however the room was left. Not over a dock already holding the
   // surface's own conversation: that would end a voice discussion mid-thought,
   // and the dock's strip has the chat a click away. The door, shut, goes back
-  // to being its own composer for the next summons.
+  // to being its own composer for the next summons. A chat minted for a door
+  // shut while it was being made lands in the room late: it is carried too.
   useEffect(() => {
     if (frontDoorOpen || !chatInRoom) return;
     setChatInRoom(false);
@@ -8157,7 +8175,7 @@ function App() {
     setConversationPin("companion");
     openDock();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frontDoorOpen]);
+  }, [frontDoorOpen, chatInRoom]);
   // On screen in the dock's column — the same room, at column scale.
   const chatDocked = !roomChat && !!chatId && voiceDocked && dockContext?.kind === "companion";
   // The compact card launches only in place — Plan or Run. Elsewhere than the
@@ -10731,7 +10749,7 @@ function App() {
         compact={doorCompact && renderMonochatComposer("card")}
         context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
         busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
-        arrivals={unseenPlanIds.size}
+        arrivals={unseenArrivals}
         announce={doorNews}
         // A chat in the room: its heading's New goes back to a blank
         // composer, the conversation kept in History.
@@ -10767,7 +10785,7 @@ function App() {
               queuedInstruction={queuedChatPlans.queued[chatId]?.instruction ?? null}
               onCancelQueuedPlan={() => { queuedChatPlans.cancel(chatId); }}
               onShowTerminal={id => { setFrontDoorOpen(false); void showRawTerminal(id); }}
-              onOpenPlan={id => { selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
+              onOpenPlan={id => { tripDoor(); selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
               onFix={applyReadinessFix}
                             onSelectChat={openChat}
               onEmpty={() => { setChatId(null); setChatSeed(null); refreshChats(); }}

@@ -45,16 +45,19 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(flash).toContain("setArrivalGlow(");
     expect(flash).toContain('notice(arrivalMessage(title, revision), "Open");');
     expect(flash).not.toMatch(/setFrontDoorOpen\(true\)|setDoorCompact\(true\)|selectSurface/);
-    expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).toContain("arrivals={unseenPlanIds.size}");
+    expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).toContain("arrivals={unseenArrivals}");
+    // Counted from the plans still listed: one deleted unseen is not news.
+    expect(app).toMatch(/const unseenArrivals = useMemo\(\s*\(\) => summaries\.filter\(\(s\) => unseenPlanIds\.has\(s\.sessionId\)\)\.length,/);
   });
 
   it("only its notice's Open — a gesture — puts the door away for the plan", () => {
     const open = arrival.slice(arrival.indexOf("const openArrival = () => {"), arrival.indexOf("const notice ="));
-    expect(open).toContain("setFrontDoorOpen(false);");
-    expect(open).toContain("setDoorCompact(false);");
+    // A trip the user asked for: the door and its card step aside, and the
+    // caret lands in the main area, even on the surface already showing.
+    expect(open).toContain("tripDoor();");
     // Nowhere else does an arrival close the door or the card.
     const rest = arrival.replace(open, "");
-    expect(rest).not.toMatch(/setFrontDoorOpen\(|setDoorCompact\(/);
+    expect(rest).not.toMatch(/setFrontDoorOpen\(|setDoorCompact\(|tripDoor\(/);
     // The notice is read where it can be seen: on the browser, above the page.
     expect(arrival).toContain('mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}');
   });
