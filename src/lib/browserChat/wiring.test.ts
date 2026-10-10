@@ -88,7 +88,7 @@ describe("the skill and the prompt teach what the backend does", () => {
     expect(skillRs).toMatch(/RETIRED_SKILLS: &\[&str\] = &\[[^\]]*"linked"/);
     expect(existsSync(join(process.cwd(), "skills/linked"))).toBe(false);
   });
-  it.fails("BC-19 KNOWN VIOLATION: the skill teaches the captured target, the action route and shared chats", () => {
+  it("BC-19 the skill teaches the captured target, the action route and shared chats", () => {
     for (const phrase of contract.skill.mustMention) expect(skill.toLowerCase(), `SKILL.md should mention ${phrase}`).toContain(phrase.toLowerCase());
     for (const route of contract.legacyRoutes) expect(skill, `SKILL.md still teaches ${route}`).not.toContain(routeLeaf(route));
   });
@@ -97,7 +97,7 @@ describe("the skill and the prompt teach what the backend does", () => {
     expect(docs).toContain(contract.actionRoute);
     for (const route of contract.legacyRoutes) expect(docs, `the first turn still teaches ${route}`).not.toContain(routeLeaf(route));
   });
-  it.fails("BC-R3 KNOWN VIOLATION: retired behaviour is gone from the skill", () => {
+  it("BC-R3 retired behaviour is gone from the skill", () => {
     for (const phrase of contract.skill.mustNotMention) expect(skill, `SKILL.md still teaches: ${phrase}`).not.toContain(phrase);
   });
   // Open: the tandem sources strip's commands have no caller. They span

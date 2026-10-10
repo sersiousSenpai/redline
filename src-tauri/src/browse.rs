@@ -2566,6 +2566,7 @@ mod contract {
     use serde_json::{json, Value};
 
     const CONTRACT: &str = include_str!("../../src/lib/browserChat/contract.json");
+    const SKILL: &str = include_str!("../../skills/browse/SKILL.md");
 
     fn contract() -> Value {
         serde_json::from_str(CONTRACT).expect("contract.json parses")
@@ -2622,6 +2623,25 @@ mod contract {
         let regular = super::turn_target_block("browser-t-1", false, None);
         assert!(regular.contains(c["scopePhrases"]["pinned-page"].as_str().unwrap()));
         assert!(!regular.contains("/v1/missions/"));
+    }
+
+    /// The skill teaches what the backend does: shared chats, the captured
+    /// target and mission, the action route; and nothing retired, nor the
+    /// old page routes it no longer teaches.
+    #[test]
+    fn the_skill_teaches_the_contract_and_nothing_retired() {
+        let c = contract();
+        let lower = SKILL.to_lowercase();
+        for phrase in strings(&c["skill"]["mustMention"]) {
+            assert!(lower.contains(&phrase.to_lowercase()), "SKILL.md must mention {phrase}");
+        }
+        for phrase in strings(&c["skill"]["mustNotMention"]) {
+            assert!(!SKILL.contains(&phrase), "SKILL.md still teaches {phrase}");
+        }
+        for legacy in strings(&c["legacyRoutes"]) {
+            let leaf = &legacy[legacy.rfind('/').unwrap()..];
+            assert!(!SKILL.contains(leaf), "SKILL.md still teaches {legacy}");
+        }
     }
 
     #[test]
