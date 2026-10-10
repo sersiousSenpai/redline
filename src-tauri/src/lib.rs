@@ -12334,10 +12334,9 @@ fn install_hook() -> Result<HookStatus, String> {
 }
 
 /// On the blocking pool (`OFF_MAIN_COMMANDS`) — `available` runs the codex
-/// capability probe, which can spawn
-/// `codex --help` (and, on a machine with an exotic install, an interactive
-/// login shell behind it). It once ran on the main thread: a synchronous
-/// subprocess on the UI thread, fired on every boot.
+/// capability probe, which can spawn `codex --help` (and, on a machine with an
+/// exotic install, an interactive login shell behind it). It once ran on the
+/// main thread: a synchronous subprocess on the UI thread, fired on every boot.
 #[tauri::command]
 fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
     codex_hook::get_status()

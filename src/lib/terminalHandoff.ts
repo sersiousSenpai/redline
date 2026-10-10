@@ -13,7 +13,7 @@
 //
 // Pure logic + injected deps so it is unit-testable without a PTY — the
 // `activeSurface.ts` / `paneLayout.ts` house pattern. The deps are wired to
-// `whenPtySpawned` / `awaitPtyOutput` (TerminalView) and the
+// `whenPtySpawned` / `awaitPtyOutput` (lib/terminalSeams) and the
 // `pty_write_checked` / `get_run_state` Tauri commands at the call site.
 
 import { isLiveRunState } from "./orchestration";

@@ -404,9 +404,10 @@ struct PtyExit {
 
 // Spawn/kill/resize/cwd run on the blocking pool by name (`OFF_MAIN_COMMANDS`
 // in lib.rs), off the main IPC thread: spawn forks a process, cwd shells out
-// to `lsof` every poll tick, and none of them need main-thread ordering. `pty_write`/`pty_ack` stay sync
-// on purpose — main-thread invocation order is what guarantees keystroke byte
-// order. The JS side (`enqueuePtyOp`) already fences spawn/kill/resize per id.
+// to `lsof` every poll tick, and none of them need main-thread ordering.
+// `pty_write`/`pty_ack` stay sync on purpose — main-thread invocation order is
+// what guarantees keystroke byte order. The JS side (`enqueuePtyOp`) already
+// fences spawn/kill/resize per id.
 #[tauri::command]
 pub fn pty_spawn(
     app: AppHandle,

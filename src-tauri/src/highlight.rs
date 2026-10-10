@@ -289,8 +289,8 @@ impl Highlighter {
     /// The doc's per-line tokens, computed once on first call and cached. `None`
     /// when the doc isn't highlightable or no grammar matched (caller renders
     /// plain text). Heavy (syntect parse) — only ever reached off the UI thread
-    /// via the `doc_highlight` / `doc_lines` commands, which run on the blocking
-    /// pool (`OFF_MAIN_COMMANDS`).
+    /// via the `open_doc` / `doc_lines` commands, which run on the blocking pool
+    /// (`OFF_MAIN_COMMANDS`).
     fn tokens<'a>(&self, path: &str, doc: &'a CachedDoc) -> Option<&'a Vec<Vec<Token>>> {
         doc.tokens
             .get_or_init(|| {

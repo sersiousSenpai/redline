@@ -96,18 +96,19 @@ it, that's the discussion to have before merging.
    builds a tokio task for each command's own future type, about **11 KB of
    release binary per command** (measured 2026-10-09: 29 commands cost
    331,248 B; 2026-10-10: moving the 18 Bookshelf commands to the pool saved
-   149,024 B, and moving the remaining 114 saved about 1.28 MB, the first 30
-   of them 348,128 B), and the binary has no room for that. `(async)` belongs
-   only on an `async fn` that awaits; `perf_guard.rs` scans every source file
-   for one on a sync body, or an `async fn` command that never awaits. Either way, two calls can finish out of
-   order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
-   instead: each call takes a ticket as it arrives and runs on the pool when
-   its turn comes, one at a time (`save_workspace`: every gesture saves
-   without waiting for the last, and the file is what the next launch loads;
-   `add_comment`/`update_comment`/`delete_comment`: an edit sent right after
-   its add must not overtake it). `watch_dir`/`unwatch_dir` stay
-   sync to keep their order with each other, and hand their slow part to a
-   thread of their own.
+   149,024 B, and moving the remaining 114 while dropping nine registrations
+   nothing invoked saved about 1.28 MB, the first 30 moves alone 348,128 B),
+   and the binary has no room for that. `(async)` belongs only on an
+   `async fn` that awaits; `perf_guard.rs` scans every source file for one on
+   a sync body, or an `async fn` command that never awaits. Either way, two
+   calls can finish out of order. A command whose calls must keep theirs goes
+   in `IN_ORDER_COMMANDS` instead: each call takes a ticket as it arrives and
+   runs on the pool when its turn comes, one at a time (`save_workspace`:
+   every gesture saves without waiting for the last, and the file is what the
+   next launch loads; `add_comment`/`update_comment`/`delete_comment`: an
+   edit sent right after its add must not overtake it).
+   `watch_dir`/`unwatch_dir` stay sync to keep their order with each other,
+   and hand their slow part to a thread of their own.
 
    SQLite is heavy whatever the query's size. Every write waits on the one
    writer connection (`Database::lock_conn`), which a backup, the canary or an
