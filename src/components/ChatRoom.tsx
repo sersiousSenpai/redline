@@ -483,6 +483,7 @@ export function ChatRoom({
     streaming,
     threadKey: companionId,
     onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
+    onFallback: (n) => n && setNotice(n),
   });
   const dictation = useDictation({
     enabled: dictationEnabled && !composer,

@@ -57,7 +57,7 @@ const VOICE_SAMPLE =
 // is app-wide: cancelling the voice panel's reply must never drop a chat's read
 // aloud. Seeding from the clock keeps two windows' counters apart as well.
 let lastGeneration = Date.now();
-const nextGeneration = () => ++lastGeneration;
+export const nextGeneration = () => ++lastGeneration;
 
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -203,8 +203,12 @@ function speakWithSystemVoice(text: string, rate: number): Playing | null {
  *  to synthesize — once per problem, not once per sentence, since a failing
  *  engine fails every sentence the same way. The sentence itself is read by the
  *  system voice. The Rust side also logs the real provider response (HTTP status
- *  + body) at `error` level. */
-export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
+ *  + body) at `error` level. `kokoroVoice` reads in that Kokoro voice whatever
+ *  engine is saved: the studio voice's stand-in. */
+export function cloudTtsDriver(
+  onError?: (msg: string) => void,
+  kokoroVoice?: string,
+): SpeechDriver {
   let ctx: AudioContext | null = null;
   const audioCtx = () => (ctx ??= new AudioContext());
 
@@ -256,6 +260,7 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
         text,
         generation: gen,
         speed: clampRate(rate),
+        voice: kokoroVoice,
       });
       if (gen !== generation) return null;
       // `decodeAudioData` detaches the buffer, so hand it a fresh ArrayBuffer.

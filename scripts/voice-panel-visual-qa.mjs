@@ -171,6 +171,36 @@ try {
   check("…and stays one button", await cdp.evaluate("document.querySelector('.rl-discuss-pill').querySelectorAll('button').length === 0"));
   await screenshot("08-pill-waiting");
 
+  // The studio voice: its card in settings, then a reply its stand-in reads
+  // while the model warms, with a quiet chip that takes no focus.
+  await emit("voice-done", { ...turn(await cdp.evaluate("window.__qaTurn")), body: "It ships behind a flag.", messageId: "m4", timing: {} });
+  await click("[aria-label='Voice settings']");
+  await cdp.evaluate("(() => { const s = document.querySelector('[data-tour=voice] select'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'studio'); s.dispatchEvent(new Event('change', { bubbles: true })); })()");
+  for (let i = 0; i < 50 && !(await cdp.evaluate("!!document.querySelector('[data-studio-card] [aria-label=\"Play a sample of Ryan\"]')")); i++) await delay(100);
+  const cardText = await cdp.evaluate("document.querySelector('[data-studio-card]')?.textContent ?? ''");
+  check("The studio card says what it costs", cardText.includes("Studio voice — 3.1 GB download, about 4.2 GB memory while speaking"), cardText.slice(0, 120));
+  check("…and that it is installed, with its speed check", cardText.includes("✓ Installed") && cardText.includes("3.7 times faster"));
+  const plays = await cdp.evaluate("[...document.querySelectorAll('[data-studio-card] button[aria-label^=\"Play a sample\"]')].map(b => { const r = b.getBoundingClientRect(); return { w: r.width, h: r.height }; })");
+  check("Its three previews are 24px targets", plays.length === 3 && plays.every((b) => b.w >= 24 && b.h >= 24), plays);
+  await screenshot("09-studio-card");
+  await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] button')].find(b => b.textContent === 'Save').click()"); await delay(300);
+  await enter("And the testing section?");
+  const studioTurn = turn(await cdp.evaluate("window.__qaTurn"));
+  const focusBefore = await cdp.evaluate("document.activeElement?.getAttribute('aria-label')");
+  await emit("voice-delta", { ...studioTurn, text: "⟦tone: calm⟧ Testing covers the reader first. Then the replay." });
+  for (let i = 0; i < 30 && !(await cdp.evaluate("!!document.querySelector('[data-studio-chip]')")); i++) await delay(100);
+  const chip = await cdp.evaluate("document.querySelector('[data-studio-chip]')?.textContent ?? ''");
+  check("A reply before the model is warm shows why its stand-in reads", chip === "Studio voice warming · System voice reading", chip);
+  check("…which never takes focus", (await cdp.evaluate("document.activeElement?.getAttribute('aria-label')")) === focusBefore, focusBefore);
+  check("…and the stand-in reads it, the tone marker left out", (await cdp.evaluate("window.__qaSpoken.slice(-1)[0] ?? ''")).startsWith("Testing covers the reader first."));
+  const status = await rect("[data-studio-chip] + span"), chipBox = await rect("[data-studio-chip]");
+  check("…on the status row, beside the speech state, on one line", chipBox && chipBox.right <= status.x && Math.abs(chipBox.y + chipBox.height / 2 - (status.y + status.height / 2)) < 3 && chipBox.height < 24, { status, chipBox });
+  await screenshot("10-studio-chip");
+  await emit("voice-done", { ...studioTurn, body: "⟦tone: calm⟧ Testing covers the reader first. Then the replay.", messageId: "m5", timing: {} });
+  await click("[aria-label='Voice settings']");
+  check("The speed slider is off on the studio voice", await cdp.evaluate("document.querySelector(\"input[aria-label='Speech speed']\").disabled"));
+  await click("[aria-label='Voice settings']");
+
   for (const theme of ["studio", "aurora", "terminal", "basic"]) {
     for (const width of [360, 300]) {
       await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)}); window.__qa.setWidth(${width})`); await settle();

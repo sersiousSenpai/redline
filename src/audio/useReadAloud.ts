@@ -50,6 +50,9 @@ export function useReadAloud(opts: {
   /** Reported when a sentence fails to synthesize — silence with no
    *  explanation reads as a broken feature. */
   onError?: (msg: string) => void;
+  /** Why the studio voice's stand-in is reading this reply; null when the
+   *  studio voice is (studioTts.ts). */
+  onFallback?: (note: string | null) => void;
 }): ReadAloud {
   const { enabled, liveText, streaming, threadKey, onError } = opts;
   const queueRef = useRef<SpeechQueue | null>(null);
@@ -60,6 +63,9 @@ export function useReadAloud(opts: {
   const step = useRef<ReadAloudState>(READ_ALOUD_START);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const onFallbackRef = useRef(opts.onFallback);
+  onFallbackRef.current = opts.onFallback;
+  const [studio, setStudio] = useState(false);
 
   // One queue for the hook's life; the engine is resolved once and swapped in
   // when the answer lands (the default system driver speaks in the meantime).
@@ -68,9 +74,23 @@ export function useReadAloud(opts: {
     q.setPrefs(loadVoicePrefs());
     queueRef.current = q;
     let alive = true;
-    void invoke<{ engine: string }>("tts_get_settings")
-      .then((s) => {
+    void invoke<{ engine: string; studioStyle?: string }>("tts_get_settings")
+      .then(async (s) => {
         if (!alive || (s.engine || "system") === "system") return;
+        if (s.engine === "studio") {
+          // Its own chunk; until it loads, the system voice holds the queue.
+          const { studioTtsDriver } = await import("./studioTts");
+          if (!alive) return;
+          q.setDriver(
+            studioTtsDriver({
+              onError: (m) => onErrorRef.current?.(m),
+              onFallback: (n) => onFallbackRef.current?.(n),
+              style: s.studioStyle,
+            }),
+          );
+          setStudio(true);
+          return;
+        }
         q.setDriver(cloudTtsDriver((m) => onErrorRef.current?.(m)));
         if (s.engine === "kokoro")
           void invoke("tts_kokoro_warm").catch(() => {});
@@ -84,6 +104,17 @@ export function useReadAloud(opts: {
       queueRef.current = null;
     };
   }, []);
+
+  // A chat reading aloud in the studio voice is a voice surface: five minutes
+  // after the last one closes, its sidecar is stopped.
+  useEffect(() => {
+    if (!studio || !enabled) return;
+    const surface = `read-aloud:${threadKey}:${Math.random().toString(36).slice(2)}`;
+    void import("./studioTts").then((m) => m.studioSurface(surface, true));
+    return () => {
+      void import("./studioTts").then((m) => m.studioSurface(surface, false));
+    };
+  }, [studio, enabled, threadKey]);
 
   // Muting, and switching conversations, both mean "stop talking now".
   useEffect(() => {

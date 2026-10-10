@@ -675,7 +675,11 @@ function VoicePanelBase({
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   // Active TTS engine (system speechSynthesis vs cloud premium) + settings view.
   const [engine, setEngine] = useState<TtsEngine>("system");
+  const engineRef = useRef<TtsEngine>("system");
   const [showSettings, setShowSettings] = useState(false);
+  // Why the studio voice's stand-in is reading this reply (a quiet chip in the
+  // header); null while the studio voice speaks, or another engine is chosen.
+  const [studioNote, setStudioNote] = useState<string | null>(null);
 
   // Push-to-talk (Phase 2). `listening` drives the indicator + button; `partial`
   // is the live transcript shown while the talk button is held. `talkingRef`
@@ -783,6 +787,7 @@ function VoicePanelBase({
       if (discardSpeechRef.current) return;
       const raw = rawRef.current;
       const reply = splitReply(raw);
+      queueRef.current?.setTone(reply.tone);
       const base = spokenLenRef.current;
       const fresh = reply.spoken.slice(base);
       const marks = reply.marks.slice(markedRef.current);
@@ -849,15 +854,33 @@ function VoicePanelBase({
   }, [setTranscript]);
 
   const applyEngine = useCallback(
-    (e: TtsEngine) => {
+    (e: TtsEngine, style = "") => {
       setEngine(e);
+      engineRef.current = e;
+      setStudioNote(null);
       queueRef.current?.setDriver(
         playback.wrap(
-          e === "system" ? browserSpeechDriver() : cloudTtsDriver(reportSynthError),
+          e === "system" || e === "studio"
+            ? browserSpeechDriver()
+            : cloudTtsDriver(reportSynthError),
         ),
       );
       // Pre-load Kokoro's model so the first sentence doesn't pay cold-start.
       if (e === "kokoro") void invoke("tts_kokoro_warm").catch(() => {});
+      // The studio voice's driver is a chunk of its own; the system voice holds
+      // the queue for the moment it takes to load. Loading it starts the model
+      // warming: the panel opening is intent to talk.
+      if (e === "studio") {
+        void import("../audio/studioTts").then((studio) => {
+          if (engineRef.current !== "studio") return;
+          queueRef.current?.setDriver(
+            playback.wrap(
+              studio.studioTtsDriver({ onError: reportSynthError, onFallback: setStudioNote, style }),
+            ),
+          );
+          studio.warmStudio().catch(() => {});
+        });
+      }
     },
     [playback, reportSynthError],
   );
@@ -894,10 +917,21 @@ function VoicePanelBase({
 
   // Load the configured engine on open.
   useEffect(() => {
-    void invoke<{ engine: string }>("tts_get_settings")
-      .then((s) => applyEngine((s.engine as TtsEngine) || "system"))
+    void invoke<{ engine: string; studioStyle?: string }>("tts_get_settings")
+      .then((s) => applyEngine((s.engine as TtsEngine) || "system", s.studioStyle))
       .catch(() => {});
   }, [applyEngine]);
+
+  // The studio voice's sidecar is stopped five minutes after the last voice
+  // surface closes; this panel is one while it is open on that engine.
+  useEffect(() => {
+    if (engine !== "studio") return;
+    const surface = `voice:${sessionId}`;
+    void import("../audio/studioTts").then((studio) => studio.studioSurface(surface, true));
+    return () => {
+      void import("../audio/studioTts").then((studio) => studio.studioSurface(surface, false));
+    };
+  }, [engine, sessionId]);
 
   // Warm Kokoro's model the instant the panel opens (a no-op for other engines),
   // so its ~seconds of first-load happen while you're reading, not after you
@@ -1220,9 +1254,12 @@ function VoicePanelBase({
     if (playing && reading) {
       return `They stopped the read-aloud in §${reading.anchorId} "${reading.title}"`;
     }
-    if (playing) return `You were interrupted after saying: "${tail(playing.text, 160)}"`;
+    // Exactly what was heard where the voice keeps a timeline (the studio
+    // voice), else the whole clip that was sounding.
+    const heard = playing && playback.heard();
+    if (heard) return `You were interrupted after saying: "${tail(heard, 160)}"`;
     const phase = turnRef.current.phase;
-    if (phase === "streaming") return "You were interrupted before they heard any of your reply";
+    if (playing || phase === "streaming") return "You were interrupted before they heard any of your reply";
     if (phase !== "idle") return "You were interrupted before you said anything";
     return null;
   }, [playback]);
@@ -2148,7 +2185,9 @@ function VoicePanelBase({
             className="px-4 pb-4 pt-3 flex flex-col gap-3"
             style={{ borderTop: "1px solid var(--color-rule)" }}
           >
-            {/* Speed — applies to every engine (system + cloud). */}
+            {/* Speed — applies to every engine but the studio voice, which
+                can't change speed without changing pitch; its pace is a
+                tested style instead. The slider still sets its stand-in's. */}
             <div className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between">
                 <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-ink)" }}>
@@ -2167,11 +2206,14 @@ function VoicePanelBase({
                 onChange={(e) =>
                   setPrefs((p) => ({ ...p, rate: Number(e.target.value) }))
                 }
+                disabled={engine === "studio"}
                 style={{ width: "100%" }}
                 aria-label="Speech speed"
               />
               <span style={{ fontSize: "11px", color: MUTED }}>
-                1.0× is normal; most voices feel natural around 1.2–1.4×.
+                {engine === "studio"
+                  ? "The studio voice keeps its natural pace; pick Slow or Brisk as its style above."
+                  : "1.0× is normal; most voices feel natural around 1.2–1.4×."}
               </span>
             </div>
 
@@ -2746,8 +2788,21 @@ function VoicePanelBase({
                   ▶ Replay
                 </button>
               )}
+              {/* Why the studio voice's stand-in is reading: quiet, never
+                  focused, gone when the studio voice speaks again. */}
+              {studioNote && (
+                <span
+                  data-studio-chip
+                  role="status"
+                  title={studioNote}
+                  className="rounded-full px-2 py-0.5 truncate min-w-0"
+                  style={{ fontSize: "11px", color: MUTED, border: "1px solid var(--color-rule)" }}
+                >
+                  {studioNote}
+                </span>
+              )}
               <span
-                className="ml-auto"
+                className="ml-auto shrink-0"
                 style={{ fontSize: "12px", color: indicator.color }}
               >
                 ● {indicator.label}

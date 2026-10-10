@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -14,11 +14,19 @@ import {
   splitBlend,
 } from "../audio/kokoroVoices";
 import { loadVoicePrefs } from "../audio/speech";
+import type { StudioPrefs } from "./StudioVoiceCard";
+
+// The studio voice's card: install, voice and style. A chunk of its own, as
+// most people never pick it.
+const StudioVoiceCard = lazy(() =>
+  import("./StudioVoiceCard").then((m) => ({ default: m.StudioVoiceCard })),
+);
 
 /** TTS engines the panel can select. `system` is the built-in (free, robotic)
- *  `speechSynthesis`; `kokoro` is a free natural voice that runs locally; `openai`
+ *  `speechSynthesis`; `kokoro` is a free natural voice that runs locally;
+ *  `studio` is the most natural, a 3 GB local model on Apple Silicon; `openai`
  *  and `elevenlabs` are premium cloud voices (each needs the user's own key). */
-export type TtsEngine = "system" | "kokoro" | "openai" | "elevenlabs";
+export type TtsEngine = "system" | "kokoro" | "studio" | "openai" | "elevenlabs";
 
 /** Dictation (speech-to-text) backends. `auto` prefers local Whisper when its
  *  model is installed and falls back to Apple; the other two force one. */
@@ -32,6 +40,9 @@ interface TtsSettings {
   hasElevenKey: boolean;
   elevenVoice: string;
   pythonPath: string;
+  studioModel?: string;
+  studioVoice?: string;
+  studioStyle?: string;
 }
 
 interface KokoroStatus {
@@ -89,9 +100,9 @@ const muted: React.CSSProperties = {
 
 interface VoiceSettingsProps {
   onClose: () => void;
-  /** Called after a successful save with the now-active engine, so the panel
-   *  can swap the live speech driver. */
-  onSaved: (engine: TtsEngine) => void;
+  /** Called after a successful save with the now-active engine (and the
+   *  studio voice's style), so the panel can swap the live speech driver. */
+  onSaved: (engine: TtsEngine, studioStyle: string) => void;
 }
 
 export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
@@ -108,6 +119,14 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [progress, setProgress] = useState<KokoroSetup | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The studio voice is offered only where it can run: Apple Silicon on
+  // macOS 14 or later.
+  const [studioSupported, setStudioSupported] = useState(false);
+  const [studio, setStudio] = useState<StudioPrefs>({
+    model: "1.7B-CustomVoice-8bit",
+    voice: "ryan",
+    style: "",
+  });
 
   // Dictation (microphone → text). Independent of the TTS engine above: this is
   // which recognizer transcribes your speech. `auto` prefers local Whisper once
@@ -129,7 +148,15 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         setKokoroVoice(s.kokoroVoice || "af_heart");
         setHasElevenKey(s.hasElevenKey);
         setElevenVoice(s.elevenVoice || "21m00Tcm4TlvDq8ikWAM");
+        setStudio((p) => ({
+          model: s.studioModel || p.model,
+          voice: s.studioVoice || p.voice,
+          style: s.studioStyle ?? p.style,
+        }));
       })
+      .catch(() => {});
+    void invoke<{ supported: boolean }>("tts_studio", { op: "status" })
+      .then((s) => alive && setStudioSupported(!!s.supported))
       .catch(() => {});
     return () => {
       alive = false;
@@ -258,9 +285,15 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         elevenKey: elevenKeyInput.trim() ? elevenKeyInput.trim() : null,
         elevenVoice,
       });
+      if (engine === "studio") {
+        await invoke("tts_studio", {
+          op: "prefs",
+          args: { voice: studio.voice, style: studio.style },
+        });
+      }
       // Dictation engine is a separate setting from the TTS engine above.
       await invoke("dictation_set_engine", { engine: dictationEngine });
-      onSaved(engine);
+      onSaved(engine, studio.style);
       onClose();
     } catch (e) {
       setError(String(e));
@@ -310,6 +343,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         >
           <option value="system">System voice (free, on-device)</option>
           <option value="kokoro">Kokoro — natural, on-device &amp; free (no key)</option>
+          {(studioSupported || engine === "studio") && (
+            <option value="studio">Studio — most natural, on-device (3.1 GB download)</option>
+          )}
           <option value="openai">OpenAI — premium, natural (needs a key)</option>
           <option value="elevenlabs">ElevenLabs — premium, most natural (needs a key)</option>
         </select>
@@ -402,6 +438,12 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             onError={setError}
           />
         </div>
+      )}
+
+      {engine === "studio" && (
+        <Suspense fallback={<span style={muted}>Loading…</span>}>
+          <StudioVoiceCard prefs={studio} onChange={setStudio} onError={setError} />
+        </Suspense>
       )}
 
       {engine === "openai" && (
