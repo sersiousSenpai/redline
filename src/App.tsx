@@ -263,6 +263,13 @@ const OrchestrationSurface = lazy(() =>
     default: m.OrchestrationSurface,
   })),
 );
+// Off the boot path for the same reason as MemorySurface: the Localhost
+// surface is a pure function of one scan, opened on demand, and static only
+// by omission while boot JS sits at its ceiling.
+const loadServersPane = () => import("./components/ServersPane");
+const ServersPane = lazy(() =>
+  loadServersPane().then((m) => ({ default: m.ServersPane })),
+);
 // Off the boot path, and this one is not optional: boot JS sits at ~99% of the
 // size budget, so a chat room in the boot chunk would fail `size-budget.json`
 // outright. It loads when the door's third destination is taken.
@@ -285,6 +292,7 @@ const SURFACE_CHUNK_LOADERS: Partial<
   browser: loadBrowserPane,
   memory: loadMemorySurface,
   runs: loadOrchestrationSurface,
+  servers: loadServersPane,
   // Not a surface any more — the room is the conversation dock's Companion
   // body. Kept keyed here so the dock warms it through the same helper.
   chat: loadChatRoom,
@@ -292,7 +300,6 @@ const SURFACE_CHUNK_LOADERS: Partial<
 function prefetchSurfaceChunk(surface: string): void {
   void SURFACE_CHUNK_LOADERS[surface]?.().catch(() => {});
 }
-import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
@@ -8957,16 +8964,18 @@ function App() {
               </ErrorBoundary>
             );
             const serversBody = (
-              <ServersPane
-                scan={devServers.scan}
-                error={devServers.error}
-                onRefresh={devServers.refresh}
-                onStop={devServers.stopServer}
-                onPlanStop={devServers.planStop}
-                projectOptions={projectOptions}
-                onRun={runDevServer}
-                onOpenUrl={openUrlInBrowser}
-              />
+              <Suspense fallback={null}>
+                <ServersPane
+                  scan={devServers.scan}
+                  error={devServers.error}
+                  onRefresh={devServers.refresh}
+                  onStop={devServers.stopServer}
+                  onPlanStop={devServers.planStop}
+                  projectOptions={projectOptions}
+                  onRun={runDevServer}
+                  onOpenUrl={openUrlInBrowser}
+                />
+              </Suspense>
             );
             const memoryBody = (
               // fallback={null}: the surface arrives a beat after its plate,

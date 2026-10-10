@@ -107,6 +107,14 @@ describe("size guard", () => {
     });
   }
 
+  it("App.tsx keeps the Localhost surface lazy", () => {
+    // No vendor family, just ~10 kB of surface opened on demand, which sat on
+    // the boot path by omission until boot JS reached its ceiling.
+    const app = files.find(({ rel }) => rel === "App.tsx")!;
+    expect(app.text).toMatch(/const ServersPane = lazy\(/);
+    expect(app.text).not.toMatch(/import \{ ServersPane \} from/);
+  });
+
   // The markdown-rendering stack. `MarkdownView` value-imports markdown-it,
   // markdown-it-task-lists and highlight.js/lib/common — ~670 kB of source
   // that reached the boot path through ONE chain: App → CommentCard →
