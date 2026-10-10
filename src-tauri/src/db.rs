@@ -657,6 +657,11 @@ impl Database {
     /// has them, the writer otherwise. Route a path here only when nothing it
     /// runs writes — a write through it fails — and never while holding
     /// `lock_conn`'s guard (without readers this IS that lock).
+    ///
+    /// A reader no longer waits for the writer, so it can land between two
+    /// statements of one write. A write of more than one statement therefore
+    /// runs in one transaction (`unchecked_transaction` on the writer, then
+    /// `commit`): a reader sees all of it or none of it.
     pub(crate) fn read_conn(&self) -> ReadConn<'_> {
         if let Some(slot) = self.readers.as_ref().and_then(Readers::take) {
             let read = ReadConn::Reader(slot);
@@ -2536,7 +2541,8 @@ impl Database {
         revision: &Revision,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(session_id, version_number) DO UPDATE SET
@@ -2553,7 +2559,8 @@ impl Database {
                 revision.restored as i64,
             ],
         )?;
-        Self::touch_session(&conn, session_id, revision.received_at);
+        Self::touch_session(&tx, session_id, revision.received_at);
+        tx.commit()?;
         Ok(())
     }
 
@@ -2716,17 +2723,19 @@ impl Database {
         const JOURNAL_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
         let now = crate::ledger::now_millis();
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO context_journal (ts, kind, surface_kind, surface_id, label, detail)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![now, kind, surface_kind, surface_id, label, detail],
         )?;
-        let id = conn.last_insert_rowid();
-        let _ = conn.execute(
+        let id = tx.last_insert_rowid();
+        let _ = tx.execute(
             "DELETE FROM context_journal
              WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
             params![id, JOURNAL_KEEP_ROWS, now, JOURNAL_KEEP_MS],
         );
+        tx.commit()?;
         Ok(id)
     }
 
@@ -3015,14 +3024,16 @@ impl Database {
 
     pub fn delete_companion(&self, companion_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM companion_messages WHERE companion_id = ?1",
             params![companion_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3124,7 +3135,8 @@ impl Database {
         msg: &crate::state::CompanionMessage,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO companion_messages
                 (id, companion_id, role, body, status, surface_kind, surface_id,
                  surface_label, created_at)
@@ -3141,7 +3153,8 @@ impl Database {
                 msg.created_at
             ],
         )?;
-        Self::touch_companion_locked(&conn, &msg.companion_id, msg.created_at);
+        Self::touch_companion_locked(&tx, &msg.companion_id, msg.created_at);
+        tx.commit()?;
         Ok(())
     }
 
@@ -3386,7 +3399,9 @@ impl Database {
     /// why the caller gates it behind a typed-title confirm.
     pub fn delete_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        Self::delete_draft_locked(&conn, draft_id)
+        let tx = conn.unchecked_transaction()?;
+        Self::delete_draft_locked(&tx, draft_id)?;
+        tx.commit()
     }
 
     fn delete_draft_locked(conn: &Connection, draft_id: &str) -> rusqlite::Result<()> {
@@ -3512,24 +3527,26 @@ impl Database {
     /// their source directories too.
     pub fn delete_folder(&self, folder_id: &str) -> rusqlite::Result<Vec<String>> {
         let conn = self.lock_conn();
-        let edges = Self::folder_edges_locked(&conn)?;
+        let tx = conn.unchecked_transaction()?;
+        let edges = Self::folder_edges_locked(&tx)?;
         let subtree = folder_subtree(&edges, folder_id);
         let mut deleted: Vec<String> = Vec::new();
         for fid in &subtree {
-            let mut stmt = conn.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
+            let mut stmt = tx.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
             let ids: Vec<String> = stmt
                 .query_map(params![fid], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<_>>()?;
             drop(stmt);
             for id in ids {
-                Self::delete_draft_locked(&conn, &id)?;
+                Self::delete_draft_locked(&tx, &id)?;
                 deleted.push(id);
             }
-            conn.execute(
+            tx.execute(
                 "DELETE FROM bookshelf_folders WHERE folder_id = ?1",
                 params![fid],
             )?;
         }
+        tx.commit()?;
         Ok(deleted)
     }
 
@@ -3628,17 +3645,19 @@ impl Database {
         });
         let now = crate::ledger::now_millis();
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO friction_events (ts, kind, surface, session_id, detail)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![now, kind, surface, session_id, detail],
         )?;
-        let id = conn.last_insert_rowid();
-        let _ = conn.execute(
+        let id = tx.last_insert_rowid();
+        let _ = tx.execute(
             "DELETE FROM friction_events
              WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
             params![id, FRICTION_KEEP_ROWS, now, FRICTION_KEEP_MS],
         );
+        tx.commit()?;
         Ok(id)
     }
 
@@ -4162,14 +4181,16 @@ impl Database {
     /// rows are presentation, not the record).
     pub fn delete_mem_chat(&self, thread_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM mem_chat_messages WHERE thread_id = ?1",
             params![thread_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM mem_chat_threads WHERE thread_id = ?1",
             params![thread_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -4257,11 +4278,13 @@ impl Database {
     /// Delete a draft comment + its discussion thread rows.
     pub fn delete_draft_comment(&self, draft_id: &str, id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
+        tx.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
             params![draft_id, id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -5180,6 +5203,7 @@ impl Database {
         comment: &Comment,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
         let (edit_original, edit_revised) = match &comment.edit {
             Some(e) => (Some(e.original.as_str()), Some(e.revised.as_str())),
             None => (None, None),
@@ -5203,7 +5227,7 @@ impl Database {
                 None => (None, None, None, None),
             };
         let reopen_history_json = reopen_history_to_json(&comment.reopen_history);
-        conn.execute(
+        tx.execute(
             "INSERT INTO comments (
                 id, session_id, version_number, type, scope, anchor_id,
                 body, edit_original, edit_revised, created_at, status,
@@ -5247,7 +5271,8 @@ impl Database {
                 research_to_json(comment.research.as_ref()),
             ],
         )?;
-        Self::touch_session(&conn, session_id, comment.created_at);
+        Self::touch_session(&tx, session_id, comment.created_at);
+        tx.commit()?;
         Ok(())
     }
 
@@ -5441,11 +5466,13 @@ impl Database {
         state: &str,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE sessions SET attach_state = ?1 WHERE session_id = ?2",
             params![state, session_id],
         )?;
-        Self::touch_session(&conn, session_id, crate::state::now_millis());
+        Self::touch_session(&tx, session_id, crate::state::now_millis());
+        tx.commit()?;
         Ok(())
     }
 
@@ -5801,17 +5828,19 @@ impl Database {
 
     pub fn delete_comment(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
         // Cascade the comment's discussion thread. Comment ids are reused
         // (`c-{max+1}`), so leaving these rows would resurface a deleted
         // comment's answer under the next comment that inherits its id.
-        conn.execute(
+        tx.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
             params![session_id, comment_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM comments WHERE session_id = ?1 AND id = ?2",
             params![session_id, comment_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -5863,8 +5892,9 @@ impl Database {
         let from = format!("/attachments/{old_id}/");
         let to = format!("/attachments/{new_id}/");
         let conn = self.lock_conn();
+        let tx = conn.unchecked_transaction()?;
         for table in ["comments", "thread_messages"] {
-            conn.execute(
+            tx.execute(
                 &format!(
                     "UPDATE {table} SET attachments = REPLACE(attachments, ?1, ?2)
                      WHERE session_id = ?3 AND attachments IS NOT NULL"
@@ -5872,34 +5902,37 @@ impl Database {
                 params![from, to, new_id],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1",
             params![session_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM comments WHERE session_id = ?1",
             params![session_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM revisions WHERE session_id = ?1",
             params![session_id],
         )?;
         // Staged (never-written) offers go with the session that produced them.
         // NOTE: `voice_messages` / `voice_sessions` are *not* cleared here —
         // pre-existing, and out of scope for this change.
-        conn.execute(
+        tx.execute(
             "DELETE FROM comment_offers WHERE session_id = ?1",
             params![session_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM sessions WHERE session_id = ?1",
             params![session_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -5910,7 +5943,8 @@ impl Database {
 
     pub fn insert_thread_message(&self, msg: &ThreadMessage) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO thread_messages
                 (id, session_id, comment_id, role, body, status, created_at,
                  attachments, mode)
@@ -5927,7 +5961,8 @@ impl Database {
                 msg.mode,
             ],
         )?;
-        Self::touch_session(&conn, &msg.session_id, msg.created_at);
+        Self::touch_session(&tx, &msg.session_id, msg.created_at);
+        tx.commit()?;
         Ok(())
     }
 
@@ -6106,14 +6141,16 @@ impl Database {
     /// Delete a tab's whole thread: its turns and its persisted agent session.
     pub fn delete_browse_thread(&self, browse_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM browse_messages WHERE browse_id = ?1",
             params![browse_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM browse_threads WHERE browse_id = ?1",
             params![browse_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -6447,14 +6484,16 @@ impl Database {
     /// so the next open lands back on the template chooser.
     pub fn delete_browse_list(&self, browse_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM browse_list_items WHERE browse_id = ?1",
             params![browse_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM browse_lists WHERE browse_id = ?1",
             params![browse_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -6598,15 +6637,17 @@ impl Database {
     /// `browse_id`, independent of the mission row).
     pub fn delete_mission(&self, mission_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM mission_findings WHERE mission_id = ?1",
             params![mission_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM mission_messages WHERE mission_id = ?1",
             params![mission_id],
         )?;
-        conn.execute("DELETE FROM missions WHERE mission_id = ?1", params![mission_id])?;
+        tx.execute("DELETE FROM missions WHERE mission_id = ?1", params![mission_id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -6925,14 +6966,16 @@ impl Database {
     /// user may still want.
     pub fn delete_linked(&self, linked_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM linked_messages WHERE linked_id = ?1",
             params![linked_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM linked_sessions WHERE linked_id = ?1",
             params![linked_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -7212,22 +7255,24 @@ impl Database {
 
     pub fn delete_code_review(&self, review_id: &str) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
-        conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
             "DELETE FROM review_annotations WHERE review_id = ?1",
             params![review_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM review_viewed WHERE review_id = ?1",
             params![review_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM review_pushes WHERE review_id = ?1",
             params![review_id],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM review_sessions WHERE review_id = ?1",
             params![review_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -13348,6 +13393,75 @@ mod tests {
         assert_eq!(value(&read), "1", "a write never lands in the middle of a read");
         drop(read);
         assert_eq!(db.get_setting("k").as_deref(), Some("2"));
+    }
+
+    /// A write of several statements is one transaction, so a reader sees all
+    /// of it or none of it. Stopped at its last statement (a TEMP trigger on
+    /// the writer), a session delete leaves everything in place; statement by
+    /// statement, a reader found the session's thread, comments and
+    /// revisions gone under a session row that was still there.
+    #[test]
+    fn a_reader_never_sees_a_half_applied_delete_session() {
+        let file = FileDb::new();
+        let db = file.db();
+        let store = crate::state::SessionStore::new(db.clone());
+        let md = "# T\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let comment = store
+            .add_comment(
+                "s",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "why?".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
+                    research: None,
+                },
+            )
+            .unwrap();
+        db.insert_thread_message(&ThreadMessage {
+            id: "m1".into(),
+            session_id: "s".into(),
+            comment_id: comment.id.clone(),
+            role: "assistant".into(),
+            body: "because".into(),
+            status: "complete".into(),
+            created_at: 1,
+            attachments: Vec::new(),
+            mode: None,
+        })
+        .unwrap();
+        let rows = |db: &Database| -> Vec<i64> {
+            let read = db.read_conn();
+            ["sessions", "revisions", "comments", "thread_messages"]
+                .iter()
+                .map(|table| {
+                    read.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE session_id = 's'"), [], |r| r.get(0))
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert_eq!(rows(&db), [1, 1, 1, 1]);
+
+        db.lock_conn()
+            .execute_batch("CREATE TEMP TRIGGER hold_last BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'held'); END")
+            .unwrap();
+        assert!(db.delete_session("s").is_err());
+        assert_eq!(rows(&db), [1, 1, 1, 1], "a failed delete deletes nothing");
+
+        db.lock_conn().execute_batch("DROP TRIGGER temp.hold_last").unwrap();
+        db.delete_session("s").unwrap();
+        assert_eq!(rows(&db), [0, 0, 0, 0]);
     }
 
     /// A write routed through `read_conn` fails on either kind of database,
