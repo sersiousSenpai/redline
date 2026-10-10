@@ -67,11 +67,14 @@ it, that's the discussion to have before merging.
    thread — a variable the user controls directly. Each stream is individually
    batched and ACK-backpressured (rule 3), so overload degrades per-stream (a
    busy terminal falls behind) rather than freezing the app, but anything that
-   scales *per visible terminal* must be batched or bounded: the cwd poll is
-   one `pty_cwds` subprocess per tick for the whole fleet (never one `lsof`
-   per pane), `pty_procs` (each terminal's foreground program and listening
-   ports, for the wall's state badges) is one `ps` and one `lsof` per call
-   whatever the terminal count, and WebGL renderers are visibility-scoped
+   scales *per visible terminal* must be batched or bounded: the dock's one
+   fleet poll is the only loop that samples terminals from the OS. Each tick
+   is one `pty_cwds` subprocess for every visible tile (never one `lsof` per
+   pane), every other tick adds `pty_procs` (each terminal's foreground
+   program and listening ports, for the wall's state badges: one `ps` and one
+   `lsof` whatever the terminal count), it pauses while the window is hidden,
+   and the shell follows the focused terminal's cwd from its reads instead of
+   running a loop of its own. WebGL renderers are visibility-scoped
    and capped at `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's
    process-wide context cap can never silently evict the oldest terminal's
    context. At fourteen tiles that ceiling binds for the first time — it used
@@ -118,6 +121,14 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
+- `src/lib/renderHygiene.test.ts` — the shell's re-render hygiene: the
+  memoized sidebar, browser pane and dock get no inline closures (handlers go
+  through `useStableHandlers`), reads that changed nothing keep the previous
+  state (`keepEqual`), every poll in the migrated files runs through
+  `usePoll` (one tick at a time, paused while hidden), the shell runs no
+  terminal `lsof` of its own, and `content-visibility` stays on the three
+  lists nothing scrolls to (its comment in `styles.css` says why comment
+  cards and transcripts are left out).
 - `src/lib/paintGuard.test.ts` — rule 6. Resolves every `animation` in
   `src/**/*.css`, every inline `animation:` in a component and every
   `el.animate(…)` call to the properties it animates, and fails when an

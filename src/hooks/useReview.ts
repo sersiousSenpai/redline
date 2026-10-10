@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePersistedState } from "../theme/usePersistedState";
+import { usePoll } from "./usePoll";
 import type {
   CodeReviewSession,
   DiffFile,
@@ -97,20 +98,23 @@ export function useReview() {
     }
   }, [repo, source, base, sha]);
 
-  // The staleness poll runs only while a diff is showing and not yet stale.
-  useEffect(() => {
-    if (!repo || !diff || stale) return;
-    const id = window.setInterval(() => {
-      void invoke<string>("review_fingerprint", { repo, source, base, sha })
-        .then((fp) => {
-          if (fingerprintRef.current && fp !== fingerprintRef.current) {
-            setStale(true);
-          }
-        })
-        .catch(() => {});
-    }, 5000);
-    return () => window.clearInterval(id);
-  }, [repo, source, base, sha, diff, stale]);
+  // The staleness poll runs only while a diff is showing and not yet stale,
+  // and not while the window is hidden. The shell owns this hook, so the
+  // poll runs on every surface; a hidden window costs no git subprocess.
+  usePoll(
+    () => invoke<string>("review_fingerprint", { repo, source, base, sha }),
+    repo && diff && !stale ? 5000 : null,
+    {
+      pauseWhenHidden: true,
+      leading: false,
+      onResult: (fp) => {
+        if (fingerprintRef.current && fp !== fingerprintRef.current) {
+          setStale(true);
+        }
+      },
+    },
+    [repo, source, base, sha, diff],
+  );
 
   useEffect(() => {
     void refreshDiff();

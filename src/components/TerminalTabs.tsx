@@ -16,6 +16,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
+import { usePoll } from "../hooks/usePoll";
 import {
   attachRepos,
   bumpMru,
@@ -139,6 +140,10 @@ interface TerminalTabsProps {
    *  terminal the reviewer is currently watching. Best-effort: a "wrong" tile
    *  is still strictly better than the alternative of no inject at all. */
   onActiveTabChange?: (id: string) => void;
+  /** The focused terminal's live cwd, whenever it or the focus moves — read
+   *  by the fleet poll, so the host can follow a `cd` without an `lsof` loop
+   *  of its own. */
+  onFocusedCwd?: (id: string, cwd: string) => void;
   /** Dock terminals whose `claude` is currently held awaiting review. Each
    *  such terminal gets its own "plan intercepted by redline" strip inside
    *  its tile, so the grid shows the truth per tile. */
@@ -183,11 +188,15 @@ const PARK_TICK_MS = 2000;
  *  follow it off the wall. */
 const FRESH_PARKED_MS = 4000;
 
+/** The fleet poll's tick: every visible tile's live cwd, in one `lsof`. */
+const FLEET_POLL_MS = 2000;
+
 /** How often `pty_procs` samples every terminal's foreground program and
- *  ports (one `ps` + one `lsof` for the whole fleet, perf-budget rule 5).
- *  Slower than the cwd poll: a state badge a few seconds late costs nothing,
- *  and the settle windows that act on it are fifteen seconds and up. */
-const PROCS_POLL_MS = 4000;
+ *  ports (one `ps` + one `lsof` for the whole fleet, perf-budget rule 5) —
+ *  every other fleet tick. Slower than the cwds: a state badge a few seconds
+ *  late costs nothing, and the settle windows that act on it are fifteen
+ *  seconds and up. */
+const PROCS_POLL_MS = 2 * FLEET_POLL_MS;
 
 /** The intercept strip. Text can't be injected into the held PTY, so this fakes
  *  one line of terminal output: terminal bg + mono font + matching padding so
@@ -321,6 +330,7 @@ export const TerminalTabs = memo(
       onNeedsYouChange,
       collapsed,
       onActiveTabChange,
+      onFocusedCwd,
       heldTerminalIds,
       heldPlanTitles,
       projectOptions,
@@ -656,41 +666,22 @@ export const TerminalTabs = memo(
   // untiled terminal's OSC title never updates — its bytes aren't parsed).
   // A sample that finds the shell back in the foreground also retires a
   // working or needs-you older than it: the agent that reported it has
-  // exited. One sample at a time: on a loaded machine a slow `lsof` must not
-  // stack a second fleet-wide scan behind it.
+  // exited. Sampled by the fleet poll (see "Live cwds").
   const [procs, setProcs] = useState<ReadonlyMap<string, TermProc>>(
     () => new Map(),
   );
-  useEffect(() => {
-    let cancelled = false;
-    let inFlight = false;
-    const poll = async () => {
-      if (inFlight || document.visibilityState === "hidden") return;
-      inFlight = true;
-      const sampledAt = Date.now();
-      try {
-        const rows = await invoke<TermProc[]>("pty_procs");
-        if (cancelled || !Array.isArray(rows)) return;
-        setProcs((prev) => mergeProcs(prev, rows));
-        const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
-        if (stale.length) {
-          setAcks((prev) =>
-            stale.reduce((next, [id, ack]) => putAck(next, id, ack), prev),
-          );
-        }
-      } catch {
-        /* keep the last sample */
-      } finally {
-        inFlight = false;
-      }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), PROCS_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [setAcks]);
+  const sampleProcs = async () => {
+    const sampledAt = Date.now();
+    const rows = await invoke<TermProc[]>("pty_procs");
+    if (!Array.isArray(rows)) return;
+    setProcs((prev) => mergeProcs(prev, rows));
+    const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
+    if (stale.length) {
+      setAcks((prev) =>
+        stale.reduce((next, [id, ack]) => putAck(next, id, ack), prev),
+      );
+    }
+  };
 
   // Terminals whose process has exited. They stay on the wall showing
   // "[process exited]" until closed; the state lets them park.
@@ -837,29 +828,46 @@ export const TerminalTabs = memo(
     });
   }, []);
 
-  // Poll every VISIBLE tile in one batched `pty_cwds` — one subprocess per
-  // tick at any tile count (perf-budget rule 5; the per-pane `pty_cwd` loop
-  // this replaces was one `lsof` per pane per tick). Hidden terminals keep
-  // their last-known label and refresh the instant they're shown (a `tiles`
-  // change re-runs this effect) or the menu opens (refreshAllCwds).
+  // The fleet poll: ONE clock for everything the wall reads from the OS
+  // (perf-budget rule 5). Every tick reads every VISIBLE tile's cwd in one
+  // batched `pty_cwds` — one `lsof` at any tile count. Every other tick also
+  // runs `sampleProcs` (one `ps` + one listening-socket `lsof` for the whole
+  // fleet); "every other" is measured in time, so a sample a `tiles` change
+  // asks for between ticks never shifts that cadence. The host follows the
+  // focused terminal's cwd from these reads (`onFocusedCwd`) instead of
+  // running an `lsof` loop of its own.
+  //
+  // One sample at a time (usePoll): on a loaded machine a slow scan must not
+  // stack a second one behind it. Paused while the window is hidden. Hidden
+  // terminals keep their last-known label and refresh the instant they're
+  // shown (a `tiles` change samples now) or the menu opens (refreshAllCwds).
+  const procsAtRef = useRef(-Infinity);
+  const sampleFleetNow = usePoll(
+    async () => {
+      const procsDue =
+        Date.now() - procsAtRef.current >= PROCS_POLL_MS - FLEET_POLL_MS / 2;
+      if (procsDue) procsAtRef.current = Date.now();
+      await Promise.all([
+        invoke<Record<string, string>>("pty_cwds", { ids: [...tilesRef.current] })
+          .then((map) => mergeCwds(Object.entries(map)))
+          .catch(() => {
+            /* keep last-known labels */
+          }),
+        procsDue &&
+          sampleProcs().catch(() => {
+            /* keep the last sample */
+          }),
+      ]);
+    },
+    FLEET_POLL_MS,
+    { pauseWhenHidden: true, leading: false },
+  );
+  useEffect(() => sampleFleetNow(), [tiles, sampleFleetNow]);
+
+  const focusedCwd = focusedId ? liveCwds.get(focusedId) : undefined;
   useEffect(() => {
-    let cancelled = false;
-    const ids = [...tiles];
-    const poll = async () => {
-      try {
-        const map = await invoke<Record<string, string>>("pty_cwds", { ids });
-        if (!cancelled) mergeCwds(Object.entries(map));
-      } catch {
-        /* keep last-known labels */
-      }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 2500);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [tiles, mergeCwds]);
+    if (focusedId && focusedCwd) onFocusedCwd?.(focusedId, focusedCwd);
+  }, [focusedId, focusedCwd, onFocusedCwd]);
 
   // The menu is the fleet's only inventory, and a never-tiled terminal only
   // has its spawn cwd — refresh EVERY terminal (still one subprocess) when a
@@ -1568,8 +1576,8 @@ export const TerminalTabs = memo(
   };
   const parkRef = useRef(parkTile);
   parkRef.current = parkTile;
-  useEffect(() => {
-    const timer = window.setInterval(() => {
+  usePoll(
+    () => {
       if (hoverRef.current || isResizing() || draggingRef.current) return;
       const index = parkCandidate({
         tiles: tilesRef.current,
@@ -1582,9 +1590,10 @@ export const TerminalTabs = memo(
         now: Date.now(),
       });
       if (index !== null) parkRef.current(index);
-    }, PARK_TICK_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+    },
+    PARK_TICK_MS,
+    { pauseWhenHidden: true, leading: false },
+  );
   const hintTileRef = useRef(hintTile);
   hintTileRef.current = hintTile;
 

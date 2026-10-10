@@ -5416,6 +5416,28 @@ html[data-rl-resizing] [data-rl-pane] {
   .rl-row-arrival::after { animation: rl-toast-out 1.6s ease-in both; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-info) 70%, transparent); }
 }
 
+/* Long lists skip the style, layout and paint of rows out of view: the
+   sessions list, a session's revisions, the file tree. A skipped row holds
+   the height it last rendered at (`auto`), so only a never-painted row
+   estimates, and these rows are near-uniform. Nothing scrolls to these rows
+   or measures them. Paint containment clips a row's children to the row, so
+   the row buttons' focus rings draw inset.
+
+   Deliberately NOT on comment cards or chat/thread transcripts. The comment
+   pane smooth-scrolls a focused card to center, and cards above it that
+   render mid-scroll at their real height move the target off its mark. A
+   transcript pins to its bottom with `scrollTop = scrollHeight` before the
+   bubbles near the bottom have rendered, so it would open short of its last
+   message, and scrolling back would render each bubble above the viewport
+   and shove the reading position. */
+.rl-session-row,
+.rl-revision-row,
+.rl-file-row { content-visibility: auto; }
+.rl-session-row { contain-intrinsic-height: auto 72px; }
+.rl-revision-row,
+.rl-file-row { contain-intrinsic-height: auto 24px; }
+.rl-session-row button:focus-visible { outline-offset: -2px; }
+
 /* Comment discussion threads. */
 /* Under the always-open composer: escalation left, Discard right. */
 .rl-discussion-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

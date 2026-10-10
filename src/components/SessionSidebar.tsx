@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 
 import type { RevisionSummary, SessionSummary } from "../types";
@@ -139,13 +139,16 @@ function SessionSidebarBase({
     });
   }, [activeId]);
 
-  const toggleExpand = (id: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggleExpand = useCallback(
+    (id: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }),
+    [],
+  );
 
   // Combine selection. Local because nothing outside the sidebar watches it —
   // the moment it matters, it leaves as an argument to `onCombine`.
@@ -157,10 +160,18 @@ function SessionSidebarBase({
   // typing a sentence about it.
   const [combining, setCombining] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
-  const togglePicked = (id: string) =>
-    setPicked((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-    );
+  // A row click picks while combining and opens the plan otherwise. Id-based
+  // and stable between those modes, so a memoized row only renders when its
+  // own session, selection or pick changes.
+  const clickRow = useCallback(
+    (id: string) => {
+      if (!combining) return onSelect(id);
+      setPicked((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+      );
+    },
+    [combining, onSelect],
+  );
   const cancelCombining = () => {
     setCombining(false);
     setPicked([]);
@@ -289,11 +300,9 @@ function SessionSidebarBase({
               }
               combining={combining}
               pickedAt={picked.indexOf(s.sessionId)}
-              onClick={() =>
-                combining ? togglePicked(s.sessionId) : onSelect(s.sessionId)
-              }
-              onToggleExpand={() => toggleExpand(s.sessionId)}
-              onDelete={() => onDelete(s.sessionId)}
+              onClick={clickRow}
+              onToggleExpand={toggleExpand}
+              onDelete={onDelete}
               onSetPlanState={onSetPlanState}
               onMoveProject={onMoveProject}
               onExport={onExport}
@@ -445,7 +454,7 @@ function JoinedRow({
   );
 }
 
-function SessionRow({
+function SessionRowBase({
   session,
   active,
   expanded,
@@ -480,9 +489,9 @@ function SessionRow({
   /** Which revision the active pane is viewing — only relevant on the active
    *  session row, used to highlight the corresponding RevisionRow. */
   viewedVersionNumber: number | null;
-  onClick: () => void;
-  onToggleExpand: () => void;
-  onDelete: () => void;
+  onClick: (sessionId: string) => void;
+  onToggleExpand: (sessionId: string) => void;
+  onDelete: (sessionId: string) => void;
   onSetPlanState?: (id: string, state: ManualPlanState) => void;
   onMoveProject?: (id: string) => void;
   onExport: (sessionId: string, versionNumber: number) => void;
@@ -503,7 +512,7 @@ function SessionRow({
     session.planTitle || session.projectName || session.projectPath || session.sessionId;
 
   return (
-    <li className="relative group">
+    <li className="rl-session-row relative group">
       {/* One-shot arrival glow — an overlay, like the tile hail, so it paints
           above the row's own background. Keyed on the nonce: a new arrival is
           a new element, so the animation genuinely restarts. */}
@@ -516,7 +525,7 @@ function SessionRow({
           title={expanded ? "Hide revisions" : "Show revisions"}
           onClick={(e) => {
             e.stopPropagation();
-            onToggleExpand();
+            onToggleExpand(session.sessionId);
           }}
           className="absolute left-1 top-2 z-10 px-1"
           style={{
@@ -568,7 +577,7 @@ function SessionRow({
             onClick={(e) => {
               e.stopPropagation();
               setConfirming(false);
-              onDelete();
+              onDelete(session.sessionId);
             }}
             className="rounded px-1.5"
             style={{
@@ -626,7 +635,7 @@ function SessionRow({
       )}
       <button
         type="button"
-        onClick={onClick}
+        onClick={() => onClick(session.sessionId)}
         aria-pressed={combining ? picked : undefined}
         aria-label={
           combining
@@ -904,6 +913,11 @@ function SessionRow({
   );
 }
 
+/** Memoized: a summaries read re-renders the list, and with every handler
+ *  id-based and stable and an unchanged session keeping its object (App's
+ *  `refreshSummaries`), only the rows that changed render. */
+const SessionRow = memo(SessionRowBase);
+
 /** One revision under an expanded session. Row click loads that revision
  *  into the document pane for read-only viewing/compare. A small download
  *  icon on the right exports the same revision as clean markdown. */
@@ -934,7 +948,7 @@ function RevisionRow({
       ? `View v${displayVersion} (latest)`
       : `View v${displayVersion} in the document pane`;
   return (
-    <li>
+    <li className="rl-revision-row">
       <button
         type="button"
         onClick={onSelect}

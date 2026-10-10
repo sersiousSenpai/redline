@@ -294,6 +294,8 @@ function prefetchSurfaceChunk(surface: string): void {
 }
 import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
+import { useStableHandlers, useStableValue } from "./hooks/useStable";
+import { keepEqual, keepEqualRows } from "./lib/keepEqual";
 import { useTextClearance } from "./hooks/useTextClearance";
 import { useDevServers } from "./hooks/useDevServers";
 import {
@@ -2640,9 +2642,17 @@ function App() {
 
   // Follow the active terminal's live working directory: when it `cd`s into a
   // new folder, auto-open that folder as a sidebar tab, and — when linked nav
-  // is engaged — bring the tab forward. Only the active terminal is polled, so
-  // this is one `lsof` call per tick. `linkNav` is read through a ref so the
-  // poll loop isn't torn down and restarted each time the toggle flips.
+  // is engaged — bring the tab forward. The dock's fleet poll reads every
+  // visible tile's cwd in one `lsof` and reports the focused one's here, with
+  // its id, so a focus change can never pair one terminal with another's
+  // folder; the shell runs no `lsof` loop of its own. `linkNav` is read
+  // through a ref so a toggle flip doesn't replay the last report.
+  const [termCwd, setTermCwd] = useState<{ id: string; dir: string } | null>(null);
+  const handleFocusedCwd = useCallback(
+    (id: string, dir: string) =>
+      setTermCwd((prev) => (prev?.id === id && prev.dir === dir ? prev : { id, dir })),
+    [],
+  );
   const linkNavRef = useRef(linkNav);
   linkNavRef.current = linkNav;
   // Per-folder memory of the last file viewed in each folder. Activating a
@@ -2657,9 +2667,9 @@ function App() {
   const folderTermRef = useRef<Map<string, string>>(new Map());
   // Per-terminal context: the folder this terminal lives in and the file last
   // viewed *from* it. Switching terminal tabs restores this instantly (no
-  // 1.8s poll wait), so each terminal holds its own place even when several
-  // share a project. Stale ids are harmless — activeTermId only ever points
-  // at live tabs.
+  // wait for the next cwd read), so each terminal holds its own place even
+  // when several share a project. Stale ids are harmless — activeTermId only
+  // ever points at live tabs.
   const termCtxRef = useRef<
     Map<string, { folder: string | null; file: string | null }>
   >(new Map());
@@ -2864,23 +2874,14 @@ function App() {
   ]);
 
   useEffect(() => {
-    const termId = activeTermId;
-    if (!termId) return;
+    if (!termCwd) return;
+    const { id: termId, dir } = termCwd;
     let cancelled = false;
-    let lastDir: string | null = null;
-    const poll = async () => {
-      let dir: string | null = null;
-      try {
-        dir = await invoke<string | null>("pty_cwd", { id: termId });
-      } catch {
-        return;
-      }
-      if (cancelled || !dir || dir === lastDir) return;
-      lastDir = dir;
+    void (async () => {
       // A terminal sitting in $HOME (where new shells spawn) or the filesystem
       // root isn't "a project" — don't surface those as folder tabs. The user
       // has to `cd` into an actual project for it to open.
-      if (await isUninterestingDir(dir)) return;
+      if ((await isUninterestingDir(dir)) || cancelled) return;
       openFolder(dir);
       // Record folder→terminal, keeping this terminal in exactly one folder so
       // a later `cd` doesn't leave a stale folder pointing at it.
@@ -2895,22 +2896,19 @@ function App() {
       termCtxRef.current.set(termId, { folder: dir, file });
       // Terminal-aware activation: THIS terminal's remembered file wins over
       // the folder's shared memory. Going through activateFolder here would
-      // clobber the per-terminal restore on every tab switch (the poll
-      // restarts per terminal, so its first tick always lands here) — with
-      // two terminals in one folder, both tabs would converge on whichever
-      // file was opened last anywhere in that folder.
+      // clobber the per-terminal restore on every tab switch (a switch is a
+      // new report, so it always lands here) — with two terminals in one
+      // folder, both tabs would converge on whichever file was opened last
+      // anywhere in that folder.
       if (linkNavRef.current) {
         selectFolder(dir);
         setActiveFile(file ?? folderFileRef.current.get(dir) ?? null);
       }
-    };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 1800);
+    })();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
-  }, [activeTermId, openFolder, selectFolder, setActiveFile]);
+  }, [termCwd, openFolder, selectFolder, setActiveFile]);
 
   // Opening/closing a file records it as the active folder's remembered file
   // (so the folder reopens on it) AND as the active terminal's remembered file
@@ -2951,7 +2949,7 @@ function App() {
   }, [setActiveFile, sidebarTab, activeTermId]);
 
   // Terminal tab switch → instantly restore that terminal's folder + file
-  // (the poll above would catch up in ~1.8s; this makes it immediate).
+  // (the cwd report above follows within a fleet tick; this is immediate).
   // Respects the linked-nav toggle exactly like the poll does, and falls back
   // to the folder's own memory when this terminal hasn't viewed a file yet.
   useEffect(() => {
@@ -3677,7 +3675,11 @@ function App() {
   async function refreshSummaries(): Promise<SessionSummary[]> {
     try {
       const list = await invoke<SessionSummary[]>("list_sessions");
-      setSummaries(list);
+      // Every read is a fresh list. Keep the previous one, or each row that
+      // didn't change, so the sidebar's memoized rows and everything derived
+      // from `summaries` skip the render. Rows pair by id: a bumped session
+      // re-sorts to the top.
+      setSummaries((prev) => keepEqualRows(prev, list, (s) => s.sessionId));
       return list;
     } catch (err) {
       console.error("list_sessions failed", err);
@@ -3749,7 +3751,11 @@ function App() {
           full.revisions[full.revisions.length - 1]?.versionNumber ?? 0;
         publishMeta(handle.ydoc, { currentVersion: v });
       }
-      setSession(full);
+      // A re-read that changed nothing keeps the session object, and one that
+      // changed a comment keeps every revision, section list and comment it
+      // didn't touch — so the editor, the cards and the memos keyed on them
+      // stay put.
+      setSession((prev) => keepEqual(prev, full));
     } catch (err) {
       console.error("get_session failed", err);
     }
@@ -4350,7 +4356,9 @@ function App() {
           ?.inviteHash;
         if (hash) next.add(hash);
       }
-      setPresentHashes(next);
+      // Awareness changes on every remote cursor move; the set of who is
+      // here almost never does.
+      setPresentHashes((prev) => keepEqual(prev, next));
     };
     read();
     awareness.on("change", read);
@@ -4896,8 +4904,14 @@ function App() {
       setCollabComments([]);
       return;
     }
-    setCollabComments(yjsBackend.list());
-    return yjsBackend.observe(() => setCollabComments(yjsBackend.list()));
+    // The room's map changes under every collaborator edit; keep each comment
+    // (and the list) that a change didn't touch.
+    const read = () => {
+      const next = yjsBackend.list();
+      setCollabComments((prev) => keepEqual(prev, next));
+    };
+    read();
+    return yjsBackend.observe(read);
   }, [yjsBackend]);
 
   // Owner: publish session meta into the current room (idempotent per key).
@@ -5010,11 +5024,12 @@ function App() {
   // plans intercepted from external terminals. A *set*, not a boolean about the
   // focused tab: in a split dock each pane answers for itself, and approving
   // one pane's plan must leave the other pane's strip standing.
-  const heldTermIds = useMemo(() => heldTerminalIds(summaries), [summaries]);
+  const heldTermIds = useStableValue(useMemo(() => heldTerminalIds(summaries), [summaries]));
   // The same linkage carrying the plan's *name*, so the tab bar's repo popover
   // can say which piece of work each held terminal is sitting on rather than
-  // only that it is held.
-  const heldPlanTitles = useMemo(() => heldPlanByTerminal(summaries), [summaries]);
+  // only that it is held. Both are kept by value, so a summaries read that
+  // moved no hold leaves the memoized dock alone.
+  const heldPlanTitles = useStableValue(useMemo(() => heldPlanByTerminal(summaries), [summaries]));
   // Detached is *derived* from the active session's persisted attach state —
   // the backend records detachment (drop-guard, failed submit, startup sweep
   // for POSTs orphaned by a restart), so this survives restarts and detaches
@@ -5964,7 +5979,9 @@ function App() {
   // session's project, each open folder workspace, and every folder registered
   // in the workspace manifest (project_create writes there, so a created
   // project is visible before any plan ever lands in it), deduped by path.
-  const projectOptions = useMemo<ProjectOption[]>(() => {
+  // Kept by value: every summaries read re-derives it, and the dock and the
+  // door take it as a prop.
+  const projectOptions = useStableValue(useMemo<ProjectOption[]>(() => {
     const seen = new Map<string, ProjectOption>();
     const add = (path: string, name: string, source: ProjectOption["source"]) => {
       if (!path) return;
@@ -5978,7 +5995,7 @@ function App() {
       add(path, base.slice(base.lastIndexOf("/") + 1) || path, "workspace");
     }
     return [...seen.values()];
-  }, [summaries, openFolders, workspace]);
+  }, [summaries, openFolders, workspace]));
 
   // Kinds of projects created THIS session, written synchronously at
   // creation. The workspace registration lands via queued state, but the
@@ -6830,48 +6847,21 @@ function App() {
   // Stable, id-based callbacks for the comment cards. Each card's `React.memo`
   // only pays off if its props keep referential identity across unrelated App
   // re-renders (a focus flip, a layout tweak); inline `() => deleteComment(c.id)`
-  // closures would defeat that by minting a new function every render. We route
-  // through a ref that always holds the latest handlers, so the wrappers stay
-  // identity-stable for the component's lifetime with no stale-closure risk.
-  const commentHandlersRef = useRef({
+  // closures would defeat that by minting a new function every render.
+  const commentCallbacks = useStableHandlers({
     // Always-set (never toggle-to-null): re-clicking a card re-centers and
     // re-flashes its highlight instead of silently clearing the focus.
-    select: focusComment,
-    remove: deleteComment,
-    update: updateComment,
-    accept: acceptResolution,
-    acceptSuggestion: acceptAgentSuggestion,
-    reopen: reopenResolution,
-    promote: promoteToChange,
+    onSelect: focusComment,
+    onDelete: deleteComment,
+    onUpdate: updateComment,
+    onAccept: acceptResolution,
+    onAcceptSuggestion: acceptAgentSuggestion,
+    onReopen: reopenResolution,
+    onPromote: promoteToChange,
   });
-  commentHandlersRef.current = {
-    select: focusComment,
-    remove: deleteComment,
-    update: updateComment,
-    accept: acceptResolution,
-    acceptSuggestion: acceptAgentSuggestion,
-    reopen: reopenResolution,
-    promote: promoteToChange,
-  };
   // Stable so PlanEditor / HistoricalRevisionView don't re-bind their highlight
   // click handler on every App render (notably ~60×/s during a divider drag).
   const handleHighlightClick = focusComment;
-  const commentCallbacks = useMemo(
-    () => ({
-      onSelect: (id: string) => commentHandlersRef.current.select(id),
-      onDelete: (id: string) => commentHandlersRef.current.remove(id),
-      onUpdate: (id: string, update: import("./types").UpdateCommentRequest) =>
-        commentHandlersRef.current.update(id, update),
-      onAccept: (id: string) => commentHandlersRef.current.accept(id),
-      onAcceptSuggestion: (c: Comment) =>
-        commentHandlersRef.current.acceptSuggestion(c),
-      onReopen: (id: string, note?: string) =>
-        commentHandlersRef.current.reopen(id, note),
-      onPromote: (id: string, directive: string) =>
-        commentHandlersRef.current.promote(id, directive),
-    }),
-    [],
-  );
 
   // Installs both pieces of the Redline integration. The hook (a JSON merge
   // into the user's settings.json) and the skill (a whole-file write) have
@@ -8122,6 +8112,63 @@ function App() {
               />
   );
 
+  // The memoized sidebar and browser pane get identity-stable handlers (see
+  // `commentCallbacks`), so they render when their data changes and not on
+  // every shell render.
+  const sidebarHandlers = useStableHandlers({
+    onSelect: setActiveId,
+    onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
+    onCombine: (ids: string[]) => void beginCombine(ids),
+    onDelete: deleteSession,
+    onSetPlanState: (id: string, state: ManualPlanState) => void setPlanState(id, state),
+    onMoveProject: (id: string) => void openMovePlan(id),
+    onExport: exportRevision,
+    onSelectRevision: (sessionId: string, versionNumber: number | null) => {
+      // The sidebar fires this for the row click. The session it points at
+      // might not be the active one yet — flip activeId first so the pane
+      // mounts the right session before the viewed-version applies.
+      if (sessionId !== activeId) setActiveId(sessionId);
+      setViewedVersionNumber(versionNumber);
+    },
+    onOpenRunReport: (sessionId: string) => {
+      // The run chip is the Runs monitor's one entry point: a live run opens
+      // the live monitor (selecting the session so the monitor lands on ITS
+      // run); a finished run reopens the report, as before.
+      const chipRunState =
+        summaries.find((s) => s.sessionId === sessionId)?.runState ?? null;
+      if (isLiveRunState(chipRunState)) {
+        if (sessionId !== activeId) setActiveId(sessionId);
+        selectSurface("runs");
+      } else {
+        setRunReportFor(sessionId);
+        selectSurface("review");
+      }
+    },
+  });
+  const browserHandlers = useStableHandlers({
+    onOpenDraft: (draftId: string) => { setDrafterDraftId(draftId); setDrafterShelfOpen(false); selectSurface("drafter"); },
+    onMissionContinue: (missionId: string, destination: "plan" | "auto", body: string, handoffId: string) => {
+      const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
+      selectSurface("document");
+      setSendError(null);
+      setSendConfirm({ markdown: body, initialProject: guessProjectForPlan(body, projectOptions) ?? folder ?? lastLaunchProject, missionHandoff: { missionId, handoffId, destination } });
+    },
+    onClose: () => selectSurface("document"),
+    // Drop a plan/prompt drafted while browsing into a fresh Redline plan
+    // session: close the browser overlay, confirm the target repo, then
+    // launch the plan in the terminal (see handler).
+    onSendToRedline: sendBrowserDraftToRedline,
+    // Or open the reply in the Prompt Drafter (repo pre-guessed) to shape it
+    // before sending.
+    onSendToDrafter: sendBrowserToDrafter,
+    // A synthesized mission brief seeds the Prompt Drafter.
+    onSynthesizeToDrafter: seedDrafterFromMission,
+    // Cleared once acted on — a request that lingers replays on every
+    // remount (the pane's nonce guard resets with it).
+    onOpenRequestConsumed: onBrowserOpenConsumed,
+    onCloseDock: () => setDockOpenBy((state) => withDockOpen(state, "browser", false)),
+  });
+
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
@@ -8345,48 +8392,16 @@ function App() {
             // rule is a quietly blank plate, never a spinner.
             <Suspense fallback={null}>
             <SessionSidebar
+              {...sidebarHandlers}
               sessions={summaries}
               activeId={activeId}
               pendingCounts={pendingPerSession}
               joined={joinedInfo}
-              onSelectJoined={() =>
-                joinedInfo && setActiveId(joinedInfo.key)
-              }
               onLeaveJoined={leaveJoined}
-              onSelect={(id) => setActiveId(id)}
               onNewPlan={openFrontDoor}
-              onCombine={(ids) => void beginCombine(ids)}
-              onDelete={deleteSession}
-              onSetPlanState={(id, state) => { void setPlanState(id, state); }}
-              onMoveProject={id => { void openMovePlan(id); }}
-              onExport={exportRevision}
-              onSelectRevision={(sessionId, versionNumber) => {
-                // The sidebar fires this for the row click. The session it
-                // points at might not be the active one yet — flip activeId
-                // first so the pane mounts the right session before the
-                // viewed-version applies.
-                if (sessionId !== activeId) setActiveId(sessionId);
-                setViewedVersionNumber(versionNumber);
-              }}
               viewedVersionNumber={viewedVersionNumber}
               unseenIds={unseenPlanIds}
               arrivalGlow={arrivalGlow}
-              onOpenRunReport={(sessionId) => {
-                // The run chip is the Runs monitor's one entry point: a live
-                // run opens the live monitor (selecting the session so the
-                // monitor lands on ITS run); a finished run reopens the
-                // report, as before.
-                const chipRunState =
-                  summaries.find((s) => s.sessionId === sessionId)?.runState ??
-                  null;
-                if (isLiveRunState(chipRunState)) {
-                  if (sessionId !== activeId) setActiveId(sessionId);
-                  selectSurface("runs");
-                } else {
-                  setRunReportFor(sessionId);
-                  selectSurface("review");
-                }
-              }}
             />
             </Suspense>
           ) : (
@@ -10216,6 +10231,7 @@ function App() {
             onNeedsYouChange={setTermNeedYou}
             collapsed={termFullscreen ? false : termCollapsed}
             onActiveTabChange={setActiveTermId}
+            onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}
             heldPlanTitles={heldPlanTitles}
             projectOptions={projectOptions}
@@ -10626,34 +10642,15 @@ function App() {
 <Suspense fallback={null}>
               <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
                 <BrowserPane
+                  {...browserHandlers}
                   onPageContext={setBrowserIslandPage}
-                  onOpenDraft={(draftId) => { setDrafterDraftId(draftId); setDrafterShelfOpen(false); selectSurface("drafter"); }}
-                  onMissionContinue={(missionId, destination, body, handoffId) => {
-                    const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
-                    selectSurface("document");
-                    setSendError(null);
-                    setSendConfirm({ markdown: body, initialProject: guessProjectForPlan(body, projectOptions) ?? folder ?? lastLaunchProject, missionHandoff: { missionId, handoffId, destination } });
-                  }}
-                  onClose={() => selectSurface("document")}
                   surfaceActive={browserOpen}
                   visible={browserVisible && !hookConflicts.dialogOpen}
                   projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
-                  // Drop a plan/prompt drafted while browsing into a fresh Redline
-                  // plan session: close the browser overlay, confirm the target
-                  // repo, then launch the plan in the terminal (see handler).
-                  onSendToRedline={sendBrowserDraftToRedline}
-                  // Or open the reply in the Prompt Drafter (repo pre-guessed)
-                  // to shape it before sending.
-                  onSendToDrafter={sendBrowserToDrafter}
-                  // A synthesized mission brief seeds the Prompt Drafter.
-                  onSynthesizeToDrafter={seedDrafterFromMission}
                   // "Open" on a Localhost card. A prop, not an event: this pane
                   // mounts only when the browser surface is selected, so an event
                   // emitted at selection time would beat its own listener.
                   openRequest={browserOpenRequest}
-                  // Cleared once acted on — a request that lingers replays on
-                  // every remount (the pane's nonce guard resets with it).
-                  onOpenRequestConsumed={onBrowserOpenConsumed}
                   // Re-sync the native webview whenever a surrounding pane toggles
                   // and reflows the slot without a drag (e.g. closing the comment
                   // pane, which otherwise leaves the webview stranded at its old
@@ -10676,7 +10673,6 @@ function App() {
                   dockSlot={dockSlotEl}
                   dockPill={dockPill}
                   onOpenDockPill={openDockPill}
-                  onCloseDock={() => setDockOpenBy(state => withDockOpen(state, "browser", false))}
                   onDockState={setBrowserDock}
                 />
               </ErrorBoundary>

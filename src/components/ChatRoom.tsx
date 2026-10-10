@@ -11,6 +11,7 @@ import { Check, Mic, Plus, X } from "lucide-react";
 import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
+import { usePoll } from "../hooks/usePoll";
 import { useDictation } from "../lib/useDictation";
 import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
@@ -204,12 +205,9 @@ export function ChatRoom({
     return () => { alive = false; };
   }, [companionId]);
   const [buildConflict, setBuildConflict] = useState(false);
-  useEffect(() => {
-    if (mode !== "build" || !project?.path) { setBuildConflict(false); return; }
-    let alive = true;
-    const poll = () => { void invoke<boolean>("companion_build_activity", { companionId, projectPath: project.path }).then(value => { if (alive) setBuildConflict(value); }).catch(() => {}); };
-    poll(); const timer = window.setInterval(poll, 10000); return () => { alive = false; window.clearInterval(timer); };
-  }, [companionId, mode, project?.path]);
+  const buildPath = mode === "build" ? project?.path : undefined;
+  useEffect(() => { if (!buildPath) setBuildConflict(false); }, [buildPath]);
+  usePoll(() => invoke<boolean>("companion_build_activity", { companionId, projectPath: buildPath }), buildPath ? 10_000 : null, { pauseWhenHidden: true, onResult: setBuildConflict }, [companionId, buildPath]);
   const [armedRun, setArmedRun] = useState<ChatPlanRequest | null>(null);
   const [changes, setChanges] = useState<ChatChanges[]>([]);
   const refreshChanges = useCallback(() => { void invoke<ChatChanges[]>("companion_changes", { companionId }).then(rows => setChanges(rows ?? [])).catch(() => {}); }, [companionId]);
