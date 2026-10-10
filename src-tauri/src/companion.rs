@@ -1828,7 +1828,7 @@ pub fn companion_cancel(
     Ok(())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn companion_build_activity(companion: tauri::State<'_, CompanionState>, store: tauri::State<'_, crate::state::SessionStore>, companion_id: String, project_path: String) -> bool {
     companion.db.list_companions().unwrap_or_default().iter().any(|chat| chat.companion_id != companion_id && companion.is_running(&chat.companion_id) && companion.db.companion_project(&chat.companion_id).as_deref() == Some(&project_path) && companion.db.get_setting(&runtime_key(&chat.companion_id, "activeMode")).as_deref() == Some("build"))
         || store.list().iter().any(|session| session.project_path == project_path && session.run_state.as_deref() == Some("running"))

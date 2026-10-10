@@ -332,11 +332,23 @@ const HEAVY_MARKERS: &[&str] = &[
     "read_conn",
 ];
 
+/// The commands `lib.rs` hands to the blocking pool (`OFF_MAIN_COMMANDS`):
+/// sync in shape, off the main thread in fact.
+pub fn off_main_commands(lib_src: &str) -> Vec<String> {
+    let Some(start) = lib_src.find("const OFF_MAIN_COMMANDS: &[&str] = &[") else {
+        return Vec::new();
+    };
+    let list = &lib_src[start..];
+    let list = &list[..list.find("];").unwrap_or(list.len())];
+    list.split('"').skip(1).step_by(2).map(str::to_string).collect()
+}
+
 /// A **sync** `#[tauri::command]` whose body does real work runs on the WebView
 /// main thread and beach-balls the UI — perf-budget rule 4, and the one rule in
 /// this repo that already has both a written rule and a guard test behind it.
-/// Reports the offending function names.
-pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
+/// Reports the offending function names; `off_main` names the ones the invoke
+/// handler runs on the blocking pool anyway.
+pub fn probe_command_hygiene(path: &str, src: &str, off_main: &[String]) -> Vec<StaticFinding> {
     let mut out = Vec::new();
     let bytes: Vec<&str> = src.lines().collect();
     for (i, line) in bytes.iter().enumerate() {
@@ -359,7 +371,7 @@ pub fn probe_command_hygiene(path: &str, src: &str) -> Vec<StaticFinding> {
             .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() {
+        if name.is_empty() || off_main.contains(&name) {
             continue;
         }
         let mut body = String::new();
@@ -747,12 +759,18 @@ pub fn build_code_digest(db: &Database, repo_path: &str) -> CodeDigest {
 
     // --- Tier B: static repo health --------------------------------------
     let sources = read_rust_sources(repo);
+    let lib_src = sources
+        .iter()
+        .find(|(p, _)| p.ends_with("lib.rs"))
+        .map(|(_, s)| s.as_str())
+        .unwrap_or_default();
+    let off_main = off_main_commands(lib_src);
     let mut static_findings: Vec<StaticFinding> = Vec::new();
     for (path, src) in &sources {
         if let Some(f) = probe_oversized(path, src) {
             static_findings.push(f);
         }
-        static_findings.extend(probe_command_hygiene(path, src));
+        static_findings.extend(probe_command_hygiene(path, src, &off_main));
         if let Some(f) = probe_untested(path, src) {
             static_findings.push(f);
         }
@@ -1152,7 +1170,7 @@ mod tests {
                    pub async fn waits(state: State<'_, RunnerState>) -> Result<(), String> {\n\
                    \x20   state.db.runner_list().map(|_| ())\n\
                    }\n";
-        let found = probe_command_hygiene("x.rs", src);
+        let found = probe_command_hygiene("x.rs", src, &[]);
         // `waits` is an `async fn`: already off the main thread, not a finding.
         assert_eq!(found.len(), 2, "the sync+heavy one and the sync DB-lock one: {found:?}");
         assert!(found[0].detail.contains("heavy"));
@@ -1174,12 +1192,21 @@ mod tests {
             ("read_conn", "mission.db.read_conn().query_row(\"SELECT 1\", [], |r| r.get(0))"),
         ] {
             let src = format!("#[tauri::command]\npub fn reads(x: u32) -> u32 {{\n    let _ = {body};\n    x\n}}\n");
-            let found = probe_command_hygiene("x.rs", &src);
+            let found = probe_command_hygiene("x.rs", &src, &[]);
             assert_eq!(found.len(), 1, "{handle}: {found:?}");
             assert!(found[0].detail.contains(handle), "{handle}: {}", found[0].detail);
             let off_main = src.replace("#[tauri::command]", "#[tauri::command(async)]");
-            assert!(probe_command_hygiene("x.rs", &off_main).is_empty(), "{handle}");
+            assert!(probe_command_hygiene("x.rs", &off_main, &[]).is_empty(), "{handle}");
+            // Routed to the blocking pool by name: off the main thread too.
+            assert!(probe_command_hygiene("x.rs", &src, &["reads".to_string()]).is_empty(), "{handle}");
         }
+    }
+
+    #[test]
+    fn the_off_main_list_is_read_from_lib_rs() {
+        let lib = "const OFF_MAIN_COMMANDS: &[&str] = &[\n    \"get_session\",\n    \"list_sessions\",\n];\nconst OTHER: &[&str] = &[\"no\"];\n";
+        assert_eq!(off_main_commands(lib), vec!["get_session", "list_sessions"]);
+        assert!(off_main_commands("fn main() {}").is_empty());
     }
 
     #[test]

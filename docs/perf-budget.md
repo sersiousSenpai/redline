@@ -62,6 +62,15 @@ it, that's the discussion to have before merging.
    its own `std::thread` (the PTY pump) is also fine — the gotcha is *only*
    synchronous work inside the command body.
 
+   For a command with a sync body, the cheaper way off the main thread is its
+   name in `OFF_MAIN_COMMANDS` (lib.rs): the invoke handler hands the whole
+   call to the blocking pool, through one shared closure. `(async)` builds a
+   tokio task for each command's own future type, about **11 KB of release
+   binary per command** (measured 2026-10-09: 29 commands cost 331,248 B), and
+   the binary has no room for that. Either way, two calls can finish out of
+   order; a command whose calls must keep theirs (`watch_dir`/`unwatch_dir`)
+   stays sync and hands its slow part to a thread of its own, in order.
+
    SQLite is heavy whatever the query's size. Every write waits on the one
    writer connection (`Database::lock_conn`), which a backup, the canary or an
    embedding tick can hold for seconds. A read goes through
@@ -121,7 +130,8 @@ it, that's the discussion to have before merging.
 
 These are cheap regression nets, not a substitute for the rules above:
 
-- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`,
+- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`
+  or their place in `OFF_MAIN_COMMANDS` (and that every name there is registered),
   that PTY output stays batched over a Channel (no `pty-output` per-read
   emit), and that run events carry a run id and revision rather than the
   graph. Fails the Rust test suite if any of them regresses.
@@ -141,7 +151,8 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
   `#[tauri::command]` whose body reads a file, parses JSON, encodes base64,
   shells out, or reaches SQLite (`.database()`, a store's `db.` handle,
-  `lock_conn`, `read_conn`). It is a digest signal, not a test, so it never fails a build: the
+  `lock_conn`, `read_conn`), unless `OFF_MAIN_COMMANDS` runs it off the main
+  thread anyway. It is a digest signal, not a test, so it never fails a build: the
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
@@ -177,7 +188,8 @@ npm run build
 - A new long-running process or job that streams progress → a per-task
   `Channel` with backpressure; render throttled/virtualized summaries, never
   per-item heavy work on the UI thread.
-- Reading or encoding a file in a command → mark it `#[tauri::command(async)]`.
+- Reading or encoding a file in a command → add it to `OFF_MAIN_COMMANDS`
+  (or mark it `#[tauri::command(async)]` when the body is itself async).
 
 If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may

@@ -202,4 +202,17 @@ mod tests {
         assert!(release(&mut counts, &p));
         assert!(!release(&mut counts, &p), "extra release stays a no-op");
     }
+
+    #[test]
+    fn the_stream_thread_rolls_a_failed_watch_back() {
+        let debouncer = new_debouncer(DEBOUNCE, |_: DebounceEventResult| {}).unwrap();
+        let counts = Mutex::new(HashMap::new());
+        let missing = std::env::temp_dir().join(format!("redline-fswatch-{}", uuid::Uuid::new_v4()));
+        assert!(acquire(&mut counts.lock().unwrap(), &missing));
+        let (stream, ops) = mpsc::channel();
+        stream.send(StreamOp::Watch(missing.clone())).unwrap();
+        drop(stream);
+        run_stream(debouncer, ops, &counts);
+        assert!(counts.lock().unwrap().is_empty(), "a later mount can retry the watch");
+    }
 }

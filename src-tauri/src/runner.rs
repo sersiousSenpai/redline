@@ -1390,11 +1390,11 @@ pub async fn decompose_plan(
     Ok(g)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn runner_list(state: tauri::State<'_, RunnerState>) -> Result<Vec<RunGraph>, String> {
     state.db.runner_list()
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn runner_get(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
@@ -1696,7 +1696,7 @@ pub struct RunGraphView {
     /// `None` when the claims can't be read; the canvas keeps its last answer.
     next: Option<Vec<String>>,
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn runner_graph_view(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
@@ -1731,14 +1731,14 @@ impl RunnerState {
         json!({"attempt":n.attempt,"streaming":graph::live(&n.status),"partial":n.output,"seq":0,"meter":n.meter,"activity":[]})
     }
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn runner_report(
     state: tauri::State<'_, RunnerState>,
     run_id: String,
 ) -> Result<Value, String> {
     Ok(measured_report(&state.db.runner_get(&run_id)?))
 }
-#[tauri::command(async)]
+#[tauri::command]
 pub fn runner_review(
     state: tauri::State<'_, RunnerState>,
     run_id: String,

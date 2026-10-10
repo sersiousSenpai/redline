@@ -283,39 +283,38 @@ mod tests {
     }
 
     /// The commands a surface polls or a click waits on, each of which reads
-    /// SQLite (the Runs canvas, the orchestration drawer, a chat's build
-    /// probe and meters, a browser chat's model pick) or the disk (an agent
-    /// transcript tail, a restore's transcript scan, the install steps, the
-    /// workspace and harness manifests). On the main thread every one of them
-    /// waits behind whatever holds the database or the disk, and the UI waits
-    /// with it.
+    /// SQLite (the Runs canvas and list, the orchestration drawer, a chat's
+    /// build probe and meters, a browser chat's model pick, session reads) or
+    /// the disk (an agent transcript tail, a restore's transcript scan, the
+    /// install steps, the workspace and harness manifests). On the main
+    /// thread every one of them waits behind whatever holds the database or
+    /// the disk, and the UI waits with it. They run on the blocking pool by
+    /// name (`OFF_MAIN_COMMANDS`), which costs no binary, where `(async)`
+    /// costs ~11 KB a command.
     #[test]
-    fn polled_and_db_commands_stay_async() {
-        let runner = include_str!("runner.rs");
-        for func in ["runner_list", "runner_get", "runner_graph_view", "runner_report", "runner_review"] {
-            assert_async_command(runner, "runner.rs", func);
-        }
-        let runwatch = include_str!("runwatch.rs");
-        // The Runs list re-reads on every `orchestration-live` event.
-        assert_async_command(runwatch, "runwatch.rs", "list_orchestrations");
-        assert_async_command(runwatch, "runwatch.rs", "orchestration_snapshot");
-        assert_async_command(runwatch, "runwatch.rs", "orchestration_agent_tail");
-        assert_async_command(include_str!("companion.rs"), "companion.rs", "companion_build_activity");
-        let meter = include_str!("meter.rs");
-        assert_async_command(meter, "meter.rs", "thread_meters");
-        assert_async_command(meter, "meter.rs", "plan_session_meter");
-        let browse = include_str!("browse.rs");
-        assert_async_command(browse, "browse.rs", "browse_thread_harness");
-        assert_async_command(browse, "browse.rs", "browse_thread_set_harness");
-        // Its liveness check takes each terminal's session lock, which PTY
-        // I/O can hold.
-        assert_async_command(include_str!("term_attention.rs"), "term_attention.rs", "term_attention_snapshot");
-        let userconfig = include_str!("userconfig.rs");
-        for func in ["get_workspace", "save_workspace", "list_harnesses"] {
-            assert_async_command(userconfig, "userconfig.rs", func);
-        }
-        let lib = include_str!("lib.rs");
+    fn polled_and_db_commands_stay_off_the_main_thread() {
+        let off_main = crate::codehealth::off_main_commands(include_str!("lib.rs"));
         for func in [
+            "runner_list",
+            "runner_get",
+            "runner_graph_view",
+            "runner_report",
+            "runner_review",
+            // The Runs list re-reads on every `orchestration-live` event.
+            "list_orchestrations",
+            "orchestration_snapshot",
+            "orchestration_agent_tail",
+            "companion_build_activity",
+            "thread_meters",
+            "plan_session_meter",
+            "browse_thread_harness",
+            "browse_thread_set_harness",
+            // Its liveness check takes each terminal's session lock, which PTY
+            // I/O can hold.
+            "term_attention_snapshot",
+            "get_workspace",
+            "save_workspace",
+            "list_harnesses",
             "get_ui_prefs",
             "list_sessions",
             "get_session",
@@ -329,7 +328,31 @@ mod tests {
             "install_codex_skill",
             "install_skill",
         ] {
-            assert_async_private_command(lib, "lib.rs", func);
+            assert!(
+                off_main.iter().any(|name| name == func),
+                "lib.rs: `{func}` must be in OFF_MAIN_COMMANDS — it must not run on \
+                 the WebView main thread (see docs/perf-budget.md)"
+            );
+        }
+    }
+
+    /// The handler routes `OFF_MAIN_COMMANDS` to the blocking pool, and every
+    /// name there is a registered command: a name the generated handler
+    /// doesn't know would be answered by nobody, and its caller would wait
+    /// forever.
+    #[test]
+    fn off_main_commands_are_registered_and_routed() {
+        let lib = include_str!("lib.rs");
+        assert!(lib.contains(".invoke_handler(off_main(tauri::generate_handler!["));
+        let handler = &lib[lib.find("generate_handler![").unwrap() + "generate_handler![".len()..];
+        let registered: Vec<&str> = handler[..handler.find("])").unwrap()]
+            .split(',')
+            .filter_map(|entry| entry.trim().rsplit("::").next())
+            .collect();
+        let off_main = crate::codehealth::off_main_commands(lib);
+        assert!(!off_main.is_empty());
+        for name in &off_main {
+            assert!(registered.contains(&name.as_str()), "OFF_MAIN_COMMANDS names `{name}`, which is not registered");
         }
     }
 

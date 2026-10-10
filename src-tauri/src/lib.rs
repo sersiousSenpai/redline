@@ -6965,7 +6965,7 @@ fn bootstrap_state(
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn list_sessions(
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
@@ -7075,7 +7075,7 @@ fn delete_session(
     Ok(removed)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<ReviewSession> {
     store.get(&id)
 }
@@ -7441,7 +7441,7 @@ fn snap_toc(sections: &[state::Section], out: &mut Vec<SnapTocNode>) {
 /// off, that data is never even assembled, so it can't leak into the encrypted
 /// fragment. The low-sensitivity enrichments (timeline / stats / TOC) always
 /// ship — they're titles and counts.
-#[tauri::command(async)]
+#[tauri::command]
 fn build_plan_snapshot(
     store: tauri::State<'_, SessionStore>,
     session_id: String,
@@ -8954,7 +8954,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
     UiPrefs {
         review_pose: settings.db.get_setting("redline.ui.reviewPose"),
@@ -9548,7 +9548,7 @@ fn prime_plan_file(plan_file: &str, session_id: &str) -> bool {
 /// transcripts on disk: where the conversation can be resumed from, whether it
 /// exists at all, and whether its plan file has been primed with the restore
 /// marker (which lets the caller ask for a one-tool-call handshake).
-#[tauri::command(async)]
+#[tauri::command]
 fn prepare_restore(
     session_id: String,
     project_path: Option<String>,
@@ -12215,7 +12215,7 @@ fn memory_note_write(
 /// The note row annotating one target, if any — the detail rail's read (the
 /// Timeline row already carries `starred`/`note`, so this serves the Catalog
 /// and any non-timeline caller).
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_note_get(
     store: tauri::State<'_, SessionStore>,
     target_kind: String,
@@ -12228,7 +12228,7 @@ fn memory_note_get(
 }
 
 /// Every note row (optionally starred-only), most recently touched first.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_notes_list(
     store: tauri::State<'_, SessionStore>,
     starred_only: Option<bool>,
@@ -12411,7 +12411,7 @@ fn get_hook_status() -> HookStatus {
     hook::get_status()
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn install_hook() -> Result<HookStatus, String> {
     let result = hook::install();
     if let Ok(status) = &result {
@@ -12438,7 +12438,7 @@ fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
     codex_hook::get_status()
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
     let result = codex_hook::install();
     if let Ok(status) = &result {
@@ -12452,7 +12452,7 @@ fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
 /// the skill rather than written at launch, because `codex -p <name>` with no
 /// such file is not an error: it is a session that plans without ever having
 /// been told the revision contract. See `codex_profile`.
-#[tauri::command(async)]
+#[tauri::command]
 fn install_codex_profile() -> Result<codex_profile::CodexProfileStatus, String> {
     let result = codex_profile::install();
     if let Ok(status) = &result {
@@ -12468,7 +12468,7 @@ fn get_codex_skill_status() -> SkillStatus {
     skill::get_codex_status()
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn install_codex_skill() -> Result<SkillStatus, String> {
     skill::install_codex()
 }
@@ -12535,7 +12535,7 @@ fn get_skill_status() -> SkillStatus {
     skill::get_status()
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn install_skill() -> Result<SkillStatus, String> {
     let result = skill::install();
     if let Ok(status) = &result {
@@ -12546,6 +12546,62 @@ fn install_skill() -> Result<SkillStatus, String> {
         );
     }
     result
+}
+
+/// Sync commands that run on the blocking pool instead of the main thread:
+/// they read SQLite or the disk, and a poll or a click waits on them
+/// (perf-budget rule 4). `#[tauri::command(async)]` moves a command off the
+/// main thread too, but every one costs ~11 KB of release binary (a tokio task
+/// built for its own future type, measured 2026-10-09 across 29 commands);
+/// an entry here costs a string. A command whose calls must keep their order
+/// doesn't belong here or in `(async)`: two calls can finish out of order.
+const OFF_MAIN_COMMANDS: &[&str] = &[
+    "build_plan_snapshot",
+    "browse_thread_harness",
+    "browse_thread_set_harness",
+    "companion_build_activity",
+    "get_session",
+    "get_ui_prefs",
+    "get_workspace",
+    "install_codex_hook",
+    "install_codex_profile",
+    "install_codex_skill",
+    "install_hook",
+    "install_skill",
+    "list_harnesses",
+    "list_orchestrations",
+    "list_sessions",
+    "memory_note_get",
+    "memory_notes_list",
+    "orchestration_agent_tail",
+    "orchestration_snapshot",
+    "plan_session_meter",
+    "prepare_restore",
+    "runner_get",
+    "runner_graph_view",
+    "runner_list",
+    "runner_report",
+    "runner_review",
+    "save_workspace",
+    "term_attention_snapshot",
+    "thread_meters",
+];
+
+/// The invoke handler, with the `OFF_MAIN_COMMANDS` handed to the blocking
+/// pool whole: one shared closure type, so routing a command here adds no
+/// code, where an `(async)` wrapper builds a task per command.
+fn off_main<R: tauri::Runtime>(
+    commands: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    let commands = Arc::new(commands);
+    move |invoke| {
+        if !OFF_MAIN_COMMANDS.contains(&invoke.message.command()) {
+            return commands(invoke);
+        }
+        let commands = commands.clone();
+        tauri::async_runtime::spawn_blocking(move || commands(invoke));
+        true
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -12643,7 +12699,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(webview_guard::on_terminate);
     builder
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(off_main(tauri::generate_handler![
             hook_conflicts::scan_hook_conflicts,
             hook_conflicts::remove_hook_conflicts,
             hook_conflicts::watch_hook_conflicts,
@@ -13140,7 +13196,7 @@ pub fn run() {
             mirror_sync,
             create_memory_vault,
             mcp_config_snippet,
-        ])
+        ]))
         .setup(|app| {
             boot_trace::mark(boot_trace::SETUP_ENTER);
             // Register the `redline://` scheme with the OS at runtime. In a

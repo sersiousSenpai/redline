@@ -69,17 +69,17 @@ pub fn write_workspace_under(root: &std::path::Path, json: &str) -> Result<(), S
 }
 
 /// Tauri command: the raw `~/.redline/workspace.json` text, if present.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn get_workspace() -> Option<String> {
     read_workspace_under(&config_root())
 }
 
 /// Tauri command: persist the workspace manifest. Every GUI customization
 /// gesture funnels here — the file is the store, the GUI is a lens on it.
-/// `(async)` puts two quick gestures' saves on two worker threads, and two
-/// overlapping truncate-and-writes can leave a longer file's tail behind the
-/// shorter one's JSON — so they take turns.
-#[tauri::command(async)]
+/// Off the main thread (`OFF_MAIN_COMMANDS`), two quick gestures' saves run on
+/// two pool threads, and two overlapping truncate-and-writes can leave a
+/// longer file's tail behind the shorter one's JSON — so they take turns.
+#[tauri::command]
 pub fn save_workspace(json: String) -> Result<(), String> {
     static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = WRITING.lock().unwrap_or_else(|e| e.into_inner());
@@ -144,7 +144,7 @@ pub fn list_harnesses_under(root: &std::path::Path) -> Vec<HarnessFileEntry> {
 }
 
 /// Tauri command: the installed harness manifests, raw.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn list_harnesses() -> Vec<HarnessFileEntry> {
     list_harnesses_under(&config_root())
 }
