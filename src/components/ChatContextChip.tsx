@@ -151,7 +151,7 @@ const linkStyle: React.CSSProperties = {
   padding: 0,
   border: "none",
   background: "none",
-  color: "var(--color-info)",
+  color: "var(--color-info-text)",
   textDecoration: "underline",
   cursor: "pointer",
   font: "inherit",

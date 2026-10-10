@@ -96,7 +96,8 @@ interface Pair {
   opacity?: Rule;
   /** Fills between the surface and `background`, outermost first. */
   under?: Rule[];
-  background?: Rule;
+  /** The rule that fills under it, or the fill an inline style gives it. */
+  background?: Rule | string;
   /** Every surface it is read on. */
   on: Surface | readonly Surface[];
   /** 3 for a glyph that is a control's only label (WCAG 1.4.11). */
@@ -183,9 +184,23 @@ const CHAT: Pair[] = [
   { what: "a new chat's tip", color: [PAGE, ".rb-tip"], on: "color-paper" },
   { what: "a new chat's suggestion", color: [PAGE, ".rb-suggestion"], background: [PAGE, ".rb-suggestion"], on: "color-paper" },
   { what: "a new chat's suggestion under the pointer", color: [PAGE, ".rb-suggestion"], under: [[PAGE, ".rb-suggestion"]], background: [PAGE, ".rb-suggestion:hover"], on: "color-paper" },
+  { what: "the header's linked, on", color: [BROWSER, '.rb-icon-button[aria-pressed="true"]'], under: [[BROWSER, ".rb-thread-tools"]], background: [BROWSER, '.rb-icon-button[aria-pressed="true"]'], on: "color-paper", min: 3 },
+  { what: "the rail tray's Synthesize", color: [BROWSER, ".rb-button-primary"], background: [BROWSER, ".rb-button-primary"], on: "color-bg-elevated" },
+  { what: "the chat's mode chip, in build", color: [WORK, ".rl-chat-mode-chip.is-build"], background: [WORK, ".rl-chat-mode-picker button"], on: BOTH },
+  { what: "the build mode's warning", color: [WORK, ".rl-chat-build-warning"], on: BOTH },
+  // Inline styles, held to these tokens by the scan below: the mission
+  // chat's Synthesize and Save, a comment discussion's Attach and Update,
+  // its entry row, its flags and the chat header's context links.
+  { what: "a label on an info fill", color: "var(--color-on-info)", background: "var(--color-info)", on: "color-paper" },
+  { what: "a label on a warning fill", color: "var(--color-on-warning)", background: "var(--color-warning)", on: "color-bg-elevated" },
+  { what: "the info accent as text", color: "var(--color-info-text)", on: BOTH },
+  { what: "the warning accent as text", color: "var(--color-warning-text)", on: BOTH },
 ];
 
-const fillOf = (rule: Rule) => declared(...rule, "background") ?? declared(...rule, "background-color");
+/** The chat surfaces that style their chrome inline. */
+const INLINE_CHAT = ["ChatRoom", "BrowserChat", "BrowserChatParts", "MissionChat", "MemoryAsk", "CommentThread", "DrafterSidecar", "ReviewThread", "ChatContextChip", "ChatModePicker", "TurnNotes", "ReplyBlock", "QueueTray", "SendStopButton", "MonochatTrace"];
+
+const fillOf = (rule: Rule | string) => typeof rule === "string" ? rule : declared(...rule, "background") ?? declared(...rule, "background-color");
 const colorOf = (color: Pair["color"]) => typeof color === "string" ? color : declared(...color, "color");
 
 /** Every pair under its floor in one theme, with its ratio. */
@@ -246,5 +261,21 @@ describe("the chat chrome is legible in every theme", () => {
     const studio = tokensOf(THEMES.find((theme) => theme.name === "studio")!);
     expect(studio["color-info-text"]).toBe(studio["color-info"]);
     expect(studio["color-warning-text"]).toBe(studio["color-warning"]);
+  });
+
+  it("paints no accent straight as text, nor white on an accent, in a chat surface's inline styles", () => {
+    // White on Studio's blue is 2.8:1 and on its yellow 1.8:1; the raw
+    // accents as text fall to 1.6:1 (Silver Aerogel's yellow). The tokens
+    // above are the ones held to the floor.
+    for (const name of INLINE_CHAT) {
+      const source = readFileSync(join(process.cwd(), "src/components", `${name}.tsx`), "utf8");
+      expect(source, name).not.toMatch(/\bcolor: "var\(--color-(info|warning|on-accent)\)"/);
+    }
+    const fills = (name: string) => readFileSync(join(process.cwd(), "src/components", `${name}.tsx`), "utf8").match(/background: "var\(--color-(info|warning)\)",?\s*color: "[^"]+"/g) ?? [];
+    expect(fills("MissionChat")).toEqual([
+      'background: "var(--color-info)",\n            color: "var(--color-on-info)"',
+      'background: "var(--color-info)", color: "var(--color-on-info)"',
+    ]);
+    expect(fills("CommentThread").map((fill) => fill.replace(/\s+/g, " "))).toEqual(Array(2).fill('background: "var(--color-warning)", color: "var(--color-on-warning)"'));
   });
 });

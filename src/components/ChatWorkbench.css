@@ -46,7 +46,7 @@
 .rl-chat-mode-menu label { display: flex; width: 100%; justify-content: space-between; gap: 8px; font-size: 12px; }
 .rl-chat-mode-menu select { max-width: 175px; color: var(--color-ink); background: var(--color-paper); border: 1px solid var(--color-rule); }
 .rl-chat-mode-picker button[aria-pressed=true] { border-color: var(--color-info); background: color-mix(in srgb,var(--color-info) 10%,var(--color-paper)); }
-.rl-chat-mode-chip.is-build, .rl-chat-build-warning { color: var(--color-warning); }
+.rl-chat-mode-chip.is-build, .rl-chat-build-warning { color: var(--color-warning-text); }
 .rl-chat-build-warning { display: block; font-size: 11px; }
 .rl-changes-card { padding: 12px; border: 1px solid var(--color-rule); border-radius: 9px; font-size: 12px; margin: 8px 0; background: var(--color-paper); }
 .rl-changes-card ul { list-style: none; padding: 0; overflow-wrap: anywhere; }

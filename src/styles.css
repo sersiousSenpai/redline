@@ -131,6 +131,7 @@ html[data-theme="aurora"] .rl-plate::after {
   --color-bg-elevated: #29292e;
   --color-on-accent: #ffffff;
   --color-on-info: #1a1a1f;
+  --color-on-warning: #1a1a1f;
   --color-code-bg: #303034;
   --color-code-fg: #fafafa;
   /* Syntax-highlight (highlight.js) token palette — Studio's dark-surface

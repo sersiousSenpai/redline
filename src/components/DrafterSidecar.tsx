@@ -159,7 +159,7 @@ function DraftCommentCard({
           }}
           style={{
             fontSize: "10.5px",
-            color: "var(--color-info)",
+            color: "var(--color-info-text)",
             cursor: "pointer",
           }}
         >

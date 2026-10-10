@@ -42,8 +42,10 @@ export interface ThemeTokens {
   "color-warning-text": string;
   "color-bg-elevated": string;
   "color-on-accent": string;
-  /** What is drawn on an info fill (the composer's send button). */
+  /** What is drawn on an info fill (the composer's send button) and on a
+   *  warning fill (a comment discussion's "Attach to next submit"). */
   "color-on-info": string;
+  "color-on-warning": string;
   "color-code-bg": string;
   "color-code-fg": string;
   /** highlight.js token palette. The code surface stays the theme's own, so on
@@ -196,11 +198,16 @@ function hoverAlpha(ink: string, onto: string[], maxAlpha: number, minContrast: 
   return 0;
 }
 
-/** The first of `candidates` that reads at 4.5:1 on `fill`, else the one that
- *  reads best there. */
+/** The first of `candidates` that reads at 4.5:1 on `fill`. Where none does —
+ *  Red Sand's dark red paper is 4.2:1 on its light blue — the one that reads
+ *  best, taken toward black or white (whichever is further from `fill`) only
+ *  as far as 4.5:1 needs: still the theme's colour, and a label can sit on
+ *  the fill as well as a glyph. */
 function onFill(fill: string, candidates: string[]): string {
-  return candidates.find((c) => wcagContrast(c, fill) >= 4.5) ??
+  const best = candidates.find((c) => wcagContrast(c, fill) >= 4.5) ??
     candidates.reduce((best, c) => (wcagContrast(c, fill) > wcagContrast(best, fill) ? c : best));
+  const extreme = wcagContrast("#000000", fill) > wcagContrast("#ffffff", fill) ? "#000000" : "#ffffff";
+  return mutedInk(extreme, best, 1, 4.5, [fill], false);
 }
 
 export function deriveTokens(base: ThemeBase): ThemeTokens {
@@ -267,8 +274,11 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-bg-elevated": elevated,
     "color-on-accent": onAccent,
     // White, unless the theme's blue is too light for it (Aurora's is
-    // 2.0:1): then whichever of the theme's own paper and ink reads there.
+    // 2.0:1): then whichever of the theme's own paper and ink reads there,
+    // at 4.5:1 so a button's label can use it too.
     "color-on-info": onFill(base.blue, [onAccent, bg, fg]),
+    // White is under 3:1 on twelve themes' yellows.
+    "color-on-warning": onFill(base.yellow, [onAccent, bg, fg]),
     // Dark themes get a subtly elevated code surface; light themes keep the
     // code surface equal to the page so the code area looks unified with the
     // rest of the UI and the dark syntax palette reads at full contrast

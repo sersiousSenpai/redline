@@ -61,7 +61,7 @@ interface SendExtra {
 const ENTRY_BUTTON: CSSProperties = {
   background: "var(--color-bg-elevated)",
   border: "1px solid var(--color-rule)",
-  color: "var(--color-info)",
+  color: "var(--color-info-text)",
   fontSize: "11px",
 };
 
@@ -560,14 +560,14 @@ export const CommentThread = memo(function CommentThread({
               IS this transcript, so there's nothing else to show. The flag
               stays visible collapsed or expanded. */}
           {riderAttached && (
-            <span style={{ color: "var(--color-warning)" }}>
+            <span style={{ color: "var(--color-warning-text)" }}>
               {comment.actionable
                 ? "· added to plan — rides with next submit"
                 : "· attached — rides with next submit"}
             </span>
           )}
           {riderSent && (
-            <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
+            <span className="rl-pulse" style={{ color: "var(--color-warning-text)" }}>
               {comment.actionable
                 ? `· decision sent · ${author} is applying…`
                 : "· sent · riding with this submit…"}
@@ -779,7 +779,7 @@ export const CommentThread = memo(function CommentThread({
               className="self-start rounded px-2 py-1 font-medium"
               style={{
                 background: "var(--color-warning)",
-                color: "var(--color-on-accent)",
+                color: "var(--color-on-warning)",
                 fontSize: "11px",
               }}
               title={
@@ -803,7 +803,7 @@ export const CommentThread = memo(function CommentThread({
                   className="rounded px-2 py-1 font-medium"
                   style={{
                     background: "var(--color-warning)",
-                    color: "var(--color-on-accent)",
+                    color: "var(--color-on-warning)",
                     fontSize: "11px",
                   }}
                 >
@@ -999,7 +999,7 @@ function Composer({
       {files.error && (
         <div
           className="mb-1"
-          style={{ fontSize: "11px", color: "var(--color-warning)" }}
+          style={{ fontSize: "11px", color: "var(--color-warning-text)" }}
         >
           {files.error}
         </div>

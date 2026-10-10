@@ -217,7 +217,7 @@ export function MissionChat({
           style={{
             fontSize: "12px",
             background: "var(--color-info)",
-            color: "var(--color-on-accent)",
+            color: "var(--color-on-info)",
             opacity: status === "streaming" ? 0.5 : 1,
             cursor: status === "streaming" ? "default" : "pointer",
           }}
@@ -314,7 +314,7 @@ function GoalHeader({
               }
             }}
             className="rounded px-2 py-0.5 font-medium"
-            style={{ fontSize: "11px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
+            style={{ fontSize: "11px", background: "var(--color-info)", color: "var(--color-on-info)" }}
           >
             Save
           </button>
