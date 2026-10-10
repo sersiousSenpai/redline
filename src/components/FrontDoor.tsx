@@ -1168,7 +1168,8 @@ export function FrontDoor(props: FrontDoorProps) {
         );
       })()}
 
-      <ReadinessStrip items={setupItem ? readiness.filter((item) => item !== setupItem) : readiness} onFix={handleFix} />
+      {/* The chip's one setup installs every piece it names: none is listed twice. */}
+      <ReadinessStrip items={setupItem ? readiness.filter((item) => item.fix?.kind !== "install-integration") : readiness} onFix={handleFix} />
     </div>
   );
 }

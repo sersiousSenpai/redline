@@ -357,11 +357,15 @@ describe("the composer's fix-it chip", () => {
   it("shows the setup a launch needs as one chip, out of the strip, and its press runs the fix", async () => {
     const onFix = vi.fn(() => Promise.resolve(true));
     const other: ReadinessItem = { id: "mode-paused", state: "blocked", label: "Redline is paused", detail: "Nothing you launch would come back for review." };
-    await mount({ readiness: [INTEGRATION, other], onFix });
+    const skill: ReadinessItem = { id: "skill-stale", state: "blocked", label: "The review skill is out of date", detail: "", fix: { label: "Install integration", kind: "install-integration" } };
+    await mount({ readiness: [INTEGRATION, skill, other], onFix });
+    expect(host.querySelectorAll(".rl-fd-setup")).toHaveLength(1);
     expect(chip()?.textContent).toBe("Install integration");
     expect(chip()?.getAttribute("aria-label")).toBe("The plan hook was removed: Install integration");
-    // Said once: the strip keeps the rest, not this.
+    // Said once: the strip keeps the rest, not the setup — one setup installs
+    // every piece of it.
     expect(host.querySelector(".rl-fd-strip")?.textContent).not.toContain("The plan hook was removed");
+    expect(host.querySelector(".rl-fd-strip")?.textContent).not.toContain("The review skill is out of date");
     expect(host.querySelector(".rl-fd-strip")?.textContent).toContain("Redline is paused");
     await act(async () => chip()!.click());
     expect(onFix).toHaveBeenCalledWith(INTEGRATION);
