@@ -313,19 +313,44 @@ describe("the composer's sentence stays out of App", () => {
   });
 });
 
-// The card's caret (island plan + floating-monochat): only a hover peek opens
-// without reaching for the composer, and nothing deliberate inherits that.
-describe("the card's quiet open", () => {
+// The door's caret and its two keys (10/10 front-door return): nothing that
+// merely happens — a launch, a render, a plan arriving — opens the island,
+// closes it, or moves the caret. Only a gesture does.
+describe("the island never moves on its own", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
-  it("only a hover is quiet, and the bit never outlives the card or a New", () => {
-    const change = app.slice(app.indexOf("const onDoorOpenChange"), app.indexOf("const renderMonochatComposer"));
-    expect(change).toContain('if (open) setDoorSummonedQuiet(via === "hover");');
-    expect(change).toMatch(/if \(!frontDoorOpen\) setDoorSummonedQuiet\(false\);/);
-    expect(app).toMatch(/autoFocusOnShow=\{frontDoorOpen && !doorSummonedQuiet\}/);
-    // New is a click: the blank composer it brings back takes the caret.
+  it("boots shut — resting on the empty plate, never opened over the work", () => {
+    const init = app.slice(app.indexOf("const [frontDoorOpen, setFrontDoorOpen] = useState("), app.indexOf("const [doorCompact"));
+    expect(init).toContain("return false;");
+    expect(app).toMatch(/landing=\{plateAtRest && shellReady/);
+    // The open door hides the native page; the compact card is cut out of it.
+    const overlay = app.slice(app.indexOf("const browserOverlayActive ="), app.indexOf("const browserVisible ="));
+    expect(overlay).toContain("frontDoorOpen ||");
+    expect(overlay).not.toContain("doorCompact");
+  });
+
+  it("a hover never takes the caret; the door, or the chat it holds, takes it on every summons", () => {
+    const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
+    expect(door).toMatch(/autoFocusOnShow=\{where === "door" \? frontDoorOpen : where === "chat" && roomChat\}/);
+    // The type-to-start handoff is the door's alone.
+    expect(door).toContain('focusNonce={where === "door" ? frontDoorFocus : 0}');
+    expect(app).not.toContain("doorSummonedQuiet");
+  });
+
+  it("closes only on navigation the user started — never on a plan arriving", () => {
     const island = app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"));
-    expect(island).toMatch(/onNewChat=\{\(\) => \{[^}]*setDoorSummonedQuiet\(false\)/);
+    expect(island).toContain("surfaceKey={doorNavKey}");
+    const nav = app.match(/const doorNavKey = `([^`]*)`;/);
+    expect(nav, "the navigation key moved").not.toBeNull();
+    expect(nav![1]).not.toContain("activeId");
+    // The chips still reset on what is on screen, a plan arriving included.
+    expect(app).toMatch(/const islandSurfaceKey = `[^`]*activeId[^`]*`;/);
+  });
+
+  it("builds the in-flight launch once per launch, not per render", () => {
+    const flight = app.slice(app.indexOf("const frontDoorFlight ="), app.indexOf("const frontDoorFlight =") + 400);
+    expect(flight).toMatch(/^const frontDoorFlight = useMemo\(/);
+    expect(flight).toContain("[pendingLaunch, runFlight]");
   });
 });
 

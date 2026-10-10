@@ -129,9 +129,9 @@ const STEPS: TourStep[] = [
   {
     id: "landing",
     anchor: "landing",
-    // The composer lives in the Redline card, which floats up from the
-    // footer — so the coachmark sits above it, never on top of it.
-    placement: "top",
+    // The door's composer, resting on the plate or open: the coachmark
+    // sits below it, where the recents would be on a first run.
+    placement: "bottom",
     title: "Type what you want to build",
     lead: (
       <>
@@ -448,7 +448,9 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
   });
 
   return (
-    <div className="fixed inset-0" style={{ zIndex: 60 }}>
+    // A modal layer of its own: the open front door's inert sweep leaves it
+    // live (its "type your prompt" step opens the door under it).
+    <div className="fixed inset-0" style={{ zIndex: 60 }} data-rl-modal-layer>
       {/* Scrim. With a target, dim four bands around it so the region stays
           lit; otherwise dim the whole window. Bands absorb clicks so the app
           underneath isn't interactable mid-tour. */}

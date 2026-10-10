@@ -52,7 +52,7 @@ const ALLOWLIST: Record<string, { maxMs: number; reason: string }> = {
   springInKeyframes: {
     maxMs: 620,
     reason:
-      "the island-to-surface spring (SpringSwap, the floating browser island): once per swap, the corners ease 18 → 24 → 14 px while the transform carries the motion",
+      "the island-to-surface spring (SpringSwap, the pill's compact card): once per swap, the corners ease 18 → 24 → 14 px while the transform carries the motion",
   },
 };
 
@@ -457,7 +457,7 @@ describe("paint guard (perf rule 6)", () => {
     );
     const spring = waapi.filter((u) => u.name === "springInKeyframes");
     expect(spring.map((u) => u.rel).sort()).toEqual([
-      "components/MonochatIsland.tsx",
+      "components/MonochatCard.tsx",
       "components/SpringSwap.tsx",
     ]);
     for (const u of spring) {

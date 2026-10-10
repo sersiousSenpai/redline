@@ -348,7 +348,7 @@ import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
-import { MonochatIsland, type IslandSize, type SummonVia } from "./components/MonochatIsland";
+import { MonochatIsland } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -732,16 +732,25 @@ const getFrontDoorText = () => readSharedDraft(FRONT_DOOR_TEXT_KEY);
 const setFrontDoorText = (text: string) => writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
 
 function App() {
-  // Every launch opens the Redline card, on every surface — boot lands on it
-  // with the caret in its composer, which also makes it stay. There is no
-  // resting door on the plate any more: the card is the one way in, and it
-  // closes on ⌄ / Esc / ⌘J or on anything that changes the surface key (a
-  // held plan claiming the plate). The chat-surface seed is still consumed so
-  // its key can't linger.
+  // The Front Door. Every launch starts with it SHUT: on the document's empty
+  // plate it rests there instead — headline, composer and recents in the
+  // plate's free area — without taking the caret (typing with nothing focused
+  // flows into it), and anywhere else there is only the footer pill. Opening
+  // it is always a gesture: the pill, Shift+Enter, ⌘J, ⌘⇧N, a press or a
+  // keystroke in the resting composer. The chat-surface seed is still
+  // consumed so its key can't linger.
   const [frontDoorOpen, setFrontDoorOpen] = useState(() => {
     takeDockSeed(localStorage);
-    return true;
+    return false;
   });
+  // The pill's compact card, sprung out by a hover. Never open at launch and
+  // never re-opened by coming back to a surface.
+  const [doorCompact, setDoorCompact] = useState(false);
+  // The door is up: open, or resting on the empty plate.
+  const [doorVisible, setDoorVisible] = useState(false);
+  // Only opening a chat puts the chat in the door; any other summons is the
+  // door's home, its own composer.
+  const [chatInRoom, setChatInRoom] = useState(false);
   // One launch through the card at a time: a context read can make the
   // hand-off take a beat, and a second ⏎ inside it must not launch twice.
   const [frontDoorLaunching, setFrontDoorLaunching] = useState(false);
@@ -750,9 +759,6 @@ function App() {
   const [browserIslandPage, setBrowserIslandPage] = useState<BrowserIslandPage | null>(null);
   // The context chips the user flipped, for the surface they flipped them on.
   const [chipPresses, setChipPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  // The chat pose's ⤢. Not persisted: it is how roomy the card should be for
-  // now, not a layout to restore on the next launch.
-  const [islandSize, setIslandSize] = useState<IslandSize>("regular");
   const [monochatBusy, setMonochatBusy] = useState(false);
   const [monochatForks, setMonochatForks] = useState<Set<string>>(() => new Set());
   const reportMonochatActivity = useCallback((key: string, active: boolean) => setMonochatForks(previous => {
@@ -1458,6 +1464,8 @@ function App() {
   currentChatIdRef.current = chatId;
   const chatTitle =
     chats.find((c) => c.companionId === chatId)?.title ?? null;
+  // The open door is holding the chat rather than its own composer.
+  const roomChat = frontDoorOpen && chatInRoom && !!chatId;
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
   // design — a seed that outlived a restart would re-send an old sentence into
   // a conversation that already has it.
@@ -1481,8 +1489,8 @@ function App() {
   // `landing`), and landing on one with no body would show an empty plate.
   useEffect(() => {
     if (mainSurface !== "chat") return;
+    // The document's empty plate is where the door rests.
     selectSurfaceRef.current("document");
-    setFrontDoorOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainSurface]);
 
@@ -1982,18 +1990,22 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // ⌘J opens the front door; surface discussion controls stay local.
+  // ⌘J toggles the front door; surface discussion controls stay local. An
+  // open compact card grows into the door, draft and all.
+  const toggleDoor = useCallback(() => {
+    setDoorCompact(false);
+    setFrontDoorOpen(value => !value);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!isDockKey(e)) return;
       e.preventDefault();
-      setFrontDoorOpen(value => !value);
+      toggleDoor();
     };
-    const toggleFromBrowser = () => setFrontDoorOpen(value => !value);
     window.addEventListener("keydown", onKey);
-    window.addEventListener("redline:toggle-monochat", toggleFromBrowser);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleFromBrowser); };
-  }, []);
+    window.addEventListener("redline:toggle-monochat", toggleDoor);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleDoor); };
+  }, [toggleDoor]);
   const codeReview = useReview();
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
@@ -2305,7 +2317,10 @@ function App() {
       alive = false;
     };
   }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
-  // A chat lives in the Redline card; surface docks remain columns.
+  // The Front Door is the plate at REST — no document, no draft, nothing of
+  // its own to cover — and that is where the door rests instead of the pill.
+  const plateAtRest = mainSurface === "document" && plateMode === "door";
+  // The front door owns its full-screen layer; surface docks remain columns.
   const conversationExpanded = false;
 
 
@@ -2624,14 +2639,15 @@ function App() {
       } else if (anchor === "discussion" && paneCollapsed) {
         revealPane();
         tourRevealRestore.current = () => setPaneCollapsed(true);
-      } else if (anchor === "landing" && !frontDoorOpen) {
-        // The composer is only measurable while the card is open.
+      } else if (anchor === "landing" && !doorVisible) {
+        // The composer is only measurable while the door is up — resting on
+        // the empty plate, or open anywhere else.
         setFrontDoorOpen(true);
         tourRevealRestore.current = () => setFrontDoorOpen(false);
       }
     },
     [
-      frontDoorOpen,
+      doorVisible,
       termCollapsed,
       termFullscreen,
       termHeight,
@@ -2769,6 +2785,7 @@ function App() {
   const jumpToNeedsYou = useCallback(() => {
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
+    setDoorCompact(false);
     revealTerm();
     void ensureTerminalReady().then((dock) => dock?.jumpToNeedsYou());
   }, [revealTerm, ensureTerminalReady]);
@@ -6366,9 +6383,10 @@ function App() {
       lastLaunchProject;
     setFrontDoorText(markdown);
     setFrontDoorProject({ path: initialProject });
-    // A plan to launch, so the card's composer — not a chat it was holding.
+    // A plan to launch, so the door's composer — not a chat it was holding.
     setFrontDoorDest("plan");
-    setChatId(null);
+    setChatInRoom(false);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(value => value + 1);
   };
@@ -6942,8 +6960,10 @@ function App() {
   // when the user may act.
   const tourActive =
     tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
-  // Not the Redline card: it is cut out of the webview, never laid over it.
+  // The open door hides the page. The compact card does not: it is cut out
+  // of the webview (useNativeOverlayRegion), never laid over it.
   const browserOverlayActive =
+    frontDoorOpen ||
     !!sendConfirm ||
     showReadme ||
     showFeedback ||
@@ -7346,12 +7366,16 @@ function App() {
     setCombinePreview(null);
   };
 
-  // ── What the card attaches ─────────────────────────────────────────────
-  // The key the card closes on, and the one chip presses reset on. The draft
-  // id only names a place while the Drafter is showing. Off it, the id still
-  // changes — a first launch mints one in an effect — and that must not read
-  // as navigation and close the boot card.
+  // ── What the island attaches ───────────────────────────────────────────
+  // Two keys, for two questions. The chips are about WHAT is on screen, so
+  // their presses reset whenever that changes — a plan arriving included.
+  // The door and the card close only when the user goes somewhere: a plan
+  // landing selects itself on every surface, and that must not shut a door
+  // someone is typing in. The draft id only names a place while the Drafter
+  // is showing. Off it, the id still changes — a first launch mints one in an
+  // effect — and that must not read as anything at all.
   const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
+  const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
   const viewedPlan = sessionReady && activeId ? viewedRevision ?? null : null;
   const contextChips = surfaceChips(activeSurface, {
     page: browserIslandPage,
@@ -7461,6 +7485,9 @@ function App() {
       // composer would relaunch on the next ⏎.
       setFrontDoorText("");
       setFrontDoorAttachments([]);
+      // Handed off: the compact card shrinks back into the pill, which shows
+      // the work. The open door shows it in place.
+      setDoorCompact(false);
     } finally {
       frontDoorLaunchingRef.current = false;
       setFrontDoorLaunching(false);
@@ -7484,8 +7511,9 @@ function App() {
     const prompt = composePrompt(getFrontDoorText(), frontDoorAttachments);
     if (!prompt || frontDoorLaunchingRef.current) return;
     // Measured HERE, synchronously, while the island is still on screen — one
-    // render later it is gone. This is the box the Drafter springs out of.
-    const island = document.querySelector(".rl-fd-island");
+    // render later it is gone. This is the box the Drafter springs out of:
+    // the door's composer (a chat's in the dock is not the one sending).
+    const island = document.querySelector(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
     const r = island?.getBoundingClientRect();
     const from = r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
     frontDoorLaunchingRef.current = true;
@@ -7501,7 +7529,7 @@ function App() {
     }).finally(() => { frontDoorLaunchingRef.current = false; });
   };
 
-  // The Front Door's composer opening into a CHAT, inside the same card: the
+  // The Front Door's composer opening into a CHAT, inside the room: the
   // sentence you were typing becomes the first turn of the thread around it.
   //
   // The mint is awaited, but nothing waits on the await: `chatOpening` holds
@@ -7513,7 +7541,7 @@ function App() {
   // stays per-turn. ONE cwd for the pre-warm and the room, or they never match.
   const chatCwd = activeSurface.projectPath ?? (sidebarTab.kind === "folder" ? sidebarTab.id : null);
   const chatPrewarmKey =
-    frontDoorOpen && !chatId && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
+    doorVisible && !roomChat && frontDoorDest === "chat" && frontDoorBackend.backend === "claude-code"
       ? JSON.stringify([chatCwd, frontDoorBackend])
       : null;
   useEffect(() => {
@@ -7543,7 +7571,7 @@ function App() {
     frontDoorLaunchingRef.current = true;
     setChatOpening(true);
     setPanelBreaks({ sidebar: false, pane: false });
-    // The card GROWS into the chat in place — the composer you were typing in
+    // The door GROWS into the chat in place — the composer you were typing in
     // is the bottom of the thread you are now inside — and `selectSurface` is
     // deliberately not called, because nothing is being navigated away from.
     setFrontDoorOpen(true);
@@ -7559,6 +7587,7 @@ function App() {
       ]);
       const context = (await chatAttachment(chat.companionId, blocks))?.context;
       setChatId(chat.companionId);
+      setChatInRoom(true);
       // The room sends it, not App — see `ChatRoomProps.seed` for why that
       // ordering is what keeps the first bubble from flickering out.
       setChatSeed({ companionId: chat.companionId, text: prompt, id: crypto.randomUUID(), target: activeSurface, context });
@@ -7584,6 +7613,8 @@ function App() {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
+    setChatInRoom(true);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setPanelBreaks({ sidebar: false, pane: false });
   };
@@ -7717,10 +7748,11 @@ function App() {
   };
 
   // A4 — the landing's type-to-start handoff. Typing on the empty document
-  // plate, with the card closed, opens it and carries the keystrokes into its
-  // composer: from the first printable key until the composer takes focus,
-  // keydowns buffer here (lib/landing.ts is the pure machine) and the composer
-  // drains the buffer in a LAYOUT effect, so the handoff is lossless.
+  // plate, with nothing focused, engages the door resting there and carries
+  // the keystrokes into its composer: from the first printable key until the
+  // composer takes focus, keydowns buffer here (lib/landing.ts is the pure
+  // machine) and the composer drains the buffer in a LAYOUT effect, so the
+  // handoff is lossless.
   // Eligible only where nothing else owns keys — a modal up, a focused input,
   // or the terminal (isEditableTarget catches xterm's hidden textarea) must
   // never have its typing hijacked.
@@ -7744,8 +7776,9 @@ function App() {
   // anything — it would only ever show on a virgin install. This is that way.
   const openFrontDoor = useCallback(() => {
     setFrontDoorDest("plan");
-    // "New plan" means the composer, even when the card was holding a chat.
-    setChatId(null);
+    // "New plan" means the composer, even when the door was holding a chat.
+    setChatInRoom(false);
+    setDoorCompact(false);
     setFrontDoorOpen(true);
     setFrontDoorFocus(n => n + 1);
   }, []);
@@ -7852,7 +7885,7 @@ function App() {
             const d = headerSurfaceList.find((s) => s.id === t.surface);
             if (d) navigateTo({ surface: d.id, tab: t.tab });
           },
-          toggleDock: () => setFrontDoorOpen(value => !value),
+          toggleDock: toggleDoor,
           openConversation: (kind) => {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
@@ -7943,7 +7976,7 @@ function App() {
           />
         ) : (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <button type="button" onClick={() => setFrontDoorOpen(true)}>Open conversation</button>
+            <button type="button" onClick={() => openChat(chatId)}>Open conversation</button>
           </div>
         )
       ) : (
@@ -7988,12 +8021,12 @@ function App() {
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
 
   // The door's one flight pill: its own plan launch or its own run, whichever
-  // started last.
-  const frontDoorPlan = (pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island") ? { ...pendingLaunch, kind: "plan" as const } : null;
-  const frontDoorFlight =
-    frontDoorPlan && runFlight
-      ? (runFlight.startedAt > frontDoorPlan.startedAt ? runFlight : frontDoorPlan)
-      : (runFlight ?? frontDoorPlan);
+  // started last. Built once per launch, not per render: the composer reads a
+  // new object as a new launch.
+  const frontDoorFlight = useMemo(() => {
+    const plan = pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? { ...pendingLaunch, kind: "plan" as const } : null;
+    return plan && runFlight ? (runFlight.startedAt > plan.startedAt ? runFlight : plan) : (runFlight ?? plan);
+  }, [pendingLaunch, runFlight]);
 
   // The welcome's pills: the way back into recent plans, chats and browser
   // tabs. Tabs are ranked research-first against the unresolved plans, read
@@ -8008,13 +8041,13 @@ function App() {
   const summariesRef = useRef(summaries);
   summariesRef.current = summaries;
   useEffect(() => {
-    if (!frontDoorOpen) return;
+    if (!doorVisible) return;
     let live = true;
     void loadDoorTabs(invoke, summariesRef.current)
       .then((tabs) => { if (live) setDoorTabs(tabs); })
       .catch(() => {});
     return () => { live = false; };
-  }, [frontDoorOpen, unresolvedKey]);
+  }, [doorVisible, frontDoorOpen, unresolvedKey]);
   const doorRecentItems = useMemo(
     () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
     [summaries, chats, doorTabs],
@@ -8033,28 +8066,44 @@ function App() {
     setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
     selectSurface("browser");
   };
-  // A hover peek opens the card without reaching for the composer — the caret
-  // stays in whatever you were working in. A click or the shortcut lands it.
-  // Re-summoning returns to whatever the card held, chat included; the
-  // heading's New is the way back to a blank composer.
-  const [doorSummonedQuiet, setDoorSummonedQuiet] = useState(false);
-  const onDoorOpenChange = (open: boolean, via?: SummonVia) => {
-    if (open) setDoorSummonedQuiet(via === "hover");
-    setFrontDoorOpen(open);
-  };
-  // ⌘J and the other direct openers never pass through the line above, so a
-  // quiet bit left by a peek must not outlive the card it was about.
+  // The open door holds the chat only while it is open: shut, it goes back
+  // to being the door's home for the next summons.
   useEffect(() => {
-    if (!frontDoorOpen) setDoorSummonedQuiet(false);
+    if (!frontDoorOpen) setChatInRoom(false);
   }, [frontDoorOpen]);
-  const renderMonochatComposer = (accessories?: React.ReactNode, welcome = false, workbench?: ChatWorkbenchComposer) => (
+  // The compact card launches only in place — Plan or Run. Elsewhere than the
+  // browser its menu also offers the Drafter and Chat, and picking either
+  // grows the card into the door, which takes that destination.
+  const cardDestination: LaunchDestination = frontDoorDest === "run" ? "run" : "plan";
+  const growCardTo = (next: LaunchDestination) => {
+    setFrontDoorDest(next);
+    if (next !== "drafter" && next !== "chat") return;
+    setDoorCompact(false);
+    setFrontDoorOpen(true);
+  };
+  // One composer in three places — the door's own (resting or open), the
+  // compact card's, a chat's — and one sentence: each is a FrontDoor on the
+  // same shared draft, so what you typed in one is there in the next.
+  const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
+    const card = where === "card";
+    const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat;
+    const destination = where === "chat" ? "chat" : card ? cardDestination : frontDoorDest;
+    return (
               <FrontDoor
-                visible={shellReady && frontDoorOpen}
+                visible={shellReady && shown}
                 floating
-                welcome={welcome}
+                welcome={where === "door"}
                 recents={doorRecentItems}
                 onOpenRecent={openDoorRecent}
-                autoFocusOnShow={frontDoorOpen && !doorSummonedQuiet}
+                chips={<SurfaceChips
+                  chips={visibleChips(contextChips, destination)}
+                  pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
+                  onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
+                />}
+                // A hover never takes the caret: the card's composer waits
+                // for a click. The door's — or the chat it holds — takes it on
+                // every summons.
+                autoFocusOnShow={where === "door" ? frontDoorOpen : where === "chat" && roomChat}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 workbench={workbench}
@@ -8082,8 +8131,11 @@ function App() {
                 onDrafter={drafterFromFrontDoor}
                 onChat={() => void chatFromFrontDoor()}
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
-                destination={frontDoorDest}
-                onDestinationChange={setFrontDoorDest}
+                // The browser's card is Plan and Run alone: a page has no
+                // Drafter or Chat of its own to grow into.
+                allowedDestinations={card && mainSurface === "browser" ? ["plan", "run"] : undefined}
+                destination={card ? cardDestination : frontDoorDest}
+                onDestinationChange={card ? growCardTo : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -8103,25 +8155,30 @@ function App() {
                   const p = frontDoorFlight;
                   if (!p) return;
                   setFrontDoorOpen(false);
+                  setDoorCompact(false);
                   revealTerm();
                   terminalsRef.current?.selectTab(p.terminalId);
                   terminalsRef.current?.hailTerminal(p.terminalId);
                 }}
                 onCreateProject={createFrontDoorProject}
-                focusNonce={frontDoorFocus}
+                // The handoff is the door's alone: a card or a chat on the
+                // same sentence must not take the caret or the seed with it.
+                focusNonce={where === "door" ? frontDoorFocus : 0}
                 consumeSeed={consumeLandingSeed}
-                // Recent chats — the contextual way back into a conversation.
-                // Bounded: this is a way in, not an index; the room's own
-                // `Chats ▾` holds the full list.
-                chats={chats
+                // Recent chats — the contextual way back into a conversation,
+                // in the door alone: never in the compact card. Bounded: this
+                // is a way in, not an index; the room's own `Chats ▾` holds the
+                // full list.
+                chats={where === "door" ? chats
                   .slice(0, 4)
-                  .map((c) => ({ id: c.companionId, title: c.title }))}
-                onOpenChat={openChat}
+                  .map((c) => ({ id: c.companionId, title: c.title })) : undefined}
+                onOpenChat={where === "door" ? openChat : undefined}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
-                dictationEnabled={!dockOwnsMic && frontDoorOpen}
+                dictationEnabled={!dockOwnsMic && shown}
               />
-  );
+    );
+  };
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -10571,30 +10628,26 @@ function App() {
       )}
       <MonochatIsland
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
-        surfaceKey={islandSurfaceKey}
+        landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
+        surfaceKey={doorNavKey}
+        onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
-        onOpenChange={onDoorOpenChange}
-        // The chat lives in the same card: it grows to hold the thread, and
-        // a New in its heading goes back to a blank composer — with the caret
-        // in it, even in a card a hover opened: New is a click, not a glance.
-        pose={chatId ? "chat" : "compose"}
-        size={islandSize}
-        onSizeChange={setIslandSize}
-        onNewChat={() => { setChatId(null); setChatSeed(null); setDoorSummonedQuiet(false); refreshChats(); }}
-        context={chatId ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title)}
-        busy={frontDoorLaunching || monochatBusy || monochatForks.size > 0}
-        chips={<SurfaceChips
-          chips={visibleChips(contextChips, chatId ? "chat" : frontDoorDest)}
-          pressed={(chip) => isChipPressed(chip, chipPresses, islandSurfaceKey)}
-          onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
-        />}
+        onOpenChange={setFrontDoorOpen}
+        compactOpen={doorCompact}
+        onCompactChange={setDoorCompact}
+        compact={doorCompact && renderMonochatComposer("card")}
+        context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
+        busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
+        // A chat in the room: its heading's New goes back to a blank
+        // composer, the conversation kept in History.
+        onNewChat={roomChat ? () => { setChatId(null); setChatSeed(null); setChatInRoom(false); refreshChats(); } : undefined}
       >
-        <div ref={setChatRegularSlot} hidden={!chatId} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
-        {!chatId && renderMonochatComposer(undefined, true)}
+        <div ref={setChatRegularSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
+        {!roomChat && renderMonochatComposer("door")}
       </MonochatIsland>
       {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
             <ChatRoom
-              composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer(actions, false, workbench) }}
+              composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer("chat", actions, workbench) }}
               harness={frontDoorBackend}
               modelCatalogs={modelCatalogs}
               onHarnessChange={setFrontDoorBackend}
@@ -10628,12 +10681,11 @@ function App() {
               // whatever folder the user is browsing; HOME when
               // there is none.
               cwd={chatCwd}
-              dictationEnabled={!dockOwnsMic && frontDoorOpen}
-              // The roomy reading layout only at the card's ⤢ size.
-              expanded={frontDoorOpen && islandSize === "tall"}
+              dictationEnabled={!dockOwnsMic && roomChat}
+              // The room reads at plate scale.
+              expanded={roomChat}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
-              // Collapses the card; the conversation is still in it on the
-              // next open.
+              // Out of the room; the conversation is a recent, or History, away.
               onClose={() => setFrontDoorOpen(false)}
               seed={
                 chatSeed?.companionId === chatId

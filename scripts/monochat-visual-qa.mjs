@@ -11,11 +11,11 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.resolve(root, process.argv[2] ?? "docs/redline-card-qa-2026-10-09");
+const output = path.resolve(root, process.argv[2] ?? "docs/front-door-qa-2026-10-10");
 const temporary = await mkdtemp(path.join(tmpdir(), "redline-browser-visual-qa-"));
 const service = path.join(root, "fixtures/monochat-aurora-qa/services.ts");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const report = { startedAt: new Date().toISOString(), fixture: "fixtures/monochat-aurora-qa", screenshots: [], checks: [], errors: [], sourceSha256: {}, limitations: ["Headless Chrome component fixture; not WKWebView/native hit-testing or live Redline.", "Agent, dictation, audio and Tauri service interfaces are synthetic; no capture, database, user profile or agent launch.", "Document, browser page and recents contents are illustrative. Production chat, island, chips, setup, menus and theme components are imported intact."] };
+const report = { startedAt: new Date().toISOString(), fixture: "fixtures/monochat-aurora-qa", screenshots: [], checks: [], errors: [], sourceSha256: {}, limitations: ["Headless Chrome component fixture; not WKWebView/native hit-testing or live Redline.", "Agent, dictation, audio and Tauri service interfaces are synthetic; no capture, database, user profile or agent launch.", "Document, browser page and recents contents are illustrative. Production chat, island, compact card, chips, setup, menus and theme components are imported intact."] };
 let server, chrome, cdp;
 class CDP {
   constructor(url) {
@@ -40,7 +40,7 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function bounds(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right,scrollHeight:e.scrollHeight,clientHeight:e.clientHeight,visible:r.width>0&&r.height>0,within:r.x>=-1&&r.y>=-1&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1};})()`); }
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/hooks/useFrontDoorConversation.ts", "src/components/MonochatIsland.tsx", "src/components/MonochatIsland.css", "src/components/SurfaceChips.tsx", "src/lib/surfaceContext.ts", "src/components/ChatRoom.tsx", "src/components/MonochatTrace.tsx", "src/components/FrontDoor.tsx", "src/components/ComposerMenu.tsx", "src/components/ComposerMenu.css", "src/App.tsx", "src/components/IntegrationSetupDialog.tsx", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
+  for (const file of ["src/hooks/useFrontDoorConversation.ts", "src/components/MonochatIsland.tsx", "src/components/MonochatIsland.css", "src/components/MonochatCard.tsx", "src/components/MonochatCard.css", "src/components/SurfaceChips.tsx", "src/lib/surfaceContext.ts", "src/components/ChatRoom.tsx", "src/components/MonochatTrace.tsx", "src/components/FrontDoor.tsx", "src/components/ComposerMenu.tsx", "src/components/ComposerMenu.css", "src/App.tsx", "src/components/IntegrationSetupDialog.tsx", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root,file))).digest("hex");
   server = await createServer({ configFile:false, root, cacheDir:path.join(temporary,"vite-cache"), optimizeDeps:{entries:["fixtures/monochat-aurora-qa/index.html"], include:["@tauri-apps/plugin-deep-link", "@tauri-apps/api/webview", "@tauri-apps/api/dpi", "@xterm/xterm", "@xterm/addon-fit", "@xterm/addon-webgl"]}, plugins:[react(),tailwindcss()], resolve:{alias:[
     {find:/^.*\/hooks\/useAgentTurn$/,replacement:service}, {find:/^.*\/audio\/useReadAloud$/,replacement:service}, {find:/^.*\/lib\/useDictation$/,replacement:service},
     ...["@tauri-apps/api/core","@tauri-apps/api/event","@tauri-apps/api/window","@tauri-apps/plugin-dialog","@tauri-apps/plugin-opener"].map(find=>({find,replacement:service}))
@@ -51,8 +51,11 @@ try {
   if(!port)throw new Error("Chrome did not start");
   const targets=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json(); cdp=new CDP(targets.find(t=>t.type==="page").webSocketDebuggerUrl);
   await cdp.call("Page.enable");await cdp.call("Runtime.enable");await cdp.call("Log.enable");
-  const card = () => bounds('.rl-monochat-card');
-  const cardOpen = "!document.querySelector('.rl-monochat-card').hidden";
+  const card = () => bounds('.rl-monochat-float');
+  const cardOpen = "!!document.querySelector('.rl-monochat-float')";
+  const pose = "document.querySelector('.rl-monochat').dataset.pose";
+  const doorComposer = "document.querySelector('.rl-frontdoor-focus [data-chat-composer] textarea')";
+  const move = (x, y) => cdp.call('Input.dispatchMouseEvent',{type:'mouseMoved',x,y});
   for(const [width,height] of [[1440,960],[900,640],[480,720]]) {
     const size=`${width}x${height}`;
     await cdp.call("Emulation.setDeviceMetricsOverride",{width,height,deviceScaleFactor:1,mobile:false});
@@ -61,85 +64,105 @@ try {
     let ready=false;for(let i=0;i<150;i++){if(await cdp.evaluate("document.documentElement.dataset.qaReady==='true'")){ready=true;break;}await delay(100);}
     if(!ready)throw new Error(`Fixture did not render: ${report.errors.join("\n")}`);
     await delay(700); await settle();
-    // Boot: the card is open over an empty plate, carrying the recents, and the tour can anchor on it.
-    await screenshot(`${size}-boot`);
-    const boot = await card(), notch = await bounds('.rl-monochat-notch'), footer = await bounds('.rl-app-footer');
-    check(`${size} boot opens the card with the caret in its composer`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement===document.querySelector('[data-chat-composer] textarea')"));
-    check(`${size} card bounded, centred, at most 640 wide in compose`, boot.within && Math.abs(boot.x + boot.width/2 - width/2) < 1 && boot.width <= 641, boot);
-    check(`${size} card floats above the pill and the footer`, boot.bottom <= notch.y + 1 && boot.bottom < footer.y, { boot, notch, footer });
-    check(`${size} no hero headline anywhere`, await cdp.evaluate("!document.querySelector('.rl-monochat-card h1, .rl-monochat-card h2')"));
-    check(`${size} recents sit above the composer`, await cdp.evaluate("(() => { const r=document.querySelector('[aria-label=\"Jump back in\"]'); const i=document.querySelector('.rl-fd-island'); return !!r && r.getBoundingClientRect().bottom <= i.getBoundingClientRect().top + 1; })()"));
-    check(`${size} page recents capped at four`, await cdp.evaluate("document.querySelectorAll('.rl-fd-browse').length===4"));
-    check(`${size} tour anchor measurable at boot`, (await bounds('[data-tour="landing"]'))?.visible);
-    check(`${size} the workspace is not made inert`, await cdp.evaluate("!document.querySelector('.qa-nav').closest('[inert]')"));
-    const islandBefore = await bounds('.rl-fd-island');
+    // Boot on the empty plate: the door rests there — headline, composer,
+    // recents — with no pill and no caret taken.
+    await screenshot(`${size}-rest`);
+    const footer = await bounds('.rl-app-footer');
+    check(`${size} boot rests the door on the empty plate`, await cdp.evaluate(`${pose}==='entry'`) && !!await cdp.evaluate("document.querySelector('.rl-fd-welcome-hero h1')?.textContent.includes('Every build starts as a draft.')"));
+    check(`${size} boot takes no caret and opens nothing modal`, await cdp.evaluate("document.activeElement===document.body && !document.querySelector('[aria-modal]') && !document.querySelector('.qa-nav').closest('[inert]')"));
+    check(`${size} no pill while the door rests`, await cdp.evaluate("getComputedStyle(document.querySelector('.rl-monochat-notch')).visibility==='hidden'"));
+    check(`${size} recents sit below the composer`, await cdp.evaluate("(() => { const r=document.querySelector('[aria-label=\"Jump back in\"]'); const i=document.querySelector('.rl-frontdoor-focus .rl-fd-island'); return !!r && r.getBoundingClientRect().top >= i.getBoundingClientRect().bottom - 1; })()"));
+    check(`${size} page recents never scroll`, await cdp.evaluate("(() => { const l=document.querySelector('.rl-fd-browse-list'); return !l || l.scrollHeight <= l.clientHeight + 1; })()"));
+    check(`${size} tour anchor measurable at rest`, (await bounds('[data-tour="landing"]'))?.visible);
+    // A press in the resting composer engages it: the backdrop spreads, the box stays put.
+    const restBox = await bounds('.rl-frontdoor-focus .rl-fd-island');
+    await click('.rl-frontdoor-focus .rl-fd-input');
+    const engagedBox = await bounds('.rl-frontdoor-focus .rl-fd-island');
+    check(`${size} a press engages the resting door as a modal`, await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate("!!document.querySelector('[role=dialog][aria-modal=true]')"));
+    check(`${size} engaging never moves the composer`, Math.abs(engagedBox.y-restBox.y)<1 && Math.abs(engagedBox.x-restBox.x)<1, { restBox, engagedBox });
+    check(`${size} the welcome stays until a keystroke`, await cdp.evaluate("!document.querySelector('.rl-frontdoor-focus .rl-frontdoor').classList.contains('is-engaged')"));
     await cdp.call("Input.insertText",{text:"Plan the billing export"}); await settle();
-    const islandAfter = await bounds('.rl-fd-island');
-    check(`${size} typing drops the recents and keeps the composer in place`, await cdp.evaluate("!document.querySelector('[aria-label=\"Jump back in\"]')") && Math.abs(islandAfter.bottom - islandBefore.bottom) < 1, { islandBefore, islandAfter });
-    await screenshot(`${size}-typing`);
+    const typedBox = await bounds('.rl-frontdoor-focus .rl-fd-island');
+    check(`${size} typing fades the welcome and keeps the composer in place`, await cdp.evaluate("document.querySelector('.rl-frontdoor-focus .rl-frontdoor').classList.contains('is-engaged')") && Math.abs(typedBox.y-engagedBox.y)<1, { engagedBox, typedBox });
+    await screenshot(`${size}-engaged`);
     await cdp.evaluate("window.__qa.setText('')"); await settle();
-    // Esc from inside closes; the pill is centred in the footer row.
     await key('Escape','Escape',27);
-    check(`${size} Esc collapses to the pill`, !await cdp.evaluate(cardOpen) && await cdp.evaluate("getComputedStyle(document.querySelector('.rl-monochat-notch')).visibility==='visible'"));
+    check(`${size} Esc returns the door to rest`, await cdp.evaluate(`${pose}==='entry'`));
+    // Document surface: the pill, centred in the footer row.
+    await cdp.evaluate("window.__qa.setSurface('Document')"); await settle();
     const pill = await bounds('.rl-monochat-notch');
     check(`${size} pill centred in the footer row`, Math.abs(pill.x+pill.width/2-width/2)<1 && Math.abs(pill.y+pill.height/2-footer.y-footer.height/2)<1 && pill.width===160 && pill.height===40, { pill, footer });
     check(`${size} pill clear of footer controls`, pill.x>=(await bounds('.rl-footer-status')).right && pill.right<=(await bounds('.rl-footer-actions')).x);
     await screenshot(`${size}-pill`);
-    // Document surface: hover peek, leave, collapse.
-    await cdp.evaluate("window.__qa.setSurface('Document')"); await settle();
+    // Hover springs the compact card out, without the caret.
     await cdp.evaluate("document.querySelector('#qa-document-focus').focus()");
-    await cdp.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:pill.x+pill.width/2,y:pill.y+pill.height/2}); await delay(900); await settle();
-    check(`${size} a hover peeks the card open without taking focus`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
-    check(`${size} the plan surface offers its own chip, pressed`, await cdp.evaluate("[...document.querySelectorAll('.rl-context-chips button')].map(b=>b.textContent+':'+b.getAttribute('aria-pressed')).join()==='This plan · v3:true'"));
-    await screenshot(`${size}-peek-document`);
-    await cdp.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:20,y:height/2}); await delay(700); await settle();
-    check(`${size} leaving an untouched peek collapses it`, !await cdp.evaluate(cardOpen));
-    // Click opens and engages: clicks elsewhere do not dismiss it.
-    await click('.rl-monochat-notch');
-    check(`${size} a click opens and focuses the composer`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement===document.querySelector('[data-chat-composer] textarea')"));
-    await click('.qa-nav strong'); await cdp.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:20,y:height/2}); await delay(700); await settle();
-    check(`${size} an engaged card survives clicks and the pointer leaving`, await cdp.evaluate(cardOpen));
-    await click('.rl-context-chips button');
-    check(`${size} a chip toggles off`, await cdp.evaluate("document.querySelector('.rl-context-chips button').getAttribute('aria-pressed')==='false'"));
+    await move(pill.x+pill.width/2, pill.y+pill.height/2); await delay(1200); await settle();
+    const peek = await card();
+    check(`${size} a resting pointer springs the compact card out without taking focus`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
+    check(`${size} the card is bounded, centred and above the pill`, peek?.within && Math.abs(peek.x + peek.width/2 - width/2) < 1 && peek.width <= 641 && peek.bottom <= pill.y + 1, { peek, pill });
+    check(`${size} the card carries the surface's chip, pressed`, await cdp.evaluate("[...document.querySelectorAll('.rl-monochat-float .rl-context-chips button')].map(b=>b.textContent+':'+b.getAttribute('aria-pressed')).join()==='This plan · v3:true'"));
+    check(`${size} the card holds no headline, recents or History`, await cdp.evaluate("!document.querySelector('.rl-monochat-float h1, .rl-monochat-float [aria-label=\"Jump back in\"], .rl-monochat-float [aria-label=\"Conversation history\"]')"));
+    check(`${size} the card never scrolls sideways`, await cdp.evaluate("(() => { const c=document.querySelector('.rl-monochat-float'); return c.scrollWidth <= c.clientWidth && getComputedStyle(c).overflowX==='hidden'; })()"));
+    check(`${size} the pill stays a live target while the card is out`, await cdp.evaluate("getComputedStyle(document.querySelector('.rl-monochat-notch')).visibility==='visible'"));
+    await screenshot(`${size}-card-document`);
+    await move(20, height/2); await delay(700); await settle();
+    check(`${size} leaving an untouched card closes it`, !await cdp.evaluate(cardOpen));
+    // Pinned by a press inside; a press outside still closes it.
+    await move(pill.x+pill.width/2, pill.y+pill.height/2); await delay(1200); await settle();
+    await click('.rl-monochat-float .rl-fd-input');
+    await move(20, height/2); await delay(700); await settle();
+    check(`${size} a press inside pins the card`, await cdp.evaluate(cardOpen));
+    await click('.qa-nav strong');
+    check(`${size} a press outside closes it`, !await cdp.evaluate(cardOpen));
+    // A click on the pill grows the card into the door, caret in.
+    await move(pill.x+pill.width/2, pill.y+pill.height/2); await delay(1200); await settle();
+    await click('.rl-monochat-notch'); await delay(400); await settle();
+    check(`${size} a click on the pill opens the full door with the caret`, !await cdp.evaluate(cardOpen) && await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate(`document.activeElement===${doorComposer}`));
+    check(`${size} the door wears its headline`, await cdp.evaluate("!!document.querySelector('.rl-frontdoor-focus .rl-fd-welcome-hero h1')"));
+    await screenshot(`${size}-door`);
     for (const label of ['Choose project','Destination']) {
-      await click(`[aria-label="${label}"]`);
+      await click(`.rl-frontdoor-focus [aria-label="${label}"]`);
       check(`${size} ${label} menu bounded`,(await bounds(`[role="menu"][aria-label="${label}"]`))?.within);
-      await screenshot(`${size}-${label.replaceAll(' ','-').toLowerCase()}`);
       await key('Escape','Escape',27);
-      check(`${size} ${label} Escape keeps the card open`, await cdp.evaluate(cardOpen));
+      check(`${size} ${label} Escape keeps the door open`, await cdp.evaluate(`${pose}==='conversation'`));
     }
-    await click('[aria-label="Collapse Redline"]');
-    check(`${size} ⌄ collapses`, !await cdp.evaluate(cardOpen));
-    // Shift+Enter summons from the document and focuses.
+    await click('[aria-label="Return to workspace"]');
+    check(`${size} ⌄ returns to the workspace`, await cdp.evaluate(`${pose}==='notch'`));
+    // Shift+Enter summons from the document, never from a text field.
     await cdp.evaluate("document.querySelector('#qa-document-focus').focus()");
     await key('Enter','Enter',13,8);
-    check(`${size} Shift+Enter summons and focuses`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement===document.querySelector('[data-chat-composer] textarea')"));
+    check(`${size} Shift+Enter summons the door with the caret`, await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate(`document.activeElement===${doorComposer}`));
     await key('Escape','Escape',27);
     check(`${size} Esc returns focus to the document`, await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
-    // Browser surface: This page / Task list.
+    await cdp.evaluate("window.__qa.setSidecar(true)"); await settle();
+    await cdp.evaluate("document.querySelector('[aria-label=\"Anchored reply\"]').focus()");
+    await key('Enter','Enter',13,8);
+    check(`${size} Shift+Enter in a text field stays that field's newline`, await cdp.evaluate(`${pose}==='notch'`));
+    await cdp.evaluate("window.__qa.setSidecar(false)"); await settle();
+    // Browser surface: This page / Task list, Plan and Run only.
     await cdp.evaluate("window.__qa.setSurface('Browser')"); await settle();
-    await click('.rl-monochat-notch');
-    check(`${size} the browser keeps This page and Task list`, await cdp.evaluate("[...document.querySelectorAll('.rl-context-chips button')].map(b=>b.textContent+':'+b.getAttribute('aria-pressed')).join()==='This page:true,Task list:false'"));
-    await screenshot(`${size}-browser`);
-    // The chat pose grows the same card; ⤢ grows it again; New hands back.
+    await move(20, height/2); await move(pill.x+pill.width/2, pill.y+pill.height/2); await delay(1200); await settle();
+    check(`${size} the browser card keeps This page and Task list`, await cdp.evaluate("[...document.querySelectorAll('.rl-monochat-float .rl-context-chips button')].map(b=>b.textContent+':'+b.getAttribute('aria-pressed')).join()==='This page:true,Task list:false'"));
+    await click('.rl-monochat-float [aria-label="Destination"]');
+    check(`${size} the browser card offers Plan and Run alone`, await cdp.evaluate("[...document.querySelectorAll('[role=menu][aria-label=Destination] [role=menuitemradio]')].map(b=>b.textContent).join('|').match(/Plan a build|Just run it/g)?.length===2 && document.querySelectorAll('[role=menu][aria-label=Destination] [role=menuitemradio]').length===2"));
+    await key('Escape','Escape',27);
+    await screenshot(`${size}-card-browser`);
+    await click('.qa-nav strong');
+    // A chat takes the room at the room's size; its heading carries the one New.
     await cdp.evaluate("window.__qa.openChat('qa')"); await delay(500); await settle();
-    const chat = await card();
-    check(`${size} a chat grows the card in place`, await cdp.evaluate("document.querySelector('.rl-monochat-card').dataset.pose==='chat'") && chat.within && chat.width <= 761 && chat.height > boot.height && !!await cdp.evaluate("document.querySelector('.rl-monochat-card [data-chat-messages]')?.textContent.includes('How do we preserve')"), chat);
+    const chat = await bounds('.rl-monochat');
+    check(`${size} a chat opens in the room`, await cdp.evaluate(`${pose}==='conversation'`) && chat.within && !!await cdp.evaluate("document.querySelector('.rl-monochat [data-chat-messages]')?.textContent.includes('How do we preserve')"), chat);
     check(`${size} one composer, at the bottom of the thread`, await cdp.evaluate("document.querySelectorAll('textarea[aria-label=\"Message Redline\"]').length===1"));
+    check(`${size} one New, in the room's heading`, await cdp.evaluate("document.querySelectorAll('.rl-monochat-new').length===1"));
     await screenshot(`${size}-chat`);
-    await cdp.call('Input.dispatchMouseEvent',{type:'mouseMoved',x:20,y:height/2}); await delay(700); await settle();
-    check(`${size} the chat pose never collapses on leave`, await cdp.evaluate(cardOpen));
-    await click('[aria-label="Enlarge the card"]'); await delay(450); await settle();
-    const tall = await card();
-    check(`${size} ⤢ makes it roomier, still inside the window`, tall.within && tall.height > chat.height && await cdp.evaluate("document.querySelector('.rl-monochat-card').dataset.size==='tall'"), tall);
-    await screenshot(`${size}-chat-tall`);
+    check(`${size} the window-drag strip never covers the room's heading`, await cdp.evaluate("(() => { const r=document.querySelector('.rl-monochat-new').getBoundingClientRect(); return document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('.rl-monochat-new') != null; })()"));
     await click('.rl-monochat-new'); await settle();
-    check(`${size} New returns to a blank composer`, await cdp.evaluate("document.querySelector('.rl-monochat-card').dataset.pose==='compose'&&!document.querySelector('[data-chat-room]')"));
+    check(`${size} New returns to a blank composer`, await cdp.evaluate("!document.querySelector('[data-chat-room]') && !!document.querySelector('.rl-frontdoor-focus [data-chat-composer] textarea')"));
     await cdp.evaluate("window.__qa.setSetup(true)");await settle();
-    check(`${size} setup remains accessible above the card`,await cdp.evaluate("!!document.querySelector('dialog:modal')"));
+    check(`${size} setup remains accessible above the door`,await cdp.evaluate("!!document.querySelector('dialog:modal')"));
     await key('Escape','Escape',27);
     await cdp.call("Emulation.setEmulatedMedia",{features:[{name:"prefers-reduced-motion",value:"reduce"}]});
-    await click('[aria-label="Collapse Redline"]'); await settle();
+    await click('[aria-label="Return to workspace"]'); await settle();
     check(`${size} reduced motion disables attraction`,await cdp.evaluate("document.querySelector('.rl-portal-membrane').style.getPropertyValue('--portal-pull')===''"));
   }
 } catch(error) {report.errors.push(error.stack??String(error));}

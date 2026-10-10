@@ -1,9 +1,8 @@
 /* ── The Redline island ────────────────────────────────────────────────────
-   A pill centred in the footer row, and the floating card it springs into.
-   Both layers are fixed: neither adds height nor moves the footer, and on the
-   browser surface each is cut out of the native webview rather than hiding
-   the page under it. */
-.rl-monochat-island { display: contents; }
+   The pill centred in the footer row, and the two poses it opens: the
+   compact card it springs out on a hover (MonochatCard.css) and the door, the
+   full-page room below. Both layers are fixed: neither adds height nor moves
+   the footer. */
 .rl-frontdoor-dock { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); width: 160px; height: 40px; z-index: 55; pointer-events: none; }
 .rl-monochat-notch { position: relative; display: grid; place-items: center; width: 160px; height: 40px; padding: 0; border: 0; border-radius: 22px; background: transparent; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
 .rl-monochat-notch[data-hidden="true"] { visibility: hidden; pointer-events: none; }
@@ -15,116 +14,37 @@
 .rl-monochat-notch:hover .rl-portal-membrane, .rl-monochat-notch:focus-visible .rl-portal-membrane { border-color: var(--color-info); }
 .rl-monochat-notch:focus-visible { outline: 1px solid var(--color-info); outline-offset: -3px; }
 .rl-monochat-notch[data-busy="true"] .rl-monochat-signal { animation: rl-portal-work 1.8s ease-in-out infinite; }
-@keyframes rl-portal-work { 50% { opacity: .35; } }
-
-/* The entrance occupies the footer's center without adding a row or height.
-   On narrow windows the existing groups scroll within their own half. */
-.rl-footer-status, .rl-footer-actions { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
-.rl-footer-status::-webkit-scrollbar, .rl-footer-actions::-webkit-scrollbar { display: none; }
-.rl-footer-status > *, .rl-footer-actions > * { flex-shrink: 0; }
-
-/* The card. Centred by auto margins, never a transform: the spring animates
-   `transform` from the pill's box (top-left origin, see springSwap.ts) and
-   has to own it outright. `bottom` is measured against the footer. */
-.rl-monochat-card {
-  position: fixed; left: 0; right: 0; bottom: 53px; z-index: 55;
-  display: flex; flex-direction: column; min-height: 0;
-  width: min(640px, calc(100vw - 40px)); max-height: min(560px, calc(100dvh - 120px)); margin: 0 auto;
-  padding: 10px 14px 14px; border: 1px solid var(--color-rule); border-radius: 14px;
-  background: var(--color-bg-elevated); color: var(--color-ink); box-shadow: 0 12px 48px #0005;
-  transform-origin: top left;
-  transition: width 260ms cubic-bezier(.2,.8,.2,1), height 260ms cubic-bezier(.2,.8,.2,1);
-}
-.rl-monochat-card[hidden] { display: none; }
-/* Chat grows the same card to hold the thread; ⤢ makes it roomier still. */
-.rl-monochat-card[data-pose="chat"] { width: min(760px, calc(100vw - 40px)); height: min(72dvh, calc(100dvh - 120px)); max-height: none; padding-bottom: 8px; }
-.rl-monochat-card[data-pose="chat"][data-size="tall"] { width: min(1040px, calc(100vw - 80px)); height: calc(100dvh - 140px); }
-
-.rl-monochat-heading { display: flex; align-items: center; gap: 2px; flex-shrink: 0; margin-bottom: 7px; color: var(--color-ink-muted); font-size: 11px; }
+/* A sentence is waiting in the composer. */
+.rl-monochat-draft { position: absolute; top: 6px; right: 12px; width: 5px; height: 5px; border-radius: 50%; background: var(--color-info); }
+.rl-frontdoor-focus { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center; pointer-events: none; visibility: hidden; }
+.rl-frontdoor-focus[data-visible="true"] { visibility: visible; }
+/* The paper always covers the WINDOW, even while the door keeps the plate's
+   insets: engaging the door spreads the backdrop, never the box. A press on
+   it lands on the layer, which is what closes the door. */
+.rl-frontdoor-focus::before { content: ""; position: fixed; inset: 0; background: var(--color-paper); opacity: 0; pointer-events: none; transition: opacity 220ms ease-out; }
+.rl-frontdoor-focus[data-open="true"] { pointer-events: auto; }
+.rl-frontdoor-focus[data-open="true"]::before { opacity: 1; pointer-events: auto; }
+.rl-monochat { position: relative; width: min(800px, calc(100vw - 48px)); height: min(760px, calc(100dvh - 100px)); color: var(--color-ink); pointer-events: auto; }
+.rl-frontdoor-focus[data-visible="false"] .rl-monochat { pointer-events: none; }
+/* Entry and focused chat share geometry so a click cannot move the caret. */
+.rl-monochat-content, .rl-monochat-conversation { height: 100%; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.rl-monochat-content { outline: none; }
+.rl-frontdoor-return { position: fixed; left: 50%; bottom: var(--portal-return-bottom, 12px); transform: translateX(-50%); width: 144px; height: 32px; border-radius: 18px; display: grid; place-items: center; background: var(--color-bg-elevated); border: 1px solid var(--color-rule); color: var(--color-ink-muted); cursor: pointer; z-index: 2; }
+.rl-frontdoor-return:hover, .rl-frontdoor-return:focus-visible { color: var(--color-ink); border-color: var(--color-info); }
+/* A chat in the room: its heading replaces the chat's own toolbar. */
+.rl-monochat-heading { display: flex; align-items: center; gap: 2px; flex-shrink: 0; padding: 0 8px 8px; color: var(--color-ink-muted); font-size: 11px; }
 .rl-monochat-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-monochat-heading button { display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 5px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.rl-monochat-heading button { display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 7px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; cursor: pointer; }
 .rl-monochat-heading button:hover, .rl-monochat-heading button:focus-visible { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 7%, transparent); outline: none; }
-.rl-monochat-heading button[aria-pressed="true"] { color: var(--color-ink); }
-
-/* What rides along with a send. A pressed chip is attached; nothing else is. */
-.rl-context-chips { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; margin: 0 0 10px; }
-.rl-context-chips button { max-width: 260px; padding: 4px 9px; border: 1px solid var(--color-rule); border-radius: 20px; color: var(--color-ink-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-context-chips button[aria-pressed="true"] { color: var(--color-ink); background: var(--color-paper); border-color: var(--color-ink-muted); }
-
-/* Scrolls down only. `overflow-y: auto` alone computes overflow-x to auto too,
-   and the armed send button's 1.04 scale pokes 0.6px past the right edge: a
-   classic-scrollbar Mac then grew a horizontal scrollbar under the composer,
-   lifting it 11px on the first keystroke. */
-.rl-monochat-body { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-.rl-monochat-card[data-pose="chat"] .rl-monochat-body { overflow: hidden; }
-.rl-frontdoor-chat-slot[hidden] { display: none; }
-
-/* The composer inside the card: the card is the box, so the island inside it
-   drops its own glass — and its lift, which would only nudge the caret. */
-.rl-monochat-card .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; padding: 0; margin: 0; min-height: 0; max-height: none; flex-shrink: 0; opacity: 1; animation: none; justify-content: flex-start; }
-.rl-monochat-card .rl-fd-island, .rl-monochat-card .rl-fd-island.is-lifted { padding: 4px 0 0; border: 0; background: transparent; box-shadow: none; border-radius: 0; backdrop-filter: none; -webkit-backdrop-filter: none; transform: none; }
-.rl-monochat-card .rl-fd-input { min-height: 40px; font-size: 15px; line-height: 1.5; padding: 3px 4px 10px; }
-.rl-monochat-card .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
-.rl-monochat-card .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
-.rl-monochat-card .rl-fd-strip { margin-top: 8px; }
-.rl-monochat-card .rl-composer-accessories { display: contents; }
-.rl-monochat-card .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
-.rl-monochat-card .rl-monochat-trace-toggle svg { width: 14px; height: 14px; }
-
-/* A chat in the card: the heading replaces the room's own toolbar, and the
-   room takes the card's surface instead of painting paper over it. */
-.rl-monochat-card [data-chat-toolbar] { display: none; }
-.rl-monochat-card [data-chat-room] { background: transparent !important; }
-.rl-monochat-card [data-chat-composer] { flex-shrink: 0; }
-.rl-monochat-card [data-chat-empty="true"] { justify-content: flex-end; }
-.rl-monochat-card [data-chat-empty="true"] [data-chat-messages] { display: none; }
-
-/* ── Recents ───────────────────────────────────────────────────────────────
-   The way back, above the composer and in flow: Plans and Chats as labelled
-   rows, then pages one per line. Set as type rather than controls — each
-   entry is a line of text over a hairline. Gone once there is a sentence. */
-.rl-monochat-card .rl-fd-recents { display: flex; flex-direction: column; gap: 14px; padding: 2px 4px 14px; margin-bottom: 4px; border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 8%, transparent); }
-/* One table for Plans and Chats: head | first | second. The rows and their
-   item lists are `display: contents`, so every entry sits in a SHARED column
-   and the second entries line up whatever the first ones measure. */
-.rl-fd-recent-chips {
-  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, max-content);
-  justify-content: start; align-items: baseline; gap: 10px 20px;
-}
-.rl-fd-recent-row { display: contents; }
-.rl-fd-recent-head { grid-column: 1; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: color-mix(in srgb, var(--color-ink-muted) 80%, transparent); }
-.rl-fd-recent-items { display: contents; }
-.rl-fd-recent-chips .rl-fd-recent { justify-self: start; }
-.rl-monochat-card .rl-fd-recent.rl-fd-suggestion {
-  max-width: min(220px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 0 0 3px; border: 0; border-radius: 0; background: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
-  color: var(--color-ink-muted); font-size: 12.5px;
-  transition: color 160ms ease, border-color 160ms ease;
-}
-.rl-monochat-card .rl-fd-recent.rl-fd-suggestion:hover, .rl-monochat-card .rl-fd-recent.rl-fd-suggestion:focus-visible {
-  background: none; color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 60%, transparent); outline: none;
-}
-/* Pages: one line each, full width, divided by hairlines. FrontDoor caps the
-   list (CARD_BROWSE_MAX) rather than letting it scroll the card. */
-.rl-fd-browse-section { display: flex; flex-direction: column; gap: 2px; }
-.rl-fd-browse-list { display: flex; flex-direction: column; }
-.rl-fd-browse {
-  display: block; width: 100%; height: 30px; padding: 0 2px; border: 0; border-radius: 0; background: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
-  color: var(--color-ink-muted); font-size: 12.5px; text-align: left; cursor: pointer;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  transition: color 160ms ease, border-color 160ms ease;
-}
-.rl-fd-browse:last-child { border-bottom: 0; }
-.rl-fd-browse:hover, .rl-fd-browse:focus-visible {
-  color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 50%, transparent); outline: none;
-}
-
-@media (max-width: 640px) { .rl-monochat-card[data-pose="chat"][data-size="tall"] { width: calc(100vw - 24px); } }
-@media (prefers-reduced-motion: reduce) { .rl-monochat-card, .rl-monochat-card *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
-.rl-monochat-card[data-reduced="true"], .rl-monochat-card[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
-
+.rl-monochat-heading + .rl-monochat-conversation { height: auto; flex: 1; }
+.rl-monochat [data-chat-toolbar] { display: none; }
+.rl-monochat[data-pose="entry"] [data-chat-messages] { display: none; }
+.rl-monochat[data-pose="entry"] [data-chat-room] { justify-content: center; }
+.rl-monochat [data-chat-composer] { flex-shrink: 0; }
+@keyframes rl-portal-work { 50% { opacity: .35; } }
+@media (max-width: 640px) { .rl-monochat { width: calc(100vw - 24px); height: calc(100dvh - 88px); } }
+@media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus::before, .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
+.rl-frontdoor-focus[data-reduced="true"]::before, .rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
 .rl-monochat-observability { font-size: 10px; }
 .rl-monochat-trace-toggle { display: flex; gap: 5px; align-items: center; border: 0; background: none; color: var(--color-ink-muted); cursor: pointer; }
 .rl-monochat-traces { position: absolute; inset: 45px 12px 12px; z-index: 3; padding: 15px; border: 1px solid var(--color-rule); border-radius: 14px; background: var(--color-bg-elevated); box-shadow: 0 12px 40px #0004; overflow: auto; }
@@ -140,3 +60,133 @@
 .rl-monochat-policy button { justify-self: start; border: 1px solid var(--color-rule); border-radius: 6px; padding: 5px 9px; color: var(--color-ink); }
 .rl-setup-return { position: fixed; z-index: 75; left: 50%; top: 48px; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; width: min(780px, 90vw); padding: 14px 18px; background: var(--color-bg-elevated); color: var(--color-ink); border: 1px solid var(--color-info); border-radius: 14px; box-shadow: 0 12px 40px #0005; font-size: 12px; }
 .rl-setup-return button { flex-shrink: 0; }
+/* Scrolls down only. `overflow-y: auto` alone computes overflow-x to auto too,
+   and the armed send button's 1.04 scale pokes 0.6px past the right edge: a
+   classic-scrollbar Mac then grows a horizontal scrollbar under the composer,
+   lifting it 11px on the first keystroke. */
+.rl-monochat .rl-floating-composer.rl-frontdoor { width: 100%; max-width: none; max-height: 100%; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; flex-shrink: 0; margin: 0; padding: 0 16px 14px; opacity: 1; animation: none; justify-content: flex-start; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 8px 2px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; transform: none; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-input { min-height: 36px; font-size: 15px; line-height: 1.55; padding: 3px 5px 10px; }
+.rl-monochat .rl-fd-input::placeholder { color: color-mix(in srgb, var(--color-ink) 68%, transparent); }
+.rl-monochat .rl-fd-tools { flex-wrap: wrap; gap: 7px; }
+.rl-monochat .rl-fd-tools > div[data-no-drag] { max-width: 220px; }
+.rl-monochat .rl-fd-tool { border-radius: 50%; background: transparent; border-color: transparent; }
+.rl-monochat .rl-fd-go { width: 34px; height: 34px; border-radius: 50%; }
+.rl-monochat .rl-composer-accessories { display: contents; }
+.rl-monochat .rl-monochat-trace-toggle { font-size: 0; width: 30px; height: 30px; justify-content: center; }
+.rl-monochat .rl-monochat-trace-toggle svg { width: 14px; height: 14px; }
+.rl-monochat .rl-fd-strip { margin-top: 10px; }
+.rl-monochat [data-chat-room] { background: transparent !important; }
+.rl-monochat .rl-floating-composer > * { position: static; }
+.rl-monochat .rl-floating-composer .rl-fd-island { position: static; }
+
+.rl-monochat .rl-floating-composer.rl-frontdoor { padding: 0 8px 8px; }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px 20px 12px; border: 1px solid var(--color-rule); border-radius: 24px; background: var(--color-bg-elevated); }
+.rl-monochat .rl-fd-strip { display: none; }
+
+.rl-monochat-conversation { justify-content: center; }
+.rl-frontdoor-chat-slot[hidden] { display: none; }
+.rl-monochat [data-chat-empty="true"] { justify-content: center; }
+.rl-monochat [data-chat-empty="true"] [data-chat-messages] { display: none; }
+
+/* The entrance occupies the footer's center without adding a row or height.
+   On narrow windows the existing groups scroll within their own half. */
+.rl-footer-status, .rl-footer-actions { min-width: 0; max-width: calc(50% - 88px); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+.rl-footer-status::-webkit-scrollbar, .rl-footer-actions::-webkit-scrollbar { display: none; }
+.rl-footer-status > *, .rl-footer-actions > * { flex-shrink: 0; }
+
+/* ── The resting door ──────────────────────────────────────────────────────
+   On the empty plate the door lands in the plate's free area (header →
+   terminal dock, measured in MonochatIsland) instead of the middle of the
+   window, so it never sits on top of the terminals. Engaged there, it KEEPS
+   those insets while the paper backdrop fades in over the whole window: the
+   composer you clicked or typed into never moves. (Gliding the insets out to
+   the window moved it 27px under the caret.) */
+.rl-frontdoor-focus[data-rest] { top: var(--fd-rest-top, 0px); bottom: var(--fd-rest-bottom, 0px); left: var(--fd-rest-left, 0px); right: var(--fd-rest-right, 0px); }
+.rl-frontdoor-focus[data-rest] .rl-monochat { height: min(760px, 100%); width: min(800px, calc(100% - 48px)); }
+
+/* At rest only what you can touch takes the pointer. The room is a transparent
+   800×760 box; left to catch clicks it would swallow every terminal and doc
+   control underneath it. */
+.rl-monochat[data-pose="entry"], .rl-monochat[data-pose="entry"] .rl-frontdoor { pointer-events: none; }
+.rl-monochat[data-pose="entry"] .rl-frontdoor > :not(.rl-fd-welcome), .rl-monochat[data-pose="entry"] .rl-fd-recent { pointer-events: auto; }
+
+/* Headline above, recents below — both OUT of flow, hung off the composer, so
+   showing, shedding or fading them never moves the box you are typing in. */
+.rl-monochat .rl-frontdoor.has-welcome { overflow: visible; }
+.rl-monochat .rl-floating-composer > .rl-fd-welcome { position: absolute; left: 0; right: 0; }
+.rl-fd-welcome-hero { bottom: calc(100% + 26px); text-align: center; pointer-events: none; }
+.rl-fd-title { font-weight: 600; line-height: 1.08; letter-spacing: -0.022em; color: var(--color-ink); text-align: center; }
+.rl-fd-welcome-hero .rl-fd-title { font-size: 36px; }
+.rl-frontdoor.is-compact .rl-fd-welcome-hero .rl-fd-title { font-size: 30px; letter-spacing: -0.015em; }
+.rl-fd-welcome-hero .rl-fd-sub { margin: 10px 0 0; }
+.rl-fd-recents { top: calc(100% + 12px); padding: 0 8px; }
+
+/* Fades on ENGAGEMENT — a sentence in the box — not on the door opening, nor
+   on the caret arriving: summoned, the door keeps its welcome until you type. */
+.rl-fd-welcome { transition: opacity 260ms ease 60ms, transform 340ms cubic-bezier(.16,1,.3,1) 60ms, visibility 0s 0s; }
+.rl-frontdoor.is-engaged .rl-fd-welcome, .rl-fd-recents.is-hidden {
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 160ms ease, transform 220ms ease, visibility 0s 220ms;
+}
+.rl-frontdoor.is-engaged .rl-fd-welcome-hero { transform: translateY(-10px); }
+.rl-frontdoor.is-engaged .rl-fd-recents, .rl-fd-recents.is-hidden { transform: translateY(6px); }
+
+/* Shed furniture before overflowing a short plate: headline first, then the
+   pills (MonochatIsland's `landingFit`). */
+.rl-frontdoor-focus[data-rest="pills"] .rl-fd-welcome-hero,
+.rl-frontdoor-focus[data-rest="bare"] .rl-fd-welcome { visibility: hidden; opacity: 0; }
+
+/* What rides along with a send. A pressed chip is attached; nothing else is. */
+.rl-context-chips { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; margin: 0 0 10px; }
+.rl-context-chips button { max-width: 260px; padding: 4px 9px; border: 1px solid var(--color-rule); border-radius: 20px; color: var(--color-ink-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-context-chips button[aria-pressed="true"] { color: var(--color-ink); background: var(--color-paper); border-color: var(--color-ink-muted); }
+.rl-monochat .rl-context-chips { margin: 0 8px 10px; }
+
+/* The way back, set as type rather than controls: no pills, no boxes — each
+   entry is a line of text over a hairline underline, generously spaced.
+   Plans and Chats sit as labelled rows; pages run full width below. */
+.rl-monochat .rl-floating-composer > .rl-fd-recents { display: flex; flex-direction: column; gap: 22px; padding: 0 16px; }
+/* One table for Plans and Chats: head | first | second. The rows and their
+   item lists are `display: contents`, so every entry sits in a SHARED column
+   and the second entries line up whatever the first ones measure. */
+.rl-fd-recent-chips {
+  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, max-content);
+  justify-content: center; align-items: baseline; gap: 12px 20px;
+}
+.rl-fd-recent-row { display: contents; }
+/* Full muted ink: thinned any further, the heads drop under 4.5:1 on paper. */
+.rl-fd-recent-head { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-ink-muted); text-align: right; }
+.rl-fd-recent-items { display: contents; }
+.rl-fd-recent-head { grid-column: 1; }
+.rl-fd-recent-chips .rl-fd-recent { justify-self: start; }
+/* Head → first entry keeps its 20px; first → second keeps its 22px. */
+.rl-fd-recent-chips .rl-fd-recent:nth-child(2) { margin-left: 2px; }
+.rl-monochat .rl-fd-recent.rl-fd-suggestion {
+  max-width: min(220px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0 0 3px; border: 0; border-radius: 0; background: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
+  color: var(--color-ink-muted); font-size: 12.5px;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.rl-monochat .rl-fd-recent.rl-fd-suggestion:hover, .rl-monochat .rl-fd-recent.rl-fd-suggestion:focus-visible {
+  background: none; color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 60%, transparent); outline: none;
+}
+
+/* Pages: one line each, full width, divided by hairlines and laid out
+   statically — FrontDoor renders only as many as the space below holds
+   (BROWSE_ROW/GAP mirror these). */
+.rl-fd-browse-section { display: flex; flex-direction: column; gap: 4px; }
+.rl-fd-browse-section > .rl-fd-recent-head { text-align: left; line-height: 14px; }
+.rl-fd-browse-list { display: flex; flex-direction: column; }
+.rl-fd-browse {
+  display: block; width: 100%; height: 36px; padding: 0 2px; border: 0; border-radius: 0; background: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--color-ink-muted); font-size: 12.5px; text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.rl-fd-browse:hover, .rl-fd-browse:focus-visible {
+  color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 50%, transparent); outline: none;
+}
+.rl-monochat[data-pose="entry"] .rl-fd-browse { pointer-events: auto; }

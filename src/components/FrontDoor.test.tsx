@@ -277,6 +277,28 @@ describe("FrontDoor — a launch in flight leaves the door usable", () => {
     expect(onCancelPending).toHaveBeenCalledTimes(1);
   });
 
+  it("never pulls the caret back on a re-render — only a new launch, into a door you are still in", async () => {
+    // App rebuilds the in-flight object on renders; the composer must read
+    // one launch as one launch (the card used to drag the caret out of the
+    // terminal on every App render while a plan was planning).
+    const terminal = document.createElement("textarea"); document.body.append(terminal);
+    try {
+      await mount({ pending: PENDING });
+      terminal.focus();
+      await act(async () => root.render(createElement(Harness, { pending: { ...PENDING } })));
+      await act(async () => root.render(createElement(Harness, { pending: { ...PENDING } })));
+      expect(document.activeElement).toBe(terminal);
+      // A new launch while the caret is somewhere else entirely: still not ours.
+      await act(async () => root.render(createElement(Harness, { pending: { ...PENDING, startedAt: PENDING.startedAt + 1 } })));
+      expect(document.activeElement).toBe(terminal);
+      // A new launch with the caret nowhere — the send button just took it
+      // off the page — puts it back for the next sentence.
+      terminal.blur();
+      await act(async () => root.render(createElement(Harness, { pending: { ...PENDING, startedAt: PENDING.startedAt + 2 } })));
+      expect(document.activeElement).toBe(composer());
+    } finally { terminal.remove(); }
+  });
+
   it("hides the pill when nothing is in flight", async () => {
     await mount({ pending: null });
     expect(flight()).toBeNull();
@@ -435,18 +457,27 @@ describe("the floating replacement composer", () => {
     expect(composer()?.value).toBe("The next thought");
     expect(host.textContent).toContain("Your message is saved");
   });
-  it("keeps plan launch and its readiness fix in one input with no hero", async () => {
+  it("the door's composer wears the headline above one input; the card's and a chat's do not", async () => {
     const onLaunch = vi.fn();
     await mount({ floating: true, welcome: true, onLaunch, text: "Build the next release" });
     expect(host.querySelectorAll("textarea")).toHaveLength(1);
-    expect(host.querySelector("h1, h2")).toBeNull();
-    expect(host.textContent).not.toContain("Every build starts as a draft.");
+    expect(host.querySelector("h1")?.textContent).toBe("Every build starts as a draft.");
+    expect(host.textContent).toContain("Describe it. Redline the plan. Then build.");
     expect(host.querySelector("[data-chat-composer] textarea")).toBe(composer());
     await pressEnter();
     expect(onLaunch).toHaveBeenCalledOnce();
+    await mount({ floating: true, welcome: false });
+    expect(host.querySelector("h1, h2")).toBeNull();
   });
 
-  it("wears the way back into recent work above the composer, with no headline", async () => {
+  it("carries the surface's context chips above the box", async () => {
+    await mount({ floating: true, chips: createElement("div", { className: "rl-context-chips" }, createElement("button", { "aria-pressed": "true" }, "This page")) });
+    const chips = host.querySelector(".rl-context-chips")!;
+    expect(chips.textContent).toBe("This page");
+    expect(chips.compareDocumentPosition(host.querySelector(".rl-fd-island")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("wears the way back into recent work below the composer, under the headline", async () => {
     await mount({
       floating: true,
       welcome: true,
@@ -457,11 +488,11 @@ describe("the floating replacement composer", () => {
         { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "LiDAR-GS", url: "https://github.com/x/lidar-gs" },
       ],
     });
-    expect(host.querySelector("h1")).toBeNull();
-    // In flow ABOVE the box: the card grows upward from the footer, so the
-    // composer stays put while the recents come and go.
+    expect(host.querySelector("h1")?.textContent).toBe("Every build starts as a draft.");
+    // Hung BELOW the box, out of flow, so the composer stays put while the
+    // recents come and go.
     const group = host.querySelector('[role="group"][aria-label="Jump back in"]')!;
-    expect(group.compareDocumentPosition(host.querySelector(".rl-fd-island")!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(group.compareDocumentPosition(host.querySelector(".rl-fd-island")!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     const pills = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-recent"));
     expect(pills.map((b) => [b.dataset.kind, b.textContent])).toEqual([
       ["plan", "Auth rewrite"],
@@ -480,10 +511,31 @@ describe("the floating replacement composer", () => {
     expect(host.textContent).not.toContain("Your harnesses");
   });
 
-  it("caps the page list at 4 rows — never a scroll, never a measurement", async () => {
+  it("lays out only as many pages as fit below the composer — never a scroll", async () => {
     const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
-    await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
-    expect(Array.from(host.querySelectorAll(".rl-fd-browse")).map((b) => b.textContent)).toEqual(["Page 0", "Page 1", "Page 2", "Page 3"]);
+    // A 300px layer whose composer ends at 100px: room for a few rows only.
+    const layer = document.createElement("div");
+    layer.className = "rl-frontdoor-focus";
+    document.body.appendChild(layer);
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === layer) return rect(0, 300) as DOMRect;
+      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
+      // The page list starts under the chip rows.
+      if (this.classList.contains("rl-fd-browse-list")) return rect(120, 120) as DOMRect;
+      return proto.call(this);
+    });
+    try {
+      layer.appendChild(host);
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+      // (300 − 120 list top − 72 breathing room) / 36 per row → 3.
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(3);
+    } finally {
+      vi.restoreAllMocks();
+      document.body.appendChild(host);
+      layer.remove();
+    }
   });
 
   it("a recent pill opens that place and never launches or steals focus", async () => {
@@ -500,21 +552,25 @@ describe("the floating replacement composer", () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 
-  it("shows the recents while the composer is empty — focused or not — and drops them once there is text", async () => {
+  it("fades the welcome on a sentence, never on the caret arriving", async () => {
     const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
     await mount({ floating: true, welcome: true, autoFocusOnShow: false, onOpenRecent: () => {}, recents });
-    const shown = () => host.querySelector('[aria-label="Jump back in"]');
-    expect(shown()).not.toBeNull();
-    // A key-summoned card is for typing; its recents stay until you do.
+    const door = host.querySelector(".rl-frontdoor")!;
+    const group = host.querySelector('[aria-label="Jump back in"]')!;
+    const shown = () => !door.classList.contains("is-engaged") && group.getAttribute("aria-hidden") === "false";
+    expect(shown()).toBe(true);
+    // A summoned door puts the caret in; its welcome stays until you type.
     await act(async () => composer()!.focus());
-    expect(shown()).not.toBeNull();
+    expect(shown()).toBe(true);
     await type("Build");
-    expect(shown()).toBeNull();
+    expect(door.classList.contains("is-engaged")).toBe(true);
+    expect(group.getAttribute("aria-hidden")).toBe("true");
+    expect(host.querySelector<HTMLButtonElement>(".rl-fd-recent")!.tabIndex).toBe(-1);
     await type("");
-    expect(shown()).not.toBeNull();
+    expect(shown()).toBe(true);
   });
 
-  it("keeps the recents to the card's composer, never a chat's", async () => {
+  it("keeps the recents to the door's composer, never the card's or a chat's", async () => {
     const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
     await mount({ floating: true, welcome: false, onOpenRecent: () => {}, recents });
     expect(host.querySelector('[aria-label="Jump back in"]')).toBeNull();
