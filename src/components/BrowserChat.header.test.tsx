@@ -9,7 +9,11 @@ const { turn, invokeMock, config, captureMock } = vi.hoisted(() => ({
     makeMessage: (seed: { id: string; role: "user" | "assistant"; body: string; status: "complete" | "error"; backend?: string }) => BrowseMessage;
   } },
   captureMock: vi.fn(async (label: string) => `snapshot:${label}`),
-  invokeMock: vi.fn(async () => []),
+  // The preflight probe finds a ready Codex: a Codex last pick is inherited
+  // only when this machine can run it.
+  invokeMock: vi.fn(async (cmd?: string) => cmd === "preflight_status"
+    ? { codex: { found: true, usable: true, signedIn: true, authState: "signed-in" }, hook: {}, skill: {} }
+    : []),
   turn: { messages: [] as BrowseMessage[], liveText: "", status: "idle", startedAt: null, loaded: true,
     send: vi.fn(), cancel: vi.fn(), unqueue: vi.fn(), clear: vi.fn(), meter: null, activity: null, meters: {} },
 }));
@@ -173,6 +177,8 @@ describe("page conversation header", () => {
       { id: "e1", browseId: "thread", role: "assistant", body: "codex ended without producing a reply", status: "error", createdAt: 4 },
     ];
     await act(async () => root.render(<BrowserChat browseId="thread" label="browser-page" onClose={() => {}}/>));
+    // The inherited Codex pick lands once the probe answers.
+    await act(async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); });
     const bylines = [...host.querySelectorAll("[data-browser-chat-messages] > div > span:first-child")].map(span => span.textContent);
     // An error row is Redline's note about this chat's current turn.
     expect(bylines).toEqual(["Claude", "Codex", "Claude", "Codex"]);

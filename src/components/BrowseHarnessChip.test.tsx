@@ -207,13 +207,43 @@ describe("page chat model picker", () => {
     expect(sets()).toHaveLength(2);
   });
 
-  it("inherits a Codex pick like any other", async () => {
+  it("inherits a Codex pick while this machine can run Codex", async () => {
     localStorage.setItem(LAST_HARNESS_KEY, JSON.stringify({ backend: "codex", model: "gpt-5.5", effort: null }));
     await mount();
     expect(latest.pick).toEqual({ backend: "codex", model: "gpt-5.5", effort: null });
     expect(trigger().textContent).toContain("Codex · gpt-5.5");
     await act(() => latest.commit());
     expect(sets()).toEqual([["browse_thread_set_harness", { browseId: "tab-1", backend: "codex", model: "gpt-5.5", effort: null }]]);
+  });
+
+  it.each([
+    ["uninstalled", { ...READY, found: false }],
+    ["signed out", { ...READY, signedIn: false, authState: "signed-out" }],
+  ])("leaves a Codex pick behind once Codex is %s, so the first send runs", async (_why, probe) => {
+    codexProbe.current = probe;
+    localStorage.setItem(LAST_HARNESS_KEY, JSON.stringify({ backend: "codex", model: "gpt-5.5", effort: null }));
+    await mount("tab-new");
+    expect(latest.pick.backend).toBe("claude-code");
+    expect(trigger().textContent).not.toContain("Codex");
+    await act(() => latest.commit());
+    expect(sets()).toEqual([]);
+  });
+
+  it("stores no Codex pick that the probe hasn't cleared yet", async () => {
+    let answer: (value: unknown) => void = () => {};
+    const fallback = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((cmd: string, args?: Record<string, unknown>) =>
+      cmd === "preflight_status" ? new Promise(resolve => { answer = resolve; }) : fallback(cmd, args));
+    localStorage.setItem(LAST_HARNESS_KEY, JSON.stringify({ backend: "codex", model: null, effort: null }));
+    await mount();
+    expect(trigger().textContent, "no Codex on the chip before the probe").not.toContain("Codex");
+    let committed = false;
+    const send = act(() => latest.commit().then(() => { committed = true; }));
+    await flush();
+    expect(committed, "the first send waits for the probe").toBe(false);
+    await act(async () => answer({ codex: { ...READY, found: false }, hook: {}, skill: {} }));
+    await send;
+    expect(sets()).toEqual([]);
   });
 
   it("never writes over a pick it failed to read", async () => {

@@ -59,6 +59,16 @@ function useCodexReadiness(open: boolean): { blocker: string | null | undefined;
   return state;
 }
 
+/** The last pick, if this machine can run it. A Codex pick is inherited only
+ *  once the probe says Codex is ready: one that has since been uninstalled
+ *  or signed out would fail the chat's first send. */
+async function runnableLastHarness(): Promise<BackendChoice | null> {
+  const last = readLastHarness();
+  if (last?.backend !== "codex") return last;
+  const probe = await integrationHealth.ensure({ backend: "codex", extension: false }).then(health => health.preflight.codex, () => null);
+  return codexBlocker(probe) ? null : last;
+}
+
 function readLastHarness(): BackendChoice | null {
   try {
     const raw = localStorage.getItem(LAST_HARNESS_KEY);
@@ -105,8 +115,12 @@ export interface BrowseHarness {
  *  the chip shows. */
 export function useBrowseHarness(browseId: string): BrowseHarness {
   // `own` is this chat's stored pick; `inherited` is shown while it has none.
+  // A Codex last pick shows only once the probe says it can run.
   const [own, setOwn] = useState<BackendChoice | null>(null);
-  const [inherited, setInherited] = useState<BackendChoice | null>(readLastHarness);
+  const [inherited, setInherited] = useState<BackendChoice | null>(() => {
+    const last = readLastHarness();
+    return last?.backend === "codex" ? null : last;
+  });
   const [seat, setSeat] = useState<{ model?: string; effort?: string }>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,12 +133,21 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
   // Resolves true once this chat's stored pick is known. A failed read is
   // not "never picked": `commit` must not write over a pick it never saw.
   const loaded = useRef<Promise<boolean>>(Promise.resolve(false));
+  // Resolves once the inherited pick is settled (a Codex one is probed).
+  const inheritedKnown = useRef<Promise<void>>(Promise.resolve());
+  const inherit = useCallback((current: () => boolean) => {
+    inheritedKnown.current = runnableLastHarness().then(pick => {
+      if (!current()) return;
+      inheritedRef.current = pick;
+      setInherited(pick);
+    });
+  }, []);
 
   useEffect(() => {
     let current = true;
     setOwn(null);
     setError(null);
-    setInherited(readLastHarness());
+    inherit(() => current);
     loaded.current = invoke<StoredHarness | null>("browse_thread_harness", { browseId }).then(value => {
       const stored = value && typeof value === "object" && !Array.isArray(value) && value.backend ? parseChoice(value) : null;
       if (current) { ownRef.current = stored; setOwn(stored); }
@@ -134,7 +157,7 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
       return false;
     });
     return () => { current = false; };
-  }, [browseId]);
+  }, [browseId, inherit]);
   useEffect(() => {
     let current = true;
     void invoke<{ seats?: Record<string, { model?: string; effort?: string }> }>("get_agent_seats").then(value => {
@@ -164,6 +187,7 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
   const commit = useCallback(async () => {
     const id = browseId;
     const known = await loaded.current;
+    await inheritedKnown.current;
     const pick = inheritedRef.current;
     if (!known || keyRef.current !== id || ownRef.current || !pick) return;
     // A failed write must not cost the message: it runs on the default.
@@ -172,8 +196,9 @@ export function useBrowseHarness(browseId: string): BrowseHarness {
   const forget = useCallback(() => {
     ownRef.current = null;
     setOwn(null);
-    setInherited(readLastHarness());
-  }, []);
+    const id = browseId;
+    inherit(() => keyRef.current === id);
+  }, [browseId, inherit]);
 
   return { pick: own ?? inherited ?? defaultChoice(), seat, saving, error, save, commit, forget };
 }
