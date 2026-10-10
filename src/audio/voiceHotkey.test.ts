@@ -180,6 +180,27 @@ describe("VoiceHotkey on the window", () => {
     expect(behind).not.toHaveBeenCalled();
   });
 
+  it("is never a dictation when the key modifies a click or a drag", () => {
+    // Option-click in the terminal, Command-click on a link: pressed before
+    // the hold counts, or after.
+    press("keydown", { code: "AltRight", key: "Alt", altKey: true });
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, altKey: true }));
+    vi.advanceTimersByTime(HOLD_MS * 2);
+    expect(hooks.start).not.toHaveBeenCalled();
+    press("keyup", { code: "AltRight", key: "Alt" });
+    press("keydown", { code: "AltRight", key: "Alt", altKey: true });
+    vi.advanceTimersByTime(HOLD_MS);
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, altKey: true }));
+    expect(hooks.cancel).toHaveBeenCalledOnce();
+    press("keyup", { code: "AltRight", key: "Alt" });
+    expect(hooks.finish).not.toHaveBeenCalled();
+    // From a page too.
+    hotkey.page("browser-t1", "down:AltRight");
+    hotkey.page("browser-t1", "other");
+    vi.advanceTimersByTime(HOLD_MS);
+    expect(hooks.start).toHaveBeenCalledOnce();
+  });
+
   it("ignores key-repeats, other keys' modifiers and the key turned off", () => {
     press("keydown", { code: "AltRight", key: "Alt", altKey: true, repeat: true });
     vi.advanceTimersByTime(HOLD_MS);

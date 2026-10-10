@@ -8,8 +8,8 @@
 // The key is a modifier, and on many keyboard layouts Right ⌥ is AltGr — the
 // key that types "@", "€" or "[". So it reacts only to a SOLO hold: a press
 // with no other modifier down that is held `HOLD_MS` with no other key pressed
-// starts a capture, and any other key during the hold cancels it and goes on
-// to the page untouched. The machine never prevents a default except for the
+// (nor a click: the key modifying one) starts a capture, and any other key
+// during the hold cancels it and goes on to the page untouched. The machine never prevents a default except for the
 // Esc that cancels a capture it started.
 //
 // - Hold ≥ `HOLD_MS`, release: dictate (push-to-talk).
@@ -253,13 +253,18 @@ export class VoiceHotkey {
       if (e.code === this.key()) this.dispatch({ type: "up", at: this.now() });
     };
     const blur = () => this.dispatch({ type: "blur", at: this.now() });
+    // A press with the key down is the key modifying a click or a drag
+    // (Option-click in the terminal, Command-click on a link): another key.
+    const press = () => void this.dispatch({ type: "other", at: this.now() });
     win.addEventListener("keydown", down, true);
     win.addEventListener("keyup", up, true);
     win.addEventListener("blur", blur);
+    win.addEventListener("pointerdown", press, true);
     return () => {
       win.removeEventListener("keydown", down, true);
       win.removeEventListener("keyup", up, true);
       win.removeEventListener("blur", blur);
+      win.removeEventListener("pointerdown", press, true);
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
     };

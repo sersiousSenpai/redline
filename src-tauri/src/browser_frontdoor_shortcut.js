@@ -13,12 +13,14 @@
       window.webkit.messageHandlers.redlineBrowser.postMessage(JSON.stringify({ kind, value }));
     } catch (_) {}
   };
-  if (window.top !== window) for (const name of ["pointerdown", "touchstart"]) window.addEventListener(name, (event) => {
-    if (!event.isTrusted) return;
-    post("interaction", name);
-  }, { capture: true, passive: true });
   const holdKeys = { AltRight: "altKey", MetaRight: "metaKey", ControlRight: "ctrlKey" };
   let held = null;
+  for (const name of ["pointerdown", "touchstart"]) window.addEventListener(name, (event) => {
+    if (!event.isTrusted) return;
+    // With the dictation key down, the key modifies the press: no dictation.
+    if (held) post("voice", "other");
+    if (window.top !== window) post("interaction", name);
+  }, { capture: true, passive: true });
   window.addEventListener("keydown", (event) => {
     if (!event.isTrusted) return;
     // The field itself, even inside a web component (the window sees only

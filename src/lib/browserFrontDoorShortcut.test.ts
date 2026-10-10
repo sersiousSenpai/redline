@@ -58,11 +58,11 @@ describe("front door shortcut in embedded page frames", () => {
       { kind: "interaction", value: "pointerdown" },
       { kind: "interaction", value: "touchstart" },
     ]);
-    // The main frame has the page's own signals for that; it listens to
-    // keys only (the dictation key's release, and its window letting go).
+    // The main frame has the page's own signals for that: its presses are
+    // heard only for the dictation key (below).
     const main = frame({ main: true });
-    expect(main.listeners.has("pointerdown")).toBe(false);
-    expect(main.window.addEventListener.mock.calls.map(([name]) => name)).toEqual(["keydown", "keyup", "blur"]);
+    main.listeners.get("pointerdown")!({ isTrusted: true });
+    expect(main.postMessage).not.toHaveBeenCalled();
   });
   it("leaves composition, ordinary Enter and modified shortcuts alone", () => {
     const { postMessage, key } = frame();
@@ -111,6 +111,15 @@ describe("the dictation key in embedded page frames", () => {
     const typed = key({ code: "KeyL", key: "@", altKey: true, shiftKey: false });
     expect(typed.preventDefault).not.toHaveBeenCalled();
     listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    expect(voice(postMessage)).toEqual(["down:AltRight", "other", "up"]);
+  });
+
+  it("says a click joined the hold: the key modifies it (Option-click, Command-click)", () => {
+    const { postMessage, key, listeners } = frame({ main: true });
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false });
+    listeners.get("pointerdown")!({ isTrusted: true });
+    listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    listeners.get("pointerdown")!({ isTrusted: true });
     expect(voice(postMessage)).toEqual(["down:AltRight", "other", "up"]);
   });
 
