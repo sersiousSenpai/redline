@@ -522,12 +522,13 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
   }, [open]);
   useEffect(() => {
     if (!open) return;
-    // Modal for keys too: a window-level listener behind the door (the voice
-    // panel's hold-to-talk) must never hear a Space typed or pressed in it.
-    // Its default — the space in the composer, a button's press — stands.
-    const space = (event: KeyboardEvent) => { if (event.code === "Space") event.stopPropagation(); };
+    // Modal for keys too: a window-level listener behind the door must never
+    // hear a Space pressed in it. Its default — the space in the composer, a
+    // button's press — stands. The release is left to reach the window: the
+    // voice panel hears it only to end a talk held since before the door
+    // opened, which must still end.
     const onKey = (event: KeyboardEvent) => {
-      space(event);
+      if (event.code === "Space") event.stopPropagation();
       // Saved chats are App-owned portals. Follow DOM containment after
       // child handlers have run, rather than relying on React ancestry. With
       // the caret nowhere at all, the door is all there is to act on.
@@ -542,8 +543,7 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
       }
     };
     document.addEventListener("keydown", onKey);
-    document.addEventListener("keyup", space);
-    return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("keyup", space); };
+    return () => document.removeEventListener("keydown", onKey);
   }, [open]);
 
   // Resting, the door engages on a press in its composer or a keystroke

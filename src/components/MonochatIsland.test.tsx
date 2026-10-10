@@ -775,20 +775,23 @@ describe("modal manners", () => {
   });
 
   it("a Space typed or pressed in the door never reaches a window listener behind it", async () => {
-    const behind = vi.fn();
-    window.addEventListener("keydown", behind); window.addEventListener("keyup", behind);
+    const behind = vi.fn(), released = vi.fn();
+    window.addEventListener("keydown", behind); window.addEventListener("keyup", released);
     try {
       await render();
       await click('[aria-label="Open front door"]');
       const space = await key(main(), { key: " ", code: "Space" });
-      await act(async () => { main().dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true })); });
       expect(behind).not.toHaveBeenCalled();
       // The space itself still goes in.
       expect(space.defaultPrevented).toBe(false);
+      // Its release does reach the window: a talk held since before the door
+      // opened ends there.
+      await act(async () => { main().dispatchEvent(new KeyboardEvent("keyup", { key: " ", code: "Space", bubbles: true })); });
+      expect(released).toHaveBeenCalledOnce();
       await key(main(), { key: "Escape" });
       await key(host.querySelector("#document-focus")!, { key: " ", code: "Space" });
       expect(behind).toHaveBeenCalledOnce();
-    } finally { window.removeEventListener("keydown", behind); window.removeEventListener("keyup", behind); }
+    } finally { window.removeEventListener("keydown", behind); window.removeEventListener("keyup", released); }
   });
 
   it("a press on bare title bar is a window drag, not a dismissal — a press on its controls is", async () => {
