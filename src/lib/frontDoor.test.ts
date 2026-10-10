@@ -354,6 +354,34 @@ describe("the island never moves on its own", () => {
   });
 });
 
+// One chat, two places (10/10): the door's room at plate scale, the
+// conversation dock's column once you leave the room. Carried, never closed.
+describe("the room's chat is carried, never closed", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("moves one mounted chat between the room's slot and the dock's", () => {
+    expect(app).toContain("const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;");
+    expect(app).toMatch(/<div ref=\{setChatDockSlot\}/);
+    // One ChatRoom, portalled into the host that moves.
+    expect(app.match(/<ChatRoom\b/g)).toHaveLength(1);
+    expect(app).toContain("</ErrorBoundary></Suspense>, chatHost)}");
+  });
+
+  it("leaving the room, however it was left, carries the chat into the dock", () => {
+    const carry = app.slice(app.indexOf("// Leaving the room carries its chat"), app.indexOf("const chatDocked ="));
+    expect(carry).toContain("if (frontDoorOpen || !chatInRoom) return;");
+    expect(carry).toContain('setConversationPin("companion");');
+    expect(carry).toContain("openDock();");
+    // Never over the surface's own conversation already in the dock.
+    expect(carry).toContain("if (!chatId || dockOpen) return;");
+  });
+
+  it("putting the dock away hands the column back to the surface's own conversation", () => {
+    const close = app.slice(app.indexOf("const closeDock = useCallback("), app.indexOf("const openDock = useCallback("));
+    expect(close).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
+  });
+});
+
 describe("chat composer submission", () => {
   const enter = { key: "Enter", metaKey: false, shiftKey: false };
   it("uses a one-shot mode and Cmd-Enter plans directly", () => {

@@ -976,13 +976,12 @@ function App() {
   // Derived views of the single surface value — they keep the many read sites
   // below near-diff-free, and make disagreeing pane booleans unrepresentable.
   const browserOpen = mainSurface === "browser";
+  // The chat is ONE mounted room in two places: the door's slot while the
+  // door holds it, the conversation dock's once it was carried out. The host
+  // moves between them; the conversation in it never remounts.
   const [chatHost] = useState(() => createBoundedPortalHost("conversation"));
   const [chatRegularSlot, setChatRegularSlot] = useState<HTMLDivElement | null>(null);
-  useLayoutEffect(() => {
-    const target = chatRegularSlot;
-    if (target) target.appendChild(chatHost); else chatHost.remove();
-    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
-  }, [chatRegularSlot, chatHost]);
+  const [chatDockSlot, setChatDockSlot] = useState<HTMLDivElement | null>(null);
   const [browserHost] = useState(() => createBoundedPortalHost("browser"));
   const [browserMounted, setBrowserMounted] = useState(browserOpen);
   useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
@@ -1466,6 +1465,12 @@ function App() {
     chats.find((c) => c.companionId === chatId)?.title ?? null;
   // The open door is holding the chat rather than its own composer.
   const roomChat = frontDoorOpen && chatInRoom && !!chatId;
+  const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;
+  useLayoutEffect(() => {
+    const target = chatTarget;
+    if (target) target.appendChild(chatHost); else chatHost.remove();
+    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
+  }, [chatTarget, chatHost]);
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
   // design — a seed that outlived a restart would re-send an old sentence into
   // a conversation that already has it.
@@ -4795,9 +4800,13 @@ function App() {
   // Putting the conversation away — from the column or from the room. One
   // action, because "close" must not mean two different things depending on
   // the pose: whichever you were in, you end up back where you were without it.
+  // A chat carried into the dock was pinned there; putting the dock away
+  // gives the column back to the surface's own conversation (the Discuss
+  // pill reopens the plan's voice, not the chat — it is still in the door).
   const closeDock = useCallback(() => {
     setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, false));
-  }, []);
+    setConversationPin(pin => (pin === "companion" ? null : pin));
+  }, [setConversationPin]);
   const openDock = useCallback(() => setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true)), []);
   // Which of the browser pane's four panels the dock is showing, in the pane's
   // own vocabulary. Null whenever the column is closed or holding another
@@ -7975,9 +7984,8 @@ function App() {
             }}
           />
         ) : (
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <button type="button" onClick={() => openChat(chatId)}>Open conversation</button>
-          </div>
+          // The chat itself, carried out of the door: its host lands here.
+          <div ref={setChatDockSlot} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />
         )
       ) : (
       <VoicePanel
@@ -8066,11 +8074,21 @@ function App() {
     setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
     selectSurface("browser");
   };
-  // The open door holds the chat only while it is open: shut, it goes back
-  // to being the door's home for the next summons.
+  // Leaving the room carries its chat into the conversation dock, still
+  // open — however the room was left. Not over a dock already holding the
+  // surface's own conversation: that would end a voice discussion mid-thought,
+  // and the dock's strip has the chat a click away. The door, shut, goes back
+  // to being its own composer for the next summons.
   useEffect(() => {
-    if (!frontDoorOpen) setChatInRoom(false);
+    if (frontDoorOpen || !chatInRoom) return;
+    setChatInRoom(false);
+    if (!chatId || dockOpen) return;
+    setConversationPin("companion");
+    openDock();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [frontDoorOpen]);
+  // On screen in the dock's column — the same room, at column scale.
+  const chatDocked = !roomChat && !!chatId && voiceDocked && dockContext?.kind === "companion";
   // The compact card launches only in place — Plan or Run. Elsewhere than the
   // browser its menu also offers the Drafter and Chat, and picking either
   // grows the card into the door, which takes that destination.
@@ -8086,7 +8104,7 @@ function App() {
   // same shared draft, so what you typed in one is there in the next.
   const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
     const card = where === "card";
-    const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat;
+    const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat || chatDocked;
     const destination = where === "chat" ? "chat" : card ? cardDestination : frontDoorDest;
     return (
               <FrontDoor
@@ -9440,7 +9458,7 @@ function App() {
                     label: ({ browse: "Page chat", browselist: "Task list", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
                   })) : dockContexts}
                   activeKey={dockContext.key}
-                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); }}
+                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); else setConversationPin(d.kind); }}
                 />
                 <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
                 {dockBody}
@@ -10657,7 +10675,6 @@ function App() {
               target={activeSurface}
               modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate conversation harness", detail: "Choose the executable used for conversation.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : "locate-claude", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} allowedBackends={["claude-code", "codex"]}/>}
               onActivityChange={setMonochatBusy}
-              onSent={() => setFrontDoorOpen(true)}
               // Keyed by the thread: the room's mode and harness
               // are stored per chat and `usePersistedState` reads
               // its key once, so switching conversations is a
@@ -10681,12 +10698,13 @@ function App() {
               // whatever folder the user is browsing; HOME when
               // there is none.
               cwd={chatCwd}
-              dictationEnabled={!dockOwnsMic && roomChat}
-              // The room reads at plate scale.
+              dictationEnabled={!dockOwnsMic && (roomChat || chatDocked)}
+              // The room reads at plate scale; the dock's column at its own.
               expanded={roomChat}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}
-              // Out of the room; the conversation is a recent, or History, away.
-              onClose={() => setFrontDoorOpen(false)}
+              // Its own toolbar shows in the dock alone (the room wears the
+              // door's heading): Close puts the column away, chat and all.
+              onClose={closeDock}
               seed={
                 chatSeed?.companionId === chatId
                   ? chatSeed.text
