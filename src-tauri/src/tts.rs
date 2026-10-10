@@ -347,14 +347,21 @@ pub struct TtsAudio {
 /// Synthesize one chunk of text with the configured engine. Errors if the engine
 /// is `system` (handled client-side), the chosen engine isn't ready, or the
 /// request's `generation` has been cancelled (with exactly `CANCELLED`).
+///
+/// `voice` makes this one request a Kokoro sample in that voice, whatever
+/// engine and voice are saved: the settings ▶ auditions a voice before the
+/// user saves anything. It rides this command rather than one of its own
+/// because every async command costs ~11 KB of release binary (lib.rs,
+/// `OFF_MAIN_COMMANDS`).
 #[tauri::command]
 pub async fn tts_synth(
     tts: tauri::State<'_, TtsState>,
     text: String,
     generation: u64,
     speed: Option<f64>,
+    voice: Option<String>,
 ) -> Result<TtsAudio, String> {
-    synth(&tts, &text, generation, speed).await
+    synth(&tts, &text, generation, speed, voice).await
 }
 
 /// Drop every request of `generation` that hasn't reached an engine yet.
@@ -368,6 +375,7 @@ async fn synth(
     text: &str,
     generation: u64,
     speed: Option<f64>,
+    voice: Option<String>,
 ) -> Result<TtsAudio, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -376,18 +384,23 @@ async fn synth(
     if tts.is_cancelled(generation) {
         return Err(CANCELLED.to_string());
     }
-    let engine = tts
-        .db
-        .get_setting(SETTING_ENGINE)
-        .unwrap_or_else(|| "system".to_string());
+    let voice = voice.filter(|v| !v.trim().is_empty());
+    let engine = match voice {
+        Some(_) => "kokoro".to_string(),
+        None => tts
+            .db
+            .get_setting(SETTING_ENGINE)
+            .unwrap_or_else(|| "system".to_string()),
+    };
     let result = match engine.as_str() {
         "openai" => synth_openai(tts, text).await,
         "elevenlabs" => synth_eleven(tts, text, generation).await,
         "kokoro" => {
-            let voice = tts
-                .db
-                .get_setting(SETTING_KOKORO_VOICE)
-                .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string());
+            let voice = voice.unwrap_or_else(|| {
+                tts.db
+                    .get_setting(SETTING_KOKORO_VOICE)
+                    .unwrap_or_else(|| DEFAULT_KOKORO_VOICE.to_string())
+            });
             // The bounds kokoro-onnx accepts; the frontend clamps to the same.
             let speed = speed.filter(|s| s.is_finite()).unwrap_or(1.0).clamp(0.5, 2.0);
             synth_kokoro(tts, text, &voice, speed, generation).await
@@ -1337,11 +1350,11 @@ done
     async fn a_cancelled_generation_never_reaches_the_sidecar() {
         let (tts, dir) = fake_kokoro("cancelled", KOKORO_MODEL_FILE);
         tts.cancel(41);
-        let stale = synth(&tts, "The rest of the stopped reply.", 41, None).await;
+        let stale = synth(&tts, "The rest of the stopped reply.", 41, None, None).await;
         assert_eq!(stale.err().as_deref(), Some(CANCELLED));
         assert!(log_lines(&dir, "spawns.log").is_empty(), "not even a spawn");
         // The next generation speaks normally.
-        synth(&tts, "The next reply.", 42, None).await.unwrap();
+        synth(&tts, "The next reply.", 42, None, None).await.unwrap();
         assert_eq!(log_lines(&dir, "requests.log").len(), 1);
     }
 
@@ -1349,12 +1362,12 @@ done
     #[tokio::test]
     async fn a_request_cancelled_while_it_waits_for_kokoro_is_dropped_on_its_turn() {
         let (tts, dir) = fake_kokoro("queued", KOKORO_MODEL_FILE);
-        synth(&tts, "Warm up.", 1, None).await.unwrap();
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
         // The sentence ahead of it is synthesizing: it holds the lock.
         let ahead = tts.kokoro.lock().await;
         let queued = tokio::spawn({
             let tts = tts.clone();
-            async move { synth(&tts, "Behind the stop.", 2, None).await }
+            async move { synth(&tts, "Behind the stop.", 2, None, None).await }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         tts.cancel(2);
@@ -1373,28 +1386,46 @@ done
         let (mut tts, dir) = fake_kokoro("hung", KOKORO_MODEL_FILE);
         tts.kokoro_timeout_floor = Duration::from_millis(200);
         let started = std::time::Instant::now();
-        let hung = synth(&tts, "hang", 1, None).await;
+        let hung = synth(&tts, "hang", 1, None, None).await;
         assert_eq!(hung.err().as_deref(), Some(KOKORO_HUNG));
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(tts.kokoro.lock().await.is_none(), "the hung sidecar was dropped");
-        synth(&tts, "The next sentence.", 1, None).await.unwrap();
+        synth(&tts, "The next sentence.", 1, None, None).await.unwrap();
         assert_eq!(log_lines(&dir, "spawns.log").len(), 2, "respawned once");
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn kokoro_renders_the_users_speed() {
+    async fn kokoro_renders_the_users_speed_and_an_auditioned_voice() {
         let (tts, dir) = fake_kokoro("speed", KOKORO_MODEL_FILE);
-        let first = synth(&tts, "One.", 1, Some(1.5)).await.unwrap();
-        assert_eq!(first.speed, 1.5, "the player must not speed it up again");
-        let second = synth(&tts, "Two.", 1, Some(9.0)).await.unwrap();
-        assert_eq!(second.speed, 2.0, "clamped to what kokoro-onnx accepts");
+        tts.db.set_setting(SETTING_KOKORO_VOICE, "am_adam").unwrap();
+        let saved = synth(&tts, "One.", 1, Some(1.5), None).await.unwrap();
+        assert_eq!(saved.speed, 1.5, "the player must not speed it up again");
+        let sample = synth(&tts, "Two.", 1, Some(9.0), Some("af_heart+am_michael".into()))
+            .await
+            .unwrap();
+        assert_eq!(sample.speed, 2.0, "clamped to what kokoro-onnx accepts");
         let reqs: Vec<serde_json::Value> = log_lines(&dir, "requests.log")
             .iter()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
+        assert_eq!(reqs[0]["voice"], "am_adam");
         assert_eq!(reqs[0]["speed"], 1.5);
+        assert_eq!(reqs[1]["voice"], "af_heart+am_michael");
         assert_eq!(reqs[1]["speed"], 2.0);
+        // An audition never replaces the saved voice.
+        assert_eq!(read_settings(&tts).kokoro_voice, "am_adam");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_voice_sample_uses_kokoro_whatever_engine_is_saved() {
+        let (tts, dir) = fake_kokoro("sample", KOKORO_MODEL_FILE);
+        tts.db.set_setting(SETTING_ENGINE, "system").unwrap();
+        assert!(synth(&tts, "Plain speech.", 1, None, None).await.is_err());
+        synth(&tts, "A sample.", 2, None, Some("bf_emma".into())).await.unwrap();
+        assert_eq!(log_lines(&dir, "requests.log").len(), 1);
+        assert_eq!(read_settings(&tts).engine, "system", "nothing was saved");
     }
 
     #[test]
@@ -1440,7 +1471,7 @@ done
     #[tokio::test]
     async fn a_verified_download_switches_the_voice_to_fp32_and_retires_int8() {
         let (tts, dir) = fake_kokoro("upgrade", KOKORO_LEGACY_MODEL_FILE);
-        synth(&tts, "Speaking on int8.", 1, None).await.unwrap();
+        synth(&tts, "Speaking on int8.", 1, None, None).await.unwrap();
 
         const BODY: &[u8] = b"fp32 weights";
         let check = FileCheck {
@@ -1456,7 +1487,7 @@ done
         assert!(!dir.join(KOKORO_LEGACY_MODEL_FILE).exists());
         assert!(tts.kokoro.lock().await.is_none(), "the int8 sidecar was stopped");
 
-        synth(&tts, "Speaking on fp32.", 1, None).await.unwrap();
+        synth(&tts, "Speaking on fp32.", 1, None, None).await.unwrap();
         let spawns = log_lines(&dir, "spawns.log");
         assert!(spawns[0].ends_with(KOKORO_LEGACY_MODEL_FILE), "{spawns:?}");
         assert!(spawns[1].ends_with(KOKORO_MODEL_FILE), "{spawns:?}");

@@ -7,6 +7,7 @@
 # speaks a line-delimited JSON protocol on stdio:
 #
 #   stdin  : one JSON object per line  -> {"text": "...", "voice": "af_sarah", "speed": 1.0}
+#            ("voice" may also be two names joined by "+": an even blend of both)
 #   stdout : one JSON object per line  -> {"ready": true}          (once, at startup)
 #                                         {"audio": "<base64 wav>"} (per request)
 #                                         {"error": "..."}          (startup or per request)
@@ -45,6 +46,17 @@ def to_wav(samples, sample_rate):
     )
     header += b"data" + struct.pack("<I", n)
     return header + pcm
+
+
+def style_for(kokoro, voice):
+    """A voice name as kokoro-onnx takes it, or for "a+b" the two voices'
+    style vectors averaged: a blend between them."""
+    names = [n for n in voice.split("+") if n]
+    if len(names) < 2:
+        return voice
+    import numpy as np
+
+    return np.mean([kokoro.get_voice_style(n) for n in names], axis=0)
 
 
 def main():
@@ -88,9 +100,13 @@ def main():
             emit({"error": "empty text"})
             continue
 
+        # kokoro-onnx accepts 0.5-2.0; Redline's speed slider spans the same.
+        speed = min(2.0, max(0.5, speed))
+        # The British voices (bf_*, bm_*) were trained on British phonemes.
+        lang = "en-gb" if voice.startswith("b") else "en-us"
         try:
             samples, sample_rate = kokoro.create(
-                text, voice=voice, speed=speed, lang="en-us"
+                text, voice=style_for(kokoro, voice), speed=speed, lang=lang
             )
             wav = to_wav(samples, sample_rate)
             emit({"audio": base64.b64encode(wav).decode("ascii")})

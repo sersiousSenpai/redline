@@ -49,6 +49,9 @@ export const CLIP_GRACE_MS = 1500;
 /** What `tts_synth` answers for a request whose generation was cancelled:
  *  expected, never a failure to report. */
 const CANCELLED = "cancelled";
+/** What the settings ▶ says in a voice being auditioned. */
+const VOICE_SAMPLE =
+  "Here's how I'll sound reading your plan back to you. Tell me what to change, and we'll work through it.";
 
 // Generations are unique across every driver in the app, because `tts_cancel`
 // is app-wide: cancelling the voice panel's reply must never drop a chat's read
@@ -340,5 +343,49 @@ export function cloudTtsDriver(onError?: (msg: string) => void): SpeechDriver {
       void ctx?.resume();
       current?.release();
     },
+  };
+}
+
+let sampleCtx: AudioContext | null = null;
+
+/** The settings ▶: synthesize a sample sentence in Kokoro `voice` (one the user
+ *  is auditioning, not necessarily the saved one) at `rate`, and play it.
+ *  Returns a stop that also drops the request in Rust if it hasn't reached the
+ *  engine. `onEnd` is called once it has played, or with the error if it
+ *  couldn't be; never after stop. */
+export function playVoiceSample(
+  voice: string,
+  rate: number,
+  onEnd: (error?: string) => void,
+): () => void {
+  const generation = nextGeneration();
+  let stopped = false;
+  let playing: Playing | null = null;
+  void (async () => {
+    try {
+      const res = await invoke<TtsAudio>("tts_synth", {
+        text: VOICE_SAMPLE,
+        generation,
+        speed: clampRate(rate),
+        voice,
+      });
+      if (stopped) return;
+      const ctx = (sampleCtx ??= new AudioContext());
+      if (ctx.state !== "running") await ctx.resume();
+      const bytes = base64ToBytes(res.audioBase64);
+      const audio = await ctx.decodeAudioData(bytes.buffer as ArrayBuffer);
+      if (stopped) return;
+      playing = playClip(ctx, { audio, speed: res.speed || 1 }, rate);
+      await playing?.done;
+      if (!stopped) onEnd();
+    } catch (e) {
+      if (!stopped) onEnd(e instanceof Error ? e.message : String(e));
+    }
+  })();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    playing?.stop();
+    void invoke("tts_cancel", { generation }).catch(() => {});
   };
 }

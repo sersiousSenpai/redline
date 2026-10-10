@@ -9,7 +9,7 @@
 // a source stopped while suspended reports 'ended' only on resume.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CLIP_GRACE_MS, cloudTtsDriver, READ_AHEAD } from "./cloudTts";
+import { CLIP_GRACE_MS, cloudTtsDriver, playVoiceSample, READ_AHEAD } from "./cloudTts";
 import { SpeechQueue, type SpeechState } from "./speech";
 
 // --- the Rust side -----------------------------------------------------------
@@ -17,6 +17,7 @@ interface SynthArgs {
   text: string;
   generation: number;
   speed: number;
+  voice?: string;
 }
 type Pending = SynthArgs & { resolve: (v: unknown) => void; reject: (e: unknown) => void };
 const rust = {
@@ -403,5 +404,28 @@ describe("cloudTtsDriver: speed, and failures", () => {
     expect(errors).toEqual(["OpenAI TTS error 401: invalid key"]);
     expect(spoken).toEqual(["One.", "Two.", "Three."]);
     expect(done).toEqual(["One.", "Two.", "Three."]);
+  });
+});
+
+describe("playVoiceSample", () => {
+  it("auditions a voice without saving it, and reports when it has played", async () => {
+    const onEnd = vi.fn();
+    playVoiceSample("am_michael+am_fenrir", 1.25, onEnd);
+    await advance(0);
+    expect(rust.calls[0]).toMatchObject({ voice: "am_michael+am_fenrir", speed: 1.25 });
+    await advance(3000);
+    expect(onEnd).toHaveBeenCalledWith();
+  });
+
+  it("stop drops the request in Rust and never reports after", async () => {
+    rust.synthMs = 200;
+    const onEnd = vi.fn();
+    const stop = playVoiceSample("af_heart", 1, onEnd);
+    await advance(10);
+    stop();
+    expect(rust.cancels).toEqual([rust.calls[0].generation]);
+    await advance(3000);
+    expect(onEnd).not.toHaveBeenCalled();
+    expect(started()).toEqual([]);
   });
 });
