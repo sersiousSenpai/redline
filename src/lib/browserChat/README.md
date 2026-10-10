@@ -44,8 +44,10 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   The backend never reads the globally active tab or mission for a turn that
   carries a target.
 - The agent changes a page only through `POST /v1/browser/action` on the
-  captured label. The older `/navigate`, `/click` and `/query` routes still
-  answer, but the prompt and the skill no longer teach them.
+  captured label. The older `/navigate`, `/click` and `/query` routes, and
+  the `/active` read that `/tabs` replaced, still answer, but the prompt and
+  the skill no longer teach them (`legacyRoutes`). Every other route the
+  agent may call is taught by one of the two.
 - A mission's routes are the captured ones, `/v1/missions/{id}`; a Mosaic,
   like regular browsing, has no mission.
 - The agent never curates: no pins, Task-list items or launches on its own.

@@ -21,7 +21,6 @@
   },
   "readRoutes": [
     "/v1/browser/snapshot",
-    "/v1/browser/active",
     "/v1/browser/tabs",
     "/v1/browser/thread"
   ],
@@ -32,7 +31,8 @@
   "legacyRoutes": [
     "/v1/browser/navigate",
     "/v1/browser/click",
-    "/v1/browser/query"
+    "/v1/browser/query",
+    "/v1/browser/active"
   ],
   "capturedMissionRoutes": ["/v1/missions/{id}", "/v1/missions/{id}/findings"],
   "globalMissionRoutes": ["/v1/mission/active", "/v1/mission/findings"],

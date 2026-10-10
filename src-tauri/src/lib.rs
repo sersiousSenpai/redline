@@ -3423,9 +3423,13 @@ async fn run_server(state: AppState) {
             get(handle_get_feedback),
         )
         // Browse agent (browser pane): the headless browse agent reads and
-        // drives the active browser tab through these routes via the
-        // already-permitted `curl` allow. All act on the tab the user is
-        // currently looking at (`AppState::active_browser`).
+        // drives the user's browser tabs through these routes via the
+        // already-permitted `curl` allow. Reads take `?tab=` (a tab number or
+        // a label) and otherwise read the tab on screen
+        // (`AppState::active_browser`); `/action` acts only on the label its
+        // body names. `/navigate`, `/click` and `/query` predate `/action`,
+        // and `/active` predates `/tabs`; they still answer, but the prompt
+        // and the skill no longer teach them.
         .route("/v1/browser/active", get(handle_browser_active))
         .route("/v1/browser/tabs", get(handle_browser_tabs))
         .route("/v1/browser/thread", get(handle_browser_thread))
