@@ -69,9 +69,9 @@ it, that's the discussion to have before merging.
    binary per command** (measured 2026-10-09: 29 commands cost 331,248 B), and
    the binary has no room for that. Either way, two calls can finish out of
    order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
-   instead, which one thread runs one call at a time, oldest first
-   (`save_workspace`: every gesture saves without waiting for the last, and
-   the file is what the next launch loads). `watch_dir`/`unwatch_dir` stay
+   instead: each call takes a ticket as it arrives and runs on the pool when
+   its turn comes, one at a time (`save_workspace`: every gesture saves
+   without waiting for the last, and the file is what the next launch loads). `watch_dir`/`unwatch_dir` stay
    sync to keep their order with each other, and hand their slow part to a
    thread of their own.
 

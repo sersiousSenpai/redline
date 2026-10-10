@@ -333,9 +333,9 @@ const HEAVY_MARKERS: &[&str] = &[
     "read_conn",
 ];
 
-/// The commands `lib.rs` runs off the main thread by name, on the blocking
-/// pool (`OFF_MAIN_COMMANDS`) or in order on a thread of their own
-/// (`IN_ORDER_COMMANDS`): sync in shape, off the main thread in fact.
+/// The commands `lib.rs` runs on the blocking pool by name, in any order
+/// (`OFF_MAIN_COMMANDS`) or in arrival order (`IN_ORDER_COMMANDS`): sync in
+/// shape, off the main thread in fact.
 pub fn off_main_commands(lib_src: &str) -> Vec<String> {
     let mut names = command_list(lib_src, "OFF_MAIN_COMMANDS");
     names.extend(command_list(lib_src, "IN_ORDER_COMMANDS"));

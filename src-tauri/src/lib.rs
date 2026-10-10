@@ -12614,44 +12614,57 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls
-/// arrived in: one thread runs them, one at a time, oldest first.
-/// `save_workspace` is here because every customization gesture fires one
-/// without waiting for the last, and on the pool an older layout could land
-/// after a newer one and be what the next launch loads.
+/// arrived in: each takes a ticket as it arrives and runs on the pool when its
+/// turn comes, one at a time. `save_workspace` is here because every
+/// customization gesture fires one without waiting for the last, and two of
+/// them racing on the pool could leave the older layout on disk for the next
+/// launch to load.
 const IN_ORDER_COMMANDS: &[&str] = &["save_workspace"];
 
-/// The invoke handler, with the `OFF_MAIN_COMMANDS` handed to the blocking
-/// pool whole and the `IN_ORDER_COMMANDS` queued to one thread: one shared
-/// closure type, so routing a command adds no code, where an `(async)`
-/// wrapper builds a task per command.
+/// The `IN_ORDER_COMMANDS` turn: the next ticket to hand out, and the ticket
+/// whose call may run now.
+static IN_ORDER_TICKETS: AtomicU64 = AtomicU64::new(0);
+static IN_ORDER_TURN: (StdMutex<u64>, std::sync::Condvar) =
+    (StdMutex::new(0), std::sync::Condvar::new());
+
+/// The invoke handler, with the `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS`
+/// handed to the blocking pool whole: one shared closure type, so routing a
+/// command adds no code, where an `(async)` wrapper builds a task per command.
 fn off_main<R: tauri::Runtime>(
     commands: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     let commands = Arc::new(commands);
-    let (in_order, queue) = std::sync::mpsc::channel::<tauri::ipc::Invoke<R>>();
-    let run = commands.clone();
-    std::thread::Builder::new()
-        .name("commands-in-order".into())
-        .spawn(move || {
-            for invoke in queue {
-                // A panicking call must not take every later one down with it.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(invoke)));
-            }
-        })
-        .expect("failed to start the in-order command thread");
     move |invoke| {
         let command = invoke.message.command();
-        if IN_ORDER_COMMANDS.contains(&command) {
-            let _ = in_order.send(invoke);
-            return true;
-        }
-        if !OFF_MAIN_COMMANDS.contains(&command) {
+        // Taken here, on the thread the calls arrive on, so tickets follow
+        // arrival order.
+        let ticket = IN_ORDER_COMMANDS
+            .contains(&command)
+            .then(|| IN_ORDER_TICKETS.fetch_add(1, Ordering::Relaxed));
+        if ticket.is_none() && !OFF_MAIN_COMMANDS.contains(&command) {
             return commands(invoke);
         }
         let commands = commands.clone();
-        tauri::async_runtime::spawn_blocking(move || commands(invoke));
+        tauri::async_runtime::spawn_blocking(move || match ticket {
+            Some(ticket) => in_turn(ticket, || commands(invoke)),
+            None => commands(invoke),
+        });
         true
     }
+}
+
+/// Run an `IN_ORDER_COMMANDS` call when its ticket's turn comes, then pass the
+/// turn on, even when the call panics: otherwise every later one would wait
+/// forever.
+fn in_turn(ticket: u64, call: impl FnOnce() -> bool) -> bool {
+    let (serving, passed) = &IN_ORDER_TURN;
+    let mut serving = passed
+        .wait_while(serving.lock().unwrap_or_else(|e| e.into_inner()), |now| *now != ticket)
+        .unwrap_or_else(|e| e.into_inner());
+    let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call));
+    *serving += 1;
+    passed.notify_all();
+    handled.unwrap_or(true)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -14049,6 +14062,39 @@ mod tests {
         assert!(other.try_lock().is_ok());
         drop(guard);
         assert!(same.try_lock().is_ok());
+    }
+
+    /// `IN_ORDER_COMMANDS` calls run in the order their tickets were taken,
+    /// whatever order the pool starts them in, and a call that panics still
+    /// passes the turn on.
+    #[test]
+    fn in_order_calls_run_in_ticket_order() {
+        let tickets: Vec<u64> = (0..4).map(|_| IN_ORDER_TICKETS.fetch_add(1, Ordering::Relaxed)).collect();
+        let ran = Arc::new(StdMutex::new(Vec::new()));
+        let fails = tickets[1];
+        // Newest first, each given a moment to reach its turn and wait.
+        let calls: Vec<_> = tickets
+            .iter()
+            .rev()
+            .map(|&ticket| {
+                let ran = ran.clone();
+                let call = std::thread::spawn(move || {
+                    in_turn(ticket, || {
+                        if ticket == fails {
+                            std::panic::resume_unwind(Box::new("a failed save"));
+                        }
+                        ran.lock().unwrap().push(ticket);
+                        true
+                    })
+                });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                call
+            })
+            .collect();
+        for call in calls {
+            call.join().expect("in_turn contains the panic");
+        }
+        assert_eq!(*ran.lock().unwrap(), vec![tickets[0], tickets[2], tickets[3]]);
     }
 
     /// `GET /v1/perf` evaluates script in the app's own webview, so the only

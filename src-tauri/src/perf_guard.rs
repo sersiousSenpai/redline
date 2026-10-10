@@ -345,8 +345,9 @@ mod tests {
     /// Every customization gesture saves the workspace manifest without
     /// waiting for the last save, and the file is what the next launch loads.
     /// On the blocking pool two quick saves could land newest-first and leave
-    /// the older layout on disk; on the in-order thread they can't. A command
-    /// whose calls must keep their order is in that list and only that list.
+    /// the older layout on disk; taking turns by arrival ticket they can't. A
+    /// command whose calls must keep their order is in that list and only
+    /// that list.
     #[test]
     fn workspace_saves_keep_their_order_off_the_main_thread() {
         let lib = include_str!("lib.rs");
@@ -359,15 +360,15 @@ mod tests {
         let handler = &lib[lib.find("fn off_main<").unwrap()..];
         let handler = &handler[..handler.find("\n}\n").unwrap()];
         assert!(
-            handler.contains(".name(\"commands-in-order\".into())") && handler.contains("IN_ORDER_COMMANDS.contains(&command)"),
-            "lib.rs: off_main must queue IN_ORDER_COMMANDS to its one in-order thread"
+            handler.contains("IN_ORDER_COMMANDS\n            .contains(&command)") && handler.contains("in_turn(ticket, "),
+            "lib.rs: off_main must ticket IN_ORDER_COMMANDS as they arrive and run each in its turn"
         );
     }
 
-    /// The handler routes `OFF_MAIN_COMMANDS` to the blocking pool and
-    /// `IN_ORDER_COMMANDS` to its in-order thread, and every name there is a
-    /// registered command: a name the generated handler doesn't know would be
-    /// answered by nobody, and its caller would wait forever.
+    /// The handler routes `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS` to the
+    /// blocking pool, and every name there is a registered command: a name
+    /// the generated handler doesn't know would be answered by nobody, and its
+    /// caller would wait forever.
     #[test]
     fn off_main_commands_are_registered_and_routed() {
         let lib = include_str!("lib.rs");
