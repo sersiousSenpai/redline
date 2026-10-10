@@ -130,7 +130,7 @@ try {
     configFile: false,
     root,
     cacheDir: path.join(temporary, "vite-cache"),
-    optimizeDeps: { entries: ["fixtures/memory-soak/index.html"], include: ["mermaid", "yjs", "y-webrtc", "highlight.js/lib/common", "markdown-it"] },
+    optimizeDeps: { entries: ["fixtures/memory-soak/index.html"], include: ["mermaid", "yjs", "y-webrtc", "highlight.js/lib/core", "lowlight", "markdown-it"] },
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: ["@tauri-apps/api/core", "@tauri-apps/api/event"].map((find) => ({ find, replacement: service })),

@@ -122,6 +122,20 @@ describe("MarkdownView", () => {
     }
   });
 
+  it("highlights a fence in a common language or its alias, and leaves an unknown one plain", async () => {
+    const code = async (lang: string, src: string) =>
+      (await rendered({ body: "```" + lang + "\n" + src + "\n```", compact: true })).querySelector("code")!.innerHTML;
+    expect(await code("ts", "const a = 1;")).toBe(
+      '<span class="hljs-keyword">const</span> a = <span class="hljs-number">1</span>;\n',
+    );
+    expect(await code("sh", 'echo "hi"')).toBe('<span class="hljs-built_in">echo</span> <span class="hljs-string">"hi"</span>\n');
+    expect(await code("html", "<b>x</b>")).toBe(
+      '<span class="hljs-tag">&lt;<span class="hljs-name">b</span>&gt;</span>x<span class="hljs-tag">&lt;/<span class="hljs-name">b</span>&gt;</span>\n',
+    );
+    expect(await code("Rust", "fn main() {}")).toContain('<span class="hljs-keyword">fn</span>');
+    expect(await code("nolang", "<b>x</b>")).toBe("&lt;b&gt;x&lt;/b&gt;\n");
+  });
+
   it("wraps each markdown run of a body with a diagram, around the diagram", async () => {
     const view = await rendered({ body: "Lead.\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter.", compact: true, rich: true });
     expect(Array.from(view.children).map((el) => el.outerHTML)).toEqual([

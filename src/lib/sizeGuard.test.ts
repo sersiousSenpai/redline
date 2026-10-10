@@ -116,7 +116,7 @@ describe("size guard", () => {
   });
 
   // The markdown-rendering stack. `MarkdownView` value-imports markdown-it,
-  // markdown-it-task-lists and highlight.js/lib/common — ~670 kB of source
+  // markdown-it-task-lists and highlight.js with its grammars — ~670 kB of source
   // that reached the boot path through ONE chain: App → CommentCard →
   // CommentThread → MarkdownView. These pin the chain's root.
   for (const name of [
@@ -177,14 +177,28 @@ describe("size guard", () => {
     ).toEqual([]);
   });
 
-  it("highlight.js is only imported via lib/common, never the full barrel", () => {
+  it("highlight.js is never imported through the full barrel", () => {
     const offenders = files
       .filter(({ text }) => /from\s+["']highlight\.js["']/.test(text))
       .map(({ rel }) => rel);
     expect(
       offenders,
-      'use `import hljs from "highlight.js/lib/common"` — the barrel is ~1.9 MB of grammars',
+      'use `import hljs from "highlight.js/lib/core"` plus lowlight\'s `common` grammars — the barrel is ~1.9 MB of grammars',
     ).toEqual([]);
+  });
+
+  it("highlight.js grammars bundle once, as the ES modules the editor's code blocks use", () => {
+    // The package's `lib/common` registers the CommonJS build of each grammar.
+    // lowlight (the editor's code blocks) imports the ES build of the same
+    // grammars, so a `lib/common` import anywhere ships every one twice:
+    // ~140 kB of dist, measured 2026-10-10.
+    const offenders = files
+      .filter(({ text }) => /from\s+["']highlight\.js\/(lib|es)\/(common|languages\/)/.test(text))
+      .map(({ rel }) => rel);
+    expect(offenders, "register lowlight's `common` grammars on highlight.js/lib/core").toEqual([]);
+    const view = files.find(({ rel }) => rel === "components/MarkdownView.tsx")!.text;
+    expect(view).toMatch(/import hljs from "highlight\.js\/lib\/core";/);
+    expect(view).toMatch(/import \{ common \} from "lowlight";/);
   });
 
   it("build analysis is never written into dist", () => {
