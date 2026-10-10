@@ -16,13 +16,15 @@
 //   nothing focused goes, too), else a turn in the conversation (the session
 //   decides which).
 //
-// A text box inside a `[data-dictation-send]` container is a chat composer:
-// "send it" submits it, as its own Enter does. Focus inside a
-// `[data-dictation-turn]` container (the voice panel) makes a turn.
+// What a field is for comes from the composer it is in
+// (lib/dictationComposer.ts): in a chat composer "send it" submits, as its own
+// Enter does; in the voice panel what is said is a turn.
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { composers, type ComposerEntry, type ComposerSpec } from "../lib/dictationComposer";
 import { fitToContext } from "./dictationCleanup";
+import type { AroundText } from "./vocabLearn";
 import { lastPhraseStart } from "./voiceIntents";
 import type { KeySource } from "./voiceHotkey";
 
@@ -35,8 +37,12 @@ export interface RichEditor {
   };
   commands: {
     insertContent(value: unknown): boolean;
+    insertContentAt(range: { from: number; to: number }, value: unknown): boolean;
     deleteRange(range: { from: number; to: number }): boolean;
   };
+  view: { coordsAtPos(pos: number): { left: number; top: number; bottom: number } };
+  on(event: "update", fn: () => void): unknown;
+  off(event: "update", fn: () => void): unknown;
 }
 
 export type DictationTarget =
@@ -56,10 +62,39 @@ const EDITABLE = '[contenteditable=""],[contenteditable="true"],[contenteditable
  *  page's own focus takes no text. */
 const PAGE_CHAT_FIELD = "[data-browser-chat-composer] textarea";
 
+/** A registered composer as it stands: its frame, how it takes dictation,
+ *  and the field its mic and the fallback write into. */
+export interface Composer {
+  frame: HTMLElement;
+  spec: ComposerSpec;
+  field: HTMLElement | null;
+}
+
+const view = (e: ComposerEntry): Composer => ({
+  frame: e.frame,
+  spec: e.spec.current ?? {},
+  field: e.field?.current ?? e.frame.querySelector<HTMLElement>("textarea, input"),
+});
+
+/** The composer `el` is in, if any. */
+export function composerAt(el: Element | null): Composer | null {
+  for (let n = el; n; n = n.parentElement) {
+    const e = composers.get(n as HTMLElement);
+    if (e) return view(e);
+  }
+  return null;
+}
+
+/** The composer that takes what is said with nothing focused, if one shows. */
+export function fallbackComposer(): Composer | null {
+  for (const e of composers.values()) if (e.spec.current?.fallback && e.frame.isConnected) return view(e);
+  return null;
+}
+
 /** What `el` takes text as, if anything. */
 export function targetFor(el: Element | null): DictationTarget | null {
   if (!el) return null;
-  const send = !!el.closest("[data-dictation-send]");
+  const send = !!composerAt(el)?.spec.send;
   if (el instanceof HTMLTextAreaElement) {
     if (el.classList.contains("xterm-helper-textarea")) return { kind: "terminal", el };
     if (el.disabled || el.readOnly) return null;
@@ -87,10 +122,10 @@ export function resolveTarget(doc: Document, source: KeySource): DictationTarget
     return targetFor(doc.querySelector(PAGE_CHAT_FIELD)) ?? { kind: "turn" };
   }
   const active = doc.activeElement;
-  if (active?.closest("[data-dictation-turn]")) return { kind: "turn" };
+  if (composerAt(active)?.spec.turn) return { kind: "turn" };
   // Nothing that takes text focused: the open door's box, where typing with
   // nothing focused goes too; otherwise a turn.
-  return targetFor(active) ?? targetFor(doc.querySelector("[data-dictation-default]")) ?? { kind: "turn" };
+  return targetFor(active) ?? targetFor(fallbackComposer()?.field ?? null) ?? { kind: "turn" };
 }
 
 /** The element a target writes into, for the strip to sit on. */
@@ -108,11 +143,41 @@ export function canSend(t: DictationTarget): boolean {
  *  that"). Each takes back what is left after the one before. */
 export interface Placed {
   el: HTMLElement;
+  /** Its words as they stand: what was written, or a polish put in place. */
+  text(): string;
+  /** Nobody has changed the field (or the document) since they were. */
+  untouched(): boolean;
   takeBack(all: boolean): boolean;
+  /** Put `next` in place of the words while untouched; ⌘Z puts them back —
+   *  the field's, or the editor's own undo. Absent where words can't be
+   *  swapped: an editable area, a rich-text dictation of several lines. */
+  replace?(next: string): boolean;
+  /** The text the words sit in, for learning the corrections made to them. */
+  around?: AroundText;
 }
 
-const announce = (el: Element, inputType: string, data: string | null) =>
-  el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+/** True while a change is the dictation's own, so the input listeners that
+ *  learn corrections can tell it from the user's. */
+let writing = false;
+const announce = (el: Element, inputType: string, data: string | null) => {
+  writing = true;
+  try {
+    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+  } finally {
+    writing = false;
+  }
+};
+
+/** How many times each field dictated into has changed: by the user, or by
+ *  a later dictation (whose words moved this one's). */
+const edits = new WeakMap<Element, number>();
+function editCount(el: HTMLElement): number {
+  if (!edits.has(el)) {
+    edits.set(el, 0);
+    el.addEventListener("input", () => edits.set(el, (edits.get(el) ?? 0) + 1));
+  }
+  return edits.get(el)!;
+}
 
 /** How much of `written` the last phrase starts at, ignoring the space
  *  before it; 0 for all of it. */
@@ -122,6 +187,10 @@ function phraseCut(written: string, all: boolean): number {
   while (cut > 0 && /\s/.test(written[cut - 1])) cut -= 1;
   return cut;
 }
+
+/** ⌘Z (Ctrl+Z), and not ⌘⇧Z. */
+const isUndo = (e: KeyboardEvent) =>
+  (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z";
 
 function placeInField(t: Extract<DictationTarget, { kind: "field" }>, text: string): Placed | null {
   const el = t.el;
@@ -133,18 +202,65 @@ function placeInField(t: Extract<DictationTarget, { kind: "field" }>, text: stri
   const line = el instanceof HTMLInputElement;
   const fitted = fitToContext(text, el.value.slice(0, start), el.value.slice(end), { line });
   if (!fitted) return null;
+  editCount(el);
   el.setRangeText(fitted, start, end, "end");
   announce(el, "insertText", fitted);
   let written = fitted;
+  let version = editCount(el);
+  const intact = () => el.isConnected && el.value.slice(start, start + written.length) === written;
+  const untouched = () => intact() && editCount(el) === version;
+  /** Swap the words for `next`, the caret kept where it was relative to them. */
+  const swap = (next: string, inputType: string) => {
+    const delta = next.length - written.length;
+    const oldEnd = start + written.length;
+    const keep = (at: number | null) => (at === null || at < oldEnd ? at : at + delta);
+    const [selStart, selEnd] = [keep(el.selectionStart), keep(el.selectionEnd)];
+    el.setRangeText(next, start, oldEnd, "end");
+    if (selStart !== null && selEnd !== null) el.setSelectionRange(selStart, selEnd);
+    written = next;
+    announce(el, inputType, next);
+    version = editCount(el);
+  };
   return {
     el,
+    text: () => written,
+    untouched,
     takeBack(all) {
-      if (!el.isConnected || el.value.slice(start, start + written.length) !== written) return false;
+      if (!intact()) return false;
       const cut = phraseCut(written, all);
       el.setRangeText("", start + cut, start + written.length, "end");
       written = written.slice(0, cut);
       announce(el, "deleteContentBackward", null);
+      version = editCount(el);
       return true;
+    },
+    replace(next) {
+      if (!untouched()) return false;
+      const before = written;
+      swap(next, "insertReplacementText");
+      // ⌘Z takes back the polish alone, while nothing else has changed:
+      // the field's own undo never saw either write.
+      const box: HTMLElement = el;
+      const undo = (e: KeyboardEvent) => {
+        if (!isUndo(e)) return;
+        box.removeEventListener("keydown", undo, true);
+        if (!untouched() || written !== next) return;
+        e.preventDefault();
+        swap(before, "historyUndo");
+      };
+      box.addEventListener("keydown", undo, true);
+      return true;
+    },
+    around: {
+      value: () => el.value,
+      span: () => [start, start + written.length],
+      onEdit(fn) {
+        const heard = () => {
+          if (!writing) fn();
+        };
+        el.addEventListener("input", heard);
+        return () => el.removeEventListener("input", heard);
+      },
     },
   };
 }
@@ -178,14 +294,23 @@ function placeInRich(t: Extract<DictationTarget, { kind: "rich" }>, text: string
   const inline = !fitted.includes("\n");
   // A text node as JSON, never a string: a string is parsed as HTML, which
   // would eat "<" and the space a word needs in front of it.
-  editor.commands.insertContent(inline ? { type: "text", text: fitted } : richHtml(fitted));
+  writing = true;
+  try {
+    editor.commands.insertContent(inline ? { type: "text", text: fitted } : richHtml(fitted));
+  } finally {
+    writing = false;
+  }
   let end = editor.state.selection.to;
   let mine = editor.state.doc;
   let written = fitted;
+  const untouched = () => !editor.isDestroyed && editor.state.doc === mine;
+  const all = () => editor.state.doc.textBetween(0, editor.state.doc.content.size, "\n", " ");
   return {
     el,
+    text: () => written,
+    untouched,
     takeBack(all) {
-      if (editor.isDestroyed || editor.state.doc !== mine) return false;
+      if (!untouched()) return false;
       // Positions are characters only while the dictation was one line.
       const cut = inline ? phraseCut(written, all) : 0;
       editor.commands.deleteRange({ from: from + cut, to: end });
@@ -194,6 +319,39 @@ function placeInRich(t: Extract<DictationTarget, { kind: "rich" }>, text: string
       mine = editor.state.doc;
       return true;
     },
+    // One editor transaction: its own undo step, so ⌘Z takes back the
+    // polish and leaves the words as first written.
+    replace: inline
+      ? (next) => {
+          if (!untouched() || next.includes("\n")) return false;
+          writing = true;
+          try {
+            editor.commands.insertContentAt({ from, to: end }, { type: "text", text: next });
+          } finally {
+            writing = false;
+          }
+          written = next;
+          end = from + next.length;
+          mine = editor.state.doc;
+          return true;
+        }
+      : undefined,
+    around: inline
+      ? {
+          value: all,
+          span() {
+            const at = editor.state.doc.textBetween(0, from, "\n", " ").length;
+            return [at, at + written.length];
+          },
+          onEdit(fn) {
+            const heard = () => {
+              if (!writing) fn();
+            };
+            editor.on("update", heard);
+            return () => editor.off("update", heard);
+          },
+        }
+      : undefined,
   };
 }
 
@@ -215,6 +373,8 @@ function placeInEditable(t: Extract<DictationTarget, { kind: "editable" }>, text
     el.addEventListener("input", () => (touched = true), { once: true });
     return {
       el,
+      text: () => fitted,
+      untouched: () => !touched,
       takeBack: () => !touched && el.contains(doc.activeElement) && doc.execCommand("undo"),
     };
   }
@@ -224,6 +384,8 @@ function placeInEditable(t: Extract<DictationTarget, { kind: "editable" }>, text
   announce(el, "insertText", fitted);
   return {
     el,
+    text: () => node.data,
+    untouched: () => node.isConnected,
     takeBack(all) {
       if (!node.isConnected || !node.data) return false;
       node.data = node.data.slice(0, phraseCut(node.data, all));

@@ -7,7 +7,7 @@ const { turn } = vi.hoisted(() => ({ turn: { messages: [] as { id: string; role:
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
 vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => ({ speaking: false, stop: () => {} }) }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
+vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => [] }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));

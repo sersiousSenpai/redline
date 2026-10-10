@@ -21,7 +21,14 @@ import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from "reac
 
 import "./DictationStrip.css";
 
+/** What the strip sits on: a composer, or a box worked out each frame (the
+ *  caret's line in a document). */
+export type StripAnchor = Element | { rect(): DOMRect | null };
+
 export interface StripState {
+  /** Whose capture it shows: the dictation host's, or the voice panel's own
+   *  push-to-talk. Each clears only its own. */
+  owner?: string;
   /** `listening`: capturing. `placing`: transcribing after the release.
    *  `notice`: a message that fades. */
   phase: "listening" | "placing" | "notice";
@@ -29,8 +36,8 @@ export interface StripState {
   text: string;
   /** The latest levels, 0–1, oldest first. */
   levels: number[];
-  /** What the strip sits on (the composer); null: the window's foot. */
-  anchor: Element | null;
+  /** What the strip sits on; null: the window's foot. */
+  anchor: StripAnchor | null;
   /** The quiet second line of what to do ("release to insert"). */
   hint: string;
   /** Words nothing could take, offered for copying. */
@@ -95,7 +102,7 @@ export function DictationStrip() {
     let frame = 0;
     let last = "";
     const place = () => {
-      const rect = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
+      const rect = !anchor ? null : "rect" in anchor ? anchor.rect() : anchor.isConnected ? anchor.getBoundingClientRect() : null;
       const next = stripBox(rect, { width: innerWidth, height: innerHeight });
       const key = `${next.left},${next.top},${next.width}`;
       if (key !== last) {

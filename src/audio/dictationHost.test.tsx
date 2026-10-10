@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { act, useState } from "react";
+import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,10 +9,11 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: appInvoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 import { strip } from "../components/DictationStrip";
+import { useDictationComposer, type ComposerSpec } from "../lib/dictationComposer";
 import { DictationBroker } from "./dictationBroker";
 import { DICTATION_OWNER, DictationHost, type TalkContext, type TurnTaker } from "./dictationHost";
 import { getVoiceAway, setVoiceAway } from "./voiceAway";
-import { APP_KEYS, HOLD_MS } from "./voiceHotkey";
+import { APP_KEYS, HOLD_MS, type HotkeyEvent } from "./voiceHotkey";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -66,6 +67,7 @@ function nativeMic() {
 
 let mic: ReturnType<typeof nativeMic>;
 let host: DictationHost;
+let polish: { polish: ReturnType<typeof vi.fn> };
 let talk: TalkContext | null;
 let taker: TurnTaker | null;
 let root: Root;
@@ -75,6 +77,8 @@ let now: number;
 beforeEach(() => {
   appInvoke.mockReset();
   appInvoke.mockImplementation(async () => null);
+  localStorage.clear();
+  polish = { polish: vi.fn(async () => "") };
   mic = nativeMic();
   talk = null;
   taker = null;
@@ -86,6 +90,7 @@ beforeEach(() => {
     conversation: () => talk,
     taker: () => taker,
     invoke: appInvoke as never,
+    polish: polish as never,
   });
   mount = document.createElement("div");
   document.body.appendChild(mount);
@@ -99,8 +104,16 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** What the host asked of the app, past loading the user's words. */
-const voiceCalls = () => appInvoke.mock.calls.filter(([cmd]) => cmd !== "get_ui_prefs");
+/** What the host asked of the app, past loading the user's words and the
+ *  memory index's names. */
+const voiceCalls = () => appInvoke.mock.calls.filter(([cmd]) => cmd !== "get_ui_prefs" && cmd !== "classmem_tree");
+
+/** The key, as the window would hear it. */
+function press(e: HotkeyEvent): boolean {
+  let swallowed = false;
+  act(() => void (swallowed = host.hotkey.dispatch(e)));
+  return swallowed;
+}
 
 const settle = () => act(async () => {
   for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
@@ -108,19 +121,23 @@ const settle = () => act(async () => {
 
 /** Hold the key `ms`, saying `text` meanwhile, and let go. */
 async function hold(text: string, opts: { ms?: number; heard?: boolean } = {}) {
-  host.hotkey.dispatch({ type: "down", at: now, source: APP_KEYS, solo: true });
-  host.hotkey.dispatch({ type: "elapsed", at: now + HOLD_MS });
+  press({ type: "down", at: now, source: APP_KEYS, solo: true });
+  press({ type: "elapsed", at: now + HOLD_MS });
   await settle();
   mic.say(text, opts);
   now += opts.ms ?? 1500;
-  host.hotkey.dispatch({ type: "up", at: now });
+  press({ type: "up", at: now });
   await settle();
 }
 
-function Composer({ onSend }: { onSend?: (text: string) => void }) {
+const CHAT: ComposerSpec = { send: true, polish: true };
+
+function Composer({ onSend, spec = CHAT }: { onSend?: (text: string) => void; spec?: ComposerSpec }) {
+  const frame = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
+  useDictationComposer(frame, spec);
   return (
-    <div data-dictation-anchor data-dictation-send>
+    <div ref={frame}>
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -133,8 +150,8 @@ function Composer({ onSend }: { onSend?: (text: string) => void }) {
   );
 }
 
-async function composer(onSend?: (text: string) => void) {
-  await act(async () => root.render(<Composer onSend={onSend} />));
+async function composer(onSend?: (text: string) => void, spec?: ComposerSpec) {
+  await act(async () => root.render(<Composer onSend={onSend} spec={spec} />));
   const ta = mount.querySelector("textarea")!;
   ta.focus();
   return { ta, shown: () => mount.querySelector("output")!.textContent };
@@ -143,8 +160,8 @@ async function composer(onSend?: (text: string) => void) {
 describe("dictating into a composer", () => {
   it("captures as the dictation owner, shows the words on the strip, and writes them cleaned up on release", async () => {
     const { ta, shown } = await composer();
-    host.hotkey.dispatch({ type: "down", at: now, source: APP_KEYS, solo: true });
-    host.hotkey.dispatch({ type: "elapsed", at: now + HOLD_MS });
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
     await settle();
     expect(mic.calls[0]).toEqual(["dictation_start", { owner: DICTATION_OWNER, kind: "hold", vocab: [], preroll: true }]);
     expect(strip.get()).toMatchObject({ phase: "listening", hint: "release to insert", anchor: ta.parentElement });
@@ -153,7 +170,7 @@ describe("dictating into a composer", () => {
     // Nothing is written while the key is held.
     expect(ta.value).toBe("");
     now += 2000;
-    host.hotkey.dispatch({ type: "up", at: now });
+    press({ type: "up", at: now });
     await settle();
     expect(shown()).toBe("The kokoro sidecar in tts.rs");
     expect(strip.get()).toBeNull();
@@ -190,11 +207,11 @@ describe("dictating into a composer", () => {
 
   it("cancels on Esc: the capture is dropped and nothing is written", async () => {
     const { shown } = await composer();
-    host.hotkey.dispatch({ type: "down", at: now, source: APP_KEYS, solo: true });
-    host.hotkey.dispatch({ type: "elapsed", at: now + HOLD_MS });
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
     await settle();
     mic.say("never mind all this");
-    expect(host.hotkey.dispatch({ type: "escape", at: now + 900 })).toBe(true);
+    expect(press({ type: "escape", at: now + 900 })).toBe(true);
     await settle();
     expect(mic.calls[mic.calls.length - 1]).toEqual(["dictation_kill_all", { owner: DICTATION_OWNER }]);
     expect(shown()).toBe("");
@@ -204,8 +221,8 @@ describe("dictating into a composer", () => {
 
   it("keeps the words heard when another gesture takes the mic", async () => {
     const { shown } = await composer();
-    host.hotkey.dispatch({ type: "down", at: now, source: APP_KEYS, solo: true });
-    host.hotkey.dispatch({ type: "elapsed", at: now + HOLD_MS });
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
     await settle();
     mic.say("half a thought about the tray");
     now += 1200;
@@ -218,22 +235,228 @@ describe("dictating into a composer", () => {
 
   it("locks open from a composer's mic button until it is pressed again", async () => {
     const { ta, shown } = await composer();
-    host.toggleInto(ta);
+    act(() => host.toggleInto(ta));
     await settle();
     expect(strip.get()?.hint).toBe("tap again to insert · esc cancels");
     mic.say("a long thought, said slowly");
     now += 9000;
-    host.toggleInto(ta);
+    act(() => host.toggleInto(ta));
     await settle();
     expect(shown()).toBe("A long thought, said slowly");
     // And the key's tap ends one too.
-    host.toggleInto(ta);
+    act(() => host.toggleInto(ta));
     await settle();
     mic.say("second thought");
-    host.hotkey.dispatch({ type: "down", at: now, source: APP_KEYS, solo: true });
-    host.hotkey.dispatch({ type: "up", at: now + 80 });
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "up", at: now + 80 });
     await settle();
     expect(shown()).toBe("A long thought, said slowly second thought");
+  });
+});
+
+describe("standing down", () => {
+  function Two() {
+    return (
+      <>
+        <Composer />
+        <Composer />
+      </>
+    );
+  }
+
+  it("lets the newest mic press win: the old capture's words land where they were going", async () => {
+    await act(async () => root.render(<Two />));
+    const [a, b] = [...mount.querySelectorAll("textarea")];
+    act(() => host.toggleInto(a));
+    await settle();
+    mic.say("for the first box");
+    act(() => host.toggleInto(b));
+    await settle();
+    expect(a.value).toBe("For the first box");
+    // And the mic is open into the second one now.
+    expect(mic.calls.filter(([cmd]) => cmd === "dictation_start")).toHaveLength(2);
+    // (Compared by identity: a deep match would walk the whole DOM.)
+    expect(strip.get()?.phase).toBe("listening");
+    expect(strip.get()?.anchor).toBe(b.parentElement);
+    mic.say("and the second");
+    act(() => host.toggleInto(b));
+    await settle();
+    expect(b.value).toBe("And the second");
+  });
+
+  it("drops a mic press while the last capture is still being placed", async () => {
+    await act(async () => root.render(<Two />));
+    const [a, b] = [...mount.querySelectorAll("textarea")];
+    act(() => host.toggleInto(a));
+    await settle();
+    mic.say("first");
+    // The stop is on its way: the transcript has not come back yet.
+    let answer!: (text: string) => void;
+    mic.bridge.invoke.mockImplementationOnce(async () => new Promise<never>((r) => (answer = r as never)));
+    act(() => host.toggleInto(a));
+    act(() => host.toggleInto(b));
+    await settle();
+    expect(mic.calls.filter(([cmd]) => cmd === "dictation_start")).toHaveLength(1);
+    await act(async () => answer("first"));
+    await settle();
+    expect(a.value).toBe("First");
+    expect(host.busy()).toBe(false);
+  });
+
+  function Card({ open, keep }: { open: boolean; keep: ComposerSpec["keep"] }) {
+    return open ? <Composer spec={{ polish: true, keep }} /> : null;
+  }
+
+  it("keeps the words of a composer that closes mid-capture where it keeps its draft", async () => {
+    let draft = "Fix the tray.";
+    const keep = vi.fn((add: (draft: string) => string) => void (draft = add(draft)));
+    await act(async () => root.render(<Card open keep={keep} />));
+    const ta = mount.querySelector("textarea")!;
+    act(() => host.toggleInto(ta));
+    await settle();
+    mic.say("um remember the scroll pin");
+    // A tap outside closes the card: the capture stands down on its own.
+    await act(async () => root.render(<Card open={false} keep={keep} />));
+    await settle();
+    expect(mic.calls.some(([cmd]) => cmd === "dictation_stop")).toBe(true);
+    expect(draft).toBe("Fix the tray. Remember the scroll pin");
+    expect(strip.get()).toMatchObject({ phase: "notice", text: "Kept in the draft" });
+    expect(host.busy()).toBe(false);
+  });
+
+  it("never touches the voice panel's own strip", async () => {
+    await composer();
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    mic.say("half a thought");
+    // The panel takes the mic and shows its capture.
+    const panel = { owner: "voice", phase: "listening" as const, text: "", levels: [], anchor: null, hint: "release to send" };
+    strip.set(panel);
+    await act(async () => void (await new DictationBroker(mic.bridge).start("voice", { kind: "hold" })));
+    await settle();
+    expect(strip.get()).toEqual(panel);
+  });
+});
+
+describe("the polish", () => {
+  const LONG = "so um what i think we should do is move the queue tray above the composer and keep the thread still";
+  const T0 = "So what i think we should do is move the queue tray above the composer and keep the thread still";
+  const POLISHED = "So what I think we should do is move the queue tray above the composer and keep the thread still.";
+
+  /** A polish that answers when told to. */
+  function deferred() {
+    let answer!: (text: string) => void;
+    polish.polish.mockImplementation(() => new Promise<string>((r) => (answer = r)));
+    return (text: string) => act(async () => {
+      // Late enough for the editor's own undo step.
+      now += 1000;
+      answer(text);
+      for (let i = 0; i < 6; i++) await new Promise((r) => setTimeout(r, 0));
+    });
+  }
+
+  it("swaps the words for the polished ones after they land, and ⌘Z takes it back", async () => {
+    const reply = deferred();
+    talk = { key: "plan-1", markdown: () => "Move the QueueTray.", cwd: null };
+    const { ta, shown } = await composer();
+    await hold(LONG);
+    // In at once, as the rules wrote it; the polish asked with the vocabulary.
+    expect(shown()).toBe(T0);
+    expect(polish.polish).toHaveBeenCalledWith(T0, ["QueueTray"]);
+    await reply(POLISHED);
+    expect(shown()).toBe(POLISHED);
+    await act(async () => void ta.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true })));
+    expect(shown()).toBe(T0);
+  });
+
+  it("leaves words the user touched before it came", async () => {
+    const reply = deferred();
+    const { ta, shown } = await composer();
+    await hold(LONG);
+    await act(async () => {
+      ta.setRangeText("!", ta.value.length, ta.value.length);
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "!" }));
+    });
+    await reply(POLISHED);
+    expect(shown()).toBe(`${T0}!`);
+  });
+
+  it("throws away an answer in place of a polish", async () => {
+    const reply = deferred();
+    const { shown } = await composer();
+    await hold(LONG);
+    await reply("Great idea! Moving the tray above the composer keeps the newest line visible, which helps a lot.");
+    expect(shown()).toBe(T0);
+  });
+
+  it("is never asked for short words, words sent by \"send it\", a composer that doesn't want it, or once turned off", async () => {
+    const onSend = vi.fn();
+    await composer(onSend);
+    await hold("fix the tray");
+    await hold(`${LONG} and send it`);
+    expect(onSend).toHaveBeenCalledOnce();
+    await act(async () => root.render(<Composer spec={{}} />));
+    mount.querySelector("textarea")!.focus();
+    await hold(LONG);
+    localStorage.setItem("redline.dictation.polish", "off");
+    await act(async () => root.render(<Composer key="again" />));
+    mount.querySelector("textarea")!.focus();
+    await hold(LONG);
+    expect(polish.polish).not.toHaveBeenCalled();
+  });
+
+  it("is never asked for a turn", async () => {
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    await hold(LONG);
+    expect(voiceCalls().map(([cmd]) => cmd)).toContain("voice_send");
+    expect(polish.polish).not.toHaveBeenCalled();
+  });
+});
+
+describe("the vocabulary", () => {
+  it("is learned from a word the user corrects, and spelled that way from then on", async () => {
+    let stored: string | null = null;
+    appInvoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_ui_prefs") return { voiceVocab: stored };
+      if (cmd === "set_ui_pref") stored = args!.value as string;
+      return null;
+    });
+    const { ta, shown } = await composer();
+    await hold("the civcore sidecar needs a timeout");
+    expect(shown()).toBe("The civcore sidecar needs a timeout");
+    // The user puts it right — then sends, and the box clears.
+    await act(async () => {
+      ta.setSelectionRange(4, 11);
+      ta.setRangeText("Kokoro", 4, 11, "end");
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Kokoro" }));
+      ta.setRangeText("", 0, ta.value.length);
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    });
+    await settle();
+    expect(JSON.parse(stored!).pairs).toEqual([{ heard: "civcore", meant: "Kokoro", at: now }]);
+    await hold("restart the civcore sidecar");
+    expect(mic.calls.filter(([cmd]) => cmd === "dictation_start").pop()![1]?.vocab).toEqual(["Kokoro"]);
+    expect(shown()).toBe("Restart the Kokoro sidecar");
+  });
+
+  it("carries the memory index's names, after the plan's", async () => {
+    appInvoke.mockImplementation(async (cmd: string) =>
+      cmd === "classmem_tree" ? [{ title: "Smart Turn scoring" }, { title: "Voice agent via Kokoro" }] : null,
+    );
+    host = new DictationHost({
+      broker: new DictationBroker(mic.bridge),
+      doc: document,
+      conversation: () => talk,
+      taker: () => taker,
+      invoke: appInvoke as never,
+      polish: polish as never,
+    });
+    talk = { key: "plan-1", markdown: () => "Keep Tauri warm.", cwd: null };
+    await settle();
+    await composer();
+    await hold("check the smart turn model");
+    expect(mic.calls[0][1]?.vocab).toEqual(["Tauri", "Kokoro", "Smart Turn"]);
   });
 });
 

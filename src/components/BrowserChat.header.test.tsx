@@ -21,7 +21,10 @@ const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
     activity: null as null | { at: number; kind: string; label: string }[], meters: {} as Record<string, unknown> },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: dictation.listening, toggle: dictation.toggle }) }));
+vi.mock("../lib/dictationComposer", async (actual) => ({
+  ...(await actual<typeof import("../lib/dictationComposer")>()),
+  useDictationComposer: () => ({ listening: dictation.listening, toggle: dictation.toggle }),
+}));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { act, useState } from "react";
+import { act, useRef, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Editor } from "@tiptap/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { drafterExtensions } from "../editor/extensions/drafterExtensions";
+import { useDictationComposer, type ComposerSpec } from "../lib/dictationComposer";
 import { pageInsertScript, placeText, resolveTarget, submitAfter, targetFor, type DictationTarget } from "./dictationTarget";
 import { APP_KEYS } from "./voiceHotkey";
 
@@ -34,11 +35,18 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
+/** A composer frame, registered as `spec` says. */
+function Frame({ spec, children }: { spec: ComposerSpec; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDictationComposer(ref, spec);
+  return <div ref={ref}>{children}</div>;
+}
+
 /** A chat composer as the app writes one: React owns the value, Enter sends. */
 function Composer({ initial = "", onSend }: { initial?: string; onSend?: (text: string) => void }) {
   const [draft, setDraft] = useState(initial);
   return (
-    <div data-dictation-send>
+    <Frame spec={{ send: true }}>
       <textarea
         aria-label="composer"
         value={draft}
@@ -51,7 +59,7 @@ function Composer({ initial = "", onSend }: { initial?: string; onSend?: (text: 
         }}
       />
       <output>{draft}</output>
-    </div>
+    </Frame>
   );
 }
 
@@ -253,20 +261,156 @@ describe("the terminal and web pages", () => {
 });
 
 describe("resolveTarget", () => {
-  it("makes a turn with nothing that takes text focused, or focus in the voice panel", () => {
+  it("makes a turn with nothing that takes text focused, or focus in the voice panel", async () => {
     expect(resolveTarget(document, APP_KEYS)).toEqual({ kind: "turn" });
-    host.innerHTML = '<div data-dictation-turn><input aria-label="Type a message"></div>';
+    await act(async () =>
+      root.render(
+        <Frame spec={{ turn: true }}>
+          <input aria-label="Type a message" />
+        </Frame>,
+      ),
+    );
     host.querySelector("input")!.focus();
     expect(resolveTarget(document, APP_KEYS)).toEqual({ kind: "turn" });
   });
 
-  it("puts words said with nothing focused into the open door's box, as typing does", () => {
-    host.innerHTML = "<textarea data-dictation-default></textarea>";
+  it("puts words said with nothing focused into the open door's box, as typing does", async () => {
+    await act(async () =>
+      root.render(
+        <>
+          <Frame spec={{ fallback: true }}>
+            <textarea aria-label="door" />
+          </Frame>
+          <Frame spec={{ turn: true }}>
+            <button>Talk</button>
+          </Frame>
+        </>,
+      ),
+    );
     expect(resolveTarget(document, APP_KEYS)).toMatchObject({ kind: "field", el: host.querySelector("textarea") });
     // Never from a web page, and never instead of the voice panel.
     expect(resolveTarget(document, { page: "browser-t1", field: false })).toEqual({ kind: "turn" });
-    host.insertAdjacentHTML("beforeend", "<div data-dictation-turn><button>Talk</button></div>");
     host.querySelector("button")!.focus();
     expect(resolveTarget(document, APP_KEYS)).toEqual({ kind: "turn" });
+  });
+
+  it("knows a chat composer from any other box by its registration", async () => {
+    await act(async () =>
+      root.render(
+        <>
+          <Composer />
+          <Field />
+        </>,
+      ),
+    );
+    expect(targetFor(host.querySelector("textarea"))).toMatchObject({ kind: "field", send: true });
+    expect(targetFor(host.querySelector("input"))).toMatchObject({ kind: "field", send: false });
+  });
+});
+
+describe("swapping the words for a polish", () => {
+  async function dictated(text: string, initial = "Note:") {
+    await act(async () => root.render(<Composer initial={initial} />));
+    const ta = host.querySelector("textarea")!;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    let placed = null as ReturnType<typeof placeText>;
+    await act(async () => void (placed = placeText(resolveTarget(document, APP_KEYS), text)));
+    return { ta, placed: placed! };
+  }
+  const undoKey = (el: Element) => {
+    const e = new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true });
+    el.dispatchEvent(e);
+    return e.defaultPrevented;
+  };
+
+  it("swaps them while untouched, caret kept after them, and ⌘Z takes back the polish alone", async () => {
+    const { ta, placed } = await dictated("so um the tray it scrolls when it shouldnt");
+    expect(shown()).toBe("Note: so um the tray it scrolls when it shouldnt");
+    expect(placed.untouched()).toBe(true);
+    await act(async () => void placed.replace!(" the tray scrolls when it shouldn't."));
+    expect(shown()).toBe("Note: the tray scrolls when it shouldn't.");
+    expect(placed.text()).toBe(" the tray scrolls when it shouldn't.");
+    expect(ta.selectionStart).toBe(ta.value.length);
+    // Spoken "scratch that" still finds the words after the swap.
+    expect(placed.untouched()).toBe(true);
+    let taken = false;
+    await act(async () => void (taken = undoKey(ta)));
+    expect(taken).toBe(true);
+    expect(shown()).toBe("Note: so um the tray it scrolls when it shouldnt");
+    // Once: the next ⌘Z is the field's own.
+    expect(undoKey(ta)).toBe(false);
+  });
+
+  it("leaves words the user has touched alone", async () => {
+    const { ta, placed } = await dictated("one two three");
+    // The user types elsewhere in the field: a real input event.
+    await act(async () => {
+      ta.setRangeText("!", 0, 0);
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "!" }));
+    });
+    expect(placed.untouched()).toBe(false);
+    expect(placed.replace!("One, two, three.")).toBe(false);
+    expect(shown()).toBe("!Note: one two three");
+  });
+
+  it("is not swapped under ⌘Z once something else changed after the polish", async () => {
+    const { ta, placed } = await dictated("one two three");
+    await act(async () => void placed.replace!(" one, two, three"));
+    await act(async () => {
+      ta.setRangeText(" four", ta.value.length, ta.value.length);
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: " four" }));
+    });
+    expect(undoKey(ta)).toBe(false);
+    expect(shown()).toBe("Note: one, two, three four");
+  });
+
+  it("tells a later dictation's words from the user's, and either way stops swapping", async () => {
+    const { placed: first } = await dictated("first part");
+    let second = null as ReturnType<typeof placeText>;
+    await act(async () => void (second = placeText(resolveTarget(document, APP_KEYS), "second part")));
+    expect(shown()).toBe("Note: first part second part");
+    // The later words moved nothing of the first's, but they changed the
+    // field: the first is no longer the last thing written.
+    expect(first.untouched()).toBe(false);
+    expect(second!.untouched()).toBe(true);
+  });
+
+  it("is one editor transaction in the rich-text editor, undone by the editor's own ⌘Z", () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const editor = new Editor({ element: el, extensions: drafterExtensions(), content: "<p>Plan</p>" });
+    editors.push(editor);
+    editor.commands.setTextSelection(5);
+    const placed = placeText(targetFor(editor.view.dom)!, "um fix the tray and the pin");
+    expect(editor.getText()).toBe("Plan um fix the tray and the pin");
+    // A history step of its own: the editor groups changes closer than this.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
+    expect(placed!.replace!(" Fix the tray and the pin.")).toBe(true);
+    vi.restoreAllMocks();
+    expect(editor.getText()).toBe("Plan Fix the tray and the pin.");
+    editor.commands.undo();
+    expect(editor.getText()).toBe("Plan um fix the tray and the pin");
+    // Typed into since: no swap.
+    const again = placeText(targetFor(editor.view.dom)!, "more");
+    editor.commands.insertContent("!");
+    expect(again!.replace!(" More.")).toBe(false);
+  });
+
+  it("reports the text around the words, and only the user's edits to it", async () => {
+    const { ta, placed } = await dictated("the civ core sidecar");
+    const around = placed.around!;
+    expect(around.value()).toBe("Note: the civ core sidecar");
+    expect(around.span()).toEqual([5, 26]);
+    const heard = vi.fn();
+    const stop = around.onEdit(heard);
+    await act(async () => void placed.replace!(" the Civ Core sidecar"));
+    expect(heard).not.toHaveBeenCalled();
+    await act(async () => {
+      ta.setRangeText("x", 0, 0);
+      ta.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "x" }));
+    });
+    expect(heard).toHaveBeenCalledOnce();
+    stop();
   });
 });

@@ -10,7 +10,7 @@ import { useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { Camera, Image as ImageIcon, MousePointerClick, Plus } from "lucide-react";
 import type { ComposerModel } from "../lib/browserChat/turn";
 import type { TurnChip } from "../lib/browserChat/transcript";
-import type { Dictation } from "../lib/useDictation";
+import type { Dictation } from "../lib/dictationComposer";
 import { Panel, useClickPopover } from "./popover";
 import { SendStopButton } from "./SendStopButton";
 import { TurnContext } from "./BrowserChatParts";

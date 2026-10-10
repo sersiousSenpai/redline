@@ -19,7 +19,7 @@ import { ComposerMenu } from "./ComposerMenu";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
-import { useDictation } from "../lib/useDictation";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
@@ -472,10 +472,6 @@ export function FrontDoor(props: FrontDoorProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchedAt]);
 
-  // The mic locks dictation open into the box; the words arrive through the
-  // box's own onChange, and the live strip sits over the composer.
-  const dictation = useDictation(taRef);
-
   // The island's growth into the document editor. Declared here, above the
   // send path, because `send` captures the FLIP's starting box on the gesture.
   const hasText = text.trim().length > 0;
@@ -633,6 +629,22 @@ export function FrontDoor(props: FrontDoorProps) {
     (destination === "run" && !runSupported(backend.backend))
       ? "plan"
       : destination;
+
+  // Dictation (the hold key, or the mic locking it open) writes into the box
+  // through its own onChange; the live strip sits over the island. "Send it"
+  // submits a chat's turn, never a launch; the door's resting box takes what
+  // is said with nothing focused; a card closed mid-capture keeps the words
+  // in the shared draft, as it keeps what was typed.
+  const dictation = useDictationComposer(
+    islandRef,
+    {
+      send: !!workbench || liveDestination === "chat",
+      polish: true,
+      fallback: !!welcome && visible,
+      keep: setText,
+    },
+    taRef,
+  );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (workbench && !e.nativeEvent.isComposing) {
@@ -799,7 +811,7 @@ export function FrontDoor(props: FrontDoorProps) {
         </div>
       )}
       {chips}
-      <div ref={islandRef} data-dictation-anchor data-dictation-send={workbench || liveDestination === "chat" ? "" : undefined} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
+      <div ref={islandRef} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
         <div className="rl-fd-morph">
           {/* Plan pills. Deliberately NOT the attachment chip: an
               attachment is a file handed to a prompt, and these are whole
@@ -888,9 +900,6 @@ export function FrontDoor(props: FrontDoorProps) {
                 : floating ? "What are we working on?" : "What do you want to build?"
             }
             aria-label="Message Redline"
-            // The door's own box takes what is said with nothing focused,
-            // as it takes what is typed (type-to-start).
-            data-dictation-default={welcome && visible ? "" : undefined}
             value={text}
             rows={1}
             spellCheck

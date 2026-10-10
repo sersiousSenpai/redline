@@ -42,7 +42,6 @@ export function useAgentTurn(config: { surface: string; key: string }) {
   return { messages, queue: [], liveText: "Reviewing the final source. " + "The conversation remains readable while this reply grows. ".repeat(35), status: "streaming", startedAt: Date.now() - 3000, loaded: true, send: noop, cancel: noop, unqueue: noop, clear: noop, meter: null, activity: [], meters: {} };
 }
 export function useReadAloud() { return { speaking: false, stop: noop, speak: noop }; }
-export function useDictation() { return { listening: false, partial: "", toggle: noop }; }
 export async function invoke(command: string) {
   if (command === "browser_home_feed") return { recent:[{url:"https://docs.example.test/start",title:"Getting started"},{url:"https://design.example.test/library",title:"Design library"}],frequent:[{url:"https://example.test",title:"Project dashboard"}],tasks:[{url:"https://docs.example.test/start",title:"Review the launch checklist",count:3}],missions:[{missionId:"qa-mission",title:"Research browser responsiveness"}] };
   if (command === "companion_list") return [{ companionId: "qa-carried", title: "Research carried into the browser", createdAt: 1_789_286_000_000 }];

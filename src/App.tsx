@@ -381,7 +381,7 @@ import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isDockKey, isNeedsYouKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
-import { loadDictation } from "./lib/useDictation";
+import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
 import {

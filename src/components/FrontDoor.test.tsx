@@ -52,6 +52,7 @@ import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
 import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
 import type { ReadinessItem } from "../lib/readiness";
 import { readSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
+import { composerAt, fallbackComposer } from "../audio/dictationTarget";
 
 const flush = () =>
   act(async () => {
@@ -695,6 +696,28 @@ it("offers history as an explicit choice without selecting it when the blank com
   await act(async () => entry.click());
   expect(onOpenChat).toHaveBeenCalledTimes(1);
   expect(onOpenChat).toHaveBeenCalledWith("older-chat");
+});
+
+describe("dictation into the door", () => {
+  it("registers its island: polished, \"send it\" only for a chat's turn, and the resting box takes words said with nothing focused", async () => {
+    await mount({ floating: true, welcome: true, visible: true });
+    const door = composerAt(composer()!);
+    expect(door?.frame).toBe(host.querySelector(".rl-fd-island"));
+    expect(door?.spec).toMatchObject({ send: false, polish: true, fallback: true });
+    expect(fallbackComposer()?.field).toBe(composer());
+    // A launch is never "sent" by voice; a chat's turn is.
+    await mount({ floating: true, destination: "chat", chatEnabled: true });
+    expect(composerAt(composer()!)?.spec).toMatchObject({ send: true, fallback: false });
+    expect(fallbackComposer()).toBeNull();
+  });
+
+  it("keeps a closed card's words in the shared draft, fitted to it", async () => {
+    await mount({ floating: true, text: "Fix the tray." });
+    const keep = composerAt(composer()!)!.spec.keep!;
+    await act(async () => root.render(<></>));
+    keep((draft) => `${draft} Remember the pin`);
+    expect(readSharedDraft(FRONT_DOOR_TEXT_KEY)).toBe("Fix the tray. Remember the pin");
+  });
 });
 
 describe("FrontDoor — Just run it", () => {

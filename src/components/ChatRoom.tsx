@@ -12,7 +12,7 @@ import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePoll } from "../hooks/usePoll";
-import { useDictation } from "../lib/useDictation";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
 import { CONTINUE_EVENT, handoffGate, prepareConversationPreview, type ContinueDestination, type ContinuationMessage } from "../lib/conversationContinuation";
@@ -481,7 +481,10 @@ export function ChatRoom({
     threadKey: companionId,
     onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
   });
-  const dictation = useDictation(taRef);
+  // Its own composer, when no launch composer is supplied: a chat box —
+  // "send it" sends, and kept words get the polish.
+  const composerFrameRef = useRef<HTMLDivElement>(null);
+  const dictation = useDictationComposer(composerFrameRef, { send: true, polish: true }, taRef);
 
   const attach = async () => {
     try {
@@ -720,9 +723,8 @@ export function ChatRoom({
       <QueueTray rows={queueRows} onRemove={id => { void removeQueue(id); }} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
       {/* The floating launch composer owns input when supplied. */}
       {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel }) : <div
+        ref={composerFrameRef}
         data-chat-composer
-        data-dictation-anchor
-        data-dictation-send
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
       >

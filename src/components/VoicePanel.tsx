@@ -44,6 +44,7 @@ import {
 } from "../audio/utterance";
 import { broker } from "../audio/dictationBroker";
 import { registerTurnTaker } from "../audio/dictationHost";
+import { useDictationComposer } from "../lib/dictationComposer";
 import {
   holdPoint,
   pointAt,
@@ -547,6 +548,8 @@ function VoicePanelBase({
 }: VoicePanelProps) {
   const isDrafter = sessionId.startsWith("drafter:");
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // The hold-to-dictate key is a turn here, even from the typed input.
+  useDictationComposer(panelRef, { turn: true });
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   /** Something is playing or queued to play (from `Playback`, not the queue's
    *  own flag — a clip that never ends trips the stall watchdog instead of
@@ -2136,8 +2139,6 @@ function VoicePanelBase({
       ref={panelRef}
       tabIndex={-1}
       onKeyDown={onPanelKeyDown}
-      // The hold-to-dictate key is a turn here, even from the typed input.
-      data-dictation-turn
       className="flex-1 min-w-0 flex flex-col"
       style={{
         background: "var(--color-bg-elevated)",

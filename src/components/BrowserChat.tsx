@@ -30,7 +30,7 @@ import { useAgentTurn } from "../hooks/useAgentTurn";
 import type { RunningPageAction } from "../hooks/usePageActions";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useSharedDraft } from "../hooks/useSharedDraft";
-import { useDictation } from "../lib/useDictation";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { ReplyBlock, UserTurn } from "./ReplyBlock";
 import { ThreadMeterStrip } from "./TurnFooter";
 import { contextResets, type Activity, type TurnMeter } from "../lib/turnMeter";
@@ -467,8 +467,10 @@ export const BrowserChat = memo(function BrowserChat({
   }
 
   // Speaking into the box is one press away: the mic is the round button's
-  // face on an empty box. What is heard lands in the box, at its caret.
-  const dictation = useDictation(composerRef);
+  // face on an empty box. What is heard lands in the box, at its caret; it
+  // stands down, its words kept, when another surface takes the mic.
+  const capsuleRef = useRef<HTMLDivElement>(null);
+  const dictation = useDictationComposer(capsuleRef, { send: true, polish: true }, composerRef);
 
   const attach = {
     onScreenshot: () => {
@@ -636,7 +638,7 @@ export const BrowserChat = memo(function BrowserChat({
         tray={tray}
         onTray={setTray}
       />
-      <div data-browser-chat-composer data-dictation-anchor data-dictation-send className="rb-composer shrink-0">
+      <div ref={capsuleRef} data-browser-chat-composer className="rb-composer shrink-0">
         <BrowserChatComposer
           taRef={composerRef}
           frameRef={frameRef}
