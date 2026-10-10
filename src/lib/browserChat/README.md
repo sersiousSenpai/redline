@@ -40,6 +40,10 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
 
 - The chat shows `resolveConversation(world).browseId`. Do not compute a
   thread id from `activeId`, `discussionId` or `linkedByWorkspace`.
+- BrowserPane holds the world through `hooks/useChatWorld`: its own tabs,
+  the tab on screen and the workspace, plus a slice only the reducer
+  writes. A handler that moves the conversation dispatches an event; it
+  never sets the anchor, the flip or a shared thread itself.
 - A turn's target page, scope and workspace are captured when the user sends.
   The backend never reads the globally active tab or mission for a turn that
   carries a target.
@@ -56,6 +60,12 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   the pane's own chat split, the edge rail. Do not bring them back.
 
 ## Open
+
+- **Which thread a mission pin came from.** A pin records the page the
+  reply was about (the turn's target) under that page's tab, which is what
+  the jump to a finding and the page capture read. The thread is not
+  recorded: a finding has no column for it, so a pin from a shared chat
+  jumps back to its page, not to that chat.
 
 - **Shared-chat check-ins.** `/v1/browser/thread?tab=` returns the tab's own
   thread. In linked mode the discussion about that tab is in the shared chat,

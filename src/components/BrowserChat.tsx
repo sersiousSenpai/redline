@@ -2,17 +2,17 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { ContinueAs, ConversationSourceContext } from "./ContinueAs";
 import { useMemo, memo, useEffect, useRef, useState } from "react";
-import { useContext } from "react";
 import {
   Copy,
   ListTodo,
   MoreHorizontal,
-  PenLine,
   Pin,
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
+import { contextLine, type ResolvedConversation, type WorkspaceKey } from "../lib/browserChat/scope";
+import { needsSnapshot, replyActions, seedPolicy, turnEnvelope, type ReplyAction, type SeedSource } from "../lib/browserChat/turn";
 import type { BrowseMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
@@ -27,13 +27,14 @@ import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
 import { agentLabelFor, backendLabel } from "../lib/backendChoice";
 
 interface BrowserChatProps {
-  /** Stable per-tab id — keys the browse-agent backend + persisted thread. */
-  browseId: string;
-  /** Native webview label of this tab (`browser-<id>`) — used to snapshot the
-   *  page for the agent's first-turn grounding. */
-  label: string;
-  /** Captured with the page target; `regular` explicitly means no mission. */
-  workspaceId?: string;
+  /** The conversation on screen, as the structure layer resolves it: the
+   *  thread it shows and sends on (which keys the backend and the persisted
+   *  history), the page a turn targets, and whether it follows tabs. The
+   *  chat never works any of that out itself (lib/browserChat/README.md). */
+  conversation: ResolvedConversation;
+  /** BrowserPane's workspace. A turn is captured under it as a mission, or as
+   *  no mission for regular browsing and a Mosaic (BC-13). */
+  workspace: WorkspaceKey;
   /** Working dir for the agent (scopes Read/Grep/Glob); `$HOME` when null. */
   projectDir?: string | null;
   /** Close the discussion panel (the thread itself is kept). */
@@ -41,38 +42,25 @@ interface BrowserChatProps {
   /** Open an http(s) link the user clicked in a reply as a Redline browser tab,
    *  instead of letting it escape the app's webview. */
   onOpenLink?: (url: string) => void;
-  /** Title of the tab this conversation is anchored to, when it differs from the
-   *  foreground tab (the agent opened the visible tab on this conversation's
-   *  behalf). Shown as a header hint so the strip/thread mismatch reads as
-   *  intentional. Undefined when the discussion matches the visible tab. */
-  anchoredFromTitle?: string;
-  /** Ship an assistant reply (its markdown) into a fresh Redline plan session —
-   *  spawns a terminal running `claude --permission-mode plan` seeded with it.
-   *  Lets a plan/prompt drafted while browsing drop straight into Redline. */
-  onSendToRedline?: (markdown: string) => void;
-  /** Open an assistant reply in the Prompt Drafter (target repo pre-guessed) to
-   *  shape before sending — the review-first alternative to `onSendToRedline`. */
-  onSendToDrafter?: (markdown: string) => void;
   /** Pin an assistant reply to the active mission ("I like this part"). Present
-   *  only when a mission is active; the parent attaches the source tab. */
+   *  only when a mission is active; the parent attaches the page it was about. */
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
   /** Append an assistant reply to the workspace Cart, creating it if needed. */
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
-  /** Text to merge into the composer once, on mount or when the nonce changes
-   *  — how `💬` on a list item, and a highlight in the page, arrive here with
-   *  the passage already quoted. `autoSend` sends it instead (the one-tap
-   *  highlight intents; see lib/browseSelection.ts).
+  /** Text handed to the composer once, on mount or when the nonce changes —
+   *  how `💬` on a list item, a picked element and a highlight in the page
+   *  arrive here with the passage already quoted. Its `source` is the gesture
+   *  it came from, and `seedPolicy` says what that gesture means: send at
+   *  once, or merge below the draft, and whether the caret moves (BC-14,
+   *  BC-33).
    *
    *  A prop with a nonce, not a direct write to the persisted draft key: the
    *  draft lives in `useSharedDraft`'s memory first, and writing that
    *  localStorage key from outside would never reach a panel already
    *  mounted. Same shape as `openRequest`/`onOpenRequestConsumed` in
    *  BrowserPane and `consumeSeed` on the Front Door. */
-  seed?: { text: string; nonce: number; autoSend?: boolean } | null;
+  seed?: { text: string; nonce: number; source: SeedSource } | null;
   onSeedConsumed?: () => void;
-  title?: string;
-  /** Showing the workspace's shared chat rather than this tab's own. */
-  linked?: boolean;
   /** Swap to the other kind of chat on this tab, until it is switched away. */
   onToggleTabChat?: () => void;
   /** On: new tabs and tab switches stay in the shared chat. Off: each tab
@@ -104,26 +92,21 @@ function lastReplyBackend(messages: readonly BrowseMessage[]): string | null {
  *  tab. Standalone analog of `CommentThread` (browse-* events, `--rl-discussion-zoom`,
  *  auto-grow composer), keyed by a per-tab `browseId` rather than a comment. */
 export const BrowserChat = memo(function BrowserChat({
-  browseId,
-  label,
-  workspaceId,
+  conversation,
+  workspace,
   projectDir,
   onClose,
   onOpenLink,
-  anchoredFromTitle,
-  onSendToRedline,
-  onSendToDrafter,
   onAddToMission,
   onAddToCart,
   seed,
   onSeedConsumed,
-  title = "Page chat",
-  linked = false,
   onToggleTabChat,
   linkedMode = false,
   onToggleLinkedMode,
   onResearch,
 }: BrowserChatProps) {
+  const { browseId } = conversation;
   // Composer draft survives tab switches and app restarts (the component is
   // keyed by browseId, so each tab's discussion keeps its own).
   const [draft, setDraft] = useSharedDraft(`rl.chatDraft.browse.${browseId}`);
@@ -138,6 +121,10 @@ export const BrowserChat = memo(function BrowserChat({
   // restore (partial text + spinner), self-heal — lives in the shared hook,
   // keyed by browseId: switching tabs rebinds it; a turn left streaming keeps
   // running backend-side and is picked up loss-free on return.
+  //
+  // The page this conversation last SENT a snapshot of. It moves only once
+  // the backend has the turn, so a send that failed re-grounds the next one;
+  // null after a remount, where re-grounding is the safe default (BC-11).
   const lastGroundedLabel = useRef<string | null>(null);
   // This chat's provider/model/effort, which the next turn reads at start.
   const harness = useBrowseHarness(browseId);
@@ -168,35 +155,24 @@ export const BrowserChat = memo(function BrowserChat({
       historyArgs: { browseId },
       sendFailPrefix: "Couldn't reach the browse agent",
       buildSendArgs: async (text): Promise<Record<string, unknown>> => {
+        // The page, scope and workspace this turn was typed against, captured
+        // now: a queued turn keeps them through any tab switch (BC-12).
+        const target = conversation;
         // A chat showing an inherited pick stores it before its first turn.
         const runsOn = (await harness.commit()).backend;
         sentAgent.current = { browseId, agent: backendLabel(runsOn) };
-        const targetLabel = label;
-        const targetWorkspaceId = workspaceId;
-        // The backend treats a turn as "first" until the agent session is
-        // saved, which only happens on a *successful* reply — so keep sending
-        // a snapshot until then (e.g. if the opening turn errored), matching
-        // that contract. A provider switch since the last reply counts too:
-        // the other side either starts fresh or resumes a session that has not
-        // seen the page since.
-        const firstTurn = lastReplyBackend(messages) !== runsOn;
-        // First turn embeds a live DOM snapshot so the agent is grounded
-        // without a mandatory round-trip; follow-ups rely on its /snapshot
-        // tool. Live snapshot if the tab is up; otherwise the cached one (a
-        // suspended discussion tab still grounds the first turn). A miss just
-        // means a slower first answer. The hook drops the send if the tab
-        // switched mid-capture.
-        const snapshot = firstTurn || lastGroundedLabel.current !== targetLabel ? await captureSnapshotOrCached(targetLabel) : undefined;
-        lastGroundedLabel.current = targetLabel;
-        return {
-          browseId,
-          text,
-          snapshot,
-          cwd: projectDir ?? null,
-          targetLabel,
-          workspaceId: targetWorkspaceId,
-          followingTabs: linked,
-        };
+        // The opening turn embeds a DOM snapshot so the agent is grounded
+        // without a round-trip, and so does a turn on a page the conversation
+        // has not grounded on; follow-ups rely on its /snapshot tool. The
+        // backend treats a turn as "first" until a session on this provider
+        // has answered, so a failed opening turn keeps sending it (BC-11,
+        // BC-18). Live if the tab is up, otherwise the cached one (a
+        // suspended tab still grounds). A miss just means a slower answer.
+        // The hook drops the send if the panel switched mid-capture.
+        const snapshot = needsSnapshot(target, { lastReplyBackend: lastReplyBackend(messages), runsOn, lastGroundedLabel: lastGroundedLabel.current })
+          ? await captureSnapshotOrCached(target.targetLabel)
+          : undefined;
+        return { ...turnEnvelope(target, workspace, text, projectDir ?? null, snapshot) };
       },
       makeMessage: ({ id, role, body, status, backend }) => ({
         id,
@@ -207,6 +183,10 @@ export const BrowserChat = memo(function BrowserChat({
         createdAt: Date.now(),
         backend: backend ?? null,
       }),
+      // The backend has the turn, so the page it carried is grounded.
+      onSent: (args) => {
+        if ("snapshot" in args) lastGroundedLabel.current = String(args.targetLabel);
+      },
     });
 
   // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
@@ -238,24 +218,25 @@ export const BrowserChat = memo(function BrowserChat({
     stick();
   }, [browseId]);
 
-  // A seed (`💬` on a list item) MERGES into the draft rather than replacing
-  // it: whatever the user had half-typed is theirs, and quoting an item is an
-  // addition to the question, not a reason to lose it. Nonce-keyed so the same
-  // item can be quoted twice, and consumed immediately so a re-render can't
-  // paste it again.
+  // A seed that waits for the user (`💬` on a list item, a picked element, an
+  // Ask) MERGES into the draft rather than replacing it: whatever the user had
+  // half-typed is theirs, and quoting an item is an addition to the question,
+  // not a reason to lose it. Nonce-keyed so the same item can be quoted twice,
+  // and consumed immediately so a re-render can't paste it again.
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const lastSeedRef = useRef<number | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   useEffect(() => {
     if (!seed || seed.nonce === lastSeedRef.current) return;
+    const policy = seedPolicy(seed.source);
     // An auto-send seed waits for the thread to finish restoring: sending into
     // a not-yet-loaded thread races the restore. Holding it costs nothing —
     // this effect re-runs the moment `loaded` flips, and the seed is untouched
     // until then (so a remount can't lose it either).
-    if (seed.autoSend && !loaded) return;
+    if (policy.autoSend && !loaded) return;
     lastSeedRef.current = seed.nonce;
-    if (seed.autoSend) {
+    if (policy.autoSend) {
       // The draft is deliberately untouched: whatever they were half-typing is
       // still theirs. `send` queues behind an in-flight reply on its own, so a
       // one-tap intent mid-answer needs nothing special here, and going through
@@ -267,9 +248,11 @@ export const BrowserChat = memo(function BrowserChat({
       return;
     }
     const prev = draftRef.current;
-    setDraft(prev.trim() ? `${prev.replace(/\s*$/, "")}\n\n${seed.text}` : seed.text);
+    setDraft(policy.mergesDraft && prev.trim() ? `${prev.replace(/\s*$/, "")}\n\n${seed.text}` : seed.text);
     onSeedConsumed?.();
-    // Land the caret at the end, below the quote, ready to type the question.
+    // Only a gesture whose point is typing next takes the caret (BC-33): land
+    // it at the end, below the quote, ready to type the question.
+    if (!policy.focusComposer) return;
     requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
@@ -308,9 +291,9 @@ export const BrowserChat = memo(function BrowserChat({
     >
       <div className="rb-thread-tools" data-browser-chat-header>
         <div className="min-w-0 flex-1">
-          <span className="block truncate" style={{ fontSize: 13, fontWeight: 600 }}>{linked ? "Browser chat" : title}</span>
+          <span className="block truncate" style={{ fontSize: 13, fontWeight: 600 }}>{conversation.title}</span>
         </div>
-        <button type="button" className="rb-button" onClick={onToggleTabChat}>{linked ? "Tab chat" : "Shared chat"}</button>
+        <button type="button" className="rb-button" onClick={onToggleTabChat}>{conversation.kind === "shared" ? "Tab chat" : "Shared chat"}</button>
         {onToggleLinkedMode && <button type="button" className="rb-icon-button" aria-label="Linked mode" aria-pressed={linkedMode} onClick={onToggleLinkedMode}
           title={linkedMode
             ? "Linked mode on — new tabs and tab switches stay in the shared chat. Click to give each tab its own chat."
@@ -323,11 +306,11 @@ export const BrowserChat = memo(function BrowserChat({
           the header — that row is full at the dock's ~360px. */}
       <div className="rb-thread-harness" data-browser-chat-harness>
         <BrowseHarnessChip harness={harness} />
+        {/* What the chat is looking at: the page a shared or anchored chat
+            acts on, where an anchored one started, and the kind of chat only
+            when it is the exception to linked mode (BC-3, BC-5). */}
         <div className="rb-thread-context">
-          {/* Only when the tab is the exception: with linked mode off every
-              tab has its own chat, and the title already says whose. */}
-          {!linked && linkedMode && <span>This tab’s own chat</span>}
-          {anchoredFromTitle && <span>{linked ? "Following" : "From"} {anchoredFromTitle}</span>}
+          {contextLine(conversation).map((part) => <span key={part}>{part}</span>)}
         </div>
       </div>
       {conversationPanel === "menu" && <BrowserPopover anchor={moreRef} title="Conversation actions" onClose={() => setConversationPanel(null)}>
@@ -372,8 +355,6 @@ export const BrowserChat = memo(function BrowserChat({
               meter={meters[m.id]}
               contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
-              onSendToRedline={onSendToRedline}
-              onSendToDrafter={onSendToDrafter}
               onAddToMission={onAddToMission}
               onAddToCart={onAddToCart}
               onResend={() => {
@@ -427,8 +408,6 @@ function MessageBubble({
   agent,
   seat,
   onOpenLink,
-  onSendToRedline,
-  onSendToDrafter,
   onAddToMission,
   onAddToCart,
   onResend,
@@ -441,8 +420,6 @@ function MessageBubble({
   /** The model this chat asked for, if it named one. */
   seat: string | null;
   onOpenLink?: (url: string) => void;
-  onSendToRedline?: (markdown: string) => void;
-  onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
   onResend?: () => void;
@@ -454,25 +431,24 @@ function MessageBubble({
   if (msg.role === "user") {
     return <UserTurn body={msg.body} unsent={msg.status === "unsent"} onResend={onResend} onOpenLink={onOpenLink} />;
   }
-  const isError = msg.status === "error";
+  const actions = replyActions({ role: msg.role, status: msg.status, body: msg.body, missionActive: !!onAddToMission });
   return (
     <ReplyBlock
       phase="settled"
       byline={agent}
       seat={seat}
       text={msg.body}
-      error={isError}
+      error={msg.status === "error"}
       meter={meter}
       contextReset={contextReset}
       inspect={{ surface: "browse", key: msg.browseId }}
       onOpenLink={onOpenLink}
       actions={
-        !isError && msg.body.trim() ? (
+        actions.length ? (
           <MessageActions
+            actions={actions}
             messageId={msg.id}
             body={msg.body}
-            onSendToRedline={onSendToRedline}
-            onSendToDrafter={onSendToDrafter}
             onAddToMission={onAddToMission}
             onAddToCart={onAddToCart}
           />
@@ -482,27 +458,24 @@ function MessageBubble({
   );
 }
 
-/** A settled reply's actions, in its tail row: copy the whole message (covers
- *  prose, where per-block buttons don't reach), pin it to the mission, add it
- *  to the task list, continue the conversation elsewhere — and, when wired
- *  outside a conversation, ship it into Redline straight to Claude Code
- *  (after confirming the target repo) or via the Prompt Drafter. */
+/** A settled reply's actions, in its tail row, in the order `replyActions`
+ *  gives them: copy the whole message (covers prose, where per-block buttons
+ *  don't reach), add it to the task list, pin it to the mission, continue the
+ *  conversation elsewhere. Every one is the user's gesture; handing a reply
+ *  to the Drafter or a new plan lives inside Continue as… (BC-24). */
 function MessageActions({
+  actions,
   messageId,
   body,
-  onSendToRedline,
-  onSendToDrafter,
   onAddToMission,
   onAddToCart,
 }: {
+  actions: readonly ReplyAction[];
   messageId: string;
   body: string;
-  onSendToRedline?: (markdown: string) => void;
-  onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
 }) {
-  const source = useContext(ConversationSourceContext);
   const [copied, setCopied] = useState(false);
   const [pinned, setPinned] = useState<"idle" | "ok" | "failed">("idle");
   const [listed, setListed] = useState<"idle" | "ok" | "failed">("idle");
@@ -520,45 +493,40 @@ function MessageActions({
       window.setTimeout(() => setPinned("idle"), 1400);
     });
   };
+  const addToList = () => {
+    // Same truthfulness rule as the pin: an add that never reached the DB
+    // must not flash a tick.
+    void Promise.resolve(onAddToCart?.(body)).then((ok) => {
+      setListed(ok === false ? "failed" : "ok");
+      window.setTimeout(() => setListed("idle"), 1400);
+    });
+  };
   return (
     <span data-reply-actions className="contents">
-      <button type="button" className="rl-reply-action" onClick={copy} title="Copy this reply">
-        {copied ? "Copied ✓" : <><Copy size={11} strokeWidth={2} aria-hidden /> Copy</>}
-      </button>
-      {onAddToMission && (
-        <button type="button" className="rl-reply-action" data-tone="info" onClick={pin} title="Pin this reply to the active mission">
-          {pinned === "ok" ? "Pinned ✓" : pinned === "failed" ? "Pin failed ✗" : <><Pin size={11} strokeWidth={2} aria-hidden /> Mission</>}
-        </button>
-      )}
-      {onAddToCart && (
-        <button
-          type="button"
-          className="rl-reply-action"
-          data-tone="info"
-          onClick={() => {
-            // Same truthfulness rule as the pin beside it: an add that never
-            // reached the DB must not flash a tick.
-            void Promise.resolve(onAddToCart(body)).then((ok) => {
-              setListed(ok === false ? "failed" : "ok");
-              window.setTimeout(() => setListed("idle"), 1400);
-            });
-          }}
-          title="Add this reply to the task list"
-        >
-          {listed === "ok" ? "Added ✓" : listed === "failed" ? "Add failed ✗" : <><ListTodo size={12} aria-hidden /> Task list</>}
-        </button>
-      )}
-      <ContinueAs through={messageId} />
-      {!source && onSendToDrafter && (
-        <button type="button" className="rl-reply-action" data-tone="info" onClick={() => onSendToDrafter(body)} title="Open this reply in the Prompt Drafter to shape before sending">
-          <PenLine size={11} strokeWidth={2} aria-hidden /> Drafter
-        </button>
-      )}
-      {!source && onSendToRedline && (
-        <button type="button" className="rl-reply-action" data-tone="info" onClick={() => onSendToRedline(body)} title="Send this reply to Claude Code — you'll confirm the target repo">
-          Claude Code ▶
-        </button>
-      )}
+      {actions.map((action) => {
+        switch (action) {
+          case "copy":
+            return (
+              <button key={action} type="button" className="rl-reply-action" onClick={copy} title="Copy this reply">
+                {copied ? "Copied ✓" : <><Copy size={11} strokeWidth={2} aria-hidden /> Copy</>}
+              </button>
+            );
+          case "add-to-task-list":
+            return onAddToCart && (
+              <button key={action} type="button" className="rl-reply-action" data-tone="info" onClick={addToList} title="Add this reply to the task list">
+                {listed === "ok" ? "Added ✓" : listed === "failed" ? "Add failed ✗" : <><ListTodo size={12} aria-hidden /> Task list</>}
+              </button>
+            );
+          case "add-to-mission":
+            return (
+              <button key={action} type="button" className="rl-reply-action" data-tone="info" onClick={pin} title="Pin this reply to the active mission">
+                {pinned === "ok" ? "Pinned ✓" : pinned === "failed" ? "Pin failed ✗" : <><Pin size={11} strokeWidth={2} aria-hidden /> Mission</>}
+              </button>
+            );
+          case "continue-as":
+            return <ContinueAs key={action} through={messageId} />;
+        }
+      })}
     </span>
   );
 }

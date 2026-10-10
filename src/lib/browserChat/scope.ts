@@ -107,6 +107,9 @@ export interface ResolvedConversation {
 }
 
 const tabById = (w: ChatWorld, id: string) => w.tabs.find((t) => t.id === id);
+/** An open event for a page that is already open brings it forward instead
+ *  of listing it twice: the pane opens an address once, by URL. */
+const withTab = (w: ChatWorld, tab: ChatTab) => (tabById(w, tab.id) ? w.tabs : [...w.tabs, tab]);
 
 function anchoredTab(w: ChatWorld): ChatTab | undefined {
   return tabById(w, w.discussionId) ?? tabById(w, w.activeId) ?? w.tabs[0];
@@ -181,10 +184,10 @@ function step(w: ChatWorld, e: ChatEvent): ChatWorld {
       // A full switch: page AND conversation follow (BC-5).
       return tabById(w, e.tabId) ? { ...w, activeId: e.tabId, discussionId: e.tabId } : w;
     case "user-open-tab":
-      return { ...w, tabs: [...w.tabs, e.tab], activeId: e.tab.id, discussionId: e.tab.id };
+      return { ...w, tabs: withTab(w, e.tab), activeId: e.tab.id, discussionId: e.tab.id };
     case "agent-open-tab":
       // The page comes forward; the conversation stays anchored (BC-5).
-      return { ...w, tabs: [...w.tabs, e.tab], activeId: e.tab.id };
+      return { ...w, tabs: withTab(w, e.tab), activeId: e.tab.id };
     case "open-source":
       return e.existing
         ? step(w, { type: "user-select-tab", tabId: e.tab.id })

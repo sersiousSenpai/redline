@@ -6,7 +6,10 @@ import { appearanceCss, normalizeAppearance, siteKey, type BrowserAppearance } f
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal, flushSync } from "react-dom";
 
-import { shortcutTabId, pageChatIdentity, type LinkedConversation } from "../lib/browseChatState";
+import { shortcutTabId } from "../lib/browseChatState";
+import { dockDescriptor, resolveConversation, type ChatEvent } from "../lib/browserChat/scope";
+import { seedPolicy, type SeedSource } from "../lib/browserChat/turn";
+import { useChatWorld } from "../hooks/useChatWorld";
 import { ensureCart } from "../lib/browseCart";
 import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
 import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
@@ -42,7 +45,6 @@ import {
 } from "../lib/browseChatState";
 import { cartKey, sameTabUrl } from "../lib/browseList";
 import {
-  autoSends,
   parseSelectionEvents,
   promptForSelection,
   type SelectionEvent,
@@ -229,11 +231,12 @@ interface BrowserPaneProps {
   /** Active file-explorer folder, if one is open — passed to the page-discussion
    *  agent as its working directory. */
   projectDir?: string | null;
-  /** Ship a page-discussion reply into a fresh Redline plan session (terminal +
-   *  `claude --permission-mode plan`). Forwarded to the chat's per-reply action. */
+  /** Ship the Task list into a fresh Redline plan session (terminal +
+   *  `claude --permission-mode plan`). A page-chat reply hands off through
+   *  its own Continue as… instead (BC-24). */
   onSendToRedline?: (markdown: string) => void;
-  /** Open a page-discussion reply in the Prompt Drafter (repo pre-guessed) to
-   *  shape before sending. Forwarded to the chat's per-reply action. */
+  /** Open the Task list in the Prompt Drafter (repo pre-guessed) to shape
+   *  before sending. One renderer feeds both handoffs (BC-16). */
   onSendToDrafter?: (markdown: string) => void;
   /** Seed the Prompt Drafter with a synthesized mission brief (markdown → Tiptap
    *  doc), so the user shapes the real document and ships it to Claude Code. */
@@ -247,11 +250,12 @@ interface BrowserPaneProps {
   openRequest?: {
     url: string;
     nonce: number;
-    /** Seed (and, with `autoSend`, send) the opened tab's chat — Search from
-     *  the plan hands its research ask over this way. A chat request always
-     *  opens a fresh tab, and its chat is that tab's own, never the shared
-     *  one, whichever way linked mode leans. */
-    chat?: { text: string; autoSend?: boolean };
+    /** Send a turn in the opened tab's chat — Search from the plan hands its
+     *  research ask over this way, and it goes out without moving the caret
+     *  (`seedPolicy`'s plan Search). A chat request always opens a fresh
+     *  tab, and its chat is that tab's own, never the shared one, whichever
+     *  way linked mode leans (BC-6). */
+    chat?: { text: string };
     /** Prefer an existing tab by its thread (a research comment's "View
      *  result"); falls back to opening `url` when that tab is gone. */
     focusBrowseId?: string;
@@ -349,18 +353,14 @@ function BrowserPaneBase({
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const pendingWorkspaceSaveRef = useRef<{ workspaceId: string; value: Omit<SavedBrowserWorkspace, "revision"> } | null>(null);
   const [layouts, setLayouts] = usePersistedState<Record<string, BrowserLayout>>("redline.browser.layouts", {}, { debounceMs: 120 });
-  const [linkedByWorkspace, setLinkedByWorkspace] = usePersistedState<Record<string, LinkedConversation | null>>("redline.browser.followByWorkspace", {});
-  // Linked mode decides which chat a tab lands in: on, the workspace's shared
-  // chat; off, the tab's own. A global preference, unlike `flipFor` — the one
-  // tab showing the other kind right now, which is never persisted.
-  const [linkedMode, setLinkedMode] = usePersistedState<boolean>("redline.browser.linkedMode", false);
-  const [flipFor, setFlipFor] = useState<string | null>(null);
   const [groupsByWorkspace, setGroupsByWorkspace] = usePersistedState<Record<string, TabGroup[]>>("redline.browser.groups", {});
   const [organizedByWorkspace, setOrganizedByWorkspace] = usePersistedState<Record<string, boolean>>("redline.browser.organized", {});
   const [organizing, setOrganizing] = useState(false);
   const organizeEpoch = useRef(0);
   const organized = organizedByWorkspace[workspaceKey] ?? false;
-  useEffect(() => { try { if (!localStorage.getItem("redline.browser.followDefaultV1")) { setLinkedByWorkspace(prev => Object.fromEntries(Object.entries(prev).filter(([, value]) => value))); localStorage.setItem("redline.browser.followDefaultV1", "true"); } localStorage.removeItem("redline.browser.ownChatTabs"); } catch { /* optional migration */ } }, []);
+  // Retired keys: the per-tab opt-out list (BC-R1) and the one-time cleanup
+  // of the shared chats it left behind, which reading them now does.
+  useEffect(() => { try { localStorage.removeItem("redline.browser.ownChatTabs"); localStorage.removeItem("redline.browser.followDefaultV1"); } catch { /* optional migration */ } }, []);
 
   // id → live Webview handle. Kept in a ref (not state) because these are
   // native resources we create/destroy imperatively, not render outputs.
@@ -512,15 +512,15 @@ function BrowserPaneBase({
   const [activeId, setActiveId] = useState(() => initialActiveRef.current!);
   const picker = useElementPicker(`browser-${activeId}`, setWorkspaceError);
   const pickerRef = useRef(picker); pickerRef.current = picker;
-  // Which tab's DISCUSSION thread the chat pane shows. Normally equals activeId,
-  // but they diverge when the agent opens a tab on the user's behalf: the new
-  // tab becomes the visible/active page (activeId), while the conversation stays
-  // anchored to the tab it was started from (discussionId) so the in-flight
-  // reply isn't interrupted and the one conversation keeps driving the new tab.
-  // Any manual tab click re-couples them (see selectTab).
-  const [discussionId, setDiscussionId] = useState(
-    () => initialActiveRef.current!,
-  );
+  // The page chat's scope: which thread it shows and which page a turn
+  // targets. That is the structure layer's world, built from these tabs, the
+  // tab on screen and the workspace plus a slice only its reducer writes; the
+  // two diverge when an agent opens a tab on the conversation's behalf (the
+  // page comes forward, the conversation stays anchored, BC-5). Every gesture
+  // that moves the conversation dispatches an event, and nothing here derives
+  // a thread id. See lib/browserChat/README.md.
+  const { world: chatWorld, dispatch: dispatchChat } = useChatWorld({ workspace: workspaceKey, tabs, activeId }, newBrowseId);
+  const conversation = resolveConversation(chatWorld);
   const [addr, setAddr] = useState(
     () =>
       initialTabsRef.current!.find((t) => t.id === initialActiveRef.current)
@@ -540,27 +540,11 @@ function BrowserPaneBase({
     "redline.browser.chatState",
     {}, { debounceMs: 120 },
   );
-  // Keyed on the ACTIVE tab, not `discussionId`: the memory should follow the
-  // tab the user is looking at, and those two deliberately diverge when an
-  // agent opens a tab on the current conversation's behalf.
+  // Keyed on the ACTIVE tab, not the anchored conversation: the memory should
+  // follow the tab the user is looking at, and those two deliberately diverge
+  // when an agent opens a tab on the current conversation's behalf.
   const activeBrowseId =
     (tabs.find((t) => t.id === activeId) ?? tabs[0])?.browseId ?? null;
-  // A flip belongs to the conversation on screen: the active tab's, except
-  // while an agent-opened tab keeps the conversation anchored to its origin —
-  // keying on the active tab there would yank a shared chat mid-reply.
-  const discussionBrowseId = tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseId;
-  const flipped = !!discussionBrowseId && flipFor === discussionBrowseId;
-  const ownChat = !!discussionBrowseId && (linkedMode ? flipped : !flipped);
-  // Mode wins on a switch. Rendering already ignores a flip made on another
-  // tab; this only stops it coming back when you return to that tab. Declared
-  // above the open-request effect: when both run in one commit (a Search
-  // landing with the restored pages), its update must queue first.
-  useEffect(() => { setFlipFor(f => f === discussionBrowseId ? f : null); }, [discussionBrowseId, workspaceKey]);
-  const linkedConversation = ownChat ? null : linkedByWorkspace[workspaceKey] ?? null;
-  useEffect(() => {
-    if (dockPill !== "page" || ownChat || linkedByWorkspace[workspaceKey]) return;
-    setLinkedByWorkspace(prev => prev[workspaceKey] ? prev : { ...prev, [workspaceKey]: { browseId: newBrowseId(), title: "Browser chat", originTabId: activeId } });
-  }, [dockPill, ownChat, workspaceKey, linkedByWorkspace, activeId, setLinkedByWorkspace]);
   const groups = reconcileGroups(groupsByWorkspace[workspaceKey] ?? [], tabs);
   const setGroups = (next: TabGroup[]) => setGroupsByWorkspace(prev => ({ ...prev, [workspaceKey]: next }));
   const organizeTabs = async (fileOnly = false) => {
@@ -625,11 +609,11 @@ function BrowserPaneBase({
   const [chatSeed, setChatSeed] = useState<{
     text: string;
     nonce: number;
-    /** Set by the one-tap highlight actions (Define/Explain/Research): the
-     *  intent line is already a complete instruction, so the turn goes out
-     *  rather than sitting in the composer waiting for a ⌘↵ that confirms
-     *  nothing. See lib/browseSelection.ts. */
-    autoSend?: boolean;
+    /** The gesture it came from. The chat asks `seedPolicy` whether that
+     *  sends at once (the one-tap highlight intents, a plan Search) and
+     *  whether it places the caret (only a gesture whose point is typing
+     *  next, BC-33). */
+    source: SeedSource;
   } | null>(null);
   // Page actions must reveal their destination before a mounted background
   // conversation can consume the seed (including one-tap auto-send actions).
@@ -737,26 +721,21 @@ function BrowserPaneBase({
    *  here — the shim does it in-page, inside the click's user activation. */
   const dispatchSelection = useCallback(
     (ev: SelectionEvent, nonce: number) => {
-      // Address the tab whose conversation the pane is actually SHOWING. That
-      // is normally the active tab; the two diverge only when the agent opened
-      // a page on the user's behalf and the conversation stayed anchored to the
-      // tab it started from — and that anchored conversation is exactly the one
-      // that should hear what the user highlighted on the page it opened.
-      const browseId =
-        tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseIdRef.current;
-      if (!browseId) return;
-      if (ev.action === "list") {
+      const source: SeedSource = ev.action === "list"
+        ? { kind: "selection-list" }
+        : { kind: "selection", action: ev.action, note: ev.note };
+      if (!seedPolicy(source).toChat) {
         void addSelectionToCart(ev);
         return;
       }
-      seedPageChat({
-        text: promptForSelection(ev),
-        nonce,
-        autoSend: autoSends(ev.action, ev.note),
-      });
+      // The seed lands in the conversation on screen. That is normally the
+      // active tab's; when an agent opened the page and the conversation
+      // stayed anchored, the anchored one is exactly the one that should
+      // hear what the user highlighted on the page it opened.
+      seedPageChat({ text: promptForSelection(ev), nonce, source });
       setChatHere({ open: true, pill: "page" });
     },
-    [tabs, discussionId, addSelectionToCart, setChatHere, seedPageChat],
+    [addSelectionToCart, setChatHere, seedPageChat],
   );
   // The 250 ms poll below runs on a `[]`-deps effect; read through a ref so it
   // never has to resubscribe (same pattern as `openTabRef`).
@@ -879,21 +858,15 @@ function BrowserPaneBase({
   }, [tabs]);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
-  const discussionIdRef = useRef(discussionId);
-  discussionIdRef.current = discussionId;
   // Tell the dock which conversations exist beside this pane. Only ids and
   // labels cross — the panels themselves stay here and are portalled into the
   // dock's slot, so this is a description, never a second copy of the state.
   //
-  // The discussion tab, not the active one: that is whose thread the page
-  // conversation shows, and the two deliberately diverge when an agent opens a
-  // tab on the current conversation's behalf.
-  const dockDiscussionTab =
-    tabs.find((t) => t.id === discussionId) ??
-    tabs.find((t) => t.id === activeId) ??
-    tabs[0];
-  const dockBrowseId = linkedConversation?.browseId ?? dockDiscussionTab?.browseId ?? null;
-  const dockTitle = linkedConversation?.title ?? dockDiscussionTab?.title ?? null;
+  // The page entry is the conversation the layer resolves, whether or not the
+  // column is showing it: a shared chat already has its thread (BC-10).
+  const dock = dockDescriptor(chatWorld);
+  const dockBrowseId = dock?.browseId ?? null;
+  const dockTitle = dock?.title ?? null;
   const workspaceKeyRef = useRef(workspaceKey); workspaceKeyRef.current = workspaceKey;
   const dockCartId = cartKey(workspaceKey);
   const dockMissionId = mission.activeMission?.missionId ?? null;
@@ -1529,8 +1502,8 @@ function BrowserPaneBase({
       }
       else if (event.kind === "inspect" && event.value && typeof event.value === "object") {
         if (!pickerRef.current.accept(event.label)) return;
-        setDiscussionId(tab.id);
-        setChatSeed(inspectorSeed({ ...(event.value as Record<string, unknown>), tabId: tab.id, browseId: tab.browseId }));
+        dispatchChat({ type: "inspect", tabId: tab.id });
+        setChatSeed({ ...inspectorSeed({ ...(event.value as Record<string, unknown>), tabId: tab.id, browseId: tab.browseId }), source: { kind: "element" } });
         setChatFor(tab.browseId, { open: true, pill: "page" });
       } else if (event.kind === "inspect-error" && pickerRef.current.accept(event.label)) setWorkspaceError(PICKING_ERROR);
     });
@@ -1687,22 +1660,25 @@ function BrowserPaneBase({
     };
   }, [scheduleSync]);
 
-  // Foreground a tab. A user action (tab click, opening a tab) couples the
-  // discussion to it; an AGENT-initiated open (`anchorDiscussion: true`) leaves
-  // the discussion where it is, so the conversation that opened the tab keeps
-  // streaming and keeps driving it.
+  // Foreground a tab, and tell the chat which gesture did it: the event, not
+  // this function, decides whether the conversation follows the page.
+  const foregroundTab = (id: string, event: ChatEvent) => {
+    // Selecting a suspended tab wakes it: ensure it has a live webview (recreate
+    // if its prior one died or never materialized), and bump its recency.
+    switchTiming.current = { id, at: performance.now() };
+    setActiveId(id);
+    if (id === activeIdRef.current) ensureLive(id);
+    return dispatchChat(event);
+  };
+  // A tab click, a tile focus, a keyboard next/previous tab: a full switch
+  // that re-couples page and conversation (BC-5).
   const selectTab = (id: string) => {
     // A drag just ended on this tab — that's a reorder, not a selection.
     if (suppressTabClickRef.current) {
       suppressTabClickRef.current = false;
       return;
     }
-    // Selecting a suspended tab wakes it: ensure it has a live webview (recreate
-    // if its prior one died or never materialized), and bump its recency.
-    switchTiming.current = { id, at: performance.now() };
-    setActiveId(id);
-    setDiscussionId(id);
-    if (id === activeIdRef.current) ensureLive(id);
+    foregroundTab(id, { type: "user-select-tab", tabId: id });
   };
 
   const tabDragCleanupRef = useRef<(() => void) | null>(null);
@@ -1719,7 +1695,7 @@ function BrowserPaneBase({
         const tab = tabsRef.current.find(page => page.id === id);
         if (tileIndex !== null && tab) {
           updateTileLayout(assignVisibleTile(tileLayout, visibleBrowseIds, tileIndex, tab.browseId));
-          setActiveId(tab.id); setDiscussionId(tab.id);
+          setActiveId(tab.id); dispatchChat({ type: "user-select-tab", tabId: tab.id });
         } else if (overId && overId !== id) {
           if (organized && tab) { const target = tabsRef.current.find(page => page.id === overId); const group = groups.find(group => group.browseIds.includes(target?.browseId ?? "")); if (group) setGroups(moveTabToGroup(groups, tab.browseId, group.id)); }
           else setTabs(ts => reorderTabs(ts, id, overId));
@@ -1728,27 +1704,37 @@ function BrowserPaneBase({
     });
   };
 
-  /** Returns the browse ID of the tab opened or foregrounded. */
+  /** Returns the browse ID of the tab opened or foregrounded. `via` is the
+   *  gesture, for the chat: the user's own open moves the conversation onto
+   *  the page; an agent's brings the page forward while the conversation
+   *  stays anchored to the tab it started on; a link clicked in a reply does
+   *  the same, unless that page is already open in a tab, which it selects;
+   *  a plan Search opens a fresh tab with its own chat (BC-5, BC-6). */
   const openTab = (
     url: string = HOME,
-    opts: { anchorDiscussion?: boolean; fresh?: boolean } = {},
+    { via = "user" }: { via?: "user" | "agent" | "source" | "plan-search" } = {},
   ): string | null => {
+    const opened = (tab: Tab, existing: boolean): ChatEvent =>
+      via === "agent" ? { type: "agent-open-tab", tab }
+      : via === "source" ? { type: "open-source", tab, existing }
+      : via === "plan-search" ? { type: "plan-search-opened", tab }
+      : { type: "user-open-tab", tab };
     // Opening an already-open URL foregrounds that tab instead of stacking a
     // duplicate — "Open" on a Localhost card (and any replayed request) would
     // otherwise accumulate tabs. `sameTabUrl`, not `===`: the poll below
     // rewrites `t.url` to the webview's canonical URL, so a tab opened at
     // `http://localhost:3000` is holding `http://localhost:3000/dashboard` by
     // the time you click the card again. Blank tabs are exempt: "+" on HOME is
-    // an intentional second empty tab. So is a `fresh` open: a plan Search
-    // wants a tab (and a chat) of its own even when the same page is open.
-    if (url !== HOME && url !== NEWTAB && !opts.fresh) {
+    // an intentional second empty tab. So is a plan Search: it wants a tab
+    // (and a chat) of its own even when the same page is open.
+    if (url !== HOME && url !== NEWTAB && via !== "plan-search") {
       const existing = tabsRef.current.find((t) => sameTabUrl(t.url, url));
       if (existing) {
         ensureLive(existing.id);
         touchMru(existing.id);
         setActiveId(existing.id);
         updateTileLayout({ focused: existing.browseId, maximized: null });
-        if (!opts.anchorDiscussion) setDiscussionId(existing.id);
+        dispatchChat(opened(existing, true));
         return existing.browseId;
       }
     }
@@ -1767,9 +1753,7 @@ function BrowserPaneBase({
     setTabs((ts) => [...ts, tab]);
     setActiveId(id);
     updateTileLayout({ focused: browseId, maximized: null });
-    // Move the conversation onto the new tab unless an agent opened it on behalf
-    // of the current conversation (then it stays anchored to its origin tab).
-    if (!opts.anchorDiscussion) setDiscussionId(id);
+    dispatchChat(opened(tab, false));
     if (url === NEWTAB) window.setTimeout(() => focusAddressRef.current(), 0);
     return browseId;
   };
@@ -1785,18 +1769,9 @@ function BrowserPaneBase({
       const next = remaining[Math.min(idx, remaining.length - 1)];
       setActiveId(next.id);
     }
-    // If the tab whose conversation is showing is gone, re-anchor the discussion
-    // to the (new) active tab so the chat pane never points at a dead thread.
-    if (id === discussionIdRef.current) {
-      const stillThere = remaining.some((t) => t.id === discussionIdRef.current);
-      if (!stillThere) {
-        const idx = tabsRef.current.findIndex((t) => t.id === id);
-        const next = remaining[Math.min(idx, remaining.length - 1)];
-        setDiscussionId(
-          id === activeIdRef.current ? next.id : activeIdRef.current,
-        );
-      }
-    }
+    // Closing the anchored tab re-anchors the conversation to the page on
+    // screen, so the chat never points at a dead thread (BC-5).
+    dispatchChat({ type: "close-tab", tabId: id });
     explicitlyClosedRef.current.add(id);
     const closedBrowseId = tabsRef.current.find((tab) => tab.id === id)?.browseId;
     updateTileLayout({ tiles: tileLayout.tiles.filter((bid) => bid !== closedBrowseId),
@@ -1909,7 +1884,9 @@ function BrowserPaneBase({
     swapCommitRef.current = newSet;
     setTabs(newSet);
     setActiveId(active.id);
-    setDiscussionId(active.id);
+    // Threads reattach by browseId; any flip is dropped and the mode decides
+    // (BC-8), and the workspace's shared chat exists before it renders.
+    dispatchChat({ type: "workspace-swapped", workspace: destinationId, tabs: newSet, activeId: active.id });
     setAddr(active.url);
     setLiveVersion((v) => v + 1);
     if (target.kind === "mission") mission.resumeMission(target.id);
@@ -1932,7 +1909,8 @@ function BrowserPaneBase({
     const m = await mission.startMission(title, goal, fromRegular ? currentDescs : [], projectDir); // sets active = m
     if (!m) return;
     if (fromRegular) {
-      setLinkedByWorkspace((prev) => ({ ...prev, [m.missionId]: prev.regular ?? null, regular: null }));
+      // The shared chat goes with the tabs; regular browsing starts fresh (BC-4).
+      dispatchChat({ type: "mission-started-from-regular", missionId: m.missionId });
       setWorkspaceKey(m.missionId);
       setLayouts((prev) => ({ ...prev, [m.missionId]: tileLayout }));
       await saveBrowserWorkspace(m.missionId, { tabs: currentDescs, layout: tileLayout });
@@ -1973,45 +1951,37 @@ function BrowserPaneBase({
   };
 
   // The header's "Tab chat" / "Shared chat": show the other kind of chat on
-  // the tab you're looking at, until you switch away. Relative to what is on
-  // screen rather than to the old flip, which may belong to an anchored origin.
+  // the tab you're looking at, until you switch away (BC-3).
   const toggleTabChat = () => {
-    setFlipFor(ownChat === linkedMode ? null : activeBrowseId);
-    setDiscussionId(activeId);
+    dispatchChat({ type: "toggle-tab-chat" });
     setChatHere({ open: true, pill: "page" });
   };
   const toggleLinkedMode = () => {
-    setLinkedMode(m => !m);
-    setFlipFor(null);
-    setDiscussionId(activeId);
+    dispatchChat({ type: "toggle-linked-mode" });
     setChatHere({ open: true, pill: "page" });
   };
+  // A link the user clicks in a page-chat reply is a source: it opens beside
+  // the conversation, which stays where it is (BC-5).
+  const openSource = (url: string) => openTab(url, { via: "source" });
 
   const conversationEventRef = useRef<(event: Event) => void>(() => {});
   conversationEventRef.current = (event) => {
     const detail = (event as CustomEvent<{ conversationKind?: string; conversationId?: string }>).detail;
     if (!detail?.conversationId || !/^[a-zA-Z0-9_-]+$/.test(detail.conversationId)) return;
     if (detail.conversationKind === "browse") {
+      // Back to that exact thread, whichever way linked mode leans (BC-7). A
+      // thread that resolves to anything else is one whose tab has closed.
+      const open: ChatEvent = { type: "open-conversation", browseId: detail.conversationId };
       const tab = tabsRef.current.find(item => item.browseId === detail.conversationId);
-      // Back to that exact thread, whichever way linked mode leans: a tab's
-      // own chat is a flip under linked mode, the shared chat one without it.
-      if (tab) { selectTabRef.current(tab.id); setFlipFor(linkedMode ? tab.browseId : null); }
-      else if (detail.conversationId === linkedByWorkspace[workspaceKey]?.browseId) { setDiscussionId(activeId); setFlipFor(linkedMode ? null : activeBrowseId); }
-      else setWorkspaceError("This page conversation's tab is no longer open.");
+      const landed = tab ? foregroundTab(tab.id, open) : dispatchChat(open);
+      if (resolveConversation(landed)?.browseId !== detail.conversationId) setWorkspaceError("This page conversation's tab is no longer open.");
       setChatHere({ open: true, pill: "page" });
     }
   };
   useEffect(() => {
     const conversation = (event: Event) => conversationEventRef.current(event);
-    const source = (event: Event) => {
-      const detail = (event as CustomEvent<{ browseId?: string; url?: string }>).detail;
-      const tab = tabsRef.current.find((page) => page.browseId === detail?.browseId);
-      if (tab) selectTabRef.current(tab.id);
-      else if (detail?.url && /^https?:\/\//i.test(detail.url)) openTabRef.current(detail.url, { anchorDiscussion: true });
-    };
     window.addEventListener("redline-open-conversation", conversation);
-    window.addEventListener("redline-open-source-tab", source);
-    return () => { window.removeEventListener("redline-open-conversation", conversation); window.removeEventListener("redline-open-source-tab", source); };
+    return () => window.removeEventListener("redline-open-conversation", conversation);
   }, []);
 
   // --- Mosaics ---------------------------------------------------------------
@@ -2203,7 +2173,7 @@ function BrowserPaneBase({
   useEffect(() => {
     const p = listen<BrowseOpenTabEvent>("browse-open-tab", (e) => {
       const url = e.payload?.url;
-      if (url) openTabRef.current(url, { anchorDiscussion: true });
+      if (url) openTabRef.current(url, { via: "agent" });
     });
     return () => {
       void p.then((un) => un());
@@ -2219,8 +2189,6 @@ function BrowserPaneBase({
   const lastOpenNonceRef = useRef(0);
   const onOpenRequestConsumedRef = useRef(onOpenRequestConsumed);
   onOpenRequestConsumedRef.current = onOpenRequestConsumed;
-  const linkedModeRef = useRef(linkedMode);
-  linkedModeRef.current = linkedMode;
   useEffect(() => {
     // Held until the mount-time restore has swapped its tabs in.
     if (!workspaceRestored || !openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
@@ -2228,20 +2196,22 @@ function BrowserPaneBase({
     const existing = openRequest.focusBrowseId
       ? tabsRef.current.find((t) => t.browseId === openRequest.focusBrowseId)
       : undefined;
+    // "View result" returns to the tab's OWN thread in either mode, which is
+    // where its search's turn went; the Front Door's quiet reopen leaves the
+    // choice to linked mode (BC-6).
+    const reopen = (tabId: string): ChatEvent => ({ type: "reopen-tab", tabId, quiet: !!openRequest.quiet });
     let browseId: string | null;
     if (existing) {
-      selectTabRef.current(existing.id);
+      foregroundTab(existing.id, reopen(existing.id));
       browseId = existing.browseId;
     } else {
-      browseId = openTabRef.current(openRequest.url, { fresh: !!openRequest.chat });
+      // A plan Search opens a fresh tab whose own chat takes its turn.
+      browseId = openTabRef.current(openRequest.url, { via: openRequest.chat ? "plan-search" : "user" });
+      if (browseId && openRequest.focusBrowseId && !openRequest.quiet) dispatchChat(reopen(canonicalTabId(browseId)));
     }
     if (browseId && (openRequest.chat || (openRequest.focusBrowseId && !openRequest.quiet))) {
-      // The tab's OWN thread, in either mode: that is where a search's turn
-      // goes and where "View result" finds it. The mode-wins effect keeps it,
-      // since it names the tab this same batch brings to the front.
-      setFlipFor(linkedModeRef.current ? browseId : null);
       if (openRequest.chat) {
-        seedPageChat({ text: openRequest.chat.text, nonce: openRequest.nonce, autoSend: openRequest.chat.autoSend });
+        seedPageChat({ text: openRequest.chat.text, nonce: openRequest.nonce, source: { kind: "plan-search" } });
       }
       // By thread, not "here": the active-tab ref hasn't caught up with a
       // tab opened on this same tick.
@@ -2252,15 +2222,17 @@ function BrowserPaneBase({
   }, [openRequest, workspaceRestored]);
 
   // The browse agent switches the user into an existing tab by emitting
-  // `browse-focus-tab`. selectTab foregrounds it AND moves the discussion into
-  // its thread — a full switch, exactly like clicking the tab.
+  // `browse-focus-tab`. It foregrounds the tab AND moves the conversation
+  // into its thread — a full switch, exactly like clicking the tab (BC-5).
   const selectTabRef = useRef(selectTab);
   selectTabRef.current = selectTab;
+  const foregroundTabRef = useRef(foregroundTab);
+  foregroundTabRef.current = foregroundTab;
   useEffect(() => {
     const p = listen<BrowseFocusTabEvent>("browse-focus-tab", (e) => {
       const id = e.payload?.id;
       if (id && tabsRef.current.some((t) => t.id === id)) {
-        selectTabRef.current(id);
+        foregroundTabRef.current(id, { type: "agent-focus-tab", tabId: id });
       }
     });
     return () => {
@@ -2401,11 +2373,6 @@ function BrowserPaneBase({
         // The conversation remains mounted and visible during stage one.
         if (!chatOpen || !dockSlot) return slot;
         const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
-        // The chat shows the DISCUSSION tab's thread (usually the active tab, but
-        // pinned to its origin when an agent opened the active tab). It still
-        // grounds on the visible page via `label`.
-        const discussionTab =
-          tabs.find((t) => t.id === discussionId) ?? activeTab;
         // No switcher of its own any more: the dock's context strip is the one
         // place in the app that says which conversation you are in.
         const chatPanel = (
@@ -2426,7 +2393,7 @@ function BrowserPaneBase({
                     // live page and can read the repo, so it is the right
                     // colleague — this needs no backend of its own.
                     onDiscussItem={(quoted) => {
-                      seedPageChat({ text: quoted, nonce: Date.now() });
+                      seedPageChat({ text: quoted, nonce: Date.now(), source: { kind: "task-item" } });
                       setChatHere({ open: true, pill: "page" });
                     }}
                   />
@@ -2460,39 +2427,41 @@ function BrowserPaneBase({
                 ) : (
                   <MissionEmptyState onStart={() => setMissionDialogOpen(true)} />
                 )
-              ) : (
+              ) : conversation && (
                 <div className="rb-chat-frame">
                   <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-hidden">
                 <BrowserChat
+                  key={conversation.browseId}
+                  conversation={conversation}
+                  workspace={workspaceKey}
+                  linkedMode={chatWorld.linkedMode}
+                  onToggleTabChat={toggleTabChat}
+                  onToggleLinkedMode={toggleLinkedMode}
                   onResearch={openResearch}
-                  title={dockTitle ?? "Page chat"}
-                  key={dockBrowseId}
-                  {...pageChatIdentity(discussionTab, activeId, linkedConversation)}
-                  linked={!ownChat} onToggleTabChat={toggleTabChat}
-                  linkedMode={linkedMode} onToggleLinkedMode={toggleLinkedMode}
-                  workspaceId={workspaceKey}
                   projectDir={projectDir}
-                  anchoredFromTitle={
-                    linkedConversation?.title ?? (discussionTab.id !== activeId ? discussionTab.title : undefined)
-                  }
                   onClose={() => setChatHere({ open: false })}
-                  onOpenLink={(url) => openTab(url)}
-                  onSendToRedline={onSendToRedline}
-                  onSendToDrafter={onSendToDrafter}
+                  onOpenLink={openSource}
                   seed={chatSeed}
                   onSeedConsumed={() => setChatSeed(null)}
                   onAddToCart={addReplyToCart}
                   onAddToMission={
                     mission.activeMission
-                      ? (body) =>
+                      ? (body) => {
+                          // The page the reply was about is the turn's
+                          // target, the tab on screen, not the tab the
+                          // conversation is anchored to (BC-24). The pin is
+                          // keyed by that page's tab, which is what a jump
+                          // and the page capture both read.
+                          const page = tabs.find((t) => t.label === conversation.targetLabel);
                           // Returns whether the pin reached the DB, so the
                           // button can say "Pin failed" instead of lying.
-                          mission.addFinding({
+                          return mission.addFinding({
                             body,
-                            browseId: discussionTab.browseId,
-                            sourceUrl: discussionTab.url,
-                            sourceTitle: discussionTab.title,
-                          })
+                            browseId: page?.browseId ?? null,
+                            sourceUrl: page?.url ?? null,
+                            sourceTitle: conversation.targetTitle,
+                          });
+                        }
                       : undefined
                   }
                 />

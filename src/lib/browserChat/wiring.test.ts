@@ -28,6 +28,7 @@ const skillRs = read("src-tauri/src/skill.rs");
 const skill = read("skills/browse/SKILL.md");
 const chat = read("src/components/BrowserChat.tsx");
 const pane = read("src/components/BrowserPane.tsx");
+const replyBlock = read("src/components/ReplyBlock.tsx");
 const app = read("src/App.tsx");
 /** App plus the Front Door and the pill's card, wherever they are drawn. */
 const door = [app, ...readdirSync(join(process.cwd(), "src/components"))
@@ -162,7 +163,13 @@ describe("the page chat's UI laws", () => {
     expect(chat).not.toMatch(/autoFocus/);
   });
   it("BC-35 links in replies open as Redline tabs", () => {
-    expect(chat).toMatch(/<MarkdownView[^>]*onLinkClick=\{onOpenLink\}/);
+    // Every turn the chat draws hands its link handler to the one reply
+    // anatomy, which gives it to the markdown live and settled.
+    const turns = [...chat.matchAll(/<(ReplyBlock|UserTurn)\b[^>]*/g)].map((m) => m[0]);
+    expect(turns.length).toBeGreaterThanOrEqual(3);
+    for (const turn of turns) expect(turn).toContain("onOpenLink={onOpenLink}");
+    expect(replyBlock).toMatch(/<StreamingText[^>]*onOpenLink=\{onOpenLink\}/);
+    expect(replyBlock).toMatch(/<MarkdownView[^>]*onLinkClick=\{onOpenLink\}/);
   });
   it("BC-36 linked mode is an icon in the chat header", () => {
     expect(chat).toContain('aria-label="Linked mode"');
@@ -190,24 +197,45 @@ describe("the page chat's UI laws", () => {
     pinnedBy("src/hooks/useAgentTurn.test.ts", "drops a send whose args were still building when the panel went away");
   });
   it("BC-32 pinned by browseChatState.test", () => pinnedBy("src/lib/browseChatState.test.ts", "NEVER drops a tab that still exists, however stale"));
-  it.fails("BC-9 KNOWN VIOLATION: the shared thread is minted by the gesture, not by an effect after render", () => {
+  it("BC-9 the shared thread is minted by the gesture, not by an effect after render", () => {
     expect(pane).not.toMatch(/useEffect\(\(\) => \{\s*if \(dockPill !== "page" \|\| ownChat \|\| linkedByWorkspace\[workspaceKey\]\) return;/);
   });
-  it.fails("BC-5 KNOWN VIOLATION: the header names the page, never the shared chat's own title as an origin", () => {
+  it("BC-5 the header names the page, never the shared chat's own title as an origin", () => {
     expect(pane).not.toMatch(/anchoredFromTitle=\{\s*linkedConversation\?\.title/);
   });
-  it.fails("BC-24 KNOWN VIOLATION: no reply action is threaded that can never render", () => {
+  it("BC-24 no reply action is threaded that can never render", () => {
     const providerAlwaysWraps = /<ConversationSourceContext\.Provider value=\{\{/.test(chat);
     const gatedOff = /!source && onSendTo(Redline|Drafter)/.test(chat);
     expect(providerAlwaysWraps && gatedOff, "Send to Claude Code / Open in Drafter are dead props").toBe(false);
   });
-  it.fails("BC-24 KNOWN VIOLATION: Add to mission records the page the reply was about, not the anchored tab", () => {
+  it("BC-24 Add to mission records the page the reply was about, not the anchored tab", () => {
     const pin = pane.slice(pane.indexOf("onAddToMission={"), pane.indexOf("/>", pane.indexOf("onAddToMission={")));
     expect(pin).not.toMatch(/sourceUrl:\s*discussionTab\.url/);
   });
-  it.fails("BC-11 KNOWN VIOLATION: the grounding watermark moves only once a send succeeds", () => {
+  it("BC-11 the grounding watermark moves only once a send succeeds", () => {
     const build = chat.slice(chat.indexOf("buildSendArgs:"), chat.indexOf("makeMessage:"));
     expect(build, "a failed send would skip the next re-snapshot").not.toMatch(/lastGroundedLabel\.current\s*=/);
+  });
+  it("BC-9 BC-10 the pane shows and advertises only the conversation the layer resolves", () => {
+    expect(pane).toMatch(/conversation=\{conversation\}/);
+    expect(pane).toContain("resolveConversation(chatWorld)");
+    expect(pane).toContain("dockDescriptor(chatWorld)");
+    // Every move of the conversation is an event; no cell of its own is left.
+    for (const cell of ["setDiscussionId", "setFlipFor", "setLinkedByWorkspace", "pageChatIdentity"]) expect(pane, `${cell} is back`).not.toContain(cell);
+  });
+  it("BC-12 BC-13 a turn sends the layer's envelope, grounded by its snapshot rule", () => {
+    const build = chat.slice(chat.indexOf("buildSendArgs:"), chat.indexOf("makeMessage:"));
+    expect(build).toContain("turnEnvelope(");
+    expect(build).toContain("needsSnapshot(");
+    expect(build).not.toMatch(/\bfollowingTabs:|\bworkspaceId:/);
+  });
+  it("BC-14 BC-33 a seed does what seedPolicy says its gesture means", () => {
+    expect(chat).toContain("seedPolicy(seed.source)");
+    expect(pane).toContain("seedPolicy(source).toChat");
+    expect(chat).not.toMatch(/seed\.autoSend/);
+  });
+  it("BC-24 a reply offers what replyActions lists, in its order", () => {
+    expect(chat).toContain("replyActions({");
   });
   it("BC-31 a tab a running turn TARGETS stays live (a shared chat runs on a thread no tab owns)", () => {
     expect(browseRs).toContain("record_target(");

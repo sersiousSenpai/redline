@@ -476,6 +476,30 @@ describe("send", () => {
     ctl.detach();
   });
 
+  it("tells the surface a send landed, with the args that went out, and never one that failed", async () => {
+    const { io, invokeImpl } = fakeIo();
+    invokeImpl.set("get_browse_thread", () => []);
+    invokeImpl.set("browse_turn_status", () => idle);
+    let reject = false;
+    invokeImpl.set("browse_send", () => {
+      if (reject) throw new Error("daemon down");
+      return { started: false, queued: true, messageId: "q-db" };
+    });
+    const onSent = vi.fn();
+    const ctl = new AgentTurnController<TurnMessage>(() => makeCfg({ onSent }), io);
+    await ctl.attach();
+    await flush();
+    ctl.send("queued behind a reply");
+    await flush();
+    // Queued counts: the backend has it.
+    expect(onSent).toHaveBeenCalledWith({ browseId: "L1", text: "queued behind a reply" });
+    reject = true;
+    ctl.send("lost");
+    await flush();
+    expect(onSent).toHaveBeenCalledOnce();
+    ctl.detach();
+  });
+
   it("drops a send whose args were still building when the panel went away", async () => {
     const { io, invokeImpl, invoke } = fakeIo();
     invokeImpl.set("get_browse_thread", () => []);

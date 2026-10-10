@@ -97,6 +97,14 @@ describe("an agent-opened tab keeps the conversation anchored", () => {
     w = run(w, select("one"));
     expect(thread(w)).toBe("one");
   });
+  it("BC-5 opening an address that is already open brings its tab forward, never a second copy", () => {
+    let w = run(world(), { type: "agent-open-tab", tab: tab("one") });
+    expect(w.tabs.map((t) => t.id)).toEqual(["t-one", "t-two"]);
+    expect(resolveConversation(w)).toMatchObject({ browseId: "two", targetLabel: "browser-t-one", anchoredFrom: "two.test" });
+    w = run(w, { type: "user-open-tab", tab: tab("one") });
+    expect(w.tabs).toHaveLength(2);
+    expect(resolveConversation(w)).toMatchObject({ browseId: "one", anchoredFrom: null });
+  });
   it("BC-5 an agent /focus is a full switch, like a click", () => {
     const w = run(world(), { type: "agent-open-tab", tab: tab("three") }, { type: "agent-focus-tab", tabId: "t-one" });
     expect(resolveConversation(w)).toMatchObject({ browseId: "one", targetLabel: "browser-t-one", anchoredFrom: null });

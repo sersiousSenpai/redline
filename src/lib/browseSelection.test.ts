@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
+import { seedPolicy } from "./browserChat/turn";
 import {
-  autoSends,
   clampSelection,
   MAX_SELECTION_CHARS,
   parseSelectionEvents,
@@ -137,15 +137,6 @@ describe("promptForSelection", () => {
   });
 });
 
-describe("autoSends", () => {
-  it("waits only for `ask`", () => {
-    expect(autoSends("ask")).toBe(false);
-    for (const a of ["define", "explain", "research", "list"] as SelectionAction[]) {
-      expect(autoSends(a)).toBe(true);
-    }
-  });
-});
-
 describe("the ＋ List tap", () => {
   // The bar used to file the highlighted PASSAGE as the list item. That wrote
   // the page's own words into the user's list; the passage is where they were
@@ -200,6 +191,6 @@ describe("the ＋ List tap", () => {
 it("asks the inline question with its quoted passage and sends it immediately", () => {
   const [event] = parseSelectionEvents([{ action: "ask", text: "A selected passage", note: "How does this work?", url: "https://example.test" }]);
   expect(promptForSelection(event)).toBe("> A selected passage\n\nHow does this work?");
-  expect(autoSends(event.action, event.note)).toBe(true);
+  expect(seedPolicy({ kind: "selection", action: "ask", note: event.note }).autoSend).toBe(true);
   expect(parseSelectionEvents([{ action: "ask", text: "Passage", note: "q".repeat(2100) }])[0].note).toHaveLength(2000);
 });
