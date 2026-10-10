@@ -5,18 +5,16 @@ import type { ResolvedConversation } from "./scope";
 import {
   capturedWorkspace,
   composerModel,
-  contextPills,
   needsSnapshot,
   replyActions,
   seedPolicy,
-  streamParts,
   turnEnvelope,
 } from "./turn";
 import { agentCapabilities, BROWSER_PANELS, pillComposerDestinations } from "./chrome";
 import contract from "./contract.json";
 
-// Conformance: what a turn carries, seeds, the composer, reply actions and
-// how a turn in flight is drawn. Each title starts with the rule it pins.
+// Conformance: what a turn carries, seeds, the composer and reply actions.
+// Each title starts with the rule it pins.
 
 const conv = (over: Partial<ResolvedConversation> = {}): ResolvedConversation => ({
   kind: "tab", browseId: "one", title: "one.test", targetLabel: "browser-t-one", targetTitle: "Docs", targetNumber: 1,
@@ -71,10 +69,18 @@ describe("the composer", () => {
   it("BC-29 browse cannot steer yet; BC-25 the picker stays live", () => {
     expect(composerModel({ phase: "streaming", queued: 0, draft: "x" })).toMatchObject({ canSteer: false, pickerLive: true });
   });
-  it("BC-14 BC-15 BC-13 the target is a fixed pill, attachments are removable pills, the mission shows in a mission", () => {
-    const pills = contextPills({ conv: conv({ targetNumber: 2, targetTitle: "Docs" }), selection: "token bucket", element: "button.buy", missionTitle: "Rate limits" });
-    expect(pills.map((p) => [p.kind, p.removable])).toEqual([["page", false], ["selection", true], ["element", true], ["mission", false]]);
-    expect(pills[0].label).toBe("2 · Docs");
+  it("BC-27 one round button: the mic on an empty box, send with text, queue mid-reply, stop on an empty box mid-reply", () => {
+    expect(composerModel({ phase: "idle", queued: 0, draft: "" }).button).toBe("mic");
+    expect(composerModel({ phase: "idle", queued: 0, draft: "  " }).button).toBe("mic");
+    expect(composerModel({ phase: "idle", queued: 0, draft: "hi" }).button).toBe("send");
+    expect(composerModel({ phase: "streaming", queued: 0, draft: "next" }).button).toBe("queue");
+    expect(composerModel({ phase: "streaming", queued: 0, draft: "" }).button).toBe("stop");
+    // With the mic someone else's, an empty box shows a send with nothing to send.
+    expect(composerModel({ phase: "idle", queued: 0, draft: "", canDictate: false })).toMatchObject({ button: "send", primaryEnabled: false });
+  });
+  it("BC-40 an attached chip alone is something to send", () => {
+    expect(composerModel({ phase: "idle", queued: 0, draft: "", chips: 1 })).toMatchObject({ button: "send", primaryEnabled: true });
+    expect(composerModel({ phase: "streaming", queued: 0, draft: "", chips: 1 })).toMatchObject({ button: "queue", primaryIsStop: false });
   });
 });
 
@@ -99,22 +105,5 @@ describe("reply actions and the agent's reach", () => {
   it("BC-37 the pill's hover composer launches Plan/Run on the browser; elsewhere it is unrestricted", () => {
     expect(pillComposerDestinations("browser")).toEqual(["plan", "run"]);
     expect(pillComposerDestinations("document")).toBeUndefined();
-  });
-});
-
-describe("a turn in flight is the reply, not boxes around it", () => {
-  it("BC-34 exactly one pending line before anything arrives", () => {
-    expect(streamParts({ phase: "streaming", liveText: "", activity: [] })).toEqual([{ kind: "pending", label: "Working" }]);
-    expect(streamParts({ phase: "streaming", liveText: "", activity: [{ kind: "thinking", label: "Thinking…" }] })).toEqual([{ kind: "pending", label: "Thinking…" }]);
-    expect(streamParts({ phase: "streaming", liveText: "", activity: [], rateLimited: true })).toEqual([{ kind: "pending", label: "Waiting on a rate limit" }]);
-  });
-  it("BC-34 tool use folds into one collapsed row; text replaces the pending line", () => {
-    const parts = streamParts({ phase: "streaming", liveText: "The page", activity: [{ kind: "tool", label: "Read page · tab 2" }, { kind: "tool", label: "Click · Buy" }] });
-    expect(parts.map((p) => p.kind)).toEqual(["steps", "text"]);
-    expect(parts[0]).toMatchObject({ collapsed: true, current: "Click · Buy" });
-    expect(streamParts({ phase: "streaming", liveText: "", activity: [{ kind: "tool", label: "Read page" }] }).map((p) => p.kind)).toEqual(["steps"]);
-  });
-  it("BC-34 draws nothing when idle", () => {
-    expect(streamParts({ phase: "idle", liveText: "", activity: [] })).toEqual([]);
   });
 });

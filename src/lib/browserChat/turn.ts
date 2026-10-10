@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// What rides each page-chat turn, what the composer may do, what a reply
-// offers, and how a turn in flight is drawn. Pure. BrowserChat renders these,
-// and its `buildSendArgs` returns `turnEnvelope(...)` (plus the snapshot when
-// `needsSnapshot` says so) verbatim to `browse_send`.
+// What rides each page-chat turn, what the composer may do and what a reply
+// offers. Pure. BrowserChat renders these, and its `buildSendArgs` returns
+// `turnEnvelope(...)` (plus the snapshot when `needsSnapshot` says so)
+// verbatim to `browse_send`. How a turn is drawn is transcript.ts.
 //
 // Rule ids (BC-n) are catalogued in invariants.ts.
 
 import type { TurnPhase } from "../agentTurn";
-import type { Activity } from "../turnMeter";
 import contract from "./contract.json";
 import { workspaceKind, type ResolvedConversation, type WorkspaceKey } from "./scope";
 
@@ -133,6 +132,10 @@ export interface ComposerModel {
    *  AND the draft is empty, and typing turns it back into Queue (BC-27, BC-34). */
   primaryIsStop: boolean;
   primaryEnabled: boolean;
+  /** The one round button's face: the mic on an empty box, so speaking is
+   *  one press away; send with something to send; queue with something to
+   *  send while a reply runs; stop on an empty box while it runs. */
+  button: "mic" | "send" | "queue" | "stop";
   canQueue: boolean;
   /** Inject into the running turn. Browse has no steer route yet (BC-29). */
   canSteer: false;
@@ -141,48 +144,26 @@ export interface ComposerModel {
   placeholder: string;
 }
 
-export function composerModel(i: { phase: TurnPhase; queued: number; draft: string }): ComposerModel {
+/** `chips` counts attached context: a quoted passage alone is a message.
+ *  `canDictate` is false when the mic is someone else's. */
+export function composerModel(i: { phase: TurnPhase; queued: number; draft: string; chips?: number; canDictate?: boolean }): ComposerModel {
   const streaming = i.phase === "streaming";
-  const typed = i.draft.trim().length > 0;
+  const typed = i.draft.trim().length > 0 || (i.chips ?? 0) > 0;
   const canQueue = !streaming || i.queued < QUEUE_CAP;
+  const primaryIsStop = streaming && !typed;
   return {
     editable: true,
     enterSends: true,
     primary: streaming ? "queue" : "send",
-    primaryIsStop: streaming && !typed,
+    primaryIsStop,
     primaryEnabled: streaming ? !typed || canQueue : typed,
+    button: primaryIsStop ? "stop" : typed ? (streaming ? "queue" : "send") : i.canDictate === false ? "send" : "mic",
     canQueue,
     canSteer: false,
     pickerLive: true,
     placeholder: streaming ? "Type ahead — sends after this reply" : "Ask about this page",
   };
 }
-
-/** Context the composer shows as chips above the textarea. The page chip is
- *  the turn's TARGET and is always present (it changes as a shared chat
- *  follows tabs); a highlight or a picked element is attached by the gesture
- *  that made it and can be removed; the mission shows only inside a mission
- *  workspace (BC-13, BC-14, BC-15). */
-export type ContextPill =
-  | { kind: "page"; label: string; removable: false }
-  | { kind: "selection"; label: string; removable: true }
-  | { kind: "element"; label: string; removable: true }
-  | { kind: "mission"; label: string; removable: false };
-
-export function contextPills(i: {
-  conv: ResolvedConversation;
-  selection?: string | null;
-  element?: string | null;
-  missionTitle?: string | null;
-}): ContextPill[] {
-  const page = `${i.conv.targetNumber} · ${i.conv.targetTitle || "This page"}`;
-  const pills: ContextPill[] = [{ kind: "page", label: clip(page), removable: false }];
-  if (i.selection?.trim()) pills.push({ kind: "selection", label: clip(i.selection.trim()), removable: true });
-  if (i.element?.trim()) pills.push({ kind: "element", label: clip(i.element.trim()), removable: true });
-  if (i.missionTitle?.trim()) pills.push({ kind: "mission", label: clip(i.missionTitle.trim()), removable: false });
-  return pills;
-}
-const clip = (s: string) => (s.length > 40 ? `${s.slice(0, 39)}…` : s);
 
 // --- reply actions ----------------------------------------------------------
 
@@ -194,33 +175,4 @@ export type ReplyAction = "copy" | "add-to-task-list" | "add-to-mission" | "cont
 export function replyActions(i: { role: string; status: string; body: string; missionActive: boolean }): ReplyAction[] {
   if (i.role !== "assistant" || i.status !== "complete" || !i.body.trim()) return [];
   return ["copy", "add-to-task-list", ...(i.missionActive ? (["add-to-mission"] as const) : []), "continue-as"];
-}
-
-// --- a turn in flight -------------------------------------------------------
-
-export type ActivityStep = Pick<Activity, "kind" | "label">;
-
-export type StreamPart =
-  | { kind: "pending"; label: string }
-  | { kind: "steps"; steps: ActivityStep[]; collapsed: true; current: string }
-  | { kind: "text"; text: string };
-
-/** How the in-flight reply is drawn: as the reply itself, not boxes around it
- *  (BC-34). Before anything arrives there is exactly ONE pending line; tool
- *  use folds into one compact, collapsed steps row naming the current step;
- *  once text arrives it is the only growing element. Badges and meters live
- *  in the composer footer or on hover, never in the stream. */
-export function streamParts(i: {
-  phase: TurnPhase;
-  liveText: string;
-  activity: readonly ActivityStep[];
-  rateLimited?: boolean;
-}): StreamPart[] {
-  if (i.phase !== "streaming") return [];
-  const parts: StreamPart[] = [];
-  const steps = i.activity.filter((a) => a.kind === "tool");
-  if (steps.length) parts.push({ kind: "steps", steps: [...steps], collapsed: true, current: steps[steps.length - 1].label });
-  if (i.liveText) parts.push({ kind: "text", text: i.liveText });
-  else if (!steps.length) parts.push({ kind: "pending", label: i.rateLimited ? "Waiting on a rate limit" : i.activity[i.activity.length - 1]?.label ?? "Working" });
-  return parts;
 }

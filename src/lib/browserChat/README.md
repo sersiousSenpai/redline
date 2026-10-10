@@ -12,7 +12,8 @@ they are written down and executed.
 | File | Owns |
 |---|---|
 | `scope.ts` | `ChatWorld` (tabs, the tab on screen vs the anchored tab, linked mode, the momentary flip, one shared thread per workspace), every gesture as a `ChatEvent`, `reduceChatWorld` (normalizes after every event), `resolveConversation`, `contextLine`, `dockDescriptor`. **Nothing else derives a thread id.** |
-| `turn.ts` | `turnEnvelope` (exactly `browse_send`'s arguments), `capturedWorkspace`, `needsSnapshot`, `seedPolicy` (highlight, element, Task-list item, plan Search), `composerModel`, `contextPills`, `replyActions`, `streamParts`. |
+| `turn.ts` | `turnEnvelope` (exactly `browse_send`'s arguments), `capturedWorkspace`, `needsSnapshot`, `seedPolicy` (highlight, element, Task-list item, plan Search), `composerModel` (the one round button: mic, send, queue, stop), `replyActions`. |
+| `transcript.ts` | How a turn is drawn: `workRows` (a reply's steps as verb + object rows, reads folded, a page action's outcome in place of its call), `liveSteps` and `liveStepLabel` (the one live line), `composeTurn` and `userTurnParts` (the chips a message carries, both ways), `follows` and `parkAt` (when the thread follows). |
 | `chrome.ts` | The pill's hover composer on the browser (Plan and Run), the dock's three browser panels, the agent's reach per provider. |
 | `contract.json` | Values both languages must agree on: send parameters, scope phrases, routes, action kinds, the queue and project caps, activity phrases, what the skill must and must not teach. |
 | `invariants.ts` | The numbered rules (BC-1 to BC-37, and BC-R1 to BC-R5 for rejected designs), each with the memory note, plan or code it was decided in. |
@@ -55,6 +56,15 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
 - A mission's routes are the captured ones, `/v1/missions/{id}`; a Mosaic,
   like regular browsing, has no mission.
 - The agent never curates: no pins, Task-list items or launches on its own.
+- A reply's steps are the turn's tool activity, kept with the row's meter.
+  What a page action did is written onto the turn by the backend
+  (`browser_actions::outcome_step` → `BrowseState::note_action`), in the
+  words `contract.json`'s `actionOutcomes` gives, so the row reads the same
+  after a relaunch. Rows go under the text: a step never moves text already
+  written.
+- Context in the composer is a chip that rides the message as text; read a
+  message back into its chips with `userTurnParts`, never by matching its
+  body in a component.
 - Never take the caret, except for a gesture whose point is typing next.
 - Retired: the separate linked discussion, tandem mode and its sources strip,
   the pane's own chat split, the edge rail. Do not bring them back.
@@ -66,6 +76,11 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   the jump to a finding and the page capture read. The thread is not
   recorded: a finding has no column for it, so a pin from a shared chat
   jumps back to its page, not to that chat.
+
+- **Which tab a shared chat's message was about.** The user's card shows the
+  context the message carried, but not the tab a shared chat's turn
+  targeted: that is not stored with the message (the same column the
+  check-ins below need).
 
 - **Shared-chat check-ins.** `/v1/browser/thread?tab=` returns the tab's own
   thread. In linked mode the discussion about that tab is in the shared chat,

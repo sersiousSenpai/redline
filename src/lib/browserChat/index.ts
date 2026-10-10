@@ -5,6 +5,7 @@
 // add the rule to invariants.ts and pin it in the same change.
 export * from "./scope";
 export * from "./turn";
+export * from "./transcript";
 export * from "./chrome";
 export { INVARIANTS, invariant, type Invariant } from "./invariants";
 export { default as BROWSER_CHAT_CONTRACT } from "./contract.json";
