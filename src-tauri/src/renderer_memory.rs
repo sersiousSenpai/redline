@@ -104,6 +104,10 @@ fn find_renderer(app: &AppHandle) {
     use tauri::Manager;
 
     let Some(webview) = app.get_webview("main") else {
+        // The window is gone and its renderer with it. Forget the pid: over
+        // hours the system hands it to some other process, whose footprint
+        // would read as the renderer's.
+        PID.store(0, Ordering::Relaxed);
         return;
     };
     let _ = webview.with_webview(|pw| {
