@@ -488,6 +488,54 @@ describe("report and chat views", () => {
     await land("m-r2");
     expect(top).toBe(1000);
   });
+
+  it("keeps the reply box in view as a reply streams, unless the reviewer scrolled it away", async () => {
+    // The enlarged thread scrolls with the comment pane, so whether the box
+    // is on screen is the observer's call.
+    let report: ((entries: { isIntersecting: boolean }[]) => void) | null = null;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: typeof report) { report = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const scrolled = vi.fn();
+    const own = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "scrollIntoView");
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollIntoView", { configurable: true, value: scrolled });
+    try {
+      await mount(null);
+      await act(async () => clickWith("Chat"));
+      await flush();
+      const ta = host.querySelector("textarea")!;
+      await act(async () => type(ta, "Why there?"));
+      await act(async () => ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+      // Typing ahead: the caret stays in the box through the reply.
+      expect(document.activeElement).toBe(ta);
+      let seq = 0;
+      const delta = (chunk: string) => act(async () => {
+        handlers["fork-delta"]({ payload: { sessionId: SESSION, commentId: ITEM, text: chunk, seq: ++seq } });
+        await new Promise((r) => requestAnimationFrame(r));
+      });
+
+      scrolled.mockClear();
+      await delta("Because ");
+      expect(scrolled, "parked at the box, it follows the reply").toHaveBeenCalled();
+
+      // Scrolled up to re-read: no token pulls the pane back down.
+      act(() => report!([{ isIntersecting: false }]));
+      scrolled.mockClear();
+      await delta("it ");
+      await delta("re-renders");
+      expect(scrolled).not.toHaveBeenCalled();
+
+      // Back down at the box: it follows again.
+      act(() => report!([{ isIntersecting: true }]));
+      await delta(" on save.");
+      expect(scrolled).toHaveBeenCalled();
+    } finally {
+      if (own) Object.defineProperty(HTMLTextAreaElement.prototype, "scrollIntoView", own);
+      else delete (HTMLTextAreaElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
 });
 
 describe("the discussion reads like a discussion", () => {

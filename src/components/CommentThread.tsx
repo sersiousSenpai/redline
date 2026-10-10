@@ -276,9 +276,28 @@ export const CommentThread = memo(function CommentThread({
   // reply streams — while the reviewer is parked there. Scrolling back up to
   // re-read isn't fought by every token: the rule every chat surface shares.
   const chatScroll = useStickToBottom<HTMLDivElement>([view, expanded, chatRows.length, liveText]);
-  // And keep the reply box in view with it, while the reviewer is here.
+  // And keep the reply box in view with it, while the reviewer is here — and
+  // only while it is on screen. In the enlarged thread the comment pane is
+  // the scroller, so a reviewer who scrolls it up to re-read, caret still in
+  // the box, must not be pulled back down by every streamed token.
+  const composerOnScreen = useRef(true);
+  const watched = useRef<{ el: Element; io: IntersectionObserver } | null>(null);
+  useEffect(() => {
+    const el = composerRef.current;
+    if (watched.current?.el === el) return;
+    watched.current?.io.disconnect();
+    watched.current = null;
+    composerOnScreen.current = true;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((entries) => {
+      composerOnScreen.current = entries[entries.length - 1].isIntersecting;
+    });
+    io.observe(el);
+    watched.current = { el, io };
+  });
+  useEffect(() => () => watched.current?.io.disconnect(), []);
   useLayoutEffect(() => {
-    if (view !== "chat" || !expanded) return;
+    if (view !== "chat" || !expanded || !composerOnScreen.current) return;
     if (hostRef.current?.contains(document.activeElement)) {
       composerRef.current?.scrollIntoView?.({ block: "nearest" });
     }
