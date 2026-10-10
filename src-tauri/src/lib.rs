@@ -6805,8 +6805,9 @@ fn browser_cached_snapshot(
 
 /// Whether a background tab may be suspended (its webview destroyed to reclaim
 /// memory). False if the tab is the active one, has a browse turn streaming or
-/// targeting it, or is playing media — so we never cut off what the user is watching or an
-/// in-flight agent reply. The frontend calls this before evicting an LRU tab.
+/// targeting it, or is playing media — so we never cut off what the user is
+/// watching or an in-flight agent reply. The frontend calls this before
+/// evicting an LRU tab.
 #[tauri::command(async)]
 async fn browser_can_suspend(app: AppHandle, label: String) -> Result<bool, String> {
     if browser_workspace::protected(&label) {
