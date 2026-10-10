@@ -7,7 +7,9 @@ import { useCallback, useSyncExternalStore } from "react";
 // Memory is the source of truth: a snapshot is a Map lookup, never a
 // JSON.parse of localStorage, and a keystroke never waits on a synchronous
 // setItem. The disk copy trails by WRITE_DELAY_MS and every pending write
-// lands on `pagehide`, so a reload still finds the last keystroke.
+// lands the moment the page may be leaving: `pagehide` (a reload),
+// `beforeunload` (quit tears the webview down, and that is the event still
+// dispatched then) and the window hiding.
 const WRITE_DELAY_MS = 300;
 const listeners = new Map<string, Set<() => void>>();
 const drafts = new Map<string, string>();
@@ -23,6 +25,10 @@ function flush() {
   unsaved.clear();
 }
 window.addEventListener("pagehide", flush);
+window.addEventListener("beforeunload", flush);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flush();
+});
 // Another window wrote a draft this one holds. Theirs is the newer keystroke,
 // so ours is forgotten and the next read takes theirs from the disk.
 window.addEventListener("storage", event => {

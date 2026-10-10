@@ -43,6 +43,23 @@ it("lands a pending write on pagehide, so a reload finds the last keystroke", ()
   expect(localStorage.getItem(key)).toBe(JSON.stringify("the very last words"));
   localStorage.removeItem(key);
 });
+// Quitting tears the webview down wholesale, and `beforeunload` is what still
+// runs then (the Drafter's quit flush relies on it); hiding the window is the
+// last moment a later quit or crash is sure to find the page alive.
+it.each([
+  ["quit", () => window.dispatchEvent(new Event("beforeunload"))],
+  ["hide", () => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+  }],
+])("lands a pending write on %s too", (how, leave) => {
+  const key = `test-left-thread-${how}`;
+  writeSharedDraft(key, "typed just before leaving");
+  expect(localStorage.getItem(key)).toBeNull();
+  leave();
+  expect(localStorage.getItem(key)).toBe(JSON.stringify("typed just before leaving"));
+  localStorage.removeItem(key);
+});
 it("takes another window's newer write to a draft this one is showing", async () => {
   const key = "test-other-window";
   const host=document.createElement("div"); document.body.append(host); const root=createRoot(host);
