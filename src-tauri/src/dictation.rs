@@ -21,9 +21,10 @@
 //! were written for.
 //!
 //! **A warm mic with pre-roll.** The audio engine keeps running for `WARM`
-//! after a capture ends, its one permanent tap filling a ring with the last
-//! `PREROLL_MS` of audio, and the tap itself closes the mic once that time is
-//! up with no capture on it (no timer task). A capture started while warm
+//! after a capture ends (not on a Bluetooth headset's mic, which it would hold
+//! in call mode: `warm_for`), its one permanent tap filling a ring with the
+//! last `PREROLL_MS` of audio, and the tap itself closes the mic once that time
+//! is up with no capture on it (no timer task). A capture started while warm
 //! opens at once and begins with that ring — what the mic heard since the last
 //! capture finished, never that capture's own end — so a first syllable
 //! spoken as the key goes down is never clipped. Each start checks the warm
@@ -276,8 +277,20 @@ fn clean_vocab(raw: Vec<String>) -> Vec<String> {
 // --- Pre-roll and levels -----------------------------------------------------
 
 /// How long the warm mic stays open after a capture ends.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const WARM: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long the mic stays warm when the mic in use has this transport: not
+/// at all on a Bluetooth headset, whose open mic holds it in its call mode —
+/// everything Redline plays, its reply among it, would sound like a phone
+/// line until the mic closed, and then cut out as the headset switched back.
+#[cfg(any(target_os = "macos", test))]
+fn warm_for(input_transport: Option<u32>) -> std::time::Duration {
+    match input_transport {
+        Some(t) if is_bluetooth(t) => std::time::Duration::ZERO,
+        _ => WARM,
+    }
+}
 
 /// How much audio from before a press a capture starts with.
 const PREROLL_MS: f64 = 300.0;
@@ -512,7 +525,7 @@ fn classify_route(transport: u32, source: Option<u32>) -> OutputRoute {
             },
             "builtin",
         ),
-        t if t == fourcc(b"blue") || t == fourcc(b"blea") => ("headphones", "bluetooth"),
+        t if is_bluetooth(t) => ("headphones", "bluetooth"),
         t if t == fourcc(b"hdmi") => ("speakers", "hdmi"),
         t if t == fourcc(b"dprt") => ("speakers", "displayport"),
         t if t == fourcc(b"airp") => ("speakers", "airplay"),
@@ -525,8 +538,13 @@ fn classify_route(transport: u32, source: Option<u32>) -> OutputRoute {
     OutputRoute { kind, transport }
 }
 
-/// The three CoreAudio property reads the route needs, declared by hand rather
-/// than pulling in a bindings crate for them.
+/// A Bluetooth transport, classic or low-energy.
+fn is_bluetooth(transport: u32) -> bool {
+    transport == fourcc(b"blue") || transport == fourcc(b"blea")
+}
+
+/// The CoreAudio property reads the route and the mic's transport need,
+/// declared by hand rather than pulling in a bindings crate for them.
 #[cfg(target_os = "macos")]
 mod coreaudio {
     use super::fourcc;
@@ -578,6 +596,12 @@ mod coreaudio {
         let device = read_u32(SYSTEM_OBJECT, b"dOut", b"glob").filter(|&d| d != 0)?;
         let transport = read_u32(device, b"tran", b"glob")?;
         Some((transport, read_u32(device, b"ssrc", b"outp")))
+    }
+
+    /// The default input device's transport type: the mic a capture opens.
+    pub fn default_input_transport() -> Option<u32> {
+        let device = read_u32(SYSTEM_OBJECT, b"dIn ", b"glob").filter(|&d| d != 0)?;
+        read_u32(device, b"tran", b"glob")
     }
 }
 
@@ -1293,7 +1317,8 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
 /// and the rate it was taken at. Main thread.
 #[cfg(target_os = "macos")]
 fn retire_capture(state: &DictationInner, finish: bool, only: Option<u64>) -> (Vec<f32>, f64) {
-    let cool_at = std::time::Instant::now() + WARM;
+    // Asked before the lock, so the tap never waits on CoreAudio.
+    let cool_at = std::time::Instant::now() + warm_for(coreaudio::default_input_transport());
     let drained = {
         let mut tap = state.tap.lock().unwrap();
         let rate = tap.rate;
@@ -1609,6 +1634,15 @@ mod tests {
         tap.feed(&[0.3; 300], &mut Vec::new());
         tap.detach(None, false, now);
         assert_eq!(tap.preroll.snapshot(), vec![0.3; 300]);
+    }
+
+    #[test]
+    fn the_mic_stays_warm_except_on_a_bluetooth_headset() {
+        assert_eq!(warm_for(None), WARM);
+        assert_eq!(warm_for(Some(fourcc(b"bltn"))), WARM);
+        assert_eq!(warm_for(Some(fourcc(b"usb "))), WARM);
+        assert_eq!(warm_for(Some(fourcc(b"blue"))), std::time::Duration::ZERO);
+        assert_eq!(warm_for(Some(fourcc(b"blea"))), std::time::Duration::ZERO);
     }
 
     /// A stop waits for the main thread to end its capture: on the main
