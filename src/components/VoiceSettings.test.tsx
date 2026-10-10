@@ -276,6 +276,8 @@ describe("end-of-turn model", () => {
     expect(toggle().checked).toBe(true);
     await act(async () => toggle().click());
     expect(localStorage.getItem("redline.voice.turnModelOff")).toBe("1");
+    // Off stops its process now, not at the next listen.
+    expect(invoked.filter((c) => c.cmd === "turn_scorer").map((c) => c.args)).toContainEqual({ op: "stop" });
     await act(async () => toggle().click());
     expect(localStorage.getItem("redline.voice.turnModelOff")).toBeNull();
   });
