@@ -9,7 +9,6 @@ import { RetryNote } from "./QueuedChip";
 import { MarkdownView } from "./MarkdownView";
 import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
-import { WorkingIndicator } from "./WorkingIndicator";
 import { useMonochat } from "./MonochatContext";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 
@@ -309,9 +308,6 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
             meter={turn.meter}
             activity={turn.activity}
           />
-          {!liveText && !turn.retrying && (
-            <WorkingIndicator compact startedAt={turn.startedAt ?? undefined} />
-          )}
         </div>
       )}
       <div className="flex items-end gap-1">

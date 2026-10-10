@@ -22,7 +22,6 @@ import StreamingBubble from "./StreamingBubble";
 import TurnFooter, { ThreadMeterStrip } from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
 import { BrowserMenuItem, BrowserPopover } from "./BrowserSurfaces";
 import { BrowseHarnessChip, useBrowseHarness } from "./BrowseHarnessChip";
 import { agentLabelFor, backendLabel } from "../lib/backendChoice";
@@ -150,7 +149,6 @@ export const BrowserChat = memo(function BrowserChat({
     messages,
     liveText,
     status,
-    startedAt,
     loaded,
     send,
     cancel,
@@ -391,9 +389,6 @@ export const BrowserChat = memo(function BrowserChat({
               activity={activity}
               onOpenLink={onOpenLink}
             />
-            {!(liveText) && (
-              <WorkingIndicator startedAt={startedAt ?? undefined} />
-            )}
           </>
         )}
       </div>

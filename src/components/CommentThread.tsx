@@ -672,11 +672,7 @@ export const CommentThread = memo(function CommentThread({
               ))}
               {chatInFlight &&
                 (liveText ? (
-                  <StreamingText
-                    className="rl-chat-agent"
-                    text={liveText}
-                    caret={retrying ? "" : "▌"}
-                  />
+                  <StreamingText className="rl-chat-agent" text={liveText} />
                 ) : (
                   <WorkingIndicator
                     label={retrying ? "Retrying" : "Thinking"}
@@ -753,9 +749,6 @@ export const CommentThread = memo(function CommentThread({
                     meter={turn.meter}
                     activity={turn.activity}
                   />
-                  {!liveText && !retrying && (
-                    <WorkingIndicator startedAt={workStartedAt ?? undefined} />
-                  )}
                 </>
               )}
             </div>

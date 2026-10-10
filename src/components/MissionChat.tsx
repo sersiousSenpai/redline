@@ -11,7 +11,6 @@ import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
 
 interface MissionChatProps {
   mission: Mission;
@@ -61,7 +60,7 @@ export function MissionChat({
 
   // The turn lifecycle — persisted thread, live stream, mid-turn remount
   // restore (partial text + spinner), self-heal — lives in the shared hook.
-  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue, meter, activity, meters } =
+  const { messages, liveText, status, loaded, send, cancel, unqueue, meter, activity, meters } =
     useAgentTurn<MissionMessage>({
       surface: "mission",
       key: missionId,
@@ -178,7 +177,6 @@ export function MissionChat({
               activity={activity}
               onOpenLink={onOpenLink}
             />
-            {!liveText && <WorkingIndicator startedAt={startedAt ?? undefined} />}
           </>
         )}
       </div>

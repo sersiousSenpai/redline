@@ -16,7 +16,6 @@ import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
 
 // The Memory surface's Ask tab (Second Brain P4): ONE persisted conversation
 // over the lake + catalog, backed by memchat.rs on the `memchat-*` event
@@ -45,7 +44,6 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
     messages,
     liveText,
     status,
-    startedAt,
     loaded,
     send: sendTurn,
     cancel,
@@ -260,13 +258,8 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
                 inspect={{ surface: "memchat", key: "memchat" }}
                 meter={meter}
                 activity={activity}
+                status={retrieving}
               />
-              {!liveText && (
-                <WorkingIndicator
-                  label={retrieving ?? "Thinking"}
-                  startedAt={startedAt ?? undefined}
-                />
-              )}
             </>
           )}
         </div>

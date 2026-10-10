@@ -302,14 +302,16 @@ describe("StreamingBubble", () => {
     expect(view().innerHTML).toBe(serialized(renderLiveMarkdown(text, -1)));
   });
 
-  it("keeps the room scale, the caret, and the lead paragraph's place", async () => {
+  it("keeps the room scale and the lead paragraph's place, with no caret after it", async () => {
     await bubble({ text: "Lead.\n\nNext", room: true });
     expect(view().className).toBe("rl-md rl-md-room");
     // The tail joins the same container, so `.rl-md > p:first-child` is
     // still the reply's first paragraph and nothing else.
     expect(Array.from(view().children).map((el) => el.outerHTML)).toEqual(["<p>Lead.</p>", "<p>Next</p>"]);
-    expect(host.textContent).toMatch(/Next\s*▌$/);
-    await bubble({ text: "Lead.\n\nNext", room: true, retrying: true });
+    // The markdown is the last thing in the bubble: no caret glyph on a line
+    // of its own that vanishes when the reply settles.
+    expect(view().parentElement?.nextSibling).toBeNull();
+    expect(host.textContent).toMatch(/Next\s*$/);
     expect(host.textContent).not.toContain("▌");
   });
 });
