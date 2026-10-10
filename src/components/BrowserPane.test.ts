@@ -3,6 +3,7 @@
 import { describe, it, expect } from "vitest";
 import {
   WEBVIEW_PLATE_INSET,
+  shotsForOpenTabs,
   webviewSlotInset,
 } from "./BrowserPane";
 import { reorderTabs } from "../lib/browserTabDrag";
@@ -67,5 +68,23 @@ describe("reorderTabs", () => {
       ["t1", "t2", "t3", "t4", "t5", "t6"].sort(),
     );
     expect(out[0].id).toBe("t5");
+  });
+});
+
+// A tab's picture is a PNG data URL as wide as its tile. Kept for every tab
+// ever opened, they were the renderer's biggest per-tab leak.
+describe("shotsForOpenTabs", () => {
+  const shots = new Map([
+    ["t-1", "data:image/png;base64,one"],
+    ["t-2", "data:image/png;base64,two"],
+  ]);
+
+  it("drops the pictures of tabs that closed or left with their workspace", () => {
+    expect([...shotsForOpenTabs(shots, [{ id: "t-2" }, { id: "t-3" }]).keys()]).toEqual(["t-2"]);
+    expect(shotsForOpenTabs(shots, []).size).toBe(0);
+  });
+
+  it("hands back the same map when every picture still has its tab", () => {
+    expect(shotsForOpenTabs(shots, [{ id: "t-1" }, { id: "t-2" }, { id: "t-3" }])).toBe(shots);
   });
 });

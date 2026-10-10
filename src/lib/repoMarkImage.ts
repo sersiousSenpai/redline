@@ -14,8 +14,11 @@ import { markPixels, type RepoMark } from "./repoIcon";
 const TILE = 64;
 
 // Keyed by the mark, not the repo, so two repos that somehow resolve to the
-// same mark share one bitmap. Permanent for the session: a mark is a pure
-// function of a name, and re-rasterizing it would never produce anything new.
+// same mark share one bitmap. Kept for the session — a mark is a pure function
+// of a name, and re-rasterizing it would never produce anything new — but only
+// the newest MAX_MARKS of them (docs/perf-budget.md rule 7): each is a few KB
+// of data URL, one per repo the session has shown.
+const MAX_MARKS = 128;
 const cache = new Map<string, string | null>();
 
 function keyOf(mark: RepoMark): string {
@@ -49,5 +52,6 @@ export function markImage(mark: RepoMark): string | null {
     url = null;
   }
   cache.set(key, url);
+  if (cache.size > MAX_MARKS) cache.delete(cache.keys().next().value!);
   return url;
 }

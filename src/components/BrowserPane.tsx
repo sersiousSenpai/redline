@@ -123,6 +123,19 @@ export { SAFARI_UA };
 export const WEBVIEW_PLATE_INSET = 0;
 export const webviewSlotInset = (_fullscreen: boolean): number => 0;
 
+/** The tab pictures worth keeping: one per open tab. Each is a PNG data URL
+ *  as wide as its tile, and a closed tab's (or a swapped-out workspace's) is
+ *  never shown again, so keeping every one ever taken grew without bound
+ *  (docs/perf-budget.md rule 7). The same map back when none went. */
+export function shotsForOpenTabs(
+  shots: Map<string, string>,
+  tabs: readonly { id: string }[],
+): Map<string, string> {
+  const open = new Set(tabs.map((t) => t.id));
+  if ([...shots.keys()].every((id) => open.has(id))) return shots;
+  return new Map([...shots].filter(([id]) => open.has(id)));
+}
+
 // Native webviews are expensive OS resources, and React StrictMode mounts →
 // unmounts → remounts effects synchronously in dev (a fast toggle off/on does
 // the same). Destroying and recreating the webviews on every such cycle is
@@ -440,6 +453,8 @@ function BrowserPaneBase({
             if (!file.data) return;
             const url = `data:image/png;base64,${file.data}`;
             setTabShots((prev) => {
+              // The tab closed while its picture was being taken.
+              if (!tabsRef.current.some((t) => t.id === id)) return prev;
               const next = new Map(prev);
               next.set(id, url);
               return next;
@@ -858,6 +873,9 @@ function BrowserPaneBase({
   // Mirror state into refs so the async webview callbacks read current values.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  useEffect(() => {
+    setTabShots((prev) => shotsForOpenTabs(prev, tabs));
+  }, [tabs]);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const discussionIdRef = useRef(discussionId);
