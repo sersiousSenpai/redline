@@ -65,9 +65,13 @@ describe("reading replies aloud", () => {
     await act(async () => toggle.click());
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(readAloud.warm).toHaveBeenCalledTimes(2);
-    // Turning it off is no intent to hear anything.
+    expect(toggle.getAttribute("style")).toContain("border: 1px solid var(--color-info)");
+    // Turning it off is no intent to hear anything — and the toggle goes
+    // back to its rule, not to a border with no colour.
     await act(async () => toggle.click());
     expect(readAloud.warm).toHaveBeenCalledTimes(2);
+    expect(toggle.getAttribute("style")).toContain("border: 1px solid var(--color-rule)");
+    expect(toggle.style.color).toBe("var(--color-ink)");
   });
 });
 

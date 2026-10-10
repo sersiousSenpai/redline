@@ -991,17 +991,14 @@ function ToolbarButton({
         padding: "3px 10px",
         borderRadius: 999,
         cursor: disabled ? "default" : "pointer",
-        border: "1px solid var(--color-rule)",
+        // One shorthand either way: a `borderColor` dropped from under
+        // `border` when the toggle turns off would take the rule's colour
+        // with it.
+        border: `1px solid ${on ? "var(--color-info)" : "var(--color-rule)"}`,
         background: "transparent",
-        color: "var(--color-ink)",
+        color: on ? "var(--color-info-text)" : "var(--color-ink)",
         opacity: disabled ? 0.45 : 1,
         whiteSpace: "nowrap",
-        ...(on
-          ? {
-              color: "var(--color-info-text)",
-              borderColor: "var(--color-info)",
-            }
-          : null),
       }}
       aria-pressed={on}
     >
