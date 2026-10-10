@@ -1,6 +1,7 @@
 /* The dictation strip (DictationStrip.tsx): a fixed overlay pinned to the
    composer a dictation will land in, so it can never move the composer.
-   Its transcript wears the Front Door's old live-partial ink. */
+   Its words are in ink, italic while they are still being heard: the Front
+   Door's old live-partial tint fell under 4.5:1 in six themes. */
 .rl-dictation-strip {
   position: fixed;
   z-index: 1001;
@@ -47,10 +48,10 @@
   direction: rtl;
   text-align: left;
   font-style: italic;
-  color: color-mix(in srgb, var(--color-info) 80%, var(--color-ink-muted));
+  color: var(--color-ink);
 }
 .rl-dictation-text > span { direction: ltr; unicode-bidi: isolate; }
-.rl-dictation-strip[data-phase="notice"] .rl-dictation-text { font-style: normal; color: var(--color-ink); }
+.rl-dictation-strip[data-phase="notice"] .rl-dictation-text { font-style: normal; }
 .rl-dictation-hint {
   flex: none;
   color: var(--color-ink-muted);
