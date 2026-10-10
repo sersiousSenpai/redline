@@ -6,8 +6,6 @@
   "webviews": ["main", "browser-*"],
   "permissions": [
     "core:default",
-    "core:window:allow-set-focus",
-    "core:window:allow-unminimize",
     "core:window:allow-is-focused",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",

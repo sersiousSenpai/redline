@@ -97,6 +97,14 @@ describe("the decision countdown never brings Redline forward", () => {
     expect(decision).not.toMatch(/unminimize|setFocus/);
     expect(app).not.toMatch(/\.unminimize\(\)|getCurrentWindow\(\)\.setFocus\(\)|w\.setFocus\(\)/);
   });
+
+  it("no webview may bring the window forward at all, nor a web page in the browser", () => {
+    const capabilities = ["default", "attention"].map((name) =>
+      readFileSync(join(process.cwd(), `src-tauri/capabilities/${name}.json`), "utf8"));
+    for (const capability of capabilities) expect(capability).not.toMatch(/core:window:allow-(set-focus|unminimize)/);
+    // A bounce of the Dock icon is how it asks instead.
+    expect(capabilities[1]).toContain("core:window:allow-request-user-attention");
+  });
 });
 
 describe("the setup dialog opens by itself only on a true first run", () => {
