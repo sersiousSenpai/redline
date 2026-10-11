@@ -40,9 +40,13 @@ import {
 } from "../audio/turnModel";
 
 // The studio voice's card: install, voice and style. A chunk of its own, as
-// most people never pick it.
+// most people never pick it; local dictation polish, on the same runtime,
+// comes from that chunk too.
 const StudioVoiceCard = lazy(() =>
   import("./StudioVoiceCard").then((m) => ({ default: m.StudioVoiceCard })),
+);
+const LocalPolish = lazy(() =>
+  import("./StudioVoiceCard").then((m) => ({ default: m.LocalPolish })),
 );
 
 /** TTS engines the panel can select. `system` is the built-in (free, robotic)
@@ -143,8 +147,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [progress, setProgress] = useState<KokoroSetup | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The studio voice is offered only where it can run: Apple Silicon on
-  // macOS 14 or later.
+  // The studio voice, and local polish on its runtime, are offered only
+  // where they can run: Apple Silicon on macOS 14 or later.
   const [studioSupported, setStudioSupported] = useState(false);
   const [studio, setStudio] = useState<StudioPrefs>({
     model: "1.7B-CustomVoice-8bit",
@@ -593,12 +597,17 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             <span style={muted}>
               A moment after longer dictations land, a fast Claude model tidies their
               punctuation and false starts — only the text goes to it, never the
-              audio. With local polish installed (the Studio voice's settings), a
-              model on this Mac does it instead, unless it can't answer in time.
-              ⌘Z takes a polish back. Spoken turns are never polished.
+              audio. With local polish installed (below), a model on this Mac does it
+              instead, and the Claude model steps in only when it can't answer in
+              time. ⌘Z takes a polish back. Spoken turns are never polished.
             </span>
           </span>
         </label>
+        {studioSupported && (
+          <Suspense fallback={null}>
+            <LocalPolish onError={setError} />
+          </Suspense>
+        )}
         <span style={muted}>
           Which recognizer transcribes your speech when you dictate. Both run
           fully on your Mac — no audio ever leaves the device. Whisper is a

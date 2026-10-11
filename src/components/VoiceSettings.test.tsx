@@ -94,7 +94,8 @@ vi.mock("../audio/cloudTts", () => ({
   }),
 }));
 
-// The studio voice's card (its own tests): here, only what it hands back.
+// The studio voice's card and the local polish row (their own tests): here,
+// only what the card hands back, and where the row is shown.
 vi.mock("./StudioVoiceCard", () => ({
   StudioVoiceCard: ({ prefs, onChange }: { prefs: { voice: string }; onChange: (p: object) => void }) =>
     createElement(
@@ -102,6 +103,7 @@ vi.mock("./StudioVoiceCard", () => ({
       { type: "button", onClick: () => onChange({ ...prefs, voice: "serena", style: "calm" }) },
       `studio card: ${prefs.voice}`,
     ),
+  LocalPolish: () => createElement("div", { "data-local-polish": "" }, "local polish row"),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -336,16 +338,34 @@ describe("dictation key", () => {
 });
 
 describe("dictation polish", () => {
+  const box = (text: string) =>
+    [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
+      b.closest("label")!.textContent!.includes(text),
+    )!;
+
   it("is on by default, and turned off with the rest on Save", async () => {
     await mount();
-    const box = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
-      b.closest("label")!.textContent!.includes("Polish dictated text"),
-    )!;
-    expect(box.checked).toBe(true);
-    await act(async () => box.click());
+    expect(box("Polish dictated text").checked).toBe(true);
+    await act(async () => box("Polish dictated text").click());
     expect(polishEnabled()).toBe(true);
     await save();
     expect(polishEnabled()).toBe(false);
+  });
+
+  it("offers local polish in Dictation whatever the speaking engine, where it can run", async () => {
+    studioSupported = true;
+    for (const engine of ["kokoro", "system", "studio"]) {
+      savedEngine = engine;
+      await mount();
+      await flush();
+      expect(host.querySelectorAll("[data-local-polish]"), engine).toHaveLength(1);
+      act(() => root.unmount());
+      root = createRoot(host);
+    }
+    studioSupported = false;
+    await mount();
+    await flush();
+    expect(host.querySelector("[data-local-polish]")).toBeNull();
   });
 });
 

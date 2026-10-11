@@ -2974,6 +2974,34 @@ for line in sys.stdin:
         );
     }
 
+    /// Local polish is the runtime and its own model: its install fetches
+    /// nothing of the voice's, and it polishes where no voice is installed
+    /// (Voice settings offers it whatever the speaking engine).
+    #[tokio::test]
+    async fn local_polish_needs_only_the_runtime_and_its_own_model() {
+        assert!(shared_of(&POLISH).is_empty(), "no speech tokenizer");
+        let voice_files: Vec<&str> = SHARED
+            .iter()
+            .chain(VARIANTS.iter().flat_map(|v| v.own))
+            .map(|(_, c)| c.sha256)
+            .collect();
+        assert!(POLISH.own.iter().all(|(_, c)| !voice_files.contains(&c.sha256)));
+        let (studio, _, _) = fake_studio("polish-alone", FAST, normal_pressure);
+        studio
+            .0
+            .record(&|r| r["models"] = json!({POLISH.id: {}}))
+            .unwrap();
+        assert_eq!(studio.status()["installed"], false, "no voice");
+        let (channel, _) = recorder();
+        assert_eq!(
+            studio.speak("Hello.", 1, &json!({}), channel).unwrap_err(),
+            NOT_INSTALLED
+        );
+        assert_eq!(studio.warm_polish(&json!(["QueueTray"])), Ok(true));
+        let frames = finished(&polish(&studio, "um so the QueueTray moves", 2)).await;
+        assert_eq!(outcome(&frames[0])["type"], "polished");
+    }
+
     /// A dictation warms the polish model ahead of its polish: once per
     /// vocabulary, and apart from the voice, whose state and surfaces hear
     /// nothing of it.

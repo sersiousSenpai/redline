@@ -12,10 +12,11 @@
 //
 // The engine sits behind `PolishEngine` (`polishEngine` below picks one). The
 // local polish model comes first: a small model in the studio voice's sidecar
-// (tts_studio.rs), installed from the studio voice's settings card, that never
-// sends the words anywhere. Without it — or when it can't answer within its
-// budget, about 0.7 s — the fixed cleanup child does it (voice.rs
-// `voice_clean`: a fast model with no tools, kept warm). Both are told that
+// (tts_studio.rs), installed from Voice settings' Dictation section whatever
+// the speaking engine, that never sends the words anywhere. Without it — or
+// when it can't answer within its budget, about 0.7 s — the fixed cleanup
+// child does it (voice.rs `voice_clean`: a fast model with no tools, kept
+// warm). Both are told that
 // the speaker is never talking to them and given the vocabulary's spellings,
 // and the local one's every reply is checked in the sidecar as well. What
 // comes back is checked here before it is used: an answer, a summary or a
