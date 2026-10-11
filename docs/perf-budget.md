@@ -735,6 +735,33 @@ background reply (two lazy chunks; the boot chunk carries only the pill's
 lazy import and the caption's store), and dictation's project names
 (`dictation_identifiers`, a plain command) and near-homophone step.
 
+### Wave 3 on top (measured 2026-10-11)
+
+The three wave-3 lanes merged in the order below onto `dd67c59`, the last
+row above. Every figure is measured on the integration branch: boot JS and
+dist from `npx vite build` of each merge commit's full tree, the binary from
+an embedded build of the same commit. The `dd67c59` row is the one recorded
+above, which the voice-runtime and chat lanes each rebuilt to the byte.
+
+| Merge | Release binary | Boot JS | Dist total |
+|---|---|---|---|
+| `dd67c59` | 40,284,672 B | 636,044 B | 9,420,190 B |
+| `fix/voice-runtime` | +240 B | +613 B | +3,136 B |
+| `fix/voice-panel-anatomy` | 0 | +4 B | +50 B |
+| `fix/chat-residuals` | +16,576 B | +471 B | +3,830 B |
+| All merged (`b1b413b`) | 40,301,488 B | 637,132 B | 9,427,206 B |
+
+That leaves 1,098,512 B of binary, 22,868 B of boot JS and 22,794 B of dist
+under the unchanged ceilings. The binary moves in pages: `__TEXT`,
+`__DATA_CONST` and `__DATA` are whole 16 KiB pages and only `__LINKEDIT`
+grows by the byte, so the chat lane's +16,576 B is one page plus 192 B. The
+voice-runtime lane's code fit in the slack of the page before it, which makes
+the split of that page between those two lanes an artifact of merge order;
+together they cost +16,816 B. The voice-runtime boot bytes are the dictation
+key's setting (`audio/holdKey.ts`), which the shortcut list now reads; the
+chat lane's are the overlay gate and the ⌘⇧N carry in the shell. No lane
+added a Tauri command.
+
 ### Build Redline (measured 2026-09-16)
 
 Three points, on one machine, same day:
