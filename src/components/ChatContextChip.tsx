@@ -21,7 +21,7 @@ export function ChatContextChip({
 }: {
   context: ChatContext;
   onOpenPlan?: (sessionId: string) => void;
-  /** The thread's column: the list is no wider. */
+  /** The thread's column: the list is no wider (nor wider than it reads). */
   maxWidth: number;
 }) {
   const [open, setOpen] = useState(false);
@@ -94,14 +94,15 @@ export function ChatContextChip({
           data-chat-context-panel
           className="rl-thin-scroll-y"
           style={{
-            // Hung from the header over the thread, never taking its height.
+            // Hung from the header over the thread, never taking its height,
+            // and dropped from the chip's end of the row.
             position: "absolute",
             top: "calc(100% + 4px)",
             left: 12,
             right: 12,
             zIndex: 30,
-            maxWidth,
-            marginInline: "auto",
+            maxWidth: Math.min(maxWidth, 480),
+            marginLeft: "auto",
             maxHeight: 260,
             overflowY: "auto",
             padding: "10px 12px",
