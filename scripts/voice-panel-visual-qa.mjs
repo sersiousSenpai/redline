@@ -49,6 +49,7 @@ const panelText = () => cdp.evaluate("document.querySelector('[data-tour=voice]'
 /** The composer's one button (SendStopButton), and the reply on its way. */
 const PRIMARY = "[data-tour=voice] form .rl-send";
 const LIVE = "[data-tour=voice] [data-reply=live]";
+const starter = (label) => cdp.evaluate(`[...document.querySelectorAll('[data-tour=voice] button')].find(b => b.textContent === ${JSON.stringify(label)}).setAttribute('data-qa', 'starter')`);
 const SID = "qa-plan";
 const turn = (n) => ({ sessionId: SID, generation: 1, turn: n });
 const REPLY = "The risk is a double apply when the panel comes back mid-turn. ⟦§A.2⟧ Gate the replay on the turn id.\n⟦screen⟧\n| Case | Today | Fix |\n|---|---|---|\n| remount | replays | gate on turn |";
@@ -171,6 +172,24 @@ try {
   check("An interrupted reply is kept, with a muted tag on its tail", (await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().querySelector('[data-reply-tail]').textContent")) === "(interrupted)");
   check("…and no error", !(await cdp.evaluate("!!document.querySelector('[data-tour=voice] p[style*=danger]')")));
   await screenshot("07-interrupted");
+
+  // ▸ Read it to me, then Stop: the composer's one button ends the reading
+  // with nothing of it left to say, and the next Summarize is heard first.
+  await cdp.evaluate("window.__qaSpoken.length = 0; window.__qaCalls.length = 0");
+  await starter("▸ Read it to me"); await click("[data-qa=starter]"); await cdp.evaluate("document.querySelector('[data-qa=starter]').removeAttribute('data-qa')");
+  const reading = await cdp.evaluate("window.__qaSpoken.slice()");
+  check("Reading the plan, the composer's one button is Stop", reading.length > 0 && (await cdp.evaluate(`document.querySelector('${PRIMARY}')?.dataset.send`)) === "stop", reading);
+  await click(`${PRIMARY}[aria-label=Stop]`);
+  check("…which leaves nothing of it to say", (await cdp.evaluate("window.__qa.playing()")) === 0 && (await cdp.evaluate(`document.querySelector('${PRIMARY}').getAttribute('aria-label')`)) === "Send");
+  await delay(1600);
+  check("…and nothing more of it is said", (await cdp.evaluate("window.__qaSpoken.length")) === reading.length && (await calls("voice_interrupt")).length === 0);
+  await screenshot("07b-read-stopped");
+  await starter("▸ Summarize"); await click("[data-qa=starter]"); await cdp.evaluate("document.querySelector('[data-qa=starter]').removeAttribute('data-qa')");
+  const summary = turn(await cdp.evaluate("window.__qaTurn"));
+  await emit("voice-delta", { ...summary, text: "Here is the short version. It ships behind a flag." });
+  check("…and the next Summarize is the next thing heard", (await cdp.evaluate(`window.__qaSpoken[${reading.length}]`)) === "Here is the short version.", await cdp.evaluate("window.__qaSpoken"));
+  await emit("voice-done", { ...summary, body: "Here is the short version. It ships behind a flag.", messageId: "m-sum", timing: {} });
+  await delay(1600);
 
   // Space talks only from inside the panel, and only once held.
   await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().querySelector('.rl-reply-byline').setAttribute('data-qa', 'byline')");

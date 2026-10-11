@@ -68,6 +68,8 @@ function Fixture() {
       away: awayReply(),
       opened: () => opened,
       setClipMs: (ms: number) => { clipMs = ms; },
+      /** Clips the fake speech still has to play. */
+      playing: () => playing.length,
       pressed: () => pressed,
     };
     document.documentElement.dataset.qaReady = "true";

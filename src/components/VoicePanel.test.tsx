@@ -130,6 +130,10 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "turn_scorer":
         if (args?.op === "warm" && !script.turnModel) throw "the end-of-turn model isn't downloaded";
         return { runtime: true, model: script.turnModel, warm: script.turnModel, score: script.turnScore };
+      // Kokoro: the sentence itself as its "audio", which the fake context
+      // below plays.
+      case "tts_synth":
+        return { audioBase64: Buffer.from(String(args?.text)).toString("base64"), mime: "audio/wav", speed: 1 };
       case "delete_comment":
         return true;
       default:
@@ -170,6 +174,8 @@ interface FakeUtterance {
   onerror?: () => void;
 }
 let utterances: FakeUtterance[];
+/** What the system voice was told besides `speak`. */
+let synthCalls: string[];
 let root: Root;
 let host: HTMLDivElement;
 
@@ -189,9 +195,9 @@ const finishSpeech = () =>
   });
 const spoken = () => utterances.map((u) => u.text).join(" ");
 
-async function mount() {
+async function mount(markdown = "# Plan\n\nBody.") {
   await act(async () => {
-    root.render(<VoicePanel sessionId={SID} markdown={"# Plan\n\nBody."} sections={SECTIONS} onClose={() => {}} />);
+    root.render(<VoicePanel sessionId={SID} markdown={markdown} sections={SECTIONS} onClose={() => {}} />);
   });
   await wait();
   await wait();
@@ -260,6 +266,12 @@ function space(type: "keydown" | "keyup", target: EventTarget) {
   return ev;
 }
 
+/** Poll until `test` holds (real timers), then insist on it. */
+async function until(test: () => boolean, ms = 2000) {
+  for (let t = 0; t < ms && !test(); t += 10) await wait(10);
+  expect(test()).toBe(true);
+}
+
 /** The composer's one button (SendStopButton), whatever its face. */
 const primary = () => input().form!.lastElementChild as HTMLButtonElement;
 
@@ -285,6 +297,7 @@ beforeEach(() => {
   script.final = "";
   script.cycleWait = null;
   utterances = [];
+  synthCalls = [];
   setVoiceAway(null);
   scrolled = [];
   Element.prototype.scrollIntoView = function (this: Element) {
@@ -293,10 +306,11 @@ beforeEach(() => {
   (window as unknown as { speechSynthesis: unknown }).speechSynthesis = {
     speak: (u: FakeUtterance) => utterances.push(u),
     cancel: () => {
+      synthCalls.push("cancel");
       utterances = [];
     },
-    pause: () => {},
-    resume: () => {},
+    pause: () => synthCalls.push("pause"),
+    resume: () => synthCalls.push("resume"),
     getVoices: () => [],
     addEventListener() {},
     removeEventListener() {},
@@ -316,6 +330,7 @@ afterEach(async () => {
   host.remove();
   document.body.innerHTML = "";
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 // --- Space ---------------------------------------------------------------------
@@ -906,6 +921,105 @@ describe("non-speech captures", () => {
     expect(sends()).toEqual([]);
     await holdToTalk("Focus on rollout.");
     expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
+  });
+});
+
+// --- reading the plan aloud, then Stop ---------------------------------------------
+
+describe("reading the plan aloud", () => {
+  const PLAN = "# Plan\n\nFirst point of the plan. Second point of the plan.\n\n## Rollout\n\nRoll it out in waves. Then widen the flag.";
+  const planSaid = /point of the plan|Roll it out|widen the flag/;
+
+  /** A Web Audio context whose clips each play for 200 ms, logging what is
+   *  heard: the sentence each was synthesized from. */
+  function fakeAudioContext(heard: string[]) {
+    return class {
+      state = "running";
+      destination = {};
+      createBufferSource() {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const source = {
+          buffer: null as { tag: string } | null,
+          playbackRate: { value: 1 },
+          onended: null as (() => void) | null,
+          connect() {},
+          start() {
+            heard.push(source.buffer!.tag);
+            timer = setTimeout(() => source.onended?.(), 200);
+          },
+          stop() {
+            clearTimeout(timer);
+            setTimeout(() => source.onended?.(), 0);
+          },
+        };
+        return source;
+      }
+      async decodeAudioData(bytes: ArrayBuffer) {
+        const tag = new TextDecoder().decode(new Uint8Array(bytes));
+        const data = new Float32Array(tag.length * 10).fill(0.5);
+        return { tag, sampleRate: 1000, getChannelData: () => data };
+      }
+      async suspend() {
+        this.state = "suspended";
+      }
+      async resume() {
+        this.state = "running";
+      }
+    };
+  }
+
+  it("is stopped by the composer's button with nothing left to say, and the next Summarize is heard first", async () => {
+    await mount(PLAN);
+    await act(async () => button("▸ Read it to me").click());
+    await wait();
+    expect(spoken()).toMatch(planSaid);
+    // While it reads, the one button is Stop.
+    expect(primary().dataset.send).toBe("stop");
+    expect(button("Pause speech")).toBeTruthy();
+    calls.length = 0;
+    await act(async () => primary().click());
+    // Stopped in the voice, with nothing of it left queued…
+    expect(synthCalls).toContain("cancel");
+    expect(utterances).toEqual([]);
+    // …and idle: the button sends again, and the reading can be replayed.
+    expect(primary().getAttribute("aria-label")).toBe("Send");
+    expect(button("Pause speech")).toBeUndefined();
+    expect(button("▶ Replay").disabled).toBe(false);
+    // No turn ran, so none was interrupted.
+    expect(names()).not.toContain("voice_interrupt");
+    await wait(300);
+    expect(utterances).toEqual([]);
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "Here is the short version. It ships in two waves." });
+    expect(utterances[0]?.text).toBe("Here is the short version.");
+    expect(spoken()).not.toMatch(planSaid);
+  });
+
+  it("on Kokoro, drops the reading's backlog in the engine, and the next Summarize is the next clip heard", async () => {
+    script.engine = "kokoro";
+    const heard: string[] = [];
+    vi.stubGlobal("AudioContext", fakeAudioContext(heard));
+    await mount(PLAN);
+    await act(async () => button("▸ Read it to me").click());
+    await until(() => heard.length > 0);
+    const reading = (named("tts_synth")[0][1] as { generation: number }).generation;
+    // A sentence or two ahead of the one heard, never the whole plan queued.
+    expect(named("tts_synth").length).toBeLessThanOrEqual(3);
+    expect(primary().dataset.send).toBe("stop");
+    await act(async () => primary().click());
+    expect(named("tts_cancel").map(([, a]) => a)).toEqual([{ generation: reading }]);
+    expect(primary().getAttribute("aria-label")).toBe("Send");
+    const asked = named("tts_synth").length;
+    const before = heard.length;
+    await wait(400);
+    expect(named("tts_synth")).toHaveLength(asked);
+    expect(heard).toHaveLength(before);
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "Here is the short version. It ships in two waves." });
+    await until(() => heard.length > before);
+    expect(heard[before]).toBe("Here is the short version.");
+    const after = named("tts_synth").slice(asked).map(([, a]) => String(a?.text));
+    expect(after.filter((text) => planSaid.test(text))).toEqual([]);
   });
 });
 
