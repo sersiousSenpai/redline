@@ -58,6 +58,10 @@ pub struct ActionResult {
     pub elapsed_ms: u64,
     pub observed: Value,
     pub error: Option<String>,
+    /// The page-chat turns running against the page when the action was
+    /// asked for: the dot it lights on the tab is theirs to clear as they end.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<String>,
 }
 struct PageQueue {
     serial: tokio::sync::Mutex<()>,
@@ -65,6 +69,13 @@ struct PageQueue {
     interrupted: AtomicU64,
 }
 static QUEUES: OnceLock<Mutex<HashMap<String, Arc<PageQueue>>>> = OnceLock::new();
+/// Keep an outcome under its operation id, so a retry of the same id is
+/// answered with it rather than run again.
+fn remember(queue: &PageQueue, operation_id: String, serialized: String, result: ActionResult) {
+    let mut history = queue.results.lock().unwrap();
+    history.push_back((operation_id, serialized, result));
+    while history.len() > 128 { history.pop_front(); }
+}
 fn page_queue(label: &str) -> Arc<PageQueue> {
     QUEUES.get_or_init(Default::default).lock().unwrap().entry(label.to_owned()).or_insert_with(|| Arc::new(PageQueue { serial: tokio::sync::Mutex::new(()), results: Mutex::new(VecDeque::new()), interrupted: AtomicU64::new(0) })).clone()
 }
@@ -119,6 +130,35 @@ fn report(app: &tauri::AppHandle, result: &ActionResult) {
     }
 }
 
+/// The outcome an accepted action owes if its request goes first. Stop kills
+/// the agent's curl mid-action and the route's future is dropped with it;
+/// without this the tab's dot and the turn's work row would wait on an
+/// acknowledgement that never comes. It reports `interrupted`. One that had
+/// started running also fences the actions queued behind it and is kept
+/// under its operation id, since what it did to the page is unknown.
+struct Owed<R: Fn(&ActionResult)> {
+    report: R,
+    queue: Arc<PageQueue>,
+    ack: ActionResult,
+    start: Instant,
+    /// Once it runs: the request as it was, for the id's history.
+    ran: Option<(String, String)>,
+    settled: bool,
+}
+impl<R: Fn(&ActionResult)> Drop for Owed<R> {
+    fn drop(&mut self) {
+        if self.settled { return; }
+        self.ack.status = "interrupted".into();
+        self.ack.elapsed_ms = self.start.elapsed().as_millis() as u64;
+        self.ack.error = Some(if self.ran.is_some() { "No confirmed outcome before the request ended. Inspect the page before retrying a side effect." } else { "The request ended while waiting for the page action queue; this action did not run." }.into());
+        if let Some((operation_id, serialized)) = self.ran.take() {
+            self.queue.interrupted.fetch_add(1, Ordering::SeqCst);
+            remember(&self.queue, operation_id, serialized, self.ack.clone());
+        }
+        (self.report)(&self.ack);
+    }
+}
+
 pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<ActionResult, String> {
     if request.operation_id.is_empty() || request.operation_id.len() > 128 || !request.label.starts_with("browser-") || request.label.len() > 160 { return Err("An operation ID and stable browser target are required".into()); }
     let serialized = serde_json::to_string(&request).map_err(|e| e.to_string())?;
@@ -129,13 +169,16 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
     let input_revision = crate::browser_events::input_revision(&request.label);
     let start = Instant::now();
     let tab = app.try_state::<crate::BrowserTabs>().and_then(|tabs| tabs.get().iter().position(|t| t.label == request.label)).map(|i| i + 1);
-    let mut result = ActionResult { operation_id: request.operation_id.clone(), label: request.label.clone(), kind: request.operation.kind(), tab, status: "accepted".into(), elapsed_ms: 0, observed: Value::Null, error: None };
+    let turns = app.try_state::<crate::browse::BrowseState>().map(|browse| browse.turns_targeting(&request.label)).unwrap_or_default();
+    let mut result = ActionResult { operation_id: request.operation_id.clone(), label: request.label.clone(), kind: request.operation.kind(), tab, status: "accepted".into(), elapsed_ms: 0, observed: Value::Null, error: None, turns };
     let _ = app.emit("browser-action", &result);
+    let mut owed = Owed { report: |ack: &ActionResult| report(&app, ack), queue: queue.clone(), ack: result.clone(), start, ran: None, settled: false };
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000).clamp(100, 30_000));
     let deadline = tokio::time::Instant::now() + timeout;
     let _guard = match tokio::time::timeout_at(deadline, queue.serial.lock()).await {
         Ok(guard) => guard,
         Err(_) => {
+            owed.settled = true;
             result.status = "interrupted".into();
             result.elapsed_ms = start.elapsed().as_millis() as u64;
             result.error = Some("Timed out waiting for the page action queue; this request did not run.".into());
@@ -143,7 +186,11 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
             return Ok(result);
         }
     };
+    // Rebound below the page's lock, so a drop settles what is owed before
+    // the lock lets the next action in to read the fence.
+    let mut owed = owed;
     if let Some((_, previous, outcome)) = queue.results.lock().unwrap().iter().find(|(id, _, _)| id == &request.operation_id) {
+        owed.settled = true;
         if previous == &serialized {
             let _ = app.emit("browser-action", outcome);
             return Ok(outcome.clone());
@@ -156,6 +203,7 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
     }
     result.status = "running".into();
     let _ = app.emit("browser-action", &result);
+    owed.ran = Some((request.operation_id.clone(), serialized.clone()));
     let task = async {
         if queue.interrupted.load(Ordering::SeqCst) != queue_revision { return Err("Interrupted because an earlier page action had no confirmed outcome; inspect the page before continuing".to_owned()); }
         if crate::browser_events::input_revision(&request.label) != input_revision { return Err("Interrupted by user interaction".to_owned()); }
@@ -193,9 +241,10 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
         Ok(Err(error)) => { result.status = if error.starts_with("Interrupted") { "interrupted" } else { "failed" }.into(); result.error = Some(error); }
         Err(_) => { result.status = "interrupted".into(); result.error = Some("No confirmed outcome before the timeout. Inspect the page before retrying a side effect.".into()); }
     }
+    owed.settled = true;
     result.elapsed_ms = start.elapsed().as_millis() as u64;
     if result.status == "interrupted" { queue.interrupted.fetch_add(1, Ordering::SeqCst); }
-    { let mut history = queue.results.lock().unwrap(); history.push_back((request.operation_id, serialized, result.clone())); while history.len() > 128 { history.pop_front(); } }
+    remember(&queue, request.operation_id, serialized, result.clone());
     report(&app, &result);
     drop(_guard);
     crate::browser_workspace::touch(&request.label);
@@ -240,9 +289,40 @@ mod tests {
     #[test] fn acknowledgements_say_what_ran_and_on_which_tab() {
         let request = parse_request(json!({ "operationId": "op", "label": "browser-t2", "operation": { "kind": "select", "selector": "s", "value": "v" } })).unwrap();
         assert_eq!(request.operation.kind(), "select");
-        let ack = ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind: request.operation.kind(), tab: Some(2), status: "running".into(), elapsed_ms: 0, observed: Value::Null, error: None };
+        let mut ack = ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind: request.operation.kind(), tab: Some(2), status: "running".into(), elapsed_ms: 0, observed: Value::Null, error: None, turns: Vec::new() };
         let wire = serde_json::to_value(&ack).unwrap();
         assert_eq!((wire["kind"].as_str(), wire["tab"].as_u64(), wire["label"].as_str()), (Some("select"), Some(2), Some("browser-t2")));
+        // The turns that drove it ride along only when there are any.
+        assert!(wire.get("turns").is_none());
+        ack.turns = vec!["shared".into()];
+        assert_eq!(serde_json::to_value(&ack).unwrap()["turns"], json!(["shared"]));
+    }
+    /// A request dropped mid-action (Stop kills the agent's curl) still says
+    /// how its action ended. One that ran fences the actions queued behind it
+    /// and answers a retry of its id; one still waiting for the page did not
+    /// run, and leaves both alone. A settled action owes nothing.
+    #[test] fn a_dropped_request_still_acknowledges_its_action() {
+        let ack = |status: &str| ActionResult { operation_id: "op-ran".into(), label: "browser-test-owed".into(), kind: "click", tab: Some(1), status: status.into(), elapsed_ms: 0, observed: Value::Null, error: None, turns: vec!["shared".into()] };
+        let heard = Mutex::new(Vec::<ActionResult>::new());
+        let owed = |ran: Option<(String, String)>, settled: bool| Owed { report: |a: &ActionResult| heard.lock().unwrap().push(a.clone()), queue: page_queue("browser-test-owed"), ack: ack(if ran.is_some() { "running" } else { "accepted" }), start: Instant::now(), ran, settled };
+        let queue = page_queue("browser-test-owed");
+        let fence = queue.interrupted.load(Ordering::SeqCst);
+
+        drop(owed(Some(("op-ran".into(), "{click}".into())), false));
+        let said = heard.lock().unwrap().pop().unwrap();
+        assert_eq!((said.status.as_str(), said.turns.as_slice()), ("interrupted", ["shared".to_string()].as_slice()));
+        assert!(said.error.as_deref().unwrap().starts_with("No confirmed outcome"));
+        assert_eq!(queue.interrupted.load(Ordering::SeqCst), fence + 1);
+        assert!(queue.results.lock().unwrap().iter().any(|(id, request, kept)| id == "op-ran" && request == "{click}" && kept.status == "interrupted"));
+
+        drop(owed(None, false));
+        let said = heard.lock().unwrap().pop().unwrap();
+        assert!(said.error.as_deref().unwrap().contains("did not run"));
+        assert_eq!(queue.interrupted.load(Ordering::SeqCst), fence + 1);
+
+        drop(owed(Some(("op-done".into(), "{click}".into())), true));
+        assert!(heard.lock().unwrap().is_empty());
+        assert!(!queue.results.lock().unwrap().iter().any(|(id, _, _)| id == "op-done"));
     }
     /// The row a reply keeps for each outcome reads with the contract's verbs
     /// (src/lib/browserChat/contract.json `actionOutcomes`), which the chat
@@ -250,7 +330,7 @@ mod tests {
     #[test] fn an_outcome_reads_as_the_contracts_past_tense() {
         let contract: Value = serde_json::from_str(include_str!("../../src/lib/browserChat/contract.json")).unwrap();
         let done = &contract["actionOutcomes"]["done"];
-        let ack = |kind: &'static str, status: &str, observed: Value, error: Option<&str>| ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind, tab: Some(2), status: status.into(), elapsed_ms: 1, observed, error: error.map(Into::into) };
+        let ack = |kind: &'static str, status: &str, observed: Value, error: Option<&str>| ActionResult { operation_id: "op".into(), label: "browser-t2".into(), kind, tab: Some(2), status: status.into(), elapsed_ms: 1, observed, error: error.map(Into::into), turns: Vec::new() };
         let cases = [
             ("navigate", json!({"url": "https://www.example.com/pricing/"}), "example.com/pricing"),
             ("click", json!({"name": "Buy now"}), "“Buy now”"),

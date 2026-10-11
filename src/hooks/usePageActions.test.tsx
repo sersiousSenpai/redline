@@ -33,50 +33,70 @@ function Probe() {
   return <div data-running={[...running].map(([label, a]) => `${label}:${a.kind}:${a.tab}`).join()} data-acting={[...acting].join()} />;
 }
 const probe = () => host.firstElementChild!;
-const ack = (label: string, status: string) => act(async () => handlers.get("browser-action")?.({ payload: { label, kind: "click", tab: 2, status } }));
+const ack = (label: string, status: string, turns?: string[]) => act(async () => handlers.get("browser-action")?.({ payload: { label, kind: "click", tab: 2, status, turns } }));
+const ends = (event: string, browseId: string) => act(async () => handlers.get(event)?.({ payload: { browseId } }));
+const acting = () => probe().getAttribute("data-acting");
 
 describe("usePageActions", () => {
-  it("knows the running action by its page, and keeps the page's dot until a turn ends", async () => {
+  it("knows the running action by its page, and keeps the page's dot until the turn that drove it ends", async () => {
     await act(async () => root.render(<Probe />));
-    await ack("browser-t2", "accepted");
+    await ack("browser-t2", "accepted", ["shared"]);
     expect(probe().getAttribute("data-running")).toBe("browser-t2:click:2");
-    expect(probe().getAttribute("data-acting")).toBe("browser-t2");
-    await ack("browser-t2", "interrupted");
+    expect(acting()).toBe("browser-t2");
+    await ack("browser-t2", "interrupted", ["shared"]);
     expect(probe().getAttribute("data-running")).toBe("");
-    expect(probe().getAttribute("data-acting")).toBe("browser-t2");
-    await act(async () => handlers.get("browse-cancelled")?.({ payload: { browseId: "shared" } }));
-    expect(probe().getAttribute("data-acting")).toBe("");
+    expect(acting()).toBe("browser-t2");
+    await ends("browse-cancelled", "shared");
+    expect(acting()).toBe("");
   });
 
-  it("clears a finished action's dot on its own when no page-chat turn ends", async () => {
+  it("clears a dot only for the turn that drove it: another turn ending leaves it", async () => {
+    await act(async () => root.render(<Probe />));
+    await ack("browser-t1", "accepted", ["tab-one"]);
+    await ack("browser-t1", "completed", ["tab-one"]);
+    await ack("browser-t2", "accepted", ["shared"]);
+    await ack("browser-t2", "completed", ["shared"]);
+    await ends("browse-done", "shared");
+    expect(acting()).toBe("browser-t1");
+    await ends("browse-error", "tab-one");
+    expect(acting()).toBe("");
+  });
+
+  it("clears at once an outcome that lands after its turn has ended", async () => {
+    // Stop ends the turn and drops the action's request; the route still
+    // says how the action ended, a beat later.
+    await act(async () => root.render(<Probe />));
+    await ack("browser-t2", "running", ["shared"]);
+    await ends("browse-cancelled", "shared");
+    expect(acting()).toBe("browser-t2");
+    await ack("browser-t2", "interrupted", ["shared"]);
+    expect(acting()).toBe("");
+  });
+
+  it("holds a thread's new turn to its own end, not its last one's", async () => {
+    await act(async () => root.render(<Probe />));
+    await ack("browser-t2", "accepted", ["shared"]);
+    await ack("browser-t2", "completed", ["shared"]);
+    await ends("browse-done", "shared");
+    expect(acting()).toBe("");
+    await ack("browser-t2", "accepted", ["shared"]);
+    await ack("browser-t2", "completed", ["shared"]);
+    expect(acting()).toBe("browser-t2");
+    await ends("browse-done", "shared");
+    expect(acting()).toBe("");
+  });
+
+  it("clears a finished action's dot on its own when no page-chat turn drove it", async () => {
     await act(async () => root.render(<Probe />));
     await ack("browser-t1", "running");
     await ack("browser-t1", "completed");
     await act(async () => { vi.advanceTimersByTime(19_000); });
-    expect(probe().getAttribute("data-acting")).toBe("browser-t1");
-    // A turn ending clears only finished actions: one still running keeps its dot.
-    await ack("browser-t3", "running");
+    expect(acting()).toBe("browser-t1");
+    // No turn's end is this action's: one still running keeps its dot.
+    await ack("browser-t3", "running", ["shared"]);
+    await ends("browse-done", "shared");
+    expect(acting()).toBe("browser-t1,browser-t3");
     await act(async () => { vi.advanceTimersByTime(2_000); });
-    expect(probe().getAttribute("data-acting")).toBe("browser-t3");
-    await act(async () => handlers.get("browse-done")?.({ payload: { browseId: "one" } }));
-    expect(probe().getAttribute("data-acting")).toBe("browser-t3");
-  });
-
-  it("lets go of an action whose outcome never came, once the route's deadline has passed", async () => {
-    // Stop kills the agent's request mid-action, and the route's handler goes
-    // with it before it can say how the action ended.
-    await act(async () => root.render(<Probe />));
-    await ack("browser-t2", "accepted");
-    await ack("browser-t2", "running");
-    await act(async () => { vi.advanceTimersByTime(30_000); });
-    expect(probe().getAttribute("data-running")).toBe("browser-t2:click:2");
-    await act(async () => { vi.advanceTimersByTime(2_000); });
-    expect(probe().getAttribute("data-running")).toBe("");
-    expect(probe().getAttribute("data-acting")).toBe("");
-    // An outcome that does come in time keeps its usual course.
-    await ack("browser-t2", "running");
-    await ack("browser-t2", "completed");
-    await act(async () => { vi.advanceTimersByTime(19_000); });
-    expect(probe().getAttribute("data-acting")).toBe("browser-t2");
+    expect(acting()).toBe("browser-t3");
   });
 });

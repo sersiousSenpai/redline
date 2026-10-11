@@ -187,11 +187,20 @@ impl BrowseState {
     /// runs on. Suspending it would pull the page from under the agent
     /// mid-turn (BC-31).
     pub fn is_targeted(&self, label: &str) -> bool {
+        !self.turns_targeting(label).is_empty()
+    }
+
+    /// The running turns sent against this tab, whichever thread they run
+    /// on: a page action's acknowledgement names them, so the tab's dot is
+    /// cleared by the turns that drove it, not by any turn ending.
+    pub fn turns_targeting(&self, label: &str) -> Vec<String> {
         self.targets
             .lock()
             .unwrap()
             .iter()
-            .any(|(id, target)| target == label && self.turns.is_running(id))
+            .filter(|(id, target)| *target == label && self.turns.is_running(id))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// A page action on `label` has an outcome: write what it did onto each
@@ -2156,6 +2165,9 @@ mod tests {
         state.record_target("shared-chat", Some("browser-t2"));
         assert!(state.is_targeted("browser-t2"));
         assert!(!state.is_targeted("browser-t1"));
+        // An action on the page names the turn driving it.
+        assert_eq!(state.turns_targeting("browser-t2"), ["shared-chat"]);
+        assert!(state.turns_targeting("browser-t1").is_empty());
         // The next turn on the same thread retargets it.
         state.record_target("shared-chat", Some("browser-t1"));
         assert!(state.is_targeted("browser-t1"));

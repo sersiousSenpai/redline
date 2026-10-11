@@ -165,6 +165,19 @@ describe("the activity line names what the agent is doing", () => {
     expect(pane).toMatch(/pageActions=\{pageActions\.running\}/);
     expect(pane).toMatch(/<BrowserTabRail[^>]*acting=\{/);
   });
+  it("BC-41 every accepted action is answered, and its dot is its own turn's to clear", () => {
+    // A request dropped mid-action (Stop kills the agent's curl) still
+    // acknowledges an outcome: the guard is armed before the page's queue is
+    // awaited, and settled only once an outcome has been reported.
+    const execute = fnBody(actionsRs, "execute");
+    expect(execute.indexOf("let mut owed = Owed {")).toBeGreaterThan(-1);
+    expect(execute.indexOf("let mut owed = Owed {")).toBeLessThan(execute.indexOf("queue.serial.lock()"));
+    expect(actionsRs).toMatch(/impl<R: Fn\(&ActionResult\)> Drop for Owed<R>/);
+    // The acknowledgement names the turns driving the page; the dots clear
+    // by them, not on any turn ending.
+    expect(actionsRs).toContain("browse.turns_targeting(&request.label)");
+    expect(read("src/hooks/usePageActions.ts")).toContain("[...by].every((turn) => ended.has(turn))");
+  });
   it("BC-34 BC-41 what an action did is written onto the turn that targets its page, so the row outlives a relaunch", () => {
     // Every outcome path reports, and reporting writes the step.
     expect(fnBody(actionsRs, "report")).toContain("note_action(");

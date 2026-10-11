@@ -329,12 +329,12 @@ describe("the agent acting on a page", () => {
     await mount();
     const label = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
     const tab = () => host.querySelector(`[data-tab-id="${label.replace("browser-", "")}"]`)!;
-    await event("browser-action", { label, kind: "click", tab: 1, status: "running" });
+    await event("browser-action", { label, kind: "click", tab: 1, status: "running", turns: ["one"] });
     expect(tab().hasAttribute("data-agent-acting")).toBe(true);
     expect(tab().getAttribute("aria-label")).toContain("the agent is acting on this page");
     expect(dock.querySelector("[data-page-action]")?.getAttribute("data-page-action")).toBe("click:1");
     // Done: the chat's live line moves on, the dot stays until the turn ends.
-    await event("browser-action", { label, kind: "click", tab: 1, status: "completed" });
+    await event("browser-action", { label, kind: "click", tab: 1, status: "completed", turns: ["one"] });
     expect(dock.querySelector("[data-page-action]")).toBeNull();
     expect(tab().hasAttribute("data-agent-acting")).toBe(true);
     await event("browse-done", { browseId: "one" });
