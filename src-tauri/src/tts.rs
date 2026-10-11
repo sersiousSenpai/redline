@@ -39,13 +39,13 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 use crate::db::Database;
+use crate::pinned_fetch::{fetch_pinned, Pinned};
 use crate::tts_studio::Studio;
 
 const SETTING_ENGINE: &str = "tts_engine";
@@ -102,6 +102,13 @@ pub(crate) struct FileCheck {
     pub(crate) sha256: &'static str,
 }
 
+impl FileCheck {
+    /// The pin for this file as published at `url` (pinned_fetch.rs).
+    pub(crate) fn at(self, url: &str) -> Pinned<'_> {
+        Pinned { url, bytes: self.bytes, sha256: self.sha256 }
+    }
+}
+
 /// The uv release both local voice engines build their Python with, pinned by
 /// the SHA-256 Astral publishes beside each tarball. uv in turn checks the
 /// CPython it downloads against the hashes built into this release.
@@ -124,9 +131,6 @@ const KOKORO_VOICES_CHECK: FileCheck = FileCheck {
     sha256: "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
 };
 
-/// Emit a setup-progress event roughly every megabyte, so the download bar moves
-/// without flooding the IPC channel with thousands of tiny updates.
-const PROGRESS_STEP: u64 = 1_000_000;
 /// A download that goes this long without a response or a byte is given up.
 /// The background upgrade runs unattended under the one-download lock, so a
 /// stalled connection would otherwise hold it, and every later attempt, for
@@ -1017,7 +1021,7 @@ pub(crate) async fn ensure_uv(
 
     let url = format!("{UV_URL}{asset}.tar.gz");
     let tarball = root.join("uv.tar.gz");
-    fetch_checked(http, &url, &tarball, "the voice toolchain", check, DOWNLOAD_STALL, progress)
+    fetch_pinned(http, &check.at(&url), &tarball, "the voice toolchain", DOWNLOAD_STALL, progress)
         .await?;
 
     // Unpack with the system `tar` (gzip built in on macOS) and lift out the
@@ -1245,128 +1249,17 @@ async fn download_if_missing(
         return Ok(());
     }
     let what = format!("the Kokoro {phase}");
-    fetch_checked(&tts.http, url, dest, &what, check, DOWNLOAD_STALL, &|received, total| {
+    fetch_pinned(&tts.http, &check.at(url), dest, &what, DOWNLOAD_STALL, &|received, total| {
         emit_setup(app, phase, received, total);
         true
     })
     .await
 }
 
-/// Stream `url` into `<dest>.part`, then rename it into place — a crash
-/// mid-download never leaves a truncated file that looks complete. The file is
-/// hashed as it arrives and only the exact published file (`check`) is renamed
-/// in; one that comes out different is deleted, `.part` and all, so `dest`
-/// (and whatever model sits beside it) is left as it was.
-///
-/// A download cut off part-way (the network drops, or `stall` passes with
-/// nothing received) keeps its `.part`, and the next call resumes it with an
-/// HTTP Range request instead of starting over: the studio voice's weights are
-/// 2.4 GB. What arrived before is hashed from disk, so the check still covers
-/// every byte. Each attempt asks for `url` itself, never a URL it was once
-/// redirected to: a model host redirects to a signed link that expires.
-///
-/// `progress` returning false stops it the same way, with exactly `CANCELLED`:
-/// an install the user cancelled, to resume later.
-pub(crate) async fn fetch_checked(
-    http: &reqwest::Client,
-    url: &str,
-    dest: &Path,
-    what: &str,
-    check: FileCheck,
-    stall: Duration,
-    progress: &(dyn Fn(u64, u64) -> bool + Sync),
-) -> Result<(), String> {
-    let mut tmp = dest.as_os_str().to_owned();
-    tmp.push(".part");
-    let tmp = PathBuf::from(tmp);
-    let stalled = || format!("downloading {what} stalled — try again");
-    let failed = |e: &dyn std::fmt::Display| format!("downloading {what} failed: {e}");
-    let mut hasher = Sha256::new();
-    let mut received = std::fs::metadata(&tmp).map_or(0, |m| m.len());
-    if received > check.bytes {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        received = 0;
-    }
-    if received == check.bytes {
-        // Complete, but never renamed in (a crash between the two).
-        received = hash_into(&tmp, &mut hasher)?;
-    } else {
-        let mut request = http.get(url);
-        if received > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={received}-"));
-        }
-        let mut resp = tokio::time::timeout(stall, request.send())
-            .await
-            .map_err(|_| stalled())?
-            .map_err(|e| failed(&e))?;
-        let status = resp.status();
-        if !status.is_success() {
-            if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-                let _ = tokio::fs::remove_file(&tmp).await;
-            }
-            return Err(failed(&format_args!("HTTP {status}")));
-        }
-        let mut file = if received > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT {
-            received = hash_into(&tmp, &mut hasher)?;
-            std::fs::OpenOptions::new().append(true).open(&tmp).map(tokio::fs::File::from_std)
-        } else {
-            // A server that ignores Range sends the whole file again.
-            received = 0;
-            tokio::fs::File::create(&tmp).await
-        }
-        .map_err(|e| format!("opening {what} for writing failed: {e}"))?;
-        progress(received, check.bytes);
-        let mut last_emit = received;
-        let streamed = async {
-            while let Some(chunk) = tokio::time::timeout(stall, resp.chunk())
-                .await
-                .map_err(|_| stalled())?
-                .map_err(|e| failed(&e))?
-            {
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|e| format!("writing {what} failed: {e}"))?;
-                hasher.update(&chunk);
-                received += chunk.len() as u64;
-                if received - last_emit >= PROGRESS_STEP {
-                    last_emit = received;
-                    if !progress(received, check.bytes) {
-                        return Err(CANCELLED.to_string());
-                    }
-                }
-            }
-            Ok::<(), String>(())
-        }
-        .await;
-        // What was written stays on disk, whole, for the next call to resume.
-        let flushed = file.flush().await;
-        streamed?;
-        flushed.map_err(|e| format!("writing {what} failed: {e}"))?;
-    }
-    if received != check.bytes || format!("{:x}", hasher.finalize()) != check.sha256 {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(format!(
-            "the downloaded {what} wasn't the published file ({received} bytes), so it was \
-             discarded — try again"
-        ));
-    }
-    tokio::fs::rename(&tmp, dest)
-        .await
-        .map_err(|e| format!("finalizing {what} failed: {e}"))
-}
-
-/// Feed a file to `hasher`, returning its length. A plain blocking read: it
-/// runs once per resumed download, on a task nothing waits on, and an async
-/// file would cost the binary a blocking task per operation.
-fn hash_into(path: &Path, hasher: &mut Sha256) -> Result<u64, String> {
-    let failed = |e: std::io::Error| format!("reading a partial download failed: {e}");
-    let mut file = std::fs::File::open(path).map_err(failed)?;
-    std::io::copy(&mut file, hasher).map_err(failed)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn test_state() -> TtsState {
         let db = Arc::new(Database::open_in_memory().unwrap());
@@ -1507,11 +1400,9 @@ done
         format!("http://{addr}/kokoro-v1.0.onnx")
     }
 
-    /// Where `fetch_checked` keeps a download until it is verified.
+    /// Where `fetch_pinned` keeps a download until it is verified.
     fn part(dest: &Path) -> PathBuf {
-        let mut p = dest.as_os_str().to_owned();
-        p.push(".part");
-        PathBuf::from(p)
+        crate::pinned_fetch::part_path(dest)
     }
 
     /// A loopback HTTP server for as long as the test runs. `respond` gets each
@@ -1745,13 +1636,15 @@ done
         std::fs::write(dir.join(KOKORO_VOICES_FILE), b"").unwrap();
         let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
         let dest = dir.join(KOKORO_MODEL_FILE);
-        let url = serve_once(b"cut off mid-download");
-        let err = fetch_checked(
+        let body = b"not the fp32 weights";
+        let url = serve_once(body);
+        // The published model's hash, over bytes that aren't it.
+        let check = FileCheck { bytes: body.len() as u64, ..KOKORO_MODEL_CHECK };
+        let err = fetch_pinned(
             &tts.http,
-            &url,
+            &check.at(&url),
             &dest,
             "the Kokoro upgrade",
-            KOKORO_MODEL_CHECK,
             DOWNLOAD_STALL,
             &|_, _| true,
         )
@@ -1770,12 +1663,11 @@ done
         let dest = data.join("kokoro").join(KOKORO_MODEL_FILE);
         let http = reqwest::Client::new();
         let started = std::time::Instant::now();
-        let err = fetch_checked(
+        let err = fetch_pinned(
             &http,
-            &serve_then_stall(),
+            &KOKORO_MODEL_CHECK.at(&serve_then_stall()),
             &dest,
             "the Kokoro upgrade",
-            KOKORO_MODEL_CHECK,
             Duration::from_millis(300),
             &|_, _| true,
         )
@@ -1800,7 +1692,7 @@ done
         };
         let dest = dir.join(KOKORO_MODEL_FILE);
         let url = serve_once(BODY);
-        fetch_checked(&tts.http, &url, &dest, "the Kokoro upgrade", check, DOWNLOAD_STALL, &|_, _| true)
+        fetch_pinned(&tts.http, &check.at(&url), &dest, "the Kokoro upgrade", DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -1855,29 +1747,26 @@ done
         let url = format!("{base}/resolve/main/model.safetensors");
         let http_client = reqwest::Client::new();
 
-        let check = check_for(body);
-        let err = fetch_checked(&http_client, &url, &dest, "the model", check, DOWNLOAD_STALL, &|_, _| true)
-            .await
-            .unwrap_err();
-        assert!(err.contains("failed"), "{err}");
-        assert!(!dest.exists());
-        let kept = std::fs::metadata(part(&dest)).unwrap().len() as usize;
-        assert!(kept > 0 && kept <= 100_000, "{kept}");
-
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let saw = seen.clone();
         let note = move |received, total| {
             saw.lock().unwrap().push((received, total));
             true
         };
-        fetch_checked(&http_client, &url, &dest, "the model", check_for(body), DOWNLOAD_STALL, &note)
-        .await
-        .unwrap();
+        fetch_pinned(&http_client, &check_for(body).at(&url), &dest, "the model", DOWNLOAD_STALL, &note)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         assert!(!part(&dest).exists());
-        assert_eq!(*ranges.lock().unwrap(), [None, Some(kept)], "resumed where it stopped");
+        let ranges = ranges.lock().unwrap().clone();
+        let kept = ranges[1].unwrap_or(0);
+        assert!(kept > 0 && kept <= 100_000, "{kept}");
+        assert_eq!(ranges, [None, Some(kept)], "resumed where it stopped");
         assert_eq!(signed.load(std::sync::atomic::Ordering::SeqCst), 2, "re-signed for the resume");
-        assert_eq!(seen.lock().unwrap()[0], (kept as u64, body.len() as u64));
+        assert!(
+            seen.lock().unwrap().contains(&(kept as u64, body.len() as u64)),
+            "the resume counts what was kept"
+        );
     }
 
     #[tokio::test]
@@ -1889,7 +1778,7 @@ done
         std::fs::write(part(&dest), &body[..20_000]).unwrap();
         let client = reqwest::Client::new();
         let url = format!("{base}/f");
-        fetch_checked(&client, &url, &dest, "the vocabulary", check_for(body), DOWNLOAD_STALL, &|_, _| true)
+        fetch_pinned(&client, &check_for(body).at(&url), &dest, "the vocabulary", DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
@@ -1900,7 +1789,8 @@ done
         let body: &'static [u8] = Box::leak(noise(50_000).into_boxed_slice());
         let base = serve(move |head| {
             let at = range_from(head).unwrap_or(0);
-            http("206 Partial Content", "", &body[at..])
+            let range = format!("Content-Range: bytes {at}-{}/{}\r\n", body.len() - 1, body.len());
+            http("206 Partial Content", &range, &body[at..])
         });
         let data = scratch_dir("bad-resume");
         let dest = data.join("config.json");
@@ -1908,7 +1798,7 @@ done
         std::fs::write(part(&dest), vec![7u8; 1_000]).unwrap();
         let client = reqwest::Client::new();
         let url = format!("{base}/f");
-        let err = fetch_checked(&client, &url, &dest, "the config", check_for(body), DOWNLOAD_STALL, &|_, _| true)
+        let err = fetch_pinned(&client, &check_for(body).at(&url), &dest, "the config", DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
@@ -1925,7 +1815,7 @@ done
         let client = reqwest::Client::new();
         // Nothing listens there: the bytes on disk are enough.
         let check = check_for(&body);
-        fetch_checked(&client, "http://127.0.0.1:9/f", &dest, "the config", check, DOWNLOAD_STALL, &|_, _| true)
+        fetch_pinned(&client, &check.at("http://127.0.0.1:9/f"), &dest, "the config", DOWNLOAD_STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);

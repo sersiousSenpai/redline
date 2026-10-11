@@ -264,7 +264,7 @@ impl TurnScorerState {
         }
     }
 
-    async fn install(&self, pin: &Pinned) -> Result<(), String> {
+    async fn install(&self, pin: &Pinned<'_>) -> Result<(), String> {
         let _one_at_a_time = self.download.lock().unwrap();
         let dest = self.model_path();
         if dest.exists() {
@@ -278,7 +278,7 @@ impl TurnScorerState {
             &dest,
             "the end-of-turn model",
             DOWNLOAD_STALL,
-            &|_, _| {},
+            &|_, _| true,
         )
         .await
     }

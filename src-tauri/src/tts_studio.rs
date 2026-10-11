@@ -76,8 +76,9 @@ use sha2::{Digest, Sha256};
 use tauri::ipc::{Channel, JavaScriptChannelId, Response};
 
 use crate::db::Database;
+use crate::pinned_fetch::fetch_pinned;
 use crate::tts::{
-    build_venv, ensure_uv, fetch_checked, FileCheck, TtsState, CANCELLED as STOPPED, DOWNLOAD_STALL,
+    build_venv, ensure_uv, FileCheck, TtsState, CANCELLED as STOPPED, DOWNLOAD_STALL,
 };
 
 const SETTING_MODEL: &str = "tts_studio_model";
@@ -1754,8 +1755,8 @@ impl Inner {
     /// Download `v` from `base` (Hugging Face, or a test server): the
     /// `shared` files into `models/shared`, linked into the variant, and its
     /// own files. A file already there at its published size was verified on
-    /// the way in. A dropped connection is resumed twice before the install
-    /// gives up.
+    /// the way in. A dropped connection is resumed twice (`fetch_pinned`)
+    /// before the install gives up.
     async fn fetch_model(
         &self,
         v: &Variant,
@@ -1783,29 +1784,15 @@ impl Inner {
             }
             let url = format!("{base}{}/resolve/{}/{path}", v.repo, v.revision);
             let what = format!("the studio voice's {path}");
-            let mut tries = 0;
-            loop {
-                let fetched = fetch_checked(
-                    &self.http,
-                    &url,
-                    dest,
-                    &what,
-                    *check,
-                    DOWNLOAD_STALL,
-                    &|r, _| self.progress("model", done + r, total),
-                )
-                .await;
-                match fetched {
-                    Err(e)
-                        if tries < 2
-                            && self.going()
-                            && !e.contains("wasn't the published file") =>
-                    {
-                        tries += 1
-                    }
-                    other => break other?,
-                }
-            }
+            fetch_pinned(
+                &self.http,
+                &check.at(&url),
+                dest,
+                &what,
+                DOWNLOAD_STALL,
+                &|r, _| self.progress("model", done + r, total),
+            )
+            .await?;
             done += check.bytes;
             self.progress("model", done, total);
         }
@@ -3476,12 +3463,11 @@ for line in sys.stdin:
             from.fetch_min(r, Ordering::SeqCst);
             true
         };
-        fetch_checked(
+        fetch_pinned(
             &reqwest::Client::new(),
-            &url,
+            &check.at(&url),
             &dest,
             "the tokenizer",
-            check,
             DOWNLOAD_STALL,
             &note,
         )

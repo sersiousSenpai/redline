@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! One verified download of a model file the app fetches on first use (the
-//! Whisper models today; meant to carry the Kokoro and studio-voice files
-//! too). The file streams into a `.part` beside its destination and is renamed
-//! into place only once it is byte-for-byte the published file: its size and
-//! SHA-256 are pinned in the code that asks for it.
+//! One verified download of a file the app fetches on first use: the local
+//! voices' models (Kokoro's and the studio voice's), the uv that builds their
+//! Python, the Whisper models and the end-of-turn model. The file streams into
+//! a `.part` beside its destination and is renamed into place only once it is
+//! byte-for-byte the published file: its size and SHA-256 are pinned in the
+//! code that asks for it.
 //!
 //! What it adds over a plain streamed fetch is **resume**. A dropped or stalled
 //! connection keeps the `.part`; the next attempt (a retry inside the same
 //! call, or a later click) hashes what is already on disk and asks the server
-//! for the rest with an HTTP `Range` request. A server that ignores the range
-//! starts the file over, and a `.part` that can't be the published file (too
-//! long, or wrong once complete) is deleted, so a bad half file never sticks.
+//! for the rest with an HTTP `Range` request. Each attempt asks for the pinned
+//! URL itself, never one it was once redirected to: a model host redirects to
+//! a signed link that expires. A server that ignores the range starts the
+//! file over, and a `.part` that can't be the published file (too long, or
+//! wrong once complete) is deleted, so a bad half file never sticks.
 //!
 //! The file work is plain `std::fs`, not the runtime's async files: writing a
 //! received chunk takes microseconds, and each async file operation would
@@ -26,13 +29,15 @@ use reqwest::header::{CONTENT_RANGE, RANGE};
 use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 
+use crate::tts::CANCELLED;
+
 /// What a download must come to before it replaces anything: where it is
 /// published, its size, and the SHA-256 the host publishes for it.
 #[derive(Clone, Copy, Debug)]
-pub struct Pinned {
-    pub url: &'static str,
+pub struct Pinned<'a> {
+    pub url: &'a str,
     pub bytes: u64,
-    pub sha256: &'static str,
+    pub sha256: &'a str,
 }
 
 /// Report progress roughly every megabyte, so a bar moves without flooding
@@ -51,15 +56,17 @@ pub fn part_path(dest: &Path) -> PathBuf {
 /// Download `pin` to `dest`, resuming a `.part` left by an earlier attempt.
 /// `what` names the file in errors ("the Whisper model"). `stall` gives up an
 /// attempt that goes that long without a response or a byte. `progress` gets
-/// `(received, total)`, counting bytes resumed from disk as received. It is a
-/// `dyn` callback so every caller shares one copy of this state machine.
+/// `(received, total)`, counting bytes resumed from disk as received; its
+/// returning false stops the download with exactly `tts::CANCELLED`, the
+/// `.part` kept to resume (an install the user cancelled). It is a `dyn`
+/// callback so every caller shares one copy of this state machine.
 pub async fn fetch_pinned(
     http: &reqwest::Client,
-    pin: &Pinned,
+    pin: &Pinned<'_>,
     dest: &Path,
     what: &str,
     stall: Duration,
-    progress: &(dyn Fn(u64, u64) + Send + Sync),
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> Result<(), String> {
     let part = part_path(dest);
     let mut last = String::new();
@@ -71,6 +78,7 @@ pub async fn fetch_pinned(
             // Not the published file: it was discarded, and fetching the same
             // bytes again won't change that.
             Err(Failure::Wrong(e)) => return Err(e),
+            Err(Failure::Stopped) => return Err(CANCELLED.to_string()),
             Err(Failure::Retry(e)) => last = e,
         }
     }
@@ -82,15 +90,17 @@ enum Failure {
     Retry(String),
     /// The bytes are not the published file; the `.part` was deleted.
     Wrong(String),
+    /// `progress` asked to stop; the `.part` is kept to resume.
+    Stopped,
 }
 
 async fn attempt(
     http: &reqwest::Client,
-    pin: &Pinned,
+    pin: &Pinned<'_>,
     part: &Path,
     what: &str,
     stall: Duration,
-    progress: &(dyn Fn(u64, u64) + Send + Sync),
+    progress: &(dyn Fn(u64, u64) -> bool + Sync),
 ) -> Result<(), Failure> {
     let retry = |e: String| Failure::Retry(e);
     let stalled = || Failure::Retry(format!("downloading {what} stalled — try again"));
@@ -144,7 +154,9 @@ async fn attempt(
             have += chunk.len() as u64;
             if have - last_report >= PROGRESS_STEP {
                 last_report = have;
-                progress(have, pin.bytes);
+                if !progress(have, pin.bytes) {
+                    return Err(Failure::Stopped);
+                }
             }
         }
         progress(have, pin.bytes);
@@ -163,7 +175,7 @@ async fn attempt(
 /// Where a download picks up: the hash and length of a `.part` an earlier
 /// attempt left, or a fresh start. A `.part` longer than the published file
 /// can't be resumed into it, so it is deleted.
-fn resume_point(pin: &Pinned, part: &Path) -> Result<(Sha256, u64), String> {
+fn resume_point(pin: &Pinned<'_>, part: &Path) -> Result<(Sha256, u64), String> {
     let mut hasher = Sha256::new();
     let Ok(mut file) = std::fs::File::open(part) else {
         return Ok((hasher, 0));
@@ -210,7 +222,7 @@ mod tests {
 
     const BODY: &[u8] = b"weights for a model that is exactly this long, nothing more";
 
-    fn pin_for(url: String, body: &[u8]) -> Pinned {
+    fn pin_for(url: String, body: &[u8]) -> Pinned<'static> {
         Pinned {
             url: Box::leak(url.into_boxed_str()),
             bytes: body.len() as u64,
@@ -299,7 +311,8 @@ mod tests {
         let (url, seen) = serve(BODY, vec![Answer::Ranged]);
         let reports = Mutex::new(Vec::new());
         fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|r, t| {
-            reports.lock().unwrap().push((r, t))
+            reports.lock().unwrap().push((r, t));
+            true
         })
         .await
         .unwrap();
@@ -318,6 +331,7 @@ mod tests {
         let first = Mutex::new(None);
         fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|r, _| {
             first.lock().unwrap().get_or_insert(r);
+            true
         })
         .await
         .unwrap();
@@ -330,7 +344,7 @@ mod tests {
     async fn a_dropped_connection_keeps_its_bytes_and_the_retry_resumes_them() {
         let dest = scratch("dropped");
         let (url, seen) = serve(BODY, vec![Answer::CutAt(25), Answer::Ranged]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -342,7 +356,7 @@ mod tests {
         let dest = scratch("ignored-range");
         std::fs::write(part_path(&dest), &BODY[..20]).unwrap();
         let (url, _) = serve(BODY, vec![Answer::IgnoreRange]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY, "not the kept bytes plus a second copy");
@@ -354,7 +368,7 @@ mod tests {
         let (url, seen) = serve(BODY, vec![Answer::Ranged, Answer::Ranged]);
         let mut pin = pin_for(url, BODY);
         pin.sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
-        let err = fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| {})
+        let err = fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| true)
             .await
             .unwrap_err();
         assert!(err.contains("wasn't the published file"), "{err}");
@@ -364,11 +378,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_download_asked_to_stop_keeps_its_bytes_for_the_next_try() {
+        let dest = scratch("stopped");
+        let body: &'static [u8] = Box::leak(vec![7u8; 3 * PROGRESS_STEP as usize].into_boxed_slice());
+        let (url, seen) = serve(body, vec![Answer::Ranged, Answer::Ranged]);
+        let pin = pin_for(url, body);
+        let err = fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|r, _| r < PROGRESS_STEP)
+            .await
+            .unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert_eq!(seen.lock().unwrap().len(), 1, "a stop is not retried");
+        assert!(!dest.exists());
+        let kept = std::fs::metadata(part_path(&dest)).unwrap().len();
+        assert!(kept >= PROGRESS_STEP, "{kept}");
+        // The next try picks up where it stopped.
+        fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| true)
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap()[1], kept.to_string());
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[tokio::test]
     async fn a_part_longer_than_the_published_file_is_thrown_away_first() {
         let dest = scratch("too-long");
         std::fs::write(part_path(&dest), [BODY, b"and then some"].concat()).unwrap();
         let (url, seen) = serve(BODY, vec![Answer::Ranged]);
-        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin_for(url, BODY), &dest, "the model", STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);
@@ -380,7 +416,7 @@ mod tests {
         let dest = scratch("complete-part");
         std::fs::write(part_path(&dest), BODY).unwrap();
         let pin = pin_for("http://127.0.0.1:9/never".to_string(), BODY);
-        fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| {})
+        fetch_pinned(&reqwest::Client::new(), &pin, &dest, "the model", STALL, &|_, _| true)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), BODY);

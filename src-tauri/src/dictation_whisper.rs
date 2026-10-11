@@ -74,7 +74,7 @@ pub struct WhisperModel {
     /// The setting value and the id the frontend uses.
     pub id: &'static str,
     file: &'static str,
-    pin: Pinned,
+    pin: Pinned<'static>,
 }
 
 /// Both files come from the whisper.cpp project's model repository, at one
@@ -562,7 +562,10 @@ async fn install(whisper: &WhisperState, app: &AppHandle, model: &'static Whispe
             &dest,
             "the Whisper model",
             DOWNLOAD_STALL,
-            &|received, total| emit("model", received, total),
+            &|received, total| {
+                emit("model", received, total);
+                true
+            },
         )
         .await?;
         emit("done", 0, 0);
