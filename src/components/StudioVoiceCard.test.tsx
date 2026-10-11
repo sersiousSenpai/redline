@@ -4,7 +4,7 @@
 // The studio voice's settings card against a scripted `tts_studio`: what it
 // costs, what this Mac lacks in words, the install from first byte to "Studio
 // voice ready." (cancelled and resumed on the way), the previews, the model,
-// and the way back out.
+// the way back out, and the local dictation polish beside it.
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ const { rust, handlers, samples } = vi.hoisted(() => ({
     calls: [] as Array<[string, Args]>,
     status: {} as Record<string, unknown>,
     preflight: {} as Record<string, unknown>,
+    polishPreflight: {} as Record<string, unknown>,
   },
   handlers: new Map<string, Array<(e: { payload: unknown }) => void>>(),
   samples: [] as Array<{ voice: string; text: string; onEnd: (e?: string) => void; stop: () => void }>,
@@ -24,7 +25,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string, args: Args = {}) => {
     rust.calls.push([cmd, args]);
     if (args.op === "status") return { ...rust.status };
-    if (args.op === "preflight") return { ...rust.preflight };
+    if (args.op === "preflight") {
+      const polish = (args.args as Args).model === "polish/Qwen3.5-2B-4bit";
+      return { ...(polish ? rust.polishPreflight : rust.preflight) };
+    }
     return null;
   }),
 }));
@@ -49,6 +53,7 @@ import { StudioVoiceCard, type StudioPrefs } from "./StudioVoiceCard";
 
 const EIGHT = "1.7B-CustomVoice-8bit";
 const FOUR = "1.7B-CustomVoice-4bit";
+const POLISH = "polish/Qwen3.5-2B-4bit";
 let host: HTMLDivElement;
 let root: Root;
 let prefs: StudioPrefs;
@@ -88,7 +93,7 @@ beforeEach(() => {
     models: null,
     runtimeCurrent: false,
     state: "off",
-    installing: false,
+    installing: null,
     speedRatio: null,
     slow: false,
   };
@@ -100,6 +105,7 @@ beforeEach(() => {
     needDiskBytes: 4.5e9,
     needMemoryBytes: 4.2e9,
   };
+  rust.polishPreflight = { ...rust.preflight, needDiskBytes: 2.5e9, needMemoryBytes: 1.9e9, needRamBytes: 8e9 };
   handlers.clear();
   samples.length = 0;
   errors.length = 0;
@@ -154,7 +160,8 @@ describe("StudioVoiceCard", () => {
     expect(button("Install the studio voice")!.disabled).toBe(true);
     rust.calls.length = 0;
     await act(async () => button("Check again")!.click());
-    expect(ops()).toEqual(["status", "preflight"]);
+    // The voice's check, and the local polish's.
+    expect(ops()).toEqual(["status", "preflight", "preflight"]);
   });
 
   it("ends an install warm, saying so in the chosen voice, and then offers each voice to hear", async () => {
@@ -216,6 +223,58 @@ describe("StudioVoiceCard", () => {
     expect(ops()).toContain("remove");
   });
 
+  it("offers local polish as a download of its own, installed beside the voice", async () => {
+    await render();
+    const row = () => host.querySelector("[data-studio-polish]")!.textContent!;
+    expect(row()).toContain("Polish dictation locally — 1.7 GB download, about 1.9 GB of memory while in use");
+    await act(async () => button("Install local polish (1.7 GB)")!.click());
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "install", args: { polish: true } }]);
+    await fire("studio-setup", { phase: "model", received: 0.87e9, total: 1.74e9, polish: true });
+    const bar = host.querySelector('[role=progressbar][aria-label="Local polish install"]')!;
+    expect(bar.getAttribute("aria-valuenow")).toBe("50");
+    expect(row()).toContain("Downloading the polish model… 0.9 GB of 1.7 GB");
+    // The voice's install isn't the one running, and waits for it.
+    expect(host.querySelector('[aria-label="Studio voice install"]')).toBeNull();
+    expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(true);
+    rust.status = { ...rust.status, runtimeCurrent: true, models: { [POLISH]: {} } };
+    await fire("studio-setup", { phase: "done", polish: true });
+    await flush();
+    expect(samples).toEqual([]);
+    expect(row()).toContain("✓ Dictation is polished on this Mac");
+    expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(false);
+  });
+
+  it("shows a local polish install it reopens on in the polish row", async () => {
+    rust.status = { ...rust.status, installing: POLISH };
+    await render();
+    expect(host.querySelector('[role=progressbar][aria-label="Local polish install"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Studio voice install"]')).toBeNull();
+    expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(true);
+  });
+
+  it("puts what this Mac lacks for local polish in its own words", async () => {
+    rust.polishPreflight = { ...rust.polishPreflight, blockers: ["ram"], ramBytes: 4e9 };
+    await render();
+    expect(host.querySelector("[data-studio-polish]")!.textContent).toContain(
+      "Needs 8.0 GB of memory; this Mac has 4.0 GB.",
+    );
+    expect(button("Install local polish (1.7 GB)")!.disabled).toBe(true);
+    expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(false);
+  });
+
+  it("removes only local polish, after asking", async () => {
+    rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render();
+    await act(async () => button("Remove local polish…")!.click());
+    expect(host.textContent).toContain("Remove local polish (1.7 GB)?");
+    expect(button("Remove the studio voice…")).toBeDefined();
+    const confirm = host.querySelector<HTMLButtonElement>('[aria-label="Remove local polish"] button')!;
+    expect(confirm.textContent).toBe("Remove");
+    await act(async () => confirm.click());
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "remove", args: { polish: true } }]);
+    expect(ops().filter((o) => o === "remove")).toHaveLength(1);
+  });
+
   it("credits what it downloads, with the licenses the audit corrected", async () => {
     await render();
     const about = host.querySelector("details")!.textContent!;
@@ -223,5 +282,6 @@ describe("StudioVoiceCard", () => {
     expect(about).toContain("GCC runtime libraries (GPL-3.0-or-later with the GCC runtime library exception)");
     expect(about).toContain("libquadmath (LGPL-2.1-or-later)");
     expect(about).toContain("BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0");
+    expect(about).toContain("Qwen3.5-2B by the Qwen team (Apache-2.0)");
   });
 });

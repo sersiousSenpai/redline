@@ -18,8 +18,9 @@
 //      background, the Discuss pill showing that a reply is coming. Turns are
 //      never cleaned up. Nothing moves focus, and nothing opens the panel.
 //   3. Kept words then get the AI polish where their composer asks for it
-//      (dictationPolish.ts), and for a while any word the user corrects is
-//      learned (vocabLearn.ts).
+//      (dictationPolish.ts; a local model warms for it as the capture
+//      starts), and for a while any word the user corrects is learned
+//      (vocabLearn.ts).
 //   4. Esc cancels; another gesture taking the mic — the voice panel's, or
 //      another composer's mic button — keeps the words heard so far, and so
 //      does a composer that closes mid-capture (lib/dictationComposer.ts).
@@ -34,7 +35,7 @@ import { composerGone, setDictationLive } from "../lib/dictationComposer";
 import { quietFor } from "./audible";
 import { broker as appBroker, type DictationBroker } from "./dictationBroker";
 import { cleanupDictation, fitToContext, spokenBreaks } from "./dictationCleanup";
-import { cleanupChild, polished, polishEnabled, POLISH_SETTLE_MS, wantsPolish, type PolishEngine } from "./dictationPolish";
+import { polished, polishEnabled, polishEngine, POLISH_SETTLE_MS, wantsPolish, type PolishEngine } from "./dictationPolish";
 import {
   canSend,
   composerAt,
@@ -183,6 +184,9 @@ export class DictationHost {
     };
     this.session = s;
     this.levels = [];
+    // Words for a composer that polishes: the local model loads, and builds
+    // its prompt for this vocabulary, while the user is still speaking.
+    if (s.composer?.spec.polish && polishEnabled()) this.deps.polish.warm?.(vocab);
     setDictationLive(targetElement(target));
     const verb = !turn ? "insert" : talk ? "send" : "copy";
     strip.set({
@@ -516,7 +520,7 @@ function ensure(): DictationHost {
     conversation: () => conversation(),
     taker: () => taker,
     invoke,
-    polish: cleanupChild,
+    polish: polishEngine,
   });
   host = h;
   h.hotkey.attach(window);

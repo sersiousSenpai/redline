@@ -183,6 +183,16 @@ try {
   const plays = await cdp.evaluate("[...document.querySelectorAll('[data-studio-card] button[aria-label^=\"Play a sample\"]')].map(b => { const r = b.getBoundingClientRect(); return { w: r.width, h: r.height }; })");
   check("Its three previews are 24px targets", plays.length === 3 && plays.every((b) => b.w >= 24 && b.h >= 24), plays);
   await screenshot("09-studio-card");
+  const polishRow = await cdp.evaluate("document.querySelector('[data-studio-polish]')?.textContent ?? ''");
+  check("Local polish is offered as a download of its own", polishRow.includes("Polish dictation locally — 1.7 GB download, about 1.9 GB of memory while in use"), polishRow.slice(0, 120));
+  await cdp.evaluate("document.querySelector('[data-studio-polish]').scrollIntoView({ block: 'center' })"); await settle();
+  const polishInstall = await rect("[data-studio-polish] button");
+  check("…its install a 24px target", polishInstall && polishInstall.height >= 24 && polishInstall.width >= 24, polishInstall);
+  await cdp.evaluate("window.__qa.setWidth(300)"); await settle();
+  const spill = await cdp.evaluate("(() => { const c = document.querySelector('[data-studio-card]'); const right = c.getBoundingClientRect().right; return [...c.querySelectorAll('*')].filter(e => e.getBoundingClientRect().right > right + 1).map(e => e.tagName + ':' + (e.textContent ?? '').slice(0, 30)).slice(0, 5); })()");
+  check("At 300px nothing in the studio card, local polish included, spills out", spill.length === 0, spill);
+  await screenshot("09-studio-polish-300");
+  await cdp.evaluate("window.__qa.setWidth(360)"); await settle();
   await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] button')].find(b => b.textContent === 'Save').click()"); await delay(300);
   await enter("And the testing section?");
   const studioTurn = turn(await cdp.evaluate("window.__qaTurn"));

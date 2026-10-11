@@ -4,8 +4,9 @@
 // The studio voice in Voice settings: what it costs, whether this Mac can run
 // it, the install (about 3 GB, in the background, cancellable and resumable),
 // and once it is in, the voice, the style and the model, each with a ▶ to hear
-// it. Its own chunk, loaded when "Studio" is picked as the engine. Everything
-// it does goes through the one `tts_studio` command (tts_studio.rs).
+// it; and beside it, the local dictation polish, a download of its own on the
+// same runtime. Its own chunk, loaded when "Studio" is picked as the engine.
+// Everything it does goes through the one `tts_studio` command (tts_studio.rs).
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -28,7 +29,8 @@ interface Status {
   models: Record<string, { speedRatio?: number }> | null;
   runtimeCurrent: boolean;
   state: string;
-  installing: boolean;
+  /** The model an install is fetching: a voice's, or the polish model's. */
+  installing: string | null;
   speedRatio: number | null;
   slow: boolean;
 }
@@ -36,6 +38,7 @@ interface Status {
 interface Preflight {
   blockers: string[];
   ramBytes: number;
+  needRamBytes?: number;
   freeMemoryBytes: number;
   freeDiskBytes: number;
   needDiskBytes: number;
@@ -49,6 +52,8 @@ interface Setup {
   speedRatio?: number;
   slow?: boolean;
   message?: string;
+  /** The polish model's install, not the voice's. */
+  polish?: boolean;
 }
 
 const MODELS = [
@@ -68,6 +73,9 @@ const MODELS = [
   },
 ];
 
+/** The local dictation polish model (tts_studio.rs `POLISH`). */
+const POLISH = { id: "polish/Qwen3.5-2B-4bit", download: "1.7 GB", memory: "1.9 GB" };
+
 const SAMPLE =
   "Here's how I'll sound reading your plan back to you. Tell me what to change, and we'll work through it.";
 const READY = "Studio voice ready.";
@@ -79,7 +87,6 @@ const PHASES: Record<string, string> = {
   uv: "Fetching the voice toolchain…",
   python: "Downloading a private Python…",
   deps: "Installing the voice engine…",
-  model: "Downloading the voice model…",
   warm: "Warming up — the very first time takes a minute…",
   speed: "Checking how fast it speaks here…",
 };
@@ -105,17 +112,17 @@ const primary: React.CSSProperties = {
   color: "var(--color-anchor-text)",
 };
 
-/** A preflight blocker, in words. */
-function blocker(code: string, p: Preflight): string {
+/** A preflight blocker, in words; `use` is what the memory is for. */
+function blocker(code: string, p: Preflight, use: string): string {
   switch (code) {
     case "unsupported":
       return "Needs a Mac with Apple Silicon on macOS 14 or later.";
     case "ram":
-      return `Needs 16 GB of memory; this Mac has ${gb(p.ramBytes)}.`;
+      return `Needs ${gb(p.needRamBytes ?? 16e9)} of memory; this Mac has ${gb(p.ramBytes)}.`;
     case "disk":
       return `Needs ${gb(p.needDiskBytes)} of free disk; ${gb(p.freeDiskBytes)} is free.`;
     case "memory":
-      return `Needs about ${gb(p.needMemoryBytes)} of free memory to speak; ${gb(p.freeMemoryBytes)} is free right now. Quit something heavy, then check again.`;
+      return `Needs about ${gb(p.needMemoryBytes)} of free memory to ${use}; ${gb(p.freeMemoryBytes)} is free right now. Quit something heavy, then check again.`;
     default:
       return code;
   }
@@ -133,7 +140,10 @@ export function StudioVoiceCard({
   const [status, setStatus] = useState<Status | null>(null);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [setup, setSetup] = useState<Setup | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [polishPreflight, setPolishPreflight] = useState<Preflight | null>(null);
+  const [polishSetup, setPolishSetup] = useState<Setup | null>(null);
+  /** Which install a Remove is being asked about. */
+  const [confirmRemove, setConfirmRemove] = useState<"voice" | "polish" | null>(null);
   const [sampling, setSampling] = useState<string | null>(null);
   const stopSample = useRef<(() => void) | null>(null);
   const prefsRef = useRef(prefs);
@@ -145,6 +155,9 @@ export function StudioVoiceCard({
       .catch(() => {});
     void invoke<Preflight>("tts_studio", { op: "preflight", args: { model } })
       .then(setPreflight)
+      .catch(() => {});
+    void invoke<Preflight>("tts_studio", { op: "preflight", args: { model: POLISH.id } })
+      .then(setPolishPreflight)
       .catch(() => {});
   };
 
@@ -168,11 +181,11 @@ export function StudioVoiceCard({
     const subs = [
       listen<Setup>("studio-setup", (e) => {
         const s = e.payload;
-        setSetup(s);
+        (s.polish ? setPolishSetup : setSetup)(s);
         if (s.phase !== "done" && s.phase !== "error") return;
         refresh();
         // The install ends warm: say so in the voice the user is choosing.
-        if (s.phase === "done") sample(prefsRef.current.voice, READY);
+        if (s.phase === "done" && !s.polish) sample(prefsRef.current.voice, READY);
       }),
       listen("studio-status", () => refresh()),
     ];
@@ -184,9 +197,12 @@ export function StudioVoiceCard({
   }, []);
 
   const model = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
-  const installing =
-    !!status?.installing ||
-    (!!setup && setup.phase !== "done" && setup.phase !== "error");
+  const running = (s: Setup | null) => !!s && s.phase !== "done" && s.phase !== "error";
+  const installing = (!!status?.installing && status.installing !== POLISH.id) || running(setup);
+  const polishing = status?.installing === POLISH.id || running(polishSetup);
+  const polishInstalled = !!status?.runtimeCurrent && !!status.models?.[POLISH.id] && !polishing;
+  // One install at a time: the other's button waits.
+  const busy = installing || polishing;
   const installed = !!status?.runtimeCurrent && !!status.models?.[model.id];
   const stoppedEarly = setup?.phase === "error" ? setup.message ?? "" : null;
   const speed = status?.models?.[model.id]?.speedRatio ?? null;
@@ -213,21 +229,111 @@ export function StudioVoiceCard({
       .catch((e) => onError(String(e)));
   };
 
-  const remove = () => {
-    setConfirmRemove(false);
-    stopSample.current?.();
-    void invoke("tts_studio", { op: "remove" })
+  const installPolish = () => {
+    setPolishSetup({ phase: "preflight", polish: true });
+    void invoke("tts_studio", { op: "install", args: { polish: true } }).catch((e) => {
+      setPolishSetup(null);
+      onError(String(e));
+    });
+  };
+
+  const remove = (what: "voice" | "polish") => {
+    setConfirmRemove(null);
+    if (what === "voice") stopSample.current?.();
+    void invoke("tts_studio", what === "polish" ? { op: "remove", args: { polish: true } } : { op: "remove" })
       .then(() => {
-        setSetup(null);
+        (what === "polish" ? setPolishSetup : setSetup)(null);
         refresh();
       })
       .catch((e) => onError(String(e)));
   };
 
-  const pct =
-    setup?.phase === "model" && setup.total
-      ? Math.min(100, ((setup.received ?? 0) / setup.total) * 100)
-      : null;
+  const confirm = (what: "voice" | "polish", ask: string, offer: string) =>
+    confirmRemove === what ? (
+      <div className="flex items-center gap-2" role="group" aria-label={offer.replace("…", "")}>
+        <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>{ask}</span>
+        <button type="button" onClick={() => remove(what)} style={button}>
+          Remove
+        </button>
+        <button type="button" onClick={() => setConfirmRemove(null)} style={button}>
+          Keep
+        </button>
+      </div>
+    ) : (
+      <button type="button" onClick={() => setConfirmRemove(what)} style={button}>
+        {offer}
+      </button>
+    );
+
+  const percent = (s: Setup | null) =>
+    s?.phase === "model" && s.total ? Math.min(100, ((s.received ?? 0) / s.total) * 100) : null;
+
+  /** An install's progress: the bar, what it is doing, and Cancel. */
+  const progress = (s: Setup | null, label: string, fetching: string) => {
+    const pct = percent(s);
+    return (
+      <div className="flex flex-col gap-1">
+        <div
+          role="progressbar"
+          aria-label={label}
+          aria-valuenow={pct === null ? undefined : Math.round(pct)}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          style={{ height: "6px", borderRadius: "3px", background: "var(--color-rule)", overflow: "hidden" }}
+        >
+          <div
+            style={{
+              height: "100%",
+              width: pct === null ? "40%" : `${pct}%`,
+              background: "var(--color-anchor-text)",
+              transition: "width 200ms ease",
+            }}
+          />
+        </div>
+        <span style={muted}>
+          {s?.phase === "model" ? fetching : PHASES[s?.phase ?? ""] ?? "Working…"}
+          {pct !== null && s?.total ? ` ${gb(s.received ?? 0)} of ${gb(s.total)}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => void invoke("tts_studio", { op: "cancel" }).catch(() => {})}
+          style={button}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  };
+  /** What this Mac lacks for an install (`use`: what its memory is for), or
+   *  that it can run it. */
+  const fits = (p: Preflight | null, use: string) =>
+    p && p.blockers.length > 0 ? (
+      <>
+        {p.blockers.map((b) => (
+          <span key={b} style={{ ...muted, color: "var(--color-warning)" }}>
+            {blocker(b, p, use)}
+          </span>
+        ))}
+        {p.blockers.includes("memory") && (
+          <button type="button" onClick={() => refresh()} style={button}>
+            Check again
+          </button>
+        )}
+      </>
+    ) : (
+      p && (
+        <span style={muted}>
+          ✓ This Mac can run it: {gb(p.freeDiskBytes)} of disk and {gb(p.freeMemoryBytes)} of memory free.
+        </span>
+      )
+    );
+  const stoppedNote = (message: string) => (
+    <span style={muted}>
+      {message === "cancelled"
+        ? "Install paused. What it downloaded is kept."
+        : `The install stopped: ${message}`}
+    </span>
+  );
 
   return (
     <div className="flex flex-col gap-3" data-studio-card>
@@ -279,75 +385,17 @@ export function StudioVoiceCard({
         </div>
       ) : (
         <div className="flex flex-col gap-1.5">
-          {preflight && preflight.blockers.length > 0 ? (
-            <>
-              {preflight.blockers.map((b) => (
-                <span key={b} style={{ ...muted, color: "var(--color-warning)" }}>
-                  {blocker(b, preflight)}
-                </span>
-              ))}
-              {preflight.blockers.includes("memory") && (
-                <button type="button" onClick={() => refresh()} style={button}>
-                  Check again
-                </button>
-              )}
-            </>
-          ) : (
-            preflight && (
-              <span style={muted}>
-                ✓ This Mac can run it: {gb(preflight.freeDiskBytes)} of disk and{" "}
-                {gb(preflight.freeMemoryBytes)} of memory free.
-              </span>
-            )
-          )}
-
+          {fits(preflight, "speak")}
           {installing ? (
-            <div className="flex flex-col gap-1">
-              <div
-                role="progressbar"
-                aria-label="Studio voice install"
-                aria-valuenow={pct === null ? undefined : Math.round(pct)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                style={{ height: "6px", borderRadius: "3px", background: "var(--color-rule)", overflow: "hidden" }}
-              >
-                <div
-                  style={{
-                    height: "100%",
-                    width: pct === null ? "40%" : `${pct}%`,
-                    background: "var(--color-anchor-text)",
-                    transition: "width 200ms ease",
-                  }}
-                />
-              </div>
-              <span style={muted}>
-                {PHASES[setup?.phase ?? ""] ?? "Working…"}
-                {pct !== null && setup?.total
-                  ? ` ${gb(setup.received ?? 0)} of ${gb(setup.total)}`
-                  : ""}
-              </span>
-              <button
-                type="button"
-                onClick={() => void invoke("tts_studio", { op: "cancel" }).catch(() => {})}
-                style={button}
-              >
-                Cancel
-              </button>
-            </div>
+            progress(setup, "Studio voice install", "Downloading the voice model…")
           ) : (
             <>
-              {stoppedEarly !== null && (
-                <span style={muted}>
-                  {stoppedEarly === "cancelled"
-                    ? "Install paused. What it downloaded is kept."
-                    : `The install stopped: ${stoppedEarly}`}
-                </span>
-              )}
+              {stoppedEarly !== null && stoppedNote(stoppedEarly)}
               <button
                 type="button"
                 onClick={install}
-                disabled={!!preflight?.blockers.length}
-                style={{ ...primary, opacity: preflight?.blockers.length ? 0.5 : 1 }}
+                disabled={!!preflight?.blockers.length || busy}
+                style={{ ...primary, opacity: preflight?.blockers.length || busy ? 0.5 : 1 }}
               >
                 {stoppedEarly !== null ? "Resume install" : `Install the studio voice (${model.download})`}
               </button>
@@ -423,25 +471,39 @@ export function StudioVoiceCard({
         </span>
       </label>
 
-      {installed && !installing && (
-        confirmRemove ? (
-          <div className="flex items-center gap-2" role="group" aria-label="Remove the studio voice">
-            <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>
-              Remove the studio voice and everything it downloaded?
-            </span>
-            <button type="button" onClick={remove} style={button}>
-              Remove
-            </button>
-            <button type="button" onClick={() => setConfirmRemove(false)} style={button}>
-              Keep
-            </button>
-          </div>
+      {installed &&
+        !busy &&
+        confirm("voice", "Remove the studio voice and everything it downloaded?", "Remove the studio voice…")}
+
+      <div className="flex flex-col gap-1.5" data-studio-polish>
+        <span style={label}>Dictation polish</span>
+        <span style={muted}>
+          Polish dictation locally — {POLISH.download} download, about {POLISH.memory} of
+          memory while in use. Longer dictations are then tidied on this Mac by a small
+          model, and their words never leave it.
+        </span>
+        {polishInstalled ? (
+          <>
+            <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>✓ Dictation is polished on this Mac</span>
+            {confirm("polish", `Remove local polish (${POLISH.download})?`, "Remove local polish…")}
+          </>
+        ) : polishing ? (
+          progress(polishSetup, "Local polish install", "Downloading the polish model…")
         ) : (
-          <button type="button" onClick={() => setConfirmRemove(true)} style={button}>
-            Remove the studio voice…
-          </button>
-        )
-      )}
+          <>
+            {fits(polishPreflight, "polish")}
+            {polishSetup?.phase === "error" && stoppedNote(polishSetup.message ?? "")}
+            <button
+              type="button"
+              onClick={installPolish}
+              disabled={!!polishPreflight?.blockers.length || busy}
+              style={{ ...button, opacity: polishPreflight?.blockers.length || busy ? 0.5 : 1 }}
+            >
+              {polishSetup?.phase === "error" ? "Resume install" : `Install local polish (${POLISH.download})`}
+            </button>
+          </>
+        )}
+      </div>
 
       <details style={muted}>
         <summary style={{ cursor: "pointer" }}>About the studio voice</summary>
@@ -460,6 +522,11 @@ export function StudioVoiceCard({
           the GCC runtime library exception) and libquadmath (LGPL-2.1-or-later),
           downloaded as scipy publishes them. Every file is pinned by its SHA-256; the
           full list is VOICE_ENGINE_NOTICES.md in Redline's source.
+        </p>
+        <p style={{ marginTop: "6px" }}>
+          Local polish uses Qwen3.5-2B by the Qwen team (Apache-2.0), converted for MLX
+          by mlx-community (Apache-2.0), through mlx-lm (MIT) with Jinja2 and MarkupSafe
+          (BSD-3-Clause).
         </p>
       </details>
     </div>
