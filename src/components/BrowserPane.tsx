@@ -773,6 +773,15 @@ function BrowserPaneBase({
   // workspace to return to when it closes (regular browsing or a mission).
   const [mosaicsOpen, setMosaicsOpen] = useState(false);
   const [mosaicList, setMosaicList] = useState<MosaicSummary[] | null>(null);
+  // A deleted mission's or mosaic's shared chat is forgotten once its list
+  // has loaded and says so; the persisted map holds only live workspaces.
+  useEffect(() => {
+    dispatchChat({
+      type: "workspaces-listed",
+      missions: mission.missionsLoaded ? mission.missions.map((m) => m.missionId) : null,
+      mosaics: mosaicList?.map((m) => m.id) ?? null,
+    });
+  }, [mission.missionsLoaded, mission.missions, mosaicList, dispatchChat]);
   const [mosaicError, setMosaicError] = useState<string | null>(null);
   const [mosaicEdit, setMosaicEdit] = useState<{ draft: MosaicDraft; previous: Mosaic | null } | null>(null);
   const [activeMosaic, setActiveMosaic] = useState<Mosaic | null>(null);

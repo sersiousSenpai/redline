@@ -280,6 +280,15 @@ describe("linked mode decides tab chat vs shared chat", () => {
     expect(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!)).toEqual({ regular: "kept" });
   });
 
+  it("forgets the shared chat of a mission that no longer exists, and keeps a mosaic's until their list says", async () => {
+    linkedModeOn();
+    mocks.mission = { missions: [{ missionId: "m-live", title: "Live" }] };
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "m-live": "a", "m-gone": "b", "mosaic:grid": "c" }));
+    await mount();
+    expect(conversation()).toBe("kept");
+    expect(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!)).toEqual({ regular: "kept", "m-live": "a", "mosaic:grid": "c" });
+  });
+
   it("opens a link from a reply beside the conversation, and selects a page that is already open", async () => {
     await mount();
     document.body.dataset.link = "https://three.test/";
