@@ -16,17 +16,48 @@ import { isChipPressed, surfaceChips, toggleChip, visibleChips, type ChipPresses
 import type { SurfaceInfo } from "../../src/lib/activeSurface";
 import type { BackendChoice } from "../../src/lib/backendChoice";
 import type { DoorRecent } from "../../src/lib/doorRecents";
+import type { ThemeName } from "../../src/theme/themes";
 import "../../src/styles.css";
 import "./fixture.css";
+// `?recents=long|vlong` swaps in titles as long as real ones run, `?shell=1`
+// puts a sessions sidebar beside the plate and opens the terminal dock under
+// it, and `?theme=` boots another theme.
+const query = new URLSearchParams(location.search);
 const noop = () => {};
 // The composer's text lives in the shared draft, as it does in App.
 const setText = (text: string) => writeSharedDraft(FRONT_DOOR_TEXT_KEY, text);
-const recents: DoorRecent[] = [
+const SHORT: DoorRecent[] = [
   { kind: "plan", id: "s1", label: "Auth rewrite", detail: "Plan · redline — Auth rewrite" },
   { kind: "plan", id: "s2", label: "Billing export v2", detail: "Plan · redline — Billing export v2" },
   { kind: "chat", id: "qa", label: "Redline Aurora", detail: "Chat — Redline Aurora" },
-  ...Array.from({ length: 6 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Research page ${i + 1} — a long title about gaussian splats and lidar`, detail: "", url: `https://example.test/${i}` })),
+  ...Array.from({ length: 6 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Research page ${i + 1} — a long title about gaussian splats and lidar`, detail: "", url: `https://example.test/${i}`, host: "example.test" })),
 ];
+const PAGES: [string, string][] = [
+  ["Qwen3-TTS-12Hz-1.7B-CustomVoice · Hugging Face", "https://huggingface.co/Qwen/Qwen3-TTS"],
+  ["field-sizing - CSS: Cascading Style Sheets | MDN", "https://developer.mozilla.org/en-US/docs/Web/CSS/field-sizing"],
+  ["WebKit Features in Safari 26.0 | WebKit", "https://webkit.org/blog/17333/"],
+  ["Parakeet TDT 0.6B v3 — model card and benchmarks", "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3"],
+  ["Tauri 2 — Window customization", "https://v2.tauri.app/learn/window-customization/"],
+  ["Calm technology: principles for designing quiet interfaces", "https://calmtech.com/"],
+  ["LiDAR-GS: real-time gaussian splatting from lidar sweeps", "https://github.com/x/lidar-gs"],
+  ["Kokoro-82M · Hugging Face", "https://huggingface.co/hexgrad/Kokoro-82M"],
+];
+const pages: DoorRecent[] = PAGES.map(([label, url], i) => ({ kind: "browse", id: `b${i}`, label, detail: "", url, host: new URL(url).hostname.replace(/^www\./, "") }));
+const LONG: DoorRecent[] = [
+  { kind: "plan", id: "s1", label: "Front Door polish: drop the plan chip, restore the recents and the focus zoom", detail: "Plan · redline — Front Door polish" },
+  { kind: "plan", id: "s2", label: "Voice runtime: keep barge-in from killing the warm session", detail: "Plan · redline — Voice runtime" },
+  { kind: "chat", id: "qa", label: "Should the composer pill say what it does?", detail: "Chat — Should the composer pill say what it does?" },
+  { kind: "chat", id: "c2", label: "Kokoro vs Qwen3-TTS", detail: "Chat — Kokoro vs Qwen3-TTS" },
+  ...pages,
+];
+const VLONG: DoorRecent[] = [
+  { kind: "plan", id: "s1", label: "MachineOS Desk: native LiDAR capture, gaussian-splat preview and the calibration loop for the second sensor head", detail: "Plan · machineos — MachineOS Desk" },
+  { kind: "plan", id: "s2", label: "Auth rewrite", detail: "Plan · redline — Auth rewrite" },
+  { kind: "chat", id: "qa", label: "Why does the pill say Redline?", detail: "Chat — Why does the pill say Redline?" },
+  ...pages,
+];
+const recents = query.get("recents") === "long" ? LONG : query.get("recents") === "vlong" ? VLONG : SHORT;
+const shell = query.get("shell") === "1";
 const surfaceOf = (name: string): SurfaceInfo => ({
   kind: name === "Document" ? "plan" : name === "Browser" ? "browser" : "welcome",
   id: name === "Document" ? "s1" : null, label: name === "Document" ? "Auth rewrite" : null, detail: null, projectPath: null, updatedAt: 0,
@@ -38,7 +69,7 @@ function Fixture() {
   const openChat = (id: string) => { setChatId(id); setChatInRoom(true); setCompact(false); setOpen(true); };
   const [visible, setVisible] = useState(false);
   const [sidecar, setSidecar] = useState(false), [setup, setSetup] = useState(false), [surface, setSurface] = useState("Home");
-  const [terminal, setTerminal] = useState(false);
+  const [terminal, setTerminal] = useState(shell);
   const [destination, setDestination] = useState<"chat" | "plan" | "drafter" | "run">("plan");
   const [project, setProject] = useState<string | null>("/projects/redline");
   const [choice, setChoice] = useState<BackendChoice>({ backend: "codex", model: null, effort: null });
@@ -68,7 +99,9 @@ function Fixture() {
       chats={where === "door" ? chats.map(chat => ({ id: chat.companionId, title: chat.title })) : undefined} onOpenChat={where === "door" ? openChat : undefined}/>;
   };
   return <><nav className="qa-nav rl-app-header"><strong>REDLINE <span>AURORA</span></strong><button onClick={() => setSurface("Home")}>Home</button><button onClick={() => setSurface("Document")}>Document</button><button onClick={() => setSurface("Browser")}>Browser</button><button onClick={() => { setSidecar(true); }}>Discussion</button><button onClick={() => setSetup(true)}>Integration setup</button></nav>
-    {surface === "Home" ? <main className="qa-empty-plate rl-doc-column"/> : surface === "Browser" ? <main className="qa-browser-page rl-doc-column"><h1>LiDAR-GS</h1><p>A synthetic page standing in for the native webview.</p></main> : <main className="qa-document rl-plate rl-doc-column"><div className="qa-eyebrow">PRODUCT DIRECTION · REVISION 04</div><h1>A little space.<br/>A larger possibility.</h1><p className="qa-lede">One conversation that moves with your work.</p><div className="qa-rule"/><h2>Stay inside the thought.</h2><p>The document is the center of attention. Redline waits at the edge, holding the thread until you need it. A question can become a discussion, a decision, or a coordinated run.</p><p>Each action remains connected to its source. The working context follows the conversation across documents, browser pages, reviews, and memory.</p><button id="qa-document-focus" className="qa-note" onClick={() => { setSidecar(true); }}>2 · Review the handoff between harnesses ↗</button><h2>Work with the whole team.</h2><p>Choose Codex or Claude for the next turn. Task dependencies, observed usage, and file ownership remain visible as the work progresses.</p></main>}
+    {surface === "Home" ? (shell
+      ? <div className="qa-shell"><aside className="qa-sidebar"><b>Sessions</b><span>Auth rewrite · v3</span><span>Billing export v2</span><span>Voice turn deadline</span></aside><main className="qa-empty-plate rl-doc-column"/></div>
+      : <main className="qa-empty-plate rl-doc-column"/>) : surface === "Browser" ? <main className="qa-browser-page rl-doc-column"><h1>LiDAR-GS</h1><p>A synthetic page standing in for the native webview.</p></main> : <main className="qa-document rl-plate rl-doc-column"><div className="qa-eyebrow">PRODUCT DIRECTION · REVISION 04</div><h1>A little space.<br/>A larger possibility.</h1><p className="qa-lede">One conversation that moves with your work.</p><div className="qa-rule"/><h2>Stay inside the thought.</h2><p>The document is the center of attention. Redline waits at the edge, holding the thread until you need it. A question can become a discussion, a decision, or a coordinated run.</p><p>Each action remains connected to its source. The working context follows the conversation across documents, browser pages, reviews, and memory.</p><button id="qa-document-focus" className="qa-note" onClick={() => { setSidecar(true); }}>2 · Review the handoff between harnesses ↗</button><h2>Work with the whole team.</h2><p>Choose Codex or Claude for the next turn. Task dependencies, observed usage, and file ownership remain visible as the work progresses.</p></main>}
     {sidecar && <aside className="qa-discussion" aria-label="Document discussion"><button onClick={() => setSidecar(false)}>Close discussion</button><p>Preserve the original decision. This discussion stays beside its source.</p><textarea aria-label="Anchored reply" placeholder="Continue this discussion…"/><button>Send reply</button></aside>}
     <PaneDivider orientation="horizontal" label="terminal" collapsed={!terminal} dragging={false} onToggle={() => setTerminal(value => !value)} onPointerDown={noop}/>
     {terminal && <div className="qa-terminal rl-term-dock">Terminal · fixture</div>}
@@ -85,5 +118,5 @@ function Fixture() {
     {setup && <IntegrationSetupDialog backend="codex" health={null} busy={false} error="The previous verification timed out. Your draft is saved; retry when Codex is available." progress={null} done={false} pending onInstall={noop} onDismiss={() => setSetup(false)} onLocate={noop}/>}
   </>;
 }
-applyTheme("aurora");
+applyTheme((query.get("theme") ?? "aurora") as ThemeName);
 createRoot(document.getElementById("root")!).render(<Fixture/>);

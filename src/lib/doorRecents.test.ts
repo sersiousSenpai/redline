@@ -160,6 +160,8 @@ describe("doorRecents", () => {
       ["browse", "b3", "A"],
     ]);
     expect(r[3].detail).toContain("Research for “Auth rewrite”");
+    // A page's row names where it lives, quietly; plans and chats live here.
+    expect(r.map((x) => x.host)).toEqual([undefined, undefined, undefined, "cloudflare.com", "a.dev"]);
   });
 
   it("lists up to ten pages, while plans and chats stay at two", () => {

@@ -40,6 +40,7 @@ import {
 } from "../lib/launch";
 import type { CombineSource } from "../types";
 import type { DoorRecent } from "../lib/doorRecents";
+import { fitTitle, keepHyphens } from "../lib/fitTitle";
 import type { ReadinessItem } from "../lib/readiness";
 import {
   BACKENDS,
@@ -205,10 +206,14 @@ const BROWSE_ROW = 36;
 const BROWSE_GAP = 0;
 /** Breathing room under the last page: the list ends well short of the edge. */
 const BROWSE_AIR = 72;
-/** Composer bottom → page list top when the list has no box yet (the gap to
- *  the recents, two chip rows, the section gap and the head). Only a first
- *  guess; the real top wins. */
-const BROWSE_ABOVE = 12 + 2 * 30 + 22 + 18;
+/** Composer bottom → page list top when the list has no box yet: the gap to
+ *  the recents, the Plans row, the row gap, the Chats row, the gap to
+ *  Searches, its head and the head's gap. Only a first guess; the real top
+ *  wins. (One-line rows sit on a 36 px pitch: 24 + 12 here, 36 a page.) */
+const BROWSE_ABOVE = 12 + 24 + 12 + 24 + 20 + 16 + 4;
+/** The lines a plan or chat title may take in its column before it is cut at
+ *  a word (`fitTitle`). */
+const TITLE_LINES = 2;
 
 /** The recents' sections, in reading order. The label says what an entry in
  *  that row opens, so the entries themselves can stay plain text. */
@@ -317,6 +322,9 @@ export function FrontDoor(props: FrontDoorProps) {
   const recentsRef = useRef<HTMLDivElement | null>(null);
   const browseListRef = useRef<HTMLDivElement | null>(null);
   const [browseRoom, setBrowseRoom] = useState(BROWSE_MAX);
+  // Plan and chat titles that run past TITLE_LINES in their column, as cut
+  // back to the last whole word that fits — keyed by the full title.
+  const [fitted, setFitted] = useState<Record<string, string>>({});
   const [focused, setFocused] = useState(false);
 
   // The door has to survive being squeezed. The document column floors at
@@ -728,6 +736,29 @@ export function FrontDoor(props: FrontDoorProps) {
   // are the first thing to go.
   const recentsHidden = hasText || !!offer || tight;
 
+  // Each title is measured on a hidden copy of itself at its own width, never
+  // on the title on screen, which may be showing a cut.
+  const fitTitles = () => {
+    const next: Record<string, string> = {};
+    for (const title of recentsRef.current?.querySelectorAll<HTMLElement>(".rl-fd-recent-title") ?? []) {
+      const button = title.parentElement, full = button?.getAttribute("aria-label");
+      const width = title.getBoundingClientRect().width, line = parseFloat(getComputedStyle(title).lineHeight);
+      if (!button || !full || !width || !line) continue;
+      const probe = title.cloneNode(false) as HTMLElement;
+      probe.style.cssText = `position:absolute;visibility:hidden;width:${width}px`;
+      button.append(probe);
+      const most = TITLE_LINES * line + 0.5;
+      const shown = fitTitle(keepHyphens(full), (text) => {
+        probe.textContent = text;
+        return probe.getBoundingClientRect().height <= most;
+      });
+      probe.remove();
+      if (shown !== keepHyphens(full)) next[full] = shown;
+    }
+    setFitted((previous) => (JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+  };
+  const titles = recents.filter((r) => r.kind !== "browse").map((r) => r.label).join("\n");
+
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!floating || !welcome || !root) return;
@@ -735,6 +766,7 @@ export function FrontDoor(props: FrontDoorProps) {
     let frame = 0;
     const measure = () => {
       frame = 0;
+      fitTitles();
       const bounds = layer?.getBoundingClientRect();
       // Unlaid-out (hidden, or a test DOM): no evidence of a limit.
       if (!bounds || bounds.height === 0) return setBrowseRoom(BROWSE_MAX);
@@ -758,7 +790,9 @@ export function FrontDoor(props: FrontDoorProps) {
       ro?.disconnect();
       window.removeEventListener("resize", schedule);
     };
-  }, [floating, welcome, recents.length]);
+    // `fitTitles` reads only refs and the DOM.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [floating, welcome, recents.length, titles]);
 
   // The island's shape state. `lifted` is focus-or-content: the slab settles
   // when you aren't using it and rises when you are. A launch in flight is
@@ -1109,8 +1143,9 @@ export function FrontDoor(props: FrontDoorProps) {
         </div>
       )}
 
-      {/* Recents: the way back to where you were. Plans and chats are short,
-          so they sit as labelled rows; pages are wide, so they run full width
+      {/* Recents: the way back to where you were. Plans and chats sit as a
+          labelled table, two to a row in even columns, each title whole
+          over up to two lines; pages are wide, so they run full width
           below — as many as the free space under the box holds, never a
           scroll. They retire with the headline the moment there is a
           sentence. `mousedown` is swallowed so a press never moves focus into
@@ -1124,10 +1159,19 @@ export function FrontDoor(props: FrontDoorProps) {
             data-kind={r.kind}
             tabIndex={recentsHidden ? -1 : 0}
             title={r.detail}
+            // A title cut to fit is still named in full.
+            aria-label={r.kind === "browse" ? undefined : r.label}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => onOpenRecent(r)}
           >
-            {r.label}
+            {r.kind === "browse" ? (
+              <>
+                <span className="rl-fd-browse-title">{r.label}</span>
+                {r.host && <span className="rl-fd-browse-host" aria-hidden="true">{r.host}</span>}
+              </>
+            ) : (
+              <span className="rl-fd-recent-title">{fitted[r.label] ?? keepHyphens(r.label)}</span>
+            )}
           </button>
         );
         const pages = recents.filter((r) => r.kind === "browse");
@@ -1153,8 +1197,10 @@ export function FrontDoor(props: FrontDoorProps) {
                 );
               })}
             </div>
+            {/* With no row to show it keeps its box, empty: the list's top
+                is what the rows are measured from. */}
             {pages.length > 0 && (
-              <div className="rl-fd-browse-section">
+              <div className="rl-fd-browse-section" data-empty={Math.min(pages.length, browseRoom) === 0 || undefined}>
                 <span className="rl-fd-recent-head">
                   {RECENT_SECTIONS.find((x) => x.kind === "browse")!.label}
                 </span>

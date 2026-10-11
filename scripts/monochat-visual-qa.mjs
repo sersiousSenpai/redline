@@ -334,6 +334,59 @@ try {
       await cdp.evaluate("window.__qa.setTheme('aurora')"); await cdp.evaluate("window.__qa.setSetupFault(false)");
     }
   }
+  // The recents (10/11): the 10-04 table — Plans and Chats as labelled rows
+  // in even columns, pages full width below — on one edge and one 4 px
+  // scale, titles whole where their column has room and cut only at a word
+  // where it has not. Real-length titles, plain and in the shell (sessions
+  // sidebar + open terminal dock).
+  const boot = async (width, height, query) => {
+    await cdp.call("Emulation.setDeviceMetricsOverride",{width,height,deviceScaleFactor:1,mobile:false});
+    await cdp.call("Page.navigate",{url:`${report.fixtureUrl}?${query}`});
+    let ready=false;for(let i=0;i<150;i++){try{if(await cdp.evaluate("document.documentElement.dataset.qaReady==='true'")){ready=true;break;}}catch{}await delay(100);}
+    if(!ready)throw new Error(`Fixture did not render: ${report.errors.join("\n")}`);
+    await delay(700); await settle();
+  };
+  const recentsGeometry = `(() => {
+    const box = (e) => { const r = e.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, right: r.right, bottom: r.bottom }; };
+    const group = document.querySelector('[aria-label="Jump back in"]'), table = group.querySelector('.rl-fd-recent-chips');
+    const input = document.querySelector('.rl-frontdoor-focus .rl-fd-input'), layer = document.querySelector('.rl-frontdoor-focus');
+    const inputText = input.getBoundingClientRect().x + parseFloat(getComputedStyle(input).paddingLeft);
+    const rows = [...table.querySelectorAll('.rl-fd-recent-row')].map(row => ({ kind: row.dataset.kind, head: box(row.querySelector('.rl-fd-recent-head')), entries: [...row.querySelectorAll('.rl-fd-recent')].map(e => ({ ...box(e), label: e.getAttribute('aria-label'), text: e.querySelector('.rl-fd-recent-title').textContent.replace(/\u2011/g, '-'), lines: Math.round(e.querySelector('.rl-fd-recent-title').getBoundingClientRect().height / 20) })) }));
+    const columns = getComputedStyle(table).gridTemplateColumns.split(' ').map(parseFloat);
+    const section = group.querySelector('.rl-fd-browse-section');
+    const pages = [...group.querySelectorAll('.rl-fd-browse')].map(e => ({ ...box(e), text: e.querySelector('.rl-fd-browse-title').getBoundingClientRect().x }));
+    return { inputText, layerBottom: layer.getBoundingClientRect().bottom, table: box(table), columns, rows, pages,
+      heads: [...group.querySelectorAll('.rl-fd-recent-head')].map(h => h.getBoundingClientRect().x + parseFloat(getComputedStyle(h).paddingLeft)),
+      searches: section ? { head: box(section.querySelector('.rl-fd-recent-head')), empty: section.hasAttribute('data-empty'), visibility: getComputedStyle(section).visibility } : null,
+      scrolls: document.scrollingElement.scrollHeight > innerHeight + 1 || [...group.querySelectorAll('*')].some(e => e.scrollHeight > e.clientHeight + 1 && /auto|scroll/.test(getComputedStyle(e).overflowY)) };
+  })()`;
+  // Whole, or cut after a whole word of the label with "…".
+  const wholeWords = (entry) => entry.text === entry.label || (entry.text.endsWith('…') && entry.label.split(' ').some((_, i, words) => words.slice(0, i + 1).join(' ').replace(/[\s,;:·—–-]+$/u, '') === entry.text.slice(0, -1)));
+  for (const [width, height] of [[1440, 900], [1100, 760]]) for (const shell of [false, true]) for (const set of ["long", "vlong"]) {
+    if (set === "vlong" && shell) continue;
+    const tag = `${width}x${height}-recents-${set}${shell ? "-shell" : ""}`;
+    await boot(width, height, `recents=${set}${shell ? "&shell=1" : ""}`);
+    const g = await cdp.evaluate(recentsGeometry);
+    const entries = g.rows.flatMap(row => row.entries);
+    await screenshot(tag);
+    check(`${tag}: titles are whole, or cut only after a whole word`, entries.length >= 3 && entries.every(wholeWords), entries.map(e => [e.label, e.text]));
+    if (set === "long") check(`${tag}: no title is cut where its column has room`, entries.every(e => e.text === e.label && e.lines <= 2), entries.map(e => [e.text, e.lines]));
+    else check(`${tag}: a title past two lines is cut at a word, in two lines`, entries.some(e => e.text.endsWith('…')) && entries.every(e => e.lines <= 2), entries.map(e => [e.text, e.lines]));
+    check(`${tag}: the two entry columns are even`, Math.abs(g.columns[1] - g.columns[2]) <= 1, g.columns);
+    check(`${tag}: second entries share a column`, (() => { const second = g.rows.map(row => row.entries[1]).filter(Boolean); return second.length < 2 || Math.abs(second[0].x - second[1].x) <= 1; })(), g.rows.map(row => row.entries.map(e => e.x)));
+    check(`${tag}: every head and page starts on the placeholder's x`, g.heads.every(x => Math.abs(x - g.inputText) <= 1) && g.pages.every(p => Math.abs(p.text - g.inputText) <= 1), { input: g.inputText, heads: g.heads, pages: g.pages.map(p => p.text) });
+    if (g.rows.length === 2) {
+      const bottom = Math.max(g.rows[0].head.bottom, ...g.rows[0].entries.map(e => e.bottom)), top = Math.min(g.rows[1].head.y, ...g.rows[1].entries.map(e => e.y));
+      check(`${tag}: Plans → Chats is 12`, Math.abs(top - bottom - 12) <= 1, { bottom, top });
+    }
+    if (g.searches && !g.searches.empty) {
+      check(`${tag}: the table → Searches is 20`, Math.abs(g.searches.head.y - g.table.bottom - 20) <= 1, { table: g.table.bottom, head: g.searches.head.y });
+      check(`${tag}: pages sit on a 36 px pitch, clear of the edge by 72`, g.pages.length > 0 && g.pages.every((p, i) => i === 0 || Math.abs(p.y - g.pages[i - 1].y - 36) <= 0.5) && g.pages.at(-1).bottom <= g.layerBottom - 72 + 0.5, { pages: g.pages.map(p => p.y), layerBottom: g.layerBottom });
+    } else check(`${tag}: with no page row to show, the section shows nothing`, !g.searches || g.searches.visibility === 'hidden', g.searches);
+    check(`${tag}: nothing scrolls`, !g.scrolls);
+    check(`${tag}: every recent is at least 24 × 24`, (await smallTargets('[aria-label="Jump back in"]')).length === 0, await smallTargets('[aria-label="Jump back in"]'));
+    report.recents = { ...report.recents, [tag]: { columns: g.columns, rows: g.rows.map(row => row.entries.map(e => [e.text, e.lines])), pages: g.pages.length } };
+  }
 } catch(error) {report.errors.push(error.stack??String(error));}
 finally {
   report.finishedAt=new Date().toISOString(); report.passed=report.checks.every(check=>check.passed)&&report.errors.length===0;

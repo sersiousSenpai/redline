@@ -89,7 +89,7 @@
 .rl-monochat .rl-floating-composer .rl-fd-island { position: static; }
 
 .rl-monochat .rl-floating-composer.rl-frontdoor { padding: 0 8px 8px; }
-.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px 20px 12px; border: 1px solid var(--color-rule); border-radius: 24px; background: var(--color-bg-elevated); }
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { padding: 18px var(--fd-island-pad-x) 12px; border: 1px solid var(--color-rule); border-radius: 24px; background: var(--color-bg-elevated); }
 .rl-monochat .rl-fd-strip { display: none; }
 
 .rl-monochat-conversation { justify-content: center; }
@@ -128,7 +128,6 @@
 .rl-fd-welcome-hero .rl-fd-title { font-size: 36px; }
 .rl-frontdoor.is-compact .rl-fd-welcome-hero .rl-fd-title { font-size: 30px; letter-spacing: -0.015em; }
 .rl-fd-welcome-hero .rl-fd-sub { margin: 10px 0 0; }
-.rl-fd-recents { top: calc(100% + 12px); padding: 0 8px; }
 
 /* Fades on ENGAGEMENT — a sentence in the box — not on the door opening, nor
    on the caret arriving: summoned, the door keeps its welcome until you type. */
@@ -152,50 +151,74 @@
 .rl-monochat .rl-context-chips { margin: 0 8px 10px; }
 
 /* The way back, set as type rather than controls: no pills, no boxes — each
-   entry is a line of text over a hairline underline, generously spaced.
-   Plans and Chats sit as labelled rows; pages run full width below. */
-.rl-monochat .rl-floating-composer > .rl-fd-recents { display: flex; flex-direction: column; gap: 22px; padding: 0 16px; }
-/* One table for Plans and Chats: head | first | second. The rows and their
-   item lists are `display: contents`, so every entry sits in a SHARED column
-   and the second entries line up whatever the first ones measure. */
+   entry is text over a hairline underline, generously spaced. Plans and Chats
+   sit as a labelled table; pages run full width below.
+
+   One edge and one scale. The recents' box is the composer box's content box
+   (the floating composer's 8 px, the island's border and its padding), every
+   text in them starts where the placeholder does (the field's 5 px), and every
+   gap is on a 4 px scale: 4 · 12 · 16 · 20 · 24 · 36. Three levels: the
+   section heads, the entries (brighter than the heads, quieter than the
+   composer's text), and a page's host. */
+.rl-monochat {
+  --fd-island-pad-x: 20px;
+  --fd-edge: calc(8px + 1px + var(--fd-island-pad-x));
+  --fd-text: 5px;
+  --fd-item: color-mix(in srgb, var(--color-ink-muted) 60%, var(--color-ink));
+}
+/* 12 below the composer's own 8: 20 from the box. */
+.rl-monochat .rl-floating-composer > .rl-fd-recents { top: calc(100% + 12px); display: flex; flex-direction: column; gap: 20px; padding: 0 var(--fd-edge); }
+/* One table for Plans and Chats: head | first | second, the two entry
+   columns even halves of what the head leaves. The rows and their item lists
+   are `display: contents`, so every entry sits in a SHARED column and the
+   second entries line up whatever the first ones measure. */
 .rl-fd-recent-chips {
-  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, max-content);
-  justify-content: center; align-items: baseline; gap: 12px 20px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  justify-content: stretch; align-items: baseline; gap: 12px 24px;
 }
 .rl-fd-recent-row { display: contents; }
 /* Full muted ink: thinned any further, the heads drop under 4.5:1 on paper. */
-.rl-fd-recent-head { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-ink-muted); text-align: right; }
+.rl-fd-recent-head { grid-column: 1; padding-left: var(--fd-text); font-size: 10.5px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--color-ink-muted); text-align: left; }
 .rl-fd-recent-items { display: contents; }
-.rl-fd-recent-head { grid-column: 1; }
-.rl-fd-recent-chips .rl-fd-recent { justify-self: start; }
-/* Head → first entry keeps its 20px; first → second keeps its 22px. */
-.rl-fd-recent-chips .rl-fd-recent:nth-child(2) { margin-left: 2px; }
-/* 24px tall for the pointer (WCAG 2.5.8): the room is taken above the text,
-   so the hairline still sits right under it. */
+/* 24 px tall for the pointer (WCAG 2.5.8). A title takes up to two lines of
+   its column, balanced, and past that is cut at a word (FrontDoor's
+   `fitTitle`); a single word too long for it is clipped. */
 .rl-monochat .rl-fd-recent.rl-fd-suggestion {
-  max-width: min(220px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-height: 24px; padding: 6px 0 3px; border: 0; border-radius: 0; background: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
-  color: var(--color-ink-muted); font-size: 12.5px;
-  transition: color 160ms ease, border-color 160ms ease;
+  justify-self: start; max-width: 100%; min-height: 24px; padding: 2px 0;
+  border: 0; border-radius: 0; background: none;
+  white-space: normal; overflow: visible; text-overflow: clip; text-align: left;
+  font-size: 12.5px; line-height: 20px; font-weight: 400; color: var(--fd-item);
+  transition: color 160ms ease;
+}
+.rl-fd-recent-title {
+  display: block; overflow-x: clip; text-wrap: balance;
+  text-decoration: underline 1px color-mix(in srgb, var(--color-ink) 18%, transparent);
+  text-underline-offset: 4px; text-decoration-skip-ink: none;
+  transition: text-decoration-color 160ms ease;
 }
 .rl-monochat .rl-fd-recent.rl-fd-suggestion:hover, .rl-monochat .rl-fd-recent.rl-fd-suggestion:focus-visible {
-  background: none; color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 60%, transparent); outline: none;
+  background: none; color: var(--color-ink); outline: none;
+}
+.rl-fd-recent:hover .rl-fd-recent-title, .rl-fd-recent:focus-visible .rl-fd-recent-title {
+  text-decoration-color: color-mix(in srgb, var(--color-info) 60%, transparent);
 }
 
 /* Pages: one line each, full width, divided by hairlines and laid out
    statically — FrontDoor renders only as many as the space below holds
-   (BROWSE_ROW/GAP mirror these). */
+   (BROWSE_ROW/GAP mirror these). A page's host sits at the row's end. */
 .rl-fd-browse-section { display: flex; flex-direction: column; gap: 4px; }
-.rl-fd-browse-section > .rl-fd-recent-head { text-align: left; line-height: 14px; }
+/* None fit: the section keeps its box, which FrontDoor measures from. */
+.rl-fd-browse-section[data-empty] { visibility: hidden; }
 .rl-fd-browse-list { display: flex; flex-direction: column; }
 .rl-fd-browse {
-  display: block; width: 100%; height: 36px; padding: 0 2px; border: 0; border-radius: 0; background: none;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 9%, transparent);
-  color: var(--color-ink-muted); font-size: 12.5px; text-align: left; cursor: pointer;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex; align-items: center; gap: 16px; width: 100%; height: 36px; padding: 0 var(--fd-text);
+  border: 0; border-radius: 0; background: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-ink) 10%, transparent);
+  color: var(--fd-item); font-size: 12.5px; text-align: left; cursor: pointer;
   transition: color 160ms ease, border-color 160ms ease;
 }
+.rl-fd-browse-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-fd-browse-host { flex: none; font-size: 11px; color: var(--color-ink-muted); }
 .rl-fd-browse:hover, .rl-fd-browse:focus-visible {
   color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 50%, transparent); outline: none;
 }

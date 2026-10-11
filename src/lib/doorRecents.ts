@@ -23,6 +23,9 @@ export interface DoorRecent {
   detail: string;
   /** Browse only: reopens the page when its tab has since closed. */
   url?: string;
+  /** Browse only: where the page lives, without "www." — its row's quiet
+   *  second word. */
+  host?: string;
   /** Browse only: an explicit research link — reopening it shows its answer. */
   research?: boolean;
 }
@@ -401,7 +404,7 @@ export function doorRecents(
       const label = t.title?.trim() || hostOf(t.url);
       // The hover says where it lives and, when known, what it was for.
       const why = t.plan ? `\nResearch for “${t.plan}”` : t.mission ? `\nFrom the “${t.mission}” mission` : "";
-      return { kind: "browse", id: t.browseId, label, detail: `${label}\n${t.url}${why}`, url: t.url, research: t.research };
+      return { kind: "browse", id: t.browseId, label, detail: `${label}\n${t.url}${why}`, url: t.url, host: hostOf(t.url), research: t.research };
     });
   return [...plans, ...chats, ...tabs];
 }

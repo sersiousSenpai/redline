@@ -112,8 +112,11 @@ const TEXTS: Pair[] = [
   { what: "the door's headline", color: [ISLAND, ".rl-fd-title"], on: "color-paper" },
   { what: "the door's subline", color: [APP, ".rl-fd-sub"], on: "color-paper" },
   { what: "a recents head", color: [ISLAND, ".rl-fd-recent-head"], on: "color-paper" },
-  { what: "a recent plan or chat", color: [ISLAND, ".rl-monochat .rl-fd-recent.rl-fd-suggestion"], on: "color-paper" },
+  // A title takes its entry's ink (`--fd-item`): brighter than the heads,
+  // quieter than the sentence being typed.
+  { what: "a recent plan or chat's title", color: [ISLAND, ".rl-monochat .rl-fd-recent.rl-fd-suggestion"], on: "color-paper" },
   { what: "a recent page", color: [ISLAND, ".rl-fd-browse"], on: "color-paper" },
+  { what: "a recent page's host", color: [ISLAND, ".rl-fd-browse-host"], on: "color-paper" },
   { what: "the room's heading and its New", color: [ISLAND, ".rl-monochat-heading"], on: "color-paper" },
   { what: "a context chip, in the door", color: [ISLAND, ".rl-context-chips button"], on: "color-paper" },
   { what: "a context chip, in the card", color: [ISLAND, ".rl-context-chips button"], on: "color-bg-elevated" },
@@ -234,10 +237,16 @@ function readsEveryRule(pairs: readonly Pair[]) {
   expect(THEMES).toHaveLength(15);
 }
 
-const tokensOf = (theme: (typeof THEMES)[number]) => deriveTokens(theme.base) as unknown as Record<string, string>;
+/** The door's own custom properties, declared on its room and read like a
+ *  theme's tokens: `--fd-item` is the recents' ink. */
+const ROOM_TOKENS: Record<string, string> = { "fd-item": declared(ISLAND, ".rl-monochat", "--fd-item")! };
+const tokensOf = (theme: (typeof THEMES)[number]): Record<string, string> => ({ ...(deriveTokens(theme.base) as unknown as Record<string, string>), ...ROOM_TOKENS });
 
 describe("the door and its card are legible in every theme", () => {
-  it("reads every rule it checks", () => readsEveryRule(TEXTS));
+  it("reads every rule it checks", () => {
+    readsEveryRule(TEXTS);
+    expect(ROOM_TOKENS["fd-item"]).toMatch(/^color-mix\(/);
+  });
 
   it.each(THEMES.map((theme) => [theme.name, theme] as const))("%s: every text reaches 4.5:1", (_name, theme) => {
     expect(shortfalls(TEXTS, tokensOf(theme))).toEqual([]);

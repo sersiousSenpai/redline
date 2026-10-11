@@ -573,8 +573,8 @@ describe("the floating replacement composer", () => {
       onOpenRecent: () => {},
       recents: [
         { kind: "plan", id: "s1", label: "Auth rewrite", detail: "Plan · npla — Auth rewrite" },
-        { kind: "chat", id: "c1", label: "Pricing", detail: "Chat — Pricing" },
-        { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "LiDAR-GS", url: "https://github.com/x/lidar-gs" },
+        { kind: "chat", id: "c1", label: "Keep barge-in alive", detail: "Chat — Keep barge-in alive" },
+        { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "LiDAR-GS", url: "https://github.com/x/lidar-gs", host: "github.com" },
       ],
     });
     expect(host.querySelector("h1")?.textContent).toBe("Every build starts as a draft.");
@@ -582,14 +582,18 @@ describe("the floating replacement composer", () => {
     // recents come and go.
     const group = host.querySelector('[role="group"][aria-label="Jump back in"]')!;
     expect(group.compareDocumentPosition(host.querySelector(".rl-fd-island")!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    // Plans and chats: a title over its hairline, named in full. A hyphen
+    // between letters never breaks across its two lines.
     const pills = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-recent"));
-    expect(pills.map((b) => [b.dataset.kind, b.textContent])).toEqual([
-      ["plan", "Auth rewrite"],
-      ["chat", "Pricing"],
+    expect(pills.map((b) => [b.dataset.kind, b.getAttribute("aria-label"), b.querySelector(".rl-fd-recent-title")?.textContent])).toEqual([
+      ["plan", "Auth rewrite", "Auth rewrite"],
+      ["chat", "Keep barge-in alive", "Keep barge\u2011in alive"],
     ]);
-    // Pages stack as plain full-width rows: the title, nothing under it.
+    // Pages stack as plain full-width rows: the title, and where it lives at
+    // the row's end — a quiet detail, not part of its name.
     const pages = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-browse-list .rl-fd-browse"));
-    expect(pages.map((b) => b.textContent)).toEqual(["LiDAR-GS"]);
+    expect(pages.map((b) => [b.querySelector(".rl-fd-browse-title")?.textContent, b.querySelector(".rl-fd-browse-host")?.textContent])).toEqual([["LiDAR-GS", "github.com"]]);
+    expect(pages[0].querySelector(".rl-fd-browse-host")?.getAttribute("aria-hidden")).toBe("true");
     // Each kind is its own labelled row, so it is plain what a chip opens.
     expect(Array.from(host.querySelectorAll(".rl-fd-recent-head")).map((h) => h.textContent)).toEqual([
       "Plans",
@@ -620,10 +624,84 @@ describe("the floating replacement composer", () => {
       await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
       // (300 − 120 list top − 72 breathing room) / 36 per row → 3.
       expect(host.querySelectorAll(".rl-fd-browse").length).toBe(3);
+      expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(false);
     } finally {
       vi.restoreAllMocks();
       document.body.appendChild(host);
       layer.remove();
+    }
+  });
+
+  it("before its list has a box, guesses its top from the rows above it — and shows an empty section's box, not its head", async () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
+    const layer = document.createElement("div");
+    layer.className = "rl-frontdoor-focus";
+    document.body.appendChild(layer);
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    let layerBottom = 300;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === layer) return rect(0, layerBottom) as DOMRect;
+      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
+      return proto.call(this);
+    });
+    try {
+      layer.appendChild(host);
+      // The composer ends at 100: 12 to the recents, a 24 px Plans row, 12,
+      // a 24 px Chats row, 20 to Searches, its 16 px head and 4 → 212. Then
+      // 300 − 212 − 72 leaves room for no 36 px row.
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(0);
+      // The section stays mounted, so the list keeps a top to measure from.
+      expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(true);
+      // A taller layer: (372 − 212 − 72) / 36 → 2.
+      layerBottom = 372;
+      await act(async () => { window.dispatchEvent(new Event("resize")); await new Promise((r) => requestAnimationFrame(() => r(null))); });
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(2);
+      expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(false);
+    } finally {
+      vi.restoreAllMocks();
+      document.body.appendChild(host);
+      layer.remove();
+    }
+  });
+
+  it("cuts a plan or chat title that runs past two lines of its column at a whole word, measured off screen", async () => {
+    const title = "MachineOS Desk: native LiDAR capture, gaussian-splat preview and the calibration loop for the second sensor head";
+    const style = document.createElement("style");
+    style.textContent = ".rl-fd-recent-title { line-height: 20px; }";
+    document.head.append(style);
+    // A 300 px column that holds 40 characters a line.
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    const measured: string[] = [];
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (!this.classList.contains("rl-fd-recent-title")) return proto.call(this);
+      const probe = this.style.visibility === "hidden";
+      if (probe) measured.push(this.textContent ?? "");
+      const lines = Math.ceil((this.textContent ?? "").length / 40);
+      return { top: 0, bottom: lines * 20, height: lines * 20, left: 0, right: 300, width: 300, x: 0, y: 0, toJSON() {} } as DOMRect;
+    });
+    try {
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: [
+        { kind: "plan", id: "s1", label: title, detail: "" },
+        { kind: "plan", id: "s2", label: "Auth rewrite", detail: "" },
+      ] });
+      const [long, short] = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-recent"));
+      const shown = long.querySelector(".rl-fd-recent-title")!.textContent!;
+      expect(shown.endsWith("…")).toBe(true);
+      expect(shown.length).toBeLessThanOrEqual(80);
+      // Whole words only, and as many as fit.
+      expect(title.startsWith(shown.slice(0, -1).replace(/\u2011/g, "-"))).toBe(true);
+      expect(title[shown.length - 1]).toBe(" ");
+      expect(long.getAttribute("aria-label")).toBe(title);
+      expect(short.querySelector(".rl-fd-recent-title")!.textContent).toBe("Auth rewrite");
+      // Every measurement was on a copy: none is left behind, and the title
+      // on screen was never rewritten to measure.
+      expect(measured.length).toBeGreaterThan(1);
+      expect(host.querySelectorAll(".rl-fd-recent-title")).toHaveLength(2);
+    } finally {
+      vi.restoreAllMocks();
+      style.remove();
     }
   });
 
