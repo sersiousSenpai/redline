@@ -16,11 +16,12 @@
 // the speaking engine, that never sends the words anywhere. Without it — or
 // when it can't answer within its budget, about 0.7 s — the fixed cleanup
 // child does it (voice.rs `voice_clean`: a fast model with no tools, kept
-// warm). Both are told that
-// the speaker is never talking to them and given the vocabulary's spellings,
-// and the local one's every reply is checked in the sidecar as well. What
-// comes back is checked here before it is used: an answer, a summary or a
-// rewrite in place of a polish is thrown away.
+// warm), unless the user keeps polish on this Mac (`polishLocalOnly`): then
+// the words stay as the rules cleaned them. Both are told that the speaker is
+// never talking to them and given the vocabulary's spellings, and the local
+// one's every reply is checked in the sidecar as well. What comes back is
+// checked here before it is used: an answer, a summary or a rewrite in place
+// of a polish is thrown away.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 
@@ -94,14 +95,18 @@ export const localModel = {
 } satisfies PolishEngine;
 
 /** What dictation polishes with: the local model, which Rust refuses at once
- *  when it isn't installed, else — and whenever it fails — the cleanup child.
- *  Each warms for a dictation that will be polished: the local model when it
- *  is installed, else the cleanup child. */
+ *  when it isn't installed, else — and whenever it fails — the cleanup child,
+ *  unless polish stays on this Mac. Each warms for a dictation that will be
+ *  polished: the local model when it is installed, else the cleanup child. */
 export const polishEngine: PolishEngine = {
-  polish: (text, vocab) => localModel.polish(text, vocab).catch(() => cleanupChild.polish(text, vocab)),
+  polish: (text, vocab) =>
+    localModel.polish(text, vocab).catch((e: unknown) => {
+      if (polishLocalOnly()) throw e;
+      return cleanupChild.polish(text, vocab);
+    }),
   warm: (vocab) =>
     void localModel.warm(vocab).then((local) => {
-      if (!local) cleanupChild.warm(vocab);
+      if (!local && !polishLocalOnly()) cleanupChild.warm(vocab);
     }),
 };
 
@@ -125,6 +130,28 @@ export function polishEnabled(): boolean {
 export function setPolishEnabled(on: boolean): void {
   try {
     localStorage.setItem(PREF, on ? "on" : "off");
+  } catch {
+    /* best-effort, like the voice prefs */
+  }
+}
+
+const LOCAL_PREF = "redline.dictation.polishLocalOnly";
+
+/** Polish only on this Mac: no cloud fallback, so a slow or missing local
+ *  model leaves the words as the rules cleaned them. Off unless the user
+ *  turns it on (per machine). */
+export function polishLocalOnly(): boolean {
+  try {
+    return localStorage.getItem(LOCAL_PREF) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setPolishLocalOnly(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(LOCAL_PREF, "1");
+    else localStorage.removeItem(LOCAL_PREF);
   } catch {
     /* best-effort, like the voice prefs */
   }

@@ -17,7 +17,9 @@ import {
   polished,
   polishEnabled,
   polishEngine,
+  polishLocalOnly,
   setPolishEnabled,
+  setPolishLocalOnly,
   wantsPolish,
 } from "./dictationPolish";
 
@@ -45,6 +47,14 @@ describe("when to polish", () => {
     expect(polishEnabled()).toBe(false);
     setPolishEnabled(true);
     expect(polishEnabled()).toBe(true);
+  });
+
+  it("may use the cloud fallback until the user keeps it on this Mac", () => {
+    expect(polishLocalOnly()).toBe(false);
+    setPolishLocalOnly(true);
+    expect(polishLocalOnly()).toBe(true);
+    setPolishLocalOnly(false);
+    expect(polishLocalOnly()).toBe(false);
   });
 });
 
@@ -215,5 +225,39 @@ describe("the engine", () => {
     });
     polishEngine.warm!(VOCAB);
     await vi.waitFor(() => expect(cleanupCalls()).toEqual([["voice_clean", { text: "" }]]));
+  });
+});
+
+describe("polish kept on this Mac", () => {
+  beforeEach(() => setPolishLocalOnly(true));
+
+  it("never reaches the cleanup child: a slow or failed local polish leaves the words", async () => {
+    const asked = localModel();
+    const slow = polishEngine.polish("um the tray", []);
+    await Promise.resolve();
+    asked[0].reply(frame(asked[0].args.generation, FINAL | ERROR, { type: "error", code: "slow" }));
+    await expect(slow).rejects.toThrow("slow");
+    invoke.mockImplementation(async (cmd: string, args?: Args) => {
+      if (cmd === "tts_studio" && args?.op === "polish") throw "polish_not_installed";
+      return "From the cleanup child.";
+    });
+    await expect(polishEngine.polish("um the pin", [])).rejects.toBe("polish_not_installed");
+    expect(cleanupCalls()).toEqual([]);
+  });
+
+  it("warms no cleanup child without local polish", async () => {
+    invoke.mockImplementation(async () => false);
+    polishEngine.warm!(["QueueTray"]);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(invoke).toHaveBeenCalledWith("tts_studio", { op: "warm", args: { polish: true, vocab: ["QueueTray"] } });
+    expect(cleanupCalls()).toEqual([]);
+  });
+
+  it("still uses the local model", async () => {
+    const asked = localModel();
+    const done = polishEngine.polish("um so the queue tray moves", []);
+    await Promise.resolve();
+    asked[0].reply(frame(asked[0].args.generation, FINAL, { type: "polished", text: "So the queue tray moves." }));
+    expect(await done).toBe("So the queue tray moves.");
   });
 });

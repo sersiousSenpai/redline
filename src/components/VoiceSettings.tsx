@@ -19,7 +19,12 @@ import {
   KOKORO_VOICES,
   splitBlend,
 } from "../audio/kokoroVoices";
-import { polishEnabled, setPolishEnabled } from "../audio/dictationPolish";
+import {
+  polishEnabled,
+  polishLocalOnly,
+  setPolishEnabled,
+  setPolishLocalOnly,
+} from "../audio/dictationPolish";
 import { loadVoicePrefs } from "../audio/speech";
 import { HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "../audio/voiceHotkey";
 import {
@@ -167,8 +172,10 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
   // The key held to dictate anywhere (per machine, like the voice prefs).
   const [holdKey, setHoldKey] = useState<HoldKey>(loadHoldKey);
-  // The AI polish dictated text gets once it is in (per machine too).
+  // The AI polish dictated text gets once it is in (per machine too), and
+  // whether it may fall back to the cloud model.
   const [polish, setPolish] = useState(polishEnabled);
+  const [localOnly, setLocalOnly] = useState(polishLocalOnly);
 
   useEffect(() => {
     let alive = true;
@@ -328,6 +335,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       await invoke("dictation_set_engine", { engine: dictationEngine, whisperModel });
       saveHoldKey(holdKey);
       setPolishEnabled(polish);
+      setPolishLocalOnly(localOnly);
       onSaved(engine, studio.style);
       onClose();
     } catch (e) {
@@ -600,6 +608,26 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
               audio. With local polish installed (below), a model on this Mac does it
               instead, and the Claude model steps in only when it can't answer in
               time. ⌘Z takes a polish back. Spoken turns are never polished.
+            </span>
+          </span>
+        </label>
+        <label
+          className="flex items-start gap-2"
+          style={{ cursor: polish ? "pointer" : "default", marginLeft: "22px", opacity: polish ? 1 : 0.6 }}
+        >
+          <input
+            type="checkbox"
+            checked={localOnly}
+            disabled={!polish}
+            onChange={(e) => setLocalOnly(e.target.checked)}
+            style={{ marginTop: "2px" }}
+          />
+          <span className="flex flex-col gap-0.5">
+            <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>Only on this Mac</span>
+            <span style={muted}>
+              Never send dictated text to the Claude model. When local polish isn't
+              installed, or can't answer in time, the words stay as dictation's own
+              rules cleaned them.
             </span>
           </span>
         </label>

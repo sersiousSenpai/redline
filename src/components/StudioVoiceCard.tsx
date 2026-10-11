@@ -573,7 +573,7 @@ export function LocalPolish({ onError }: { onError: (msg: string) => void }) {
       <span style={muted}>
         {POLISH.download} download, about {POLISH.memory} of memory while in use. Longer
         dictations are then tidied by a small model on this Mac; the Claude model steps
-        in only when it can't answer in time.
+        in only when it can't answer in time, unless polish stays on this Mac.
       </span>
       {installed ? (
         <>

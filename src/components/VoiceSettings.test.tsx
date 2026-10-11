@@ -110,7 +110,7 @@ vi.mock("./StudioVoiceCard", () => ({
 
 import { VoiceSettings } from "./VoiceSettings";
 import { loadHoldKey, saveHoldKey } from "../audio/voiceHotkey";
-import { polishEnabled } from "../audio/dictationPolish";
+import { polishEnabled, polishLocalOnly } from "../audio/dictationPolish";
 import { learnPair, updateVocabStore } from "../audio/vocab";
 
 const flush = () =>
@@ -348,8 +348,19 @@ describe("dictation polish", () => {
     expect(box("Polish dictated text").checked).toBe(true);
     await act(async () => box("Polish dictated text").click());
     expect(polishEnabled()).toBe(true);
+    expect(box("Only on this Mac").disabled, "nothing to keep local").toBe(true);
     await save();
     expect(polishEnabled()).toBe(false);
+  });
+
+  it("may use the Claude model until it is kept on this Mac, saved with the rest", async () => {
+    await mount();
+    expect(box("Only on this Mac").checked).toBe(false);
+    expect(box("Only on this Mac").disabled).toBe(false);
+    await act(async () => box("Only on this Mac").click());
+    expect(polishLocalOnly()).toBe(false);
+    await save();
+    expect(polishLocalOnly()).toBe(true);
   });
 
   it("offers local polish in Dictation whatever the speaking engine, where it can run", async () => {
