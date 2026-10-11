@@ -3,10 +3,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { MessageSquare } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { useTextClearance } from "../hooks/useTextClearance";
 import { setVoiceAway, useVoiceAway } from "../audio/voiceAway";
+import { useCaptioned } from "../audio/voiceCaption";
+
+const DiscussCaption = lazy(() => import("./DiscussCaption"));
 
 // The floating "Discuss" pill on the document and drafter panes. One compact
 // button, one destination: the voice panel — the app's discussion surface
@@ -23,7 +26,11 @@ import { setVoiceAway, useVoiceAway } from "../audio/voiceAway";
 //
 // It also carries the state of a voice turn left running when the panel
 // closed (`voiceAway`): a breathing mark while the agent works, a dot once its
-// reply is waiting. States, never segments — one click still opens the panel.
+// reply is waiting. And a turn taken with the hold key while the panel is
+// closed springs it into a caption (`voiceCaption`, DiscussCaption): your
+// words as you say them, then the reply as it is spoken, shrinking back into
+// the pill once it is said. States, never segments — one click, on the pill
+// or its caption, still opens the panel.
 // And a 150 ms hover on it is intent to talk: the studio voice starts loading
 // its model then (Rust ignores the warm for any other engine).
 
@@ -66,6 +73,12 @@ export function DiscussPill({
   const pillRef = useRef<HTMLButtonElement | null>(null);
   const warmRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const tracked = useVoiceAway();
+  // The caption stays mounted past its last state, to shrink back.
+  const captioned = useCaptioned(voiceKey);
+  const [captionUp, setCaptionUp] = useState(false);
+  useEffect(() => {
+    if (captioned && !captionUp) setCaptionUp(true);
+  }, [captioned, captionUp]);
   const awayKey = tracked?.state === "thinking" ? tracked.key : null;
   // Another plan's waiting reply is that plan's news, not this one's.
   const away = tracked && (voiceKey === undefined || tracked.key === voiceKey) ? tracked : null;
@@ -138,35 +151,42 @@ export function DiscussPill({
   });
 
   return (
-    <button
-      ref={pillRef}
-      type="button"
-      onClick={onClick}
-      onPointerEnter={(e) => {
-        if (e.pointerType === "mouse" && !e.buttons)
-          warmRef.current = setTimeout(() => void invoke("tts_studio", { op: "warm" }).catch(() => {}), 150);
-      }}
-      onPointerLeave={() => clearTimeout(warmRef.current)}
-      title={label}
-      aria-label={label}
-      className="rl-discuss-pill absolute flex items-center gap-1.5 rounded-full"
-      /* `left` lives in the stylesheet — the icon stage moves it, and an
-         inline value would out-specific the stage rule. */
-      style={{
-        bottom: `${bottom}px`,
-        padding: "6px 12px",
-        fontSize: "13px",
-        background: "var(--color-bg-elevated)",
-        border: "1px solid var(--color-rule)",
-        color: "var(--color-ink)",
-        boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-        cursor: "pointer",
-        zIndex: 20,
-      }}
-    >
-      <MessageSquare size={14} strokeWidth={2} />
-      <span className="rl-discuss-label">Discuss</span>
-      {away && <span className="rl-discuss-badge" data-state={away.state} aria-hidden />}
-    </button>
+    <>
+      <button
+        ref={pillRef}
+        type="button"
+        onClick={onClick}
+        onPointerEnter={(e) => {
+          if (e.pointerType === "mouse" && !e.buttons)
+            warmRef.current = setTimeout(() => void invoke("tts_studio", { op: "warm" }).catch(() => {}), 150);
+        }}
+        onPointerLeave={() => clearTimeout(warmRef.current)}
+        title={label}
+        aria-label={label}
+        className="rl-discuss-pill absolute flex items-center gap-1.5 rounded-full"
+        /* `left` lives in the stylesheet — the icon stage moves it, and an
+           inline value would out-specific the stage rule. */
+        style={{
+          bottom: `${bottom}px`,
+          padding: "6px 12px",
+          fontSize: "13px",
+          background: "var(--color-bg-elevated)",
+          border: "1px solid var(--color-rule)",
+          color: "var(--color-ink)",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+          cursor: "pointer",
+          zIndex: 20,
+        }}
+      >
+        <MessageSquare size={14} strokeWidth={2} />
+        <span className="rl-discuss-label">Discuss</span>
+        {away && <span className="rl-discuss-badge" data-state={away.state} aria-hidden />}
+      </button>
+      {captionUp && (
+        <Suspense fallback={null}>
+          <DiscussCaption pill={pillRef} voiceKey={voiceKey} onOpen={onClick} onGone={() => setCaptionUp(false)} />
+        </Suspense>
+      )}
+    </>
   );
 }

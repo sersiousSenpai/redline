@@ -171,6 +171,71 @@ try {
   check("…and stays one button", await cdp.evaluate("document.querySelector('.rl-discuss-pill').querySelectorAll('button').length === 0"));
   await screenshot("08-pill-waiting");
 
+  // A turn taken with the hold key and the panel closed: the pill springs into
+  // a caption — what it hears, then what the agent does, then the reply as it
+  // is spoken — and shrinks back once it is said. (Another conversation's key,
+  // so the open panel here never takes it over.)
+  const AWAY = { sessionId: "qa-away", generation: 1 };
+  const capWait = async (test, ms = 3000) => { for (let i = 0; i < ms / 50 && !(await cdp.evaluate(test)); i++) await delay(50); return cdp.evaluate(test); };
+  await cdp.evaluate("window.__qa.setCaption({ key: 'qa-away', phase: 'hearing', text: 'is the replay safe on remount', levels: [0.2, 0.5, 0.9, 0.6, 0.3, 0.7], activity: null, since: Date.now() })");
+  await capWait("!!document.querySelector('.rl-discuss-caption')");
+  await delay(500);
+  const pillBox = await rect(".rl-discuss-pill"), capBox = await rect(".rl-discuss-caption");
+  check("Hearing, the pill springs into a caption on its own corner", capBox && Math.abs(capBox.x - pillBox.x) < 1.5 && Math.abs(capBox.bottom - pillBox.bottom) < 1.5, { pillBox, capBox });
+  check("…at most 420 px wide, and never past the pane", capBox.width <= 420 && capBox.right <= (await rect("[data-qa=doc-scroll]")).right, capBox);
+  check("…the pill hidden under it", (await cdp.evaluate("getComputedStyle(document.querySelector('.rl-discuss-pill')).visibility")) === "hidden");
+  check("…with the waveform and the words", await cdp.evaluate("document.querySelectorAll('.rl-discuss-caption-wave i').length === 16 && document.querySelector('.rl-discuss-caption').textContent.includes('is the replay safe on remount')"));
+  await screenshot("11-caption-hearing");
+  await cdp.evaluate("window.__qa.setCaption({ ...window.__qa.caption(), phase: 'thinking', text: '', levels: [], activity: { at: 1, kind: 'tool', label: 'Bash…' } })"); await settle();
+  check("Thinking, it says what the agent is doing", (await cdp.evaluate("document.querySelector('.rl-discuss-caption').textContent")).includes("Reading the plan…"));
+  check("…on one line", (await rect(".rl-discuss-caption")).height <= 32, await rect(".rl-discuss-caption"));
+  await screenshot("12-caption-thinking");
+
+  // The reply, through the background reply's own speech queue.
+  await cdp.evaluate("window.__qa.setClipMs(400); window.__qaSpoken.length = 0");
+  await cdp.evaluate("window.__qa.away.expect('qa-away').then(() => window.__qa.away.sent('qa-away', { generation: 1, turn: 41 }))"); await settle();
+  await emit("voice-delta", { ...AWAY, turn: 41, text: "Mostly, yes. The risk is a double apply when the panel comes back in the middle of a turn that is still streaming its answer. " });
+  await emit("voice-delta", { ...AWAY, turn: 41, text: "Gate it on the turn id.\n⟦screen⟧\n| Case | Fix |\n|---|---|\n| remount | gate |" });
+  const speakingCap = await capWait("window.__qa.caption()?.phase === 'speaking'");
+  check("Speaking, it shows the sentence being said", speakingCap && (await cdp.evaluate("document.querySelector('.rl-discuss-caption').textContent")).includes("Mostly, yes."));
+  await capWait("document.querySelector('.rl-discuss-caption').textContent.includes('double apply')");
+  const two = await rect(".rl-discuss-caption");
+  check("…in two lines at most", two.height > 32 && two.height <= 52, two);
+  check("…and only the spoken part is said", await cdp.evaluate("window.__qaSpoken.join(' ').includes('Mostly, yes.') && !/Case|remount|⟦/.test(window.__qaSpoken.join(' '))"), await cdp.evaluate("window.__qaSpoken"));
+  await screenshot("13-caption-speaking");
+  // A click opens the panel, and the caret stays where it was.
+  await cdp.evaluate("document.querySelector(\"input[aria-label='Type a message to the voice agent']\").focus()");
+  const openedBefore = await cdp.evaluate("window.__qa.opened()");
+  await click(".rl-discuss-caption");
+  check("A click on the caption is the pill's: the panel opens", (await cdp.evaluate("window.__qa.opened()")) === openedBefore + 1);
+  check("…and the caret stays where it was", (await cdp.evaluate("document.activeElement?.getAttribute('aria-label')")) === "Type a message to the voice agent");
+  // Esc stops it: the speech, the turn, and the caption.
+  await cdp.evaluate("document.activeElement.blur(); window.__qaCalls.length = 0");
+  await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+  await settle();
+  check("Esc stops the reply and the turn", (await calls("voice_interrupt")).some((a) => a?.sessionId === "qa-away"));
+  check("…and the caption shrinks back into the pill", await capWait("!document.querySelector('.rl-discuss-caption') && getComputedStyle(document.querySelector('.rl-discuss-pill')).visibility === 'visible'"));
+  // A reply heard to its end stays a moment, then goes by itself.
+  await cdp.evaluate("window.__qa.setCaption({ key: 'qa-away', phase: 'thinking', text: '', levels: [], activity: null, since: Date.now() })");
+  await cdp.evaluate("window.__qa.away.expect('qa-away').then(() => window.__qa.away.sent('qa-away', { generation: 1, turn: 42 }))"); await settle();
+  await emit("voice-delta", { ...AWAY, turn: 42, text: "It ships behind a flag." });
+  await emit("voice-done", { ...AWAY, turn: 42, body: "It ships behind a flag.", messageId: "m9", timing: {} });
+  check("Once said, it rests on the last sentence", await capWait("window.__qa.caption()?.phase === 'done'"));
+  await screenshot("14-caption-done");
+  check("…for about 2 s, then shrinks back by itself", !(await cdp.evaluate("!document.querySelector('.rl-discuss-caption')")) && (await capWait("!document.querySelector('.rl-discuss-caption')", 4000)));
+  // Its words reach 4.5:1 in every theme.
+  for (const theme of ["studio", "aurora", "terminal", "basic"]) {
+    await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`);
+    await cdp.evaluate("window.__qa.setCaption({ key: 'qa-away', phase: 'speaking', text: 'The risk is a double apply when the panel comes back.', levels: [], activity: null, since: Date.now() })");
+    await capWait("!!document.querySelector('.rl-discuss-caption')"); await delay(450);
+    const ratio = await cdp.evaluate(`(() => { const lum = (c) => { const [r, g, b] = c.match(/[\\d.]+/g).slice(0, 3).map(Number).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; }; const el = document.querySelector('.rl-discuss-caption'); const s = getComputedStyle(el); const a = lum(s.color), b = lum(s.backgroundColor); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); })()`);
+    check(`${theme}: the caption's words reach 4.5:1`, ratio >= 4.5, { ratio });
+    await screenshot(`15-caption-${theme}`);
+    await cdp.evaluate("window.__qa.setCaption(null)"); await capWait("!document.querySelector('.rl-discuss-caption')");
+  }
+  await cdp.evaluate("window.__qa.setTheme('basic')"); await settle();
+
   // The studio voice: its card in settings, then a reply its stand-in reads
   // while the model warms, with a quiet chip that takes no focus.
   await emit("voice-done", { ...turn(await cdp.evaluate("window.__qaTurn")), body: "It ships behind a flag.", messageId: "m4", timing: {} });

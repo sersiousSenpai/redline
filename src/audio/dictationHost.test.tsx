@@ -15,6 +15,7 @@ import { useDictationComposer, type ComposerSpec } from "../lib/dictationCompose
 import { DictationBroker } from "./dictationBroker";
 import { BACKGROUND_WARM_MS, DICTATION_OWNER, DictationHost, type TalkContext, type TurnTaker } from "./dictationHost";
 import { getVoiceAway, setVoiceAway } from "./voiceAway";
+import { voiceCaption } from "./voiceCaption";
 import { APP_KEYS, HOLD_MS, type HotkeyEvent } from "./voiceHotkey";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -70,6 +71,8 @@ function nativeMic() {
 let mic: ReturnType<typeof nativeMic>;
 let host: DictationHost;
 let polish: { polish: ReturnType<typeof vi.fn>; warm: ReturnType<typeof vi.fn> };
+/** The background reply (awayReply.ts), as the host drives it. */
+let away: Record<"expect" | "sent" | "drop" | "hush" | "release", ReturnType<typeof vi.fn>>;
 let talk: TalkContext | null;
 let taker: TurnTaker | null;
 let root: Root;
@@ -81,6 +84,7 @@ beforeEach(() => {
   appInvoke.mockImplementation(async () => null);
   localStorage.clear();
   polish = { polish: vi.fn(async () => ""), warm: vi.fn() };
+  away = { expect: vi.fn(async () => {}), sent: vi.fn(), drop: vi.fn(), hush: vi.fn(), release: vi.fn() };
   mic = nativeMic();
   talk = null;
   taker = null;
@@ -93,12 +97,14 @@ beforeEach(() => {
     taker: () => taker,
     invoke: appInvoke as never,
     polish: polish as never,
+    away: async () => away as never,
   });
   mount = document.createElement("div");
   document.body.appendChild(mount);
   root = createRoot(mount);
   strip.set(null);
   setVoiceAway(null);
+  voiceCaption.set(null);
 });
 afterEach(async () => {
   await act(async () => root.unmount());
@@ -527,6 +533,7 @@ describe("the vocabulary", () => {
       taker: () => taker,
       invoke: appInvoke as never,
       polish: polish as never,
+      away: async () => away as never,
     });
     talk = { key: "plan-1", markdown: () => "Keep Tauri warm.", cwd: null };
     await settle();
@@ -611,6 +618,91 @@ describe("with nothing that takes text focused", () => {
   it("offers the words for copying when there is no conversation to send them to", async () => {
     await hold("remember to rerun the size check");
     expect(strip.get()).toMatchObject({ phase: "notice", copy: "remember to rerun the size check" });
+  });
+});
+
+describe("the reply to a turn sent in the background", () => {
+  /** The Discuss pill, on screen. */
+  const pill = () => {
+    const el = document.createElement("button");
+    el.className = "rl-discuss-pill";
+    document.body.appendChild(el);
+  };
+
+  it("is listened for before the turn goes, and followed by the turn it started", async () => {
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    const order: string[] = [];
+    away.expect.mockImplementation(async () => void order.push("expect"));
+    appInvoke.mockImplementation(async (cmd: string) => {
+      order.push(cmd);
+      return cmd === "voice_send" ? { generation: 3, turn: 7 } : null;
+    });
+    await hold("is the replay safe on remote");
+    expect(order.filter((c) => c !== "get_ui_prefs" && c !== "classmem_tree")).toEqual(["voice_session_start", "expect", "voice_send"]);
+    expect(away.expect).toHaveBeenCalledWith("plan-1");
+    expect(away.sent).toHaveBeenCalledWith("plan-1", { generation: 3, turn: 7 });
+  });
+
+  it("shows the words on the pill's caption while they are said, never the strip, then what the agent does", async () => {
+    pill();
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    expect(voiceCaption.get()).toMatchObject({ key: "plan-1", phase: "hearing", text: "" });
+    act(() => mic.emit("dictation-level", { owner: DICTATION_OWNER, rms: -20, peak: -10 }));
+    mic.say("is the replay safe");
+    expect(voiceCaption.get()).toMatchObject({ phase: "hearing", text: "is the replay safe" });
+    expect(voiceCaption.get()!.levels).toHaveLength(1);
+    expect(strip.get()).toBeNull();
+    now += 1500;
+    press({ type: "up", at: now });
+    await settle();
+    expect(voiceCaption.get()).toMatchObject({ key: "plan-1", phase: "thinking" });
+    // The caption says it went: no notice besides.
+    expect(strip.get()).toBeNull();
+  });
+
+  it("drops the caption of a capture that sends nothing", async () => {
+    pill();
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    expect(voiceCaption.get()?.phase).toBe("hearing");
+    press({ type: "escape", at: now });
+    await settle();
+    expect(voiceCaption.get()).toBeNull();
+    await hold("", { heard: false, ms: 200 });
+    expect(voiceCaption.get()).toBeNull();
+    expect(strip.get()).toMatchObject({ phase: "notice", text: "Didn't catch that" });
+  });
+
+  it("goes when the turn can't be sent, the words offered for copying", async () => {
+    pill();
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    appInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "voice_send") throw "voice session not started";
+      return null;
+    });
+    await hold("is the replay safe on remote");
+    expect(away.drop).toHaveBeenCalledWith("plan-1");
+    expect(voiceCaption.get()).toBeNull();
+    expect(strip.get()).toMatchObject({ phase: "notice", copy: "is the replay safe on remote" });
+  });
+
+  it("is hushed by the next hold, and handed to the panel that opens on its conversation", async () => {
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    await hold("is the replay safe on remote");
+    expect(away.hush).not.toHaveBeenCalled();
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    expect(away.hush).toHaveBeenCalledOnce();
+    press({ type: "escape", at: now });
+    await settle();
+    host.release("plan-1");
+    expect(away.release).toHaveBeenCalledWith("plan-1");
   });
 });
 

@@ -26,6 +26,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { DiscussPill } from "./DiscussPill";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
+import { captionFor, voiceCaption } from "../audio/voiceCaption";
+import { CAPTION_MAX, captionBox } from "./DiscussCaption";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -46,6 +48,7 @@ beforeEach(async () => {
   status.inFlight = true;
   onClick.mockReset();
   setVoiceAway(null);
+  voiceCaption.set(null);
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
@@ -144,5 +147,78 @@ describe("DiscussPill warms the studio voice on a hover", () => {
     pointer("pointerover", "mouse", 1);
     vi.advanceTimersByTime(500);
     expect(warms()).toEqual([]);
+  });
+});
+
+describe("DiscussPill springs into a caption of a turn taken with the panel closed", () => {
+  const caption = () => document.querySelector<HTMLButtonElement>(".rl-discuss-caption");
+  const show = async (patch: Partial<ReturnType<typeof captionFor>>, key = "plan-1") => {
+    await act(async () => voiceCaption.set({ ...captionFor(key, "hearing", Date.now()), ...patch }));
+    // The caption is a chunk of its own.
+    for (let i = 0; i < 20 && !caption(); i++) await settle();
+  };
+
+  beforeEach(async () => {
+    await act(async () => root.render(<DiscussPill onClick={onClick} voiceKey="plan-1" />));
+  });
+
+  it("hears: the waveform and the words, the pill hidden under it", async () => {
+    await show({ phase: "hearing", text: "is the replay safe", levels: [0.2, 0.9] });
+    expect(caption()?.dataset.phase).toBe("hearing");
+    expect(caption()?.textContent).toContain("is the replay safe");
+    expect(caption()?.querySelectorAll(".rl-discuss-caption-wave i")).toHaveLength(16);
+    expect(pill().hasAttribute("data-captioned")).toBe(true);
+  });
+
+  it("thinks: what the agent is doing, in words", async () => {
+    await show({ phase: "thinking", activity: { at: 1, kind: "tool", label: "Bash…" } });
+    expect(caption()?.textContent).toContain("Reading the plan…");
+    expect(caption()?.querySelector(".rl-discuss-caption-mark")).not.toBeNull();
+  });
+
+  it("speaks: the sentence being said", async () => {
+    await show({ phase: "speaking", text: "Mostly. The risk is a double apply when the panel comes back." });
+    expect(caption()?.dataset.phase).toBe("speaking");
+    expect(caption()?.textContent).toContain("The risk is a double apply");
+  });
+
+  it("is the pill's click, and never takes focus", async () => {
+    const field = document.createElement("textarea");
+    document.body.appendChild(field);
+    field.focus();
+    await show({ phase: "thinking" });
+    const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    caption()!.dispatchEvent(down);
+    expect(down.defaultPrevented).toBe(true);
+    expect(caption()!.tabIndex).toBe(-1);
+    await act(async () => caption()!.click());
+    expect(onClick).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(field);
+    field.remove();
+  });
+
+  it("shows only its own conversation's turn", async () => {
+    await show({ phase: "thinking" }, "plan-2");
+    expect(caption()).toBeNull();
+    expect(pill().hasAttribute("data-captioned")).toBe(false);
+  });
+
+  it("shrinks back into the pill once it is over, and springs again for the next turn", async () => {
+    await show({ phase: "done", text: "It ships behind a flag." });
+    await act(async () => voiceCaption.set(null));
+    await settle();
+    expect(caption()).toBeNull();
+    expect(pill().hasAttribute("data-captioned")).toBe(false);
+    await show({ phase: "hearing" });
+    expect(caption()).not.toBeNull();
+  });
+
+  it("grows up and right out of the pill, at most 420 px and never past its pane", () => {
+    const viewport = { width: 1400, height: 900 };
+    const pill = { left: 16, bottom: 884, width: 96 };
+    expect(captionBox(pill, 1400, viewport)).toEqual({ left: 16, bottom: 16, width: CAPTION_MAX });
+    expect(captionBox(pill, 300, viewport).width).toBe(300 - 8 - 16);
+    // A pane narrower than the pill itself: the pill's width, never less.
+    expect(captionBox(pill, 60, viewport).width).toBe(96);
   });
 });

@@ -27,8 +27,37 @@ import {
   READ_ALOUD_START,
   SpeechQueue,
   type ReadAloudState,
+  type SpeechDriver,
 } from "./speech";
 import { cloudTtsDriver } from "./cloudTts";
+import type { StudioOptions } from "./studioTts";
+
+/** The user's saved engine, and a driver of its own for it: the studio voice
+ *  (its own chunk), or the Rust-synth driver for Kokoro and the cloud voices.
+ *  `null` for the system voice, which every new queue already speaks in. A
+ *  driver per reader keeps its generations its own: one reader stopping
+ *  never cancels another's speech. */
+export async function savedEngineDriver(
+  opts: Omit<StudioOptions, "style" | "preview">,
+): Promise<{ engine: string; driver: SpeechDriver | null }> {
+  const s = await invoke<{ engine: string; studioStyle?: string }>("tts_get_settings");
+  const engine = s.engine || "system";
+  if (engine === "system") return { engine, driver: null };
+  if (engine === "studio") {
+    const { studioTtsDriver } = await import("./studioTts");
+    return { engine, driver: studioTtsDriver({ ...opts, style: s.studioStyle }) };
+  }
+  return { engine, driver: cloudTtsDriver(opts.onError) };
+}
+
+/** Intent to hear `engine`: start loading it, so the first sentence doesn't
+ *  pay its cold start — a ~300 MB model load (Kokoro) or a sidecar start
+ *  (studio). Never with Kokoro's one-time fp32 upgrade, a 325 MB download
+ *  that only the voice panel and its settings start. */
+export function warmEngine(engine: string): void {
+  if (engine === "kokoro") void invoke("tts_kokoro_warm", { upgrade: false }).catch(() => {});
+  else if (engine === "studio") void import("./studioTts").then((m) => m.warmStudio()).catch(() => {});
+}
 
 export interface ReadAloud {
   /** Something is being spoken right now (drives the Stop affordance). */
@@ -70,16 +99,9 @@ export function useReadAloud(opts: {
   onFallbackRef.current = opts.onFallback;
   const [studio, setStudio] = useState(false);
 
-  // A local voice is warmed only on intent, never because a chat mounted: a
-  // warm is a ~300 MB model load (Kokoro) or a sidecar start (studio). And
-  // never with Kokoro's one-time fp32 upgrade, a 325 MB download that only
-  // the voice panel and its settings start.
+  // A local voice is warmed only on intent, never because a chat mounted.
   const engine = useRef("system");
-  const warm = () => {
-    if (engine.current === "kokoro") void invoke("tts_kokoro_warm", { upgrade: false }).catch(() => {});
-    else if (engine.current === "studio")
-      void import("./studioTts").then((m) => m.warmStudio()).catch(() => {});
-  };
+  const warm = () => warmEngine(engine.current);
 
   // One queue for the hook's life; the engine is resolved once and swapped in
   // when the answer lands (the default system driver speaks in the meantime).
@@ -88,25 +110,17 @@ export function useReadAloud(opts: {
     q.setPrefs(loadVoicePrefs());
     queueRef.current = q;
     let alive = true;
-    void invoke<{ engine: string; studioStyle?: string }>("tts_get_settings")
-      .then(async (s) => {
-        if (!alive || (s.engine || "system") === "system") return;
-        engine.current = s.engine;
-        if (s.engine === "studio") {
-          // Its own chunk; until it loads, the system voice holds the queue.
-          const { studioTtsDriver } = await import("./studioTts");
-          if (!alive) return;
-          q.setDriver(
-            studioTtsDriver({
-              onError: (m) => onErrorRef.current?.(m),
-              onFallback: (n) => onFallbackRef.current?.(n),
-              style: s.studioStyle,
-            }),
-          );
-          setStudio(true);
-          return;
-        }
-        q.setDriver(cloudTtsDriver((m) => onErrorRef.current?.(m)));
+    // The studio voice's driver is its own chunk; until it loads, the system
+    // voice holds the queue.
+    void savedEngineDriver({
+      onError: (m) => onErrorRef.current?.(m),
+      onFallback: (n) => onFallbackRef.current?.(n),
+    })
+      .then(({ engine: e, driver }) => {
+        if (!alive || !driver) return;
+        engine.current = e;
+        q.setDriver(driver);
+        if (e === "studio") setStudio(true);
       })
       .catch(() => {
         /* the system voice is the fallback, and it is already installed */

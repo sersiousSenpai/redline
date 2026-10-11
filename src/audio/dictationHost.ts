@@ -15,8 +15,10 @@
 //      into the target — or, with nothing that takes text focused, becomes a
 //      turn in the plan's or the Drafter's conversation: through the voice
 //      panel's own push-to-talk when it is open, otherwise sent in the
-//      background, the Discuss pill showing that a reply is coming. Turns are
-//      never cleaned up. Nothing moves focus, and nothing opens the panel.
+//      background, where the Discuss pill springs into a caption of it
+//      (voiceCaption.ts) — your words as you say them, then the reply, which
+//      is spoken (awayReply.ts). Turns are never cleaned up. Nothing moves
+//      focus, and nothing opens the panel.
 //   3. Kept words then get the AI polish where their composer asks for it
 //      (dictationPolish.ts; a local model warms for it as the capture
 //      starts), and for a while any word the user corrects is learned
@@ -50,7 +52,10 @@ import {
 } from "./dictationTarget";
 import { PREROLL_CLEAR_MS, type DictationErrorEvent } from "./dictationTypes";
 import { isBenignDictationError, isNonSpeech } from "./utterance";
+import type { TurnId } from "./turnState";
 import { setVoiceAway } from "./voiceAway";
+import type { AwayReply } from "./awayReply";
+import { captionFor, voiceCaption } from "./voiceCaption";
 import { APP_KEYS, VoiceHotkey, type KeySource } from "./voiceHotkey";
 import { readIntents } from "./voiceIntents";
 import { buildVocab, learnPair, loadVocabStore, memoryVocab, onVocabStore, updateVocabStore, type VocabStore } from "./vocab";
@@ -87,6 +92,8 @@ interface Session {
   taker: TurnTaker | null;
   /** A turn sent in the background. */
   talk: TalkContext | null;
+  /** Its words show on the Discuss pill's caption, not the strip. */
+  captioned: boolean;
   vocab: string[];
   /** The live recognizer heard words. */
   heard: boolean;
@@ -103,6 +110,9 @@ export interface HostDeps {
   taker: () => TurnTaker | null;
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
   polish: PolishEngine;
+  /** What speaks a background turn's reply: a chunk of its own, with the
+   *  speech engines. */
+  away: () => Promise<AwayReply>;
 }
 
 /** How long the memory index's names are reused before they are read again. */
@@ -125,6 +135,8 @@ export class DictationHost {
   private levels: number[] = [];
   /** Conversations a background turn woke, each with its timer to sleep. */
   private woken = new Map<string, ReturnType<typeof setTimeout>>();
+  /** The background reply, once a turn has loaded it. */
+  private replying: AwayReply | null = null;
 
   constructor(private readonly deps: HostDeps) {
     this.hotkey = new VoiceHotkey({
@@ -163,13 +175,15 @@ export class DictationHost {
     const target = fixed ?? resolveTarget(this.deps.doc, source);
     const taker = target.kind === "turn" ? this.deps.taker() : null;
     if (taker) {
-      this.session = { mode, since, target, composer: null, taker, talk: null, vocab: [], heard: false, started: Promise.resolve(true), over: false };
+      this.session = { mode, since, target, composer: null, taker, talk: null, captioned: false, vocab: [], heard: false, started: Promise.resolve(true), over: false };
       taker.start(since);
       return;
     }
     const talk = this.deps.conversation();
     const vocab = buildVocab({ plan: talk?.markdown(), store: this.store, memory: this.memory });
     const turn = target.kind === "turn";
+    // A turn with the Discuss pill on screen: the pill shows it.
+    const captioned = turn && !!talk && !!this.deps.doc.querySelector(".rl-discuss-pill");
     const s: Session = {
       mode,
       since,
@@ -177,6 +191,7 @@ export class DictationHost {
       composer: composerAt(targetElement(target)),
       taker: null,
       talk: turn ? talk : null,
+      captioned,
       vocab,
       heard: false,
       started: Promise.resolve(false),
@@ -188,15 +203,19 @@ export class DictationHost {
     // its prompt for this vocabulary, while the user is still speaking.
     if (s.composer?.spec.polish && polishEnabled()) this.deps.polish.warm?.(vocab);
     setDictationLive(targetElement(target));
+    // Speaking over a reply still being said hushes it: the mic would hear it.
+    this.replying?.hush();
     const verb = !turn ? "insert" : talk ? "send" : "copy";
-    strip.set({
-      owner: DICTATION_OWNER,
-      phase: "listening",
-      text: "",
-      levels: [],
-      anchor: this.anchorFor(target, s.composer),
-      hint: mode === "hold" ? `release to ${verb}` : `tap again to ${verb} · esc cancels`,
-    });
+    if (captioned) voiceCaption.set(captionFor(talk!.key, "hearing", since));
+    else
+      strip.set({
+        owner: DICTATION_OWNER,
+        phase: "listening",
+        text: "",
+        levels: [],
+        anchor: this.anchorFor(target, s.composer),
+        hint: mode === "hold" ? `release to ${verb}` : `tap again to ${verb} · esc cancels`,
+      });
     s.started = this.deps.broker
       .start(DICTATION_OWNER, {
         kind: "hold",
@@ -257,6 +276,7 @@ export class DictationHost {
     s.over = true;
     if (s.taker) s.taker.cancel();
     else {
+      this.uncaption(s);
       this.deps.broker.cancel(DICTATION_OWNER);
       // A start still on its way would open the mic after this cancel.
       void s.started.then((ok) => {
@@ -292,13 +312,21 @@ export class DictationHost {
     const s = this.session;
     if (!s || s.over || s.taker) return;
     if (text.trim()) s.heard = true;
-    this.show({ text });
+    if (s.captioned) voiceCaption.update(s.talk!.key, { text });
+    else this.show({ text });
   }
 
   private level(rms: number): void {
-    if (!this.session || this.session.over) return;
+    const s = this.session;
+    if (!s || s.over) return;
     this.levels = [...this.levels.slice(1 - STRIP_BARS), levelHeight(rms)];
-    this.show({ levels: this.levels });
+    if (s.captioned) voiceCaption.update(s.talk!.key, { levels: this.levels });
+    else this.show({ levels: this.levels });
+  }
+
+  /** A captioned capture that sends nothing: the pill's caption goes. */
+  private uncaption(s: Session): void {
+    if (s.captioned && voiceCaption.get()?.key === s.talk!.key && voiceCaption.get()?.phase === "hearing") voiceCaption.set(null);
   }
 
   /** Change the strip — only while it is this host's, or nobody's: the voice
@@ -334,7 +362,7 @@ export class DictationHost {
     // A tap, a cough, a breath: the transcriber's filler is not words.
     if (isNonSpeech({ text: spokenBreaks(said).trim(), heldMs, heard: s.heard })) return this.notice("Didn't catch that");
     if (s.target.kind === "turn") {
-      if (s.talk) return this.sendTurn(s.talk, text);
+      if (s.talk) return this.sendTurn(s.talk, text, s.captioned);
       return this.nowhere(text, "No text box to type into");
     }
     const el = targetElement(s.target);
@@ -401,15 +429,24 @@ export class DictationHost {
   }
 
   /** A turn in the conversation, the panel closed: sent as the panel would,
-   *  a reply still running interrupted rather than refused. The Discuss pill
-   *  shows the reply coming, then waiting. */
-  private async sendTurn(talk: TalkContext, text: string): Promise<void> {
+   *  a reply still running interrupted rather than refused. Its reply is
+   *  spoken, and the Discuss pill shows it coming: on its caption, which
+   *  springs from the pill while it thinks and speaks, and then as a dot
+   *  until the panel is opened. With no pill on screen, the strip says the
+   *  turn went. */
+  private async sendTurn(talk: TalkContext, text: string, captioned: boolean): Promise<void> {
     const call = this.deps.invoke;
-    const send = () => call("voice_send", { sessionId: talk.key, text, label: text });
+    const send = () => call<TurnId | null>("voice_send", { sessionId: talk.key, text, label: text });
+    voiceCaption.set(captionFor(talk.key, "thinking", Date.now()));
+    const away = await this.deps.away().catch(() => null);
+    this.replying = away;
     try {
       await call("voice_session_start", { sessionId: talk.key, planMarkdown: talk.markdown(), cwd: talk.cwd });
+      // Listening before it goes: the reply's first words can't be missed.
+      await away?.expect(talk.key);
+      let id: TurnId | null;
       try {
-        await send();
+        id = await send();
       } catch (e) {
         if (!String(e).includes("still streaming")) throw e;
         await call("voice_interrupt", { sessionId: talk.key });
@@ -418,14 +455,22 @@ export class DictationHost {
           if (!status.inFlight) break;
           await new Promise((r) => setTimeout(r, 100));
         }
-        await send();
+        id = await send();
       }
+      away?.sent(talk.key, id ?? null);
       setVoiceAway({ key: talk.key, state: "thinking" });
-      this.notice("Sent to the discussion");
+      if (!captioned) this.notice("Sent to the discussion");
       this.sleepLater(talk.key);
     } catch (e) {
+      away?.drop(talk.key);
+      if (voiceCaption.get()?.key === talk.key) voiceCaption.set(null);
       this.nowhere(text, `Couldn't reach the discussion (${String(e)})`);
     }
+  }
+
+  /** The voice panel opened on `key`: it takes the reply over. */
+  release(key: string): void {
+    this.replying?.release(key);
   }
 
   /** Let a conversation a background turn woke go once its reply is done
@@ -456,11 +501,13 @@ export class DictationHost {
   }
 
   private notice(text: string): void {
-    this.show({ phase: "notice", text, anchor: strip.get()?.anchor ?? null });
+    const pill = this.session?.captioned ? this.deps.doc.querySelector(".rl-discuss-pill") : null;
+    this.show({ phase: "notice", text, anchor: strip.get()?.anchor ?? pill });
   }
 
   private end(s: Session): void {
     s.over = true;
+    this.uncaption(s);
     if (this.session !== s) return;
     this.session = null;
     setDictationLive(null);
@@ -521,6 +568,7 @@ function ensure(): DictationHost {
     taker: () => taker,
     invoke,
     polish: polishEngine,
+    away: () => import("./awayReply").then((m) => m.awayReply()),
   });
   host = h;
   h.hotkey.attach(window);
@@ -559,9 +607,11 @@ export function toggleInto(el: HTMLElement): void {
   ensure().toggleInto(el);
 }
 
-/** The voice panel, while open, takes the turns. */
+/** The voice panel, while open, takes the turns, and the reply to one sent
+ *  while it was closed. */
 export function registerTurnTaker(t: TurnTaker): () => void {
   taker = t;
+  host?.release(t.key);
   return () => {
     if (taker === t) taker = null;
   };

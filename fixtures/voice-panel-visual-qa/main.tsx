@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { VoicePanel } from "../../src/components/VoicePanel";
 import { DiscussPill } from "../../src/components/DiscussPill";
 import { setVoiceAway } from "../../src/audio/voiceAway";
+import { voiceCaption } from "../../src/audio/voiceCaption";
+import { awayReply } from "../../src/audio/awayReply";
 import { applyTheme } from "../../src/theme/applyTheme";
 import type { Section } from "../../src/types";
 import "../../src/styles.css";
@@ -54,17 +56,22 @@ const LOREM = "The reader is pure over its input and a sink, so the fixtures dri
 function Fixture() {
   const [width, setWidth] = useState(360);
   const [pressed, setPressed] = useState(0);
+  const [opened, setOpened] = useState(0);
   const docRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     (window as unknown as { __qa: unknown }).__qa = {
       setTheme: applyTheme,
       setWidth,
       setAway: setVoiceAway,
+      setCaption: voiceCaption.set,
+      caption: voiceCaption.get,
+      away: awayReply(),
+      opened: () => opened,
       setClipMs: (ms: number) => { clipMs = ms; },
       pressed: () => pressed,
     };
     document.documentElement.dataset.qaReady = "true";
-  }, [pressed]);
+  }, [pressed, opened]);
   return (
     <main style={{ display: "flex", height: "100vh", overflow: "hidden", background: "var(--color-paper)", color: "var(--color-ink)" }}>
       <div className="relative flex-1 min-w-0 min-h-0" style={{ display: "flex", flexDirection: "column" }}>
@@ -80,7 +87,7 @@ function Fixture() {
             <p data-anchor-id="A.3.p1">{LOREM}{LOREM}</p>
           </article>
         </div>
-        <DiscussPill onClick={() => {}} />
+        <DiscussPill onClick={() => setOpened((n) => n + 1)} />
       </div>
       <div data-qa="dock" style={{ width, display: "flex", flexShrink: 0, minHeight: 0 }}>
         <VoicePanel sessionId="qa-plan" markdown={"# Session replay\n\n## Rollout\n\nShip it."} sections={SECTIONS} onClose={() => {}} />
