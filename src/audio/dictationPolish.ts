@@ -10,18 +10,26 @@
 // turn (the agent reads messy speech fine), never for words "send it" has
 // already sent, and not at all once the user turns it off.
 //
-// The engine sits behind `PolishEngine`. Today's is the fixed cleanup child
-// (voice.rs `voice_clean`: a fast model with no tools, kept warm), told that
-// the speaker is never talking to it and given the vocabulary's spellings; a
-// local model can take its place through the same interface. What comes back
-// is checked before it is used: an answer, a summary or a rewrite in place of
-// a polish is thrown away.
+// The engine sits behind `PolishEngine` (`polishEngine` below picks one). The
+// local polish model comes first: a small model in the studio voice's sidecar
+// (tts_studio.rs), installed from the studio voice's settings card, that never
+// sends the words anywhere. Without it — or when it can't answer within its
+// budget, about 0.7 s — the fixed cleanup child does it (voice.rs
+// `voice_clean`: a fast model with no tools, kept warm). Both are told that
+// the speaker is never talking to them and given the vocabulary's spellings,
+// and the local one's every reply is checked in the sidecar as well. What
+// comes back is checked here before it is used: an answer, a summary or a
+// rewrite in place of a polish is thrown away.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+
+import { nextGeneration } from "./generation";
 
 export interface PolishEngine {
   /** Polish dictated `text`, spelling the terms in `vocab` exactly as given. */
   polish(text: string, vocab: readonly string[]): Promise<string>;
+  /** A dictation that will be polished started: get ready for `vocab`. */
+  warm?(vocab: readonly string[]): void;
 }
 
 /** How many of the vocabulary's terms ride along: its ranked head. */
@@ -30,6 +38,60 @@ const SPELLINGS = 60;
 /** The fixed cleanup child. */
 export const cleanupChild: PolishEngine = {
   polish: (text, vocab) => invoke<string>("voice_clean", { text, vocab: vocab.slice(0, SPELLINGS) }),
+};
+
+/** The terms the local model is given: the head, as the sidecar takes them
+ *  (1–64 characters). The same list warms it and polishes, so the prompt it
+ *  built while the user spoke is the one the polish uses. */
+const localSpellings = (vocab: readonly string[]) =>
+  vocab.filter((t) => t.trim() && t.length <= 64).slice(0, SPELLINGS);
+
+/** Frame header flag (tts_studio.rs): the request's last frame. */
+const FINAL = 1;
+/** Rust gives up on a polish first (its budget); this is for a reply that
+ *  never comes at all. */
+export const LOCAL_LIMIT_MS = 8000;
+
+/** The local polish model. Its reply is one frame on a Channel: the
+ *  generation's low 32 bits, flags, then the outcome as JSON. Anything but a
+ *  polish — not installed, slow, failed, cancelled — rejects. A reply the
+ *  sidecar refused comes back as the words unchanged. */
+export const localModel: Required<PolishEngine> = {
+  polish: (text, vocab) =>
+    new Promise<string>((resolve, reject) => {
+      // From the app-wide counter, so a speech driver's cancel never matches it.
+      const generation = nextGeneration();
+      const reply = new Channel<ArrayBuffer>();
+      const timer = setTimeout(() => reject(new Error("slow")), LOCAL_LIMIT_MS);
+      reply.onmessage = (data) => {
+        if (data.byteLength < 12) return;
+        const head = new DataView(data, 0, 12);
+        if (head.getUint32(0, true) !== generation >>> 0 || !(head.getUint16(8, true) & FINAL)) return;
+        clearTimeout(timer);
+        let outcome: { type?: string; text?: unknown; code?: string } = {};
+        try {
+          outcome = JSON.parse(new TextDecoder().decode(new Uint8Array(data, 12)));
+        } catch {
+          /* an outcome is always JSON; anything else is a failure */
+        }
+        if (outcome.type === "polished" && typeof outcome.text === "string") resolve(outcome.text);
+        else reject(new Error(outcome.code ?? outcome.type ?? "error"));
+      };
+      const args = { text, vocab: localSpellings(vocab), generation };
+      invoke("tts_studio", { op: "polish", args, onAudio: reply }).catch((e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+    }),
+  warm: (vocab) =>
+    void invoke("tts_studio", { op: "warm", args: { polish: true, vocab: localSpellings(vocab) } }).catch(() => {}),
+};
+
+/** What dictation polishes with: the local model, which Rust refuses at once
+ *  when it isn't installed, else — and whenever it fails — the cleanup child. */
+export const polishEngine: PolishEngine = {
+  polish: (text, vocab) => localModel.polish(text, vocab).catch(() => cleanupChild.polish(text, vocab)),
+  warm: (vocab) => localModel.warm(vocab),
 };
 
 /** Shorter dictations are left as the rules made them. */

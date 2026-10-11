@@ -39,7 +39,8 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-import { CLIP_GRACE_MS, cloudTtsDriver, nextGeneration, READ_AHEAD } from "./cloudTts";
+import { CLIP_GRACE_MS, cloudTtsDriver, READ_AHEAD } from "./cloudTts";
+import { nextGeneration } from "./generation";
 import { browserSpeechDriver, type SpeechDriver } from "./speech";
 
 /** The studio voice's preset speakers offered in settings (the model has nine;

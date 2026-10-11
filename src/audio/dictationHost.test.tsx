@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -67,7 +69,7 @@ function nativeMic() {
 
 let mic: ReturnType<typeof nativeMic>;
 let host: DictationHost;
-let polish: { polish: ReturnType<typeof vi.fn> };
+let polish: { polish: ReturnType<typeof vi.fn>; warm: ReturnType<typeof vi.fn> };
 let talk: TalkContext | null;
 let taker: TurnTaker | null;
 let root: Root;
@@ -78,7 +80,7 @@ beforeEach(() => {
   appInvoke.mockReset();
   appInvoke.mockImplementation(async () => null);
   localStorage.clear();
-  polish = { polish: vi.fn(async () => "") };
+  polish = { polish: vi.fn(async () => ""), warm: vi.fn() };
   mic = nativeMic();
   talk = null;
   taker = null;
@@ -451,11 +453,40 @@ describe("the polish", () => {
     expect(polish.polish).not.toHaveBeenCalled();
   });
 
-  it("is never asked for a turn", async () => {
+  it("is never asked for a turn, nor warmed for one", async () => {
     talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
     await hold(LONG);
     expect(voiceCalls().map(([cmd]) => cmd)).toContain("voice_send");
+    // The voice panel's own turns too.
+    taker = { key: "plan-1", start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
+    await hold(LONG);
+    expect(taker.stop).toHaveBeenCalledOnce();
     expect(polish.polish).not.toHaveBeenCalled();
+    expect(polish.warm).not.toHaveBeenCalled();
+  });
+
+  it("warms as the user starts speaking into a composer that polishes, with the vocabulary it will polish with", async () => {
+    talk = { key: "plan-1", markdown: () => "Move the QueueTray.", cwd: null };
+    await composer();
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    expect(polish.warm).toHaveBeenCalledWith(["QueueTray"]);
+    mic.say(LONG);
+    now += 1500;
+    press({ type: "up", at: now });
+    await settle();
+    expect(polish.polish).toHaveBeenCalledWith(T0, polish.warm.mock.calls[0][0]);
+  });
+
+  it("is never warmed for a composer that doesn't want it, or once turned off", async () => {
+    await composer(undefined, {});
+    await hold(LONG);
+    localStorage.setItem("redline.dictation.polish", "off");
+    await act(async () => root.render(<Composer key="again" />));
+    mount.querySelector("textarea")!.focus();
+    await hold(LONG);
+    expect(polish.warm).not.toHaveBeenCalled();
   });
 });
 
@@ -580,5 +611,26 @@ describe("with nothing that takes text focused", () => {
   it("offers the words for copying when there is no conversation to send them to", async () => {
     await hold("remember to rerun the size check");
     expect(strip.get()).toMatchObject({ phase: "notice", copy: "remember to rerun the size check" });
+  });
+});
+
+describe("its chunk", () => {
+  it("loads with the terminal without the speech engines", () => {
+    // App.tsx loads it at every launch; the speech drivers load once Redline
+    // speaks. Its static imports, then (a type or a lazy import costs nothing).
+    const reached = new Set<string>();
+    const walk = (file: string) => {
+      if (reached.has(file)) return;
+      reached.add(file);
+      const from = /^\s*(?:import|export)\s+(?!type\b)(?:[^"';]*?\sfrom\s+)?"(\.[^"]+)"/gm;
+      for (const [, rel] of readFileSync(file, "utf8").matchAll(from)) {
+        const base = join(dirname(file), rel);
+        const hit = [`${base}.ts`, `${base}.tsx`].find((f) => existsSync(f));
+        if (hit) walk(hit);
+      }
+    };
+    walk("src/audio/dictationHost.ts");
+    expect(reached).toContain("src/audio/generation.ts");
+    expect([...reached].filter((f) => /\/(cloudTts|studioTts|speech|useReadAloud)\.ts$/.test(f))).toEqual([]);
   });
 });

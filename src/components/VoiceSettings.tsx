@@ -21,7 +21,6 @@ import {
 } from "../audio/kokoroVoices";
 import { polishEnabled, setPolishEnabled } from "../audio/dictationPolish";
 import { loadVoicePrefs } from "../audio/speech";
-import type { StudioPrefs } from "./StudioVoiceCard";
 import { HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "../audio/voiceHotkey";
 import {
   addWord,
@@ -32,6 +31,7 @@ import {
   updateVocabStore,
   type VocabStore,
 } from "../audio/vocab";
+import type { StudioPrefs } from "./StudioVoiceCard";
 
 // The studio voice's card: install, voice and style. A chunk of its own, as
 // most people never pick it.
@@ -587,7 +587,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             <span style={muted}>
               A moment after longer dictations land, a fast Claude model tidies their
               punctuation and false starts — only the text goes to it, never the
-              audio. ⌘Z takes a polish back. Spoken turns are never polished.
+              audio. With local polish installed (the Studio voice's settings), a
+              model on this Mac does it instead, unless it can't answer in time.
+              ⌘Z takes a polish back. Spoken turns are never polished.
             </span>
           </span>
         </label>
