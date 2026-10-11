@@ -167,3 +167,48 @@ describe("chat context, out of band", () => {
     expect(onContextLost).toHaveBeenLastCalledWith("fresh-session");
   });
 });
+
+// A new chat learns its context during its first turn. The chip that says so
+// arrives in the header row and its list hangs over the thread: nothing
+// arriving then may push the reply down under the reader.
+describe("the Context chip", () => {
+  const CONTEXT = {
+    companionId: "chat-1", delivery: "full", briefBytes: 900, memory: null, at: 1,
+    brief: { plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved", day: "2026-10-02" }], repos: [], readyCount: 0, ready: [], pages: [], decisions: [], mission: null },
+  };
+
+  it("arrives in the header mid-turn, and lists over the thread rather than moving it", async () => {
+    Object.assign(turn, { status: "streaming", liveText: "Looking at the plan" });
+    try {
+      await render({}, "");
+      const room = host.querySelector("[data-chat-room]")!;
+      const before = Array.from(room.children);
+      const unmoved = () => {
+        const now = Array.from(room.children);
+        expect(now.length).toBe(before.length);
+        now.forEach((row, i) => expect(row).toBe(before[i]));
+      };
+      await act(async () => listeners.get("companion-context")!({ payload: CONTEXT }));
+      unmoved();
+      const chip = host.querySelector<HTMLButtonElement>("[data-chat-context] button")!;
+      expect(chip.closest("[data-chat-toolbar]")).not.toBeNull();
+      expect(chip.textContent).toBe("Context· 1 plan");
+
+      await act(async () => chip.click());
+      const list = host.querySelector<HTMLElement>("[data-chat-context-panel]")!;
+      expect(list.closest("[data-chat-toolbar]")).not.toBeNull();
+      expect(list.style.position).toBe("absolute");
+      unmoved();
+      // Esc shuts the list and goes no further; a press elsewhere shuts it too.
+      const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => list.dispatchEvent(escape));
+      expect(escape.defaultPrevented).toBe(true);
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+      await act(async () => chip.click());
+      await act(async () => document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+    } finally {
+      Object.assign(turn, { status: "idle", liveText: "" });
+    }
+  });
+});
