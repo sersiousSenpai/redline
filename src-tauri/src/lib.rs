@@ -1520,9 +1520,9 @@ impl ActiveMission {
         self.0.lock().unwrap().clone()
     }
     /// The active mission's `(title, goal)`, for baking mission-awareness into
-    /// the browse/linked first-turn prompts (the orchestrator embeds the goal
-    /// natively). `None` when no mission is active. Managed as Tauri state, so
-    /// `browse_send`/`linked_send` can read it without a frontend round-trip.
+    /// a chat's first-turn prompt (the orchestrator embeds the goal natively).
+    /// `None` when no mission is active. Managed as Tauri state, so a send can
+    /// read it without a frontend round-trip.
     pub fn active_goal(&self) -> Option<(String, String)> {
         self.0
             .lock()
