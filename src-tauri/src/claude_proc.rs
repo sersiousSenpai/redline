@@ -741,8 +741,8 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
 /// code reads ride along, being the same agent's. `None` for anything else,
 /// including a command that only names a route without calling the bridge
 /// (a search through Redline's own source, a fetched page with a look-alike
-/// path).
-fn page_status_label(text: &str) -> Option<String> {
+/// path). A Codex turn's commands are named here too (`codex_conversation`).
+pub(crate) fn page_status_label(text: &str) -> Option<String> {
     if !text.contains("127.0.0.1:7676/") {
         return None;
     }
