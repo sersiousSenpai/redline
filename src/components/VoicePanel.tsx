@@ -2415,7 +2415,9 @@ function VoicePanelBase({
   // The live reply's one status line, in the voice's own words: what the
   // agent is doing before it speaks, then whether its words are being said,
   // and "Stopping…" once it has been asked to. Its last sign of life is the
-  // send, the newest step or the stop; text arriving is the reply's own.
+  // send, the newest step or the stop; text arriving is the reply's own. A
+  // rate limit it names is a wait it knows about, never silence.
+  const rateLimited = waiting && !turn.interrupting && turn.activity?.kind === "rateLimit";
   const liveStatus: ChatProgressStatus = {
     label: turn.interrupting
       ? "Stopping…"
@@ -2424,7 +2426,7 @@ function VoicePanelBase({
         : speechState === "speaking"
           ? "Speaking…"
           : "Answering…",
-    at: Math.max(turn.since ?? 0, turn.activity?.at ?? 0, turn.interrupting ? stopAskedRef.current : 0),
+    at: rateLimited ? now : Math.max(turn.since ?? 0, turn.activity?.at ?? 0, turn.interrupting ? stopAskedRef.current : 0),
     running: true,
   };
 

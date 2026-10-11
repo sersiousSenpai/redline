@@ -698,6 +698,23 @@ describe("before the first word", () => {
     expect(names()).toContain("voice_interrupt");
     expect(status()).toBe("Stopping…");
   });
+
+  it("keeps a rate limit's own words on the status line for as long as it waits", async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(<VoicePanel sessionId={SID} markdown={"# Plan"} sections={SECTIONS} onClose={() => {}} />);
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    await act(async () => {
+      button("Summarize").click();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    const status = () => host.querySelector("[data-reply='live'] [data-reply-tail] [role=status]")?.textContent ?? "";
+    await emit("voice-meter", { ...of(1), rev: 2, meter: {}, activity: { at: Date.now(), kind: "rateLimit", label: "Rate limited (five_hour) · waiting" } });
+    // A known wait is not silence: never "still waiting for the agent".
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(status()).toBe("Rate limited (five_hour) · waiting");
+  });
 });
 
 // --- one reply anatomy ------------------------------------------------------------
