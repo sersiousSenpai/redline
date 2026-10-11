@@ -33,6 +33,7 @@ The settings card credits it in one line:
 - **uv**, by Astral: Apache-2.0 OR MIT. It is used only to install.
 - **MLX** and **mlx-metal**, by Apple: MIT.
 - **mlx-audio**: MIT.
+- **mlx-lm**, by Apple: MIT. It runs the local dictation polish below.
 
 ### Python packages
 
@@ -48,7 +49,7 @@ These are the exact versions pinned in
 | packaging | Apache-2.0 OR BSD-2-Clause |
 | tqdm | MPL-2.0 AND MIT |
 | typing-extensions | PSF-2.0 |
-| click, fsspec, httpcore2, httpx2, idna | BSD-3-Clause |
+| click, fsspec, httpcore2, httpx2, idna, jinja2, markupsafe | BSD-3-Clause |
 | pygments | BSD-2-Clause |
 | shellingham | ISC |
 | annotated-doc, anyio, filelock, h11, markdown-it-py, mdurl, pyyaml, rich, truststore, typer | MIT |
@@ -62,6 +63,20 @@ linked libraries:
 
 They are downloaded as scipy publishes them, into the private environment,
 apart from Redline.
+
+## Local dictation polish (Qwen3.5)
+
+Installed into `<app data>/voice-studio/models/polish/` from the studio
+voice's settings card, and run in the studio voice's sidecar on the same
+runtime.
+
+- **Qwen3.5-2B**, by the Qwen team at Alibaba Cloud: Apache-2.0. The
+  Apache License 2.0 text is in [LICENSE](LICENSE).
+- **MLX conversion by mlx-community**: Apache-2.0. Redline downloads
+  `mlx-community/Qwen3.5-2B-4bit` at
+  `674aaa7240b91e8012fcad5d791b7dfe5ba90207`, pinned by each file's SHA-256.
+- It runs through mlx-lm, with Jinja2 and MarkupSafe for its chat template,
+  all listed with the studio voice's runtime above.
 
 ## Natural voice (Kokoro)
 

@@ -12,7 +12,8 @@
 //! `venv/` (built from the hash-pinned `resources/studio-requirements.lock`),
 //! `models/<variant>/` (pinned below; the files every variant shares, the
 //! 682 MB speech tokenizer among them, are downloaded once into
-//! `models/shared/` and hard-linked in), the sidecar script (written from this
+//! `models/shared/` and hard-linked in), `models/polish/…` (the dictation
+//! polish model, when installed), the sidecar script (written from this
 //! binary at every start), its `sidecar.log`, and `install.json` (what is
 //! installed, and how fast it spoke here). The webview drives all of it
 //! through one command, `tts_studio`.
@@ -41,12 +42,25 @@
 //! `memory_pressure` (macOS at "warn" or worse and the model not loaded: no
 //! reload then).
 //!
+//! **Dictation polish** is the sidecar's second model slot: a small instruct
+//! model (`POLISH`, its own opt-in download) that tidies a dictation after it
+//! lands (src/audio/dictationPolish.ts). It has its own queue and thread in the
+//! sidecar, so it never waits behind speech; the sidecar refuses a reply that
+//! answers the speaker instead of tidying them, and sends their words back
+//! unchanged. Its one reply comes back as a single `FINAL` frame on the
+//! request's `Channel`, the outcome being `polished` (with the `text` to use).
+//! It is best effort: no reply within its budget (`Timing::polish`, more for a
+//! longer text, plus the loading allowance while the model loads) ends it
+//! `slow` and cancels it at the sidecar, and the frontend polishes with the
+//! cleanup child instead.
+//!
 //! **Events**: `studio-status` `{state, reason}` as the process or model
 //! changes (`loading`, `ready`, `unloaded` — `reason` `idle` or
 //! `memory_pressure` — `off`, `exited`, `disabled`); `studio-setup`
-//! `{phase, received, total}` through an install (`preflight`, `uv`,
+//! `{phase, received, total, polish}` through an install (`preflight`, `uv`,
 //! `python`, `deps`, `model`, `warm`, `speed`), ending
-//! `{phase: "done", speedRatio, slow}` or `{phase: "error", message}`.
+//! `{phase: "done", speedRatio, slow}` or `{phase: "error", message}`;
+//! `polish` says it is the polish model's install.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -81,14 +95,17 @@ const fn pin(bytes: u64, sha256: &'static str) -> FileCheck {
     FileCheck { bytes, sha256 }
 }
 
-/// A model variant: its repo at a pinned revision, the three files that are
-/// its own, and about what it occupies in memory while speaking.
+/// A model variant: its repo at a pinned revision, the files that are its
+/// own, about what it occupies in memory while in use, and what a fresh
+/// install needs (free disk, the Mac's memory).
 pub(crate) struct Variant {
     id: &'static str,
     repo: &'static str,
     revision: &'static str,
-    own: [(&'static str, FileCheck); 3],
+    own: &'static [(&'static str, FileCheck)],
     memory: u64,
+    disk: u64,
+    ram: u64,
 }
 
 const HF: &str = "https://huggingface.co/";
@@ -167,7 +184,7 @@ pub(crate) const VARIANTS: [Variant; 2] = [
         id: "1.7B-CustomVoice-8bit",
         repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit",
         revision: "41d3337e8b7f2843a75841595fc14e4b9a7a4b96",
-        own: [
+        own: &[
             (
                 "config.json",
                 pin(
@@ -191,13 +208,15 @@ pub(crate) const VARIANTS: [Variant; 2] = [
             ),
         ],
         memory: 4_200_000_000,
+        disk: NEED_DISK,
+        ram: NEED_RAM,
     },
     // "Low memory": 0.8 GB less, weaker on numbers and identifiers.
     Variant {
         id: "1.7B-CustomVoice-4bit",
         repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-4bit",
         revision: "f35faf19b0cc2160865af64ecf0f22f83d335135",
-        own: [
+        own: &[
             (
                 "config.json",
                 pin(
@@ -221,11 +240,81 @@ pub(crate) const VARIANTS: [Variant; 2] = [
             ),
         ],
         memory: 3_400_000_000,
+        disk: NEED_DISK,
+        ram: NEED_RAM,
     },
 ];
 
+/// The dictation polish model: Qwen3.5-2B (Qwen team, Apache-2.0) as
+/// mlx-community's 4-bit MLX conversion, run through mlx-lm in the sidecar's
+/// polish slot. Measured on 60 messy dictations and 128 never-answer cases
+/// (2026-10-10): none answered once the sidecar's check of each reply had run,
+/// 99.1% of jargon kept, 331 ms p95 for 30 words on a quiet M3 Max. Its 1.7 GB
+/// is a vision-language conversion whose vision weights the loader drops,
+/// which is why it briefly takes ~3.5 GB as it loads and ~1.9 GB after.
+pub(crate) const POLISH: Variant = Variant {
+    id: "polish/Qwen3.5-2B-4bit",
+    repo: "mlx-community/Qwen3.5-2B-4bit",
+    revision: "674aaa7240b91e8012fcad5d791b7dfe5ba90207",
+    own: &[
+        (
+            "chat_template.jinja",
+            pin(
+                7_755,
+                "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+            ),
+        ),
+        (
+            "config.json",
+            pin(
+                3_113,
+                "beb7fc5a6e0405fe332821cf1a8ef7b69bb390a8c8933171647de5579debf949",
+            ),
+        ),
+        (
+            "model.safetensors",
+            pin(
+                1_722_271_785,
+                "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+            ),
+        ),
+        (
+            "tokenizer.json",
+            pin(
+                19_989_343,
+                "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+            ),
+        ),
+        (
+            "tokenizer_config.json",
+            pin(
+                1_139,
+                "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182",
+            ),
+        ),
+    ],
+    memory: 1_900_000_000,
+    // 1.7 GB of model, ~0.5 GB of Python and packages if they aren't in yet.
+    disk: 2_500_000_000,
+    ram: 8_000_000_000,
+};
+
 fn variant(id: &str) -> Option<&'static Variant> {
     VARIANTS.iter().find(|v| v.id == id)
+}
+
+/// A voice variant, or the polish model: what can be installed.
+fn installable(id: &str) -> Option<&'static Variant> {
+    variant(id).or((id == POLISH.id).then_some(&POLISH))
+}
+
+/// The files `v` shares with the other voice variants (`models/shared`).
+fn shared_of(v: &Variant) -> &'static [(&'static str, FileCheck)] {
+    if v.id == POLISH.id {
+        &[]
+    } else {
+        &SHARED
+    }
 }
 
 /// Frame flags (module docs).
@@ -240,6 +329,12 @@ const INSTALLING: &str = "the studio voice is still installing";
 /// macOS reports memory pressure at "warn" or worse and the model isn't
 /// loaded: loading 3-4 GB now would only push other apps out.
 const PRESSURE: &str = "memory_pressure";
+/// A polish asked for without the polish model installed: the frontend
+/// polishes with the cleanup child.
+const POLISH_NOT_INSTALLED: &str = "polish_not_installed";
+/// The running sidecar started before the polish model was installed, and
+/// speech is under way: no restart under it, so the next polish gets one.
+const POLISH_LATER: &str = "polish_unavailable";
 
 /// A fresh install needs this much free disk: 3.1 GB of models, ~0.5 GB of
 /// Python and packages, and room to spare.
@@ -255,6 +350,9 @@ const SPEED_TEXT: &str = "The plan has three parts, and the first one is ready f
 const WARM_LIMIT: Duration = Duration::from_secs(180);
 const SPEED_LIMIT: Duration = Duration::from_secs(60);
 const IDLE_UNLOAD_S: &str = "300";
+/// The polish model goes sooner: 1.9 GB beside the voice's 4.2, and a
+/// dictation warms it again while the user is still speaking.
+const POLISH_IDLE_UNLOAD_S: &str = "120";
 
 #[derive(Clone, Copy)]
 struct Timing {
@@ -274,6 +372,9 @@ struct Timing {
     closed: Duration,
     /// A second unexpected exit within this window turns the engine off.
     exit_window: Duration,
+    /// A polish of up to 30 words, the model loaded, answers within this or
+    /// ends `slow`; longer ones get more (`polish_budget`).
+    polish: Duration,
     tick: Duration,
 }
 
@@ -284,11 +385,14 @@ const TIMING: Timing = Timing {
     idle: Duration::from_secs(30 * 60),
     closed: Duration::from_secs(5 * 60),
     exit_window: Duration::from_secs(10 * 60),
+    // 331 ms p95 for 30 words on a quiet machine; 2-4x that while builds run.
+    polish: Duration::from_millis(700),
     tick: Duration::from_millis(100),
 };
 
 /// Where a request's audio and outcome go.
 enum Sink {
+    /// The webview's: a piece's frames, or a polish's one reply.
     Audio(Channel<Response>),
     /// Redline's own request (the install's warm-up and speed check): where
     /// its outcome is left for `ask`.
@@ -305,6 +409,8 @@ struct Request {
     last_frame: Option<Instant>,
     /// When it was cancelled or given up on.
     gone_at: Option<Instant>,
+    /// A polish-slot request: when it is given up on.
+    until: Option<Instant>,
 }
 
 impl Request {
@@ -342,6 +448,8 @@ struct Live {
     child: Arc<StdMutex<Child>>,
     /// Why Redline ended it, when it did (a wedged sidecar).
     why: Option<&'static str>,
+    /// It was started with the polish model (installed by then).
+    polish: bool,
 }
 
 impl Live {
@@ -361,6 +469,14 @@ struct Core {
     /// Requests written to the sidecar that it hasn't finished, by id, in
     /// the order written — which is its queue's order.
     queue: Vec<(u64, Request)>,
+    /// Polishes and the polish model's warm-ups, which the sidecar runs on
+    /// a queue of their own, by id.
+    polish: Vec<(u64, Request)>,
+    /// The polish model, as the sidecar last said (`Off`: not loaded).
+    polish_model: Model,
+    /// The vocabulary the polish model's prompt was last built for: the
+    /// sidecar builds it again (~0.3 s) for any other.
+    polish_vocab: Value,
     /// The first request in the queue, and since when.
     front: Option<u64>,
     front_since: Instant,
@@ -375,7 +491,8 @@ struct Core {
     last_used: Instant,
     surfaces: Vec<String>,
     closed_at: Option<Instant>,
-    installing: bool,
+    /// The model being installed (a variant's id, or `POLISH`'s).
+    installing: Option<&'static str>,
     /// `install.json`, read on first use.
     record: Option<Value>,
 }
@@ -418,14 +535,19 @@ impl Core {
         }
     }
 
+    /// The process is gone: everything pending ends, and neither model is
+    /// loaded any more.
     fn end_all(&mut self, code: &str, message: &str, out: &mut Out) {
-        for (_, mut r) in std::mem::take(&mut self.queue) {
+        let polishes = std::mem::take(&mut self.polish);
+        for (_, mut r) in std::mem::take(&mut self.queue).into_iter().chain(polishes) {
             r.end(
                 json!({"type": "error", "code": code, "message": message}),
                 ERROR,
                 out,
             );
         }
+        self.polish_model = Model::Off;
+        self.polish_vocab = Value::Null;
         self.rehead(Instant::now());
     }
 
@@ -518,6 +640,9 @@ impl Studio {
             epoch: 0,
             next_id: 1,
             queue: Vec::new(),
+            polish: Vec::new(),
+            polish_model: Model::Off,
+            polish_vocab: Value::Null,
             front: None,
             front_since: now,
             speech: None,
@@ -529,7 +654,7 @@ impl Studio {
             last_used: now,
             surfaces: Vec::new(),
             closed_at: None,
-            installing: false,
+            installing: None,
             record: None,
         };
         Self(Arc::new(Inner {
@@ -575,7 +700,7 @@ impl Studio {
             let mut guard = self.0.lock();
             let core = &mut *guard;
             let switched = model.is_some_and(|m| m != core.model_id);
-            if switched && core.installing {
+            if switched && core.installing.is_some() {
                 return Err(INSTALLING.into());
             }
             for (key, setting, value) in [
@@ -637,11 +762,15 @@ impl Studio {
     pub(crate) fn cancel(&self, generation: u64) {
         let mut out = Out::default();
         {
-            let mut core = self.0.lock();
+            let mut guard = self.0.lock();
+            let core = &mut *guard;
             let now = Instant::now();
             let mut ids = Vec::new();
-            for (id, r) in core.queue.iter_mut() {
-                if r.speak && r.generation == generation && r.gone_at.is_none() {
+            // Speech, and polishes (their warm-ups are generation 0, which no
+            // driver ever draws).
+            for (id, r) in core.queue.iter_mut().chain(core.polish.iter_mut()) {
+                let ours = r.speak || r.until.is_some();
+                if ours && r.generation == generation && r.gone_at.is_none() {
                     r.end(json!({"type": "cancelled"}), CANCELLED, &mut out);
                     r.gone_at = Some(now);
                     ids.push(*id);
@@ -679,6 +808,72 @@ impl Studio {
         warmed
     }
 
+    /// Polish one dictation (module docs): its outcome arrives as one `FINAL`
+    /// frame on `reply`. Refused at once, so the frontend polishes with the
+    /// cleanup child, when the polish model isn't installed or can't be had
+    /// now.
+    pub(crate) fn polish(
+        &self,
+        text: &str,
+        vocab: &Value,
+        generation: u64,
+        reply: Channel<Response>,
+    ) -> Result<(), String> {
+        let inner = &self.0;
+        let mut out = Out::default();
+        let asked = {
+            let mut core = inner.lock();
+            inner.can_polish(&mut core).and_then(|()| {
+                // Ready, its prompt built for this vocabulary and no warm-up
+                // ahead of it: the plain budget. Otherwise it loads, or builds
+                // the prompt, first.
+                let warm = core.polish_model == Model::Ready
+                    && core.polish_vocab == *vocab
+                    && core.polish.iter().all(|(_, r)| r.generation != 0);
+                let words = text.split_whitespace().count();
+                let limit = inner.polish_budget(words, warm);
+                let line = json!({"op": "polish", "text": text, "vocab": vocab});
+                let sink = Sink::Audio(reply);
+                inner.submit_polish(&mut core, line, generation, limit, sink, &mut out)?;
+                // After a restart for it, too: the new sidecar builds it.
+                core.polish_vocab = vocab.clone();
+                Ok(())
+            })
+        };
+        inner.flush(out);
+        asked
+    }
+
+    /// Load the polish model, and build its prompt for `vocab`, ahead of a
+    /// dictation's polish: a dictation started into a composer that polishes.
+    /// Nothing when it isn't installed, or is ready for this vocabulary.
+    pub(crate) fn warm_polish(&self, vocab: &Value) -> Result<(), String> {
+        let inner = &self.0;
+        let mut out = Out::default();
+        let warmed = {
+            let mut core = inner.lock();
+            let current = match core.polish_model {
+                Model::Loading => true,
+                Model::Ready => core.polish_vocab == *vocab,
+                Model::Off | Model::Unloaded => false,
+            };
+            if current || !inner.polish_installed(&mut core) {
+                return Ok(());
+            }
+            inner.can_polish(&mut core).and_then(|()| {
+                let line = json!({"op": "warmup", "slot": "polish", "vocab": vocab});
+                inner.submit_polish(&mut core, line, 0, WARM_LIMIT, Sink::Gone, &mut out)?;
+                core.polish_vocab = vocab.clone();
+                if core.polish_model != Model::Ready {
+                    core.polish_model = Model::Loading;
+                }
+                Ok(())
+            })
+        };
+        inner.flush(out);
+        warmed
+    }
+
     /// A voice surface (the voice panel, a chat's read-aloud) opened or closed.
     /// Five minutes after the last one closes the process is stopped.
     pub(crate) fn surface(&self, name: &str, open: bool) {
@@ -703,9 +898,11 @@ impl Studio {
     }
 
     /// What the settings card and the voice surfaces go by: whether this Mac
-    /// can run it, what is installed, the process's state (`off`, `starting`,
-    /// `loading`, `ready`, `unloaded` or `disabled`) and why, the install's
-    /// speed check, and macOS's memory-pressure level (2 and up is "warn").
+    /// can run it, what is installed (`models`: the polish model too), the
+    /// process's state (`off`, `starting`, `loading`, `ready`, `unloaded` or
+    /// `disabled`) and why, the model an install is fetching (`installing`),
+    /// the install's speed check, and macOS's memory-pressure level (2 and up
+    /// is "warn").
     pub(crate) fn status(&self) -> Value {
         let inner = &self.0;
         let mut core = inner.lock();
@@ -733,31 +930,38 @@ impl Studio {
         })
     }
 
-    /// Whether `model` (else the selected one) can be installed here, with
-    /// the numbers behind it. Each of `blockers` is a code the settings card
-    /// words: `unsupported` (not Apple Silicon on macOS 14 or later), `ram`
-    /// (under 16 GB), `disk` (less free than `needDiskBytes`), `memory` (less
-    /// free right now than `needMemoryBytes`, which it uses while speaking).
+    /// Whether `model` (else the selected one; the polish model's id for
+    /// it) can be installed here, with the numbers behind it. Each of
+    /// `blockers` is a code the settings card words: `unsupported` (not Apple
+    /// Silicon on macOS 14 or later), `ram` (less than `needRamBytes`), `disk`
+    /// (less free than `needDiskBytes`), `memory` (less free right now than
+    /// `needMemoryBytes`, which it uses while in use).
     pub(crate) fn preflight(&self, model: Option<&str>) -> Value {
         let model = model.map_or_else(|| self.0.lock().model_id.clone(), String::from);
-        variant(&model).map_or(Value::Null, |v| self.0.preflight(v))
+        installable(&model).map_or(Value::Null, |v| self.0.preflight(v))
     }
 
-    /// Install the selected model and the runtime it needs, in the
-    /// background: progress, then `done` (with the speed check) or `error`,
-    /// on `studio-setup`.
-    pub(crate) fn install(&self) {
+    /// Install the selected model (or, with `polish`, the polish model) and
+    /// the runtime it needs, in the background: progress, then `done` (with a
+    /// voice's speed check) or `error`, on `studio-setup`. One install at a
+    /// time.
+    pub(crate) fn install(&self, polish: bool) {
         let model = {
             let mut core = self.0.lock();
-            if core.installing {
+            if core.installing.is_some() {
                 return;
             }
-            core.installing = true;
+            let model = if polish {
+                POLISH.id.to_string()
+            } else {
+                core.model_id.clone()
+            };
+            core.installing = Some(installable(&model).map_or("", |v| v.id));
             self.0.stop_install.store(false, Ordering::Relaxed);
             // Installing again is the way back from a crash-disabled engine.
             core.disabled = false;
             core.exits.clear();
-            core.model_id.clone()
+            model
         };
         let inner = self.0.clone();
         background(Box::new(move || {
@@ -765,16 +969,12 @@ impl Studio {
                 std::thread::sleep(Duration::from_millis(50));
             }
             let result = tauri::async_runtime::block_on(inner.install(&model));
-            inner.lock().installing = false;
-            let done = match result {
-                Ok(ratio) => {
-                    json!({"phase": "done", "speedRatio": ratio, "slow": ratio > MAX_SPEED_RATIO})
-                }
-                Err(e) => {
-                    tracing::warn!(target: "studio", "install failed: {e}");
-                    json!({"phase": "error", "message": e})
-                }
-            };
+            inner.lock().installing = None;
+            let mut done = result.unwrap_or_else(|e| {
+                tracing::warn!(target: "studio", "install failed: {e}");
+                json!({"phase": "error", "message": e})
+            });
+            done["polish"] = polish.into();
             inner.emit("studio-setup", done);
         }));
     }
@@ -787,22 +987,36 @@ impl Studio {
 
     /// Stop the process and delete everything under `voice-studio/`, in the
     /// background; an install started meanwhile waits for it to finish.
-    pub(crate) fn remove(&self) -> Result<(), String> {
+    /// With `polish`, only the polish model: the sidecar lets go of it and
+    /// the voice speaks on.
+    pub(crate) fn remove(&self, polish: bool) -> Result<(), String> {
         let mut out = Out::default();
-        {
+        let doomed = {
             let mut core = self.0.lock();
-            if core.installing {
+            if core.installing.is_some() {
                 return Err(INSTALLING.into());
             }
-            core.stop("removed", &mut out);
-            core.record = Some(json!({}));
+            let doomed = if polish {
+                self.0.record_in(&mut core, &|r| {
+                    if let Some(models) = r["models"].as_object_mut() {
+                        models.remove(POLISH.id);
+                    }
+                })?;
+                core.send_line(json!({"op": "unload", "slot": "polish"}));
+                self.0.dir.join("models").join(POLISH.id)
+            } else {
+                core.stop("removed", &mut out);
+                core.record = Some(json!({}));
+                self.0.dir.clone()
+            };
             // Counted before this returns, so an install asked for next waits.
             self.0.removing.fetch_add(1, Ordering::SeqCst);
-        }
+            doomed
+        };
         self.0.flush(out);
         let inner = self.0.clone();
         background(Box::new(move || {
-            let _ = std::fs::remove_dir_all(&inner.dir);
+            let _ = std::fs::remove_dir_all(&doomed);
             inner.removing.fetch_sub(1, Ordering::SeqCst);
         }));
         Ok(())
@@ -845,9 +1059,20 @@ impl Inner {
     }
 
     fn installed(&self, core: &mut Core) -> bool {
+        let model = core.model_id.clone();
+        self.has(core, &model)
+    }
+
+    fn polish_installed(&self, core: &mut Core) -> bool {
+        self.has(core, POLISH.id)
+    }
+
+    /// Whether `model` is installed, and the runtime it runs on is this
+    /// Redline's.
+    fn has(&self, core: &mut Core, model: &str) -> bool {
         let record = core.record.get_or_insert_with(|| read_record(&self.dir));
         record["lock"] == lock_hash().as_str()
-            && record["models"].get(&core.model_id).is_some()
+            && record["models"].get(model).is_some()
             && self.dir.join("venv/bin/python3").exists()
     }
 
@@ -863,6 +1088,77 @@ impl Inner {
         {
             return Err(PRESSURE.into());
         }
+        Ok(())
+    }
+
+    /// Like `can_speak`, for the polish model.
+    fn can_polish(&self, core: &mut Core) -> Result<(), String> {
+        if core.disabled {
+            return Err(DISABLED.into());
+        }
+        if !self.polish_installed(core) {
+            return Err(POLISH_NOT_INSTALLED.into());
+        }
+        if matches!(core.polish_model, Model::Off | Model::Unloaded)
+            && (self.pressure)().is_some_and(|l| l >= 2)
+        {
+            return Err(PRESSURE.into());
+        }
+        Ok(())
+    }
+
+    /// How long a polish of `words` gets: `timing.polish` up to 30 words,
+    /// 10 ms a word more past that (80 words measured 806 ms p95, quiet), at
+    /// most twice it; and the loading allowance on top unless the model is
+    /// `warm` for it.
+    fn polish_budget(&self, words: usize, warm: bool) -> Duration {
+        let t = self.timing;
+        let more = Duration::from_millis(10) * words.saturating_sub(30) as u32;
+        let budget = (t.polish + more).min(t.polish * 2);
+        if warm {
+            budget
+        } else {
+            budget + t.loading
+        }
+    }
+
+    /// Write a polish-slot request, given up on after `limit`. A sidecar
+    /// started before the polish model was installed is started again with
+    /// it — unless speech is under way, which it would cut off.
+    fn submit_polish(
+        self: &Arc<Self>,
+        core: &mut Core,
+        mut line: Value,
+        generation: u64,
+        limit: Duration,
+        sink: Sink,
+        out: &mut Out,
+    ) -> Result<(), String> {
+        if core.live.as_ref().is_some_and(|l| !l.polish) {
+            if !core.queue.is_empty() {
+                return Err(POLISH_LATER.into());
+            }
+            core.stop("polish", out);
+        }
+        self.ensure_live(core, out)?;
+        let now = Instant::now();
+        let id = core.next_id;
+        core.next_id += 1;
+        line["id"] = id.into();
+        core.polish.push((
+            id,
+            Request {
+                generation,
+                speak: false,
+                sink,
+                frames: 0,
+                last_frame: None,
+                gone_at: None,
+                until: Some(now + limit),
+            },
+        ));
+        core.last_used = now;
+        core.send_line(line);
         Ok(())
     }
 
@@ -892,6 +1188,7 @@ impl Inner {
                 frames: 0,
                 last_frame: None,
                 gone_at: None,
+                until: None,
             },
         ));
         core.rehead(now);
@@ -909,7 +1206,8 @@ impl Inner {
         if core.live.is_some() {
             return Ok(());
         }
-        let mut child = match self.launch(&core.model_id) {
+        let polish = self.polish_installed(core);
+        let mut child = match self.launch(&core.model_id, polish) {
             Ok(child) => child,
             Err(e) => {
                 tracing::error!(target: "studio", "{e}");
@@ -927,6 +1225,7 @@ impl Inner {
             inbox: inbox.clone(),
             child: child.clone(),
             why: None,
+            polish,
         });
         core.model = Model::Off;
         core.reason = None;
@@ -1006,7 +1305,7 @@ impl Inner {
         self.flush(out);
     }
 
-    fn launch(&self, model: &str) -> Result<Child, String> {
+    fn launch(&self, model: &str, polish: bool) -> Result<Child, String> {
         let script = self.dir.join("studio_tts_sidecar.py");
         std::fs::write(&script, inflate(SIDECAR_Z))
             .map_err(|e| format!("could not write the studio voice's sidecar: {e}"))?;
@@ -1016,6 +1315,11 @@ impl Inner {
             .arg("--models-root")
             .arg(self.dir.join("models"))
             .args(["--model", model, "--idle-unload-s", IDLE_UNLOAD_S]);
+        // The polish model loads only when a dictation is first polished.
+        if polish {
+            c.args(["--polish-model", POLISH.id]);
+            c.args(["--polish-idle-unload-s", POLISH_IDLE_UNLOAD_S]);
+        }
         // Below 32 GB, MLX's buffer cache gives back ~350 MB for ~6% speed.
         if sysctl_int("hw.memsize").is_some_and(|ram| ram < 32 << 30) {
             c.args(["--cache-limit-mb", "0"]);
@@ -1063,6 +1367,16 @@ impl Inner {
                 "hello" if msg["protocol"] != 1 => end = Some("it speaks another protocol"),
                 "hello" => tracing::info!(target: "studio", "sidecar up: {}", msg["versions"]),
                 "fatal" => end = Some("it reported a fatal error"),
+                // The polish model's own load and unload: the voice's state,
+                // and the voice surfaces, are not about it.
+                "state" if msg["slot"] == "polish" => {
+                    core.polish_model = match msg["state"].as_str() {
+                        Some("loading") => Model::Loading,
+                        Some("ready") => Model::Ready,
+                        Some("unloaded") => Model::Unloaded,
+                        _ => core.polish_model,
+                    };
+                }
                 "state" => {
                     core.model = match msg["state"].as_str() {
                         Some("loading") => Model::Loading,
@@ -1088,6 +1402,11 @@ impl Inner {
                     }
                 }
                 _ if msg["final"] == true => {
+                    let flags = match kind.as_str() {
+                        "cancelled" => CANCELLED,
+                        "error" => ERROR,
+                        _ => 0,
+                    };
                     let at = core.queue.iter().position(|(i, _)| Some(*i) == id);
                     if let Some((_, mut r)) = at.map(|at| core.queue.remove(at)) {
                         match kind.as_str() {
@@ -1095,13 +1414,20 @@ impl Inner {
                             "error" if !r.speak => core.model = Model::Off,
                             _ => {}
                         }
-                        let flags = match kind.as_str() {
-                            "cancelled" => CANCELLED,
-                            "error" => ERROR,
-                            _ => 0,
-                        };
                         r.end(msg, flags, &mut out);
                         core.rehead(now);
+                        core.last_used = now;
+                    } else if let Some(at) = core.polish.iter().position(|(i, _)| Some(*i) == id) {
+                        let (_, mut r) = core.polish.remove(at);
+                        match kind.as_str() {
+                            "warm" => core.polish_model = Model::Ready,
+                            // A load that failed says nothing else.
+                            "error" if core.polish_model == Model::Loading => {
+                                core.polish_model = Model::Off
+                            }
+                            _ => {}
+                        }
+                        r.end(msg, flags, &mut out);
                         core.last_used = now;
                     }
                 }
@@ -1135,6 +1461,26 @@ impl Inner {
             {
                 wedged = Some("its warm-up never finished");
             }
+            // A polish past its budget ends `slow`, and the sidecar is told
+            // to drop it; one the sidecar never lets go of is forgotten.
+            let mut late = Vec::new();
+            for (id, r) in core.polish.iter_mut() {
+                if r.gone_at.is_none() && r.until.is_some_and(|until| now > until) {
+                    let slow =
+                        json!({"type": "error", "code": "slow", "message": "no polish in time"});
+                    r.end(slow, ERROR, &mut out);
+                    r.gone_at = Some(now);
+                    late.push(*id);
+                }
+            }
+            core.polish.retain(|(_, r)| {
+                r.gone_at
+                    .is_none_or(|at| now.duration_since(at) < WARM_LIMIT)
+            });
+            for id in late {
+                core.send_line(json!({"op": "cancel", "target": id}));
+            }
+            let polishing = core.polish.iter().any(|(_, r)| r.gone_at.is_none());
             match speech {
                 Some((id, None, last_frame)) => {
                     // Behind a warm-up it waits on the model, so it gets the
@@ -1164,7 +1510,7 @@ impl Inner {
                         wedged = Some("it stopped answering");
                     }
                 }
-                None if front.is_some() => {}
+                None if front.is_some() || polishing => {}
                 None => {
                     let idle = now.duration_since(core.last_used);
                     if idle > t.idle {
@@ -1186,23 +1532,21 @@ impl Inner {
     }
 
     /// Ask the sidecar something of Redline's own and wait for its answer:
-    /// the install's warm-up and speed check, on the install's own thread.
-    /// An `error` is an `Err`.
+    /// the install's warm-up (of the polish model, for `"slot": "polish"`)
+    /// and speed check, on the install's own thread. An `error` is an `Err`.
     fn ask(self: &Arc<Self>, line: Value, speak: bool, limit: Duration) -> Result<Value, String> {
         let slot = Arc::new(StdMutex::new(None));
         let mut out = Out::default();
         let asked = {
             let mut core = self.lock();
-            self.can_speak(&mut core).and_then(|()| {
-                self.submit(
-                    &mut core,
-                    line,
-                    0,
-                    speak,
-                    Sink::Reply(slot.clone()),
-                    &mut out,
-                )
-            })
+            let sink = Sink::Reply(slot.clone());
+            if line["slot"] == "polish" {
+                self.can_polish(&mut core)
+                    .and_then(|()| self.submit_polish(&mut core, line, 0, limit, sink, &mut out))
+            } else {
+                self.can_speak(&mut core)
+                    .and_then(|()| self.submit(&mut core, line, 0, speak, sink, &mut out))
+            }
         };
         self.flush(out);
         asked?;
@@ -1229,9 +1573,10 @@ impl Inner {
     }
 
     fn setup(&self, phase: &str, received: u64, total: u64) {
+        let polish = self.lock().installing == Some(POLISH.id);
         self.emit(
             "studio-setup",
-            json!({"phase": phase, "received": received, "total": total}),
+            json!({"phase": phase, "received": received, "total": total, "polish": polish}),
         );
     }
 
@@ -1265,7 +1610,7 @@ impl Inner {
         let free_disk = crate::activation::free_bytes(&self.data_dir).unwrap_or(u64::MAX);
         let models = self.dir.join("models");
         let mut have = 0;
-        for (dir, files) in [("shared", &SHARED[..]), (v.id, &v.own[..])] {
+        for (dir, files) in [("shared", shared_of(v)), (v.id, v.own)] {
             for (path, c) in files {
                 if std::fs::metadata(models.join(dir).join(path)).is_ok_and(|m| m.len() == c.bytes)
                 {
@@ -1273,10 +1618,10 @@ impl Inner {
                 }
             }
         }
-        let need_disk = NEED_DISK.saturating_sub(have);
+        let need_disk = v.disk.saturating_sub(have);
         let blockers: Vec<&str> = [
             (!supported, "unsupported"),
-            (supported && ram < NEED_RAM, "ram"),
+            (supported && ram < v.ram, "ram"),
             (supported && free_disk < need_disk, "disk"),
             (supported && free_memory < v.memory, "memory"),
         ]
@@ -1286,13 +1631,16 @@ impl Inner {
         json!({
             "supported": supported, "blockers": blockers, "ramBytes": ram,
             "freeMemoryBytes": free_memory, "freeDiskBytes": free_disk,
-            "needDiskBytes": need_disk, "needMemoryBytes": v.memory,
+            "needDiskBytes": need_disk, "needMemoryBytes": v.memory, "needRamBytes": v.ram,
         })
     }
 
     /// Change `install.json` (the cached copy and the file).
     fn record(&self, change: &dyn Fn(&mut Value)) -> Result<(), String> {
-        let mut core = self.lock();
+        self.record_in(&mut self.lock(), change)
+    }
+
+    fn record_in(&self, core: &mut Core, change: &dyn Fn(&mut Value)) -> Result<(), String> {
         let record = core.record.get_or_insert_with(|| read_record(&self.dir));
         change(record);
         std::fs::write(
@@ -1302,9 +1650,11 @@ impl Inner {
         .map_err(|e| format!("could not record the studio voice's install: {e}"))
     }
 
-    async fn install(self: &Arc<Self>, model: &str) -> Result<f64, String> {
-        let v =
-            variant(model).ok_or_else(|| format!("there is no studio voice model '{model}'"))?;
+    /// Install `model` (the polish model's id, or a voice variant's) and the
+    /// runtime: its `done` event.
+    async fn install(self: &Arc<Self>, model: &str) -> Result<Value, String> {
+        let v = installable(model)
+            .ok_or_else(|| format!("there is no studio voice model '{model}'"))?;
         self.setup("preflight", 0, 0);
         let preflight = self.preflight(v);
         if preflight["blockers"]
@@ -1332,10 +1682,23 @@ impl Inner {
         if !self.going() {
             return Err(STOPPED.into());
         }
-        self.fetch_model(v, &SHARED, HF).await?;
+        self.fetch_model(v, shared_of(v), HF).await?;
         self.record(&|r| r["models"][model] = json!({}))?;
 
         self.setup("warm", 0, 0);
+        if v.id == POLISH.id {
+            // Its first load builds its kernels: the install waits that out,
+            // so the first dictation it polishes doesn't — unless the voice is
+            // speaking from a sidecar started without it, which a restart
+            // would cut off; the first dictation then loads it.
+            let warm = json!({"op": "warmup", "slot": "polish"});
+            if let Err(e) = self.ask(warm, false, WARM_LIMIT) {
+                if e != POLISH_LATER {
+                    return Err(e);
+                }
+            }
+            return Ok(json!({"phase": "done"}));
+        }
         let voice = DEFAULT_VOICE;
         self.ask(json!({"op": "warmup", "voice": voice}), false, WARM_LIMIT)?;
         self.setup("speed", 0, 0);
@@ -1347,7 +1710,7 @@ impl Inner {
             _ => return Err("the studio voice's speed check produced no audio".into()),
         };
         self.record(&|r| r["models"][model] = json!({"speedRatio": ratio}))?;
-        Ok(ratio)
+        Ok(json!({"phase": "done", "speedRatio": ratio, "slow": ratio > MAX_SPEED_RATIO}))
     }
 
     /// Build the Python runtime under `voice-studio/`: uv, its CPython, and
@@ -1540,15 +1903,20 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   at once, so the frontend speaks the piece in its fallback voice, when the
 ///   engine is off, not installed, can't start, or memory is too tight to load
 ///   it.
+/// - `polish`: one dictation, `args` `{text, vocab, generation}`; its outcome
+///   arrives as one frame on `on_audio`. Fails at once, so the frontend
+///   polishes with the cleanup child, when the polish model isn't installed
+///   or can't be had now.
 /// - `status` (with `kokoro`: whether Kokoro can stand in), `preflight`
 ///   (`args` `{model?}`): the queries.
 /// - `prefs`: save `args` `{model?, voice?, style?}`.
-/// - `install` (`args` `{model?}`, saved first): progress and the outcome on
-///   `studio-setup`; `cancel` stops it (its outcome is the error
-///   `cancelled`), and installing again resumes.
-/// - `warm`: pre-warm on intent, `args` `{always?}`.
+/// - `install` (`args` `{model?}`, saved first; or `{polish: true}`):
+///   progress and the outcome on `studio-setup`; `cancel` stops it (its
+///   outcome is the error `cancelled`), and installing again resumes.
+/// - `warm`: pre-warm on intent, `args` `{always?}`; or the polish model's,
+///   `args` `{polish: true, vocab}`.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
-/// - `remove`.
+/// - `remove` (`args` `{polish?}`: only the polish model).
 ///
 /// A plain command that never blocks (the install and the removal run on
 /// threads of their own), so calls keep their order: one piece of speech
@@ -1564,16 +1932,19 @@ pub fn tts_studio(
     let studio = tts.studio();
     let args = args.unwrap_or_default();
     match op.as_str() {
-        "speak" => {
+        // The piece's audio, or the polish's reply, goes on `on_audio`.
+        "speak" | "polish" => {
             let channel = on_audio.and_then(|id| id.parse::<JavaScriptChannelId>().ok());
             let on_audio: Channel<Response> =
-                channel.ok_or("speak needs a channel")?.channel_on(webview);
+                channel.ok_or("it needs a channel")?.channel_on(webview);
             let generation = args["generation"].as_u64().unwrap_or_default();
-            if tts.is_cancelled(generation) {
+            let text = args["text"].as_str().unwrap_or_default();
+            if op == "polish" {
+                studio.polish(text, &args["vocab"], generation, on_audio)?;
+            } else if tts.is_cancelled(generation) {
                 let cancelled = frame(generation, 0, FINAL | CANCELLED, br#"{"type":"cancelled"}"#);
                 let _ = on_audio.send(Response::new(cancelled));
             } else {
-                let text = args["text"].as_str().unwrap_or_default();
                 studio.speak(text, generation, &args, on_audio)?;
             }
         }
@@ -1588,17 +1959,19 @@ pub fn tts_studio(
         "prefs" => studio.set_prefs(&args)?,
         // The model to install is saved as it starts: one picked in the
         // settings card stays a choice until then.
+        "install" if args["polish"] == true => studio.install(true),
         "install" => {
             studio.set_prefs(&args)?;
-            studio.install()
+            studio.install(false)
         }
+        "warm" if args["polish"] == true => studio.warm_polish(&args["vocab"])?,
         "warm" => studio.warm(args["always"] == true)?,
         "cancel" => studio.cancel_install(),
         "surface" => studio.surface(
             args["surface"].as_str().unwrap_or_default(),
             args["open"] == true,
         ),
-        "remove" => studio.remove()?,
+        "remove" => studio.remove(args["polish"] == true)?,
         other => return Err(format!("the studio voice has no '{other}'")),
     }
     Ok(Value::Null)
@@ -1620,7 +1993,12 @@ mod tests {
     /// cancelled), "HANG" (never answers anything again), "DIE" (exits),
     /// "PRESSURE" (first reports an unload under memory pressure) or "LATE"
     /// (one more chunk after its `end`); a warm-up for the voice "WARM<n>"
-    /// loads for n ms.
+    /// loads for n ms. Polishes (and the polish slot's warm-ups) run on a
+    /// queue and thread of their own, as in the sidecar, and only in a
+    /// process started with `--polish-model`: the reply drops "um" and "uh"
+    /// and ends with a full stop, unless the text says "WAIT<n>" (it comes
+    /// after n ms), "STALL" (nothing until it is cancelled) or "FAIL" (an
+    /// error).
     const FAKE_SIDECAR: &str = r#"
 import base64, collections, json, os, re, sys, threading, time
 here = os.path.dirname(os.path.abspath(__file__))
@@ -1672,13 +2050,53 @@ def work():
                   "stats": {"gen_ms": 100, "audio_ms": 400}})
             if "LATE" in text:
                 chunk(rid, gen, 3)
+polishes, pcv = collections.deque(), threading.Condition()
+def polish_work():
+    while True:
+        with pcv:
+            while not polishes:
+                pcv.wait()
+            req = polishes.popleft()
+        rid, text = req.get("id"), req.get("text", "")
+        if req.get("op") == "warmup":
+            emit({"type": "state", "slot": "polish", "state": "loading"})
+            time.sleep(0.05)
+            emit({"type": "state", "slot": "polish", "state": "ready"})
+            emit({"type": "warm", "id": rid, "final": True, "slot": "polish"})
+            continue
+        if req.get("op") == "unload":
+            emit({"type": "state", "slot": "polish", "state": "unloaded", "reason": "request"})
+            emit({"type": "unloaded", "id": rid, "final": True, "slot": "polish"})
+            continue
+        wait = re.search(r"WAIT(\d+)", text)
+        time.sleep(int(wait.group(1)) / 1000 if wait else 0.01)
+        while "STALL" in text and rid not in cancelled:
+            time.sleep(0.01)
+        if rid in cancelled:
+            emit({"type": "cancelled", "id": rid, "final": True})
+        elif "FAIL" in text:
+            emit({"type": "error", "id": rid, "code": "polish_failed", "message": "it broke", "final": True})
+        else:
+            said = " ".join(w for w in text.split() if w not in ("um", "uh"))
+            out = said[:1].upper() + said[1:] + "."
+            emit({"type": "polished", "id": rid, "final": True, "text": out, "changed": True,
+                  "guard": None, "stats": {}})
 threading.Thread(target=work, daemon=True).start()
+threading.Thread(target=polish_work, daemon=True).start()
 emit({"type": "hello", "protocol": 1, "pid": os.getpid()})
 for line in sys.stdin:
     append("requests.log", line.strip())
     req = json.loads(line)
     if req.get("op") == "cancel":
         cancelled.add(req.get("target"))
+        continue
+    if req.get("op") == "polish" or req.get("slot") == "polish":
+        if "--polish-model" not in sys.argv:
+            emit({"type": "error", "id": req.get("id"), "code": "polish_unavailable", "final": True})
+            continue
+        with pcv:
+            polishes.append(req)
+            pcv.notify()
         continue
     with cv:
         queue.append(req)
@@ -1692,6 +2110,7 @@ for line in sys.stdin:
         idle: Duration::from_secs(60),
         closed: Duration::from_secs(60),
         exit_window: Duration::from_secs(60),
+        polish: Duration::from_millis(150),
         tick: Duration::from_millis(20),
     };
 
@@ -2167,7 +2586,7 @@ for line in sys.stdin:
             "the 4-bit model was never installed"
         );
         // An install fetches the model it started with: no switching under it.
-        studio.0.lock().installing = true;
+        studio.0.lock().installing = Some(VARIANTS[0].id);
         let eight = VARIANTS[0].id;
         assert_eq!(
             studio.set_prefs(&json!({"model": eight})).unwrap_err(),
@@ -2215,8 +2634,8 @@ for line in sys.stdin:
             }
             earlier.lock().unwrap().push((event.to_string(), payload));
         });
-        studio.remove().unwrap();
-        studio.install();
+        studio.remove(false).unwrap();
+        studio.install(false);
         until("the install to end", || {
             seen.lock()
                 .unwrap()
@@ -2244,7 +2663,7 @@ for line in sys.stdin:
             "b696f4bf45f54497b6de758981e76f1410bd68af05a657477dee466b0202df1a"
         );
         for v in &VARIANTS {
-            let files: Vec<&(&str, FileCheck)> = SHARED.iter().chain(&v.own).collect();
+            let files: Vec<&(&str, FileCheck)> = SHARED.iter().chain(v.own).collect();
             let mut paths: Vec<&str> = files.iter().map(|(p, _)| *p).collect();
             paths.sort();
             paths.dedup();
@@ -2260,7 +2679,7 @@ for line in sys.stdin:
         let download = |v: &Variant| {
             SHARED
                 .iter()
-                .chain(&v.own)
+                .chain(v.own)
                 .map(|(_, c)| c.bytes)
                 .sum::<u64>()
         };
@@ -2289,7 +2708,7 @@ for line in sys.stdin:
             "stale .deflate"
         );
         let pins: Vec<&str> = lock.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(pins.len(), 31);
+        assert_eq!(pins.len(), 34);
         for pin in &pins {
             let (name, rest) = pin.split_once("==").unwrap();
             assert!(
@@ -2298,6 +2717,9 @@ for line in sys.stdin:
             );
         }
         assert!(pins.iter().any(|p| p.starts_with("mlx-audio==0.5.8 ")));
+        // The polish model's runtime: the mlx-lm it was measured on.
+        assert!(pins.iter().any(|p| p.starts_with("mlx-lm==0.32.0 ")));
+        assert!(inflate(SIDECAR_Z).contains(r#""ops": ["speak", "polish","#));
     }
 
     /// A warm on intent (the Discuss pill's hover, a voice surface opening)
@@ -2345,8 +2767,10 @@ for line in sys.stdin:
             id: "v",
             repo: "v",
             revision: "rev",
-            own: [("a", small), ("b", small), ("c", small)],
+            own: Vec::leak(vec![("a", small), ("b", small), ("c", small)]),
             memory: 0,
+            disk: 0,
+            ram: 0,
         };
         let (studio, _, _) = fake_studio("cancel", FAST, normal_pressure);
         studio.cancel_install();
@@ -2400,15 +2824,17 @@ for line in sys.stdin:
             id,
             repo: id,
             revision: "rev",
-            own: [
+            own: Vec::leak(vec![
                 ("config.json", check("config.json")),
                 ("model.safetensors", check("model.safetensors")),
                 (
                     "model.safetensors.index.json",
                     check("model.safetensors.index.json"),
                 ),
-            ],
+            ]),
             memory: 0,
+            disk: 0,
+            ram: 0,
         };
         let (studio, _, seen) = fake_studio("fetch", FAST, normal_pressure);
         let (a, b) = (variant("a"), variant("b"));
@@ -2462,6 +2888,318 @@ for line in sys.stdin:
             progress.iter().any(|p| p["received"] == p["total"]),
             "{progress:?}"
         );
+    }
+
+    // --- Dictation polish ---------------------------------------------------
+
+    /// Mark the polish model installed beside the voice.
+    fn install_polish(studio: &Studio) {
+        studio
+            .0
+            .record(&|r| r["models"][POLISH.id] = json!({}))
+            .unwrap();
+    }
+
+    /// Polish `text` as `generation`, returning where its reply lands.
+    fn polish_with(studio: &Studio, text: &str, vocab: &Value, generation: u64) -> Frames {
+        let (channel, frames) = recorder();
+        studio.polish(text, vocab, generation, channel).unwrap();
+        frames
+    }
+
+    fn polish(studio: &Studio, text: &str, generation: u64) -> Frames {
+        polish_with(studio, text, &json!(["QueueTray"]), generation)
+    }
+
+    /// Every line Redline wrote to the sidecar.
+    fn sent(dir: &Path) -> Vec<Value> {
+        log_lines(dir, "requests.log")
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn polish_installed(studio: &Studio) -> bool {
+        studio.0.polish_installed(&mut studio.0.lock())
+    }
+
+    fn polish_ready(studio: &Studio) -> bool {
+        let core = studio.0.lock();
+        core.polish_model == Model::Ready && core.polish.is_empty()
+    }
+
+    /// A polish goes to the sidecar's polish slot with its vocabulary, and
+    /// its one reply comes back as a single final frame under its generation.
+    #[tokio::test]
+    async fn a_polish_round_trips_as_one_frame() {
+        let (studio, dir, _) = fake_studio("polish", FAST, normal_pressure);
+        install_polish(&studio);
+        let generation = (1u64 << 32) + 9;
+        let frames = finished(&polish(&studio, "um so the QueueTray moves", generation)).await;
+        assert_eq!(frames.len(), 1, "no audio, just the reply");
+        let f = &frames[0];
+        assert_eq!(f[..4], 9u32.to_le_bytes());
+        assert_eq!(flags(f), FINAL);
+        assert_eq!(outcome(f)["type"], "polished");
+        assert_eq!(outcome(f)["text"], "So the QueueTray moves.");
+        assert_eq!(
+            sent(&dir),
+            [
+                json!({"id": 1, "op": "polish", "text": "um so the QueueTray moves", "vocab": ["QueueTray"]})
+            ]
+        );
+        let spawn = &log_lines(&dir, "spawns.log")[0];
+        assert!(
+            spawn.contains("--polish-model polish/Qwen3.5-2B-4bit --polish-idle-unload-s 120"),
+            "{spawn}"
+        );
+    }
+
+    /// A dictation warms the polish model ahead of its polish: once per
+    /// vocabulary, and apart from the voice, whose state and surfaces hear
+    /// nothing of it.
+    #[tokio::test]
+    async fn the_polish_model_warms_once_per_vocabulary_apart_from_the_voice() {
+        let (studio, dir, seen) = fake_studio("polish-warm", FAST, normal_pressure);
+        install_polish(&studio);
+        let vocab = json!(["QueueTray"]);
+        studio.warm_polish(&vocab).unwrap();
+        studio.warm_polish(&vocab).unwrap();
+        until("the polish model", || polish_ready(&studio)).await;
+        studio.warm_polish(&vocab).unwrap();
+        studio.warm_polish(&json!(["TalkPanel"])).unwrap();
+        until("the polish model", || polish_ready(&studio)).await;
+        let warmups: Vec<Value> = sent(&dir)
+            .into_iter()
+            .filter(|l| l["op"] == "warmup")
+            .collect();
+        assert_eq!(
+            warmups,
+            [
+                json!({"id": 1, "op": "warmup", "slot": "polish", "vocab": ["QueueTray"]}),
+                json!({"id": 2, "op": "warmup", "slot": "polish", "vocab": ["TalkPanel"]}),
+            ]
+        );
+        assert!(
+            status_events(&seen).is_empty(),
+            "{:?}",
+            status_events(&seen)
+        );
+        assert_eq!(
+            studio.status()["state"],
+            "starting",
+            "the voice isn't loaded"
+        );
+    }
+
+    #[test]
+    fn a_longer_polish_or_a_cold_model_gets_more_time() {
+        let (studio, _, _) = fake_studio("polish-budget", TIMING, normal_pressure);
+        let budget = |words, warm| studio.0.polish_budget(words, warm).as_millis();
+        assert_eq!(budget(13, true), 700);
+        assert_eq!(budget(30, true), 700);
+        assert_eq!(budget(80, true), 1200);
+        assert_eq!(budget(400, true), 1400);
+        assert_eq!(budget(30, false), 4700);
+    }
+
+    /// Past its budget a polish ends `slow` (the frontend then polishes with
+    /// the cleanup child) and is cancelled at the sidecar. A model that isn't
+    /// loaded, or whose prompt is for another vocabulary, gets the loading
+    /// allowance on top.
+    #[tokio::test]
+    async fn a_polish_past_its_budget_ends_slow_and_a_cold_model_gets_longer() {
+        let (studio, dir, _) = fake_studio("polish-slow", FAST, normal_pressure);
+        install_polish(&studio);
+        let cold = finished(&polish(&studio, "WAIT400 the tray", 1)).await;
+        assert_eq!(outcome(&cold[0])["type"], "polished");
+        studio.warm_polish(&json!(["QueueTray"])).unwrap();
+        until("the polish model", || polish_ready(&studio)).await;
+        let started = Instant::now();
+        let slow = finished(&polish(&studio, "STALL the tray", 2)).await;
+        let waited = started.elapsed();
+        assert!(waited >= FAST.polish && waited < FAST.loading, "{waited:?}");
+        assert_eq!(flags(&slow[0]), FINAL | ERROR);
+        assert_eq!(outcome(&slow[0])["code"], "slow");
+        assert!(sent(&dir).contains(&json!({"op": "cancel", "target": 3})));
+        // The sidecar lets go of it, and the next one polishes.
+        let next = finished(&polish(&studio, "um the pin", 3)).await;
+        assert_eq!(outcome(&next[0])["text"], "The pin.");
+        // Another vocabulary means a prompt to build first: not slow.
+        let other = polish_with(&studio, "WAIT400 the pin", &json!(["TalkPanel"]), 4);
+        assert_eq!(outcome(&finished(&other).await[0])["type"], "polished");
+    }
+
+    /// Without the polish model nothing starts: the frontend hears at once
+    /// that it should polish with the cleanup child.
+    #[tokio::test]
+    async fn polish_is_refused_at_once_without_its_model() {
+        let (studio, dir, _) = fake_studio("polish-missing", FAST, normal_pressure);
+        let (channel, frames) = recorder();
+        assert_eq!(
+            studio
+                .polish("um the tray", &json!([]), 1, channel)
+                .unwrap_err(),
+            POLISH_NOT_INSTALLED
+        );
+        studio.warm_polish(&json!([])).unwrap();
+        assert!(!polish_installed(&studio));
+        install_polish(&studio);
+        assert!(polish_installed(&studio));
+        // ...nor on a runtime another Redline built.
+        studio
+            .0
+            .record(&|r| r["lock"] = "an older lock".into())
+            .unwrap();
+        let (channel, _) = recorder();
+        assert_eq!(
+            studio
+                .polish("the tray", &json!([]), 2, channel)
+                .unwrap_err(),
+            POLISH_NOT_INSTALLED
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(frames.lock().unwrap().is_empty());
+        assert!(log_lines(&dir, "spawns.log").is_empty());
+    }
+
+    /// A sidecar started before the polish model was installed is started
+    /// again with it for the next polish — but never under speech.
+    #[tokio::test]
+    async fn a_sidecar_from_before_the_polish_install_restarts_for_it_between_replies() {
+        let (studio, dir, seen) = fake_studio("polish-restart", FAST, normal_pressure);
+        finished(&say(&studio, "Before.", 1)).await;
+        install_polish(&studio);
+        let speaking = say(&studio, "SLOW Still talking.", 2);
+        let (channel, _) = recorder();
+        assert_eq!(
+            studio
+                .polish("the tray", &json!([]), 3, channel)
+                .unwrap_err(),
+            POLISH_LATER
+        );
+        assert_eq!(
+            outcome(finished(&speaking).await.last().unwrap())["type"],
+            "end"
+        );
+        let reply = finished(&polish(&studio, "um the tray", 4)).await;
+        assert_eq!(outcome(&reply[0])["text"], "The tray.");
+        // The new sidecar built its prompt for this vocabulary.
+        assert_eq!(studio.0.lock().polish_vocab, json!(["QueueTray"]));
+        let spawns = log_lines(&dir, "spawns.log");
+        assert_eq!(spawns.len(), 2);
+        assert!(!spawns[0].contains("--polish-model") && spawns[1].contains("--polish-model"));
+        assert_eq!(
+            status_events(&seen).last().unwrap(),
+            &json!({"state": "off", "reason": "polish"}),
+            "a stop, not a crash"
+        );
+    }
+
+    /// A polish ends with its generation's cancel, as speech does, and with
+    /// the sidecar.
+    #[tokio::test]
+    async fn a_polish_ends_with_its_generation_or_with_the_sidecar() {
+        let (studio, dir, _) = fake_studio("polish-cancel", FAST, normal_pressure);
+        install_polish(&studio);
+        let stalled = polish(&studio, "STALL the tray", 5);
+        let after = polish(&studio, "WAIT100 the pin", 6);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        studio.cancel(5);
+        let ended = stalled.lock().unwrap().clone();
+        assert_eq!(flags(&ended[0]), FINAL | CANCELLED, "at once");
+        until("the sidecar to be told", || {
+            sent(&dir).contains(&json!({"op": "cancel", "target": 1}))
+        })
+        .await;
+        assert_eq!(outcome(&finished(&after).await[0])["type"], "polished");
+
+        let stuck = polish(&studio, "STALL again", 7);
+        finished(&say(&studio, "DIE", 8)).await;
+        assert_eq!(
+            outcome(&finished(&stuck).await[0])["code"],
+            "sidecar_exited"
+        );
+    }
+
+    /// Removing the polish model takes only its files: the running sidecar
+    /// lets go of it, and the voice speaks on.
+    #[tokio::test]
+    async fn removing_the_polish_model_leaves_the_voice() {
+        let (studio, dir, _) = fake_studio("polish-remove", FAST, normal_pressure);
+        install_polish(&studio);
+        let model = studio.0.dir.join("models").join(POLISH.id);
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("model.safetensors"), b"weights").unwrap();
+        finished(&polish(&studio, "um the tray", 1)).await;
+        studio.remove(true).unwrap();
+        until("its files to go", || !model.exists()).await;
+        assert!(sent(&dir).contains(&json!({"op": "unload", "slot": "polish"})));
+        assert!(read_record(&studio.0.dir)["models"]
+            .get(POLISH.id)
+            .is_none());
+        assert!(!polish_installed(&studio));
+        assert_eq!(studio.status()["installed"], true, "the voice stays");
+        let (channel, _) = recorder();
+        assert_eq!(
+            studio
+                .polish("the tray", &json!([]), 2, channel)
+                .unwrap_err(),
+            POLISH_NOT_INSTALLED
+        );
+        let spoke = finished(&say(&studio, "Still here.", 3)).await;
+        assert_eq!(outcome(spoke.last().unwrap())["type"], "end");
+        assert_eq!(log_lines(&dir, "spawns.log").len(), 1, "never restarted");
+    }
+
+    /// The polish model is checked for what it needs, not the voice's 16 GB
+    /// and 4.5 GB, and can never be picked as a voice.
+    #[test]
+    fn the_polish_model_is_checked_for_its_own_needs() {
+        let (studio, _, _) = fake_studio("polish-preflight", FAST, normal_pressure);
+        let p = studio.preflight(Some(POLISH.id));
+        assert_eq!(p["needMemoryBytes"], POLISH.memory);
+        assert_eq!(p["needRamBytes"], 8_000_000_000u64);
+        assert!(p["needDiskBytes"].as_u64().unwrap() <= 2_500_000_000);
+        assert!(studio.set_prefs(&json!({"model": POLISH.id})).is_err());
+    }
+
+    /// The polish model's install says so in every `studio-setup` event, so
+    /// the settings card shows its progress in its own row.
+    #[tokio::test]
+    async fn the_polish_install_names_itself_in_its_progress() {
+        use std::os::unix::fs::PermissionsExt;
+        let (studio, _, seen) = fake_studio("polish-install", FAST, normal_pressure);
+        // A runtime to rebuild, with a uv that fails at once: no network.
+        studio
+            .0
+            .record(&|r| r["lock"] = "an older lock".into())
+            .unwrap();
+        let uv = studio.0.data_dir.join("kokoro/bin/uv");
+        std::fs::create_dir_all(uv.parent().unwrap()).unwrap();
+        std::fs::write(&uv, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        studio.install(true);
+        assert_eq!(studio.status()["installing"], POLISH.id);
+        until("the install to end", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(e, p)| e == "studio-setup" && p["phase"] == "error")
+        })
+        .await;
+        let setup: Vec<Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(e, _)| e == "studio-setup")
+            .map(|(_, p)| p.clone())
+            .collect();
+        assert!(
+            setup.len() >= 2 && setup.iter().all(|p| p["polish"] == true),
+            "{setup:?}"
+        );
+        assert_eq!(studio.status()["installing"], Value::Null);
     }
 
     // --- Opt-in: the real sidecar and model -------------------------------
@@ -2711,6 +3449,79 @@ for line in sys.stdin:
             "a 206 from where the file stopped"
         );
         assert_eq!(std::fs::metadata(&dest).unwrap().len(), check.bytes);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// REDLINE_STUDIO_VENV names a venv with the locked packages (mlx-lm
+    /// among them), and REDLINE_POLISH_MODEL a directory holding the polish
+    /// model's five files; no voice model is needed. A generous budget, so
+    /// a machine busy with other work reports its latency rather than
+    /// failing on it: what each polish took is printed against the 700 ms.
+    #[tokio::test]
+    #[ignore = "needs REDLINE_STUDIO_VENV and REDLINE_POLISH_MODEL"]
+    async fn real_sidecar_polishes_a_dictation_and_never_answers_it() {
+        let venv = from_env("REDLINE_STUDIO_VENV");
+        let model = from_env("REDLINE_POLISH_MODEL");
+        let data =
+            std::env::temp_dir().join(format!("redline-studio-real-polish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let dir = data.join("voice-studio");
+        let polish_dir = dir.join("models").join(POLISH.id);
+        std::fs::create_dir_all(polish_dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(venv, dir.join("venv")).unwrap();
+        std::os::unix::fs::symlink(model, &polish_dir).unwrap();
+        std::fs::write(
+            dir.join("install.json"),
+            json!({"lock": lock_hash(), "models": {POLISH.id: {}}}).to_string(),
+        )
+        .unwrap();
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let timing = Timing {
+            polish: Duration::from_secs(15),
+            ..TIMING
+        };
+        let studio = Studio::with(&data, reqwest::Client::new(), db, timing, memory_pressure);
+
+        let vocab = json!(["VoicePanel", "tts.rs", "Kokoro", "QueueTray"]);
+        let started = Instant::now();
+        studio.warm_polish(&vocab).unwrap();
+        patiently("the polish model", || polish_ready(&studio)).await;
+        println!("\nspawn to warm: {:?}", started.elapsed());
+
+        let dictated = "um so the VoicePanel should, should stop reading when the Kokoro \
+                        sidecar in tts dot rs times out and uh fall back to the system voice";
+        let asked = "can you tell me why the QueueTray hides the newest line when a reply is long";
+        for (n, said) in [dictated, asked, dictated, asked, dictated, asked]
+            .into_iter()
+            .enumerate()
+        {
+            let started = Instant::now();
+            let frames = polish_with(&studio, said, &vocab, n as u64 + 1);
+            patiently("the polish", || final_of(&frames).is_some()).await;
+            let took = started.elapsed();
+            let reply = outcome(&final_of(&frames).unwrap());
+            println!(
+                "{:>5.0} ms ({} words; budget {} ms): {}",
+                took.as_secs_f64() * 1e3,
+                said.split_whitespace().count(),
+                TIMING.polish.as_millis(),
+                reply
+            );
+            assert_eq!(reply["type"], "polished", "{reply}");
+            let text = reply["text"].as_str().unwrap();
+            if said == asked {
+                assert!(
+                    text.starts_with("Can you tell me why the QueueTray") && text.ends_with('?'),
+                    "still the speaker's question: {text}"
+                );
+            } else {
+                assert_eq!(reply["guard"], Value::Null, "{reply}");
+                assert!(!text.contains(" um ") && !text.contains(" uh "), "{text}");
+                for term in ["VoicePanel", "Kokoro", "tts.rs"] {
+                    assert!(text.contains(term), "{term} kept: {text}");
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&data);
     }
 }
