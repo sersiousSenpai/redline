@@ -30,45 +30,16 @@
 // needs no permission; a page whose scripts don't run (a PDF) doesn't hear the
 // key — click into Redline's own chrome first. Since the page's own scripts
 // can post the same signals, Redline takes a page's press only while the key
-// really is down and that page has the keyboard (browser_events.rs).
+// really is down and that page has the keyboard (browser_events.rs). The
+// key's setting lives apart (holdKey.ts), for the shortcut list to name it.
+
+import { loadHoldKey, type HoldKey } from "./holdKey";
+
+export { DEFAULT_HOLD_KEY, HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "./holdKey";
 
 export const HOLD_MS = 250;
 /** A tap and a press closer together than this lock the mic open. */
 export const DOUBLE_TAP_MS = 300;
-
-export type HoldKey = "AltRight" | "MetaRight" | "ControlRight" | "off";
-export const DEFAULT_HOLD_KEY: HoldKey = "AltRight";
-export const HOLD_KEYS: { key: HoldKey; label: string }[] = [
-  { key: "AltRight", label: "Right ⌥ Option" },
-  { key: "MetaRight", label: "Right ⌘ Command" },
-  { key: "ControlRight", label: "Right ⌃ Control" },
-  { key: "off", label: "Off" },
-];
-
-const KEY_PREF = "redline.dictation.key";
-let holdKey: HoldKey | null = null;
-
-/** The configured key (per machine, like the voice prefs). */
-export function loadHoldKey(): HoldKey {
-  if (holdKey) return holdKey;
-  let saved: string | null = null;
-  try {
-    saved = localStorage.getItem(KEY_PREF);
-  } catch {
-    /* private mode: the default */
-  }
-  holdKey = HOLD_KEYS.some((k) => k.key === saved) ? (saved as HoldKey) : DEFAULT_HOLD_KEY;
-  return holdKey;
-}
-
-export function saveHoldKey(key: HoldKey): void {
-  holdKey = key;
-  try {
-    localStorage.setItem(KEY_PREF, key);
-  } catch {
-    /* best-effort, like the voice prefs */
-  }
-}
 
 /** Where a key event came from: Redline's own window, or the web page in the
  *  browser tab `page` (its webview label), whose focused element may be a

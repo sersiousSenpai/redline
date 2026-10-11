@@ -14,6 +14,8 @@
 // churn without benefit — the registry's job is a single source of truth for
 // what exists, not a new event system.
 
+import { HOLD_KEYS, loadHoldKey } from "../audio/holdKey";
+
 /** A cheat-sheet section: what `ShortcutHelp` renders. `keys` is
  *  space-separated caps ("⇧ ⌘ P" → three keycaps). Lives here — with the
  *  data — so the component depends on the registry, not the reverse. */
@@ -52,8 +54,9 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   // terminal, so App matches it in the capture phase, ahead of xterm.
   { id: "needs-you", keys: ["⌘", "⇧", "J"], label: "Jump to the terminal that needs you", group: "Global", wired: true },
   // Not a chord: a modifier held on its own (audio/voiceHotkey.ts, which owns
-  // its listener). Double-tap locks the mic open; Voice settings changes it.
-  // One cap for the key: the cheat sheet splits caps at plain spaces.
+  // its listener). Double-tap locks the mic open; Voice settings changes it,
+  // and the renderings name the key it chose (`shownKeymap`). One cap for the
+  // key: the cheat sheet splits caps at plain spaces.
   { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
@@ -137,18 +140,26 @@ export function isFrontDoorKey(e: KeyComboInfo): boolean {
 
 // ---- Renderings -------------------------------------------------------------
 
+/** The registry as this machine has it: the dictation entry names the hold
+ *  key Voice settings chose, and is left out while that key is Off. */
+export function shownKeymap(): KeyBinding[] {
+  const cap = HOLD_KEYS.find((k) => k.key === loadHoldKey())?.cap;
+  return GLOBAL_KEYMAP.flatMap((b) => (b.id !== "dictate" ? [b] : cap ? [{ ...b, keys: ["hold", cap] }] : []));
+}
+
 /** The onboarding tour's shortcuts step, straight from the registry. */
 export function tourShortcuts(): { keys: string[]; text: string }[] {
-  return GLOBAL_KEYMAP.map((b) => ({ keys: b.keys, text: b.label }));
+  return shownKeymap().map((b) => ({ keys: b.keys, text: b.label }));
 }
 
 /** ShortcutHelp-shaped groups for a global cheat sheet, registry-ordered.
  *  (`ShortcutHelp` splits `keys` on spaces into keycaps.) */
 export function globalShortcutGroups(): ShortcutGroup[] {
   const order: KeyBinding["group"][] = ["Global", "Layout", "Document"];
+  const shown = shownKeymap();
   return order.map((title) => ({
     title,
-    items: GLOBAL_KEYMAP.filter((b) => b.group === title).map((b) => ({
+    items: shown.filter((b) => b.group === title).map((b) => ({
       keys: b.keys.join(" "),
       label: b.label,
     })),

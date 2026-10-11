@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { saveHoldKey } from "../audio/holdKey";
 import {
   GLOBAL_KEYMAP,
   REVIEW_KEYMAP,
@@ -12,6 +13,7 @@ import {
   isNewPlanKey,
   isPaletteKey,
   isSnapBackKey,
+  shownKeymap,
   tourShortcuts,
 } from "./keymap";
 
@@ -178,6 +180,33 @@ describe("renderings", () => {
       .find((i) => i.label === "Snap the layout back");
     expect(snap?.keys.split(" ")).toEqual(["⌘", "⇧", "0"]);
   });
+  describe("the dictation key", () => {
+    afterEach(() => saveHoldKey("AltRight"));
+    const dictate = () => tourShortcuts().find((r) => r.text.startsWith("Dictate"));
+
+    it("is the hold key Voice settings chose, one cap for the key", () => {
+      expect(dictate()?.keys).toEqual(["hold", "right\u00a0⌥"]);
+      saveHoldKey("MetaRight");
+      expect(dictate()?.keys).toEqual(["hold", "right\u00a0⌘"]);
+      saveHoldKey("ControlRight");
+      expect(dictate()?.keys).toEqual(["hold", "right\u00a0⌃"]);
+      const caps = globalShortcutGroups()
+        .flatMap((g) => g.items)
+        .find((i) => i.label.startsWith("Dictate"))!
+        .keys.split(" ");
+      expect(caps).toEqual(["hold", "right\u00a0⌃"]);
+    });
+
+    it("is left out while dictating by key is off", () => {
+      saveHoldKey("off");
+      expect(dictate()).toBeUndefined();
+      expect(shownKeymap().map((b) => b.id)).not.toContain("dictate");
+      expect(globalShortcutGroups().flatMap((g) => g.items)).toHaveLength(GLOBAL_KEYMAP.length - 1);
+      // The registry itself still documents it.
+      expect(bindingKeys("dictate")).toEqual(["hold", "right\u00a0⌥"]);
+    });
+  });
+
   it("the review cheat sheet keeps its three sections", () => {
     expect(REVIEW_KEYMAP.map((g) => g.title)).toEqual([
       "Files",
