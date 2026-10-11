@@ -145,6 +145,7 @@ mod thumbs;
 mod tts;
 mod tts_studio;
 mod turn;
+mod turn_scorer;
 mod update;
 mod userconfig;
 mod voice;
@@ -12488,6 +12489,9 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    // Waits for the main thread to end the utterance, then for its final
+    // transcript.
+    "dictation_cycle",
     // Reads the settings and checks the model files on disk.
     "dictation_status",
     // Waits for the main thread to end the capture, then for Whisper.
@@ -12656,6 +12660,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "unwatch_hook_conflicts",
     "watch_hook_conflicts",
     "work_ready_count",
+    // Downloads, loads and asks the end-of-turn model, each waiting on it.
+    "turn_scorer",
     // Drives a model download to its end.
     "whisper_install",
 ];
@@ -13141,6 +13147,7 @@ pub fn run() {
             dictation::dictation_kill_all,
             dictation::dictation_status,
             dictation_whisper::whisper_install,
+            turn_scorer::turn_scorer,
             dictation_whisper::dictation_set_engine,
             devmap::dev_servers_scan,
             devmap::dev_server_stop,
@@ -13554,6 +13561,9 @@ pub fn run() {
             tts.studio().on_event(move |event, payload| {
                 let _ = events.emit(event, payload);
             });
+            // The optional end-of-turn model for hands-free voice: a process
+            // of its own on the Kokoro runtime's interpreter.
+            app.manage(turn_scorer::TurnScorerState::new(&data_dir, tts.venv_python()));
             app.manage(tts);
 
             // Active browser tab tracker — shared with the daemon's

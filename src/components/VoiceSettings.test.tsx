@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 // The Kokoro voice picker: graded voices to audition with ▶, a blend, and the
 // rule that only the user's own pick ever changes the saved voice — someone on
 // am_adam (graded F+) is shown the grade, never moved off it. And the Whisper
-// model choice for dictation.
+// model choice for dictation, and the end-of-turn model for hands-free.
 
 const invoked: { cmd: string; args: Record<string, unknown> }[] = [];
 let savedVoice = "am_adam";
@@ -22,6 +22,9 @@ let savedEngine = "kokoro";
 let studioSupported = false;
 // The `voiceVocab` ui pref.
 let vocabBlob: string | null = null;
+// The end-of-turn model: the Kokoro runtime it needs, and whether it is downloaded.
+let turnRuntime = true;
+let turnModelPresent = false;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args: Record<string, unknown>) => {
     invoked.push({ cmd, args: args ?? {} });
@@ -62,6 +65,10 @@ vi.mock("@tauri-apps/api/core", () => ({
         whisperModels,
         outputRoute: { kind: "speakers", transport: "builtin" },
       });
+    if (cmd === "turn_scorer") {
+      if (args.op === "install") turnModelPresent = true;
+      return Promise.resolve({ runtime: turnRuntime, model: turnModelPresent, warm: false, score: null });
+    }
     return Promise.resolve(null);
   }),
 }));
@@ -121,6 +128,8 @@ beforeEach(() => {
     { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
   ];
   handlers.clear();
+  turnRuntime = true;
+  turnModelPresent = false;
   savedVoice = "am_adam";
   savedEngine = "kokoro";
   studioSupported = false;
@@ -379,5 +388,36 @@ describe("vocabulary", () => {
   it("says how a correction is learned while there are none", async () => {
     await mount();
     expect(host.querySelector('[aria-label="Vocabulary"]')!.textContent).toContain("None yet.");
+  });
+});
+
+describe("end-of-turn model", () => {
+  const toggle = () =>
+    [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
+      b.closest("label")!.textContent!.includes("Listen for when I've finished"),
+    )!;
+
+  it("is offered only with the Kokoro runtime it runs on", async () => {
+    turnRuntime = false;
+    await mount();
+    expect(host.textContent).not.toContain("End of turn");
+  });
+
+  it("downloads on request, then is on, and can be switched off", async () => {
+    await mount();
+    expect(host.textContent).toContain("End of turn (hands-free)");
+    await act(async () => button("Download the end-of-turn model (8.7 MB)").click());
+    await flush();
+    expect(invoked.filter((c) => c.cmd === "turn_scorer").map((c) => c.args)).toEqual([
+      { op: "status" },
+      { op: "install" },
+    ]);
+    expect(toggle().checked).toBe(true);
+    await act(async () => toggle().click());
+    expect(localStorage.getItem("redline.voice.turnModelOff")).toBe("1");
+    // Off stops its process now, not at the next listen.
+    expect(invoked.filter((c) => c.cmd === "turn_scorer").map((c) => c.args)).toContainEqual({ op: "stop" });
+    await act(async () => toggle().click());
+    expect(localStorage.getItem("redline.voice.turnModelOff")).toBeNull();
   });
 });

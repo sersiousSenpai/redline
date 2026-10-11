@@ -114,6 +114,13 @@ export class DictationBroker {
     return done;
   }
 
+  /** End `owner`'s utterance and start the next on the same open capture
+   *  (hands-free turn-taking): the utterance's final transcript, "" when
+   *  `owner` no longer holds the mic. */
+  cycle(owner: DictationOwner): Promise<string> {
+    return this.bridge.invoke<string>("dictation_cycle", { owner }).then((text) => text ?? "");
+  }
+
   /** Drop `owner`'s capture, text and all. The mic stays warm. */
   cancel(owner: DictationOwner): void {
     if (this.holder === owner) this.setHolder(null);

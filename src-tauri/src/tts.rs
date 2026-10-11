@@ -249,7 +249,7 @@ impl TtsState {
     fn venv_dir(&self) -> PathBuf {
         self.kokoro_dir.join("venv")
     }
-    fn venv_python(&self) -> PathBuf {
+    pub(crate) fn venv_python(&self) -> PathBuf {
         self.venv_dir().join("bin").join("python3")
     }
 

@@ -33,6 +33,7 @@ function native() {
         holder = null;
         return `final from ${owner}` as never;
       }
+      if (cmd === "dictation_cycle") return (holder === owner ? `utterance from ${owner}` : "") as never;
       if (cmd === "dictation_kill_all") {
         if (holder === owner) holder = null;
       }
@@ -143,6 +144,18 @@ describe("DictationBroker", () => {
     b.attach("voice", { partial });
     n.emit("dictation-partial", { owner: "door", text: "late" });
     expect(partial).not.toHaveBeenCalled();
+  });
+
+  it("ends an owner's utterance by name and keeps its mic open", async () => {
+    const n = native();
+    const b = new DictationBroker(n.bridge);
+    await b.start("voice", { kind: "open" });
+    expect(await b.cycle("voice")).toBe("utterance from voice");
+    expect(n.calls[n.calls.length - 1]).toEqual(["dictation_cycle", { owner: "voice" }]);
+    expect(b.current()).toBe("voice");
+    // Another owner's cycle ends nothing of this one's.
+    expect(await b.cycle("door")).toBe("");
+    expect(n.holder()).toBe("voice");
   });
 
   it("tells subscribers when the holder changes", async () => {

@@ -18,7 +18,9 @@
 //   installed, else Apple. "" from an owner that no longer holds the mic.
 //   Await it before starting the same owner again: a start that reaches the
 //   mic before the stop does is the holder's repeat press, a no-op.
-// - `dictation_cycle({ owner? })` → the utterance so far; the mic stays open.
+// - `dictation_cycle({ owner? })` → the utterance so far, as the recognizer's
+//   final transcript (its last partial if the final takes over 0.5 s); the
+//   mic stays open, and the next utterance starts.
 // - `dictation_kill_all({ owner? })`: with an owner, cancels that owner's
 //   capture (text discarded); without, closes every capture and the warm mic.
 // - `dictation_status()` → `DictationStatus`. The output route changes as
@@ -42,6 +44,10 @@ import type { DictationError } from "./utterance";
 export const PREROLL_CLEAR_MS = 500;
 
 export type DictationOwner = string;
+
+/** The owner of a capture started without one (`DEFAULT_OWNER` in
+ *  dictation.rs): every caller written before owners shares it. */
+export const DEFAULT_OWNER: DictationOwner = "default";
 
 export interface DictationGrant {
   /** The caller holds the mic: it just took it, or already had it. */

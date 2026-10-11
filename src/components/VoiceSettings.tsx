@@ -32,6 +32,12 @@ import {
   type VocabStore,
 } from "../audio/vocab";
 import type { StudioPrefs } from "./StudioVoiceCard";
+import {
+  setTurnModelWanted,
+  turnModel,
+  turnModelWanted,
+  type TurnModelStatus,
+} from "../audio/turnModel";
 
 // The studio voice's card: install, voice and style. A chunk of its own, as
 // most people never pick it.
@@ -702,6 +708,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
 
       <Vocabulary onError={setError} />
 
+      <TurnModelSetting />
+
       {error && (
         <p style={{ color: "var(--color-danger, #c0392b)", fontSize: "12px", marginTop: "10px" }}>
           {error}
@@ -1044,5 +1052,91 @@ function GradeBadge({ grade }: { grade: string }) {
       <span className="sr-only">grade </span>
       {grade}
     </span>
+  );
+}
+
+/** The optional end-of-turn model for hands-free (`turnModel.ts`): a download,
+ *  then a switch. It runs on the Kokoro voice's runtime, so it is offered
+ *  only once that is installed. Switched on, it applies from the next time
+ *  hands-free listens; switched off, at once. */
+function TurnModelSetting() {
+  const [status, setStatus] = useState<TurnModelStatus | null>(null);
+  const [wanted, setWanted] = useState(turnModelWanted);
+  const [installing, setInstalling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void turnModel("status")
+      .then((s) => alive && setStatus(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!status?.runtime) return null;
+
+  const install = async () => {
+    setInstalling(true);
+    setError(null);
+    try {
+      setStatus(await turnModel("install"));
+      setTurnModelWanted(true);
+      setWanted(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-col gap-2 mt-5 pt-4"
+      style={{ borderTop: "1px solid var(--color-rule)" }}
+    >
+      <span style={label}>End of turn (hands-free)</span>
+      <span style={muted}>
+        A small model on your Mac listens for whether you have finished, so a
+        pause mid-thought doesn't send half a sentence. Now and then it waits a
+        beat longer.
+      </span>
+      {status.model ? (
+        <label className="flex items-center gap-2" style={{ fontSize: "12px", color: "var(--color-ink)" }}>
+          <input
+            type="checkbox"
+            checked={wanted}
+            onChange={(e) => {
+              setTurnModelWanted(e.target.checked);
+              setWanted(e.target.checked);
+              // Off at once, not at the next listen: no process, no audio kept.
+              if (!e.target.checked) void turnModel("stop").catch(() => {});
+            }}
+          />
+          Listen for when I've finished
+        </label>
+      ) : (
+        <button
+          type="button"
+          onClick={install}
+          disabled={installing}
+          className="rounded-sm px-3 py-1.5"
+          style={{
+            fontSize: "13px",
+            fontWeight: 600,
+            border: "1px solid var(--color-rule)",
+            background: "var(--color-anchor-bg)",
+            color: "var(--color-anchor-text)",
+            cursor: installing ? "default" : "pointer",
+            opacity: installing ? 0.6 : 1,
+            alignSelf: "flex-start",
+          }}
+        >
+          {installing ? "Downloading…" : "Download the end-of-turn model (8.7 MB)"}
+        </button>
+      )}
+      {error && <span style={{ ...muted, color: "var(--color-danger, #c0392b)" }}>{error}</span>}
+    </div>
   );
 }

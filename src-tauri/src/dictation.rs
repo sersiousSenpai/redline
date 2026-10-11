@@ -34,7 +34,9 @@
 //!
 //! **Levels.** While capturing, the tap emits `dictation-level` once per 50 ms
 //! of audio (20 Hz), RMS and peak in dBFS: the waveform of a dictation strip,
-//! and the silence an end-of-turn detector listens for.
+//! and the silence an end-of-turn detector listens for. While the end-of-turn
+//! model is warm (`turn_scorer.rs`) the tap also keeps the live capture's last
+//! few seconds, which that model is asked about.
 //!
 //! **Vocabulary.** A start may carry the capture's vocabulary, ranked (the
 //! frontend builds it in `vocab.ts`). Apple's recognizer gets it as
@@ -309,10 +311,14 @@ struct PreRoll {
 }
 
 impl PreRoll {
+    /// An empty ring for the last `ms` of a mic at `rate`.
+    fn holding(rate: f64, ms: f64) -> Self {
+        Self { buf: vec![0.0; (rate * ms / 1000.0).round() as usize], next: 0, len: 0 }
+    }
+
     /// Size the ring for a mic at `rate` and empty it.
     fn reset(&mut self, rate: f64) {
-        self.buf = vec![0.0; (rate * PREROLL_MS / 1000.0).round() as usize];
-        self.clear();
+        *self = Self::holding(rate, PREROLL_MS);
     }
 
     /// Forget what the ring holds, keeping its size.
@@ -416,6 +422,10 @@ struct TapShared {
     meter: Option<LevelMeter>,
     /// When the warm mic closes, if no capture starts first.
     cool_at: Option<std::time::Instant>,
+    /// How much of each capture to keep for the end-of-turn model, while it
+    /// is warm, and the live capture's ring of it.
+    keep_tail: Option<f64>,
+    tail: Option<PreRoll>,
     /// The live capture's recognition request.
     #[cfg(target_os = "macos")]
     request: Option<TapRequest>,
@@ -433,6 +443,7 @@ impl TapShared {
         self.seq = Some(seq);
         self.pcm = pcm;
         self.meter = Some(LevelMeter::new(owner.to_string(), self.rate));
+        self.tail = self.keep_tail.map(|ms| PreRoll::holding(self.rate, ms));
         self.cool_at = None;
     }
 
@@ -448,6 +459,7 @@ impl TapShared {
         }
         self.seq = None;
         self.meter = None;
+        self.tail = None;
         #[cfg(target_os = "macos")]
         {
             self.request = None;
@@ -477,7 +489,22 @@ impl TapShared {
         if let Some(meter) = self.meter.as_mut() {
             meter.feed(mono, levels);
         }
+        if let Some(tail) = self.tail.as_mut() {
+            tail.push(mono);
+        }
         self.preroll.push(mono);
+    }
+
+    /// Keep the last `ms` of every capture from now on, the live one
+    /// included (`None`: stop, and let go of what is kept).
+    fn keep(&mut self, ms: Option<f64>) {
+        self.keep_tail = ms;
+        self.tail = match ms {
+            Some(ms) if self.meter.is_some() => {
+                Some(self.tail.take().unwrap_or_else(|| PreRoll::holding(self.rate, ms)))
+            }
+            _ => None,
+        };
     }
 }
 
@@ -674,6 +701,13 @@ struct DictationInner {
     mic: Mutex<Option<WarmMic>>,
     #[cfg(target_os = "macos")]
     capture: Mutex<Option<CaptureTask>>,
+    /// A `dictation_cycle` waiting on the final transcript of the task it
+    /// finished: that task's number, and the text once it comes, which
+    /// `final_ready` announces.
+    #[cfg(target_os = "macos")]
+    final_for: Mutex<Option<(u64, Option<String>)>>,
+    #[cfg(target_os = "macos")]
+    final_ready: std::sync::Condvar,
 }
 
 impl DictationInner {
@@ -727,6 +761,18 @@ impl DictationInner {
             .filter(|h| h.owner == owner)
             .map(|h| h.seq)
     }
+
+    /// Hand recognition task `task`'s final transcript (`None`: it ended
+    /// without one, "" to the cycle) to the cycle waiting on it, if one is.
+    #[cfg(target_os = "macos")]
+    fn deliver_final(&self, task: u64, text: Option<String>) {
+        if let Some((t, heard @ None)) = self.final_for.lock().unwrap().as_mut() {
+            if *t == task {
+                *heard = Some(text.unwrap_or_default());
+                self.final_ready.notify_all();
+            }
+        }
+    }
 }
 
 /// Dictation, managed as Tauri state. Cloneable so it can be moved into
@@ -760,8 +806,24 @@ impl DictationState {
                 mic: Mutex::new(None),
                 #[cfg(target_os = "macos")]
                 capture: Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                final_for: Mutex::new(None),
+                #[cfg(target_os = "macos")]
+                final_ready: std::sync::Condvar::new(),
             }),
         }
+    }
+
+    /// Keep the last `ms` of each capture's audio for the end-of-turn model
+    /// (`None` stops it).
+    pub fn keep_tail(&self, ms: Option<f64>) {
+        self.inner.tap.lock().unwrap().keep(ms);
+    }
+
+    /// The live capture's kept audio, mono and oldest first, with its rate.
+    pub fn tail(&self) -> Option<(Vec<f32>, f64)> {
+        let tap = self.inner.tap.lock().unwrap();
+        tap.tail.as_ref().map(|t| (t.snapshot(), tap.rate))
     }
 
     /// Tear down any capture and the warm mic — backs `dictation_kill_all`
@@ -955,11 +1017,22 @@ fn transcribe_utterance(
     whisper.transcribe(&mono_16k, vocab)
 }
 
+/// How long a cycle waits for the finished utterance's final transcript
+/// before settling for its last partial. Once its audio ends the recognizer
+/// writes the final in 0.08–0.35 s (the dictation test set, real time).
+#[cfg(target_os = "macos")]
+const FINAL_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Commit `owner`'s current utterance and immediately re-arm a fresh
-/// recognition on the SAME running engine, returning the finalized transcript.
-/// Unlike `dictation_stop`, the microphone never closes — the per-utterance
-/// boundary of a continuous conversation. A no-op returning "" unless `owner`
-/// holds the mic.
+/// recognition on the SAME running engine, returning the utterance's final
+/// transcript — the recognizer writes its last word as much as 0.5 s after
+/// the voice stops, so the partials may not have it yet — or its last
+/// partial if the final is slow to come. Unlike `dictation_stop`, the
+/// microphone never closes — the per-utterance boundary of a continuous
+/// conversation. A no-op returning "" unless `owner` holds the mic.
+///
+/// It runs on the blocking pool (`OFF_MAIN_COMMANDS`): it waits for the main
+/// thread to end the utterance, then for the recognizer.
 #[tauri::command]
 pub fn dictation_cycle(
     dictation: tauri::State<'_, DictationState>,
@@ -974,19 +1047,35 @@ pub fn dictation_cycle(
 
     #[cfg(target_os = "macos")]
     {
-        let state = dictation.inner.clone();
+        let inner = &dictation.inner;
+        *inner.final_for.lock().unwrap() = None;
+        let state = inner.clone();
         let app_main = app.clone();
-        let _ = app.run_on_main_thread(move || {
+        let scheduled = app.run_on_main_thread(move || {
             if state.owner_of(seq).is_none() {
                 return;
             }
-            // Finalize this utterance's recognition, then listen for the next
-            // on the same engine, from its first buffer on.
+            // Finalize this utterance's recognition — its final transcript
+            // comes to this cycle — then listen for the next on the same
+            // engine, from its first buffer on.
+            *state.final_for.lock().unwrap() = Some((state.armed.load(Ordering::SeqCst), None));
             retire_capture(&state, true, Some(seq));
             if let Some(mic) = state.mic.lock().unwrap().as_ref() {
                 arm_capture(&app_main, &state, mic, &owner, seq, false);
             }
         });
+        if scheduled.is_ok() {
+            let waiting = inner.final_for.lock().unwrap();
+            let (mut waiting, _) = inner
+                .final_ready
+                .wait_timeout_while(waiting, FINAL_WAIT, |w| !matches!(w, Some((_, Some(_)))))
+                .unwrap();
+            if let Some((_, Some(heard))) = waiting.take() {
+                if !heard.trim().is_empty() {
+                    return Ok(heard);
+                }
+            }
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1275,6 +1364,12 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
             // SAFETY: the recognizer hands back a valid result or error pointer.
             if let Some(result) = unsafe { result.as_ref() } {
                 if !live {
+                    // A task a cycle finished: its final transcript, with the
+                    // last word the partials may not have caught, goes there.
+                    if unsafe { result.isFinal() } {
+                        let text = unsafe { result.bestTranscription().formattedString() }.to_string();
+                        state_res.deliver_final(mine, Some(text));
+                    }
                     return;
                 }
                 let text = unsafe { result.bestTranscription().formattedString() }.to_string();
@@ -1285,8 +1380,11 @@ fn arm_capture(app: &AppHandle, state: &Arc<DictationInner>, mic: &WarmMic, owne
                 let code = error.code() as i64;
                 let message = error.localizedDescription().to_string();
                 tracing::warn!(target: "dictation", domain = %domain, code, live, "recognizer error: {message}");
-                if !live && is_benign_recognizer_error(&domain, code) {
-                    return;
+                if !live {
+                    state_res.deliver_final(mine, None);
+                    if is_benign_recognizer_error(&domain, code) {
+                        return;
+                    }
                 }
                 let _ = app_res.emit(
                     "dictation-error",
@@ -1586,6 +1684,56 @@ mod tests {
         assert_eq!(tap.preroll.snapshot().len(), 300);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_cycle_gets_the_final_transcript_of_the_task_it_finished_and_no_other() {
+        let state = DictationState::new();
+        let waiting = || state.inner.final_for.lock().unwrap().clone();
+        *state.inner.final_for.lock().unwrap() = Some((7, None));
+        // The task armed after it, and a late final of one before it: not its.
+        state.inner.deliver_final(8, Some("next".into()));
+        state.inner.deliver_final(6, Some("before".into()));
+        assert_eq!(waiting(), Some((7, None)));
+        state.inner.deliver_final(7, Some("rename the panel to TalkPanel".into()));
+        assert_eq!(waiting(), Some((7, Some("rename the panel to TalkPanel".into()))));
+        // Its first final is the one; a repeat changes nothing.
+        state.inner.deliver_final(7, Some("again".into()));
+        assert_eq!(waiting(), Some((7, Some("rename the panel to TalkPanel".into()))));
+        // A task that ends in an error lets its cycle go at once, with nothing.
+        *state.inner.final_for.lock().unwrap() = Some((9, None));
+        state.inner.deliver_final(9, None);
+        assert_eq!(waiting(), Some((9, Some(String::new()))));
+    }
+
+    #[test]
+    fn the_tail_holds_the_live_capture_only_and_only_while_the_model_is_warm() {
+        let now = std::time::Instant::now();
+        let mut tap = TapShared::default();
+        tap.reset(1_000.0);
+        tap.attach(1, "voice", None);
+        tap.feed(&[0.1; 100], &mut Vec::new());
+        assert!(tap.tail.is_none(), "nobody asked for it");
+        // Warmed mid-capture: from now on, the last 2 s (2000 samples).
+        tap.keep(Some(2_000.0));
+        tap.feed(&[0.2; 1_500], &mut Vec::new());
+        tap.feed(&[0.3; 1_000], &mut Vec::new());
+        let kept = tap.tail.as_ref().unwrap().snapshot();
+        assert_eq!(kept.len(), 2_000);
+        assert_eq!((kept[0], kept[999], kept[1_000]), (0.2, 0.2, 0.3));
+        // The next capture starts its own, from its first buffer.
+        tap.detach(Some(1), true, now);
+        assert!(tap.tail.is_none());
+        tap.feed(&[0.4; 10], &mut Vec::new());
+        tap.attach(2, "voice", None);
+        tap.feed(&[0.5; 10], &mut Vec::new());
+        assert_eq!(tap.tail.as_ref().unwrap().snapshot(), vec![0.5; 10]);
+        tap.keep(None);
+        assert!(tap.tail.is_none());
+        tap.detach(Some(2), true, now);
+        tap.attach(3, "voice", None);
+        assert!(tap.tail.is_none(), "stopped for good");
+    }
+
     #[test]
     fn the_warm_mic_cools_once_its_time_is_up_with_no_capture_on_it() {
         let now = std::time::Instant::now();
@@ -1651,13 +1799,13 @@ mod tests {
         assert_eq!(warm_for(Some(fourcc(b"blea"))), std::time::Duration::ZERO);
     }
 
-    /// A stop waits for the main thread to end its capture: on the main
-    /// thread itself it would wait forever. An install drives a download of
-    /// hundreds of megabytes to its end, and the status is asked per turn.
+    /// A stop or a cycle waits for the main thread to end its capture: on the
+    /// main thread itself it would wait forever. An install drives a download
+    /// of hundreds of megabytes to its end, and the status is asked per turn.
     #[test]
     fn the_stop_the_install_and_the_status_run_off_the_main_thread() {
         let pool = crate::codehealth::command_list(include_str!("lib.rs"), "OFF_MAIN_COMMANDS");
-        for name in ["dictation_stop", "whisper_install", "dictation_status"] {
+        for name in ["dictation_stop", "dictation_cycle", "whisper_install", "dictation_status"] {
             assert!(pool.iter().any(|n| n == name), "lib.rs: `{name}` must be in OFF_MAIN_COMMANDS");
         }
         let src = include_str!("dictation.rs");
