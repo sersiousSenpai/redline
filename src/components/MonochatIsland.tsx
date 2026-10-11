@@ -71,6 +71,11 @@ const ROOM_RISE_MS = 260;
 const GLIDE_IN_MS = 340;
 const GLIDE_OUT_MS = 300;
 const GLIDE_EASE = "cubic-bezier(.2,.8,.2,1)";
+/** After a press in the resting box lets go, how long the box waits for the
+ *  double-click's second press before it glides. */
+const GLIDE_BEAT_MS = 300;
+/** What a held glide listens to, to know the pointer is done with the box. */
+const GLIDE_WAITS = ["pointerdown", "pointerup", "pointercancel", "keyup", "focusin"];
 
 // The compact card is its own chunk: nothing on the boot path needs it until
 // a pointer rests on the pill, and the dwell is long enough to fetch it.
@@ -195,6 +200,9 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   const walked = useRef(false);
   // The resting door's glide, held at its start while the press is down.
   const held = useRef<Animation | null>(null);
+  // That glide. While it runs, a press it has left on the paper — a slow
+  // double-click's second — was aimed at the box: it never closes the door.
+  const glideIn = useRef<Animation | null>(null);
   // The middle of the plate's free area, where the resting door is centred.
   const restCentre = useRef<{ x: number; y: number } | null>(null);
   const live = useRef({ open, compactOpen }); live.current = { open, compactOpen };
@@ -235,13 +243,27 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       // With the caret, it arrives zoomed: its welcome never shows.
       setZoom(via !== "pointer");
       if (via === "press") {
-        const release = () => {
-          held.current?.play(); held.current = null;
-          window.removeEventListener("pointerup", release, true);
-          window.removeEventListener("pointercancel", release, true);
+        // The box glides only once the pointer is done with it: never while
+        // a press is down, not for a double-click's beat after one lets go
+        // (the second click lands where the first did, not on the paper, which
+        // would close the door), and not while a menu that click opened on one
+        // of its chips is up — placed where the chip rests, it would be left
+        // behind. A key typed goes at once: typing never minds the box moving.
+        let down = true, timer = 0;
+        const stop = () => { window.clearTimeout(timer); for (const type of GLIDE_WAITS) window.removeEventListener(type, wait, true); };
+        const wait = (event: Event) => {
+          window.clearTimeout(timer);
+          if (event.type === "pointerdown") down = true;
+          else if (event.type === "pointerup" || event.type === "pointercancel") down = false;
+          if (down) return;
+          if (!held.current) return stop();
+          timer = window.setTimeout(() => {
+            if (!held.current) return stop();
+            if (hasChildOverlay()) return;
+            stop(); held.current.play(); held.current = null;
+          }, event.type.startsWith("pointer") ? GLIDE_BEAT_MS : 0);
         };
-        window.addEventListener("pointerup", release, true);
-        window.addEventListener("pointercancel", release, true);
+        for (const type of GLIDE_WAITS) window.addEventListener(type, wait, true);
       }
     }
     remember();
@@ -432,6 +454,8 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   };
   useLayoutEffect(() => {
     const shell = room.current;
+    // A glide still held when the door shuts never left the plate.
+    const stayed = !!held.current;
     settle();
     held.current = null;
     const composer = shell && !heldChat.current ? Array.from(shell.querySelectorAll(".rl-frontdoor")).find(shown) : null;
@@ -441,12 +465,13 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       if (!shell?.animate) return;
       // Engaged on the plate, the box glides from where it rested to the
       // window's centre, the caret riding along — transform only. A press
-      // holds it at its start until the pointer lets go: the box never moves
-      // under a held pointer, so a drag that selects text is safe.
+      // holds it at its start until the pointer is done (see `engage`): the
+      // box never moves under a held pointer, so a drag that selects text,
+      // a double-click or a chip's menu is safe.
       const offset = landed && composer ? travel() : null;
       if (offset) {
         if (reduced) { flight.current = [shell.animate([{ opacity: 0 }, { opacity: 1 }], ISLAND_FADE_MS)]; return; }
-        const flown = glide(shell, offset, GLIDE_IN_MS);
+        const flown = glideIn.current = glide(shell, offset, GLIDE_IN_MS);
         flight.current = flown ? [flown] : [];
         if (flown && summon.current === "press") { flown.pause(); held.current = flown; }
         return;
@@ -482,7 +507,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     // goes.
     if (landed) {
       setZoom(false);
-      const offset = composer && !handoff && shell?.animate ? travel() : null;
+      const offset = composer && !handoff && !stayed && shell?.animate ? travel() : null;
       if (!offset) return;
       if (reduced) { flight.current = [shell!.animate([{ opacity: 0 }, { opacity: 1 }], ISLAND_FADE_MS)]; return; }
       const flown = glide(shell!, { x: -offset.x, y: -offset.y }, GLIDE_OUT_MS);
@@ -630,7 +655,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     const start = (event: PointerEvent) => {
       // Observe the DOM capture phase because the selected chat can be a
       // React portal owned by App, outside this component's event ancestry.
-      backdropPress.current = event.button === 0 && !!event.target && isBackdrop(event.target) && !hasChildOverlay();
+      backdropPress.current = event.button === 0 && !!event.target && isBackdrop(event.target) && !hasChildOverlay() && glideIn.current?.playState !== "running";
     };
     document.addEventListener("pointerdown", start, true);
     return () => { document.removeEventListener("pointerdown", start, true); backdropPress.current = false; };
@@ -765,7 +790,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
           <div data-window-drag-edge="bottom" onMouseDown={dragWindow} style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: SHELL_EDGE, pointerEvents: "auto" }}/>
         </div>}
         {open && <button className="rl-frontdoor-return" type="button" onClick={() => onOpenChange(false)} aria-label="Return to workspace" title="Return to workspace (Esc)"><ChevronDown size={18}/></button>}
-      <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced}>
+      <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced} data-chat={onNewChat ? true : undefined}>
         <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} {...engaging}>
           {open && onNewChat && <div className="rl-monochat-heading">
             <h2 className="rl-monochat-title">{context}</h2>

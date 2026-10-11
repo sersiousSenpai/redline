@@ -120,7 +120,8 @@
    glide this replaces moved the box 27px under a held caret). */
 .rl-frontdoor-focus[data-landed]::before { transform-origin: 0 0; transform: var(--fd-paper-from, none); transition: opacity 200ms ease-in, transform 260ms cubic-bezier(.4,0,.2,1); }
 .rl-frontdoor-focus[data-landed][data-open="true"]::before { transform: none; transition: opacity 220ms ease-out, transform 300ms cubic-bezier(.2,.8,.2,1); }
-.rl-frontdoor-focus[data-landed][data-open="true"] .rl-monochat { width: min(800px, calc(100% - var(--fd-rest-left, 0px) - var(--fd-rest-right, 0px) - 48px)); }
+/* A chat the room holds has no box to glide: it keeps the window's width. */
+.rl-frontdoor-focus[data-landed][data-open="true"] .rl-monochat:not([data-chat]) { width: min(800px, calc(100% - var(--fd-rest-left, 0px) - var(--fd-rest-right, 0px) - 48px)); }
 /* Reduced motion: the paper only fades. */
 .rl-frontdoor-focus[data-reduced="true"][data-landed]::before, .rl-frontdoor-focus[data-reduced="true"][data-landed][data-open="true"]::before { transform: none; transition: opacity 120ms linear; }
 

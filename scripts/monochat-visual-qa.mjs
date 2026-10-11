@@ -96,13 +96,15 @@ try {
       geometry: l.getAnimations({ subtree: true }).filter(a => /^(top|left|right|bottom|inset|width|height|margin|padding)/.test(a.transitionProperty ?? '')).map(a => a.transitionProperty) }; })()`;
   const zoomIn = async (tag) => {
     const before = await cdp.evaluate(zoomProbe);
-    await film('__qaZoomIn', zoomProbe, 48);
+    await film('__qaZoomIn', zoomProbe, 72);
     const at = await centre('.rl-frontdoor-focus .rl-fd-input');
     await cdp.call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...at});
     await delay(160);
     const held = await cdp.evaluate(zoomProbe);
     await cdp.call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...at});
-    await delay(700); await settle();
+    // The box waits a double-click's beat (300 ms) after the release, then
+    // glides for 340.
+    await delay(900); await settle();
     const frames = await cdp.evaluate('window.__qaZoomIn');
     const after = await cdp.evaluate(zoomProbe);
     const pressed = frames.findIndex(f => f.zoom), t0 = frames[pressed]?.t ?? 0;
@@ -465,6 +467,38 @@ try {
       const { rest } = await zoomIn(`${tag}-zoom`);
       await screenshot(`${tag}-zoomed`);
       await zoomOut(`${tag}-zoom`, rest);
+    }
+    // Where the box glides furthest, the pointer is never left behind by it:
+    // a double-click's second press lands in the box (not on the paper,
+    // which closes the door), and a chip's menu opened from the resting box
+    // stays on its chip — the box waits under it and glides once it goes.
+    if (set === "long" && shell) {
+      const field = '.rl-frontdoor-focus .rl-fd-input';
+      const centred = `(() => { const r = document.querySelector('.rl-frontdoor-focus .rl-frontdoor').getBoundingClientRect(); return Math.abs(r.x + r.width / 2 - innerWidth / 2) <= 1 && Math.abs(r.y + r.height / 2 - innerHeight / 2) <= 1; })()`;
+      const open = "document.querySelector('.rl-frontdoor-focus').dataset.open === 'true'";
+      await cdp.evaluate("window.__qa.setText('Plan the billing export for the quarterly report')"); await settle();
+      const word = await cdp.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(field)}).getBoundingClientRect(); return { x: r.x + 120, y: r.y + 14 }; })()`);
+      await cdp.call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...word}); await delay(40);
+      await cdp.call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...word}); await delay(140);
+      const under = await cdp.evaluate(`document.elementFromPoint(${word.x}, ${word.y}) === document.querySelector(${JSON.stringify(field)})`);
+      await cdp.call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:2,...word}); await delay(40);
+      await cdp.call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:2,...word}); await delay(900); await settle();
+      check(`${tag}: a double-click in the resting box selects a word and keeps the door, then the box glides`, under && await cdp.evaluate(`${open} && document.activeElement === document.querySelector(${JSON.stringify(field)}) && document.activeElement.selectionEnd > document.activeElement.selectionStart && ${centred}`), { under, selection: await cdp.evaluate(`[document.activeElement.selectionStart, document.activeElement.selectionEnd, ${open}]`) });
+      await key('Escape','Escape',27); await delay(500);
+      await cdp.evaluate("window.__qa.setText('')"); await delay(300); await settle();
+      const chip = '.rl-frontdoor-focus [aria-label="Destination"]';
+      const chipAt = await bounds(chip);
+      await press(await centre(chip)); await delay(900); await settle();
+      const menu = await bounds('[role="menu"][aria-label="Destination"]'), chipNow = await bounds(chip);
+      check(`${tag}: a chip pressed in the resting box opens its menu on the chip, the box waiting under it`, menu?.visible && Math.abs(chipNow.x - chipAt.x) < 1 && Math.abs(chipNow.y - chipAt.y) < 1 && Math.abs(menu.x - chipNow.x) <= 1 && (Math.abs(chipNow.y - menu.bottom) <= 12 || Math.abs(menu.y - chipNow.bottom) <= 12) && await cdp.evaluate(open), { chipAt, chipNow, menu });
+      await screenshot(`${tag}-chip-menu-from-rest`);
+      await key('Escape','Escape',27); await delay(900); await settle();
+      check(`${tag}: the menu gone, the box glides to the window's centre`, await cdp.evaluate(`${open} && !document.querySelector('[role=menu]') && ${centred}`));
+      await key('Escape','Escape',27); await delay(500);
+      // A chat the room holds on the plate has no box to glide: the window's width.
+      await cdp.evaluate("window.__qa.openChat('qa')"); await delay(700); await settle();
+      const chatRoom = await bounds('.rl-monochat');
+      check(`${tag}: a chat in the room on the plate takes the window's width`, Math.abs(chatRoom.width - Math.min(800, width - 48)) <= 1 && await cdp.evaluate("document.querySelector('.rl-frontdoor-focus').hasAttribute('data-landed')"), chatRoom);
     }
   }
 } catch(error) {report.errors.push(error.stack??String(error));}

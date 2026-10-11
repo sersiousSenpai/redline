@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createPortal } from "react-dom";
@@ -78,10 +80,10 @@ const main_ = () => host.querySelector<HTMLElement>(".rl-doc-column")!;
 const last = <T,>(list: T[]) => list[list.length - 1];
 /** Web Animations, recorded: who animated what, and how. */
 function flights() {
-  type Recorded = { cancel(): void; pause: ReturnType<typeof vi.fn>; play: ReturnType<typeof vi.fn>; onfinish: null };
+  type Recorded = { playState: AnimationPlayState; cancel(): void; pause: ReturnType<typeof vi.fn>; play: ReturnType<typeof vi.fn>; onfinish: null };
   const calls: Array<{ element: Element; frames: Keyframe[]; options: KeyframeAnimationOptions; animation: Recorded }> = [];
   (HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element, frames: Keyframe[], options: number | KeyframeAnimationOptions) {
-    const animation = { cancel() {}, pause: vi.fn(), play: vi.fn(), onfinish: null };
+    const animation: Recorded = { playState: "running", cancel() { animation.playState = "idle"; }, pause: vi.fn(() => { animation.playState = "paused"; }), play: vi.fn(() => { animation.playState = "running"; }), onfinish: null };
     calls.push({ element: this, frames, options: typeof options === "number" ? { duration: options } : options, animation });
     return animation;
   };
@@ -826,6 +828,11 @@ describe("the door's flights", () => {
     expect(glide.pause).toHaveBeenCalledOnce();
     expect(glide.play).not.toHaveBeenCalled();
     await act(async () => { window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true })); });
+    // A double-click's beat after the release, so a second press lands in
+    // the box, not on the paper.
+    await advance(299);
+    expect(glide.play).not.toHaveBeenCalled();
+    await advance(1);
     expect(glide.play).toHaveBeenCalledOnce();
     // The caret rode along.
     expect(document.activeElement).toBe(main());
@@ -836,6 +843,98 @@ describe("the door's flights", () => {
     const home = calls.filter(call => call.element === room());
     expect(home.map(call => [call.frames, call.options])).toEqual([[[{ transform: "translate3d(-130px, -14px, 0)" }, { transform: "none" }], { duration: 300, easing: "cubic-bezier(.2,.8,.2,1)" }]]);
     expect(layer.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("a press on one of the resting box's chips: the box waits under the menu it opened, and glides once it goes", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    const glide = calls.filter(call => call.element === room())[0].animation;
+    // The release's click opens a menu, placed where its chip rests now.
+    const menu = document.createElement("div"); menu.setAttribute("role", "menu");
+    try {
+      await act(async () => { window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true })); document.body.append(menu); });
+      await advance(1000);
+      expect(glide.play).not.toHaveBeenCalled();
+      // Picked from or dismissed — by the pointer or the keyboard — it goes,
+      // and the box follows.
+      await act(async () => { menu.remove(); window.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape" })); });
+      await advance(0);
+      expect(glide.play).toHaveBeenCalledOnce();
+      // Once: what comes after the glide never replays it.
+      await act(async () => { window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true })); });
+      await advance(1000);
+      expect(glide.play).toHaveBeenCalledOnce();
+    } finally { menu.remove(); }
+  });
+
+  it("a press the glide leaves behind on the paper — a slow double-click's second — never closes the door", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    const glide = calls.filter(call => call.element === room())[0].animation;
+    await pointer(main(), "pointerup", { button: 0 });
+    await advance(300);
+    expect(glide.playState).toBe("running");
+    const paper = host.querySelector<HTMLElement>(".rl-monochat-conversation")!;
+    await pointer(paper, "pointerdown", { button: 0 });
+    await pointer(paper, "click", { button: 0 });
+    expect(pose()).toBe("conversation");
+    // Arrived, a press on the paper closes it as ever.
+    glide.playState = "finished";
+    await pointer(paper, "pointerdown", { button: 0 });
+    await pointer(paper, "click", { button: 0 });
+    expect(pose()).toBe("entry");
+  });
+
+  it("a double-click in the resting box: the box waits for the second press, so it lands in the box and the door stays", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    const glide = calls.filter(call => call.element === room())[0].animation;
+    await pointer(main(), "pointerup", { button: 0 });
+    await advance(150);
+    // The second press, held: still nothing moves.
+    await pointer(main(), "pointerdown", { button: 0 });
+    await pointer(main(), "click", { button: 0, detail: 2 });
+    await advance(1000);
+    expect(glide.play).not.toHaveBeenCalled();
+    expect(pose()).toBe("conversation");
+    await pointer(main(), "pointerup", { button: 0 });
+    await advance(299);
+    expect(glide.play).not.toHaveBeenCalled();
+    await advance(1);
+    expect(glide.play).toHaveBeenCalledOnce();
+  });
+
+  it("a key typed after the press glides the box at once: typing never minds it moving", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    const glide = calls.filter(call => call.element === room())[0].animation;
+    await pointer(main(), "pointerup", { button: 0 });
+    await act(async () => { main().dispatchEvent(new KeyboardEvent("keyup", { key: "w", bubbles: true })); });
+    await advance(0);
+    expect(glide.play).toHaveBeenCalledOnce();
+  });
+
+  it("shut while the press still holds it, the box never left the plate: nothing glides home", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    calls.length = 0;
+    await key(main(), { key: "Escape" });
+    expect(pose()).toBe("entry");
+    expect(calls.filter(call => call.element === room())).toEqual([]);
+    // Its release later moves nothing either.
+    await pointer(main(), "pointerup", { button: 0 });
+    await advance(1000);
+    expect(calls.filter(call => call.element === room())).toEqual([]);
   });
 
   it("summoned from the keyboard on the plate, it glides at once", async () => {
@@ -940,6 +1039,8 @@ describe("the zoom", () => {
   it("holds while the caret goes to one of the box's own menus or pickers", async () => {
     await render();
     await summon();
+    // An empty box: a sentence in it would hold the zoom on its own.
+    field().value = "";
     for (const attributes of [{ "data-rl-island-owned": "" }, { role: "menu" }]) {
       const owned = document.createElement("button");
       for (const [name, value] of Object.entries(attributes)) owned.setAttribute(name, value);
@@ -1131,5 +1232,16 @@ describe("modal manners", () => {
     await render(<Harness onNewChat={() => {}}/>);
     await summon();
     expect(host.querySelector(".rl-monochat-heading h2")?.textContent).toBe("Plan");
+  });
+
+  it("a chat the room holds is marked, so the plate's rest-width pin (for the box's glide) spares it", async () => {
+    await render(<Harness landing onNewChat={() => {}}/>);
+    await summon();
+    expect(host.querySelector(".rl-frontdoor-focus")!.hasAttribute("data-landed")).toBe(true);
+    expect(host.querySelector(".rl-monochat")!.hasAttribute("data-chat")).toBe(true);
+    await render(<Harness landing/>);
+    expect(host.querySelector(".rl-monochat")!.hasAttribute("data-chat")).toBe(false);
+    const css = readFileSync(join(process.cwd(), "src/components/MonochatIsland.css"), "utf8");
+    expect(css).toMatch(/\.rl-frontdoor-focus\[data-landed\]\[data-open="true"\] \.rl-monochat:not\(\[data-chat\]\) \{ width:/);
   });
 });
