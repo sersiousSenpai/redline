@@ -278,6 +278,13 @@ describe("FrontDoor — a launch in flight leaves the door usable", () => {
     expect(onCancelPending).toHaveBeenCalledTimes(1);
   });
 
+  it("puts the caret back after a launch in the door's own composer too, which takes none on a summons", async () => {
+    await mount({ floating: true, welcome: true, autoFocusOnShow: false, pending: null });
+    expect(document.activeElement).not.toBe(composer());
+    await act(async () => root.render(createElement(Harness, { floating: true, welcome: true, autoFocusOnShow: false, pending: PENDING })));
+    expect(document.activeElement).toBe(composer());
+  });
+
   it("never pulls the caret back on a re-render — only a new launch, into a door you are still in", async () => {
     // App rebuilds the in-flight object on renders; the composer must read
     // one launch as one launch (the card used to drag the caret out of the
@@ -632,6 +639,44 @@ describe("the floating replacement composer", () => {
     }
   });
 
+  it("engaged on the plate, keeps the rows it rested with while its layer grows to the window", async () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
+    const layer = document.createElement("div");
+    layer.className = "rl-frontdoor-focus";
+    layer.dataset.landed = "";
+    layer.dataset.open = "false";
+    document.body.appendChild(layer);
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    let layerBottom = 300;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === layer) return rect(0, layerBottom) as DOMRect;
+      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
+      if (this.classList.contains("rl-fd-browse-list")) return rect(120, 120) as DOMRect;
+      return proto.call(this);
+    });
+    const resize = () => act(async () => { window.dispatchEvent(new Event("resize")); await new Promise((r) => requestAnimationFrame(() => r(null))); });
+    try {
+      layer.appendChild(host);
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(3);
+      // Engaged: the layer is the window now, and the count holds.
+      layer.dataset.open = "true";
+      layerBottom = 900;
+      await resize();
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(3);
+      // Back at rest it measures again.
+      layer.dataset.open = "false";
+      layerBottom = 336;
+      await resize();
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(4);
+    } finally {
+      vi.restoreAllMocks();
+      document.body.appendChild(host);
+      layer.remove();
+    }
+  });
+
   it("before its list has a box, guesses its top from the rows above it — and shows an empty section's box, not its head", async () => {
     const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
     const layer = document.createElement("div");
@@ -719,6 +764,22 @@ describe("the floating replacement composer", () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 
+  it("a pointer-summoned door keeps its welcome and does not take the caret", async () => {
+    // App hands the door's composer no autofocus: the island owns the caret
+    // on a summons, and a pointer on the pill leaves it on the room.
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app).toContain("autoFocusOnShow={where === \"chat\" && roomChat}");
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere); elsewhere.focus();
+    try {
+      const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
+      await mount({ floating: true, welcome: true, autoFocusOnShow: false, onOpenRecent: () => {}, recents });
+      expect(document.activeElement).toBe(elsewhere);
+      expect(host.querySelector(".rl-frontdoor")!.classList.contains("is-engaged")).toBe(false);
+      expect(host.querySelector('[aria-label="Jump back in"]')!.getAttribute("aria-hidden")).toBe("false");
+    } finally { elsewhere.remove(); }
+  });
+
   it("fades the welcome on a sentence, never on the caret arriving", async () => {
     const recents = [{ kind: "plan" as const, id: "s1", label: "Auth rewrite", detail: "" }];
     await mount({ floating: true, welcome: true, autoFocusOnShow: false, onOpenRecent: () => {}, recents });
@@ -726,7 +787,8 @@ describe("the floating replacement composer", () => {
     const group = host.querySelector('[aria-label="Jump back in"]')!;
     const shown = () => !door.classList.contains("is-engaged") && group.getAttribute("aria-hidden") === "false";
     expect(shown()).toBe(true);
-    // A summoned door puts the caret in; its welcome stays until you type.
+    // The caret arriving is the island's zoom to take (MonochatIsland); the
+    // composer's own class waits for a sentence.
     await act(async () => composer()!.focus());
     expect(shown()).toBe(true);
     await type("Build");

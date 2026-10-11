@@ -469,10 +469,11 @@ export function FrontDoor(props: FrontDoorProps) {
   // — keyed on when it started, never on the object App hands down, which a
   // re-render rebuilds — and only into a door you are still in: focus inside
   // this composer or nowhere at all. A click into the terminal to answer the
-  // plan is not something to pull the caret back from.
+  // plan is not something to pull the caret back from. The door's own
+  // composer takes it too, though its summons is the island's to focus.
   const launchedAt = pending?.startedAt ?? null;
   useEffect(() => {
-    if (launchedAt === null || !visible || !autoFocusOnShow) return;
+    if (launchedAt === null || !visible || !(autoFocusOnShow || welcome)) return;
     const active = document.activeElement;
     if (active && active !== document.body && !rootRef.current?.contains(active)) return;
     taRef.current?.focus();
@@ -766,14 +767,23 @@ export function FrontDoor(props: FrontDoorProps) {
     let frame = 0;
     const measure = () => {
       frame = 0;
+      // Engaged on the plate, the door's layer grows to the window as the
+      // welcome recedes: the rows keep the count they rested with, so none
+      // flash in on the way out or back (and its room keeps its width, so the
+      // titles keep their cuts).
+      if (layer?.dataset.landed !== undefined && layer.dataset.open === "true") return;
       fitTitles();
       const bounds = layer?.getBoundingClientRect();
       // Unlaid-out (hidden, or a test DOM): no evidence of a limit.
       if (!bounds || bounds.height === 0) return setBrowseRoom(BROWSE_MAX);
       // The list grows DOWN from a top that does not depend on how many rows
       // it holds, so measuring from it is stable. Before it has a box, fall
-      // back to the composer's bottom plus the rows above it.
-      const listTop = browseListRef.current?.getBoundingClientRect().top || root.getBoundingClientRect().bottom + BROWSE_ABOVE;
+      // back to the composer's bottom plus the rows above it. Where it is
+      // laid out, that is — not where a glide of the room (a translation, as
+      // a door engaged on the plate goes home) has it this frame.
+      const room = layer?.querySelector<HTMLElement>(".rl-monochat");
+      const drift = room ? Number(/^matrix\(1, 0, 0, 1, [^,]+, ([^)]+)\)$/.exec(getComputedStyle(room).transform)?.[1] ?? 0) : 0;
+      const listTop = (browseListRef.current?.getBoundingClientRect().top || root.getBoundingClientRect().bottom + BROWSE_ABOVE) - drift;
       const free = bounds.bottom - listTop - BROWSE_AIR;
       const rows = Math.floor((free + BROWSE_GAP) / (BROWSE_ROW + BROWSE_GAP));
       setBrowseRoom(Math.max(0, Math.min(BROWSE_MAX, rows)));

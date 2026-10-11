@@ -329,9 +329,14 @@ describe("the island never moves on its own", () => {
     expect(overlay).not.toContain("doorCompact");
   });
 
-  it("a hover never takes the caret; the door, or the chat it holds, takes it on every summons", () => {
+  it("a hover never takes the caret; the island owns the door's on a summons, and a chat it holds takes it every time", () => {
     const door = app.slice(app.indexOf("const renderMonochatComposer"), app.indexOf("<MenuOverlayProvider"));
-    expect(door).toMatch(/autoFocusOnShow=\{where === "door" \? frontDoorOpen : where === "chat" && roomChat\}/);
+    // The door's composer never focuses itself: a pointer on the pill opens
+    // the door quiet (10/11), every other summons puts the caret in — the
+    // island decides, in one place.
+    expect(door).toContain('autoFocusOnShow={where === "chat" && roomChat}');
+    const island = readFileSync(join(process.cwd(), "src/components/MonochatIsland.tsx"), "utf8");
+    expect(island).toMatch(/if \(summon\.current === "quiet" && !heldChat\.current\) body\.current\?\.focus\(/);
     // The type-to-start handoff is the door's alone.
     expect(door).toContain('focusNonce={where === "door" ? frontDoorFocus : 0}');
     expect(app).not.toContain("doorSummonedQuiet");

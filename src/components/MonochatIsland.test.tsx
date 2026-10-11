@@ -46,7 +46,7 @@ function Harness({ landing = false, busy = false, announce, onOpen, onNewChat, c
     <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }} handoff={handoff}
       compactOpen={compact} onCompactChange={setCompact} compact={<div className="rl-fd-island"><textarea aria-label="Compact reply" defaultValue=""/></div>}
       context="Plan" busy={busy} announce={announce} onNewChat={onNewChat}>
-      {children ?? <div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
+      {children ?? <div className="rl-frontdoor has-welcome"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
     </MonochatIsland>
   </>;
 }
@@ -59,6 +59,11 @@ const click = async (selector: string) => act(async () => host.querySelector<HTM
 /** The pill pressed from the keyboard — Enter or Space on it, which is a
  *  click with no pointer behind it. */
 const summon = () => act(async () => pill().click());
+/** The pill clicked with a pointer. */
+const point = () => act(async () => { pill().dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 })); });
+const layerOf = () => host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+const zoomed = () => layerOf().hasAttribute("data-zoom");
+const roomBody = () => host.querySelector<HTMLElement>("#rl-monochat-content")!;
 const advance = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
 const pointer = (node: Element, type: string, init: MouseEventInit = {}) =>
   act(async () => { node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, ...init })); });
@@ -73,10 +78,12 @@ const main_ = () => host.querySelector<HTMLElement>(".rl-doc-column")!;
 const last = <T,>(list: T[]) => list[list.length - 1];
 /** Web Animations, recorded: who animated what, and how. */
 function flights() {
-  const calls: Array<{ element: Element; frames: Keyframe[]; options: KeyframeAnimationOptions }> = [];
+  type Recorded = { cancel(): void; pause: ReturnType<typeof vi.fn>; play: ReturnType<typeof vi.fn>; onfinish: null };
+  const calls: Array<{ element: Element; frames: Keyframe[]; options: KeyframeAnimationOptions; animation: Recorded }> = [];
   (HTMLElement.prototype as { animate?: unknown }).animate = function (this: Element, frames: Keyframe[], options: number | KeyframeAnimationOptions) {
-    calls.push({ element: this, frames, options: typeof options === "number" ? { duration: options } : options });
-    return { cancel() {}, onfinish: null };
+    const animation = { cancel() {}, pause: vi.fn(), play: vi.fn(), onfinish: null };
+    calls.push({ element: this, frames, options: typeof options === "number" ? { duration: options } : options, animation });
+    return animation;
   };
   return calls;
 }
@@ -119,16 +126,25 @@ describe("the door", () => {
     expect(windowDrag).not.toHaveBeenCalled();
   });
 
-  it("a click puts the caret straight into the composer, on the full welcome", async () => {
+  it("a pointer on the pill opens it quiet: the caret on the room, the welcome up", async () => {
     const onOpen = vi.fn();
     await render(<Harness onOpen={onOpen}/>);
     host.querySelector<HTMLButtonElement>("#document-focus")!.focus();
-    await summon();
+    await point();
     expect(onOpen).toHaveBeenLastCalledWith(true);
     expect(pose()).toBe("conversation");
-    expect(document.activeElement).toBe(main());
+    expect(document.activeElement).toBe(roomBody());
+    expect(zoomed()).toBe(false);
     expect(host.querySelector('[role="dialog"]')?.getAttribute("aria-modal")).toBe("true");
     expect(host.querySelector("article")!.inert).toBe(true);
+  });
+
+  it("from the keyboard it opens with the caret in the composer, zoomed", async () => {
+    await render();
+    await summon();
+    expect(pose()).toBe("conversation");
+    expect(document.activeElement).toBe(main());
+    expect(zoomed()).toBe(true);
   });
 
   it("closes in one Escape, restores focus and preserves the same draft node", async () => {
@@ -303,17 +319,23 @@ describe("the resting door", () => {
     expect(host.querySelector("article")!.inert).toBeFalsy();
   });
 
-  it("a press in its composer or a keystroke into it engages it — and the box stays put", async () => {
+  it("a press in its composer or a keystroke into it engages it, zoomed", async () => {
     await render(<Harness landing/>);
     const layer = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
     expect(layer.dataset.rest).toBe("full");
+    expect(layer.hasAttribute("data-landed")).toBe(true);
     await pointer(main(), "pointerdown", { button: 0 });
     expect(pose()).toBe("conversation");
     expect(host.querySelector('[role="dialog"]')?.getAttribute("aria-modal")).toBe("true");
-    // Engaging spreads the backdrop, never the box: the plate's insets hold.
-    expect(layer.dataset.rest).toBe("full");
+    // Engaged, it lets go of the plate's insets for the window (the box
+    // glides there, below) and stays landed: its paper spreads from the plate.
+    expect(layer.hasAttribute("data-rest")).toBe(false);
+    expect(layer.hasAttribute("data-landed")).toBe(true);
+    expect(zoomed()).toBe(true);
     await key(main(), { key: "Escape" });
     expect(pose()).toBe("entry");
+    expect(layer.dataset.rest).toBe("full");
+    expect(zoomed()).toBe(false);
     expect(main().value).toBe("Keep this draft");
     await act(async () => main().focus());
     await key(main(), { key: "Tab" });
@@ -325,7 +347,7 @@ describe("the resting door", () => {
   it("a key on one of its recents goes where the recent goes: it engages nothing", async () => {
     const onOpen = vi.fn();
     await render(<Harness landing onOpen={onOpen}>
-      <div className="rl-frontdoor">
+      <div className="rl-frontdoor has-welcome">
         <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div>
         <div className="rl-fd-welcome rl-fd-recents"><button id="recent-plan">Earlier plan</button></div>
       </div>
@@ -343,7 +365,7 @@ describe("the resting door", () => {
 
   it("a recent taken from it by keyboard hands the caret to the new place's main area", async () => {
     await render(<Harness landing>
-      <div className="rl-frontdoor">
+      <div className="rl-frontdoor has-welcome">
         <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div>
         <div className="rl-fd-welcome rl-fd-recents"><button id="recent-page" onClick={() => host.querySelector<HTMLButtonElement>("#navigate")!.click()}>A page</button></div>
       </div>
@@ -690,9 +712,9 @@ describe("the door's flights", () => {
   const PILL: [number, number, number, number] = [648, 900, 144, 32];
   const rect = ([left, top, width, height]: number[]) => ({ left, top, width, height });
   const room = () => host.querySelector<HTMLElement>(".rl-monochat")!;
-  const welcomeDoor = <div className="rl-frontdoor"><div className="rl-fd-welcome"/><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>;
+  const welcomeDoor = <div className="rl-frontdoor has-welcome"><div className="rl-fd-welcome"/><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>;
 
-  it("a click puts the caret at the end of the draft", async () => {
+  it("a summons from the keyboard puts the caret at the end of the draft", async () => {
     await render();
     main().setSelectionRange(0, 0);
     await summon();
@@ -782,15 +804,59 @@ describe("the door's flights", () => {
     expect(layer.hasAttribute("data-closing")).toBe(false);
   });
 
-  it("on the empty plate the composer never moves: engaging and leaving only bring the paper", async () => {
+  // The plate: a sidebar on the left, the header above; jsdom's window is
+  // 1024 × 768, so the plate's free area is centred 130 px right of the
+  // window's centre and 14 px below it.
+  const PLATE = { ".rl-app-header": [0, 0, 1024, 28], ".rl-doc-column": [260, 28, 764, 740] } as Record<string, [number, number, number, number]>;
+
+  it("engaged on the plate, the box glides to the window's centre once the press lets go — transform only", async () => {
     const calls = flights();
+    boxes(PLATE);
     await render(<Harness landing/>);
+    const layer = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
+    // The paper rests as the plate's rect, to spread from it.
+    expect(layer.style.getPropertyValue("--fd-paper-from")).toBe(`translate(260px, 28px) scale(${764 / 1024}, ${740 / 768})`);
     await pointer(main(), "pointerdown", { button: 0 });
-    expect(pose()).toBe("conversation");
+    const flight = calls.filter(call => call.element === room());
+    expect(flight).toHaveLength(1);
+    expect(flight[0].frames).toEqual([{ transform: "translate3d(130px, 14px, 0)" }, { transform: "none" }]);
+    expect(flight[0].options).toEqual({ duration: 340, easing: "cubic-bezier(.2,.8,.2,1)" });
+    // Held at its start under the pressed pointer: the box never moves under it.
+    const glide = flight[0].animation;
+    expect(glide.pause).toHaveBeenCalledOnce();
+    expect(glide.play).not.toHaveBeenCalled();
+    await act(async () => { window.dispatchEvent(new MouseEvent("pointerup", { bubbles: true })); });
+    expect(glide.play).toHaveBeenCalledOnce();
+    // The caret rode along.
+    expect(document.activeElement).toBe(main());
+    // Back to the plate: the same path home.
+    calls.length = 0;
     await key(main(), { key: "Escape" });
     expect(pose()).toBe("entry");
-    expect(calls.filter(call => call.element === room())).toEqual([]);
-    expect(host.querySelector(".rl-frontdoor-focus")!.hasAttribute("data-closing")).toBe(false);
+    const home = calls.filter(call => call.element === room());
+    expect(home.map(call => [call.frames, call.options])).toEqual([[[{ transform: "translate3d(-130px, -14px, 0)" }, { transform: "none" }], { duration: 300, easing: "cubic-bezier(.2,.8,.2,1)" }]]);
+    expect(layer.hasAttribute("data-closing")).toBe(false);
+  });
+
+  it("summoned from the keyboard on the plate, it glides at once", async () => {
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await act(async () => main().focus());
+    await key(main(), { key: "w" });
+    const flight = calls.filter(call => call.element === room());
+    expect(flight).toHaveLength(1);
+    expect(flight[0].animation.pause).not.toHaveBeenCalled();
+    expect(zoomed()).toBe(true);
+  });
+
+  it("under reduced motion the engaged box snaps to the centre and fades in", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    const calls = flights();
+    boxes(PLATE);
+    await render(<Harness landing/>);
+    await pointer(main(), "pointerdown", { button: 0 });
+    expect(calls.map(call => [call.frames, call.options.duration])).toEqual([[[{ opacity: 0 }, { opacity: 1 }], ISLAND_FADE_MS]]);
   });
 
   it("a room holding a chat rises, and leaves without carrying anything back", async () => {
@@ -822,6 +888,173 @@ describe("the door's flights", () => {
     await key(main(), { key: "Escape" });
     await rest();
     expect(card()).toBeNull();
+  });
+});
+
+// The zoom (10/11): when the USER puts the caret in the door's box, everything
+// but the box recedes. Only the user's gestures set it; only the keyboard
+// walking out of an empty box, or the door closing, clears it.
+describe("the zoom", () => {
+  const field = () => main();
+  const tab = async (from: Element, to: HTMLElement) => {
+    await key(from, { key: "Tab" });
+    await act(async () => to.focus());
+  };
+  const returnPill = () => host.querySelector<HTMLButtonElement>('[aria-label="Return to workspace"]')!;
+
+  it("a quiet door zooms on a press in its box", async () => {
+    await render();
+    await point();
+    expect(zoomed()).toBe(false);
+    await pointer(field(), "pointerdown", { button: 0 });
+    expect(zoomed()).toBe(true);
+  });
+
+  it("a quiet door zooms when Tab brings the caret into its box", async () => {
+    await render();
+    await point();
+    await tab(roomBody(), field());
+    expect(zoomed()).toBe(true);
+  });
+
+  it("a character typed on the quiet room moves the caret into the box first, so it lands there", async () => {
+    await render();
+    await point();
+    const typed = await key(roomBody(), { key: "P" });
+    expect(document.activeElement).toBe(field());
+    // Not swallowed: the character's own default is what types it.
+    expect(typed.defaultPrevented).toBe(false);
+    expect(zoomed()).toBe(true);
+  });
+
+  it("a shortcut, a modifier chord or a non-character key on the quiet room moves nothing", async () => {
+    await render();
+    await point();
+    for (const init of [{ key: "k", metaKey: true }, { key: "k", ctrlKey: true }, { key: "™", altKey: true }, { key: "ArrowDown" }, { key: "Enter" }]) {
+      await key(roomBody(), init);
+      expect(document.activeElement).toBe(roomBody());
+      expect(zoomed()).toBe(false);
+    }
+  });
+
+  it("holds while the caret goes to one of the box's own menus or pickers", async () => {
+    await render();
+    await summon();
+    for (const attributes of [{ "data-rl-island-owned": "" }, { role: "menu" }]) {
+      const owned = document.createElement("button");
+      for (const [name, value] of Object.entries(attributes)) owned.setAttribute(name, value);
+      document.body.append(owned);
+      try {
+        await act(async () => field().focus());
+        await tab(field(), owned);
+        expect(zoomed()).toBe(true);
+      } finally { owned.remove(); }
+    }
+  });
+
+  it("the keyboard walking out of an empty box brings the welcome back; with a sentence in it, it holds", async () => {
+    await render();
+    await summon();
+    // A sentence: the box is still what you are in.
+    field().value = "Half a thought";
+    await tab(field(), returnPill());
+    expect(zoomed()).toBe(true);
+    await act(async () => field().focus());
+    field().value = "  ";
+    await tab(field(), returnPill());
+    expect(zoomed()).toBe(false);
+    // And back in.
+    await tab(returnPill(), field());
+    expect(zoomed()).toBe(true);
+  });
+
+  it("never clears on a press, the window losing focus, or focus the app moves", async () => {
+    await render();
+    await summon();
+    field().value = "";
+    // A press after a Tab: the Tab no longer counts.
+    await key(field(), { key: "Tab" });
+    await pointer(returnPill(), "pointerdown", { button: 0 });
+    await act(async () => returnPill().focus());
+    expect(zoomed()).toBe(true);
+    // Focus moved by the app, the window going away.
+    await act(async () => field().focus());
+    await act(async () => returnPill().focus());
+    await act(async () => { field().focus(); field().blur(); window.dispatchEvent(new Event("blur")); });
+    expect(zoomed()).toBe(true);
+  });
+
+  it("Esc clears it, and the next quiet summons arrives unzoomed", async () => {
+    await render();
+    await summon();
+    expect(zoomed()).toBe(true);
+    await key(field(), { key: "Escape" });
+    expect(pose()).toBe("notch");
+    await advance(DOOR_CLOSE_MS);
+    await point();
+    expect(zoomed()).toBe(false);
+  });
+
+  it("is held on the door's way back into the pill, so its welcome never shows on the way out", async () => {
+    await render();
+    await summon();
+    await key(field(), { key: "Escape" });
+    expect(layerOf().hasAttribute("data-closing")).toBe(true);
+    expect(zoomed()).toBe(true);
+    await advance(DOOR_CLOSE_MS);
+    expect(zoomed()).toBe(false);
+  });
+
+  it("nothing said to a screen reader — a launch, an arrival — sets or clears it", async () => {
+    await render(<Harness announce=""/>);
+    await point();
+    await render(<Harness announce="New plan · Auth rewrite"/>);
+    expect(zoomed()).toBe(false);
+    expect(document.activeElement).toBe(roomBody());
+    await pointer(field(), "pointerdown", { button: 0 });
+    await render(<Harness announce="Plan launched."/>);
+    expect(zoomed()).toBe(true);
+  });
+
+  it("a card that was only hovered grows into a quiet door; one whose field held the caret carries it in, zoomed", async () => {
+    await render();
+    await rest();
+    await point();
+    expect(document.activeElement).toBe(roomBody());
+    expect(zoomed()).toBe(false);
+    await key(roomBody(), { key: "Escape" });
+    await advance(DOOR_CLOSE_MS);
+    await rest();
+    await act(async () => host.querySelector<HTMLTextAreaElement>('[aria-label="Compact reply"]')!.focus());
+    await point();
+    expect(document.activeElement).toBe(field());
+    expect(zoomed()).toBe(true);
+  });
+
+  it("a chat's composer in the room is not the door's box: it never zooms", async () => {
+    await render(<Harness onNewChat={() => {}}><div data-chat-composer><div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply"/></div></div></div></Harness>);
+    await point();
+    // The chat takes the caret even from a pointer: there is no welcome to keep.
+    expect(document.activeElement).toBe(field());
+    await pointer(field(), "pointerdown", { button: 0 });
+    expect(zoomed()).toBe(false);
+  });
+
+  it("Tab never lands on what the welcome hid: past the last shown control it wraps to the first", async () => {
+    vi.spyOn(Element.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    await render(<Harness>
+      <div className="rl-frontdoor has-welcome">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/><button id="send">Send</button></div>
+        <div className="rl-fd-welcome rl-fd-recents" style={{ visibility: "hidden" }}><button id="hidden-recent">Earlier plan</button></div>
+      </div>
+    </Harness>);
+    await summon();
+    const send = host.querySelector<HTMLButtonElement>("#send")!;
+    await act(async () => send.focus());
+    const walk = await key(send, { key: "Tab" });
+    expect(walk.defaultPrevented).toBe(true);
+    // The first control in the door: its ⌄ return.
+    expect(document.activeElement).toBe(returnPill());
   });
 });
 

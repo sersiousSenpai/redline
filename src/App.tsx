@@ -8290,9 +8290,10 @@ function App() {
                   onToggle={(chip) => setChipPresses((presses) => toggleChip(presses, islandSurfaceKey, chip))}
                 />}
                 // A hover never takes the caret: the card's composer waits
-                // for a click. The door's — or the chat it holds — takes it on
-                // every summons.
-                autoFocusOnShow={where === "door" ? frontDoorOpen : where === "chat" && roomChat}
+                // for a click. The door's is the island's to focus — a pointer
+                // on the pill opens it quiet, anything else with the caret in
+                // it. A chat the room holds takes it on every summons.
+                autoFocusOnShow={where === "chat" && roomChat}
                 chatPending={chatOpening || !!(chatSeed && chatSeed.autoSend !== false)}
                 accessories={accessories}
                 workbench={workbench}

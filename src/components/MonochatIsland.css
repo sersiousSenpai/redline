@@ -44,7 +44,8 @@
 .rl-monochat [data-chat-composer] { flex-shrink: 0; }
 @media (max-width: 640px) { .rl-monochat { width: calc(100vw - 24px); height: calc(100dvh - 88px); } }
 /* Reduced motion: nothing travels. The paper still comes and goes, as a
-   120 ms crossfade (the room fades with it); everything else is instant. */
+   120 ms crossfade (the room fades with it, and the welcome on a zoom);
+   everything else is instant. */
 @media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
 .rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
 .rl-frontdoor-focus[data-reduced="true"]::before { transition: opacity 120ms linear; }
@@ -106,12 +107,22 @@
 /* ── The resting door ──────────────────────────────────────────────────────
    On the empty plate the door lands in the plate's free area (header →
    terminal dock, measured in MonochatIsland) instead of the middle of the
-   window, so it never sits on top of the terminals. Engaged there, it KEEPS
-   those insets while the paper backdrop fades in over the whole window: the
-   composer you clicked or typed into never moves. (Gliding the insets out to
-   the window moved it 27px under the caret.) */
+   window, so it never sits on top of the terminals. */
 .rl-frontdoor-focus[data-rest] { top: var(--fd-rest-top, 0px); bottom: var(--fd-rest-bottom, 0px); left: var(--fd-rest-left, 0px); right: var(--fd-rest-right, 0px); }
 .rl-frontdoor-focus[data-rest] .rl-monochat { height: min(760px, 100%); width: min(800px, calc(100% - 48px)); }
+/* Engaged there, the door takes the window. Its paper rests as the plate's
+   own rect (`--fd-paper-from`) and sweeps out over the sidebar, the dock, the
+   header and the footer as it fades in, contracting back as it goes. Covering
+   the header and footer is the door's own, long-standing exception — its
+   paper always covered the window — not an immersive surface. The room keeps
+   the width it rested at, so its trip to the window's centre is a pure
+   translation (a FLIP in MonochatIsland, after the press lets go: the inset
+   glide this replaces moved the box 27px under a held caret). */
+.rl-frontdoor-focus[data-landed]::before { transform-origin: 0 0; transform: var(--fd-paper-from, none); transition: opacity 200ms ease-in, transform 260ms cubic-bezier(.4,0,.2,1); }
+.rl-frontdoor-focus[data-landed][data-open="true"]::before { transform: none; transition: opacity 220ms ease-out, transform 300ms cubic-bezier(.2,.8,.2,1); }
+.rl-frontdoor-focus[data-landed][data-open="true"] .rl-monochat { width: min(800px, calc(100% - var(--fd-rest-left, 0px) - var(--fd-rest-right, 0px) - 48px)); }
+/* Reduced motion: the paper only fades. */
+.rl-frontdoor-focus[data-reduced="true"][data-landed]::before, .rl-frontdoor-focus[data-reduced="true"][data-landed][data-open="true"]::before { transform: none; transition: opacity 120ms linear; }
 
 /* At rest only what you can touch takes the pointer. The room is a transparent
    800×760 box; left to catch clicks it would swallow every terminal and doc
@@ -129,15 +140,25 @@
 .rl-frontdoor.is-compact .rl-fd-welcome-hero .rl-fd-title { font-size: 30px; letter-spacing: -0.015em; }
 .rl-fd-welcome-hero .rl-fd-sub { margin: 10px 0 0; }
 
-/* Fades on ENGAGEMENT — a sentence in the box — not on the door opening, nor
-   on the caret arriving: summoned, the door keeps its welcome until you type. */
+/* Recedes on the ZOOM — the user put the caret in the box (MonochatIsland) —
+   and on ENGAGEMENT, a sentence in it: the headline rises and the recents
+   drop, both away from the box, until only the box is left. Not on the door
+   merely opening: a pointer on the pill brings it quiet, its welcome up. Back,
+   it comes a beat later and slower. */
 .rl-fd-welcome { transition: opacity 260ms ease 60ms, transform 340ms cubic-bezier(.16,1,.3,1) 60ms, visibility 0s 0s; }
-.rl-frontdoor.is-engaged .rl-fd-welcome, .rl-fd-recents.is-hidden {
+.rl-frontdoor.is-engaged .rl-fd-welcome, .rl-frontdoor-focus[data-zoom] .rl-fd-welcome, .rl-fd-recents.is-hidden {
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity 160ms ease, transform 220ms ease, visibility 0s 220ms;
 }
-.rl-frontdoor.is-engaged .rl-fd-welcome-hero { transform: translateY(-10px); }
-.rl-frontdoor.is-engaged .rl-fd-recents, .rl-fd-recents.is-hidden { transform: translateY(6px); }
+.rl-frontdoor.is-engaged .rl-fd-welcome-hero, .rl-frontdoor-focus[data-zoom] .rl-fd-welcome-hero { transform: translateY(-10px); }
+.rl-frontdoor.is-engaged .rl-fd-recents, .rl-frontdoor-focus[data-zoom] .rl-fd-recents, .rl-fd-recents.is-hidden { transform: translateY(6px); }
+/* Reduced motion: it crossfades in place — gone once faded, there before it
+   fades back. */
+.rl-frontdoor-focus[data-reduced="true"] .rl-fd-welcome { transition: opacity 120ms linear, visibility 0s !important; transform: none !important; }
+.rl-frontdoor-focus[data-reduced="true"] .rl-frontdoor.is-engaged .rl-fd-welcome, .rl-frontdoor-focus[data-reduced="true"][data-zoom] .rl-fd-welcome, .rl-frontdoor-focus[data-reduced="true"] .rl-fd-recents.is-hidden { transition: opacity 120ms linear, visibility 0s 120ms !important; }
+/* Left alone, the box floats: a soft lift once everything else has gone. */
+.rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { transition: box-shadow 300ms ease; }
+.rl-frontdoor-focus[data-zoom] .rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island { box-shadow: 0 24px 64px -28px color-mix(in srgb, #000 40%, transparent); }
 
 /* Shed furniture before overflowing a short plate: headline first, then the
    pills (MonochatIsland's `landingFit`). */

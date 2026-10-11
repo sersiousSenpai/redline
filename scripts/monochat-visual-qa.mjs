@@ -88,6 +88,45 @@ try {
   }`;
   // Every control in a subtree smaller than 24 × 24 (WCAG 2.5.8).
   const smallTargets = (rootSelector) => cdp.evaluate(`[...document.querySelectorAll(${JSON.stringify(rootSelector)} + ' :is(button, a[href], [role=button], [tabindex="0"])')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && getComputedStyle(e).visibility === 'visible' && !e.closest('[aria-hidden=true], [hidden]') && (r.width < 24 || r.height < 24); }).map(e => (e.getAttribute('aria-label') || e.textContent.trim()).slice(0, 24) + ' ' + Math.round(e.getBoundingClientRect().width) + 'x' + Math.round(e.getBoundingClientRect().height))`);
+  // The zoom, frame by frame: the island, the paper, the welcome, the caret,
+  // the page rows, the chrome around the door, and what animates.
+  const zoomProbe = `(() => { const l = document.querySelector('.rl-frontdoor-focus'), i = l.querySelector('.rl-fd-island'), c = l.querySelector('.rl-frontdoor'), r = i.getBoundingClientRect(), d = c.getBoundingClientRect(); const look = (s) => { const e = document.querySelector(s); if (!e) return null; const st = getComputedStyle(e); return { o: +Number(st.opacity).toFixed(3), v: st.visibility }; }; const rect = (s) => { const e = document.querySelector(s); if (!e) return null; const b = e.getBoundingClientRect(); return [b.x, b.y, b.width, b.height].map(n => +n.toFixed(1)).join(','); };
+    return { x: r.x, y: r.y, w: r.width, h: r.height, cx: d.x + d.width / 2, cy: d.y + d.height / 2, paper: +Number(getComputedStyle(l, '::before').opacity).toFixed(3), zoom: l.hasAttribute('data-zoom'), hero: look('.rl-fd-welcome-hero'), recents: look('.rl-fd-recents'), rows: l.querySelectorAll('.rl-fd-browse').length, active: document.activeElement === l.querySelector('.rl-fd-input'), chrome: [rect('.rl-app-header'), rect('.rl-app-footer'), rect('.qa-sidebar'), rect('.rl-term-dock')].join('|'),
+      moves: document.querySelector('.rl-monochat').getAnimations().map(a => a.transitionProperty ?? [...new Set(a.effect.getKeyframes().flatMap(k => Object.keys(k).filter(p => !['offset', 'easing', 'composite', 'computedOffset'].includes(p))))].join('+')),
+      geometry: l.getAnimations({ subtree: true }).filter(a => /^(top|left|right|bottom|inset|width|height|margin|padding)/.test(a.transitionProperty ?? '')).map(a => a.transitionProperty) }; })()`;
+  const zoomIn = async (tag) => {
+    const before = await cdp.evaluate(zoomProbe);
+    await film('__qaZoomIn', zoomProbe, 48);
+    const at = await centre('.rl-frontdoor-focus .rl-fd-input');
+    await cdp.call('Input.dispatchMouseEvent',{type:'mousePressed',button:'left',clickCount:1,...at});
+    await delay(160);
+    const held = await cdp.evaluate(zoomProbe);
+    await cdp.call('Input.dispatchMouseEvent',{type:'mouseReleased',button:'left',clickCount:1,...at});
+    await delay(700); await settle();
+    const frames = await cdp.evaluate('window.__qaZoomIn');
+    const after = await cdp.evaluate(zoomProbe);
+    const pressed = frames.findIndex(f => f.zoom), t0 = frames[pressed]?.t ?? 0;
+    const late = frames.filter(f => f.t >= t0 + 240);
+    check(`${tag}: the box never moves under the held pointer`, Math.abs(held.x - before.x) < 1 && Math.abs(held.y - before.y) < 1 && held.zoom, { before, held });
+    check(`${tag}: then glides by transform alone, never the layer's geometry`, frames.every(f => f.geometry.length === 0 && f.moves.every(m => m === 'transform' || m === 'opacity')) && frames.some(f => f.moves.includes('transform')) && Math.abs(after.w - before.w) < 1 && Math.abs(after.h - before.h) < 1, frames.map(f => f.moves.join('/')).filter(Boolean));
+    check(`${tag}: and ends centred in the window`, Math.abs(after.cx - (await cdp.evaluate('innerWidth')) / 2) <= 1 && Math.abs(after.cy - (await cdp.evaluate('innerHeight')) / 2) <= 1, after);
+    check(`${tag}: the caret is in the box on every frame from the press`, pressed >= 0 && frames.slice(pressed + 1).every(f => f.active) && after.active, frames.map(f => f.active));
+    check(`${tag}: the header, footer, sidebar and dock never move`, frames.every(f => f.chrome === before.chrome) && after.chrome === before.chrome, { before: before.chrome, after: after.chrome });
+    check(`${tag}: the welcome recedes on the press, and the paper covers the window, by 240 ms`, late.length > 0 && late.every(f => f.hero.o === 0 && f.hero.v === 'hidden' && (!f.recents || (f.recents.o === 0 && f.recents.v === 'hidden')) && f.paper === 1), late.map(f => [f.t - t0, f.hero, f.recents, f.paper]));
+    report.zoom = { ...report.zoom, [`${tag}-in`]: { before: [before.x, before.y], held: [held.x, held.y], after: [after.x, after.y], film: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.paper, f.hero.o]) } };
+    return { frames: frames.concat([after]), rest: before };
+  };
+  /** Esc from a zoom on the plate: everything back as it rested (`rest`). */
+  const zoomOut = async (tag, rest) => {
+    await film('__qaZoomOut', zoomProbe, 48);
+    await key('Escape','Escape',27);
+    await delay(700); await settle();
+    const frames = await cdp.evaluate('window.__qaZoomOut'), after = await cdp.evaluate(zoomProbe);
+    const t0 = frames[0].t;
+    check(`${tag}: Esc brings the box home by 320 ms and the welcome back by 400 ms, with no flight toward the pill`, await cdp.evaluate(`${pose}==='entry' && !document.querySelector('.rl-frontdoor-focus[data-closing]') && !document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')`) && Math.abs(after.x - rest.x) < 1 && Math.abs(after.y - rest.y) < 1 && frames.filter(f => f.t - t0 >= 320).every(f => Math.abs(f.x - rest.x) < 1 && Math.abs(f.y - rest.y) < 1) && frames.filter(f => f.t - t0 >= 400).every(f => f.hero.o === rest.hero.o && f.recents?.o === rest.recents?.o), { rest: [rest.x, rest.y, rest.hero.o, rest.recents?.o], film: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.hero.o, f.recents?.o]) });
+    check(`${tag}: the page rows hold the count they rested with on every frame`, frames.every(f => f.rows === rest.rows) && after.rows === rest.rows, { rest: rest.rows, film: frames.map(f => f.rows) });
+    report.zoom = { ...report.zoom, [`${tag}-out`]: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.paper, f.hero.o]) };
+  };
   for(const [width,height] of [[1440,960],[900,640],[480,720]]) {
     const size=`${width}x${height}`;
     await cdp.call("Emulation.setDeviceMetricsOverride",{width,height,deviceScaleFactor:1,mobile:false});
@@ -107,25 +146,20 @@ try {
     check(`${size} page recents never scroll`, await cdp.evaluate("(() => { const l=document.querySelector('.rl-fd-browse-list'); return !l || l.scrollHeight <= l.clientHeight + 1; })()"));
     check(`${size} tour anchor measurable at rest`, (await bounds('[data-tour="landing"]'))?.visible);
     check(`${size} every target in the resting door is at least 24 × 24`, (await smallTargets('.rl-frontdoor-focus')).length === 0, await smallTargets('.rl-frontdoor-focus'));
-    // A press in the resting composer engages it. Only the paper changes: the
-    // composer — and the caret in it — never moves, on any frame (the check
-    // 58020d9 failed by 27 px while the layer's insets glided).
-    await film('__qaEngage', `{ ...${rectOf('.rl-frontdoor-focus .rl-fd-island')}, paper: Number(getComputedStyle(document.querySelector('.rl-frontdoor-focus'), '::before').opacity), flights: document.querySelector('.rl-monochat').getAnimations().length }`, 24);
-    const restBox = await bounds('.rl-frontdoor-focus .rl-fd-island');
-    await press(await centre('.rl-frontdoor-focus .rl-fd-input'));
-    const engage = await cdp.evaluate('window.__qaEngage');
-    const shift = Math.max(...engage.map(f => Math.max(Math.abs(f.x - restBox.x), Math.abs(f.y - restBox.y), Math.abs(f.w - restBox.width), Math.abs(f.h - restBox.height))));
-    check(`${size} home focus keeps composer and caret in place throughout transition`, await cdp.evaluate(`document.activeElement===document.querySelector('.rl-frontdoor-focus .rl-fd-input')`) && engage.every(f => f.flights === 0) && shift < 1, { shift, frames: engage.length });
-    check(`${size} focus backdrop fades to opaque`, engage[0].paper < 1 && engage.at(-1).paper === 1, engage.map(f => f.paper));
-    check(`${size} a press engages the resting door as a modal`, await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate("!!document.querySelector('[role=dialog][aria-modal=true]')"));
-    check(`${size} the welcome stays until a keystroke`, await cdp.evaluate("!document.querySelector('.rl-frontdoor-focus .rl-frontdoor').classList.contains('is-engaged')"));
+    // A press in the resting composer ZOOMS the door (10/11): the welcome
+    // recedes at once, the paper spreads from the plate over the window, and
+    // once the pointer lets go the box glides to the window's centre — by
+    // transform, the caret riding along. Never under the held pointer: the
+    // inset glide 58020d9 used moved the box 27 px under it.
+    const { frames: zoomFrames, rest: atRest } = await zoomIn(`${size}-zoom`);
+    check(`${size} a press engages the resting door as a modal, zoomed`, await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate("!!document.querySelector('[role=dialog][aria-modal=true]') && document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')"));
+    await screenshot(`${size}-zoomed`);
     await cdp.call("Input.insertText",{text:"Plan the billing export"}); await settle();
     const typedBox = await bounds('.rl-frontdoor-focus .rl-fd-island');
-    check(`${size} typing fades the welcome and keeps the composer in place`, await cdp.evaluate("document.querySelector('.rl-frontdoor-focus .rl-frontdoor').classList.contains('is-engaged')") && Math.abs(typedBox.y-restBox.y)<1, { restBox, typedBox });
+    check(`${size} typing keeps the zoom and the composer in place`, await cdp.evaluate("document.querySelector('.rl-frontdoor-focus .rl-frontdoor').classList.contains('is-engaged') && document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')") && Math.abs(typedBox.y-zoomFrames.at(-1).y)<1 && Math.abs(typedBox.x-zoomFrames.at(-1).x)<1, { zoomed: zoomFrames.at(-1), typedBox });
     await screenshot(`${size}-engaged`);
     await cdp.evaluate("window.__qa.setText('')"); await settle();
-    await key('Escape','Escape',27);
-    check(`${size} Esc returns the door to rest, with no flight`, await cdp.evaluate(`${pose}==='entry' && !document.querySelector('.rl-frontdoor-focus[data-closing]')`));
+    await zoomOut(`${size}-zoom`, atRest);
     // Document surface: the pill, centred in the footer row.
     await cdp.evaluate("window.__qa.setSurface('Document')"); await settle();
     const pill = await bounds('.rl-monochat-notch');
@@ -227,7 +261,8 @@ try {
     await cdp.call("Input.insertText",{text:"Grow this sentence"}); await settle();
     await cdp.evaluate("document.querySelector('.rl-monochat-float textarea').setSelectionRange(5, 9)");
     const cardBox = await card();
-    await film('__qaGrow', `document.querySelector('.rl-frontdoor-focus[data-open=true]') ? { ...${rectOf('.rl-frontdoor-focus .rl-frontdoor')}, paper: Number(getComputedStyle(document.querySelector('.rl-frontdoor-focus'), '::before').opacity) } : null`, 30);
+    const heroShown = "(() => { const h = getComputedStyle(document.querySelector('.rl-fd-welcome-hero')); return h.visibility === 'visible' ? +Number(h.opacity).toFixed(3) : 0; })()";
+    await film('__qaGrow', `document.querySelector('.rl-frontdoor-focus[data-open=true]') ? { ...${rectOf('.rl-frontdoor-focus .rl-frontdoor')}, paper: Number(getComputedStyle(document.querySelector('.rl-frontdoor-focus'), '::before').opacity), hero: ${heroShown} } : null`, 30);
     await press(await centre('.rl-monochat-notch')); await delay(120);
     await screenshot(`${size}-door-growing`);
     await delay(500); await settle();
@@ -237,14 +272,18 @@ try {
     check(`${size} the paper fades in behind it`, grow[0].paper < 0.5 && grow.at(-1).paper === 1, grow.map(f => +f.paper.toFixed(2)));
     check(`${size} a click on the pill opens the full door with the caret where the card had it`, !await cdp.evaluate("!!document.querySelector('.rl-monochat-float')") && await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate(`document.activeElement===${doorComposer} && ${doorComposer}.value==='Grow this sentence' && ${doorComposer}.selectionStart===5 && ${doorComposer}.selectionEnd===9`));
     await cdp.evaluate("window.__qa.setText('')"); await delay(400); await settle();
-    check(`${size} the door wears its headline`, await cdp.evaluate("!!document.querySelector('.rl-frontdoor-focus .rl-fd-welcome-hero h1') && getComputedStyle(document.querySelector('.rl-fd-welcome-hero')).opacity === '1'"));
+    // The caret came along, so it arrived zoomed: the box alone, its welcome
+    // never shown on the way in.
+    check(`${size} grown from a card that held the caret, the door arrives zoomed — its welcome never shows`, grow.every(f => f.hero === 0) && await cdp.evaluate("document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom') && getComputedStyle(document.querySelector('.rl-fd-welcome-hero')).visibility === 'hidden'"), grow.map(f => f.hero));
     check(`${size} every target in the door is at least 24 × 24`, (await smallTargets('.rl-frontdoor-focus')).length === 0, await smallTargets('.rl-frontdoor-focus'));
     await screenshot(`${size}-door`);
     for (const label of ['Choose project','Destination']) {
       await click(`.rl-frontdoor-focus [aria-label="${label}"]`);
       check(`${size} ${label} menu bounded`,(await bounds(`[role="menu"][aria-label="${label}"]`))?.within);
+      check(`${size} the ${label} menu keeps the zoom`, await cdp.evaluate("document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')"));
+      if (label === 'Destination' && size === '1440x960') await screenshot(`${size}-zoom-menu-open`);
       await key('Escape','Escape',27);
-      check(`${size} ${label} Escape keeps the door open`, await cdp.evaluate(`${pose}==='conversation'`));
+      check(`${size} ${label} Escape keeps the door open, and zoomed`, await cdp.evaluate(`${pose}==='conversation' && document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')`));
     }
     // Closing goes back toward the pill: still painted, already inert, then gone.
     const openBox = await bounds('.rl-frontdoor-focus .rl-frontdoor');
@@ -254,12 +293,36 @@ try {
     await delay(500); await settle();
     const shut = await cdp.evaluate('window.__qaShut');
     check(`${size} ⌄ returns to the workspace, the door falling back toward the pill`, await cdp.evaluate(`${pose}==='notch' && !document.querySelector('.rl-frontdoor-focus[data-closing]') && getComputedStyle(document.querySelector('.rl-frontdoor-focus')).visibility==='hidden'`) && shut.length >= 3 && shut.every(f => f.inert) && shut.at(-1).w < openBox.width * 0.6 && shut.at(-1).y > openBox.y, { frames: shut.length, first: shut[0], last: shut.at(-1) });
-    // Shift+Enter summons from the document, never from a text field.
+    // A pointer on the pill opens the door QUIET (10/11, R5 reversed): its
+    // welcome up and the caret on the room. A press in the box zooms it, and
+    // a character typed on the room lands in the box, zooming it too.
+    const roomFocused = "document.activeElement===document.querySelector('#rl-monochat-content')";
     await cdp.evaluate("document.querySelector('#qa-document-focus').focus()");
-    await film('__qaWelcome', `document.querySelector('.rl-frontdoor-focus[data-open=true]') ? { hero: Number(getComputedStyle(document.querySelector('.rl-fd-welcome-hero')).opacity) } : null`, 30);
+    await film('__qaQuiet', `document.querySelector('.rl-frontdoor-focus[data-open=true]') ? { hero: ${heroShown} } : null`, 30);
+    await click('.rl-monochat-notch'); await delay(600); await settle();
+    const quietIn = (await cdp.evaluate('window.__qaQuiet')).map(f => f.hero);
+    check(`${size} a pointer on the pill opens the door quiet: the welcome fades in, the caret on the room`, await cdp.evaluate(`${pose}==='conversation' && ${roomFocused} && !document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom') && getComputedStyle(document.querySelector('.rl-fd-recents')).visibility === 'visible'`) && quietIn[0] < 0.1 && quietIn.at(-1) === 1 && quietIn.some(o => o > 0.1 && o < 0.9), quietIn);
+    await screenshot(`${size}-door-quiet`);
+    await press(await centre('.rl-frontdoor-focus .rl-fd-input')); await delay(400); await settle();
+    check(`${size} a press in the quiet door's box zooms it`, await cdp.evaluate(`document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom') && document.activeElement===${doorComposer} && getComputedStyle(document.querySelector('.rl-fd-welcome-hero')).visibility === 'hidden'`));
+    await key('Escape','Escape',27); await delay(400);
+    await click('.rl-monochat-notch'); await delay(600); await settle();
+    await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "P", code: "KeyP", windowsVirtualKeyCode: 80, text: "P", unmodifiedText: "P" });
+    await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "P", code: "KeyP", windowsVirtualKeyCode: 80 }); await delay(400); await settle();
+    check(`${size} a character typed on the quiet room lands in the box, zoomed`, await cdp.evaluate(`document.activeElement===${doorComposer} && ${doorComposer}.value==='P' && document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')`), await cdp.evaluate(`${doorComposer}.value`));
+    await cdp.evaluate("window.__qa.setText('')"); await settle();
+    // Tabbing out of the empty box (to ⌄) brings the welcome back.
+    for (let i = 0; i < 12 && !await cdp.evaluate("document.activeElement?.classList.contains('rl-frontdoor-return')"); i++) await key('Tab','Tab',9);
+    await delay(500); await settle();
+    check(`${size} Tab out of the empty box brings the welcome back`, await cdp.evaluate("document.activeElement.classList.contains('rl-frontdoor-return') && !document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom') && getComputedStyle(document.querySelector('.rl-fd-welcome-hero')).opacity === '1'"));
+    await key('Escape','Escape',27); await delay(400);
+    // Shift+Enter summons from the document, never from a text field — and
+    // with the caret, so it arrives zoomed: the welcome never shows.
+    await cdp.evaluate("document.querySelector('#qa-document-focus').focus()");
+    await film('__qaWelcome', `document.querySelector('.rl-frontdoor-focus[data-open=true]') ? { hero: ${heroShown} } : null`, 30);
     await key('Enter','Enter',13,8); await delay(500);
     const welcomeIn = (await cdp.evaluate('window.__qaWelcome')).map(f => f.hero);
-    check(`${size} the welcome fades in once the door is on its way`, welcomeIn[0] < 0.1 && welcomeIn.at(-1) === 1 && welcomeIn.some(o => o > 0.1 && o < 0.9), welcomeIn.map(o => +o.toFixed(2)));
+    check(`${size} Shift+Enter arrives zoomed: the welcome never shows on the way in`, welcomeIn.length > 5 && welcomeIn.every(o => o === 0) && await cdp.evaluate("document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')"), welcomeIn);
     check(`${size} Shift+Enter summons the door with the caret at the end of the draft`, await cdp.evaluate(`${pose}==='conversation'`) && await cdp.evaluate(`document.activeElement===${doorComposer} && ${doorComposer}.selectionStart===${doorComposer}.value.length`));
     await key('Escape','Escape',27);
     check(`${size} Esc returns focus to the document`, await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
@@ -314,6 +377,16 @@ try {
     const reducedDoor = await cdp.evaluate('window.__qaReducedDoor');
     check(`${size} reduced motion: the door crossfades in 120 ms`, await cdp.evaluate(`${pose}==='conversation'`) && reducedDoor.length > 0 && reducedDoor.every(f => f.k.every(kind => kind === 'opacity@120')), reducedDoor);
     await key('Escape','Escape',27); await delay(300);
+    // ...and the zoom: on the plate the box snaps to the centre and fades in,
+    // the paper and the welcome crossfade. Nothing travels.
+    await cdp.evaluate("window.__qa.setSurface('Home')"); await delay(400); await settle();
+    const running = `(() => { const l = document.querySelector('.rl-frontdoor-focus'); const all = new Set([...l.getAnimations({ subtree: true }), ...document.getAnimations().filter(a => l.contains(a.effect?.target ?? null))]); return [...all].filter(a => a.playState === 'running').map(a => (a.transitionProperty ?? [...new Set(a.effect.getKeyframes().flatMap(k => Object.keys(k).filter(p => !['offset', 'easing', 'composite', 'computedOffset'].includes(p))))].join('+')) + '@' + Math.round(a.effect.getComputedTiming().duration)); })()`;
+    await film('__qaReducedZoom', `(() => { const k = ${running}; return k.length ? { k } : null; })()`, 6);
+    await press(await centre('.rl-frontdoor-focus .rl-fd-input')); await delay(300); await settle();
+    const reducedZoom = await cdp.evaluate('window.__qaReducedZoom');
+    check(`${size} reduced motion: the zoom only crossfades, in 120 ms`, await cdp.evaluate("document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')") && reducedZoom.length > 0 && reducedZoom.every(f => f.k.every(kind => /^(opacity@(?:120|0)|visibility@0)$/.test(kind))) && reducedZoom.some(f => f.k.includes('opacity@120')), reducedZoom);
+    await key('Escape','Escape',27); await delay(300);
+    await cdp.evaluate("window.__qa.setSurface('Document')"); await delay(300); await settle();
     await cdp.call("Emulation.setEmulatedMedia",{features:[{name:"prefers-reduced-motion",value:"no-preference"}]});
     // Every text in the door and the card, in every theme, at 4.5:1.
     if (size === "1440x960") {
@@ -323,7 +396,8 @@ try {
       await cdp.evaluate("window.__qa.setSurface('Document')"); await cdp.evaluate("window.__qa.setSetupFault(true)"); await settle();
       for (const theme of themes) {
         await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`); await delay(450);
-        await cdp.evaluate("window.__qa.setOpen(true)"); await delay(450);
+        // Opened by a pointer, quiet: its welcome is up to be read.
+        await click('.rl-monochat-notch'); await delay(450);
         for (const r of await cdp.evaluate("window.__qaContrast('.rl-frontdoor-focus', 'paper')")) if (r.ratio < 4.5) short.push(`${theme} door ${r.text}: ${r.ratio.toFixed(2)}`);
         await cdp.evaluate("window.__qa.setOpen(false)"); await delay(400);
         await cdp.evaluate("window.__qa.setCompact(true)"); await delay(700);
@@ -386,6 +460,12 @@ try {
     check(`${tag}: nothing scrolls`, !g.scrolls);
     check(`${tag}: every recent is at least 24 × 24`, (await smallTargets('[aria-label="Jump back in"]')).length === 0, await smallTargets('[aria-label="Jump back in"]'));
     report.recents = { ...report.recents, [tag]: { columns: g.columns, rows: g.rows.map(row => row.entries.map(e => [e.text, e.lines])), pages: g.pages.length } };
+    // The zoom from here, where the box has furthest to go.
+    if (set === "long") {
+      const { rest } = await zoomIn(`${tag}-zoom`);
+      await screenshot(`${tag}-zoomed`);
+      await zoomOut(`${tag}-zoom`, rest);
+    }
   }
 } catch(error) {report.errors.push(error.stack??String(error));}
 finally {

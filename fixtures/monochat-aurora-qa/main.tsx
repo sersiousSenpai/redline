@@ -88,7 +88,7 @@ function Fixture() {
     const chips = visibleChips(surfaceChips(surfaceOf(surface), { page: { title: "LiDAR-GS", url: "https://github.com/x/lidar-gs" }, tasks: true }), where === "chat" ? "chat" : card ? cardDestination : destination);
     return <FrontDoor floating welcome={where === "door"} recents={recents} onOpenRecent={recent => { if (recent.kind === "chat") openChat(recent.id); }}
       chips={<SurfaceChips chips={chips} pressed={chip => isChipPressed(chip, presses, surface)} onToggle={chip => setPresses(p => toggleChip(p, surface, chip))}/>}
-      autoFocusOnShow={where === "door" ? open : where === "chat" && roomChat} accessories={accessories} workbench={workbench}
+      autoFocusOnShow={where === "chat" && roomChat} accessories={accessories} workbench={workbench}
       visible={where === "door" ? visible : card ? compact : roomChat} choice={project ? { path: project } : null} onChoiceChange={next => setProject(next?.path ?? null)}
       projectOptions={[{ path: "/projects/redline", name: "Redline", source: "workspace" }]} openFolder={null} lastLaunchProject={null} onResolvedProjectChange={noop}
       attachments={[]} onAttachmentsChange={noop} readiness={setupFault ? [{ id: "codex-contract-missing", state: "blocked", label: "The Codex planning integration isn't installed", detail: "Install it to bring plans back to Redline.", fix: { label: "Install integration", kind: "install-integration", backend: "codex" } }] : []} onFix={async () => true} pending={null} onLaunch={() => { setText(""); setCompact(false); }} onRun={() => { setText(""); setCompact(false); }} refusal={null}
