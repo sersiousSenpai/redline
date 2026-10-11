@@ -133,12 +133,6 @@ pub(crate) fn attach_current(app: &tauri::AppHandle, label: &str) -> Result<(), 
     attach(app, label, REGIONS.lock().map_err(|_| "Overlay state unavailable")?.clone())
 }
 
-#[tauri::command(async)]
-pub fn browser_overlay_attach(app: tauri::AppHandle, webview: tauri::Webview, label: String) -> Result<(), String> {
-    if webview.label() != "main" || !label.starts_with("browser-") { return Err("Only the app can compose browser overlays".into()); }
-    attach(&app, &label, REGIONS.lock().map_err(|_| "Overlay state unavailable")?.clone())
-}
-
 #[tauri::command]
 pub fn browser_overlay_regions(app: tauri::AppHandle, webview: tauri::Webview, rects: Vec<OverlayRect>) -> Result<(), String> {
     if webview.label() != "main" || rects.len() > 16 || rects.iter().any(|rect| !rect.valid()) { return Err("Invalid floating overlay regions".into()); }

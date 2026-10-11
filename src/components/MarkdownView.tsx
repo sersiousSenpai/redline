@@ -3,12 +3,18 @@
 import { Fragment, memo, useMemo } from "react";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
-// lib/common (~40 languages), NOT the full barrel — the barrel is ~1.9 MB of
-// grammars on the main chunk (docs/perf-budget.md "Size budget"). Same set the
-// editor's code blocks use (lowlight `common`); unknown languages fall through
-// to escaped plain text below, exactly as an unhighlightable fence does today.
-import hljs from "highlight.js/lib/common";
+// The core plus lowlight's `common` grammars (~37 languages), NOT the full
+// barrel — the barrel is ~1.9 MB of grammars on the main chunk
+// (docs/perf-budget.md "Size budget"). The editor's code blocks highlight with
+// these same ES grammar modules, so the app bundles one copy of each; the
+// package's own `lib/common` registers its CommonJS twins, a second ~130 kB
+// copy. Unknown languages fall through to escaped plain text below, exactly as
+// an unhighlightable fence does today.
+import hljs from "highlight.js/lib/core";
+import { common } from "lowlight";
 import { MermaidView } from "../editor/extensions/MermaidView";
+
+for (const [name, grammar] of Object.entries(common)) hljs.registerLanguage(name, grammar);
 
 // html: false escapes any raw HTML in the source — safe for untrusted
 // Claude/user input. breaks: true treats a single newline as <br>, which

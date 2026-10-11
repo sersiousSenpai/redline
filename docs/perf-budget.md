@@ -96,15 +96,19 @@ it, that's the discussion to have before merging.
    builds a tokio task for each command's own future type, about **11 KB of
    release binary per command** (measured 2026-10-09: 29 commands cost
    331,248 B; 2026-10-10: moving the 18 Bookshelf commands to the pool saved
-   149,024 B), and the binary has no room for that. Either way, two calls can finish out of
-   order. A command whose calls must keep theirs goes in `IN_ORDER_COMMANDS`
-   instead: each call takes a ticket as it arrives and runs on the pool when
-   its turn comes, one at a time (`save_workspace`: every gesture saves
-   without waiting for the last, and the file is what the next launch loads;
-   `add_comment`/`update_comment`/`delete_comment`: an edit sent right after
-   its add must not overtake it). `watch_dir`/`unwatch_dir` stay
-   sync to keep their order with each other, and hand their slow part to a
-   thread of their own.
+   149,024 B, and moving the remaining 114 while dropping nine registrations
+   nothing invoked saved about 1.28 MB, the first 30 moves alone 348,128 B),
+   and the binary has no room for that. `(async)` belongs only on an
+   `async fn` that awaits; `perf_guard.rs` scans every source file for one on
+   a sync body, or an `async fn` command that never awaits. Either way, two
+   calls can finish out of order. A command whose calls must keep theirs goes
+   in `IN_ORDER_COMMANDS` instead: each call takes a ticket as it arrives and
+   runs on the pool when its turn comes, one at a time (`save_workspace`:
+   every gesture saves without waiting for the last, and the file is what the
+   next launch loads; `add_comment`/`update_comment`/`delete_comment`: an
+   edit sent right after its add must not overtake it).
+   `watch_dir`/`unwatch_dir` stay sync to keep their order with each other,
+   and hand their slow part to a thread of their own.
 
    SQLite is heavy whatever the query's size. Every write waits on the one
    writer connection (`Database::lock_conn`), which a backup, the canary or an
@@ -242,9 +246,10 @@ it, that's the discussion to have before merging.
 
 These are cheap regression nets, not a substitute for the rules above:
 
-- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep `(async)`
-  or their place in `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS` (and that every
-  name there is registered, and `save_workspace` keeps its order),
+- `src-tauri/src/perf_guard.rs` — asserts the known-heavy commands keep their
+  place in `OFF_MAIN_COMMANDS` or `IN_ORDER_COMMANDS`, or are an `async fn`
+  (and that every name there is registered, `save_workspace` keeps its order,
+  and no sync body carries `(async)`),
   that PTY output stays batched over a Channel (no `pty-output` per-read
   emit), that every streamed reply's delta arm feeds a `DeltaPacer` and its
   reader flushes it, that run events carry a run id and revision rather than
@@ -653,6 +658,50 @@ proxy) and runs `check-size.mjs --strict`, uploading the output as a
 reports a missing artifact as a failure. `release.yml` builds per-arch DMGs on
 `v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
 Developer ID secrets land).
+
+### Room for wave 2 (measured 2026-10-10)
+
+Wave 1 of the door and voice program left dist 24.7 KB over its ceiling,
+boot JS with 664 B and the binary with 41.6 KB. No feature was cut and no
+ceiling moved; the ceilings stay where they are so the room goes to the next
+features. Binary numbers come from embedded builds
+(`cargo build --release --features tauri/custom-protocol`); the rest from
+`npx vite build` and `node scripts/check-size.mjs --strict`.
+
+| Artifact | Before (`0aaf46b`) | After | Freed | Ceiling |
+|---|---|---|---|---|
+| Release binary | 41,358,384 B | 40,001,680 B | 1,356,704 B | 41,400,000 B |
+| Boot JS | 659,336 B | 633,535 B | 25,801 B | 660,000 B |
+| Dist total | 9,474,702 B | 9,324,785 B | 149,917 B | 9,450,000 B |
+
+The levers, each committed with its evidence (the pool one commit per module
+group):
+
+- **One copy of each highlighting grammar** (dist −141,245 B). Replies
+  imported highlight.js's `lib/common`, which registers the CommonJS build of
+  every grammar, while the editor's lowlight imports the ES build of the same
+  ones. Replies now register lowlight's `common` on the core.
+- **The terminal view off the boot path** (boot −8,315 B). App only needs
+  the handoff seams and the reveal guard, now `lib/terminalSeams.ts`.
+- **The Settings rows on approach** (boot −16,234 B). One lazy chunk, warmed
+  when the pointer or focus reaches the gear.
+- **Dead CSS** (dist −7,226 B) and **the icon's outline as relative steps**
+  (boot −1,252 B, dist −2,504 B, pixel-identical in headless Chrome).
+- **The pool instead of `(async)`**: 114 commands moved to
+  `OFF_MAIN_COMMANDS` and nine registrations nothing invokes went (binary
+  −1,275,968 B across those commits, which also carry the embedded dist's
+  share of the CSS and icon savings; the first 30 commands alone measured
+  −348,128 B). The frontend levers before them shrank the embedded dist
+  enough to take 33,024 B off the binary with no Rust change.
+- **One TOML stack** (binary −47,712 B): redline's own `toml` moved from 0.8
+  to the 1.x tauri-utils already links.
+
+Found and not taken: the code-block extension's dist inlines a private copy
+of the highlight.js core (~80 kB of source in the editor chunk); a few more
+registered commands nothing invokes (the `*_kill_all` wrappers the exit path
+bypasses, `dev_server_set_thumb`, `self_develop_discard`, `context_search`,
+`memory_restore`), left because removing them strands database code or
+touches files other lanes own.
 
 ### Build Redline (measured 2026-09-16)
 

@@ -354,7 +354,7 @@ impl BrowserUIDelegate {
 }
 
 /// Install our new-window UI delegate on one browser child webview. Called once
-/// per webview at creation (`browser_install_shims`). The delegate is retained
+/// per webview at creation (`configure_browser_tab`). The delegate is retained
 /// as an associated object, so it lives exactly as long as the webview. Safe to
 /// be a no-op if the webview handle is gone.
 pub fn install_new_window_delegate(wv: &tauri::Webview) -> Result<(), String> {

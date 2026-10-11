@@ -319,7 +319,7 @@ async fn capture_png_raw(app: &AppHandle, label: &str, width: f64) -> Result<Sho
 /// Every thumbnail on disk, so the frontend can seed its cache at mount: a
 /// still-fresh capture is not re-taken across restarts, and a card for a server
 /// that is currently down shows its last picture immediately.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn thumbs_list(app: AppHandle) -> Result<Vec<ThumbEntry>, String> {
     let dir = thumbs_dir(&app)?;
     let mut out = Vec::new();
@@ -379,7 +379,7 @@ fn is_doomed(
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn thumbs_prune(
     app: AppHandle,
     keep_keys: Vec<String>,

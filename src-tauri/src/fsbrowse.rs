@@ -44,8 +44,9 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// List one directory level. Directories sort first, then case-insensitive by
 /// name — the conventional file-explorer order. Entries whose metadata can't be
 /// read (broken symlinks, races) are skipped rather than failing the whole list.
-/// `(async)` keeps a slow directory read off the UI thread.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`), so a slow directory read stays
+/// off the UI thread.
+#[tauri::command]
 pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let read = fs::read_dir(&path).map_err(|e| format!("{path}: {e}"))?;
     let mut entries: Vec<DirEntry> = read
@@ -73,9 +74,9 @@ fn sort_entries(entries: &mut [DirEntry]) {
 
 /// Read a file for the read-only viewer. Oversized files and binaries are
 /// reported via flags instead of content so the UI can explain the omission.
-/// `(async)` so reading + UTF-8 validating a couple of megabytes never blocks
-/// the UI thread.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) so reading + UTF-8 validating a
+/// couple of megabytes never blocks the UI thread.
+#[tauri::command]
 pub fn read_text_file(path: String) -> Result<FileContent, String> {
     let meta = fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     let size = meta.len();
@@ -132,8 +133,9 @@ pub struct BinaryFile {
 
 /// Read a file as base64 — used by the viewer to show images (and any other
 /// binary the UI knows how to render) inline without the asset protocol.
-/// `(async)` so reading + base64-encoding up to 16 MB stays off the UI thread.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) so reading + base64-encoding up
+/// to 16 MB stays off the UI thread.
+#[tauri::command]
 pub fn read_file_base64(path: String) -> Result<BinaryFile, String> {
     let meta = fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     let size = meta.len();
@@ -159,9 +161,9 @@ pub fn read_file_base64(path: String) -> Result<BinaryFile, String> {
 ///
 /// Like the read commands above, this trusts the path the user pointed the app
 /// at — the app already runs the user's shell with full privileges, so writing
-/// where they can already write grants nothing new. `(async)` keeps disk I/O off
-/// the UI thread.
-#[tauri::command(async)]
+/// where they can already write grants nothing new. The blocking pool
+/// (`OFF_MAIN_COMMANDS`) keeps disk I/O off the UI thread.
+#[tauri::command]
 pub fn save_text_file(path: String, content: String) -> Result<String, String> {
     let p = Path::new(&path);
     if let Some(parent) = p.parent() {
@@ -276,7 +278,7 @@ fn describe(path: &std::path::Path, bytes: u64) -> SavedAttachment {
 
 /// Store pasted bytes as an attachment. The clipboard path: there is no source
 /// file to copy, only base64 from a `File` the composer read.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn save_attachment(
     app: tauri::AppHandle,
     session_id: String,
@@ -301,7 +303,7 @@ pub fn save_attachment(
 /// Copy a dropped file into this session's attachment directory. The drag path:
 /// the OS hands us a real absolute source path (see the drop router,
 /// `src/lib/nativeFileDrop.ts`).
-#[tauri::command(async)]
+#[tauri::command]
 pub fn import_attachment(
     app: tauri::AppHandle,
     session_id: String,
@@ -362,15 +364,6 @@ pub fn rekey_session_attachments(app: &tauri::AppHandle, old_id: &str, new_id: &
             tracing::warn!(error = %e, "failed to move session attachments on rekey");
         }
     }
-}
-
-/// Create a directory (and any missing parents), returning its absolute path.
-/// Lets the clipping flow ensure `<vault>/<clippings-subdir>` exists before
-/// listing it for filename de-duplication.
-#[tauri::command(async)]
-pub fn ensure_dir(path: String) -> Result<String, String> {
-    fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
-    Ok(Path::new(&path).to_string_lossy().into_owned())
 }
 
 /// The user's home directory — where new shells spawn (see `pty_spawn`). The

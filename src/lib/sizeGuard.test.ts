@@ -116,7 +116,7 @@ describe("size guard", () => {
   });
 
   // The markdown-rendering stack. `MarkdownView` value-imports markdown-it,
-  // markdown-it-task-lists and highlight.js/lib/common — ~670 kB of source
+  // markdown-it-task-lists and highlight.js with its grammars — ~670 kB of source
   // that reached the boot path through ONE chain: App → CommentCard →
   // CommentThread → MarkdownView. These pin the chain's root.
   for (const name of [
@@ -161,7 +161,29 @@ describe("size guard", () => {
       );
     }
     // …and the trigger itself stays static, or the gear would suspend.
-    expect(header!.text).toMatch(/^import \{ SettingsMenu \} from/m);
+    expect(header!.text).toMatch(/^import \{ SettingsMenu, settingsRow \} from "\.\/SettingsMenu";/m);
+  });
+
+  it("the settings rows' controls ride one lazy chunk, warmed at the gear", () => {
+    // Mode, theme, font, linting, notifications and surfaces render only
+    // inside the open menu; static, they were 16 kB of boot JS (measured
+    // 2026-10-10).
+    const header = files.find(({ rel }) => rel === "components/Header.tsx")!.text;
+    for (const name of ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings"]) {
+      expect(header).toContain(`const ${name} = settingsRow("${name}");`);
+    }
+    const app = files.find(({ rel }) => rel === "App.tsx")!.text;
+    expect(app).toContain('const SurfacesPanel = settingsRow("SurfacesPanel");');
+    // Only the chunk's own barrel imports them.
+    const rows = ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings", "SurfacesPanel"];
+    const offenders = files
+      .filter(({ rel }) => rel !== "components/settingsRows.ts" && !/\.test\.tsx?$/.test(rel))
+      .filter(({ text }) => rows.some((name) => new RegExp(`^import (?!type\\b)[^;]*from "[./]*(?:components/)?${name}"`, "m").test(text)))
+      .map(({ rel }) => rel);
+    expect(offenders).toEqual([]);
+    const menu = files.find(({ rel }) => rel === "components/SettingsMenu.tsx")!.text;
+    expect(menu).toContain('const loadRows = () => import("./settingsRows");');
+    expect(menu).toMatch(/onPointerEnter=\{warmRows\}\s+onFocus=\{warmRows\}/);
   });
 
   it("xterm is value-imported only inside lib/xtermLoader.ts (types are fine)", () => {
@@ -177,14 +199,28 @@ describe("size guard", () => {
     ).toEqual([]);
   });
 
-  it("highlight.js is only imported via lib/common, never the full barrel", () => {
+  it("highlight.js is never imported through the full barrel", () => {
     const offenders = files
       .filter(({ text }) => /from\s+["']highlight\.js["']/.test(text))
       .map(({ rel }) => rel);
     expect(
       offenders,
-      'use `import hljs from "highlight.js/lib/common"` — the barrel is ~1.9 MB of grammars',
+      'use `import hljs from "highlight.js/lib/core"` plus lowlight\'s `common` grammars — the barrel is ~1.9 MB of grammars',
     ).toEqual([]);
+  });
+
+  it("highlight.js grammars bundle once, as the ES modules the editor's code blocks use", () => {
+    // The package's `lib/common` registers the CommonJS build of each grammar.
+    // lowlight (the editor's code blocks) imports the ES build of the same
+    // grammars, so a `lib/common` import anywhere ships every one twice:
+    // ~140 kB of dist, measured 2026-10-10.
+    const offenders = files
+      .filter(({ text }) => /from\s+["']highlight\.js\/(lib|es)\/(common|languages\/)/.test(text))
+      .map(({ rel }) => rel);
+    expect(offenders, "register lowlight's `common` grammars on highlight.js/lib/core").toEqual([]);
+    const view = files.find(({ rel }) => rel === "components/MarkdownView.tsx")!.text;
+    expect(view).toMatch(/import hljs from "highlight\.js\/lib\/core";/);
+    expect(view).toMatch(/import \{ common \} from "lowlight";/);
   });
 
   it("build analysis is never written into dist", () => {

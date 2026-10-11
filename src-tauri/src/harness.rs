@@ -133,7 +133,7 @@ fn delete_agent_core(db: &crate::db::Database, agent_id: &str) -> Result<(), Str
 
 // --- Commands ----------------------------------------------------------------
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_create(
     store: tauri::State<'_, SessionStore>,
     name: String,
@@ -143,14 +143,14 @@ pub fn harness_agent_create(
 }
 
 /// The whole shelf, most-recently-updated first.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_list(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Vec<HarnessAgent>, String> {
     store.database().list_harness_agents().map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_update(
     store: tauri::State<'_, SessionStore>,
     agent_id: String,
@@ -172,7 +172,7 @@ pub fn harness_agent_update(
     Ok(())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_set_starred(
     store: tauri::State<'_, SessionStore>,
     agent_id: String,
@@ -184,7 +184,7 @@ pub fn harness_agent_set_starred(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_set_folder(
     store: tauri::State<'_, SessionStore>,
     agent_id: String,
@@ -197,7 +197,7 @@ pub fn harness_agent_set_folder(
 }
 
 /// Delete an agent and its `custom:<id>` seat row, if it grew one.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_delete(
     store: tauri::State<'_, SessionStore>,
     agent_id: String,
@@ -205,7 +205,7 @@ pub fn harness_agent_delete(
     delete_agent_core(&store.database(), &agent_id)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_agent_duplicate(
     store: tauri::State<'_, SessionStore>,
     agent_id: String,
@@ -331,7 +331,7 @@ pub async fn harness_agent_preview(
 
 /// Throw a preview copy away — the builder is done with it. Guarded to the
 /// `preview-` id space so no caller can reach a real document through it.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn harness_preview_discard(
     store: tauri::State<'_, SessionStore>,
     preview_id: String,

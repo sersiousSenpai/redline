@@ -678,9 +678,10 @@ and DOM access a sandboxed iframe can't provide.
 `browser_close`, `browser_url`, `browser_eval_result`, `browser_snapshot`,
 `browser_cache_snapshot`, `browser_cached_snapshot`, `browser_consume_scroll`,
 `browser_can_suspend`, `browser_suspend`, `browser_set_active`, `browser_set_tabs`,
-`browser_enable_gestures`, `browser_enable_autoresize`, `browser_set_view`,
-`browser_install_shims`, plus `show_bookmarks_menu` / `show_view_menu` /
-`prompt_text`. Suspended tabs are re-materialized on demand.
+`browser_set_view`, plus `show_bookmarks_menu` / `show_view_menu` /
+`prompt_text`. Gestures, autoresize, the overlay cut-outs and the user scripts
+are set up by the backend when it creates or wakes a tab. Suspended tabs are
+re-materialized on demand.
 
 **Per-tab page agent** (`browse.rs` + `BrowserChat.tsx`): each tab has its own
 headless `claude` agent spawned **per turn**:
@@ -864,7 +865,7 @@ Registered in `generate_handler!` (`lib.rs`). Grouped by area:
 - **Terminals** — `pty_spawn`, `pty_ack`, `pty_write`, `pty_resize`, `pty_kill`,
   `pty_kill_all`, `pty_cwd`
 - **Filesystem** — `list_dir`, `read_text_file`, `read_file_base64`,
-  `save_text_file`, `ensure_dir`, `home_dir`; `open_doc`, `doc_lines`
+  `save_text_file`, `home_dir`; `open_doc`, `doc_lines`
   (highlighting); `watch_dir`, `unwatch_dir`
 - **Fork threads** — `fork_thread_send`, `get_thread`, `fork_thread_cancel`,
   `fork_thread_discard`, `fork_kill_all`
@@ -883,8 +884,7 @@ Registered in `generate_handler!` (`lib.rs`). Grouped by area:
   `browser_url`, `browser_eval_result`, `browser_snapshot`,
   `browser_cache_snapshot`, `browser_cached_snapshot`, `browser_consume_scroll`,
   `browser_can_suspend`, `browser_suspend`, `browser_set_active`,
-  `browser_set_tabs`, `browser_enable_gestures`, `browser_enable_autoresize`,
-  `browser_set_view`, `browser_install_shims`, `show_bookmarks_menu`,
+  `browser_set_tabs`, `browser_set_view`, `show_bookmarks_menu`,
   `show_view_menu`, `prompt_text`
 
 ### 14.2 Events (backend → frontend)

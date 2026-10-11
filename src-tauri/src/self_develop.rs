@@ -1857,7 +1857,7 @@ pub fn self_develop_cancel(app: AppHandle, release_id: String) -> Result<Release
 
 /// Delete a release's workspace and output. The record stays, so the history
 /// still shows what happened.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn self_develop_discard(app: AppHandle, release_id: String) -> Result<(), String> {
     let data_dir = data_dir(&app)?;
     let release = db(&app)?
@@ -1890,7 +1890,7 @@ pub struct PatchView {
     pub repository: String,
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn self_develop_patch(app: AppHandle, release_id: String) -> Result<PatchView, String> {
     let release = db(&app)?
         .release_get(&release_id)?
@@ -1932,7 +1932,7 @@ fn sealed_manifest(app: &AppHandle, release: &Release) -> Result<ReleaseManifest
 }
 
 /// Re-check everything a restart depends on, right now.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn self_develop_preflight(
     app: AppHandle,
     release_id: String,

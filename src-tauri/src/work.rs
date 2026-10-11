@@ -430,7 +430,7 @@ pub(crate) fn work_graph_rollup(db: &Database) -> Result<WorkGraphRollup, String
 /// The memory pill's ambient "· N ready" segment: one `COUNT(*)` over the
 /// ready frontier, not the ~1.5 MB rollup below (which the pill used to pull
 /// every 60s and on every memory event, only to take `readyIds.length`).
-#[tauri::command(async)]
+#[tauri::command]
 pub fn work_ready_count(store: tauri::State<'_, crate::state::SessionStore>) -> Result<i64, String> {
     store
         .database()
@@ -439,7 +439,7 @@ pub fn work_ready_count(store: tauri::State<'_, crate::state::SessionStore>) -> 
 }
 
 /// The Work tab's read-only rollup (the Runs surface).
-#[tauri::command(async)]
+#[tauri::command]
 pub fn get_work_graph(
     store: tauri::State<'_, crate::state::SessionStore>,
 ) -> Result<WorkGraphRollup, String> {

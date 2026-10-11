@@ -12,35 +12,70 @@
 
 #[cfg(test)]
 mod tests {
-    /// A heavy `#[tauri::command]` (fs read / parse / encode) must declare
-    /// `(async)` so its body runs on a worker thread, not the WebView main
-    /// thread. We assert the attribute sits directly above the function.
-    fn assert_async_command(src: &str, file: &str, func: &str) {
-        let plain = format!("#[tauri::command(async)]\npub fn {func}");
-        let already_async = format!("#[tauri::command(async)]\npub async fn {func}");
+    /// A heavy `#[tauri::command]` (fs read / parse / encode / SQLite) must
+    /// not run on the WebView main thread. A sync body goes to the blocking
+    /// pool by name (`OFF_MAIN_COMMANDS`, which costs a string); a body that
+    /// awaits is an `async fn`. `(async)` on a sync body also leaves the main
+    /// thread, at ~8 KB of release binary a command, so
+    /// `sync_commands_ride_the_pool_not_async_tasks` keeps it off sync bodies.
+    /// The attribute must sit directly above the function, `pub` or not.
+    fn assert_off_main_command(src: &str, file: &str, func: &str) {
+        let pool = crate::codehealth::off_main_commands(include_str!("lib.rs"));
+        let declared = |attr: &str, kind: &str| {
+            ["pub ", ""].iter().any(|vis| {
+                ["(", "<"].iter().any(|open| src.contains(&format!("{attr}\n{vis}{kind} {func}{open}")))
+            })
+        };
+        let on_pool = pool.iter().any(|name| name == func) && declared("#[tauri::command]", "fn");
+        let awaits = declared("#[tauri::command(async)]", "async fn") || declared("#[tauri::command]", "async fn");
         assert!(
-            src.contains(&plain) || src.contains(&already_async),
-            "{file}: `{func}` must be `#[tauri::command(async)]` — heavy work must \
-             not run on the WebView main thread (see docs/perf-budget.md)"
+            on_pool || awaits || declared("#[tauri::command(async)]", "fn"),
+            "{file}: `{func}` must leave the WebView main thread — a sync body by name in \
+             OFF_MAIN_COMMANDS, an awaiting one as an async fn (see docs/perf-budget.md)"
         );
     }
 
+    /// The check itself: a sync command the pool does not name runs on the
+    /// main thread, and must fail it.
     #[test]
-    fn heavy_highlight_commands_stay_async() {
+    fn the_off_main_check_rejects_a_main_thread_command() {
+        let src = "#[tauri::command]\npub fn not_pooled(id: String) {}\n";
+        assert!(std::panic::catch_unwind(|| assert_off_main_command(src, "x.rs", "not_pooled")).is_err());
+        let pooled = "#[tauri::command]\nfn list_sessions(store: State<'_, SessionStore>) {}\n";
+        assert_off_main_command(pooled, "x.rs", "list_sessions");
+        let awaits = "#[tauri::command(async)]\npub async fn fetch<R: Runtime>(app: AppHandle<R>) {}\n";
+        assert_off_main_command(awaits, "x.rs", "fetch");
+    }
+
+    #[test]
+    fn heavy_highlight_commands_stay_off_the_main_thread() {
         let src = include_str!("highlight.rs");
-        assert_async_command(src, "highlight.rs", "open_doc");
-        assert_async_command(src, "highlight.rs", "doc_lines");
+        assert_off_main_command(src, "highlight.rs", "open_doc");
+        assert_off_main_command(src, "highlight.rs", "doc_lines");
+        assert_off_main_command(src, "highlight.rs", "highlight_diff");
     }
 
     #[test]
     fn browser_persistence_and_hook_watches_stay_off_the_ui_thread() {
         let workspace = include_str!("browser_workspace.rs");
         for command in ["browser_workspace_read", "browser_workspace_write", "browser_workspace_list", "browser_workspace_delete"] {
-            assert_async_command(workspace, "browser_workspace.rs", command);
+            assert_off_main_command(workspace, "browser_workspace.rs", command);
         }
-        assert_async_command(include_str!("mission.rs"), "mission.rs", "mission_add_finding");
-        for command in ["watch_hook_conflicts", "unwatch_hook_conflicts"] {
-            assert_async_command(include_str!("hook_conflicts.rs"), "hook_conflicts.rs", command);
+        assert_off_main_command(include_str!("mission.rs"), "mission.rs", "mission_add_finding");
+        for command in ["scan_hook_conflicts", "remove_hook_conflicts", "watch_hook_conflicts", "unwatch_hook_conflicts"] {
+            assert_off_main_command(include_str!("hook_conflicts.rs"), "hook_conflicts.rs", command);
+        }
+        // A page's appearance waits on its webview.
+        assert_off_main_command(include_str!("browser_events.rs"), "browser_events.rs", "browser_set_appearance");
+    }
+
+    /// Build Redline's patch view and restart preflight run git against the
+    /// candidate and check the bundle on disk; a discard deletes a workspace.
+    #[test]
+    fn build_redline_reads_stay_off_the_main_thread() {
+        let src = include_str!("self_develop.rs");
+        for func in ["self_develop_patch", "self_develop_preflight", "self_develop_discard"] {
+            assert_off_main_command(src, "self_develop.rs", func);
         }
     }
 
@@ -55,13 +90,14 @@ mod tests {
     }
 
     #[test]
-    fn heavy_fsbrowse_commands_stay_async() {
+    fn heavy_fsbrowse_commands_stay_off_the_main_thread() {
         let src = include_str!("fsbrowse.rs");
-        assert_async_command(src, "fsbrowse.rs", "list_dir");
-        assert_async_command(src, "fsbrowse.rs", "read_text_file");
-        assert_async_command(src, "fsbrowse.rs", "read_file_base64");
-        assert_async_command(src, "fsbrowse.rs", "save_text_file");
-        assert_async_command(src, "fsbrowse.rs", "ensure_dir");
+        assert_off_main_command(src, "fsbrowse.rs", "list_dir");
+        assert_off_main_command(src, "fsbrowse.rs", "read_text_file");
+        assert_off_main_command(src, "fsbrowse.rs", "read_file_base64");
+        assert_off_main_command(src, "fsbrowse.rs", "save_text_file");
+        assert_off_main_command(src, "fsbrowse.rs", "save_attachment");
+        assert_off_main_command(src, "fsbrowse.rs", "import_attachment");
     }
 
     /// A tab's repo mark walks ancestors looking for `.git`, then reads and
@@ -69,9 +105,9 @@ mod tests {
     /// the shell's `cd`. Squarely the shape that must never run on the WebView
     /// main thread.
     #[test]
-    fn heavy_repoicon_commands_stay_async() {
+    fn heavy_repoicon_commands_stay_off_the_main_thread() {
         let src = include_str!("repoicon.rs");
-        assert_async_command(src, "repoicon.rs", "repo_icon");
+        assert_off_main_command(src, "repoicon.rs", "repo_icon");
     }
 
     /// The cwd polls fork `lsof` — per call for `pty_cwd`, once for the whole
@@ -80,11 +116,20 @@ mod tests {
     /// and one `lsof` for the whole fleet. A subprocess fork on the WebView
     /// main thread is exactly perf-budget rule 4.
     #[test]
-    fn heavy_pty_cwd_commands_stay_async() {
+    fn heavy_pty_cwd_commands_stay_off_the_main_thread() {
         let src = include_str!("pty.rs");
-        assert_async_command(src, "pty.rs", "pty_cwd");
-        assert_async_command(src, "pty.rs", "pty_cwds");
-        assert_async_command(src, "pty.rs", "pty_procs");
+        assert_off_main_command(src, "pty.rs", "pty_cwd");
+        assert_off_main_command(src, "pty.rs", "pty_cwds");
+        assert_off_main_command(src, "pty.rs", "pty_procs");
+        // …and the lifecycle: a spawn forks a shell, a kill reaps one.
+        for func in ["pty_spawn", "pty_list", "pty_attach", "pty_detach", "pty_resize", "pty_kill", "pty_kill_all"] {
+            assert_off_main_command(src, "pty.rs", func);
+        }
+        // Keystrokes keep their order by staying on the main thread.
+        let pool = crate::codehealth::off_main_commands(include_str!("lib.rs"));
+        for func in ["pty_write", "pty_ack"] {
+            assert!(!pool.iter().any(|name| name == func), "pty.rs: `{func}` must stay on the main thread for byte order");
+        }
     }
 
     /// Rule 5: what the wall polls scales per call, never per terminal. One
@@ -105,27 +150,55 @@ mod tests {
     /// project roots off disk, on a poll — squarely the shape that must never
     /// run on the WebView main thread.
     #[test]
-    fn heavy_devmap_commands_stay_async() {
+    fn heavy_devmap_commands_stay_off_the_main_thread() {
         let src = include_str!("devmap.rs");
-        assert_async_command(src, "devmap.rs", "dev_servers_scan");
-        assert_async_command(src, "devmap.rs", "dev_server_stop");
-        assert_async_command(src, "devmap.rs", "dev_server_stop_plan");
-        assert_async_command(src, "devmap.rs", "dev_server_probe");
+        assert_off_main_command(src, "devmap.rs", "dev_server_set_thumb");
+        assert_off_main_command(src, "devmap.rs", "dev_servers_scan");
+        assert_off_main_command(src, "devmap.rs", "dev_server_stop");
+        assert_off_main_command(src, "devmap.rs", "dev_server_stop_plan");
+        assert_off_main_command(src, "devmap.rs", "dev_server_probe");
     }
 
     /// Uninstalling an extension deletes its directory tree from disk —
-    /// filesystem work that must not run on the WebView main thread. (The
-    /// command lives in lib.rs as a private fn, so the assertion is spelled
-    /// inline rather than through `assert_async_command`'s `pub fn` shape.)
+    /// filesystem work that must not run on the WebView main thread.
     #[test]
-    fn extension_uninstall_stays_async() {
-        let src = include_str!("lib.rs");
-        assert!(
-            src.contains("#[tauri::command(async)]\nfn extension_uninstall"),
-            "lib.rs: `extension_uninstall` must be `#[tauri::command(async)]` — \
-             fs::remove_dir_all must not run on the WebView main thread \
-             (see docs/perf-budget.md)"
-        );
+    fn extension_uninstall_stays_off_the_main_thread() {
+        assert_off_main_command(include_str!("lib.rs"), "lib.rs", "extension_uninstall");
+    }
+
+    /// The rest of lib.rs's disk, database, webview and probe work: the
+    /// extension installs, the browser tab commands (each waits on a webview),
+    /// the boot snapshot (two user-config trees), a plan's build marks and
+    /// handoff file, the drafter's suggestions, the exports (a save dialog,
+    /// then a write) and the install-status reads.
+    #[test]
+    fn lib_disk_and_webview_commands_stay_off_the_main_thread() {
+        let lib = include_str!("lib.rs");
+        for func in [
+            "local_install_inspect",
+            "local_install_confirm",
+            "extension_reload",
+            "browser_set_tabs",
+            "browser_navigate",
+            "browser_eval",
+            "browser_url",
+            "browser_set_view",
+            "bootstrap_state",
+            "mark_plan_build",
+            "write_plan_handoff",
+            "set_session_project",
+            "resume_startup_cwd",
+            "draft_suggestion_unresolve",
+            "export_revision_markdown",
+            "export_revision_docx",
+            "save_revision_to_obsidian",
+            "get_hook_status",
+            "get_codex_hook_status",
+            "get_codex_skill_status",
+            "get_skill_status",
+        ] {
+            assert_off_main_command(lib, "lib.rs", func);
+        }
     }
 
     /// The marketplace commands fetch over the network, hash artifacts, and
@@ -149,39 +222,33 @@ mod tests {
     /// and writes a PNG. Blocking the WebView thread on any of that would
     /// freeze the app for the length of every capture.
     #[test]
-    fn heavy_thumbs_commands_stay_async() {
+    fn heavy_thumbs_commands_stay_off_the_main_thread() {
         let src = include_str!("thumbs.rs");
-        assert_async_command(src, "thumbs.rs", "browser_take_thumbnail");
-        assert_async_command(src, "thumbs.rs", "thumbs_list");
-        assert_async_command(src, "thumbs.rs", "thumbs_prune");
-    }
-
-    /// A private `fn` variant of `assert_async_command` — commands defined in
-    /// `lib.rs` are module-private, not `pub`.
-    fn assert_async_private_command(src: &str, file: &str, func: &str) {
-        let plain = format!("#[tauri::command(async)]\nfn {func}");
-        let already_async = format!("#[tauri::command(async)]\nasync fn {func}");
-        assert!(
-            src.contains(&plain) || src.contains(&already_async),
-            "{file}: `{func}` must be `#[tauri::command(async)]` — heavy work must \
-             not run on the WebView main thread (see docs/perf-budget.md)"
-        );
+        assert_off_main_command(src, "thumbs.rs", "browser_take_thumbnail");
+        assert_off_main_command(src, "thumbs.rs", "thumbs_list");
+        assert_off_main_command(src, "thumbs.rs", "thumbs_prune");
+        // The memory shots: a directory listing, a file delete, the policy and
+        // the caption counts in SQLite.
+        let shots = include_str!("shots.rs");
+        for func in ["shots_list", "shot_forget", "shots_get_policy", "shots_set_policy", "shots_caption_backlog"] {
+            assert_off_main_command(shots, "shots.rs", func);
+        }
     }
 
     /// The Bookshelf writes the document itself on the drafter's 400ms persist
     /// debounce — a full TipTap JSON serialize plus a SQLite upsert, per pause in
-    /// typing. Squarely perf-budget rule 4, and the reason `drafter_set_doc` went
-    /// `(async)` when the fidelity source moved out of localStorage. The digest
+    /// typing. Squarely perf-budget rule 4, and the reason `drafter_set_doc` left
+    /// the main thread when the fidelity source moved out of localStorage. The digest
     /// probe in `codehealth::probe_command_hygiene` would flag a regression here
     /// too; this fails the build, which is faster.
     #[test]
-    fn bookshelf_document_writes_stay_async() {
+    fn bookshelf_document_writes_stay_off_the_main_thread() {
         let src = include_str!("lib.rs");
-        assert_async_private_command(src, "lib.rs", "drafter_set_doc");
-        assert_async_private_command(src, "lib.rs", "drafter_get_doc");
+        assert_off_main_command(src, "lib.rs", "drafter_set_doc");
+        assert_off_main_command(src, "lib.rs", "drafter_get_doc");
         // The Shipwright walks the repo and shells out to git before it spawns
         // anything — never on the main thread.
-        assert_async_private_command(src, "lib.rs", "shipwright_agent");
+        assert_off_main_command(src, "lib.rs", "shipwright_agent");
     }
 
     /// Every Bookshelf command touches SQLite, and the two delete commands
@@ -214,9 +281,9 @@ mod tests {
     /// aggregates compaction stats — on the main thread it froze the UI for the
     /// length of the walk, once a minute, forever.
     #[test]
-    fn memory_status_stays_async() {
+    fn memory_status_stays_off_the_main_thread() {
         let src = include_str!("lib.rs");
-        assert_async_private_command(src, "lib.rs", "memory_status");
+        assert_off_main_command(src, "lib.rs", "memory_status");
         // …and it must stay INCREMENTAL. The full re-hash belongs on the 6h
         // keeper watch, not on a poll.
         assert!(
@@ -233,9 +300,10 @@ mod tests {
     /// seconds. A sync command waits for it on the macOS main thread, and the
     /// app beach-balls (the 2026-09-29 diag: main thread inside
     /// `get_work_graph` → SQLite `pagerStress`). Pinned by name, so a refactor
-    /// that drops one `(async)` fails here.
+    /// that puts one back on the main thread fails here. The mirror's commands
+    /// write the vault on disk (and two ask for its folder first).
     #[test]
-    fn memory_surface_commands_stay_async() {
+    fn memory_surface_commands_stay_off_the_main_thread() {
         let lib = include_str!("lib.rs");
         for func in [
             "memory_catalog_health",
@@ -243,6 +311,7 @@ mod tests {
             "ledger_get_capture_external",
             "ledger_set_capture_external",
             "memory_embed_settings",
+            "memory_set_embed_provider",
             "classmem_tree",
             "classmem_node",
             "classmem_proposals",
@@ -252,18 +321,31 @@ mod tests {
             "classmem_revert_run",
             "ledger_list_events",
             "ledger_prompt_body",
-            "mirror_status",
+            "ledger_prompt_models",
+            "ledger_query",
+            "context_stats",
+            "context_thread_tree",
+            "memory_map",
             "memory_forget",
             "memory_note_write",
+            "export_context_bundle",
+            "context_search",
+            "memory_restore",
+            "mirror_status",
+            "mirror_sync",
+            "mirror_rebuild",
+            "set_mirror_dir",
+            "pick_mirror_dir",
+            "create_memory_vault",
         ] {
-            assert_async_private_command(lib, "lib.rs", func);
+            assert_off_main_command(lib, "lib.rs", func);
         }
         let work = include_str!("work.rs");
-        assert_async_command(work, "work.rs", "get_work_graph");
-        assert_async_command(work, "work.rs", "work_ready_count");
+        assert_off_main_command(work, "work.rs", "get_work_graph");
+        assert_off_main_command(work, "work.rs", "work_ready_count");
         let memchat = include_str!("memchat.rs");
-        assert_async_command(memchat, "memchat.rs", "memchat_thread");
-        assert_async_command(memchat, "memchat.rs", "memchat_clear");
+        assert_off_main_command(memchat, "memchat.rs", "memchat_thread");
+        assert_off_main_command(memchat, "memchat.rs", "memchat_clear");
     }
 
     /// `memory_catalog_health` must not route through `MemoryApi::health()`,
@@ -375,6 +457,78 @@ mod tests {
         );
     }
 
+    /// `(async)` on a sync body, or an `async fn` command that never awaits,
+    /// builds a tokio task type for that one command: ~11 KB of release binary
+    /// each (docs/perf-budget.md rule 4). A sync body goes in
+    /// OFF_MAIN_COMMANDS instead, for the cost of a string, so an async
+    /// command is one that awaits.
+    #[test]
+    fn sync_commands_ride_the_pool_not_async_tasks() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let (mut async_commands, mut offenders) = (0, Vec::new());
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).unwrap();
+            async_commands += async_task_offenders(&path.file_name().unwrap().to_string_lossy(), &src, &mut offenders);
+        }
+        assert!(async_commands > 10, "the scan found almost no async commands: it is not reading the sources");
+        assert!(offenders.is_empty(), "name these in OFF_MAIN_COMMANDS as plain sync commands: {offenders:#?}");
+    }
+
+    /// One file's share of that scan: pushes each `(async)` sync body and each
+    /// `async fn` command that never awaits, and returns how many async
+    /// commands it read.
+    fn async_task_offenders(file: &str, src: &str, offenders: &mut Vec<String>) -> usize {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut async_commands = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if !matches!(line.trim(), "#[tauri::command(async)]" | "#[tauri::command]") {
+                continue;
+            }
+            let Some(at) = lines[i + 1..].iter().position(|l| l.contains("fn ")) else { continue };
+            let signature = lines[i + 1 + at];
+            if !signature.contains("async fn ") {
+                if line.trim() != "#[tauri::command]" {
+                    offenders.push(format!("{file}: `(async)` on a sync body: {}", signature.trim()));
+                }
+                continue;
+            }
+            async_commands += 1;
+            // The body runs to the function's closing brace at column 0, or
+            // ends on the signature's own line when it closes there.
+            let body: String = if signature.contains('{') && signature.trim_end().ends_with('}') {
+                signature.to_string()
+            } else {
+                lines[i + 1 + at..].iter().take_while(|l| **l != "}").copied().collect()
+            };
+            if !body.contains(".await") {
+                offenders.push(format!("{file}: an async fn that never awaits: {}", signature.trim()));
+            }
+        }
+        async_commands
+    }
+
+    /// The scan itself: a one-line body is read alone, so it cannot borrow
+    /// the `.await` of the function after it.
+    #[test]
+    fn the_async_scan_reads_each_body_alone() {
+        let src = "#[tauri::command]\npub async fn ready() -> bool { probe() }\n\nasync fn later() {\n    tick().await;\n}\n\
+                   #[tauri::command]\npub async fn awaits(app: AppHandle) -> Result<(), String> { run(app).await }\n\
+                   #[tauri::command(async)]\npub fn sync_body() {}\n";
+        let mut offenders = Vec::new();
+        assert_eq!(async_task_offenders("x.rs", src, &mut offenders), 2);
+        assert_eq!(
+            offenders,
+            [
+                "x.rs: an async fn that never awaits: pub async fn ready() -> bool { probe() }",
+                "x.rs: `(async)` on a sync body: pub fn sync_body() {}",
+            ]
+        );
+    }
+
     /// The handler routes `OFF_MAIN_COMMANDS` and `IN_ORDER_COMMANDS` to the
     /// blocking pool, and every name there is a registered command: a name
     /// the generated handler doesn't know would be answered by nobody, and its
@@ -393,6 +547,26 @@ mod tests {
         for name in &off_main {
             assert!(registered.contains(&name.as_str()), "lib.rs names `{name}` off the main thread, but it is not registered");
         }
+    }
+
+    /// The agent harnesses: every agent command reads or writes its SQLite
+    /// table, and uninstalling a harness removes its link on disk.
+    #[test]
+    fn harness_commands_stay_off_the_main_thread() {
+        let harness = include_str!("harness.rs");
+        for func in [
+            "harness_agent_create",
+            "harness_agent_list",
+            "harness_agent_update",
+            "harness_agent_set_starred",
+            "harness_agent_set_folder",
+            "harness_agent_delete",
+            "harness_agent_duplicate",
+            "harness_preview_discard",
+        ] {
+            assert_off_main_command(harness, "harness.rs", func);
+        }
+        assert_off_main_command(include_str!("userconfig.rs"), "userconfig.rs", "harness_uninstall");
     }
 
     /// Adding or removing a watch restarts the FSEvents stream. The commands

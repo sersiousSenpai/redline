@@ -43,7 +43,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-toml = "0.8"
+toml = "1"
 # `unstable` enables the multi-webview API (embedding a native child webview
 # inside the main window — the embedded browser pane). It's the only supported
 # way to do in-window child webviews in Tauri 2 today; the JS `new Webview(...)`

@@ -402,12 +402,13 @@ struct PtyExit {
     id: String,
 }
 
-// Spawn/kill/resize/cwd run `#[tauri::command(async)]` (off the main IPC
-// thread): spawn forks a process, cwd shells out to `lsof` every poll tick,
-// and none of them need main-thread ordering. `pty_write`/`pty_ack` stay sync
-// on purpose — main-thread invocation order is what guarantees keystroke byte
-// order. The JS side (`enqueuePtyOp`) already fences spawn/kill/resize per id.
-#[tauri::command(async)]
+// Spawn/kill/resize/cwd run on the blocking pool by name (`OFF_MAIN_COMMANDS`
+// in lib.rs), off the main IPC thread: spawn forks a process, cwd shells out
+// to `lsof` every poll tick, and none of them need main-thread ordering.
+// `pty_write`/`pty_ack` stay sync on purpose — main-thread invocation order is
+// what guarantees keystroke byte order. The JS side (`enqueuePtyOp`) already
+// fences spawn/kill/resize per id.
+#[tauri::command]
 pub fn pty_spawn(
     app: AppHandle,
     state: tauri::State<'_, PtyState>,
@@ -750,7 +751,7 @@ pub struct PtyInfo {
     alive: bool,
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_list(state: tauri::State<'_, PtyState>) -> Vec<PtyInfo> {
     state.entries()
 }
@@ -768,7 +769,7 @@ fn attach_session(
 
 /// Rebind an existing shell without forking it. Replay and live writes use one
 /// ordering lock, so the new xterm receives each retained byte exactly once.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_attach(
     state: tauri::State<'_, PtyState>,
     id: String,
@@ -780,7 +781,7 @@ pub fn pty_attach(
 
 /// Unmount releases only this subscriber; an earlier mount's cleanup cannot
 /// detach the successor. The shell and bounded replay continue until close.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_detach(state: tauri::State<'_, PtyState>, id: String, attachment_id: String) {
     if let Some(session) = session_of(&state, &id) {
         let output = lock_ok(&session).output.clone();
@@ -794,7 +795,7 @@ pub fn pty_is_live(state: tauri::State<'_, PtyState>, id: String) -> bool {
     state.is_live(&id)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_resize(
     state: tauri::State<'_, PtyState>,
     id: String,
@@ -830,7 +831,7 @@ pub fn pty_ack(
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), String> {
     // Remove from the registry (outer lock only), then kill the underlying
     // child outside any lock.
@@ -941,7 +942,7 @@ fn ppid_of(pid: u32) -> Option<u32> {
 /// The live working directory of a terminal's shell — so "open a terminal
 /// here" can follow wherever the user `cd`'d. macOS/Linux: ask `lsof` for the
 /// shell pid's `cwd` fd. Returns `None` if it can't be determined.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> {
     let session = session_of(&state, &id)?;
     let pid = lock_ok(&session).pid?;
@@ -962,7 +963,7 @@ pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> 
 /// existed to contain). Ids with no live session, no pid, or no `lsof` answer
 /// are simply absent from the map — absence is the "keep your last-known label"
 /// signal, never an error.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_cwds(state: tauri::State<'_, PtyState>, ids: Vec<String>) -> HashMap<String, String> {
     let mut pid_to_id: HashMap<u32, String> = HashMap::new();
     for id in ids {
@@ -1037,7 +1038,7 @@ pub struct TermProc {
 /// `ps` process table and one `lsof` of listening sockets — never one per
 /// terminal (perf-budget rule 5). The process table also serves the
 /// listener → shell ancestry walk, which would otherwise fork a `ps` per hop.
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_procs(state: tauri::State<'_, PtyState>) -> Vec<TermProc> {
     let terminals = foreground_snapshot(&state);
     if terminals.is_empty() {
@@ -1791,7 +1792,7 @@ mod tests {
     }
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
     // Drain the map (outer lock only), then kill each child outside the lock
     // so one stuck killer can't block the others.

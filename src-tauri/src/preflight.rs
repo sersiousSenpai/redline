@@ -281,7 +281,7 @@ pub fn codex_auth_present(auth_json: &str) -> bool {
 /// Read only the top-level model; a profile's unrelated model must not become
 /// the Default choice. Invalid TOML and empty values are unavailable answers.
 pub fn configured_codex_model(text: &str) -> Option<String> {
-    text.parse::<toml::Value>().ok()?.get("model")?.as_str()
+    text.parse::<toml::Table>().ok()?.get("model")?.as_str()
         .map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
 }
 

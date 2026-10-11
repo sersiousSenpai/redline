@@ -175,9 +175,10 @@ pub fn find_icon(root: &Path) -> Option<String> {
 /// repo and no logo still answers, and the frontend draws a monogram from
 /// `name`.
 ///
-/// `(async)` because it walks ancestors and hashes files — exactly the shape
-/// that must not run on the WebView main thread (see `docs/perf-budget.md`).
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) because it walks ancestors and
+/// hashes files — exactly the shape that must not run on the WebView main
+/// thread (see `docs/perf-budget.md`).
+#[tauri::command]
 pub fn repo_icon(cwd: String) -> RepoIcon {
     let root = project_root(Path::new(&cwd));
     let name = root

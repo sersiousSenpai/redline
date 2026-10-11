@@ -2970,7 +2970,7 @@ fn extension_set_enabled(
 /// Uninstall an extension: drop it from the registry, revoke its token
 /// immediately (B4 — per-boot rotation alone is too slow a revocation for
 /// an explicit uninstall), and delete its folder.
-#[tauri::command(async)]
+#[tauri::command]
 fn extension_uninstall(name: String) -> Result<(), String> {
     let dir = extension_host::remove(&name)?;
     auth::revoke_grant(&name);
@@ -3015,7 +3015,7 @@ enum LocalInstallPreview {
 /// Inspect a folder for local install: what is it, and what would it get?
 /// Read-only — hard errors carry the validator's reason, the same posture
 /// as the marketplace's pre-consent checks.
-#[tauri::command(async)]
+#[tauri::command]
 fn local_install_inspect(path: String) -> Result<LocalInstallPreview, String> {
     let folder = std::path::Path::new(&path);
     match local_install::detect(folder)? {
@@ -3043,7 +3043,7 @@ fn local_install_inspect(path: String) -> Result<LocalInstallPreview, String> {
 /// a code extension — hot-load it through the same arm the marketplace
 /// uses, so it runs now, not at the next launch. No registry, no sha256:
 /// the folder the user picked and confirmed is the consent.
-#[tauri::command(async)]
+#[tauri::command]
 fn local_install_confirm(
     store: tauri::State<'_, SessionStore>,
     path: String,
@@ -3096,7 +3096,7 @@ fn local_install_confirm(
 /// through the link and re-registers — fresh token, fresh strikes, same
 /// enabled/disabled choice. Works for any installed extension, but exists
 /// for the linked ones.
-#[tauri::command(async)]
+#[tauri::command]
 fn extension_reload(store: tauri::State<'_, SessionStore>, name: String) -> Result<(), String> {
     if !extension::valid_name(&name) {
         return Err(format!("invalid extension name {name:?}"));
@@ -4166,6 +4166,11 @@ async fn browser_create_tab(app: AppHandle, label: String, url: String, css: Opt
     configure_browser_tab(&app, &setup_label, css.as_deref().unwrap_or(""), website.as_deref().unwrap_or("default"), zoom.unwrap_or(1.0), selection_actions.unwrap_or(true))
 }
 
+/// Set a freshly created or woken tab up: gestures, autoresize, the floating
+/// overlays' cut-outs, Redline's user scripts, and the new-window UI delegate
+/// (installed here, once per webview, NOT from `install_user_scripts`, which
+/// re-runs on every view-filter swap and would otherwise churn the delegate
+/// and drop any open popups).
 fn configure_browser_tab(app: &AppHandle, label: &str, css: &str, website: &str, zoom: f64, selection_actions: bool) -> Result<(), String> {
     let view = app.get_webview(label).ok_or("Browser view unavailable")?;
     browser_enable_gestures(app.clone(), label.to_owned())?;
@@ -6590,7 +6595,7 @@ fn mission_set_active(
 /// `/v1/browser/tabs` registry and cross-tab routes can resolve a tab selector
 /// to a webview label / discussion `browse_id`. Called by `BrowserPane`
 /// whenever the tab list changes (open/close/navigate/title update).
-#[tauri::command(async)]
+#[tauri::command]
 fn browser_set_tabs(
     tabs: tauri::State<'_, BrowserTabs>,
     cache: tauri::State<'_, SnapshotCache>,
@@ -6985,9 +6990,10 @@ struct BootstrapState {
     harnesses: Vec<crate::userconfig::HarnessFileEntry>,
 }
 
-/// `(async)` — reads two user-config trees off disk. Nothing here spawns a
-/// child process, which is the whole point of the split.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) — reads two user-config trees off
+/// disk. Nothing here spawns a child process, which is the whole point of the
+/// split.
+#[tauri::command]
 fn bootstrap_state(
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
@@ -7258,7 +7264,7 @@ fn export_file_name(name: &str, version: u32, stamp: Option<&str>, ext: &str) ->
 /// runtime rather than the main thread, where `blocking_save_file` would
 /// deadlock the event loop. Returns the saved path, or `None` if cancelled.
 #[tauri::command]
-async fn export_revision_markdown(
+fn export_revision_markdown(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     session_id: String,
@@ -7663,7 +7669,7 @@ fn import_shared_plan(
 /// title, shows the save dialog, and writes. `async` for the same
 /// blocking-dialog reason as `export_revision_markdown`.
 #[tauri::command]
-async fn export_revision_docx(
+fn export_revision_docx(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     session_id: String,
@@ -7740,7 +7746,7 @@ fn obsidian_note_filename(title: &str) -> String {
 /// off-the-main-thread `async` reasoning as the export commands (the folder
 /// picker blocks).
 #[tauri::command]
-async fn save_revision_to_obsidian(
+fn save_revision_to_obsidian(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     session_id: String,
@@ -8432,7 +8438,7 @@ fn mark_plan_build_inner(store: &SessionStore, session_id: &str, harness: &str, 
 /// Both build paths from an approved-but-unbuilt plan go through here: one
 /// journal row, and `run_state = "building"` — the chip, and the overnight
 /// queue's exclusion.
-#[tauri::command(async)]
+#[tauri::command]
 fn mark_plan_build(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -8449,7 +8455,7 @@ fn mark_plan_build(
 /// `<app data>/handoff/<sessionId>-v<N>.md`. The hand-off prompt is a short
 /// pointer to this file — the plan itself is never typed into a PTY.
 /// Returns the absolute path.
-#[tauri::command(async)]
+#[tauri::command]
 fn write_plan_handoff(app: AppHandle, store: tauri::State<'_, SessionStore>, session_id: String) -> Result<String, String> {
     let session = store.get(&session_id).ok_or("plan session not found")?;
     if session.status != SessionStatus::Approved {
@@ -8758,7 +8764,7 @@ fn set_session_project_inner(store: &SessionStore, session_id: &str, project_pat
     Ok(())
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn set_session_project(app: AppHandle, store: tauri::State<'_, SessionStore>, session_id: String, project_path: String) -> Result<(), String> {
     set_session_project_inner(&store, &session_id, &project_path)?;
     let _ = app.emit("session-status-changed", SessionEvent { session_id });
@@ -9661,7 +9667,7 @@ fn prepare_restore(
 /// resumes the planning session to IMPLEMENT the plan, and priming would
 /// overwrite the very plan file the agent is about to read with the restore
 /// marker. Claude only; everything else resumes from the project path.
-#[tauri::command(async)]
+#[tauri::command]
 fn resume_startup_cwd(session_id: String, project_path: Option<String>, backend: Option<String>) -> Option<String> {
     resume_cwd_for(&session_id, project_path, backend.as_deref())
 }
@@ -9742,7 +9748,7 @@ fn resurrect_main_window(app: &AppHandle) {
 /// `Webview` class can create/position/show/hide a child webview but cannot
 /// navigate it or run scripts in it, so the browser pane routes those here.
 /// `label` identifies the tab's webview (e.g. "browser-t0").
-#[tauri::command(async)]
+#[tauri::command]
 fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9760,7 +9766,7 @@ fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), St
 /// Evaluate JavaScript inside a browser tab's webview. This is the foundation
 /// for the AI/scripting layer (DOM scraping, JSON export) — each tab can be
 /// scripted independently by label; for now the pane uses it for back/forward.
-#[tauri::command(async)]
+#[tauri::command]
 fn browser_eval(app: AppHandle, label: String, script: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9852,7 +9858,7 @@ fn webview_current_url<R: tauri::Runtime>(wv: &tauri::Webview<R>) -> Option<Stri
 /// bar / tab title in sync with in-page navigation (link clicks, redirects).
 /// A nil URL (tab not yet navigated) reports as the empty string, which the
 /// pane's poll treats as "no change".
-#[tauri::command(async)]
+#[tauri::command]
 fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
     let wv = app
         .get_webview(&label)
@@ -9865,7 +9871,6 @@ fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
 /// `setAllowsBackForwardNavigationGestures` nor `setAllowsMagnification`
 /// (both default off), so we reach the native WKWebView through
 /// `with_webview()` and send the selectors with objc2. No-op on non-macOS.
-#[tauri::command]
 fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
@@ -9914,7 +9919,6 @@ fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> 
 /// the delta and the webview still takes it all, so one mask serves both cases.)
 /// `syncBounds` still sets the exact rect at settle and on split/divider changes.
 /// macOS-only; a no-op elsewhere.
-#[tauri::command]
 fn browser_enable_autoresize(
     app: AppHandle,
     label: String,
@@ -10681,7 +10685,7 @@ fn install_user_scripts(
 /// flicker across navigation), and is also eval'd into the current page so the
 /// toggle takes effect immediately. An empty `css` clears the filter. macOS-
 /// only; a no-op elsewhere. The CSS comes from the pane's own presets.
-#[tauri::command(async)]
+#[tauri::command]
 fn browser_set_view(
     app: AppHandle,
     label: String,
@@ -10701,43 +10705,6 @@ fn browser_set_view(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (wv, css, selection_actions);
-    }
-    Ok(())
-}
-
-/// Install Redline's always-on browser user scripts (the in-window fullscreen
-/// shim, the new-tab interceptor, and — when the toggle is on — the
-/// highlight-to-chat selection bar) on a freshly created tab, with no view
-/// filter. Invoked at tab creation AND on every wake from suspension, so video
-/// fullscreen and the selection bar work before any "View" filter is applied;
-/// `browser_set_view` later re-installs the same set alongside its CSS.
-/// Also installs the new-window UI delegate here (once per webview, NOT from
-/// `install_user_scripts`, which re-runs on every view-filter swap and would
-/// otherwise churn the delegate and drop any open popups). macOS-only; a no-op
-/// elsewhere.
-#[tauri::command(async)]
-fn browser_install_shims(
-    app: AppHandle,
-    label: String,
-    selection_actions: Option<bool>,
-) -> Result<(), String> {
-    let wv = app
-        .get_webview(&label)
-        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
-    #[cfg(target_os = "macos")]
-    {
-        browser_events::install(app.clone(), &wv)?;
-        install_user_scripts(&wv, "", selection_actions.unwrap_or(true))?;
-        // Give this webview OAuth/SSO popup support (window.open with features →
-        // a real popup window with a live opener). Best-effort: a failure here
-        // must not block the tab from working.
-        if let Err(e) = browser_popup::install_new_window_delegate(&wv) {
-            eprintln!("browser_popup: failed to install new-window delegate: {e}");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (wv, selection_actions);
     }
     Ok(())
 }
@@ -10833,7 +10800,7 @@ async fn browser_eval_result(
 // ---------------------------------------------------------------------------
 
 /// Most-recent-first ledger events for the Ledger pane.
-#[tauri::command(async)]
+#[tauri::command]
 fn ledger_list_events(
     store: tauri::State<'_, SessionStore>,
     limit: Option<i64>,
@@ -10846,7 +10813,7 @@ fn ledger_list_events(
 
 /// Re-walk the hash chain and report whether it verifies (and the first bad seq
 /// if not).
-#[tauri::command(async)]
+#[tauri::command]
 fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainVerdict, String> {
     store
         .database()
@@ -10855,7 +10822,7 @@ fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainV
 }
 
 /// Fetch a stored prompt body by id (the Ledger pane's body viewer).
-#[tauri::command(async)]
+#[tauri::command]
 fn ledger_prompt_body(
     store: tauri::State<'_, SessionStore>,
     id: i64,
@@ -10865,8 +10832,9 @@ fn ledger_prompt_body(
 
 /// `(prompt_id, model)` for every prompt with a recorded model — the Memory
 /// inspector joins this onto its event rows for the per-row model chip and the
-/// model filter. `(async)`: a full-table scan that grows with the lake.
-#[tauri::command(async)]
+/// model filter. Off the main thread (`OFF_MAIN_COMMANDS`): a full-table scan
+/// that grows with the lake.
+#[tauri::command]
 fn ledger_prompt_models(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Vec<(i64, String)>, String> {
@@ -10879,8 +10847,9 @@ fn ledger_prompt_models(
 /// Filtered, cursor-paged Timeline query — the Memory surface's spine.
 /// `ledger_list_events` above keeps its single capped read for the pill's
 /// quick inspector; this one chains pages via `filters.before_seq`, so the
-/// whole history is reachable. `(async)`: pages join provenance per row.
-#[tauri::command(async)]
+/// whole history is reachable. Off the main thread (`OFF_MAIN_COMMANDS`): pages
+/// join provenance per row.
+#[tauri::command]
 fn ledger_query(
     store: tauri::State<'_, SessionStore>,
     filters: context::LedgerFilters,
@@ -10891,7 +10860,7 @@ fn ledger_query(
 /// Aggregate counts (per day / surface / kind / class / author) — the Memory
 /// surface's facet rails + activity ribbon. Same builder as
 /// `GET /v1/context/stats`, one thin caller each.
-#[tauri::command(async)]
+#[tauri::command]
 fn context_stats(store: tauri::State<'_, SessionStore>) -> Result<context::ContextStats, String> {
     Ok(context::build_stats_cached(&store.database()))
 }
@@ -10900,14 +10869,14 @@ fn context_stats(store: tauri::State<'_, SessionStore>) -> Result<context::Conte
 /// kinds (Second Brain P5, §3). Data only — the deterministic seeded layout is
 /// the frontend's pure `memoryMap.ts`. No route twin: the Map is a GUI-only
 /// view, agents keep reading the structured routes.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_map(store: tauri::State<'_, SessionStore>) -> Result<context::MemoryMapView, String> {
     Ok(context::build_memory_map(&store.database()))
 }
 
 /// BM25 search over captured browse pages — the Timeline's page-content
 /// search. Same query/clamp discipline as `GET /v1/context/browse/search`.
-#[tauri::command(async)]
+#[tauri::command]
 fn context_search(
     store: tauri::State<'_, SessionStore>,
     q: String,
@@ -10921,7 +10890,7 @@ fn context_search(
 
 /// One session-tree node with parent + child digests — the Timeline's session
 /// grouping drill-down. Same assembly as `GET /v1/context/tree/:kind/:id`.
-#[tauri::command(async)]
+#[tauri::command]
 fn context_thread_tree(
     store: tauri::State<'_, SessionStore>,
     kind: String,
@@ -10932,7 +10901,7 @@ fn context_thread_tree(
 
 /// Read/write the capture toggle for external harness sessions (default on).
 /// The shared ingest observer applies it to every provider's prompt adapter.
-#[tauri::command(async)]
+#[tauri::command]
 fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
     store
         .database()
@@ -10941,7 +10910,7 @@ fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
         .unwrap_or(true)
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 fn ledger_set_capture_external(
     store: tauri::State<'_, SessionStore>,
     enabled: bool,
@@ -11159,10 +11128,10 @@ fn record_plan_launch(
 /// existing 400ms persist debounce; the title is derived here (first ATX
 /// heading, else first non-blank line) so the frontend sends only the content.
 ///
-/// `(async)` because it now serializes a whole TipTap document on that debounce
-/// — perf-budget rule 4 governs exactly this, and `codehealth`'s own
-/// `command_hygiene` probe would flag it otherwise.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) because it now serializes a whole
+/// TipTap document on that debounce — perf-budget rule 4 governs exactly this,
+/// and `codehealth`'s own `command_hygiene` probe would flag it otherwise.
+#[tauri::command]
 fn drafter_set_doc(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -11207,7 +11176,7 @@ fn record_render_crash(
 /// The document the Bookshelf stores: `{docJson, docMarkdown, projectPath}`.
 /// `PromptDrafter` loads from here instead of localStorage — localStorage now
 /// keeps only the *currently open* draft id, which is a UI preference.
-#[tauri::command(async)]
+#[tauri::command]
 fn drafter_get_doc(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
@@ -11326,7 +11295,7 @@ fn draft_suggestion_resolve(
 /// back to. No extension event: `SUGGESTION_RESOLVED` announces a verdict,
 /// and this is a verdict being taken back, not a new one; the eventual
 /// re-resolve publishes normally.
-#[tauri::command(async)]
+#[tauri::command]
 fn draft_suggestion_unresolve(
     store: tauri::State<'_, SessionStore>,
     id: String,
@@ -11615,40 +11584,6 @@ async fn shipwright_agent(
     })
 }
 
-/// Every finding the Shipwright has ever produced, for the review strip.
-#[tauri::command(async)]
-fn shipwright_findings(
-    store: tauri::State<'_, SessionStore>,
-    include_dismissed: bool,
-) -> Result<Vec<db::ShipwrightFinding>, String> {
-    store
-        .database()
-        .list_shipwright_findings(include_dismissed)
-        .map_err(|e| e.to_string())
-}
-
-/// Record what the user did with a finding: `accepted` (it survived the trim
-/// into the launched document) or `dismissed` (it never comes back under the
-/// same wording). `shipped` is NOT settable here — it is detected.
-#[tauri::command(async)]
-fn shipwright_resolve(
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-    status: String,
-    draft_id: Option<String>,
-) -> Result<(), String> {
-    if !matches!(status.as_str(), "accepted" | "dismissed" | "pending") {
-        return Err(format!(
-            "`{status}` is not a user verdict — `shipped` is detected from the \
-             files a later commit touched, never self-declared"
-        ));
-    }
-    store
-        .database()
-        .resolve_shipwright_finding(&id, &status, draft_id.as_deref())
-        .map_err(|e| e.to_string())
-}
-
 /// Flip accepted findings to `shipped` when a later commit touched a file their
 /// `files` array named. **Detection, not self-declaration** — self-declared
 /// success is the one number an agent will always report favourably. Returns
@@ -11755,7 +11690,7 @@ fn mcp_config_snippet() -> Result<serde_json::Value, String> {
 /// stop flagging that plan as un-exported. Returns the saved path, or `None` if
 /// the save dialog was cancelled.
 #[tauri::command]
-async fn export_context_bundle(
+fn export_context_bundle(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     scope: String,
@@ -11823,7 +11758,7 @@ async fn export_context_bundle(
 }
 
 /// Current mirror status for the settings surface.
-#[tauri::command(async)]
+#[tauri::command]
 fn mirror_status(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
     Ok(mirror::status(&store.database()))
 }
@@ -11831,7 +11766,7 @@ fn mirror_status(store: tauri::State<'_, SessionStore>) -> Result<mirror::Mirror
 /// Point the mirror at a directory chosen via a native folder picker (empty ⇒
 /// off). Does a full sync so the directory immediately reflects the ledger.
 #[tauri::command]
-async fn pick_mirror_dir(
+fn pick_mirror_dir(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Option<mirror::MirrorStatus>, String> {
@@ -11847,7 +11782,7 @@ async fn pick_mirror_dir(
 
 /// Set (or clear, when empty) the mirror directory by path.
 #[tauri::command]
-async fn set_mirror_dir(
+fn set_mirror_dir(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     dir: String,
@@ -11859,7 +11794,7 @@ async fn set_mirror_dir(
 
 /// Rebuild the configured mirror from scratch (the recovery path if it drifts).
 #[tauri::command]
-async fn mirror_rebuild(
+fn mirror_rebuild(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
 ) -> Result<mirror::MirrorStatus, String> {
@@ -11870,7 +11805,7 @@ async fn mirror_rebuild(
 
 /// Sync any new ledger events into the mirror now (also runs on a timer).
 #[tauri::command]
-async fn mirror_sync(
+fn mirror_sync(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<mirror::MirrorStatus, String> {
     let db = store.database();
@@ -11886,7 +11821,7 @@ async fn mirror_sync(
 /// full sync. Returns `None` if the picker was cancelled. Safe by construction:
 /// the mirror is one-way and namespace-scoped, so it never clobbers other notes.
 #[tauri::command]
-async fn create_memory_vault(
+fn create_memory_vault(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Option<mirror::MirrorStatus>, String> {
@@ -11947,11 +11882,12 @@ async fn classmem_organize(
 /// need in a single read. `live` is always true (the keeper is always running);
 /// `backlog` is un-organized ledger growth; `chainOk` is a live re-verify.
 ///
-/// `(async)` and INCREMENTAL, both deliberately: this fires on a 60s poll and
-/// on every browse capture, and it used to re-hash the entire ledger chain on
-/// the WebView main thread — the exact shape `perf_guard.rs` exists to catch.
+/// Off the main thread (`OFF_MAIN_COMMANDS`) and INCREMENTAL, both
+/// deliberately: this fires on a 60s poll and on every browse capture, and it
+/// used to re-hash the entire ledger chain on the WebView main thread — the
+/// exact shape `perf_guard.rs` exists to catch.
 /// The full chain walk still runs, on the 6h `ledger-backup` keeper watch.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Value, String> {
     let db = store.database();
     let max_seq = db.max_ledger_seq().map_err(|e| e.to_string())?;
@@ -12038,7 +11974,7 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
 /// The key is stored in `app_settings` and read only in Rust; it never crosses
 /// into the webview, and the network call is made from here. Same shape as the
 /// premium TTS engines (`tts.rs`).
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_set_embed_provider(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -12064,7 +12000,7 @@ fn memory_set_embed_provider(
 
 /// What the settings row shows: the configured provider and whether a key is
 /// present. The key itself is NEVER returned — only whether one is set.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_embed_settings(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<serde_json::Value, String> {
@@ -12093,7 +12029,7 @@ fn memory_embed_settings(
 /// Returns `false` when there is nothing archived: never compacted, compacted
 /// before archiving existed, or forgotten on purpose (a forget deletes the
 /// archive too — forget means forget).
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_restore(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -12116,28 +12052,10 @@ fn memory_restore(
     Ok(restored)
 }
 
-/// Rebuild the semantic index from scratch: drop every vector for the current
-/// model and let the keeper's watch re-embed. The escape hatch for a corrupt or
-/// half-built index — the whole thing is DERIVED, so throwing it away costs
-/// nothing but time and can never touch the record.
-#[tauri::command(async)]
-fn memory_reindex(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-) -> Result<serde_json::Value, String> {
-    let db = store.database();
-    let dropped = db.clear_embeddings().map_err(|e| e.to_string())?;
-    let _ = app.emit("memory-changed", ());
-    Ok(serde_json::json!({
-        "dropped": dropped,
-        "provider": embed::provider_kind().as_str(),
-    }))
-}
-
 /// Explicit forget: release a prompt's words now (a manual compaction). The
 /// ledger keeps the fact that it happened + the original body hash. Returns the
 /// new ledger seq, or `null` if the prompt was already compacted/absent.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_forget(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -12169,7 +12087,7 @@ fn memory_forget(
 /// `none`). Exactly one of `text`/`starred` per call: each act appends one
 /// `note` ledger event; the readable `user_notes` row updates in place.
 /// Rejections (phantom target, no act) surface as command errors.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_note_write(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
@@ -12226,7 +12144,7 @@ fn memory_notes_list(
 }
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_tree(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Vec<polis_core::api::TreeNodeView>, String> {
@@ -12240,7 +12158,7 @@ fn classmem_tree(
 
 /// One node with its children, (label-resolved, supersession-aware) links,
 /// and observations — the same shape the bridge route serves.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_node(
     store: tauri::State<'_, SessionStore>,
     id: String,
@@ -12274,7 +12192,7 @@ struct ProposalView {
 /// The gardener's work queue (promote/split/merge/collapse/supersede — due
 /// and deferred), enriched with the digest preview + citations the surface
 /// shows as "waiting for a run".
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<ProposalView>, String> {
     let db = store.database();
     let rows = db.list_class_proposals().map_err(|e| e.to_string())?;
@@ -12310,7 +12228,7 @@ fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<Propo
 }
 
 /// The latest classifier run (status/summary/session) for the pane header.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_latest_run(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<Option<classmem::ClassRun>, String> {
@@ -12321,7 +12239,7 @@ fn classmem_latest_run(
 /// organize / compaction / observations / revert, with what each did and
 /// cost — the memory surface's run timeline. Same shape as
 /// `GET /v1/memory/runs`.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_runs(limit: Option<i64>) -> Result<Vec<polis_core::types::ClassRun>, String> {
     use polis_core::MemoryApi;
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
@@ -12330,7 +12248,7 @@ fn classmem_runs(limit: Option<i64>) -> Result<Vec<polis_core::types::ClassRun>,
 
 /// One run with its journaled ops (op, subjects, outcome, reason — no image
 /// blobs). Same shape as `GET /v1/memory/runs/:id`.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_run(id: i64) -> Result<Option<polis_core::types::RunView>, String> {
     use polis_core::MemoryApi;
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
@@ -12343,7 +12261,7 @@ fn classmem_run(id: i64) -> Result<Option<polis_core::types::RunView>, String> {
 /// surface shows inline; nothing is deleted, and the revert is itself a run.
 /// Emits what every memory write emits, so the surface, the ledger pane and
 /// the status pill refresh.
-#[tauri::command(async)]
+#[tauri::command]
 fn classmem_revert_run(
     app: AppHandle,
     id: i64,
@@ -12374,7 +12292,7 @@ fn classmem_revert_run(
 /// re-hashes the entire ledger chain first, only to throw that verdict away —
 /// and holds the shared DB lock for the length of the walk. The chain verdict
 /// is `memory_status`'s (incremental) and the Verify button's (full) job.
-#[tauri::command(async)]
+#[tauri::command]
 fn memory_catalog_health() -> Result<Option<polis_core::types::CatalogHealth>, String> {
     let api = polis_host::polis_handle().ok_or("memory is not installed")?;
     Ok(Some(polis_memory::health::catalog_health(&api.view())))
@@ -12389,9 +12307,10 @@ fn memory_catalog_health() -> Result<Option<polis_core::types::CatalogHealth>, S
 // read through `classmem_proposals` as a queue, never as a review list.
 
 
-/// `(async)` — reads and parses `~/.claude/settings.json`. Small, but file I/O
-/// on the main thread is file I/O on the main thread (perf-budget rule 4).
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) — reads and parses
+/// `~/.claude/settings.json`. Small, but file I/O on the main thread is file I/O
+/// on the main thread (perf-budget rule 4).
+#[tauri::command]
 fn get_hook_status() -> HookStatus {
     hook::get_status()
 }
@@ -12414,11 +12333,11 @@ fn install_hook() -> Result<HookStatus, String> {
     result.map(|_| hook::get_status())
 }
 
-/// `(async)` — `available` runs the codex capability probe, which can spawn
-/// `codex --help` (and, on a machine with an exotic install, an interactive
-/// login shell behind it). This was a plain `#[tauri::command]`: a synchronous
-/// subprocess on the UI thread, fired on every boot.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) — `available` runs the codex
+/// capability probe, which can spawn `codex --help` (and, on a machine with an
+/// exotic install, an interactive login shell behind it). It once ran on the
+/// main thread: a synchronous subprocess on the UI thread, fired on every boot.
+#[tauri::command]
 fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
     codex_hook::get_status()
 }
@@ -12446,9 +12365,10 @@ fn install_codex_profile() -> Result<codex_profile::CodexProfileStatus, String> 
     result
 }
 
-/// `(async)` — same reason as `get_skill_status`: reads the installed skill
-/// files off disk and compares them with the shipped ones.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) — same reason as
+/// `get_skill_status`: reads the installed skill files off disk and compares
+/// them with the shipped ones.
+#[tauri::command]
 fn get_codex_skill_status() -> SkillStatus {
     skill::get_codex_status()
 }
@@ -12513,9 +12433,9 @@ fn remove_hook_via_menu(app: &AppHandle) {
         });
 }
 
-/// `(async)` — walks the installed skill directory and diffs its contents
-/// against the shipped payload.
-#[tauri::command(async)]
+/// On the blocking pool (`OFF_MAIN_COMMANDS`) — walks the installed skill
+/// directory and diffs its contents against the shipped payload.
+#[tauri::command]
 fn get_skill_status() -> SkillStatus {
     skill::get_status()
 }
@@ -12593,6 +12513,138 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "runner_review",
     "term_attention_snapshot",
     "thread_meters",
+    // The memory surfaces (pill, inspector, Health, Catalog, Cosmos, Ask) and the
+    // mirror: every one reads or writes SQLite or the vault on disk.
+    "classmem_latest_run",
+    "classmem_node",
+    "classmem_proposals",
+    "classmem_revert_run",
+    "classmem_run",
+    "classmem_runs",
+    "classmem_tree",
+    "context_stats",
+    "context_thread_tree",
+    "create_memory_vault",
+    "export_context_bundle",
+    "ledger_get_capture_external",
+    "ledger_list_events",
+    "ledger_prompt_body",
+    "ledger_prompt_models",
+    "ledger_query",
+    "ledger_set_capture_external",
+    "ledger_verify",
+    "memory_catalog_health",
+    "memory_embed_settings",
+    "memory_forget",
+    "memory_map",
+    "memory_note_write",
+    "memory_set_embed_provider",
+    "memory_status",
+    "mirror_rebuild",
+    "mirror_status",
+    "mirror_sync",
+    "pick_mirror_dir",
+    "set_mirror_dir",
+    // Extensions, the browser tabs, boot and session state, the drafter's document,
+    // exports, and the install-status reads: disk, SQLite, a webview or a probe.
+    "bootstrap_state",
+    "browser_eval",
+    "browser_navigate",
+    "browser_set_tabs",
+    "browser_set_view",
+    "browser_url",
+    "draft_suggestion_unresolve",
+    "drafter_get_doc",
+    "drafter_set_doc",
+    "export_revision_docx",
+    "export_revision_markdown",
+    "extension_reload",
+    "extension_uninstall",
+    "get_codex_hook_status",
+    "get_codex_skill_status",
+    "get_hook_status",
+    "get_skill_status",
+    "local_install_confirm",
+    "local_install_inspect",
+    "mark_plan_build",
+    "resume_startup_cwd",
+    "save_revision_to_obsidian",
+    "set_session_project",
+    "write_plan_handoff",
+    // The terminals' lifecycle and the wall's polls: a fork, a kill, an lsof or ps
+    // scan. The frontend fences each id's spawn/attach/kill/resize itself
+    // (`enqueuePtyOp`); `pty_write` and `pty_ack` stay on the main thread for
+    // keystroke order.
+    "pty_attach",
+    "pty_cwd",
+    "pty_cwds",
+    "pty_detach",
+    "pty_kill",
+    "pty_kill_all",
+    "pty_list",
+    "pty_procs",
+    "pty_resize",
+    "pty_spawn",
+    // The agent harnesses: the agents table in SQLite, and an installed
+    // harness's link on disk.
+    "harness_agent_create",
+    "harness_agent_delete",
+    "harness_agent_duplicate",
+    "harness_agent_list",
+    "harness_agent_set_folder",
+    "harness_agent_set_starred",
+    "harness_agent_update",
+    "harness_preview_discard",
+    "harness_uninstall",
+    // Files and the views of them: the file explorer and viewer, attachments, the
+    // highlighter (a syntect parse), repo logos (an ancestor walk and hashes), and
+    // the browser's tab pictures and memory shots on disk.
+    "doc_lines",
+    "highlight_diff",
+    "import_attachment",
+    "list_dir",
+    "open_doc",
+    "read_file_base64",
+    "read_text_file",
+    "repo_icon",
+    "save_attachment",
+    "save_text_file",
+    "shot_forget",
+    "shots_caption_backlog",
+    "shots_get_policy",
+    "shots_list",
+    "shots_set_policy",
+    "thumbs_list",
+    "thumbs_prune",
+    // The rest: the Localhost scan and stops (subprocesses, ports, project roots),
+    // hook-conflict scans and file watches, browser workspaces on disk, Build
+    // Redline's patch and preflight, the work graph, Memory Ask's thread, a
+    // page's appearance (waits on its webview), mission findings, and two memory
+    // reads in lib.rs.
+    "browser_set_appearance",
+    "browser_workspace_delete",
+    "browser_workspace_list",
+    "browser_workspace_read",
+    "browser_workspace_write",
+    "context_search",
+    "dev_server_probe",
+    "dev_server_set_thumb",
+    "dev_server_stop",
+    "dev_server_stop_plan",
+    "dev_servers_scan",
+    "get_work_graph",
+    "memchat_clear",
+    "memchat_thread",
+    "memory_restore",
+    "mission_add_finding",
+    "remove_hook_conflicts",
+    "scan_hook_conflicts",
+    "self_develop_discard",
+    "self_develop_patch",
+    "self_develop_preflight",
+    "unwatch_hook_conflicts",
+    "watch_hook_conflicts",
+    "work_ready_count",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls
@@ -12752,7 +12804,6 @@ pub fn run() {
             hook_conflicts::unwatch_hook_conflicts,
             browser_events::browser_inspect,
             browser_events::browser_set_appearance,
-            browser_overlay::browser_overlay_attach,
             browser_overlay::browser_overlay_regions,
             browser_actions::browser_action,
             browser_workspace::browser_protect_tabs,
@@ -12877,7 +12928,6 @@ pub fn run() {
             userconfig::save_workspace,
             userconfig::list_harnesses,
             userconfig::harness_flavor,
-            userconfig::harness_install_from_folder,
             userconfig::harness_uninstall,
             get_relay_config,
             set_relay_config,
@@ -12930,7 +12980,6 @@ pub fn run() {
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
             fsbrowse::save_text_file,
-            fsbrowse::ensure_dir,
             fsbrowse::save_attachment,
             fsbrowse::import_attachment,
             fsbrowse::home_dir,
@@ -13193,10 +13242,7 @@ pub fn run() {
             draft_suggestion_resolve,
             draft_suggestion_unresolve,
             parse_markdown_sections,
-            browser_enable_gestures,
-            browser_enable_autoresize,
             browser_set_view,
-            browser_install_shims,
             ledger_list_events,
             ledger_query,
             ledger_verify,
@@ -13222,7 +13268,6 @@ pub fn run() {
             memory_catalog_health,
             memory_status,
             memory_forget,
-            memory_reindex,
             memory_restore,
             memory_set_embed_provider,
             memory_embed_settings,
@@ -13231,8 +13276,6 @@ pub fn run() {
             memory_notes_list,
             librarian_agent,
             shipwright_agent,
-            shipwright_findings,
-            shipwright_resolve,
             shipwright_detect_shipped,
             export_context_bundle,
             mirror_status,
