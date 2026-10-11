@@ -263,6 +263,21 @@ describe("the tail row", () => {
     expect(host.querySelector('[aria-label="More for this reply"]')).toBeNull();
   });
 
+  it("is offered live wherever the surface's settled replies offer it, on the same stream", () => {
+    // A thread's first turn has no settled reply to open it from; the live
+    // block names the stream its settled row will, so the pane carries over.
+    for (const file of ["ChatRoom", "BrowserChat", "MissionChat", "MemoryAsk", "DrafterSidecar", "ReviewThread", "CommentThread"]) {
+      const source = readFileSync(join(process.cwd(), `src/components/${file}.tsx`), "utf8");
+      const block = /<ReplyBlock\s+phase="live"([\s\S]*?)\n\s*\/?>/g;
+      const stream = (props: string) => /inspect=\{\{ surface: "(\w+)", key: /.exec(props)?.[1];
+      const live = [...source.matchAll(block)].map((m) => stream(m[1]));
+      const settled = [...source.replace(block, "").matchAll(/inspect=\{\{ surface: "(\w+)", key: /g)].map((m) => m[1]);
+      expect(live.length, file).toBeGreaterThan(0);
+      expect(settled.length, file).toBeGreaterThan(0);
+      for (const surface of live) expect(settled, `${file}'s live reply`).toContain(surface);
+    }
+  });
+
   it("signs an error row as Redline's and keeps its text verbatim", async () => {
     await render({ phase: "settled", byline: "Redline", text: "Couldn't reach the agent: <busy>", error: true });
     expect(byline()).toBe("Redline");

@@ -85,6 +85,13 @@ describe("the transcript while a reply streams", () => {
     expect(host.querySelector('[data-reply="live"]')?.textContent).toContain("It is $8 a seat");
     expect(markdown.renders).toBe(settled);
   });
+
+  it("reaches the raw stream from the reply still streaming, a tab's first turn included", async () => {
+    turn.messages = [{ id: "u1", browseId: "thread", role: "user", body: "What does it cost?", status: "complete", createdAt: 1 }];
+    Object.assign(turn, { status: "streaming", liveText: "It" });
+    await show();
+    expect(host.querySelector('[data-reply="live"] [data-reply-tail] [aria-label="More for this reply"]')).not.toBeNull();
+  });
 });
 
 describe("page conversation header", () => {

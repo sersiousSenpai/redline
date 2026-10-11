@@ -215,7 +215,7 @@ export function ReplyBlock({
             retrying={retrying}
             lastOutputAt={output.current.at}
             more={inspect && (
-              <div className="rl-reply-actions">
+              <div className="rl-reply-actions rl-hide-scroll-x">
                 <ReplyMore inspecting={inspecting} onInspect={() => setInspecting((on) => !on)} />
               </div>
             )}

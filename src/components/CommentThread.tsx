@@ -676,6 +676,7 @@ export const CommentThread = memo(function CommentThread({
               {chatInFlight && (
                 <ReplyBlock
                   phase="live"
+                  inspect={{ surface: "fork", key: commentId }}
                   byline={agent}
                   text={liveText}
                   meter={turn.meter}
@@ -742,6 +743,7 @@ export const CommentThread = memo(function CommentThread({
                 // tail is the turn's one status line, filling the wait.
                 <ReplyBlock
                   phase="live"
+                  inspect={{ surface: "fork", key: commentId }}
                   byline={agent}
                   text={liveText}
                   meter={turn.meter}

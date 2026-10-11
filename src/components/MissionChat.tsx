@@ -190,6 +190,7 @@ export function MissionChat({
           // is the turn's one status line, filling the wait.
           <ReplyBlock
             phase="live"
+            inspect={{ surface: "mission", key: missionId }}
             byline={BYLINE}
             text={liveText}
             meter={meter}

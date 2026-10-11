@@ -290,6 +290,7 @@ export function DraftThread({ draftId, commentId }: { draftId: string; commentId
       {streaming && (
         <ReplyBlock
           phase="live"
+          inspect={{ surface: "drafter", key: draftId }}
           byline={provider}
           seat={seat}
           text={liveText}

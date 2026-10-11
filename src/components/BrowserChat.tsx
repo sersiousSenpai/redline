@@ -619,6 +619,7 @@ export const BrowserChat = memo(function BrowserChat({
           // are rows under the text, where a new one moves nothing written.
           <ReplyBlock
             phase="live"
+            inspect={{ surface: "browse", key: browseId }}
             stepsLine={false}
             byline={inFlight?.agent ?? agent}
             seat={harness.pick.model}
