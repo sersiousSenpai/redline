@@ -62,8 +62,7 @@
 //! `{phase: "done", speedRatio, slow}` or `{phase: "error", message}`;
 //! `polish` says it is the polish model's install.
 
-use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -78,7 +77,8 @@ use tauri::ipc::{Channel, JavaScriptChannelId, Response};
 use crate::db::Database;
 use crate::pinned_fetch::fetch_pinned;
 use crate::tts::{
-    build_venv, ensure_uv, FileCheck, TtsState, CANCELLED as STOPPED, DOWNLOAD_STALL,
+    build_venv, ensure_uv, inflate, locked_install, FileCheck, TtsState, CANCELLED as STOPPED,
+    DOWNLOAD_STALL,
 };
 
 const SETTING_MODEL: &str = "tts_studio_model";
@@ -1743,12 +1743,11 @@ impl Inner {
         let lockfile = self.dir.join("requirements.lock");
         std::fs::write(&lockfile, inflate(LOCK_Z))
             .map_err(|e| format!("could not write the studio voice's package list: {e}"))?;
-        let install: Vec<OsString> = ["--require-hashes", "--no-deps", "--no-build", "-r"]
-            .into_iter()
-            .map(OsString::from)
-            .chain([lockfile.into_os_string()])
-            .collect();
-        build_venv(&uv, &self.dir, &install, &|phase| self.setup(phase, 0, 0)).await?;
+        let venv = self.dir.join("venv");
+        build_venv(&uv, &self.dir, &venv, &locked_install(lockfile), &|phase| {
+            self.setup(phase, 0, 0)
+        })
+        .await?;
         Ok(())
     }
 
@@ -1835,12 +1834,6 @@ fn read_record(dir: &Path) -> Value {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_else(|| json!({}))
-}
-
-fn inflate(z: &[u8]) -> String {
-    let mut out = String::new();
-    let _ = flate2::read::DeflateDecoder::new(z).read_to_string(&mut out);
-    out
 }
 
 /// Names the embedded lock in `install.json`, so a Redline that pins other
@@ -3383,7 +3376,7 @@ for line in sys.stdin:
             watched
                 .iter()
                 .map(|d| {
-                    let mut entries: Vec<(OsString, Option<std::time::SystemTime>)> =
+                    let mut entries: Vec<(std::ffi::OsString, Option<std::time::SystemTime>)> =
                         std::fs::read_dir(d)
                             .map(|it| {
                                 it.flatten()

@@ -17,7 +17,9 @@
 //!     phonemizer is GPL, so it lives in a SEPARATE PROCESS and never links into
 //!     Redline's Apache-2.0 binary — we only exchange text and audio bytes over a
 //!     pipe. The ~325 MB fp32 model is downloaded on first use into the app data
-//!     dir. ElevenLabs / Deepgram would slot into the same `match`.
+//!     dir, and its Python packages are installed from a hash-pinned lock
+//!     (`resources/kokoro-requirements.lock`). ElevenLabs / Deepgram would slot
+//!     into the same `match`.
 //!
 //! The premium local voice, `studio`, streams rather than answering one clip
 //! per request, so it has its own commands and module (`tts_studio.rs`). It
@@ -32,6 +34,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -39,6 +42,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
@@ -81,6 +85,11 @@ const CLOUD_TIMEOUT: Duration = Duration::from_secs(20);
 // The Kokoro sidecar script is compiled into the binary and written to disk on
 // first use — no Tauri resource-path / dev-vs-bundle ambiguity to chase.
 const KOKORO_SIDECAR_PY: &str = include_str!("../resources/kokoro_sidecar.py");
+// Kokoro's Python packages, hash-pinned, as a raw deflate stream like the
+// studio voice's lock (a test checks it against its source beside it).
+const KOKORO_LOCK_Z: &[u8] = include_bytes!("../resources/kokoro-requirements.lock.deflate");
+/// In Kokoro's venv: the SHA-256 of the lock it was built from.
+const KOKORO_LOCK_RECORD: &str = "redline-lock.sha256";
 
 // Model files — downloaded on first use. From the kokoro-onnx project's pinned
 // model release. The fp32 model is ~3x faster than the int8 one on Apple CPUs
@@ -174,6 +183,8 @@ pub struct TtsState {
     /// One model download at a time: an Enable click and the background
     /// upgrade must not write the same `.part` file.
     model_dl: Arc<AsyncMutex<()>>,
+    /// One build of Kokoro's Python environment at a time, likewise.
+    runtime_build: Arc<AsyncMutex<()>>,
     /// `KOKORO_TIMEOUT_FLOOR`, a field so tests can make a hang quick to detect.
     kokoro_timeout_floor: Duration,
     /// The studio voice's sidecar, installer and settings (`tts_studio.rs`).
@@ -193,6 +204,7 @@ impl TtsState {
             eleven_sem: Arc::new(Semaphore::new(ELEVEN_MAX_CONCURRENCY)),
             cancelled: Arc::new(StdMutex::new(VecDeque::new())),
             model_dl: Arc::new(AsyncMutex::new(())),
+            runtime_build: Arc::new(AsyncMutex::new(())),
             kokoro_timeout_floor: KOKORO_TIMEOUT_FLOOR,
             studio,
         }
@@ -255,6 +267,19 @@ impl TtsState {
     }
     pub(crate) fn venv_python(&self) -> PathBuf {
         self.venv_dir().join("bin").join("python3")
+    }
+    /// Kokoro speaks from the venv Redline built, and that venv was not built
+    /// from this binary's lock: it predates the lock (installed unpinned), or
+    /// a pin has moved since. A Python the user set up themselves is theirs.
+    fn runtime_stale(&self) -> bool {
+        let ours = self.venv_python();
+        let in_use = self
+            .db
+            .get_setting(SETTING_PYTHON_PATH)
+            .is_some_and(|p| Path::new(p.trim()) == ours);
+        in_use
+            && std::fs::read_to_string(self.venv_dir().join(KOKORO_LOCK_RECORD))
+                .map_or(true, |h| h.trim() != kokoro_lock_hash())
     }
 
     /// Best-effort kill of the warm Kokoro sidecar at app teardown. Runs in a
@@ -843,13 +868,25 @@ pub async fn tts_kokoro_status(tts: tauri::State<'_, TtsState>) -> Result<Kokoro
 /// background of this call (`kokoro-setup` phase `upgrade`), which is why
 /// every caller fires it and forgets it rather than awaiting it. Only the
 /// voice panel and its settings start that 325 MB download: a chat's
-/// read-aloud warms with `upgrade: false`.
+/// read-aloud warms with `upgrade: false`. They also rebuild a Python
+/// environment that wasn't built from this Redline's lock (`runtime_stale`),
+/// quietly and whatever the engine: the studio voice's stand-in and the
+/// end-of-turn model run on it too.
 #[tauri::command]
 pub async fn tts_kokoro_warm(
     tts: tauri::State<'_, TtsState>,
     app: AppHandle,
     upgrade: Option<bool>,
 ) -> Result<(), String> {
+    if upgrade.unwrap_or(true) && tts.model_present() {
+        if let Ok(_one_at_a_time) = tts.runtime_build.try_lock() {
+            if tts.runtime_stale() {
+                if let Err(e) = ensure_kokoro_venv(&tts, None).await {
+                    tracing::warn!(target: "kokoro", "rebuilding the pinned runtime failed, keeping the old one: {e}");
+                }
+            }
+        }
+    }
     let engine = tts.db.get_setting(SETTING_ENGINE).unwrap_or_default();
     if engine != "kokoro" || !tts.model_present() {
         return Ok(());
@@ -1086,15 +1123,19 @@ pub(crate) fn uv_cmd(uv: &Path, root: &Path) -> tokio::process::Command {
     c
 }
 
-/// The three `uv` steps that build `root/venv`: fetch a managed CPython 3.12
-/// (the version onnxruntime and MLX reliably ship wheels for), create the
-/// venv from it, and pip-install `install` into it.
-pub(crate) fn venv_steps(uv: &Path, root: &Path, install: &[OsString]) -> [tokio::process::Command; 3] {
-    let venv = root.join("venv");
+/// The three `uv` steps that build the venv `venv` in `root`: fetch a managed
+/// CPython 3.12 (the version onnxruntime and MLX reliably ship wheels for),
+/// create the venv from it, and pip-install `install` into it.
+pub(crate) fn venv_steps(
+    uv: &Path,
+    root: &Path,
+    venv: &Path,
+    install: &[OsString],
+) -> [tokio::process::Command; 3] {
     let mut python = uv_cmd(uv, root);
     python.args(["python", "install", "3.12", "--no-bin"]);
     let mut create = uv_cmd(uv, root);
-    create.arg("venv").arg(&venv).args(["--python", "3.12"]);
+    create.arg("venv").arg(venv).args(["--python", "3.12"]);
     let mut deps = uv_cmd(uv, root);
     deps.args(["pip", "install", "--python"])
         .arg(venv.join("bin").join("python3"))
@@ -1102,21 +1143,44 @@ pub(crate) fn venv_steps(uv: &Path, root: &Path, install: &[OsString]) -> [tokio
     [python, create, deps]
 }
 
-/// Build Redline's private voice environment in `root` with `uv` (rebuilt
-/// clean each time), none of which touches the user's own Python. `phase`
-/// hears `"python"` and `"deps"` as each part starts. The download cache is
-/// dropped afterwards: the venv's files are its own copies.
+/// What `venv_steps` installs from a lock: exactly the listed wheels, each
+/// checked against its hash, none built from source, and nothing resolved
+/// beyond the list.
+pub(crate) fn locked_install(lockfile: PathBuf) -> Vec<OsString> {
+    ["--require-hashes", "--no-deps", "--no-build", "-r"]
+        .into_iter()
+        .map(OsString::from)
+        .chain([lockfile.into_os_string()])
+        .collect()
+}
+
+/// An embedded lock or script, from its raw deflate stream.
+pub(crate) fn inflate(z: &[u8]) -> String {
+    let mut out = String::new();
+    let _ = flate2::read::DeflateDecoder::new(z).read_to_string(&mut out);
+    out
+}
+
+/// Names the embedded Kokoro lock beside the venv built from it.
+fn kokoro_lock_hash() -> String {
+    format!("{:x}", Sha256::digest(KOKORO_LOCK_Z))
+}
+
+/// Build Redline's private voice environment `venv` in `root` with `uv`
+/// (rebuilt clean each time), none of which touches the user's own Python.
+/// `phase` hears `"python"` and `"deps"` as each part starts. The download
+/// cache is dropped afterwards: the venv's files are its own copies.
 pub(crate) async fn build_venv(
     uv: &Path,
     root: &Path,
+    venv: &Path,
     install: &[OsString],
     phase: &(dyn Fn(&str) + Sync),
 ) -> Result<PathBuf, String> {
-    let [python, create, deps] = venv_steps(uv, root, install);
+    let [python, create, deps] = venv_steps(uv, root, venv, install);
     phase("python");
     run_checked(python, "downloading Python for the voice engine").await?;
-    let venv = root.join("venv");
-    let _ = tokio::fs::remove_dir_all(&venv).await;
+    let _ = tokio::fs::remove_dir_all(venv).await;
     run_checked(create, "creating the private voice environment").await?;
     phase("deps");
     run_checked(deps, "installing the voice engine").await?;
@@ -1124,23 +1188,64 @@ pub(crate) async fn build_venv(
     Ok(venv.join("bin").join("python3"))
 }
 
-/// Build Kokoro's private environment (`build_venv`) with `kokoro-onnx` in
-/// it. Emits `kokoro-setup` phase events.
-async fn ensure_kokoro_venv(tts: &TtsState, app: &AppHandle) -> Result<(), String> {
+/// Build Kokoro's private environment (`build_venv`) from the embedded lock,
+/// beside the one in use, and switch to it once it is complete: a voice
+/// speaking from the old one speaks on until then, and the models stay where
+/// they are. `app` hears `kokoro-setup` phases; a rebuild in the background
+/// passes none. The caller holds `runtime_build`.
+async fn ensure_kokoro_venv(tts: &TtsState, app: Option<&AppHandle>) -> Result<(), String> {
     let uv = ensure_uv(&tts.http, &tts.data_dir, &tts.kokoro_dir, &|received, total| {
-        emit_setup(app, "uv", received, total);
+        if let Some(app) = app {
+            emit_setup(app, "uv", received, total);
+        }
         true
     })
     .await?;
-    // uv's resolver installs kokoro-onnx (which pulls its own bundled
-    // espeak-ng wheel) into our private venv.
-    let vpy = build_venv(&uv, &tts.kokoro_dir, &["kokoro-onnx".into()], &|phase| {
-        emit_setup(app, phase, 0, 0)
+    let lockfile = tts.kokoro_dir.join("requirements.lock");
+    tokio::fs::write(&lockfile, inflate(KOKORO_LOCK_Z))
+        .await
+        .map_err(|e| format!("could not write the voice engine's package list: {e}"))?;
+    let next = tts.kokoro_dir.join("venv.next");
+    build_venv(&uv, &tts.kokoro_dir, &next, &locked_install(lockfile), &|phase| {
+        if let Some(app) = app {
+            emit_setup(app, phase, 0, 0);
+        }
     })
     .await?;
+    tokio::fs::write(next.join(KOKORO_LOCK_RECORD), kokoro_lock_hash())
+        .await
+        .map_err(|e| format!("could not record the voice engine's packages: {e}"))?;
+    switch_venv(tts).await?;
     let _ = tts
         .db
-        .set_setting(SETTING_PYTHON_PATH, &vpy.to_string_lossy());
+        .set_setting(SETTING_PYTHON_PATH, &tts.venv_python().to_string_lossy());
+    Ok(())
+}
+
+/// Put the environment built in `venv.next` in place of `venv`, stopping the
+/// sidecar that runs from the old one: the next sentence starts on the new.
+/// A venv moves whole, since nothing Redline runs in it (`bin/python3
+/// <script>`) depends on its own path.
+async fn switch_venv(tts: &TtsState) -> Result<(), String> {
+    let venv = tts.venv_dir();
+    let old = tts.kokoro_dir.join("venv.old");
+    let _ = tokio::fs::remove_dir_all(&old).await;
+    {
+        let mut warm = tts.kokoro.lock().await;
+        if let Some(mut sc) = warm.take() {
+            let _ = sc.child.start_kill();
+        }
+        if venv.exists() {
+            tokio::fs::rename(&venv, &old)
+                .await
+                .map_err(|e| format!("could not set the old voice environment aside: {e}"))?;
+        }
+        if let Err(e) = tokio::fs::rename(tts.kokoro_dir.join("venv.next"), &venv).await {
+            let _ = tokio::fs::rename(&old, &venv).await;
+            return Err(format!("could not switch to the new voice environment: {e}"));
+        }
+    }
+    let _ = tokio::fs::remove_dir_all(&old).await;
     Ok(())
 }
 
@@ -1181,10 +1286,12 @@ pub async fn tts_kokoro_install(
         .map_err(|e| format!("could not create the Kokoro directory: {e}"))?;
 
     // 1. A Python that can import kokoro-onnx — reuse one if already reachable
-    //    (e.g. the user already had it), otherwise build our own private venv.
+    //    (e.g. the user already had it), otherwise build our own private venv,
+    //    as we do over one of ours that wasn't built from this lock.
     let (ok, _, _) = resolve_working_python(&tts).await;
-    if !ok {
-        ensure_kokoro_venv(&tts, &app).await?;
+    if !ok || tts.runtime_stale() {
+        let _one_at_a_time = tts.runtime_build.lock().await;
+        ensure_kokoro_venv(&tts, Some(&app)).await?;
         let (ok2, _, _) = resolve_working_python(&tts).await;
         if !ok2 {
             return Err(
@@ -1828,9 +1935,14 @@ done
     #[test]
     fn uv_steps_stay_inside_the_engines_directory() {
         let data = scratch_dir("uv-argv");
-        for root in [data.join("kokoro"), data.join("voice-studio")] {
+        for (root, venv) in [
+            (data.join("kokoro"), "venv.next"),
+            (data.join("voice-studio"), "venv"),
+        ] {
             let uv = root.join("bin/uv");
-            let steps = venv_steps(&uv, &root, &["kokoro-onnx".into()]);
+            let venv = root.join(venv);
+            let lock = root.join("requirements.lock");
+            let steps = venv_steps(&uv, &root, &venv, &locked_install(lock.clone()));
             for step in &steps {
                 let cmd = step.as_std();
                 assert_eq!(cmd.get_program(), uv.as_os_str());
@@ -1862,9 +1974,117 @@ done
             };
             assert_eq!(args(0), ["python", "install", "3.12", "--no-bin"]);
             assert_eq!(args(1)[0], "venv");
-            assert_eq!(args(1)[1], root.join("venv").to_string_lossy());
-            assert_eq!(args(2)[..4], ["pip", "install", "--python", &*root.join("venv/bin/python3").to_string_lossy()]);
+            assert_eq!(args(1)[1], venv.to_string_lossy());
+            // Exactly the locked wheels, each checked against its hash.
+            assert_eq!(
+                args(2),
+                [
+                    "pip",
+                    "install",
+                    "--python",
+                    &*venv.join("bin/python3").to_string_lossy(),
+                    "--require-hashes",
+                    "--no-deps",
+                    "--no-build",
+                    "-r",
+                    &*lock.to_string_lossy(),
+                ]
+            );
         }
+    }
+
+    /// Regenerate the `.deflate` as the studio voice's test says.
+    #[test]
+    fn the_embedded_kokoro_lock_is_its_source_and_pins_every_wheel() {
+        let lock = inflate(KOKORO_LOCK_Z);
+        assert_eq!(lock, include_str!("../resources/kokoro-requirements.lock"), "stale .deflate");
+        let pins: Vec<&str> = lock.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(pins.len(), 34);
+        for pin in &pins {
+            let (name, rest) = pin.split_once("==").unwrap();
+            let hashes: Vec<&str> = rest.split(" --hash=sha256:").skip(1).collect();
+            assert!(!name.is_empty() && !hashes.is_empty(), "{pin}");
+            for h in hashes {
+                assert!(h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()), "{pin}");
+            }
+        }
+        for want in [
+            "kokoro-onnx==0.5.0 ",
+            "onnxruntime==1.23.2 ",
+            "numpy==",
+            "espeakng-loader==",
+            "phonemizer-fork==",
+        ] {
+            assert!(pins.iter().any(|p| p.starts_with(want)), "{want}");
+        }
+    }
+
+    /// Only the venv Redline built, and is speaking from, is rebuilt: one
+    /// from before the lock or from another lock. A Python the user set up
+    /// is left alone.
+    #[test]
+    fn a_venv_not_built_from_this_lock_is_stale_and_only_if_it_is_ours() {
+        let data = scratch_dir("stale");
+        let tts = TtsState::new(Arc::new(Database::open_in_memory().unwrap()), data);
+        std::fs::create_dir_all(tts.venv_dir().join("bin")).unwrap();
+        let record = tts.venv_dir().join(KOKORO_LOCK_RECORD);
+        tts.db.set_setting(SETTING_PYTHON_PATH, "/opt/homebrew/bin/python3").unwrap();
+        assert!(!tts.runtime_stale(), "the user's own Python");
+        tts.db
+            .set_setting(SETTING_PYTHON_PATH, &tts.venv_python().to_string_lossy())
+            .unwrap();
+        assert!(tts.runtime_stale(), "installed before the lock");
+        std::fs::write(&record, "0".repeat(64)).unwrap();
+        assert!(tts.runtime_stale(), "built from another lock");
+        std::fs::write(&record, kokoro_lock_hash()).unwrap();
+        assert!(!tts.runtime_stale());
+    }
+
+    /// A rebuild installs the embedded lock into a venv beside the one in
+    /// use, then switches: the old sidecar is stopped, and the models stay.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rebuilt_runtime_replaces_the_old_one_and_keeps_the_models() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tts, dir) = fake_kokoro("rebuild", KOKORO_MODEL_FILE);
+        synth(&tts, "Warm up.", 1, None, None).await.unwrap();
+        // The old venv, installed before the lock, is the one in use.
+        std::fs::create_dir_all(dir.join("venv/bin")).unwrap();
+        std::fs::write(dir.join("venv/old"), b"").unwrap();
+        tts.db
+            .set_setting(SETTING_PYTHON_PATH, &tts.venv_python().to_string_lossy())
+            .unwrap();
+        // A uv that logs what it is asked and makes the venv it is told to.
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let uv = dir.join("bin/uv");
+        std::fs::write(
+            &uv,
+            "#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/../uv.log\"\n\
+             [ \"$1\" = venv ] && mkdir -p \"$2/bin\" && touch \"$2/bin/python3\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&uv, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_kokoro_venv(&tts, None).await.unwrap();
+
+        let calls = log_lines(&dir, "uv.log");
+        let pip = calls.iter().find(|c| c.starts_with("pip install")).unwrap();
+        let lock = dir.join("requirements.lock");
+        assert!(
+            pip.ends_with(&format!("--require-hashes --no-deps --no-build -r {}", lock.display())),
+            "{pip}"
+        );
+        assert!(pip.contains(&*dir.join("venv.next/bin/python3").to_string_lossy()), "{pip}");
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), inflate(KOKORO_LOCK_Z));
+        assert!(!dir.join("venv/old").exists() && !dir.join("venv.next").exists());
+        assert!(!dir.join("venv.old").exists());
+        assert!(!tts.runtime_stale(), "the new venv names its lock");
+        assert!(tts.kokoro.lock().await.is_none(), "the old venv's sidecar was stopped");
+        assert!(dir.join(KOKORO_MODEL_FILE).exists() && dir.join(KOKORO_VOICES_FILE).exists());
+        assert_eq!(
+            tts.db.get_setting(SETTING_PYTHON_PATH).unwrap(),
+            tts.venv_python().to_string_lossy()
+        );
     }
 
     #[tokio::test]
