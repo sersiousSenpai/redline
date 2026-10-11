@@ -97,6 +97,9 @@ export function ChatContextChip({
           ref={list}
           id={id}
           data-chat-context-panel
+          // Over the room like a menu: the door's paper and the pill's card
+          // leave the first press and Esc to it (`hasChildOverlay`).
+          data-rl-island-owned
           className="rl-thin-scroll-y"
           style={{
             // Hung from the header over the thread, never taking its height,

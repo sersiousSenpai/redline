@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("./MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div>{body}</div> }));
 vi.mock("./StreamingText", () => ({ StreamingText: ({ text }: { text: string }) => <div>{text}</div> }));
 import { ChatRoom, type ChatRoomProps, type ChatWorkbenchComposer } from "./ChatRoom";
+import { hasChildOverlay } from "./MonochatIsland";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -199,11 +200,15 @@ describe("the Context chip", () => {
       expect(list.closest("[data-chat-toolbar]")).not.toBeNull();
       expect(list.style.position).toBe("absolute");
       unmoved();
+      // Open, it is over the room like a menu: the door's paper and the
+      // pill's hover card leave the first press and Esc to it.
+      expect(hasChildOverlay()).toBe(true);
       // Esc shuts the list and goes no further; a press elsewhere shuts it too.
       const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
       await act(async () => list.dispatchEvent(escape));
       expect(escape.defaultPrevented).toBe(true);
       expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+      expect(hasChildOverlay()).toBe(false);
       await act(async () => chip.click());
       await act(async () => document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
       expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
