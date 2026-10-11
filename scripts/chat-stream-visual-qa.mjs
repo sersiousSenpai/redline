@@ -6,7 +6,8 @@
 // Drives every chat surface (fixtures/chat-stream-qa) through one turn —
 // idle → sent → tools → mid-stream → full stream → queued type-ahead →
 // settled, then a heading-first reply whose first tool fires after its text
-// began and is answered before it settles, and a reader parked mid-reply —
+// began and is answered before it settles, and a reader parked mid-reply,
+// and in the door's chat a Context chip arriving mid-turn and its list opened —
 // and checks the rule in
 // docs/perf-budget.md: a reply settles without moving, and the thread's
 // viewport holds still through the turn.
@@ -47,6 +48,8 @@ const scenes = process.argv[3]?.split(",") ?? SCENES;
  *  tray. (The voice panel queues in a tray of its own, which
  *  voice-panel-visual-qa checks.) */
 const QUEUEING = new Set(["card", "room", "browser", "browser-zoom", "mission", "memory"]);
+/** The door's chat, whose Context chip arrives with a new chat's first turn. */
+const CONTEXT_CHIP = new Set(["card", "room"]);
 /** Known violations, by check id: `{ scenes: [...], reason }`. Empty since
  *  the reply anatomy (ReplyBlock) landed; a regression found later goes here
  *  with its reason only while its fix is in flight. */
@@ -229,6 +232,20 @@ function queueClearance(legacyWebKit) {
   scroller.scrollTop = scroller.scrollHeight;
   return clearance;
 }
+/** What a new chat's first turn hands the room, as `companion-context` pushes it. */
+const CONTEXT = { companionId: "qa", delivery: "full", briefBytes: 2048, memory: null, at: 1, brief: {
+  plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved", day: "2026-10-02" }],
+  repos: [{ name: "redline", path: "/projects/redline", branch: "main", dirty: 2 }], readyCount: 1, ready: ["Warm chat"],
+  pages: [{ title: "LiDAR-GS", url: "https://example.com/splat" }], decisions: [], mission: null,
+} };
+/** The room's header row, its thread and the reply's first line, with the
+ *  Context chip and its list where they are drawn. */
+const readChipLayout = () => cdp.evaluate(`(() => {
+  const m = (${measure})("QA-QUESTION-2", "MARKERSTART", "MARKEREND");
+  const header = document.querySelector("[data-qa-scene] [data-chat-messages]").previousElementSibling.getBoundingClientRect();
+  const box = (selector) => { const e = document.querySelector(selector); if (!e) return null; const r = e.getBoundingClientRect(); return { top: +r.top.toFixed(1), height: +r.height.toFixed(1) }; };
+  return { header: +header.height.toFixed(1), headerBottom: +header.bottom.toFixed(1), thread: m.scroller.top, clientHeight: m.scroller.clientHeight, first: m.first?.y ?? null, chip: box("[data-chat-context] > button"), list: box("[data-chat-context-panel]") };
+})()`);
 /** Applies `patch` and reads the gap to the bottom on the first painted frame. */
 const firstFrameGap = (patch) => cdp.evaluate(`new Promise(resolve => { window.__turn.set(${JSON.stringify(patch)}); requestAnimationFrame(() => resolve((${measure})("QA-QUESTION-2", "MARKERSTART", "MARKEREND").scroller.gapToBottom)); })`);
 
@@ -319,6 +336,22 @@ async function runScene(scene) {
   await cdp.evaluate("import('/src/theme/applyTheme.ts').then((m) => m.applyTheme('aurora'))");
   await setTurn({ queue: [] }); await settle();
   rec.chromeContrast = { themes: themes.length, swept, short };
+  // A new chat learns its context during its first turn: the chip joins the
+  // header row mid-reply and its list hangs over the thread, so neither moves
+  // a line. Esc shuts the list with the caret still in the composer.
+  if (CONTEXT_CHIP.has(scene)) {
+    await setTurn({ messages: [...c.history, c.q2], status: "streaming", startedAt: Date.now(), liveText: FULL, meter: meter(300, false), activity: [] }); await settle();
+    const quiet = await readChipLayout();
+    await cdp.evaluate(`window.__emit("companion-context", ${JSON.stringify(CONTEXT)})`); await settle();
+    const arrived = await readChipLayout();
+    await cdp.evaluate("document.querySelector('[data-chat-context] > button').click()"); await settle();
+    const opened = await readChipLayout();
+    await screenshot(`${scene}-10-context-open`);
+    await cdp.evaluate("[...document.querySelectorAll('[data-qa-scene] textarea')].filter((t) => t.getBoundingClientRect().height > 0).pop().focus()");
+    for (const type of ["keyDown", "keyUp"]) await cdp.call("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await settle();
+    rec.contextChip = { before: quiet, arrived, opened, shut: await readChipLayout(), caretInComposer: await cdp.evaluate("document.activeElement?.tagName === 'TEXTAREA'") };
+  }
 
   // ── Checks ──
   const delta = (a, b) => (a == null || b == null ? null : +(b - a).toFixed(1));
@@ -364,6 +397,12 @@ async function runScene(scene) {
   check(scene, "tail-height", "holds the reply's tail row at one height", mid.tail != null && mid.tail === full.tail && full.tail === settled.tail, [mid.tail, full.tail, settled.tail]);
   check(scene, "tail-reachable", "keeps every control in a settled reply's tail within reach", settled.tailOutOfReach != null && settled.tailOutOfReach.length === 0, settled.tailOutOfReach);
   check(scene, "chrome-contrast", "reads every chrome text at 4.5:1 in all 15 themes", rec.chromeContrast.themes === 15 && rec.chromeContrast.swept > 0 && rec.chromeContrast.short.length === 0, rec.chromeContrast);
+  if (rec.contextChip) {
+    const { before: quiet, arrived, opened, shut, caretInComposer } = rec.contextChip;
+    const unmoved = (s) => ["header", "thread", "clientHeight", "first"].every((k) => still(delta(quiet[k], s[k])));
+    check(scene, "chip-still", "lets the Context chip arrive mid-turn and its list open without moving the thread", !quiet.chip && !!arrived.chip && !!opened.list && unmoved(arrived) && unmoved(opened) && opened.list.top >= opened.headerBottom, rec.contextChip);
+    check(scene, "chip-esc", "shuts the Context list on Esc with the caret in the composer", caretInComposer && !shut.list && !!shut.chip, { caretInComposer, shut });
+  }
 }
 
 try {
