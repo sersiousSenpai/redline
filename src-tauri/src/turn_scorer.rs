@@ -23,7 +23,11 @@
 //! It is downloaded on demand, pinned by revision, size and SHA-256
 //! (`pinned_fetch`). With no Kokoro runtime, no model, or a process that
 //! doesn't answer in time, there is no score, and the endpointer keeps its
-//! silence rule. The process exits when its stdin closes, with Redline.
+//! silence rule. A question is never waited on: a scorer busy with another
+//! (or starting) answers no score at once, and the question's write and its
+//! answer share one deadline, so a process that stops reading is ended
+//! rather than holding a thread. The process exits when its stdin closes,
+//! with Redline.
 //!
 //! One command, `turn_scorer({ op })`, run on the blocking pool:
 //! - `status`: whether the runtime and the model are there, and the process
@@ -57,8 +61,9 @@ const SCRIPT: &str = include_str!("../resources/turn_scorer.py");
 const AUDIO_MS: f64 = 8_000.0;
 /// Loading the model on spawn gets this long.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
-/// An answer slower than this is no use to a pause being timed; the process
-/// is taken for wedged and restarted on the next warm.
+/// A question written and answered slower than this is no use to a pause
+/// being timed; the process is taken for wedged, ended, and restarted on the
+/// next warm.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(300);
 /// A download that goes this long without a byte is given up.
 const DOWNLOAD_STALL: Duration = Duration::from_secs(30);
@@ -90,6 +95,11 @@ impl Scorer {
             let _ = child.kill();
             return Err("the end-of-turn model has no pipes".to_string());
         };
+        // A question's write waits on `poll`, against its deadline (`send`).
+        if !nonblocking(&stdin) {
+            let _ = child.kill();
+            return Err("the end-of-turn model's pipe can't be made non-blocking".to_string());
+        }
         let mut scorer = Self {
             child,
             stdin,
@@ -118,7 +128,7 @@ impl Scorer {
                 return Ok(String::from_utf8_lossy(&line[..end]).into_owned());
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            if !readable(&self.stdout, left)? {
+            if !ready(&self.stdout, false, left)? {
                 return Err(false);
             }
             let mut chunk = [0u8; 512];
@@ -127,6 +137,27 @@ impl Scorer {
                 Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
             }
         }
+    }
+
+    /// Write all of `bytes` by `deadline`: `false` once the process has
+    /// stopped reading (the pipe stayed full) or has closed it. The pipe
+    /// doesn't block (`spawn`), so a full one is waited on with `poll`.
+    fn send(&mut self, mut bytes: &[u8], deadline: Instant) -> bool {
+        while !bytes.is_empty() {
+            match self.stdin.write(bytes) {
+                Ok(0) => return false,
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if ready(&self.stdin, true, left) != Ok(true) {
+                        return false;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     fn alive(&mut self) -> bool {
@@ -143,11 +174,13 @@ impl Scorer {
         for s in pcm {
             request.extend_from_slice(&s.to_le_bytes());
         }
-        self.stdin
-            .write_all(&request)
-            .and_then(|()| self.stdin.flush())
-            .ok()?;
+        // One deadline for the question and its answer: 8 s of audio is
+        // 256 KB, four times what the pipe holds, so a process that stops
+        // reading would otherwise hold this thread for good.
         let deadline = Instant::now() + ANSWER_TIMEOUT;
+        if !self.send(&request, deadline) {
+            return None;
+        }
         loop {
             let line = self.line(deadline).ok()?;
             // An answer to a question given up on, or a library's chatter.
@@ -172,19 +205,19 @@ impl Drop for Scorer {
     }
 }
 
-/// Whether `stdout` has something to read (or has closed) within `wait`;
-/// `Err(true)` when it can't be waited on.
+/// Whether `pipe` is ready within `wait` — to `write` into (there is room,
+/// or it has closed), else to read from (there is something, or it has
+/// closed); `Err(true)` when it can't be waited on.
 #[cfg(unix)]
-fn readable(stdout: &ChildStdout, wait: Duration) -> Result<bool, bool> {
-    use std::os::fd::AsRawFd;
+fn ready(pipe: &impl std::os::fd::AsRawFd, write: bool, wait: Duration) -> Result<bool, bool> {
     let ms = wait.as_millis().min(i32::MAX as u128) as i32;
     loop {
         let mut fd = libc::pollfd {
-            fd: stdout.as_raw_fd(),
-            events: libc::POLLIN,
+            fd: pipe.as_raw_fd(),
+            events: if write { libc::POLLOUT } else { libc::POLLIN },
             revents: 0,
         };
-        // SAFETY: one pollfd for a descriptor `stdout` keeps open for the call.
+        // SAFETY: one pollfd for a descriptor `pipe` keeps open for the call.
         match unsafe { libc::poll(&mut fd, 1, ms) } {
             0 => return Ok(false),
             n if n > 0 => return Ok(true),
@@ -195,8 +228,25 @@ fn readable(stdout: &ChildStdout, wait: Duration) -> Result<bool, bool> {
 }
 
 #[cfg(not(unix))]
-fn readable(_stdout: &ChildStdout, _wait: Duration) -> Result<bool, bool> {
+fn ready<T>(_pipe: &T, _write: bool, _wait: Duration) -> Result<bool, bool> {
     Err(true)
+}
+
+/// Make writes to `stdin` return at once when the pipe is full.
+#[cfg(unix)]
+fn nonblocking(stdin: &ChildStdin) -> bool {
+    use std::os::fd::AsRawFd;
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fcntl on a descriptor `stdin` keeps open for the calls.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+    }
+}
+
+#[cfg(not(unix))]
+fn nonblocking(_stdin: &ChildStdin) -> bool {
+    false
 }
 
 /// The capture's kept audio as the model reads it: 16 kHz mono 16-bit.
@@ -254,12 +304,11 @@ impl TurnScorerState {
         TurnScorerReply {
             runtime: self.python.exists(),
             model: self.model_path().exists(),
+            // Busy, answering or starting: it is taken as up, never waited on.
             warm: self
                 .proc
-                .lock()
-                .unwrap()
-                .as_mut()
-                .is_some_and(Scorer::alive),
+                .try_lock()
+                .map_or(true, |mut p| p.as_mut().is_some_and(Scorer::alive)),
             score,
         }
     }
@@ -306,11 +355,15 @@ impl TurnScorerState {
         Ok(())
     }
 
-    /// Ask about `pcm`; a process that didn't answer is ended, for the next
-    /// warm to restart.
+    /// Ask about `pcm`. A scorer busy with another question, or starting, is
+    /// no score at once: the pause being timed can't wait for it. A process
+    /// that didn't take the question or answer it in time is ended, for the
+    /// next warm to restart.
     fn score(&self, pcm: Option<Vec<i16>>) -> Option<f32> {
         let pcm = pcm?;
-        let mut proc = self.proc.lock().unwrap();
+        let Ok(mut proc) = self.proc.try_lock() else {
+            return None;
+        };
         let score = proc.as_mut()?.score(&pcm);
         if score.is_none() {
             *proc = None;
@@ -358,13 +411,17 @@ mod tests {
     /// script run in the interpreter's place: it reads each question's header
     /// line and samples, and answers by its `mode` file — 0.97 (the
     /// default), `stale` (an answer to the question before, then this one's),
-    /// `nan` (it could not score), or `hang` (never). With `broken` beside it, it fails to load
-    /// and says so; with `dead`, it exits without a word.
+    /// `nan` (it could not score), or `hang` (never). With `broken` beside it,
+    /// it fails to load and says so; with `dead`, it exits without a word;
+    /// with `slow`, it takes a second to load; with `deaf`, it loads and then
+    /// never reads a question.
     const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 if [ -e "$dir/dead" ]; then exit 1; fi
 if [ -e "$dir/broken" ]; then echo "error bad model file"; exit 0; fi
+if [ -e "$dir/slow" ]; then sleep 1; fi
 echo ready
+if [ -e "$dir/deaf" ]; then exec sleep 30; fi
 while read -r id n; do
   dd bs=1 count=$((2 * n)) of=/dev/null 2>/dev/null
   echo "$id $n" >> "$dir/asked.log"
@@ -446,6 +503,47 @@ done
         // The next warm starts a fresh one.
         std::fs::write(data.join("mode"), "").unwrap();
         state.warm().unwrap();
+        assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
+    }
+
+    /// The bug this guards against: 8 s of audio is 256 KB, four times what
+    /// the pipe holds, so a process that stopped reading held the asking
+    /// thread in its write for good, and every later question queued behind
+    /// it on the lock.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_stops_reading_costs_a_question_its_deadline_not_a_thread() {
+        let (state, data) = fake("deaf");
+        std::fs::write(data.join("deaf"), "").unwrap();
+        state.warm().unwrap();
+        let asked = Instant::now();
+        assert_eq!(state.score(Some(vec![0; 128_000])), None);
+        assert!(asked.elapsed() < ANSWER_TIMEOUT * 3, "{:?}", asked.elapsed());
+        assert!(!state.status(None).warm, "ended, not left holding a write");
+        std::fs::remove_file(data.join("deaf")).unwrap();
+        state.warm().unwrap();
+        assert_eq!(state.score(Some(vec![0; 128_000])), Some(0.97));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_scorer_is_no_score_at_once() {
+        let (state, data) = fake("busy");
+        std::fs::write(data.join("slow"), "").unwrap();
+        let state = std::sync::Arc::new(state);
+        let starting = {
+            let state = state.clone();
+            std::thread::spawn(move || state.warm())
+        };
+        // The start holds the process's lock while the model loads.
+        while state.proc.try_lock().is_ok() {
+            std::thread::yield_now();
+        }
+        let asked = Instant::now();
+        assert_eq!(state.score(Some(vec![0; 100])), None);
+        assert!(asked.elapsed() < Duration::from_millis(50), "{:?}", asked.elapsed());
+        assert!(state.status(None).runtime, "nor does the status wait on it");
+        starting.join().unwrap().unwrap();
         assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
     }
 
