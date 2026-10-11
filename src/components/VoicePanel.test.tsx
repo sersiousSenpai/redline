@@ -260,6 +260,9 @@ function space(type: "keydown" | "keyup", target: EventTarget) {
   return ev;
 }
 
+/** The composer's one button (SendStopButton), whatever its face. */
+const primary = () => input().form!.lastElementChild as HTMLButtonElement;
+
 let scrolled: Element[];
 beforeEach(() => {
   calls.length = 0;
@@ -355,6 +358,28 @@ describe("the input row", () => {
     await wait(400);
     expect(strip.get()).toBeNull();
     expect(sends().map((s) => s.text)).toEqual(["is the replay safe"]);
+  });
+
+  it("has one primary button, never disabled: send, queue while a reply runs, stop on an empty box", async () => {
+    await mount();
+    const el = primary();
+    expect(el.getAttribute("aria-label")).toBe("Send");
+    // Nothing to send is aria-disabled, so the button keeps its focus.
+    expect(el.getAttribute("aria-disabled")).toBe("true");
+    expect(el.hasAttribute("disabled")).toBe(false);
+    await type("And the risks?");
+    expect(el.getAttribute("aria-disabled")).toBeNull();
+    await type("");
+    await summarize();
+    expect(el.getAttribute("aria-label")).toBe("Stop");
+    await type("Add that as feedback");
+    // The same button in the same slot, its face changed.
+    expect(primary()).toBe(el);
+    expect(el.getAttribute("aria-label")).toBe("Queue");
+    await act(async () => el.click());
+    expect(host.querySelector("[aria-label='Queued messages']")?.textContent).toContain("Add that as feedback");
+    expect(el.getAttribute("aria-label")).toBe("Stop");
+    expect(sends()).toHaveLength(1);
   });
 
   it("never takes down a strip that is not its own", async () => {
@@ -481,7 +506,8 @@ describe("interrupting a reply", () => {
     expect(names()).toEqual(["voice_interrupt"]);
     await emit("voice-interrupted", { ...of(1), text: "The gist is", streamedChars: 11, messageId: "m1", killed: false });
     expect(host.textContent).toContain("The gist is");
-    expect(host.textContent).toContain("(interrupted)");
+    // On the reply's tail, where it adds no line under the text.
+    expect(host.querySelector("[data-reply='settled'] [data-reply-tail]")?.textContent).toBe("(interrupted)");
     expect(host.querySelector("p[style*='danger']")).toBeNull();
     expect(input().disabled).toBe(false);
   });
@@ -622,7 +648,7 @@ describe("turns", () => {
 // --- what is shown before the first word ------------------------------------------
 
 describe("before the first word", () => {
-  it("shows what the agent is doing, says it is still going, and offers Stop", async () => {
+  it("says what the agent is doing on its reply's one status line, that it is still going, and leaves Stop to the composer", async () => {
     vi.useFakeTimers();
     await act(async () => {
       root.render(<VoicePanel sessionId={SID} markdown={"# Plan"} sections={SECTIONS} onClose={() => {}} />);
@@ -632,19 +658,69 @@ describe("before the first word", () => {
       button("Summarize").click();
       await vi.advanceTimersByTimeAsync(10);
     });
-    const thinking = () => host.querySelector("[data-voice-thinking]")?.textContent ?? "";
-    expect(thinking()).toContain("Thinking…");
-    await emit("voice-meter", { ...of(1), rev: 3, meter: {}, activity: { at: 1, kind: "tool", label: "Bash…" } });
-    expect(thinking()).toContain("Reading the plan…");
+    const live = () => host.querySelector("[data-reply='live']")!;
+    const status = () => live().querySelector("[data-reply-tail] [role=status]")?.textContent ?? "";
+    // The reply's skeleton is there from the send: its byline where its words
+    // will start, and the one working line in the whole panel under it — no
+    // caption over it, no status sentence and no indicator below.
+    expect(live().querySelector(".rl-reply-byline")?.textContent).toBe("Claude");
+    expect(status()).toBe("Thinking…");
+    expect(panel().querySelectorAll("[role=status]")).toHaveLength(1);
+    expect(panel().textContent!.match(/Thinking|Answering|Speaking|Ready|●/g)).toEqual(["Thinking"]);
+    await emit("voice-meter", { ...of(1), rev: 3, meter: {}, activity: { at: Date.now(), kind: "tool", label: "Bash…" } });
+    expect(status()).toBe("Reading the plan…");
     await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
-    expect(thinking()).toContain("Still reading the plan…");
-    expect(thinking()).not.toContain("Stop");
+    expect(status()).toBe("Still reading the plan…");
+    // Long after, still no Stop of its own: the composer's one button is it.
     await act(async () => { await vi.advanceTimersByTimeAsync(33_000); });
-    const stop = host.querySelector("[data-voice-thinking] button") as HTMLButtonElement;
-    expect(stop.textContent).toBe("Stop");
+    expect(live().querySelector("button")).toBeNull();
+    const stop = button("Stop");
+    expect(stop.dataset.send).toBe("stop");
+    expect(stop.hasAttribute("disabled")).toBe(false);
     calls.length = 0;
     await act(async () => stop.click());
     expect(names()).toContain("voice_interrupt");
+    expect(status()).toBe("Stopping…");
+  });
+});
+
+// --- one reply anatomy ------------------------------------------------------------
+
+describe("one reply anatomy", () => {
+  const REPLY = "The risk is a double apply. ⟦§A.1⟧ Gate it on the turn id.\n⟦screen⟧\n- remount replays\n- gate on the turn";
+  /** Each slot of a reply: its tag, classes and data attributes, in order. */
+  const skeleton = (reply: Element) =>
+    [...reply.children].map((el) =>
+      [el.tagName.toLowerCase(), el.getAttribute("class") ?? "", ...[...el.attributes].filter((a) => a.name.startsWith("data-")).map((a) => a.name).sort()].join(" "),
+    );
+
+  it("streams a reply into the skeleton it settles into, its chips and detail under the text", async () => {
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: REPLY });
+    const live = host.querySelector("[data-reply='live']")!;
+    const streamed = {
+      skeleton: skeleton(live),
+      text: live.querySelector(".rl-reply-text")!.innerHTML,
+      detail: live.querySelector("[data-voice-screen]")!.textContent,
+    };
+    // The spoken part is the text; the sections it named and the detail sit
+    // under it, and the tail row closes it.
+    expect(live.querySelector(".rl-reply-text")!.textContent!.trim()).toMatch(/^The risk is a double apply\.\s+Gate it on the turn id\.$/);
+    expect(streamed.skeleton.map((slot) => slot.split(" ")[1])).toEqual(["rl-reply-head", "rl-reply-text", "flex", "", "rl-reply-tail"]);
+    await emit("voice-done", { ...of(1), body: REPLY, messageId: "m1" });
+    expect(host.querySelector("[data-reply='live']")).toBeNull();
+    const settled = [...host.querySelectorAll("[data-reply]")].pop()!;
+    expect(settled.getAttribute("data-reply")).toBe("settled");
+    expect(skeleton(settled)).toEqual(streamed.skeleton);
+    expect(settled.querySelector(".rl-reply-text")!.innerHTML).toBe(streamed.text);
+    expect(settled.querySelector("[data-voice-screen]")!.textContent).toBe(streamed.detail);
+    expect(settled.querySelector(".rl-reply-byline")!.textContent).toBe("Claude");
+    expect(button("§ Rollout")).toBeTruthy();
+    // Settled, nothing says the agent is working.
+    expect(panel().querySelectorAll("[role=status]")).toHaveLength(0);
+    // The user's side is a compact card with no "You" on it.
+    expect(host.querySelector("[data-user-turn]")!.textContent!.trim()).toBe("▶ Summarize the plan");
   });
 });
 

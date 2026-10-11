@@ -15,11 +15,16 @@
 // REPLACES the streamed nodes with the settled row's, and layout-shift entries
 // only count nodes that moved, so CLS reads ~0 through a 66 px jump.
 //
-// Contract the checks read: each scene's root carries `data-qa-scene`; a
+// Contract the checks read: each scene's root carries `data-qa-scene` (and
+// `data-qa-composer`, the composer's field, where it is not a textarea); a
 // reply's root carries `data-reply` in both phases and its fixed-height tail
 // row `data-reply-tail`. A chrome box is identified by its tag, class and
 // data-attribute names, so a control that morphs in place (Send → Stop) keeps
 // its class and states its phase in attribute values.
+//
+// The voice panel takes no turn store: the fixture replays the same store
+// into it as the voice events its backend sends, and types each question
+// into its box.
 //
 // A check listed in EXPECTED_FAIL is a known violation with its reason: it
 // may fail without failing the run, and the run FAILS when it passes, so the
@@ -36,9 +41,11 @@ import { createHash } from "node:crypto";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.resolve(root, process.argv[2] ?? "build-analysis/chat-stream-visual-qa");
-const SCENES = ["card", "room", "browser", "browser-zoom", "mission", "memory", "review", "comment", "comment-chat", "drafter"];
+const SCENES = ["card", "room", "browser", "browser-zoom", "mission", "memory", "review", "comment", "comment-chat", "drafter", "voice"];
 const scenes = process.argv[3]?.split(",") ?? SCENES;
-/** Surfaces where Enter during a reply queues the message. */
+/** Surfaces where Enter during a reply queues the message in the shared
+ *  tray. (The voice panel queues in a tray of its own, which
+ *  voice-panel-visual-qa checks.) */
 const QUEUEING = new Set(["card", "room", "browser", "browser-zoom", "mission", "memory"]);
 /** Known violations, by check id: `{ scenes: [...], reason }`. Empty since
  *  the reply anatomy (ReplyBlock) landed; a regression found later goes here
@@ -141,7 +148,7 @@ function measure(ask, first, last) {
     const data = [...el.attributes].filter((a) => a.name.startsWith("data-")).map((a) => a.name).sort().join(" ");
     boxes.push({ key: `${inThread ? "thread" : "frame"}|${el.tagName.toLowerCase()}|${el.getAttribute("class") ?? ""}|${data}|${el.getAttribute("role") ?? ""}`, text: (el.innerText ?? "").replace(/\s+/g, " ").slice(0, 48), h: Math.round(r.height), w: Math.round(r.width) });
   }
-  const composer = [...scene.querySelectorAll("textarea")].filter((t) => t.getBoundingClientRect().height > 0).pop();
+  const composer = [...scene.querySelectorAll(scene.dataset.qaComposer ?? "textarea")].filter((t) => t.getBoundingClientRect().height > 0).pop();
   const reply = textNode(first)?.parentElement.closest("[data-reply]");
   const tail = reply?.querySelector("[data-reply-tail]");
   // A tail control is out of reach when it sits past the reply's edge and no
@@ -361,7 +368,7 @@ async function runScene(scene) {
 
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/components/ReplyBlock.tsx", "src/components/ReplyBlock.css", "src/components/StreamingText.tsx", "src/components/MarkdownView.tsx", "src/components/QueueTray.tsx", "src/components/SendStopButton.tsx", "src/components/ChatWorkbench.css", "src/components/ChatRoom.tsx", "src/components/BrowserChat.tsx", "src/components/MissionChat.tsx", "src/components/MemoryAsk.tsx", "src/components/ReviewThread.tsx", "src/components/CommentThread.tsx", "src/components/DrafterSidecar.tsx", "src/components/FrontDoor.tsx", "src/hooks/useStickToBottom.ts", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
+  for (const file of ["src/components/ReplyBlock.tsx", "src/components/ReplyBlock.css", "src/components/StreamingText.tsx", "src/components/MarkdownView.tsx", "src/components/QueueTray.tsx", "src/components/SendStopButton.tsx", "src/components/ChatWorkbench.css", "src/components/ChatRoom.tsx", "src/components/BrowserChat.tsx", "src/components/MissionChat.tsx", "src/components/MemoryAsk.tsx", "src/components/ReviewThread.tsx", "src/components/CommentThread.tsx", "src/components/DrafterSidecar.tsx", "src/components/VoicePanel.tsx", "src/components/FrontDoor.tsx", "src/hooks/useStickToBottom.ts", "src/styles.css"]) report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   server = await createServer({ configFile: false, root, cacheDir: path.join(temporary, "vite-cache"), optimizeDeps: { entries: ["fixtures/chat-stream-qa/index.html"], include: ["@tauri-apps/plugin-deep-link", "@tauri-apps/api/dpi"] }, plugins: [react(), tailwindcss()], resolve: { alias: [
     { find: /^.*\/hooks\/useAgentTurn$/, replacement: service }, { find: /^.*\/audio\/useReadAloud$/, replacement: service },
     ...["@tauri-apps/api/core", "@tauri-apps/api/event", "@tauri-apps/api/window", "@tauri-apps/api/webview", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener"].map((find) => ({ find, replacement: service })),

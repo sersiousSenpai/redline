@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   IDLE_TURN,
-  OFFER_STOP_AFTER_MS,
   STILL_AFTER_MS,
   accepts,
   activityCaption,
@@ -100,15 +99,15 @@ describe("captions", () => {
     );
   });
 
-  it("says it is still going at 12 s and offers a way out at 45 s", () => {
+  it("says it is still going at 12 s", () => {
     const tool = { at: 0, kind: "tool", label: "Bash…" };
-    expect(thinkingCaption(tool, STILL_AFTER_MS - 1)).toEqual({ text: "Reading the plan…", offerStop: false });
-    expect(thinkingCaption(tool, STILL_AFTER_MS)).toEqual({ text: "Still reading the plan…", offerStop: false });
-    expect(thinkingCaption(null, OFFER_STOP_AFTER_MS)).toEqual({ text: "Still thinking…", offerStop: true });
+    expect(thinkingCaption(tool, STILL_AFTER_MS - 1)).toBe("Reading the plan…");
+    expect(thinkingCaption(tool, STILL_AFTER_MS)).toBe("Still reading the plan…");
+    expect(thinkingCaption(null, 45_000)).toBe("Still thinking…");
   });
 
   it("leaves a rate limit's own words alone", () => {
     const limited = { at: 0, kind: "rateLimit", label: "Rate limited (five_hour) · waiting" };
-    expect(thinkingCaption(limited, OFFER_STOP_AFTER_MS).text).toBe("Rate limited (five_hour) · waiting");
+    expect(thinkingCaption(limited, 45_000)).toBe("Rate limited (five_hour) · waiting");
   });
 });

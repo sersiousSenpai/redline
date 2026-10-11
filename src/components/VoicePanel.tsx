@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -80,6 +81,9 @@ import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
 import { levelHeight, STRIP_BARS, strip, type StripAnchor } from "./DictationStrip";
 import { StreamingText } from "./StreamingText";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, type SendState } from "./SendStopButton";
+import type { ChatProgressStatus } from "../lib/chatProgress";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
 // turnState.ts): the panel acts only on the turn it is waiting for.
@@ -301,15 +305,6 @@ const MIC_HOT: React.CSSProperties = { background: "var(--color-danger, #c0392b)
 /** The dictation key's glyph, for the input's hint; none when it is off. */
 const TALK_KEY_GLYPH: Record<string, string> = { AltRight: "⌥", MetaRight: "⌘", ControlRight: "⌃" };
 
-const BYLINE: React.CSSProperties = {
-  fontSize: "10px",
-  fontWeight: 600,
-  textTransform: "uppercase",
-  letterSpacing: "0.07em",
-  color: MUTED,
-  marginBottom: "2px",
-};
-
 const LINK_BTN: React.CSSProperties = {
   background: "transparent",
   border: "none",
@@ -362,14 +357,28 @@ function SectionChip({ anchorId, title }: { anchorId: string; title: string }) {
   );
 }
 
-/** One reply, live or settled, in one skeleton: a quiet byline, the spoken
- *  part, the sections it named, and the on-screen detail — muted markdown
- *  under it, never spoken, never boxed. */
-const ReplyView = memo(function ReplyView({
+/** No offers under a reply: one array, so a settled reply's props hold still. */
+const NO_OFFERS: CommentOffer[] = [];
+
+/** One reply in the one reply anatomy (ReplyBlock), the same DOM live and
+ *  settled: a quiet byline, the spoken part as its text, and under it the
+ *  sections it named, the on-screen detail — muted markdown, never spoken,
+ *  never boxed — and what it offered to add. Its tail row is the turn's one
+ *  status line while it runs, and once settled says "(interrupted)" if the
+ *  user stopped it. Stop is the composer's. */
+const VoiceReply = memo(function VoiceReply({
   raw,
   live = false,
   interrupted = false,
   titles,
+  status = null,
+  startedAt = null,
+  offers = NO_OFFERS,
+  offerBusy,
+  offerErrors,
+  explicit,
+  onAdd,
+  onDismiss,
 }: {
   raw: string;
   live?: boolean;
@@ -377,6 +386,15 @@ const ReplyView = memo(function ReplyView({
   /** Section titles by anchor; null where the document has no plan sections
    *  to point at (a draft). */
   titles: ReadonlyMap<string, string> | null;
+  /** Live: what the turn is doing, in the voice's own words. */
+  status?: ChatProgressStatus | null;
+  startedAt?: number | null;
+  offers?: CommentOffer[];
+  offerBusy: Record<string, boolean>;
+  offerErrors: Record<string, string>;
+  explicit: ReadonlySet<string>;
+  onAdd: (o: CommentOffer) => void;
+  onDismiss: (o: CommentOffer) => void;
 }) {
   const reply = useMemo(() => splitReply(raw), [raw]);
   const chips = titles
@@ -385,16 +403,18 @@ const ReplyView = memo(function ReplyView({
         return title ? [[id, title] as const] : [];
       })
     : [];
+  // Plain, never `rich`: the spoken part is for the ear and can't sprout a
+  // diagram; one the agent drew belongs to the detail.
   return (
-    <div className="mb-3" data-voice-reply>
-      <div style={BYLINE}>Claude</div>
-      {live ? (
-        <StreamingText text={reply.spoken} />
-      ) : (
-        <div>
-          <MarkdownView body={reply.spoken} compact />
-        </div>
-      )}
+    <ReplyBlock
+      phase={live ? "live" : "settled"}
+      byline="Claude"
+      text={reply.spoken}
+      rich={false}
+      status={status}
+      startedAt={startedAt}
+      interrupted={interrupted}
+    >
       {chips.length > 0 && (
         <div className="flex flex-wrap gap-1" style={{ marginTop: "4px" }}>
           {chips.map(([id, title]) => (
@@ -413,12 +433,8 @@ const ReplyView = memo(function ReplyView({
           )}
         </div>
       )}
-      {interrupted && (
-        <span style={{ color: MUTED, fontSize: "0.9em", fontStyle: "italic" }}>
-          (interrupted)
-        </span>
-      )}
-    </div>
+      <OfferRow offers={offers} busy={offerBusy} errors={offerErrors} explicit={explicit} onAdd={onAdd} onDismiss={onDismiss} />
+    </ReplyBlock>
   );
 });
 
@@ -443,7 +459,7 @@ function OfferRow({
 }) {
   if (offers.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1.5" style={{ marginTop: "6px" }}>
       {offers.map((o) => {
         const disabled = !!busy[o.id] || !!o.stale;
         return (
@@ -635,6 +651,9 @@ function VoicePanelBase({
   // A stop was asked for this turn; asked again once `voice_send` names it,
   // in case the first ask reached the child before the turn did.
   const interruptWantedRef = useRef(false);
+  // When a stop was last asked for: the live line's newest sign of life
+  // while it says "Stopping…".
+  const stopAskedRef = useRef(0);
   // The turn is being let go because the user carried the one it answers on
   // (hands-free), which no "(interrupted)" note marks.
   const carryingRef = useRef(false);
@@ -1251,6 +1270,7 @@ function VoicePanelBase({
   // Ask the CLI to stop the turn in place: the same child, with everything said
   // so far in memory, takes the next one. Its end arrives as `voice-interrupted`.
   const sendInterrupt = useCallback(() => {
+    stopAskedRef.current = Date.now();
     void invoke<VoiceInterrupt | null>("voice_interrupt", { sessionId })
       .then((r) => {
         if (!r?.interrupting) return;
@@ -2326,9 +2346,21 @@ function VoicePanelBase({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [waiting]);
-  const caption = turn.interrupting
-    ? { text: "Stopping…", offerStop: false }
-    : thinkingCaption(turn.activity, now - (turn.since ?? now));
+  // The live reply's one status line, in the voice's own words: what the
+  // agent is doing before it speaks, then whether its words are being said,
+  // and "Stopping…" once it has been asked to. Its last sign of life is the
+  // send, the newest step or the stop; text arriving is the reply's own.
+  const liveStatus: ChatProgressStatus = {
+    label: turn.interrupting
+      ? "Stopping…"
+      : waiting
+        ? thinkingCaption(turn.activity, now - (turn.since ?? now))
+        : speechState === "speaking"
+          ? "Speaking…"
+          : "Answering…",
+    at: Math.max(turn.since ?? 0, turn.activity?.at ?? 0, turn.interrupting ? stopAskedRef.current : 0),
+    running: true,
+  };
 
   const queued = outbox.filter((o) => !o.spoken);
   // The tray floats over the transcript's foot; the transcript makes room under
@@ -2350,22 +2382,12 @@ function VoicePanelBase({
       : hearing
         ? "listening"
         : "idle";
-  const indicator: { label: string; color: string } = hearing
-    ? { label: "Listening…", color: "var(--color-danger, #c0392b)" }
-    : waiting
-    ? { label: caption.text, color: "var(--color-warn, #b8860b)" }
-    : turn.phase === "streaming" && speechState !== "speaking"
-    ? { label: "Answering…", color: "var(--color-anchor-text)" }
-    : speechState === "speaking"
-      ? { label: "Speaking…", color: "var(--color-anchor-text)" }
-      : speechState === "paused"
-        ? { label: "Paused", color: MUTED }
-        : { label: sessionUp ? "Ready" : "Warming up…", color: MUTED };
 
-  // The composer's one button: send; queue, once a reply is running and there
-  // is text; stop, while one runs (or plays) and the box is empty.
+  // The composer's one button (SendStopButton): send; queue, once a reply is
+  // running and there is text; stop, while one runs (or plays) and the box
+  // is empty.
   const hasText = typed.trim().length > 0;
-  const primary: "send" | "queue" | "stop" = hasText
+  const primary: SendState = hasText
     ? busy
       ? "queue"
       : "send"
@@ -2391,7 +2413,7 @@ function VoicePanelBase({
       ref={panelRef}
       tabIndex={-1}
       onKeyDown={onPanelKeyDown}
-      className="flex-1 min-w-0 flex flex-col"
+      className="flex-1 min-w-0 min-h-0 flex flex-col"
       style={{
         background: "var(--color-bg-elevated)",
         borderLeft: "1px solid var(--color-rule)",
@@ -2552,10 +2574,10 @@ function VoicePanelBase({
           <div
             ref={stick.ref}
             onScroll={stick.onScroll}
-            className="flex-1 overflow-y-auto px-4 pt-3 rl-thin-scroll-y"
+            className="flex-1 overflow-y-auto px-4 pt-3 rl-thin-scroll-y flex flex-col gap-2"
             style={{ fontSize: "13px", lineHeight: 1.5, paddingBottom: `${12 + trayHeight}px` }}
           >
-            {originChat && <details key={originChat.companionId} open={transcript.length === 0} className="mb-3 rounded border p-2" style={{ borderColor: "var(--color-rule)" }}>
+            {originChat && <details key={originChat.companionId} open={transcript.length === 0} className="rounded border p-2" style={{ borderColor: "var(--color-rule)" }}>
               <summary style={{ cursor: "pointer" }}>From chat: {originChat.title}</summary>
               {onOpenChat && <button type="button" onClick={() => onOpenChat(originChat.companionId)} style={{ color: "var(--color-info)", marginBlock: 8 }}>Open chat →</button>}
               {originChat.messages.map(message => <div key={message.id} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginBlock: 10 }}><strong>{message.role === "user" ? "You" : "Assistant"}</strong><p>{message.body}</p></div>)}
@@ -2571,17 +2593,36 @@ function VoicePanelBase({
                 each reply. Or tap a starter to begin.
               </p>
             )}
-            {transcript.map((line, i) =>
-              line.role === "note" ? (
-                <div
-                  key={line.id ?? line.key ?? `i-${i}`}
-                  className="mb-2"
-                  style={{
-                    color: MUTED,
-                    fontStyle: "italic",
-                    fontSize: "0.9em",
-                  }}
-                >
+            {transcript.map((line, i) => {
+              const key = line.id ?? line.key ?? `i-${i}`;
+              // What this line offered to add, if anything.
+              const lineOffers = (line.id && groupedOffers.byMessage.get(line.id)) || NO_OFFERS;
+              if (line.role === "agent") {
+                return (
+                  <VoiceReply
+                    key={key}
+                    raw={line.text}
+                    interrupted={line.interrupted}
+                    titles={titlesForReplies}
+                    offers={lineOffers}
+                    offerBusy={offerBusy}
+                    offerErrors={offerErrors}
+                    explicit={explicit}
+                    onAdd={addOffer}
+                    onDismiss={dismissOffer}
+                  />
+                );
+              }
+              if (line.role === "you") {
+                return (
+                  <Fragment key={key}>
+                    <UserTurn body={line.text} />
+                    <OfferRow offers={lineOffers} busy={offerBusy} errors={offerErrors} explicit={explicit} onAdd={addOffer} onDismiss={dismissOffer} />
+                  </Fragment>
+                );
+              }
+              return (
+                <div key={key} style={{ color: MUTED, fontStyle: "italic", fontSize: "0.9em" }}>
                   {line.text}
                   {line.capture && !line.capture.undone && (
                     <>
@@ -2609,80 +2650,38 @@ function VoicePanelBase({
                     </>
                   )}
                 </div>
-              ) : (
-                <div key={line.id ?? line.key ?? `i-${i}`}>
-                  {line.role === "you" ? (
-                    <div
-                      className="mb-3 rounded-lg px-3 py-2"
-                      style={{
-                        background: "var(--color-paper)",
-                        border: "1px solid var(--color-rule)",
-                        color: "var(--color-ink)",
-                        overflowWrap: "anywhere",
-                      }}
-                    >
-                      {line.text}
-                    </div>
-                  ) : (
-                    <ReplyView
-                      raw={line.text}
-                      interrupted={line.interrupted}
-                      titles={titlesForReplies}
-                    />
-                  )}
-                  {/* What this reply offered to add, if anything. */}
-                  <OfferRow
-                    offers={
-                      (line.id && groupedOffers.byMessage.get(line.id)) || []
-                    }
-                    busy={offerBusy}
-                    errors={offerErrors}
-                    explicit={explicit}
-                    onAdd={addOffer}
-                    onDismiss={dismissOffer}
-                  />
-                </div>
-              ),
+              );
+            })}
+            {/* The reply on its way, from the send: what the agent is doing
+                on its one status line until it speaks, then the reply itself,
+                in the skeleton it settles into. Offers not yet bound to a reply
+                sit under the one still streaming, or at the tail once it has
+                landed — tappable either way, never waiting on the join. */}
+            {turnBusy ? (
+              <VoiceReply
+                raw={streaming}
+                live
+                titles={titlesForReplies}
+                status={liveStatus}
+                startedAt={turn.since}
+                offers={groupedOffers.loose}
+                offerBusy={offerBusy}
+                offerErrors={offerErrors}
+                explicit={explicit}
+                onAdd={addOffer}
+                onDismiss={dismissOffer}
+              />
+            ) : (
+              <OfferRow
+                offers={groupedOffers.loose}
+                busy={offerBusy}
+                errors={offerErrors}
+                explicit={explicit}
+                onAdd={addOffer}
+                onDismiss={dismissOffer}
+              />
             )}
-            {/* The reply on its way: what the agent is doing until it speaks,
-                then the reply itself in the same skeleton it settles into. */}
-            {turnBusy &&
-              (streaming ? (
-                <ReplyView raw={streaming} live titles={titlesForReplies} />
-              ) : (
-                <div className="mb-3" data-voice-thinking>
-                  <div style={BYLINE}>Claude</div>
-                  <span style={{ color: MUTED }} aria-live="polite">
-                    {caption.text}
-                  </span>
-                  {caption.offerStop && (
-                    <button
-                      type="button"
-                      onClick={stopReply}
-                      title="Stop this reply"
-                      style={LINK_BTN}
-                    >
-                      Stop
-                    </button>
-                  )}
-                </div>
-              ))}
-            {/* Offers not yet bound to a reply — under the one still streaming,
-                or at the tail once it has landed. Either way they stay tappable
-                rather than waiting on the join. */}
-            <OfferRow
-              offers={groupedOffers.loose}
-              busy={offerBusy}
-              errors={offerErrors}
-              explicit={explicit}
-              onAdd={addOffer}
-              onDismiss={dismissOffer}
-            />
-            {error && (
-              <p style={{ color: "var(--color-danger, #c0392b)", marginTop: "8px" }}>
-                {error}
-              </p>
-            )}
+            {error && <p style={{ color: "var(--color-danger, #c0392b)" }}>{error}</p>}
           </div>
           {/* Typed turns waiting for the reply to finish. × puts one back in
               the box. */}
@@ -2743,20 +2742,17 @@ function VoicePanelBase({
             style={{ borderTop: "1px solid var(--color-rule)" }}
           >
             {/* Hands-free toggle — converse without holding a button — and
-                what the conversation is doing. */}
+                whose turn it is. What the agent is doing is said once, on its
+                reply's status line. */}
             <div className="flex items-center justify-between gap-2">
               <span style={{ fontSize: "12px", color: MUTED }}>
                 {!handsFree
                   ? "Hold to talk, or go hands-free"
                   : hearing
                     ? "Hands-free — just talk; it sends on a pause"
-                    : waiting
-                      ? `${caption.text} (tap 🎙️ to interrupt)`
-                      : turn.phase === "streaming"
-                        ? "Answering… (tap 🎙️ to interrupt)"
-                        : speechState === "speaking" || speechState === "paused"
-                          ? "Speaking… (tap 🎙️ to interrupt)"
-                          : "Hands-free — getting ready to listen"}
+                    : turnBusy || speechState !== "idle"
+                      ? "Hands-free — tap 🎙️ to interrupt"
+                      : "Hands-free — getting ready to listen"}
               </span>
               <button
                 ref={handsFreeSwitchRef}
@@ -2853,37 +2849,7 @@ function VoicePanelBase({
                   🎙️
                 </button>
               )}
-              <button
-                // Keyed by role: a stop that turns into a send must not be
-                // the same element mid-click.
-                key={primary === "stop" ? "stop" : "send"}
-                type={primary === "stop" ? "button" : "submit"}
-                onClick={primary === "stop" ? stopReply : undefined}
-                disabled={primary === "send" && !hasText}
-                title={
-                  primary === "stop"
-                    ? "Stop the reply"
-                    : primary === "queue"
-                      ? "Queue — it goes when this reply finishes (Enter)"
-                      : "Send (Enter)"
-                }
-                aria-label={primary === "stop" ? "Stop" : undefined}
-                className="rounded-md px-2.5 py-1.5"
-                style={{
-                  fontSize: "12px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: hasText ? "var(--color-anchor-bg)" : "transparent",
-                  color: hasText
-                    ? "var(--color-anchor-text)"
-                    : primary === "stop"
-                      ? "var(--color-ink)"
-                      : MUTED,
-                  cursor: hasText || primary === "stop" ? "pointer" : "default",
-                }}
-              >
-                {primary === "stop" ? "■ Stop" : primary === "queue" ? "Queue" : "Send"}
-              </button>
+              <SendStopButton state={primary} onSend={sendTyped} onStop={stopReply} disabled={!hasText} />
             </form>
 
             {/* Walkthrough controls — only while a guided walk is running. It
@@ -2985,8 +2951,9 @@ function VoicePanelBase({
               </div>
             )}
 
-            {/* Status + transport. Stop lives in the composer's button; this
-                row replays the last reply when idle and pauses one playing. */}
+            {/* Transport. Stop lives in the composer's button, and what the
+                agent is doing on its reply's status line; this row replays
+                the last reply when idle and pauses one playing. */}
             <div className="flex items-center gap-2">
               {speechState === "speaking" ? (
                 <button
@@ -3039,12 +3006,12 @@ function VoicePanelBase({
                   {studioNote}
                 </span>
               )}
-              <span
-                className="ml-auto shrink-0"
-                style={{ fontSize: "12px", color: indicator.color }}
-              >
-                ● {indicator.label}
-              </span>
+              {/* Until the warm session is up, and no turn is saying so. */}
+              {!sessionUp && !turnBusy && (
+                <span className="ml-auto shrink-0" style={{ fontSize: "12px", color: MUTED }}>
+                  Warming up…
+                </span>
+              )}
             </div>
           </div>
         </>
@@ -3060,7 +3027,11 @@ function isEnhancedVoice(v: SpeechSynthesisVoice): boolean {
   return /\((enhanced|premium)\)/i.test(v.name);
 }
 
+// One line, whatever sits beside it: the studio chip arriving next to it
+// never makes the row (and the thread above) change height.
 const transportBtn: React.CSSProperties = {
+  flexShrink: 0,
+  whiteSpace: "nowrap",
   fontSize: "13px",
   border: "1px solid var(--color-rule)",
   background: "transparent",

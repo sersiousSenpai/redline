@@ -46,6 +46,9 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function rect(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right};})()`); }
 const calls = (name) => cdp.evaluate(`window.__qaCalls.filter(c => c[0] === ${JSON.stringify(name)}).map(c => c[1] ?? null)`);
 const panelText = () => cdp.evaluate("document.querySelector('[data-tour=voice]').textContent");
+/** The composer's one button (SendStopButton), and the reply on its way. */
+const PRIMARY = "[data-tour=voice] form .rl-send";
+const LIVE = "[data-tour=voice] [data-reply=live]";
 const SID = "qa-plan";
 const turn = (n) => ({ sessionId: SID, generation: 1, turn: n });
 const REPLY = "The risk is a double apply when the panel comes back mid-turn. ⟦§A.2⟧ Gate the replay on the turn id.\n⟦screen⟧\n| Case | Today | Fix |\n|---|---|---|\n| remount | replays | gate on turn |";
@@ -65,7 +68,7 @@ try {
   report.browserVersion = (await cdp.call("Browser.getVersion")).product;
   await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1100, height: 760, deviceScaleFactor: 1, mobile: false });
   await cdp.call("Page.navigate", { url: report.fixtureUrl });
-  for (let i = 0; i < 200 && !(await cdp.evaluate("document.documentElement.dataset.qaReady === 'true' && !!document.querySelector('[data-voice-reply]')")); i++) await delay(100);
+  for (let i = 0; i < 200 && !(await cdp.evaluate("document.documentElement.dataset.qaReady === 'true' && !!document.querySelector('[data-tour=voice] [data-reply]')")); i++) await delay(100);
   await cdp.evaluate("window.__qa.setTheme('basic')"); await settle();
 
   // A reply stored raw renders through the same reader as a live one.
@@ -86,7 +89,10 @@ try {
   await enter("Is the replay safe on remount?");
   check("A typed turn sends", (await calls("voice_send")).length === 1);
   await emit("voice-meter", { ...turn(1), rev: 1, meter: {}, activity: { at: 1, kind: "tool", label: "Bash…" } });
-  check("Before the first word, the activity shows", (await cdp.evaluate("document.querySelector('[data-voice-thinking]')?.textContent ?? ''")).includes("Reading the plan…"));
+  check("Before the first word, the activity shows on the reply's status line", (await cdp.evaluate(`document.querySelector('${LIVE} [data-reply-tail] [role=status]')?.textContent ?? ''`)) === "Reading the plan…");
+  const working = await cdp.evaluate("(() => { const p = document.querySelector('[data-tour=voice]'); return { statuses: p.querySelectorAll('[role=status]').length, words: p.textContent.match(/Reading the plan|Thinking|Answering|Speaking|Ready|●/g) }; })()");
+  check("…the panel's one working indicator", working.statuses === 1 && working.words?.length === 1, working);
+  check("…and the composer's one button is Stop, never disabled", await cdp.evaluate(`(() => { const b = document.querySelector('${PRIMARY}'); return b?.dataset.send === 'stop' && b.getAttribute('aria-label') === 'Stop' && !b.disabled; })()`));
   await screenshot("02-thinking");
 
   // A follow-up typed mid-reply waits in a tray that floats over the thread.
@@ -97,7 +103,7 @@ try {
   const after = await rect(scroller);
   check("The tray never resizes the thread", Math.abs(before.height - after.height) < 1, { before, after });
   await cdp.evaluate(`(() => { const s = document.querySelector(${JSON.stringify(scroller)}); s.scrollTop = s.scrollHeight; })()`); await settle();
-  const thinkingBox = await rect("[data-voice-thinking]"), tray = await rect("[aria-label='Queued messages']");
+  const thinkingBox = await rect(LIVE), tray = await rect("[aria-label='Queued messages']");
   check("…nor hides the newest line", thinkingBox.bottom <= tray.y + 1, { thinkingBox, tray });
   const x = await rect("[aria-label='Queued messages'] button");
   check("The tray's × is a 24px target", x.width >= 24 && x.height >= 24, x);
@@ -106,19 +112,34 @@ try {
 
   // The reply streams: spoken part to speech, detail to the screen.
   const docTop = await cdp.evaluate("document.querySelector('[data-qa=doc-scroll]').scrollTop");
-  let rawSeen = false;
+  let rawSeen = false, indicators = 0;
   for (let i = 0; i < REPLY.length; i += 9) {
     await emit("voice-delta", { ...turn(1), text: REPLY.slice(i, i + 9) });
     if ((await panelText()).includes("⟦")) rawSeen = true;
+    indicators = Math.max(indicators, await cdp.evaluate("document.querySelectorAll('[data-tour=voice] [role=status]').length"));
   }
   check("No marker is ever shown while streaming", !rawSeen);
+  check("…and one status line the whole way", indicators === 1, { indicators });
+  // This reply (its first line, its slots), found by its words: once it is
+  // done, the queued follow-up goes and its reply comes after.
+  const THIS_REPLY = "[...document.querySelectorAll('[data-tour=voice] [data-reply]')].find(r => r.querySelector('.rl-reply-text').textContent.includes('double apply'))";
+  // Where its first line sits in the thread's content, wherever the thread
+  // is scrolled: the follow-up that goes once it is done scrolls it.
+  const firstLine = () => cdp.evaluate(`(() => { const r = ${THIS_REPLY}, s = document.querySelector('${scroller}'); const w = document.createTreeWalker(r.querySelector('.rl-reply-text'), NodeFilter.SHOW_TEXT); let n; while ((n = w.nextNode()) && !n.data.trim()); const range = document.createRange(); range.selectNodeContents(n); return +(range.getClientRects()[0].top - s.getBoundingClientRect().top + s.scrollTop).toFixed(1); })()`);
+  const slots = () => cdp.evaluate(`[...${THIS_REPLY}.children].map(e => e.className)`);
+  const streamedAt = await firstLine(), streamedSlots = await slots();
   let pointed = false;
   for (let i = 0; i < 40 && !pointed; i++) { pointed = await cdp.evaluate("document.querySelector('[data-anchor-id=\"A.2\"]').classList.contains('rl-voice-point')"); if (!pointed) await delay(100); }
   check("The section lights up while its sentence plays", pointed);
   await emit("voice-done", { ...turn(1), body: REPLY, messageId: "m1", timing: {} });
+  const settledAt = await firstLine();
+  check("The reply settles without moving its first line", streamedAt === settledAt, { streamedAt, settledAt });
+  const settledSlots = await slots();
+  check("…into the same skeleton", (await cdp.evaluate(`${THIS_REPLY}.dataset.reply`)) === "settled" && JSON.stringify(settledSlots) === JSON.stringify(streamedSlots), { streamedSlots, settledSlots });
+  check("…its status line gone: the one left is the queued follow-up's", await cdp.evaluate(`!${THIS_REPLY}.querySelector('[role=status]') && document.querySelectorAll('[data-tour=voice] [role=status]').length === 1`));
   const spoken = await cdp.evaluate("window.__qaSpoken.join(' | ')");
   check("Only the spoken part is spoken", spoken.includes("The risk is a double apply") && !/Case|remount \||⟦/.test(spoken), spoken);
-  check("The detail renders as a table", await cdp.evaluate("!!document.querySelector('[data-voice-reply]:last-of-type [data-voice-screen] table') || [...document.querySelectorAll('[data-voice-screen] table')].length > 0"));
+  check("The detail renders as a table, under the reply's text", await cdp.evaluate(`!!${THIS_REPLY}.querySelector('.rl-reply-text ~ [data-voice-screen] table')`));
   check("The queued follow-up goes once the reply is done", (await calls("voice_send")).map((a) => a.text).join(",") === "Is the replay safe on remount?,Add that as feedback");
   check("Pointing never scrolled the plan", (await cdp.evaluate("document.querySelector('[data-qa=doc-scroll]').scrollTop")) === docTop);
   await screenshot("04-reply");
@@ -144,15 +165,15 @@ try {
   // Stop interrupts in place: a muted tag, never a red error.
   await enter("Walk me through testing");
   await emit("voice-delta", { ...turn(3), text: "Testing covers the reader first." });
-  await click("[aria-label=Stop]");
+  await click(`${PRIMARY}[aria-label=Stop]`);
   check("Stop asks for an interrupt, never a kill", (await calls("voice_interrupt")).length === 1 && (await calls("voice_session_stop")).length === 0);
   await emit("voice-interrupted", { ...turn(3), text: "Testing covers the reader first.", streamedChars: 32, messageId: "m3", killed: false, timing: {} });
-  check("An interrupted reply is kept, with a muted tag", (await panelText()).includes("(interrupted)"));
+  check("An interrupted reply is kept, with a muted tag on its tail", (await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().querySelector('[data-reply-tail]').textContent")) === "(interrupted)");
   check("…and no error", !(await cdp.evaluate("!!document.querySelector('[data-tour=voice] p[style*=danger]')")));
   await screenshot("07-interrupted");
 
   // Space talks only from inside the panel, and only once held.
-  await cdp.evaluate("[...document.querySelectorAll('[data-voice-reply]')].pop().firstElementChild.setAttribute('data-qa', 'byline')");
+  await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().querySelector('.rl-reply-byline').setAttribute('data-qa', 'byline')");
   await click("[data-qa=byline]");
   check("A click in the thread focuses the panel", await cdp.evaluate("document.activeElement?.dataset.tour === 'voice'"));
   await cdp.evaluate("window.__qaCalls.length = 0");
@@ -268,8 +289,9 @@ try {
   check("A reply before the model is warm shows why its stand-in reads", chip === "Studio voice warming · System voice reading", chip);
   check("…which never takes focus", (await cdp.evaluate("document.activeElement?.getAttribute('aria-label')")) === focusBefore, focusBefore);
   check("…and the stand-in reads it, the tone marker left out", (await cdp.evaluate("window.__qaSpoken.slice(-1)[0] ?? ''")).startsWith("Testing covers the reader first."));
-  const status = await rect("[data-studio-chip] + span"), chipBox = await rect("[data-studio-chip]");
-  check("…on the status row, beside the speech state, on one line", chipBox && chipBox.right <= status.x && Math.abs(chipBox.y + chipBox.height / 2 - (status.y + status.height / 2)) < 3 && chipBox.height < 24, { status, chipBox });
+  await cdp.evaluate("document.querySelector('[data-studio-chip]').previousElementSibling.setAttribute('data-qa', 'transport')");
+  const transport = await rect("[data-qa=transport]"), chipBox = await rect("[data-studio-chip]");
+  check("…on the transport row, beside its button, on one line", chipBox && chipBox.x >= transport.right && Math.abs(chipBox.y + chipBox.height / 2 - (transport.y + transport.height / 2)) < 3 && chipBox.height < 24, { transport, chipBox });
   await screenshot("10-studio-chip");
   await emit("voice-done", { ...studioTurn, body: "⟦tone: calm⟧ Testing covers the reader first. Then the replay.", messageId: "m5", timing: {} });
   await click("[aria-label='Voice settings']");

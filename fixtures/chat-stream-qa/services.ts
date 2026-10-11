@@ -1,10 +1,19 @@
 // Synthetic boundary: no user database, model calls, or profile writes. A
 // controllable turn store stands in for `useAgentTurn`, driven from the QA
-// script through `window.__turn`; every Tauri interface is inert.
+// script through `window.__turn`; every Tauri interface is inert but the
+// event bridge, which the voice scene replays the store into (`__emit`), and
+// the voice backend's few answers (`__voice`).
 import { useSyncExternalStore } from "react";
 
+type Handler = (event: { payload: unknown }) => void;
+const handlers = new Map<string, Set<Handler>>();
 export function useReadAloud() { return { speaking: false, stop: () => {}, speak: () => {} }; }
-export async function listen() { return () => {}; }
+export async function listen(event: string, fn: Handler) {
+  const set = handlers.get(event) ?? new Set<Handler>();
+  set.add(fn);
+  handlers.set(event, set);
+  return () => { set.delete(fn); };
+}
 export async function emit() {} export async function emitTo() {} export async function once() { return () => {}; }
 export async function open() { return null; } export async function openUrl() {}
 export function convertFileSrc(path: string) { return path; } export function isTauri() { return false; }
@@ -21,16 +30,28 @@ const store: { state: TurnState; subscribers: Set<() => void> } = {
 };
 const subscribe = (fn: () => void) => { store.subscribers.add(fn); return () => { store.subscribers.delete(fn); }; };
 const snapshot = () => store.state;
-Object.assign(window, { __turn: {
-  set(patch: TurnState) { store.state = { ...store.state, ...patch }; for (const fn of store.subscribers) fn(); },
-  get: () => store.state,
-} });
+/** The voice backend: its stored transcript, and the turns sent so far. */
+const voice = { thread: [] as unknown[], turn: 0 };
+Object.assign(window, {
+  __turn: {
+    set(patch: TurnState) { store.state = { ...store.state, ...patch }; for (const fn of store.subscribers) fn(); },
+    get: () => store.state,
+    subscribe,
+  },
+  __emit(event: string, payload: unknown) { for (const fn of handlers.get(event) ?? []) fn({ payload }); },
+  __voice: voice,
+});
 export function useAgentTurn() {
   const state = useSyncExternalStore(subscribe, snapshot);
   return { ...state, send: noop, cancel: noop, unqueue: async () => null, clear: noop, steer: async () => {}, promote: async () => {}, steerNotice: null };
 }
 
 export async function invoke(command: string) {
+  if (command === "voice_thread") return voice.thread;
+  if (command === "voice_send") return { generation: 1, turn: ++voice.turn };
+  if (command === "voice_session_start") return 1;
+  if (command === "voice_session_status") return { up: true, inFlight: false, generation: 1, turn: voice.turn };
+  if (command === "plan_origin_chat") return null;
   if (command === "companion_list") return [{ companionId: "qa", title: "Streaming QA", createdAt: 1 }];
   if (command === "monochat_policy_get") return { conversationTokenBudget: 100000, runTokenBudget: 500000, codexParallelism: 3, claudeParallelism: 3 };
   if (command === "get_agent_seats") return { seats: {} };
