@@ -13,6 +13,7 @@ import { MemoryAsk } from "../../src/components/MemoryAsk";
 import { ReviewThread } from "../../src/components/ReviewThread";
 import { CommentThread } from "../../src/components/CommentThread";
 import { DraftThread } from "../../src/components/DrafterSidecar";
+import { VoicePanel } from "../../src/components/VoicePanel";
 import { applyTheme } from "../../src/theme/applyTheme";
 import { FRONT_DOOR_TEXT_KEY } from "../../src/lib/frontDoor";
 import type { BackendChoice } from "../../src/lib/backendChoice";
@@ -63,6 +64,72 @@ function DoorChat({ room }: { room: boolean }) {
   </>;
 }
 
+type Message = { id: string; role: string; body: string };
+type Activity = { at: number; kind: string; label: string };
+const qa = window as unknown as {
+  __turn: { get(): { messages: Message[]; liveText: string; activity: Activity[] }; subscribe(fn: () => void): () => void };
+  __emit(event: string, payload: unknown): void;
+  __voice: { thread: unknown[]; turn: number };
+};
+
+/** The voice panel over the same turn store, replayed into it as the voice
+ *  backend would speak to it: the history as its stored transcript, each new
+ *  question typed into its box and sent, then `voice-meter` for the newest
+ *  step, `voice-delta` for the text and `voice-done` for the answer. Its
+ *  speech is a fake that says each sentence in 40 ms. */
+function VoiceScene() {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const SID = "qa-voice";
+    const seen = new Set<string>();
+    let live = "";
+    let step: Activity | undefined;
+    let chain = Promise.resolve();
+    const event = () => ({ sessionId: SID, generation: 1, turn: qa.__voice.turn });
+    const ask = async (text: string) => {
+      const input = document.querySelector<HTMLInputElement>("input[aria-label='Type a message to the voice agent']")!;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve));
+      input.form!.requestSubmit();
+    };
+    const replay = async () => {
+      const s = qa.__turn.get();
+      if (!seen.size) {
+        if (!s.messages.length) return;
+        for (const m of s.messages) seen.add(m.id);
+        qa.__voice.thread = s.messages.map((m, i) => ({ id: m.id, sessionKey: SID, role: m.role === "user" ? "you" : "agent", text: m.body, createdAt: i }));
+        setOpen(true);
+        return;
+      }
+      for (const m of s.messages) {
+        if (seen.has(m.id)) continue;
+        seen.add(m.id);
+        if (m.role === "user") {
+          live = "";
+          await ask(m.body);
+        } else qa.__emit("voice-done", { ...event(), body: m.body, messageId: m.id });
+      }
+      const latest = s.activity[s.activity.length - 1];
+      if (latest && latest !== step) qa.__emit("voice-meter", { ...event(), activity: latest });
+      step = latest;
+      if (s.liveText.length > live.length && s.liveText.startsWith(live)) qa.__emit("voice-delta", { ...event(), text: s.liveText.slice(live.length) });
+      live = s.liveText;
+    };
+    return qa.__turn.subscribe(() => void (chain = chain.then(replay)));
+  }, []);
+  // Hosted as the dock column hosts it (App's dock body).
+  return <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
+    {open && <VoicePanel sessionId="qa-voice" markdown="# Plan" sections={[]} onClose={noop}/>}
+  </div>;
+}
+if (scene === "voice") {
+  Object.defineProperty(window, "speechSynthesis", { configurable: true, value: {
+    speak: (u: { onend?: () => void }) => setTimeout(() => u.onend?.(), 40),
+    cancel: noop, pause: noop, resume: noop, getVoices: () => [], addEventListener: noop, removeEventListener: noop,
+  } });
+}
+
 function Scene() {
   useEffect(() => { if (scene !== "card" && scene !== "room") requestAnimationFrame(() => requestAnimationFrame(ready)); }, []);
   switch (scene) {
@@ -75,6 +142,11 @@ function Scene() {
     case "review": return <Panel width={420} scroll><ReviewThread reviewId="r-1" annotationId="a-1"/></Panel>;
     case "comment": case "comment-chat": return <Panel width={360} scroll><CommentThread sessionId="s-1" comment={comment} autoOpen/></Panel>;
     case "drafter": return <Panel width={300} scroll><DraftThread draftId="d-1" commentId="c-1"/></Panel>;
+    // The voice panel docked beside the plan; its composer is a one-line box.
+    case "voice": return <div className="qa-split">
+      <main className="qa-page">Synthetic plan</main>
+      <aside data-qa-scene data-qa-composer="input[aria-label='Type a message to the voice agent']" className="qa-panel" style={{ width: 380 }}><VoiceScene/></aside>
+    </div>;
     default: throw new Error(`Unknown scene ${scene}`);
   }
 }

@@ -120,10 +120,9 @@ export function turnReducer(s: TurnState, a: TurnAction): TurnState {
 
 // --- Captions ---------------------------------------------------------------
 
-/** After this long with nothing said, the caption says it is still going. */
+/** After this long with nothing said, the caption says it is still going.
+ *  Stop is always the composer's button, so the caption never offers one. */
 export const STILL_AFTER_MS = 12_000;
-/** …and after this long, it offers to stop. */
-export const OFFER_STOP_AFTER_MS = 45_000;
 
 /** The voice agent's tool labels, in words for someone waiting to hear back.
  *  Its only `Bash` is the local bridge `curl`, which reads the plan; bridge
@@ -153,17 +152,9 @@ export function activityCaption(activity: Activity | null): string {
 }
 
 /** The thinking line at `elapsedMs` since the turn was sent: the activity,
- *  then "Still …" once the wait is long enough to wonder, then a way out. */
-export function thinkingCaption(
-  activity: Activity | null,
-  elapsedMs: number,
-): { text: string; offerStop: boolean } {
+ *  then "Still …" once the wait is long enough to wonder. */
+export function thinkingCaption(activity: Activity | null, elapsedMs: number): string {
   const text = activityCaption(activity);
-  if (elapsedMs < STILL_AFTER_MS || activity?.kind === "rateLimit") {
-    return { text, offerStop: elapsedMs >= OFFER_STOP_AFTER_MS };
-  }
-  return {
-    text: `Still ${text[0].toLowerCase()}${text.slice(1)}`,
-    offerStop: elapsedMs >= OFFER_STOP_AFTER_MS,
-  };
+  if (elapsedMs < STILL_AFTER_MS || activity?.kind === "rateLimit") return text;
+  return `Still ${text[0].toLowerCase()}${text.slice(1)}`;
 }

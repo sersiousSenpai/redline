@@ -45,7 +45,7 @@ export function captionLine(c: VoiceCaption, now: number): { text: string; spoke
     case "hearing":
       return { text: c.text || "Listening…", spoken: "Listening" };
     case "thinking":
-      return { text: thinkingCaption(c.activity, now - c.since).text, spoken: "Claude is thinking" };
+      return { text: thinkingCaption(c.activity, now - c.since), spoken: "Claude is thinking" };
     case "speaking":
       return { text: c.text, spoken: "Claude is answering" };
     case "done":

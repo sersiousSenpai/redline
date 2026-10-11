@@ -230,6 +230,15 @@ describe("the tail row", () => {
     expect(host.querySelector("[data-inspector]")).not.toBeNull();
   });
 
+  it("marks a reply the user stopped where the meter sits, adding no line under its text", async () => {
+    const { live, done } = await phases({ byline: "Claude", text: "The gist is", meter: null, activity: [], startedAt: 1_000 }, { interrupted: true });
+    expect(done.skeleton).toEqual(live.skeleton);
+    const line = () => host.querySelector("[data-reply-tail] .rl-reply-meter")?.textContent;
+    expect(line()).toBe("(interrupted)");
+    await render({ phase: "settled", byline: "Claude", text: "The gist is", meter: settledMeter(meter()), interrupted: true });
+    expect(line()).toMatch(/^\(interrupted\) · 32\.3k in/);
+  });
+
   it("offers no ⋯ where the surface captures nothing", async () => {
     await render({ phase: "settled", byline: "Claude", text: REPLY, meter: meter() });
     expect(host.querySelector('[aria-label="More for this reply"]')).toBeNull();

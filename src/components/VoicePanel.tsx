@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -80,6 +81,9 @@ import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
 import { levelHeight, STRIP_BARS, strip, type StripAnchor } from "./DictationStrip";
 import { StreamingText } from "./StreamingText";
+import { ReplyBlock, UserTurn } from "./ReplyBlock";
+import { SendStopButton, type SendState } from "./SendStopButton";
+import type { ChatProgressStatus } from "../lib/chatProgress";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
 // turnState.ts): the panel acts only on the turn it is waiting for.
@@ -301,15 +305,6 @@ const MIC_HOT: React.CSSProperties = { background: "var(--color-danger, #c0392b)
 /** The dictation key's glyph, for the input's hint; none when it is off. */
 const TALK_KEY_GLYPH: Record<string, string> = { AltRight: "⌥", MetaRight: "⌘", ControlRight: "⌃" };
 
-const BYLINE: React.CSSProperties = {
-  fontSize: "10px",
-  fontWeight: 600,
-  textTransform: "uppercase",
-  letterSpacing: "0.07em",
-  color: MUTED,
-  marginBottom: "2px",
-};
-
 const LINK_BTN: React.CSSProperties = {
   background: "transparent",
   border: "none",
@@ -362,14 +357,28 @@ function SectionChip({ anchorId, title }: { anchorId: string; title: string }) {
   );
 }
 
-/** One reply, live or settled, in one skeleton: a quiet byline, the spoken
- *  part, the sections it named, and the on-screen detail — muted markdown
- *  under it, never spoken, never boxed. */
-const ReplyView = memo(function ReplyView({
+/** No offers under a reply: one array, so a settled reply's props hold still. */
+const NO_OFFERS: CommentOffer[] = [];
+
+/** One reply in the one reply anatomy (ReplyBlock), the same DOM live and
+ *  settled: a quiet byline, the spoken part as its text, and under it the
+ *  sections it named, the on-screen detail — muted markdown, never spoken,
+ *  never boxed — and what it offered to add. Its tail row is the turn's one
+ *  status line while it runs, and once settled says "(interrupted)" if the
+ *  user stopped it. Stop is the composer's. */
+const VoiceReply = memo(function VoiceReply({
   raw,
   live = false,
   interrupted = false,
   titles,
+  status = null,
+  startedAt = null,
+  offers = NO_OFFERS,
+  offerBusy,
+  offerErrors,
+  explicit,
+  onAdd,
+  onDismiss,
 }: {
   raw: string;
   live?: boolean;
@@ -377,6 +386,15 @@ const ReplyView = memo(function ReplyView({
   /** Section titles by anchor; null where the document has no plan sections
    *  to point at (a draft). */
   titles: ReadonlyMap<string, string> | null;
+  /** Live: what the turn is doing, in the voice's own words. */
+  status?: ChatProgressStatus | null;
+  startedAt?: number | null;
+  offers?: CommentOffer[];
+  offerBusy: Record<string, boolean>;
+  offerErrors: Record<string, string>;
+  explicit: ReadonlySet<string>;
+  onAdd: (o: CommentOffer) => void;
+  onDismiss: (o: CommentOffer) => void;
 }) {
   const reply = useMemo(() => splitReply(raw), [raw]);
   const chips = titles
@@ -385,16 +403,18 @@ const ReplyView = memo(function ReplyView({
         return title ? [[id, title] as const] : [];
       })
     : [];
+  // Plain, never `rich`: the spoken part is for the ear and can't sprout a
+  // diagram; one the agent drew belongs to the detail.
   return (
-    <div className="mb-3" data-voice-reply>
-      <div style={BYLINE}>Claude</div>
-      {live ? (
-        <StreamingText text={reply.spoken} />
-      ) : (
-        <div>
-          <MarkdownView body={reply.spoken} compact />
-        </div>
-      )}
+    <ReplyBlock
+      phase={live ? "live" : "settled"}
+      byline="Claude"
+      text={reply.spoken}
+      rich={false}
+      status={status}
+      startedAt={startedAt}
+      interrupted={interrupted}
+    >
       {chips.length > 0 && (
         <div className="flex flex-wrap gap-1" style={{ marginTop: "4px" }}>
           {chips.map(([id, title]) => (
@@ -413,12 +433,8 @@ const ReplyView = memo(function ReplyView({
           )}
         </div>
       )}
-      {interrupted && (
-        <span style={{ color: MUTED, fontSize: "0.9em", fontStyle: "italic" }}>
-          (interrupted)
-        </span>
-      )}
-    </div>
+      <OfferRow offers={offers} busy={offerBusy} errors={offerErrors} explicit={explicit} onAdd={onAdd} onDismiss={onDismiss} />
+    </ReplyBlock>
   );
 });
 
@@ -443,7 +459,7 @@ function OfferRow({
 }) {
   if (offers.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1.5" style={{ marginTop: "6px" }}>
       {offers.map((o) => {
         const disabled = !!busy[o.id] || !!o.stale;
         return (
@@ -635,6 +651,9 @@ function VoicePanelBase({
   // A stop was asked for this turn; asked again once `voice_send` names it,
   // in case the first ask reached the child before the turn did.
   const interruptWantedRef = useRef(false);
+  // When a stop was last asked for: the live line's newest sign of life
+  // while it says "Stopping…".
+  const stopAskedRef = useRef(0);
   // The turn is being let go because the user carried the one it answers on
   // (hands-free), which no "(interrupted)" note marks.
   const carryingRef = useRef(false);
@@ -818,6 +837,18 @@ function VoicePanelBase({
   // When the user stops or talks over a reply, the rest of it — still
   // streaming in — must not be spoken. Cleared when a new turn begins.
   const discardSpeechRef = useRef(false);
+  // A talk the hold-to-dictate key started over a reply holds the reply
+  // rather than stopping it. The key is Right ⌥, which on many layouts also
+  // types a character (AltGr): held a beat too long before that character,
+  // it starts a capture the character then cancels. So the reply's sound
+  // pauses the moment the capture starts — the talk takes the floor for the
+  // ear as fast as ever, and the mic never hears the agent — and what more
+  // streams in waits here (`raw`, and whether the turn has ended: `final`).
+  // The reply stops for good once the capture hears a word, or its release
+  // brings one: the one sign no key click, fan or keystroke gives. Cancelled
+  // or empty, it plays on from where it paused. `paused`: ⏸ had paused it
+  // already, so it stays paused.
+  const heldRef = useRef<{ raw: string | null; final: boolean; paused: boolean } | null>(null);
 
   // What is actually being heard (playback.ts). Its callbacks dispatch through
   // a ref, like the endpointer's, so they always run the latest handlers.
@@ -866,13 +897,19 @@ function VoicePanelBase({
     [playback],
   );
 
-  /** Speak whatever of the live reply's spoken part is new — never the
-   *  ⟦screen⟧ detail, never a marker. The held-back tail is spoken at the
-   *  end (`final`), and as soon as the spoken part pauses (`spokenPause`). */
+  /** Speak whatever of the live reply's spoken part (`raw` is the reply so
+   *  far) is new — never the ⟦screen⟧ detail, never a marker. The held-back
+   *  tail is spoken at the end (`final`), and as soon as the spoken part
+   *  pauses (`spokenPause`). A held reply keeps it for later. */
   const speakLive = useCallback(
-    (final: boolean) => {
+    (raw: string, final: boolean) => {
       if (discardSpeechRef.current) return;
-      const raw = rawRef.current;
+      const held = heldRef.current;
+      if (held) {
+        held.raw = raw;
+        held.final ||= final;
+        return;
+      }
       const reply = splitReply(raw);
       queueRef.current?.setTone(reply.tone);
       const base = spokenLenRef.current;
@@ -976,6 +1013,7 @@ function VoicePanelBase({
   // of a reply still streaming in. A read-back the user cut short adds nothing.
   const stopSpeech = useCallback(() => {
     discardSpeechRef.current = true;
+    heldRef.current = null;
     readingRef.current = null;
     autoAddArmedRef.current = false;
     if (explicitRef.current.size) setExplicit(new Set());
@@ -1251,6 +1289,7 @@ function VoicePanelBase({
   // Ask the CLI to stop the turn in place: the same child, with everything said
   // so far in memory, takes the next one. Its end arrives as `voice-interrupted`.
   const sendInterrupt = useCallback(() => {
+    stopAskedRef.current = Date.now();
     void invoke<VoiceInterrupt | null>("voice_interrupt", { sessionId })
       .then((r) => {
         if (!r?.interrupting) return;
@@ -1323,9 +1362,10 @@ function VoicePanelBase({
     [sessionId, takeContext, dispatch, sendToSession, sendInterrupt, noteGeneration, setTranscript, setOutbox, restoreDraft],
   );
 
-  // The next waiting turn goes out once nothing is running.
+  // The next waiting turn goes out once nothing is running — nor held: what
+  // the talk holding it says goes first.
   const drain = useCallback(() => {
-    if (turnRef.current.phase !== "idle") return;
+    if (turnRef.current.phase !== "idle" || heldRef.current) return;
     const [next, ...rest] = outboxRef.current;
     if (!next) return;
     setOutbox(rest);
@@ -1345,6 +1385,16 @@ function VoicePanelBase({
     // voice), else the whole clip that was sounding.
     const heard = playing && playback.heard();
     if (heard) return `You were interrupted after saying: "${tail(heard, 160)}"`;
+    // A reply the hold key held, more of it in (or all of it, the turn over)
+    // than went to speech: they heard what went before the hold.
+    const held = heldRef.current?.raw;
+    const whole = !playing && held != null ? splitReply(held).spoken : "";
+    if (whole.length > spokenLenRef.current) {
+      const said = whole.slice(0, spokenLenRef.current);
+      return said.trim()
+        ? `You were interrupted after saying: "${tail(said, 160)}"`
+        : "You were interrupted before they heard any of your reply";
+    }
     const phase = turnRef.current.phase;
     if (playing || phase === "streaming") return "You were interrupted before they heard any of your reply";
     if (phase !== "idle") return "You were interrupted before you said anything";
@@ -1363,6 +1413,19 @@ function VoicePanelBase({
     dispatch({ type: "interrupt" });
     sendInterrupt();
   }, [cutNote, stopSpeech, dispatch, sendInterrupt]);
+
+  // A talk the hold key started over a reply: pause it (see `heldRef`).
+  const holdReply = useCallback(() => {
+    if (heldRef.current) return;
+    const queue = queueRef.current;
+    heldRef.current = { raw: null, final: false, paused: queue?.getState() === "paused" };
+    queue?.pause();
+  }, []);
+
+  // The talk heard a word: it takes the floor, as a talk over a reply does.
+  const takeFloor = useCallback(() => {
+    if (heldRef.current) stopReply();
+  }, [stopReply]);
 
   // --- Offered items ---------------------------------------------------------
 
@@ -1410,6 +1473,21 @@ function VoicePanelBase({
       if (due.has(o.id) && !o.stale) addOffer(o);
     }
   }, [addOffer, setExplicit]);
+
+  // The talk holding a reply heard nothing (the key typed a character, Esc,
+  // a tap): the reply plays on from where it paused, says what came in
+  // meanwhile, and what waited behind it goes — as it does behind a talk
+  // whose first word stopped the reply, then came to nothing.
+  const releaseReply = useCallback(() => {
+    const held = heldRef.current;
+    heldRef.current = null;
+    if (held) {
+      if (!held.paused) queueRef.current?.resume();
+      if (held.raw !== null) speakLive(held.raw, held.final);
+      if (autoAddArmedRef.current && !playback.busy()) runAutoAdd();
+    }
+    drain();
+  }, [speakLive, playback, runAutoAdd, drain]);
 
   /** A spoken yes or no to what the agent offered in its last reply, handled
    *  here instead of becoming a turn. The agent hears about it next turn. */
@@ -1495,8 +1573,8 @@ function VoicePanelBase({
   // --- Stream events -----------------------------------------------------------
   // Handlers read everything through refs or stable callbacks, so the
   // listeners are wired once per session.
-  const streamRef = useRef({ speakLive, runAutoAdd });
-  streamRef.current = { speakLive, runAutoAdd };
+  const streamRef = useRef({ speakLive, runAutoAdd, takeFloor, releaseReply });
+  streamRef.current = { speakLive, runAutoAdd, takeFloor, releaseReply };
   useEffect(() => {
     // `listen()` is async; under StrictMode the cleanup runs before these
     // resolve, so guard with `disposed` and immediately unlisten anything that
@@ -1527,7 +1605,7 @@ function VoicePanelBase({
           dispatch({ type: "text", id });
           rawRef.current += e.payload.text;
           setStreaming(rawRef.current);
-          streamRef.current.speakLive(false);
+          streamRef.current.speakLive(rawRef.current, false);
         }),
       );
       add(
@@ -1543,8 +1621,7 @@ function VoicePanelBase({
           if (!accepts(turnRef.current, id)) return;
           const body = e.payload.body || rawRef.current;
           const messageId = e.payload.messageId ?? undefined;
-          rawRef.current = body;
-          streamRef.current.speakLive(true);
+          streamRef.current.speakLive(body, true);
           rawRef.current = "";
           setStreaming("");
           setTranscript((t) => [...t, { role: "agent", text: body, id: messageId }]);
@@ -1558,10 +1635,11 @@ function VoicePanelBase({
           }
           if (!discardSpeechRef.current) {
             setLastSpoken(splitReply(body).spoken);
-            // An explicit capture is added once its read-back has played.
+            // An explicit capture is added once its read-back has played
+            // (a held reply's, once it plays on).
             if (explicitRef.current.size) {
               autoAddArmedRef.current = true;
-              if (!playbackRef.current?.busy()) streamRef.current.runAutoAdd();
+              if (!playbackRef.current?.busy() && !heldRef.current) streamRef.current.runAutoAdd();
             }
           } else if (explicitRef.current.size) {
             // Its speech was silenced (settings opened over it): nobody heard
@@ -2019,7 +2097,10 @@ function VoicePanelBase({
       },
       partial: (text) => {
         setPartial(text);
-        if (text.trim()) captureRef.current.heard = true;
+        if (text.trim()) {
+          captureRef.current.heard = true;
+          streamRef.current.takeFloor();
+        }
         if (handsFreeRef.current && hfArmedRef.current) {
           endpointRef.current?.partial(text);
         }
@@ -2044,6 +2125,7 @@ function VoicePanelBase({
           return;
         }
         talkingRef.current = false;
+        streamRef.current.releaseReply();
         // Likewise the capture a failed task leaves open, or the next press
         // would start nothing.
         broker.cancel(VOICE_OWNER);
@@ -2061,6 +2143,7 @@ function VoicePanelBase({
       // capture is over. Hands-free listens again once the mic is free.
       preempted: () => {
         talkingRef.current = false;
+        streamRef.current.releaseReply();
         if (hfArmedRef.current) {
           hfArmedRef.current = false;
           rearmDelayRef.current = 1000;
@@ -2080,6 +2163,10 @@ function VoicePanelBase({
         clearTimeout(holdTimerRef.current);
         holdTimerRef.current = null;
       }
+      // A hold-key talk still under way goes with the panel: its release, or
+      // a character cancelling it, says and sends nothing from here.
+      talkingRef.current = false;
+      heldRef.current = null;
       hfArmedRef.current = false;
       endpointRef.current?.reset();
       void turnModel("stop").catch(() => {});
@@ -2110,8 +2197,10 @@ function VoicePanelBase({
   // Push-to-talk: press → stop whatever is running and listen; release →
   // (after a short tail) → transcribe → send, unless it was no speech at all.
   // `since` is when the hold began (a key hold counts from its keydown).
+  // `held`: the hold-to-dictate key started it, which may yet type a
+  // character — what is running is held, not stopped (`heldRef`).
   const startTalk = useCallback(
-    (since = Date.now()) => {
+    (since = Date.now(), held = false) => {
       // Hands-free owns the mic while it's on — manual push-to-talk is suspended.
       if (handsFreeRef.current) return;
       if (talkingRef.current) return;
@@ -2133,16 +2222,20 @@ function VoicePanelBase({
       const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
       // Talking over the agent: silence it and stop its turn in place, so it
       // stops generating what nobody will hear — its memory stays whole.
-      if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
+      if (turnRef.current.phase !== "idle" || playback.busy()) {
+        if (held) holdReply();
+        else stopReply();
+      }
       setListening(true);
       setPartial("");
       void broker.start(VOICE_OWNER, { kind: "hold", preroll }).catch((e) => {
         talkingRef.current = false;
         setListening(false);
+        releaseReply();
         setError(String(e));
       });
     },
-    [playback, stopReply],
+    [playback, stopReply, holdReply, releaseReply],
   );
 
   const stopTalk = useCallback(() => {
@@ -2163,15 +2256,23 @@ function VoicePanelBase({
           // In any mode — in the Walkthrough this is exactly the §1e
           // interjection signal — but never a tap, a cough or a silence.
           const capture = { text, heldMs, heard: captureRef.current.heard };
-          if (!isNonSpeech(capture)) submitSpoken(text);
+          if (isNonSpeech(capture)) return releaseReply();
+          takeFloor();
+          submitSpoken(text);
         })
-        .catch((e) => setError(String(e)));
+        .catch((e) => {
+          releaseReply();
+          setError(String(e));
+        });
     }, CAPTURE_TAIL_MS);
-  }, [submitSpoken]);
+  }, [submitSpoken, takeFloor, releaseReply]);
 
-  // Esc on the hold-to-dictate key's turn: nothing is sent.
+  // Esc on the hold-to-dictate key's turn, or a character typed with the key
+  // (AltGr): nothing is sent, and a reply the talk held plays on.
   const cancelTalk = useCallback(() => {
     if (handsFreeRef.current) return;
+    // Nothing under way (a panel that closed mid-hold): nothing to cancel.
+    if (!talkingRef.current && !stopTimerRef.current) return;
     if (stopTimerRef.current) {
       clearTimeout(stopTimerRef.current);
       stopTimerRef.current = null;
@@ -2180,12 +2281,15 @@ function VoicePanelBase({
     setListening(false);
     setPartial("");
     broker.cancel(VOICE_OWNER);
-  }, []);
+    releaseReply();
+  }, [releaseReply]);
 
   // The hold-to-dictate key, with nothing that takes text focused (or focus
-  // in this panel), is a turn here: the panel's own push-to-talk.
+  // in this panel), is a turn here: the panel's own push-to-talk, holding
+  // what is running until it hears a word.
   useEffect(
-    () => registerTurnTaker({ key: sessionId, start: startTalk, stop: stopTalk, cancel: cancelTalk }),
+    () =>
+      registerTurnTaker({ key: sessionId, start: (since) => startTalk(since, true), stop: stopTalk, cancel: cancelTalk }),
     [sessionId, startTalk, stopTalk, cancelTalk],
   );
 
@@ -2326,9 +2430,23 @@ function VoicePanelBase({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [waiting]);
-  const caption = turn.interrupting
-    ? { text: "Stopping…", offerStop: false }
-    : thinkingCaption(turn.activity, now - (turn.since ?? now));
+  // The live reply's one status line, in the voice's own words: what the
+  // agent is doing before it speaks, then whether its words are being said,
+  // and "Stopping…" once it has been asked to. Its last sign of life is the
+  // send, the newest step or the stop; text arriving is the reply's own. A
+  // rate limit it names is a wait it knows about, never silence.
+  const rateLimited = waiting && !turn.interrupting && turn.activity?.kind === "rateLimit";
+  const liveStatus: ChatProgressStatus = {
+    label: turn.interrupting
+      ? "Stopping…"
+      : waiting
+        ? thinkingCaption(turn.activity, now - (turn.since ?? now))
+        : speechState === "speaking"
+          ? "Speaking…"
+          : "Answering…",
+    at: rateLimited ? now : Math.max(turn.since ?? 0, turn.activity?.at ?? 0, turn.interrupting ? stopAskedRef.current : 0),
+    running: true,
+  };
 
   const queued = outbox.filter((o) => !o.spoken);
   // The tray floats over the transcript's foot; the transcript makes room under
@@ -2350,22 +2468,12 @@ function VoicePanelBase({
       : hearing
         ? "listening"
         : "idle";
-  const indicator: { label: string; color: string } = hearing
-    ? { label: "Listening…", color: "var(--color-danger, #c0392b)" }
-    : waiting
-    ? { label: caption.text, color: "var(--color-warn, #b8860b)" }
-    : turn.phase === "streaming" && speechState !== "speaking"
-    ? { label: "Answering…", color: "var(--color-anchor-text)" }
-    : speechState === "speaking"
-      ? { label: "Speaking…", color: "var(--color-anchor-text)" }
-      : speechState === "paused"
-        ? { label: "Paused", color: MUTED }
-        : { label: sessionUp ? "Ready" : "Warming up…", color: MUTED };
 
-  // The composer's one button: send; queue, once a reply is running and there
-  // is text; stop, while one runs (or plays) and the box is empty.
+  // The composer's one button (SendStopButton): send; queue, once a reply is
+  // running and there is text; stop, while one runs (or plays) and the box
+  // is empty.
   const hasText = typed.trim().length > 0;
-  const primary: "send" | "queue" | "stop" = hasText
+  const primary: SendState = hasText
     ? busy
       ? "queue"
       : "send"
@@ -2391,7 +2499,7 @@ function VoicePanelBase({
       ref={panelRef}
       tabIndex={-1}
       onKeyDown={onPanelKeyDown}
-      className="flex-1 min-w-0 flex flex-col"
+      className="flex-1 min-w-0 min-h-0 flex flex-col"
       style={{
         background: "var(--color-bg-elevated)",
         borderLeft: "1px solid var(--color-rule)",
@@ -2552,10 +2660,10 @@ function VoicePanelBase({
           <div
             ref={stick.ref}
             onScroll={stick.onScroll}
-            className="flex-1 overflow-y-auto px-4 pt-3 rl-thin-scroll-y"
+            className="flex-1 overflow-y-auto px-4 pt-3 rl-thin-scroll-y flex flex-col gap-2"
             style={{ fontSize: "13px", lineHeight: 1.5, paddingBottom: `${12 + trayHeight}px` }}
           >
-            {originChat && <details key={originChat.companionId} open={transcript.length === 0} className="mb-3 rounded border p-2" style={{ borderColor: "var(--color-rule)" }}>
+            {originChat && <details key={originChat.companionId} open={transcript.length === 0} className="rounded border p-2" style={{ borderColor: "var(--color-rule)" }}>
               <summary style={{ cursor: "pointer" }}>From chat: {originChat.title}</summary>
               {onOpenChat && <button type="button" onClick={() => onOpenChat(originChat.companionId)} style={{ color: "var(--color-info)", marginBlock: 8 }}>Open chat →</button>}
               {originChat.messages.map(message => <div key={message.id} style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", marginBlock: 10 }}><strong>{message.role === "user" ? "You" : "Assistant"}</strong><p>{message.body}</p></div>)}
@@ -2571,17 +2679,36 @@ function VoicePanelBase({
                 each reply. Or tap a starter to begin.
               </p>
             )}
-            {transcript.map((line, i) =>
-              line.role === "note" ? (
-                <div
-                  key={line.id ?? line.key ?? `i-${i}`}
-                  className="mb-2"
-                  style={{
-                    color: MUTED,
-                    fontStyle: "italic",
-                    fontSize: "0.9em",
-                  }}
-                >
+            {transcript.map((line, i) => {
+              const key = line.id ?? line.key ?? `i-${i}`;
+              // What this line offered to add, if anything.
+              const lineOffers = (line.id && groupedOffers.byMessage.get(line.id)) || NO_OFFERS;
+              if (line.role === "agent") {
+                return (
+                  <VoiceReply
+                    key={key}
+                    raw={line.text}
+                    interrupted={line.interrupted}
+                    titles={titlesForReplies}
+                    offers={lineOffers}
+                    offerBusy={offerBusy}
+                    offerErrors={offerErrors}
+                    explicit={explicit}
+                    onAdd={addOffer}
+                    onDismiss={dismissOffer}
+                  />
+                );
+              }
+              if (line.role === "you") {
+                return (
+                  <Fragment key={key}>
+                    <UserTurn body={line.text} />
+                    <OfferRow offers={lineOffers} busy={offerBusy} errors={offerErrors} explicit={explicit} onAdd={addOffer} onDismiss={dismissOffer} />
+                  </Fragment>
+                );
+              }
+              return (
+                <div key={key} style={{ color: MUTED, fontStyle: "italic", fontSize: "0.9em" }}>
                   {line.text}
                   {line.capture && !line.capture.undone && (
                     <>
@@ -2609,80 +2736,38 @@ function VoicePanelBase({
                     </>
                   )}
                 </div>
-              ) : (
-                <div key={line.id ?? line.key ?? `i-${i}`}>
-                  {line.role === "you" ? (
-                    <div
-                      className="mb-3 rounded-lg px-3 py-2"
-                      style={{
-                        background: "var(--color-paper)",
-                        border: "1px solid var(--color-rule)",
-                        color: "var(--color-ink)",
-                        overflowWrap: "anywhere",
-                      }}
-                    >
-                      {line.text}
-                    </div>
-                  ) : (
-                    <ReplyView
-                      raw={line.text}
-                      interrupted={line.interrupted}
-                      titles={titlesForReplies}
-                    />
-                  )}
-                  {/* What this reply offered to add, if anything. */}
-                  <OfferRow
-                    offers={
-                      (line.id && groupedOffers.byMessage.get(line.id)) || []
-                    }
-                    busy={offerBusy}
-                    errors={offerErrors}
-                    explicit={explicit}
-                    onAdd={addOffer}
-                    onDismiss={dismissOffer}
-                  />
-                </div>
-              ),
+              );
+            })}
+            {/* The reply on its way, from the send: what the agent is doing
+                on its one status line until it speaks, then the reply itself,
+                in the skeleton it settles into. Offers not yet bound to a reply
+                sit under the one still streaming, or at the tail once it has
+                landed — tappable either way, never waiting on the join. */}
+            {turnBusy ? (
+              <VoiceReply
+                raw={streaming}
+                live
+                titles={titlesForReplies}
+                status={liveStatus}
+                startedAt={turn.since}
+                offers={groupedOffers.loose}
+                offerBusy={offerBusy}
+                offerErrors={offerErrors}
+                explicit={explicit}
+                onAdd={addOffer}
+                onDismiss={dismissOffer}
+              />
+            ) : (
+              <OfferRow
+                offers={groupedOffers.loose}
+                busy={offerBusy}
+                errors={offerErrors}
+                explicit={explicit}
+                onAdd={addOffer}
+                onDismiss={dismissOffer}
+              />
             )}
-            {/* The reply on its way: what the agent is doing until it speaks,
-                then the reply itself in the same skeleton it settles into. */}
-            {turnBusy &&
-              (streaming ? (
-                <ReplyView raw={streaming} live titles={titlesForReplies} />
-              ) : (
-                <div className="mb-3" data-voice-thinking>
-                  <div style={BYLINE}>Claude</div>
-                  <span style={{ color: MUTED }} aria-live="polite">
-                    {caption.text}
-                  </span>
-                  {caption.offerStop && (
-                    <button
-                      type="button"
-                      onClick={stopReply}
-                      title="Stop this reply"
-                      style={LINK_BTN}
-                    >
-                      Stop
-                    </button>
-                  )}
-                </div>
-              ))}
-            {/* Offers not yet bound to a reply — under the one still streaming,
-                or at the tail once it has landed. Either way they stay tappable
-                rather than waiting on the join. */}
-            <OfferRow
-              offers={groupedOffers.loose}
-              busy={offerBusy}
-              errors={offerErrors}
-              explicit={explicit}
-              onAdd={addOffer}
-              onDismiss={dismissOffer}
-            />
-            {error && (
-              <p style={{ color: "var(--color-danger, #c0392b)", marginTop: "8px" }}>
-                {error}
-              </p>
-            )}
+            {error && <p style={{ color: "var(--color-danger, #c0392b)" }}>{error}</p>}
           </div>
           {/* Typed turns waiting for the reply to finish. × puts one back in
               the box. */}
@@ -2743,20 +2828,17 @@ function VoicePanelBase({
             style={{ borderTop: "1px solid var(--color-rule)" }}
           >
             {/* Hands-free toggle — converse without holding a button — and
-                what the conversation is doing. */}
+                whose turn it is. What the agent is doing is said once, on its
+                reply's status line. */}
             <div className="flex items-center justify-between gap-2">
               <span style={{ fontSize: "12px", color: MUTED }}>
                 {!handsFree
                   ? "Hold to talk, or go hands-free"
                   : hearing
                     ? "Hands-free — just talk; it sends on a pause"
-                    : waiting
-                      ? `${caption.text} (tap 🎙️ to interrupt)`
-                      : turn.phase === "streaming"
-                        ? "Answering… (tap 🎙️ to interrupt)"
-                        : speechState === "speaking" || speechState === "paused"
-                          ? "Speaking… (tap 🎙️ to interrupt)"
-                          : "Hands-free — getting ready to listen"}
+                    : turnBusy || speechState !== "idle"
+                      ? "Hands-free — tap 🎙️ to interrupt"
+                      : "Hands-free — getting ready to listen"}
               </span>
               <button
                 ref={handsFreeSwitchRef}
@@ -2853,37 +2935,7 @@ function VoicePanelBase({
                   🎙️
                 </button>
               )}
-              <button
-                // Keyed by role: a stop that turns into a send must not be
-                // the same element mid-click.
-                key={primary === "stop" ? "stop" : "send"}
-                type={primary === "stop" ? "button" : "submit"}
-                onClick={primary === "stop" ? stopReply : undefined}
-                disabled={primary === "send" && !hasText}
-                title={
-                  primary === "stop"
-                    ? "Stop the reply"
-                    : primary === "queue"
-                      ? "Queue — it goes when this reply finishes (Enter)"
-                      : "Send (Enter)"
-                }
-                aria-label={primary === "stop" ? "Stop" : undefined}
-                className="rounded-md px-2.5 py-1.5"
-                style={{
-                  fontSize: "12px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: hasText ? "var(--color-anchor-bg)" : "transparent",
-                  color: hasText
-                    ? "var(--color-anchor-text)"
-                    : primary === "stop"
-                      ? "var(--color-ink)"
-                      : MUTED,
-                  cursor: hasText || primary === "stop" ? "pointer" : "default",
-                }}
-              >
-                {primary === "stop" ? "■ Stop" : primary === "queue" ? "Queue" : "Send"}
-              </button>
+              <SendStopButton state={primary} onSend={sendTyped} onStop={stopReply} disabled={!hasText} />
             </form>
 
             {/* Walkthrough controls — only while a guided walk is running. It
@@ -2985,8 +3037,9 @@ function VoicePanelBase({
               </div>
             )}
 
-            {/* Status + transport. Stop lives in the composer's button; this
-                row replays the last reply when idle and pauses one playing. */}
+            {/* Transport. Stop lives in the composer's button, and what the
+                agent is doing on its reply's status line; this row replays
+                the last reply when idle and pauses one playing. */}
             <div className="flex items-center gap-2">
               {speechState === "speaking" ? (
                 <button
@@ -3039,12 +3092,12 @@ function VoicePanelBase({
                   {studioNote}
                 </span>
               )}
-              <span
-                className="ml-auto shrink-0"
-                style={{ fontSize: "12px", color: indicator.color }}
-              >
-                ● {indicator.label}
-              </span>
+              {/* Until the warm session is up, and no turn is saying so. */}
+              {!sessionUp && !turnBusy && (
+                <span className="ml-auto shrink-0" style={{ fontSize: "12px", color: MUTED }}>
+                  Warming up…
+                </span>
+              )}
             </div>
           </div>
         </>
@@ -3060,7 +3113,11 @@ function isEnhancedVoice(v: SpeechSynthesisVoice): boolean {
   return /\((enhanced|premium)\)/i.test(v.name);
 }
 
+// One line, whatever sits beside it: the studio chip arriving next to it
+// never makes the row (and the thread above) change height.
 const transportBtn: React.CSSProperties = {
+  flexShrink: 0,
+  whiteSpace: "nowrap",
   fontSize: "13px",
   border: "1px solid var(--color-rule)",
   background: "transparent",

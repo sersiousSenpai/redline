@@ -130,6 +130,10 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "turn_scorer":
         if (args?.op === "warm" && !script.turnModel) throw "the end-of-turn model isn't downloaded";
         return { runtime: true, model: script.turnModel, warm: script.turnModel, score: script.turnScore };
+      // Kokoro: the sentence itself as its "audio", which the fake context
+      // below plays.
+      case "tts_synth":
+        return { audioBase64: Buffer.from(String(args?.text)).toString("base64"), mime: "audio/wav", speed: 1 };
       case "delete_comment":
         return true;
       default:
@@ -141,6 +145,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { VoicePanel } from "./VoicePanel";
 import { strip } from "./DictationStrip";
 import { broker } from "../audio/dictationBroker";
+import { installDictation } from "../audio/dictationHost";
 import { composerAt } from "../audio/dictationTarget";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import type { Section } from "../types";
@@ -170,6 +175,8 @@ interface FakeUtterance {
   onerror?: () => void;
 }
 let utterances: FakeUtterance[];
+/** What the system voice was told besides `speak`. */
+let synthCalls: string[];
 let root: Root;
 let host: HTMLDivElement;
 
@@ -189,9 +196,9 @@ const finishSpeech = () =>
   });
 const spoken = () => utterances.map((u) => u.text).join(" ");
 
-async function mount() {
+async function mount(markdown = "# Plan\n\nBody.") {
   await act(async () => {
-    root.render(<VoicePanel sessionId={SID} markdown={"# Plan\n\nBody."} sections={SECTIONS} onClose={() => {}} />);
+    root.render(<VoicePanel sessionId={SID} markdown={markdown} sections={SECTIONS} onClose={() => {}} />);
   });
   await wait();
   await wait();
@@ -260,6 +267,15 @@ function space(type: "keydown" | "keyup", target: EventTarget) {
   return ev;
 }
 
+/** Poll until `test` holds (real timers), then insist on it. */
+async function until(test: () => boolean, ms = 2000) {
+  for (let t = 0; t < ms && !test(); t += 10) await wait(10);
+  expect(test()).toBe(true);
+}
+
+/** The composer's one button (SendStopButton), whatever its face. */
+const primary = () => input().form!.lastElementChild as HTMLButtonElement;
+
 let scrolled: Element[];
 beforeEach(() => {
   calls.length = 0;
@@ -282,6 +298,7 @@ beforeEach(() => {
   script.final = "";
   script.cycleWait = null;
   utterances = [];
+  synthCalls = [];
   setVoiceAway(null);
   scrolled = [];
   Element.prototype.scrollIntoView = function (this: Element) {
@@ -290,10 +307,11 @@ beforeEach(() => {
   (window as unknown as { speechSynthesis: unknown }).speechSynthesis = {
     speak: (u: FakeUtterance) => utterances.push(u),
     cancel: () => {
+      synthCalls.push("cancel");
       utterances = [];
     },
-    pause: () => {},
-    resume: () => {},
+    pause: () => synthCalls.push("pause"),
+    resume: () => synthCalls.push("resume"),
     getVoices: () => [],
     addEventListener() {},
     removeEventListener() {},
@@ -313,6 +331,7 @@ afterEach(async () => {
   host.remove();
   document.body.innerHTML = "";
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 // --- Space ---------------------------------------------------------------------
@@ -355,6 +374,28 @@ describe("the input row", () => {
     await wait(400);
     expect(strip.get()).toBeNull();
     expect(sends().map((s) => s.text)).toEqual(["is the replay safe"]);
+  });
+
+  it("has one primary button, never disabled: send, queue while a reply runs, stop on an empty box", async () => {
+    await mount();
+    const el = primary();
+    expect(el.getAttribute("aria-label")).toBe("Send");
+    // Nothing to send is aria-disabled, so the button keeps its focus.
+    expect(el.getAttribute("aria-disabled")).toBe("true");
+    expect(el.hasAttribute("disabled")).toBe(false);
+    await type("And the risks?");
+    expect(el.getAttribute("aria-disabled")).toBeNull();
+    await type("");
+    await summarize();
+    expect(el.getAttribute("aria-label")).toBe("Stop");
+    await type("Add that as feedback");
+    // The same button in the same slot, its face changed.
+    expect(primary()).toBe(el);
+    expect(el.getAttribute("aria-label")).toBe("Queue");
+    await act(async () => el.click());
+    expect(host.querySelector("[aria-label='Queued messages']")?.textContent).toContain("Add that as feedback");
+    expect(el.getAttribute("aria-label")).toBe("Stop");
+    expect(sends()).toHaveLength(1);
   });
 
   it("never takes down a strip that is not its own", async () => {
@@ -481,7 +522,8 @@ describe("interrupting a reply", () => {
     expect(names()).toEqual(["voice_interrupt"]);
     await emit("voice-interrupted", { ...of(1), text: "The gist is", streamedChars: 11, messageId: "m1", killed: false });
     expect(host.textContent).toContain("The gist is");
-    expect(host.textContent).toContain("(interrupted)");
+    // On the reply's tail, where it adds no line under the text.
+    expect(host.querySelector("[data-reply='settled'] [data-reply-tail]")?.textContent).toBe("(interrupted)");
     expect(host.querySelector("p[style*='danger']")).toBeNull();
     expect(input().disabled).toBe(false);
   });
@@ -622,7 +664,7 @@ describe("turns", () => {
 // --- what is shown before the first word ------------------------------------------
 
 describe("before the first word", () => {
-  it("shows what the agent is doing, says it is still going, and offers Stop", async () => {
+  it("says what the agent is doing on its reply's one status line, that it is still going, and leaves Stop to the composer", async () => {
     vi.useFakeTimers();
     await act(async () => {
       root.render(<VoicePanel sessionId={SID} markdown={"# Plan"} sections={SECTIONS} onClose={() => {}} />);
@@ -632,19 +674,86 @@ describe("before the first word", () => {
       button("Summarize").click();
       await vi.advanceTimersByTimeAsync(10);
     });
-    const thinking = () => host.querySelector("[data-voice-thinking]")?.textContent ?? "";
-    expect(thinking()).toContain("Thinking…");
-    await emit("voice-meter", { ...of(1), rev: 3, meter: {}, activity: { at: 1, kind: "tool", label: "Bash…" } });
-    expect(thinking()).toContain("Reading the plan…");
+    const live = () => host.querySelector("[data-reply='live']")!;
+    const status = () => live().querySelector("[data-reply-tail] [role=status]")?.textContent ?? "";
+    // The reply's skeleton is there from the send: its byline where its words
+    // will start, and the one working line in the whole panel under it — no
+    // caption over it, no status sentence and no indicator below.
+    expect(live().querySelector(".rl-reply-byline")?.textContent).toBe("Claude");
+    expect(status()).toBe("Thinking…");
+    expect(panel().querySelectorAll("[role=status]")).toHaveLength(1);
+    expect(panel().textContent!.match(/Thinking|Answering|Speaking|Ready|●/g)).toEqual(["Thinking"]);
+    await emit("voice-meter", { ...of(1), rev: 3, meter: {}, activity: { at: Date.now(), kind: "tool", label: "Bash…" } });
+    expect(status()).toBe("Reading the plan…");
     await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
-    expect(thinking()).toContain("Still reading the plan…");
-    expect(thinking()).not.toContain("Stop");
+    expect(status()).toBe("Still reading the plan…");
+    // Long after, still no Stop of its own: the composer's one button is it.
     await act(async () => { await vi.advanceTimersByTimeAsync(33_000); });
-    const stop = host.querySelector("[data-voice-thinking] button") as HTMLButtonElement;
-    expect(stop.textContent).toBe("Stop");
+    expect(live().querySelector("button")).toBeNull();
+    const stop = button("Stop");
+    expect(stop.dataset.send).toBe("stop");
+    expect(stop.hasAttribute("disabled")).toBe(false);
     calls.length = 0;
     await act(async () => stop.click());
     expect(names()).toContain("voice_interrupt");
+    expect(status()).toBe("Stopping…");
+  });
+
+  it("keeps a rate limit's own words on the status line for as long as it waits", async () => {
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(<VoicePanel sessionId={SID} markdown={"# Plan"} sections={SECTIONS} onClose={() => {}} />);
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    await act(async () => {
+      button("Summarize").click();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    const status = () => host.querySelector("[data-reply='live'] [data-reply-tail] [role=status]")?.textContent ?? "";
+    await emit("voice-meter", { ...of(1), rev: 2, meter: {}, activity: { at: Date.now(), kind: "rateLimit", label: "Rate limited (five_hour) · waiting" } });
+    // A known wait is not silence: never "still waiting for the agent".
+    await act(async () => { await vi.advanceTimersByTimeAsync(90_000); });
+    expect(status()).toBe("Rate limited (five_hour) · waiting");
+  });
+});
+
+// --- one reply anatomy ------------------------------------------------------------
+
+describe("one reply anatomy", () => {
+  const REPLY = "The risk is a double apply. ⟦§A.1⟧ Gate it on the turn id.\n⟦screen⟧\n- remount replays\n- gate on the turn";
+  /** Each slot of a reply: its tag, classes and data attributes, in order. */
+  const skeleton = (reply: Element) =>
+    [...reply.children].map((el) =>
+      [el.tagName.toLowerCase(), el.getAttribute("class") ?? "", ...[...el.attributes].filter((a) => a.name.startsWith("data-")).map((a) => a.name).sort()].join(" "),
+    );
+
+  it("streams a reply into the skeleton it settles into, its chips and detail under the text", async () => {
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: REPLY });
+    const live = host.querySelector("[data-reply='live']")!;
+    const streamed = {
+      skeleton: skeleton(live),
+      text: live.querySelector(".rl-reply-text")!.innerHTML,
+      detail: live.querySelector("[data-voice-screen]")!.textContent,
+    };
+    // The spoken part is the text; the sections it named and the detail sit
+    // under it, and the tail row closes it.
+    expect(live.querySelector(".rl-reply-text")!.textContent!.trim()).toMatch(/^The risk is a double apply\.\s+Gate it on the turn id\.$/);
+    expect(streamed.skeleton.map((slot) => slot.split(" ")[1])).toEqual(["rl-reply-head", "rl-reply-text", "flex", "", "rl-reply-tail"]);
+    await emit("voice-done", { ...of(1), body: REPLY, messageId: "m1" });
+    expect(host.querySelector("[data-reply='live']")).toBeNull();
+    const settled = [...host.querySelectorAll("[data-reply]")].pop()!;
+    expect(settled.getAttribute("data-reply")).toBe("settled");
+    expect(skeleton(settled)).toEqual(streamed.skeleton);
+    expect(settled.querySelector(".rl-reply-text")!.innerHTML).toBe(streamed.text);
+    expect(settled.querySelector("[data-voice-screen]")!.textContent).toBe(streamed.detail);
+    expect(settled.querySelector(".rl-reply-byline")!.textContent).toBe("Claude");
+    expect(button("§ Rollout")).toBeTruthy();
+    // Settled, nothing says the agent is working.
+    expect(panel().querySelectorAll("[role=status]")).toHaveLength(0);
+    // The user's side is a compact card with no "You" on it.
+    expect(host.querySelector("[data-user-turn]")!.textContent!.trim()).toBe("▶ Summarize the plan");
   });
 });
 
@@ -830,6 +939,278 @@ describe("non-speech captures", () => {
     expect(sends()).toEqual([]);
     await holdToTalk("Focus on rollout.");
     expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
+  });
+});
+
+// --- reading the plan aloud, then Stop ---------------------------------------------
+
+describe("reading the plan aloud", () => {
+  const PLAN = "# Plan\n\nFirst point of the plan. Second point of the plan.\n\n## Rollout\n\nRoll it out in waves. Then widen the flag.";
+  const planSaid = /point of the plan|Roll it out|widen the flag/;
+
+  /** A Web Audio context whose clips each play for 200 ms, logging what is
+   *  heard: the sentence each was synthesized from. */
+  function fakeAudioContext(heard: string[]) {
+    return class {
+      state = "running";
+      destination = {};
+      createBufferSource() {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const source = {
+          buffer: null as { tag: string } | null,
+          playbackRate: { value: 1 },
+          onended: null as (() => void) | null,
+          connect() {},
+          start() {
+            heard.push(source.buffer!.tag);
+            timer = setTimeout(() => source.onended?.(), 200);
+          },
+          stop() {
+            clearTimeout(timer);
+            setTimeout(() => source.onended?.(), 0);
+          },
+        };
+        return source;
+      }
+      async decodeAudioData(bytes: ArrayBuffer) {
+        const tag = new TextDecoder().decode(new Uint8Array(bytes));
+        const data = new Float32Array(tag.length * 10).fill(0.5);
+        return { tag, sampleRate: 1000, getChannelData: () => data };
+      }
+      async suspend() {
+        this.state = "suspended";
+      }
+      async resume() {
+        this.state = "running";
+      }
+    };
+  }
+
+  it("is stopped by the composer's button with nothing left to say, and the next Summarize is heard first", async () => {
+    await mount(PLAN);
+    await act(async () => button("▸ Read it to me").click());
+    await wait();
+    expect(spoken()).toMatch(planSaid);
+    // While it reads, the one button is Stop.
+    expect(primary().dataset.send).toBe("stop");
+    expect(button("Pause speech")).toBeTruthy();
+    calls.length = 0;
+    await act(async () => primary().click());
+    // Stopped in the voice, with nothing of it left queued…
+    expect(synthCalls).toContain("cancel");
+    expect(utterances).toEqual([]);
+    // …and idle: the button sends again, and the reading can be replayed.
+    expect(primary().getAttribute("aria-label")).toBe("Send");
+    expect(button("Pause speech")).toBeUndefined();
+    expect(button("▶ Replay").disabled).toBe(false);
+    // No turn ran, so none was interrupted.
+    expect(names()).not.toContain("voice_interrupt");
+    await wait(300);
+    expect(utterances).toEqual([]);
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "Here is the short version. It ships in two waves." });
+    expect(utterances[0]?.text).toBe("Here is the short version.");
+    expect(spoken()).not.toMatch(planSaid);
+  });
+
+  it("on Kokoro, drops the reading's backlog in the engine, and the next Summarize is the next clip heard", async () => {
+    script.engine = "kokoro";
+    const heard: string[] = [];
+    vi.stubGlobal("AudioContext", fakeAudioContext(heard));
+    await mount(PLAN);
+    await act(async () => button("▸ Read it to me").click());
+    await until(() => heard.length > 0);
+    const reading = (named("tts_synth")[0][1] as { generation: number }).generation;
+    // A sentence or two ahead of the one heard, never the whole plan queued.
+    expect(named("tts_synth").length).toBeLessThanOrEqual(3);
+    expect(primary().dataset.send).toBe("stop");
+    await act(async () => primary().click());
+    expect(named("tts_cancel").map(([, a]) => a)).toEqual([{ generation: reading }]);
+    expect(primary().getAttribute("aria-label")).toBe("Send");
+    const asked = named("tts_synth").length;
+    const before = heard.length;
+    await wait(400);
+    expect(named("tts_synth")).toHaveLength(asked);
+    expect(heard).toHaveLength(before);
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "Here is the short version. It ships in two waves." });
+    await until(() => heard.length > before);
+    expect(heard[before]).toBe("Here is the short version.");
+    const after = named("tts_synth").slice(asked).map(([, a]) => String(a?.text));
+    expect(after.filter((text) => planSaid.test(text))).toEqual([]);
+  });
+});
+
+// --- the hold-to-dictate key over a reply --------------------------------------------
+
+describe("the hold-to-dictate key over a reply", () => {
+  /** A key on what has focus, as the window hears it. */
+  function key(type: "keydown" | "keyup", code: string, init: KeyboardEventInit = {}) {
+    const ev = new KeyboardEvent(type, { code, bubbles: true, cancelable: true, ...init });
+    act(() => {
+      (document.activeElement ?? document.body).dispatchEvent(ev);
+    });
+    return ev;
+  }
+
+  async function replying() {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "First, the ownership globs are guesses. Second, check" });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    input().focus();
+    calls.length = 0;
+    synthCalls.length = 0;
+  }
+
+  it("lets a slow AltGr keystroke in the box type its character, the reply playing on", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    // Held past its threshold: the panel listens, and the reply is paused,
+    // not stopped — what streams in meanwhile waits.
+    expect(names()).toContain("dictation_start");
+    expect(synthCalls).toEqual(["pause"]);
+    await emit("voice-delta", { ...of(1), text: " attribution is missing. Third, the end" });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    // The character: it goes on to the box, which keeps the caret…
+    const typed = key("keydown", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(50);
+    expect(typed.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input());
+    // …and the reply plays on from where it paused, saying what came in.
+    expect(names()).toContain("dictation_kill_all");
+    expect(names()).not.toContain("voice_interrupt");
+    expect(synthCalls).toEqual(["pause", "resume"]);
+    expect(spoken()).toBe("First, the ownership globs are guesses. Second, check attribution is missing.");
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check attribution is missing. Third, the end.", messageId: "m1" });
+    expect(spoken()).toContain("Third, the end.");
+    expect(host.textContent).not.toContain("(interrupted)");
+    expect(sends()).toEqual([]);
+  });
+
+  it("stops the reply in place once its capture hears a word, and sends what was said", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    expect(names()).not.toContain("voice_interrupt");
+    await emit("dictation-partial", { owner: "voice", text: "wait which" });
+    expect(names()).toContain("voice_interrupt");
+    expect(utterances).toEqual([]);
+    script.dictated = "Wait, which globs?";
+    await wait(150);
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    await emit("voice-interrupted", { ...of(1), text: "First, the ownership globs are guesses.", streamedChars: 40, messageId: "m1", killed: false });
+    await wait();
+    expect(sends().map((x) => x.text)).toEqual(["Wait, which globs?"]);
+    expect(sends()[0].context).toContain('You were interrupted after saying: "First, the ownership globs are guesses."');
+  });
+
+  it("…or once its release brings words the live transcript missed", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(450);
+    script.dictated = "Focus on the rollout first.";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(names()).toContain("voice_interrupt");
+    await emit("voice-interrupted", { ...of(1), text: "First, the ownership globs are guesses.", streamedChars: 40, messageId: "m1", killed: false });
+    await wait();
+    expect(sends().map((x) => x.text)).toEqual(["Focus on the rollout first."]);
+  });
+
+  it("tells the agent how much was heard of a reply that ended while the key held it", async () => {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "First, the ownership globs are guesses. " });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    await finishSpeech();
+    input().focus();
+    calls.length = 0;
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    // The rest of it lands, and the turn ends, while the key holds it.
+    await emit("voice-delta", { ...of(1), text: "Second, check attribution is missing." });
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check attribution is missing.", messageId: "m1" });
+    expect(utterances).toEqual([]);
+    await emit("dictation-partial", { owner: "voice", text: "hold on" });
+    script.dictated = "Hold on, which globs?";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    // Nothing of the rest is said, and the agent hears where the user got to.
+    expect(utterances).toEqual([]);
+    expect(sends().map((x) => x.text)).toEqual(["Hold on, which globs?"]);
+    expect(sends()[0].context).toContain('You were interrupted after saying: "First, the ownership globs are guesses."');
+  });
+
+  it("…or that none of it was, when the agent was still thinking as the key went down", async () => {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    input().focus();
+    calls.length = 0;
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-delta", { ...of(1), text: "It ships in two waves." });
+    await emit("voice-done", { ...of(1), body: "It ships in two waves.", messageId: "m1" });
+    await emit("dictation-partial", { owner: "voice", text: "why" });
+    script.dictated = "Why two waves?";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(utterances).toEqual([]);
+    expect(sends().map((x) => x.text)).toEqual(["Why two waves?"]);
+    expect(sends()[0].context).toContain("You were interrupted before they heard any of your reply");
+  });
+
+  it("sends what was typed meanwhile once the talk that held the reply turns out to be nothing", async () => {
+    await replying();
+    await type("And the rollout?");
+    await submit();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check it.", messageId: "m1" });
+    // The turn is over, but what was typed waits on what the talk says.
+    expect(sends()).toEqual([]);
+    // A sound the live transcript took for a word, then nothing at the end.
+    await emit("dictation-partial", { owner: "voice", text: "hm" });
+    script.dictated = "";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(sends().map((x) => x.text)).toEqual(["And the rollout?"]);
+  });
+
+  it("says nothing from a panel that closed while the key held its reply", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-delta", { ...of(1), text: " attribution is missing. Third" });
+    // The dock switches context mid-hold: the panel goes, the key comes up.
+    await act(async () => root.render(<></>));
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(utterances).toEqual([]);
+    expect(sends()).toEqual([]);
+  });
+
+  it("…nor sends what was typed there when the key's character cancels the talk after", async () => {
+    await replying();
+    await type("And the rollout?");
+    await submit();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check it.", messageId: "m1" });
+    await act(async () => root.render(<></>));
+    key("keydown", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(50);
+    expect(sends()).toEqual([]);
+    expect(utterances).toEqual([]);
   });
 });
 

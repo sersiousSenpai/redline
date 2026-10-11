@@ -5,6 +5,7 @@ import { DiscussPill } from "../../src/components/DiscussPill";
 import { setVoiceAway } from "../../src/audio/voiceAway";
 import { voiceCaption } from "../../src/audio/voiceCaption";
 import { awayReply } from "../../src/audio/awayReply";
+import { installDictation } from "../../src/audio/dictationHost";
 import { applyTheme } from "../../src/theme/applyTheme";
 import type { Section } from "../../src/types";
 import "../../src/styles.css";
@@ -68,6 +69,8 @@ function Fixture() {
       away: awayReply(),
       opened: () => opened,
       setClipMs: (ms: number) => { clipMs = ms; },
+      /** Clips the fake speech still has to play. */
+      playing: () => playing.length,
       pressed: () => pressed,
     };
     document.documentElement.dataset.qaReady = "true";
@@ -96,4 +99,6 @@ function Fixture() {
   );
 }
 
+// The hold-to-dictate key, on this window as in the app.
+installDictation(() => null);
 createRoot(document.getElementById("root")!).render(<Fixture />);

@@ -88,6 +88,10 @@ export interface ReplyBlockProps {
   room?: boolean;
   /** This turn's context restarted (compaction or a fresh CLI session). */
   contextReset?: boolean;
+  /** Settled: the user stopped this reply before it finished. A muted tag
+   *  where the meter sits — never an error, and never a line added under
+   *  the text as it settles. */
+  interrupted?: boolean;
   /** Settled: the surface's actions on this reply, for the tail row. */
   actions?: ReactNode;
   /** Draw the head row's steps line. Off on a surface that shows the steps
@@ -116,6 +120,7 @@ export function ReplyBlock({
   rich = true,
   room = false,
   contextReset = false,
+  interrupted = false,
   actions,
   stepsLine = true,
   inspect,
@@ -200,7 +205,7 @@ export function ReplyBlock({
               {actions}
               {inspect && <ReplyMore inspecting={inspecting} onInspect={() => setInspecting((on) => !on)} />}
             </div>
-            <ReplyMeter meter={meter} contextReset={contextReset} />
+            <ReplyMeter meter={meter} contextReset={contextReset} interrupted={interrupted} />
           </>
         )}
       </div>
@@ -274,12 +279,14 @@ function LiveStatus({
 
 /** The settled tail's one meter line: `truncated` first and in the warning
  *  colour, so the ellipsis can never cut it off; then the tokens and the
- *  time. The model and everything else are in its tooltip. */
-function ReplyMeter({ meter, contextReset }: { meter: TurnMeter | null; contextReset: boolean }) {
-  if (!meter) return null;
+ *  time. The model and everything else are in its tooltip. A reply the user
+ *  stopped says so here, with or without a meter. */
+function ReplyMeter({ meter, contextReset, interrupted }: { meter: TurnMeter | null; contextReset: boolean; interrupted: boolean }) {
+  if (!meter) return interrupted ? <span className="rl-reply-meter">(interrupted)</span> : null;
   const truncated = wasTruncated(meter);
   const cost = costEnabled() ? turnCostUsd(meter) : null;
   const parts = [
+    interrupted ? "(interrupted)" : null,
     contextReset ? "context reset" : null,
     meterFooterLabel(meter, false),
     cost == null ? null : `~$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`,
