@@ -553,9 +553,11 @@ done
         assert_eq!(state.score(Some(vec![0; 128_000])), None);
         assert!(asked.elapsed() < ANSWER_TIMEOUT * 3, "{:?}", asked.elapsed());
         assert!(!state.status(None).warm, "ended, not left holding a write");
+        // The next warm starts one that reads (a short question: the stand-in
+        // reads a byte at a time).
         std::fs::remove_file(data.join("deaf")).unwrap();
         state.warm().unwrap();
-        assert_eq!(state.score(Some(vec![0; 128_000])), Some(0.97));
+        assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
     }
 
     #[cfg(unix)]
