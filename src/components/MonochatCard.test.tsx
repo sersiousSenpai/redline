@@ -173,11 +173,12 @@ it("an old draft pins nothing; using it does", () => {
   expect(onClose).not.toHaveBeenCalled();
 });
 
-it("is a region named by its own heading", () => {
+it("is a region named by its own heading: what it is for, with the mark", () => {
   render();
   const heading = document.getElementById(card().getAttribute("aria-labelledby")!);
   expect(heading?.tagName).toBe("H2");
-  expect(heading?.textContent).toBe("Redline");
+  expect(heading?.textContent).toBe("Plan a build");
+  expect(heading?.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
   expect(card().getAttribute("role")).toBe("region");
 });
 

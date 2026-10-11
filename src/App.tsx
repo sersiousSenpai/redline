@@ -4173,8 +4173,10 @@ function App() {
           return;
         }
         // flash — you are in the middle of something else. Nothing moves:
-        // the row pulses (and glows once), the pill wears a badge, and the
-        // notice offers the switch we declined. A new version of the plan
+        // the row pulses until it is opened (and glows once), and the notice
+        // offers the switch we declined. The pill wears nothing for it: the
+        // row and the notice already say it, and the plan is first under
+        // Plans the next time the door opens. A new version of the plan
         // already selected is not a new row: its data refreshes under the
         // version you are on, and the row only glows.
         if (revision) void loadSession(payload.sessionId);
@@ -8196,13 +8198,6 @@ function App() {
     const plan = pendingLaunch?.origin === "front-door" || pendingLaunch?.origin === "browser-island" ? { ...pendingLaunch, kind: "plan" as const } : null;
     return plan && runFlight ? (runFlight.startedAt > plan.startedAt ? runFlight : plan) : (runFlight ?? plan);
   }, [pendingLaunch, runFlight]);
-  // The pill's count: plans that arrived unseen and are still in the list —
-  // one deleted unseen is no longer news.
-  const unseenArrivals = useMemo(
-    () => summaries.filter((s) => unseenPlanIds.has(s.sessionId)).length,
-    [summaries, unseenPlanIds],
-  );
-
   // The welcome's pills: the way back into recent plans, chats and browser
   // tabs. Tabs are ranked research-first against the unresolved plans, read
   // from the saved workspaces whenever the door shows (the lazy browser pane
@@ -10836,7 +10831,6 @@ function App() {
         compact={doorCompact && renderMonochatComposer("card")}
         context={roomChat ? chatTitle ?? "Chat" : surfaceContextLabel(activeSurface, browserIslandPage?.title) ?? "Front door"}
         busy={frontDoorLaunching || !!frontDoorFlight || monochatBusy || monochatForks.size > 0}
-        arrivals={unseenArrivals}
         announce={doorNews}
         // A chat in the room: its heading's New goes back to a blank
         // composer, the conversation kept in History.

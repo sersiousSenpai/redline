@@ -22,10 +22,14 @@ export function PulseLogo({
   state,
   size = 18,
   title,
+  decorative = false,
 }: {
   state: PulseState;
   size?: number;
   title?: string;
+  /** Beside a visible label that already says it: hidden from assistive
+   *  technology, with no name of its own. */
+  decorative?: boolean;
 }) {
   const label =
     title ??
@@ -41,8 +45,7 @@ export function PulseLogo({
       width={size}
       height={size}
       viewBox="0 0 1024 1024"
-      role="img"
-      aria-label={label}
+      {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": label })}
       style={{ flexShrink: 0, overflow: "visible" }}
     >
       <path d={BLOB} fill="#E5342B" />

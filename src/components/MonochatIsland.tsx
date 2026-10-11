@@ -11,6 +11,7 @@ import { SHELL_EDGE } from "../lib/paneLayout";
 import { DOOR_CLOSE_MS, DOOR_GROW_MS, fadeOutKeyframes, flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_OUT_EASING, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
 import type { CardRelease } from "./MonochatCard";
+import { PulseLogo } from "./PulseLogo";
 import "./MonochatIsland.css";
 
 // One Redline island on every surface, in two poses.
@@ -97,7 +98,7 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, arrivals = 0, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -114,9 +115,6 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   onVisibilityChange?: (visible: boolean) => void;
   context: string;
   busy: boolean;
-  /** Plans that arrived while you were busy elsewhere and are still unseen:
-   *  the pill wears their count. Nothing opens for them. */
-  arrivals?: number;
   /** Said politely to a screen reader: a launch handed off, a plan arrived.
    *  The pill only shows "Working", and a label change is never read out. */
   announce?: string;
@@ -148,8 +146,8 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   const dwell = useRef(0);
   const close = useRef(onOpenChange); close.current = onOpenChange;
   const compactChange = useRef(onCompactChange); compactChange.current = onCompactChange;
-  // A sentence waiting in the composer: the pill wears a dot for it. It never
-  // holds anything open — the draft is kept either way.
+  // A sentence waiting in the composer: the pill offers to continue it. It
+  // never holds anything open — the draft is kept either way.
   const draft = useHasSharedDraft(FRONT_DOOR_TEXT_KEY);
   // How much of the door the plate's free area can hold at rest. The door
   // lands in the space BETWEEN the header and the terminal dock — never on top
@@ -571,10 +569,15 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     onKeyDownCapture: (event: ReactKeyboardEvent) => { if (inBox(event.target) && !event.metaKey && !event.ctrlKey && !event.nativeEvent.isComposing && (event.key.length === 1 || event.key === "Enter" || event.key === "Backspace" || event.key === "Delete")) engage(); },
   } : {};
 
+  // The pill says what it opens, in the name the app gives this door
+  // everywhere (⌘K, the sidebar, the door's own destination), and carries
+  // the brand as the mark rather than the word. Its name starts with what it
+  // shows (WCAG 2.5.3).
+  const label = busy ? "Working" : draft ? "Continue draft" : "Plan a build";
   const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible} data-busy={busy} data-reduced={reduced}
     tabIndex={visible ? -1 : 0} aria-hidden={visible}
-    aria-label={`Open front door${busy ? ", working" : ""}${draft ? ", draft saved" : ""}${arrivals ? `, ${arrivals} new plan${arrivals === 1 ? "" : "s"}` : ""}`}
-    title="Open front door (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
+    aria-label={busy ? `${label}, plan a build` : label}
+    title="Plan a build (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
     aria-expanded={open} aria-controls="rl-monochat-content"
     onFocus={event => { if (event.relatedTarget instanceof HTMLElement && !layer.current?.contains(event.relatedTarget)) remember(event.relatedTarget); }}
     // Tabbed on past, with nothing opened: where it came from is no longer
@@ -582,7 +585,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     onBlur={() => { if (!live.current.open && !live.current.compactOpen) returnFocus.current = null; }}
     onPointerEnter={hoverIn} onPointerLeave={hoverOut}
     onClick={engage}>
-    <span ref={membrane} className="rl-portal-membrane" aria-hidden="true"><span className="rl-monochat-signal"><i/><i/><i/></span><span>{busy ? "Working" : "Redline"}</span>{draft && <span className="rl-monochat-draft"/>}{arrivals > 0 && <span className="rl-monochat-news">{arrivals}</span>}</span>
+    <span ref={membrane} className="rl-portal-membrane" aria-hidden="true">
+      <PulseLogo state={busy ? "thinking" : "idle"} size={14} decorative/>
+      <span className="rl-pill-label">{label}</span>
+    </span>
   </button>;
 
   return <>

@@ -17,4 +17,16 @@ describe("PulseLogo", () => {
     expect(mark).toContain(`<path d="${iconBlob}" fill="#E5342B"></path>`);
     expect(iconBlob).toMatch(/^M922 512l[-\d. ]+z$/);
   });
+
+  it("names itself, unless it sits beside a label that already does", () => {
+    const named = renderToStaticMarkup(<PulseLogo state="idle" />);
+    expect(named).toContain('role="img"');
+    expect(named).toContain('aria-label="Conversation mode"');
+    const decorative = renderToStaticMarkup(<PulseLogo state="thinking" decorative />);
+    expect(decorative).toContain('aria-hidden="true"');
+    expect(decorative).not.toContain("role=");
+    expect(decorative).not.toContain("aria-label");
+    // Still the working spin.
+    expect(decorative).toContain('data-state="thinking"');
+  });
 });

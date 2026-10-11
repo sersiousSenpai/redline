@@ -12,7 +12,7 @@
 /* On its way back into the pill: it already let go. */
 .rl-monochat-float[data-leaving] { pointer-events:none; }
 .rl-float-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; color:var(--color-ink-muted); font-size:11px; }
-.rl-float-heading h2 { margin:0; font:inherit; }
+.rl-float-heading h2 { display:flex; align-items:center; gap:6px; margin:0; font:inherit; }
 .rl-float-heading button { display:grid; place-items:center; width:24px; height:24px; border:0; border-radius:5px; background:none; color:inherit; cursor:pointer; }
 .rl-float-heading button:hover, .rl-float-heading button:focus-visible { color:var(--color-ink); background:color-mix(in srgb, var(--color-ink) 7%, transparent); outline:none; }
 .rl-monochat-float textarea { max-height:120px; }

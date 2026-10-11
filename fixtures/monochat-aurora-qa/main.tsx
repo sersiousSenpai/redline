@@ -44,10 +44,11 @@ function Fixture() {
   const [choice, setChoice] = useState<BackendChoice>({ backend: "codex", model: null, effort: null });
   const [chatSlot, setChatSlot] = useState<HTMLDivElement | null>(null);
   const [presses, setPresses] = useState<ChipPresses>({ surfaceKey: "", on: {} });
-  // News that never moves anything: plans that arrived while you were busy,
-  // setup left to finish, a review an agent is waiting on.
-  const [arrivals, setArrivals] = useState(0), [setupFault, setSetupFault] = useState(false), [reviewNews, setReviewNews] = useState<string | null>(null);
-  useEffect(() => { Object.assign(window, { __qa: { setOpen, setCompact, setSidecar, setSetup, setSurface, setText, openChat, setArrivals, setSetupFault, setReviewNews, setTheme: applyTheme } }); document.documentElement.dataset.qaReady = "true"; }, []);
+  // News that never moves anything: setup left to finish, a review an agent
+  // is waiting on.
+  const [setupFault, setSetupFault] = useState(false), [reviewNews, setReviewNews] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { Object.assign(window, { __qa: { setOpen, setCompact, setSidecar, setSetup, setSurface, setText, openChat, setBusy, setSetupFault, setReviewNews, setTheme: applyTheme } }); document.documentElement.dataset.qaReady = "true"; }, []);
   useEffect(() => { if (!open) setChatInRoom(false); }, [open]);
   const roomChat = open && chatInRoom && !!chatId;
   const cardDestination = destination === "run" ? "run" : "plan";
@@ -74,7 +75,7 @@ function Fixture() {
     <Footer comments={[]} sessionReady={surface !== "Home"} canSubmit={false} canApprove={false} canOrchestrate={false} waiting={false} waitingAsk={false} onSubmit={noop} onApprove={noop} onOrchestrate={noop} termCollapsed={!terminal} termTabCount={0} termHasUnseen={false} onExpandTerminal={() => setTerminal(true)} reviewNews={reviewNews} onOpenReviewNews={() => setReviewNews(null)}/>
     <MonochatIsland clearanceKey={String(terminal)} landing={surface === "Home"} surfaceKey={surface} onVisibilityChange={setVisible}
       open={open} onOpenChange={setOpen} compactOpen={compact} onCompactChange={setCompact} compact={compact && renderComposer("card")}
-      context={roomChat ? "Redline Aurora" : surface === "Document" ? "Auth rewrite" : surface === "Browser" ? "LiDAR-GS" : "Front door"} busy={false} arrivals={arrivals}
+      context={roomChat ? "Redline Aurora" : surface === "Document" ? "Auth rewrite" : surface === "Browser" ? "LiDAR-GS" : "Front door"} busy={busy}
       onNewChat={roomChat ? () => { setChatId(null); setChatInRoom(false); } : undefined}>
       <div ref={setChatSlot} hidden={!roomChat} className="rl-frontdoor-chat-slot relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"/>
       {!roomChat && renderComposer("door")}

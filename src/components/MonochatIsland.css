@@ -6,19 +6,14 @@
 .rl-frontdoor-dock { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); width: 160px; height: 40px; z-index: 55; pointer-events: none; }
 .rl-monochat-notch { position: relative; display: grid; place-items: center; width: 160px; height: 40px; padding: 0; border: 0; border-radius: 22px; background: transparent; cursor: pointer; pointer-events: auto; touch-action: manipulation; }
 .rl-monochat-notch[data-hidden="true"] { visibility: hidden; pointer-events: none; }
-.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 4px; display: flex; align-items: center; justify-content: center; gap: 9px; width: 144px; height: 32px; border: 1px solid var(--color-rule); border-radius: 18px; color: var(--color-ink); font-size: 11px; background: var(--color-bg-elevated); box-shadow: 0 2px 12px #0002; transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
-.rl-monochat-signal { display: flex; gap: 3px; align-items: center; height: 13px; }
-.rl-monochat-signal i { width: 2px; height: 7px; border-radius: 2px; background: var(--color-info); }
-.rl-monochat-signal i:nth-child(2) { height: 12px; background: var(--color-success); }
-.rl-monochat-signal i:nth-child(3) { height: 9px; background: var(--color-selection); }
+/* The brand's mark and what the pill opens. The mark side is optically
+   tighter, so its padding is too. Working, the mark's strike spins
+   (`.rl-pulse-blades`); reduced motion keeps it still. */
+.rl-portal-membrane { --portal-pull: 0; position: absolute; bottom: 4px; display: flex; align-items: center; justify-content: center; gap: 7px; width: 144px; height: 32px; padding: 0 14px 0 12px; border: 1px solid var(--color-rule); border-radius: 18px; color: var(--color-ink); font-size: 12px; font-weight: 500; letter-spacing: -0.003em; background: var(--color-bg-elevated); box-shadow: 0 2px 12px #0002; transform: translate3d(var(--portal-x, 0px), var(--portal-y, 0px), 0) scale(calc(1 + var(--portal-pull) * .035)); transition: transform 160ms cubic-bezier(.2,.7,.25,1), border-color 200ms; pointer-events: none; }
+.rl-portal-membrane svg { display: block; flex: none; }
+.rl-pill-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-monochat-notch:hover .rl-portal-membrane, .rl-monochat-notch:focus-visible .rl-portal-membrane { border-color: var(--color-info); }
 .rl-monochat-notch:focus-visible { outline: 1px solid var(--color-info); outline-offset: -3px; }
-.rl-monochat-notch[data-busy="true"] .rl-monochat-signal { animation: rl-portal-work 1.8s ease-in-out infinite; }
-/* A sentence is waiting in the composer. */
-.rl-monochat-draft { position: absolute; top: 6px; right: 12px; width: 5px; height: 5px; border-radius: 50%; background: var(--color-info); }
-/* Plans that arrived while you were busy elsewhere: a count on the pill's
-   shoulder, opaque so it reads over the footer as well as the pill. */
-.rl-monochat-news { position: absolute; top: -7px; right: 8px; min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box; border-radius: 8px; display: grid; place-items: center; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; color: var(--color-ink); background: var(--color-bg-elevated); border: 1px solid var(--color-info); }
 .rl-frontdoor-focus { position: fixed; inset: 0; z-index: 55; display: flex; align-items: center; justify-content: center; pointer-events: none; visibility: hidden; }
 /* Closing, the door stays painted while it goes back toward the pill — inert
    and see-through to the pointer from its first frame (MonochatIsland). */
@@ -47,7 +42,6 @@
 .rl-monochat[data-pose="entry"] [data-chat-messages] { display: none; }
 .rl-monochat[data-pose="entry"] [data-chat-room] { justify-content: center; }
 .rl-monochat [data-chat-composer] { flex-shrink: 0; }
-@keyframes rl-portal-work { 50% { opacity: .35; } }
 @media (max-width: 640px) { .rl-monochat { width: calc(100vw - 24px); height: calc(100dvh - 88px); } }
 /* Reduced motion: nothing travels. The paper still comes and goes, as a
    120 ms crossfade (the room fades with it); everything else is instant. */

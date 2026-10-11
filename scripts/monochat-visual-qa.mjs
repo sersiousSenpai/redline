@@ -132,14 +132,26 @@ try {
     const membrane = await bounds('.rl-portal-membrane');
     check(`${size} pill centred in the footer row`, Math.abs(pill.x+pill.width/2-width/2)<1 && Math.abs(pill.y+pill.height/2-footer.y-footer.height/2)<1 && pill.width===160 && pill.height===40, { pill, footer });
     check(`${size} pill clear of footer controls`, pill.x>=(await bounds('.rl-footer-status')).right && pill.right<=(await bounds('.rl-footer-actions')).x);
+    // 10/11: the brand's mark and the door's one name, inside the same
+    // 144 × 32 skin — no tricolour bars, no draft dot, no count.
+    const pillFace = () => cdp.evaluate("(() => { const m=document.querySelector('.rl-portal-membrane'), svg=m.querySelector('svg'), label=m.querySelector('.rl-pill-label'), r=svg.getBoundingClientRect(), l=label.getBoundingClientRect(), b=m.getBoundingClientRect(); return { label: label.textContent, name: document.querySelector('.rl-monochat-notch').getAttribute('aria-label'), children: m.children.length, mark: [r.width, r.height], markInside: r.left >= b.left && r.right <= l.left && r.top >= b.top && r.bottom <= b.bottom, labelInside: l.right <= b.right - 12 && label.scrollWidth <= label.clientWidth, extras: m.querySelectorAll('.rl-monochat-signal, .rl-monochat-draft, .rl-monochat-news').length }; })()");
+    const face = await pillFace();
+    check(`${size} the pill's skin stays 144 × 32`, Math.round(membrane.width) === 144 && Math.round(membrane.height) === 32, membrane);
+    check(`${size} the pill reads "Plan a build" beside the 14 px mark, uncut`, face.label === 'Plan a build' && face.name === 'Plan a build' && face.children === 2 && face.mark[0] === 14 && face.mark[1] === 14 && face.markInside && face.labelInside && face.extras === 0, face);
     await screenshot(`${size}-pill`);
-    // News that moves nothing (R12, R14): a plan that arrived while you were
-    // busy is a count on the pill's shoulder, clear of its label; a review an
-    // agent waits on is a chip in the footer, clear of the pill.
-    await cdp.evaluate("window.__qa.setArrivals(2)"); await cdp.evaluate("window.__qa.setReviewNews('Review ready')"); await settle();
-    const news = await bounds('.rl-monochat-news');
-    check(`${size} an arrival badges the pill and opens nothing`, news?.visible && news.within && await cdp.evaluate(`document.querySelector('.rl-monochat-news').textContent==='2' && ${pose}==='notch' && !document.querySelector('.rl-monochat-float') && document.querySelector('.rl-monochat-notch').getAttribute('aria-label').endsWith('2 new plans')`), news);
-    check(`${size} the badge sits on the pill's shoulder, clear of its label`, await cdp.evaluate("(() => { const b=document.querySelector('.rl-monochat-news').getBoundingClientRect(); const m=document.querySelector('.rl-portal-membrane').getBoundingClientRect(); const l=[...document.querySelectorAll('.rl-portal-membrane > span')].find(s => !s.className).getBoundingClientRect(); return (b.left >= l.right || b.bottom <= l.top) && b.top < m.top && b.bottom > m.top && b.right <= m.right; })()"));
+    await cdp.evaluate(`window.__qa.setText('Plan the billing export')`); await settle();
+    const drafted = await pillFace();
+    check(`${size} a waiting draft is "Continue draft", uncut`, drafted.label === 'Continue draft' && drafted.name === 'Continue draft' && drafted.labelInside && drafted.extras === 0, drafted);
+    await cdp.evaluate(`window.__qa.setText('')`); await cdp.evaluate("window.__qa.setBusy(true)"); await settle();
+    const spinning = await cdp.evaluate("document.querySelector('.rl-portal-membrane .rl-pulse-blades').getAnimations().filter(a => a.playState === 'running').length");
+    const working = await pillFace();
+    check(`${size} working, the mark's strike spins and the pill still says what a press does`, spinning > 0 && working.label === 'Working' && working.name === 'Working, plan a build', { spinning, working });
+    await cdp.evaluate("window.__qa.setBusy(false)"); await settle();
+    // News that moves nothing (R12, R14): an arrival changes nothing on the
+    // pill; a review an agent waits on is a chip in the footer, clear of it.
+    await cdp.evaluate("window.__qa.setReviewNews('Review ready')"); await settle();
+    const news = await pillFace();
+    check(`${size} news never changes the pill`, news.label === 'Plan a build' && news.extras === 0 && await cdp.evaluate(`${pose}==='notch' && !document.querySelector('.rl-monochat-float')`), news);
     // The app never gets narrower than 900 px (tauri.conf minWidth); below
     // that the footer is the fixture's, not a window anyone can have.
     if (width >= 900) {
@@ -148,7 +160,7 @@ try {
       check(`${size} a waiting review is a footer chip, 24 px tall, in full view and clear of the pill`, chip?.visible && chip.height >= 24 && chip.x >= status.x && chip.right <= status.right && chip.right <= pill.x && await cdp.evaluate("document.querySelector('.rl-footer-status button[title=\"Open the review surface\"]').textContent==='Review ready → Open'"), { chip, status, pill });
     }
     await screenshot(`${size}-news`);
-    await cdp.evaluate("window.__qa.setArrivals(0)"); await cdp.evaluate("window.__qa.setReviewNews(null)"); await settle();
+    await cdp.evaluate("window.__qa.setReviewNews(null)"); await settle();
     // Setup left to finish waits in the composer as one chip, in the door and
     // the card alike — never a dialog that pops up by itself.
     await cdp.evaluate("window.__qa.setSetupFault(true)"); await cdp.evaluate("window.__qa.setOpen(true)"); await delay(450); await settle();
@@ -288,6 +300,9 @@ try {
     // Reduced motion: nothing travels — the card and the door crossfade.
     await cdp.call("Emulation.setEmulatedMedia",{features:[{name:"prefers-reduced-motion",value:"reduce"}]}); await settle();
     check(`${size} reduced motion disables attraction`,await cdp.evaluate("document.querySelector('.rl-portal-membrane').style.getPropertyValue('--portal-pull')===''"));
+    await cdp.evaluate("window.__qa.setBusy(true)"); await settle();
+    check(`${size} reduced motion: the working mark stays still`, await cdp.evaluate("document.querySelector('.rl-portal-membrane .rl-pulse-blades').getAnimations().length === 0 && document.querySelector('.rl-pill-label').textContent === 'Working'"));
+    await cdp.evaluate("window.__qa.setBusy(false)"); await settle();
     const flightKinds = (selector) => `(() => { const e = document.querySelector(${JSON.stringify(selector)}); return e ? e.getAnimations().map(a => [...new Set(a.effect.getKeyframes().flatMap(k => Object.keys(k).filter(p => !['offset', 'easing', 'composite', 'computedOffset'].includes(p))))].join('+') + '@' + a.effect.getTiming().duration) : null; })()`;
     await film('__qaReducedCard', `(() => { const k = ${flightKinds('.rl-monochat-float')}; return k && k.length ? { k } : null; })()`, 3);
     await move(20, height/2); await move(pill.x+pill.width/2, pill.y+pill.height/2); await delay(1000); await settle();

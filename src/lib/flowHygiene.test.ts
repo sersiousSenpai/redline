@@ -63,7 +63,7 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(arrival).toContain('notice("Your chat became a plan", "Open");');
   });
 
-  it("flashes with a glow, a badge on the pill and a notice — and opens nothing", () => {
+  it("flashes with a glow, the row's pulse and a notice — never the pill — and opens nothing", () => {
     const flash = arrival.slice(arrival.indexOf("// flash"));
     expect(flash).toContain("setUnseenPlanIds(");
     // A new version under an older one you chose: fresh data, same view.
@@ -72,9 +72,10 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(flash).toContain("setArrivalGlow(");
     expect(flash).toContain('notice(arrivalMessage(title, revision), "Open");');
     expect(flash).not.toMatch(/setFrontDoorOpen\(true\)|setDoorCompact\(true\)|selectSurface/);
-    expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).toContain("arrivals={unseenArrivals}");
-    // Counted from the plans still listed: one deleted unseen is not news.
-    expect(app).toMatch(/const unseenArrivals = useMemo\(\s*\(\) => summaries\.filter\(\(s\) => unseenPlanIds\.has\(s\.sessionId\)\)\.length,/);
+    // The sidebar row pulses until the plan is opened; the pill wears no
+    // count (10/11 — R12 is down to two channels).
+    expect(app).toMatch(/unseenIds=\{unseenPlanIds\}/);
+    expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).not.toMatch(/arrivals|unseen/i);
   });
 
   it("only its notice's Open — a gesture — puts the door away for the plan", () => {

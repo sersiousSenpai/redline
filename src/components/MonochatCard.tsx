@@ -6,6 +6,7 @@ import { flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, ISLAN
 import { isTitleBarPress } from "../lib/windowDrag";
 // A menu, picker or modal layered over the card owns the pointer and Esc.
 import { hasChildOverlay } from "./MonochatIsland";
+import { PulseLogo } from "./PulseLogo";
 import "./MonochatCard.css";
 
 // The island's compact pose: the small composer that springs out of the footer
@@ -228,8 +229,10 @@ export default function MonochatCard({ pill, open, growing = false, hovered, onC
   return <div ref={shell} id="rl-monochat-card" className="rl-monochat-float" role="region" aria-labelledby={heading} data-drop-cover data-leaving={!open || undefined}>
     <div ref={content}>
       <div className="rl-float-heading">
-        <h2 id={heading}>Redline</h2>
-        <button type="button" aria-label="Collapse Redline" title="Collapse (Esc)" onClick={() => close.current()}><ChevronDown size={16}/></button>
+        {/* Named as the pill is: what it is for, with the mark for the brand.
+            A waiting draft shows as itself in the field below. */}
+        <h2 id={heading}><PulseLogo state="idle" size={12} decorative/>Plan a build</h2>
+        <button type="button" aria-label="Collapse" title="Collapse (Esc)" onClick={() => close.current()}><ChevronDown size={16}/></button>
       </div>
       {children}
     </div>

@@ -125,8 +125,9 @@ const TEXTS: Pair[] = [
   { what: "a composer menu, in the door", color: [MENU, ".rl-composer-chip"], background: [ISLAND, ".rl-monochat .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
   { what: "a composer menu, in the card", color: [MENU, ".rl-composer-chip"], background: [CARD, ".rl-monochat-float .rl-composer-chip:not(:hover, [aria-expanded=true])"], on: "color-bg-elevated" },
   { what: "the card's heading", color: [CARD, ".rl-float-heading"], on: "color-bg-elevated" },
-  { what: "the pill", color: [ISLAND, ".rl-portal-membrane"], background: [ISLAND, ".rl-portal-membrane"], on: "color-bg-elevated" },
-  { what: "the pill's count of plans that arrived", color: [ISLAND, ".rl-monochat-news"], background: [ISLAND, ".rl-monochat-news"], on: "color-bg-elevated" },
+  // "Plan a build", "Continue draft" and "Working" alike: the label takes the
+  // membrane's ink. The mark beside it is the app icon, decorative.
+  { what: "the pill's label", color: [ISLAND, ".rl-portal-membrane"], background: [ISLAND, ".rl-portal-membrane"], on: "color-bg-elevated" },
   { what: "a launch in flight, in the door", color: [APP, ".rl-fd-flight-open"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
   { what: "where that launch is running", color: [APP, ".rl-fd-detail"], opacity: [APP, ".rl-fd-flight-open .rl-fd-detail"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
   // The dictation strip, over the door's box, the card or any composer.

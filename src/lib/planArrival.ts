@@ -12,8 +12,8 @@ import type { MainSurface } from "./mainSurface";
  *    surface itself is left alone — the caller offers a Review instead.
  *  - `flash`: you are in the middle of something else — writing, reading
  *    another plan or a file, or looking back at an older version of this
- *    one. Nothing moves: the arrival marks its sidebar row, badges the pill
- *    and says so in a brief notice with Open.
+ *    one. Nothing moves: the arrival marks its sidebar row (a pulse until
+ *    it is opened) and says so in a brief notice with Open.
  *  - `handoff`: it is the plan you launched with ⏎ from the door you are
  *    still in, and you have begun nothing new there since. That ⏎ was the
  *    gesture and this is what it asked for: the door hands off into the plan.

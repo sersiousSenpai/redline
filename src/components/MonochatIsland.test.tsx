@@ -29,8 +29,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function Harness({ landing = false, busy = false, arrivals, announce, onOpen, onNewChat, children }: {
-  landing?: boolean; busy?: boolean; arrivals?: number; announce?: string; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
+function Harness({ landing = false, busy = false, announce, onOpen, onNewChat, children }: {
+  landing?: boolean; busy?: boolean; announce?: string; onOpen?: (open: boolean) => void; onNewChat?: () => void; children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [compact, setCompact] = useState(false);
@@ -45,7 +45,7 @@ function Harness({ landing = false, busy = false, arrivals, announce, onOpen, on
       <button id="hand-off" onClick={() => { setHandoff(true); setOpen(false); }}>Plan landed</button></article>
     <MonochatIsland landing={landing} surfaceKey={surface} open={open} onOpenChange={(next) => { onOpen?.(next); setOpen(next); }} handoff={handoff}
       compactOpen={compact} onCompactChange={setCompact} compact={<div className="rl-fd-island"><textarea aria-label="Compact reply" defaultValue=""/></div>}
-      context="Plan" busy={busy} arrivals={arrivals} announce={announce} onNewChat={onNewChat}>
+      context="Plan" busy={busy} announce={announce} onNewChat={onNewChat}>
       {children ?? <div className="rl-frontdoor"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Keep this draft"/></div></div>}
     </MonochatIsland>
   </>;
@@ -56,6 +56,9 @@ const pill = () => host.querySelector<HTMLButtonElement>(".rl-monochat-notch")!;
 const card = () => host.querySelector<HTMLElement>(".rl-monochat-float");
 const main = () => host.querySelector<HTMLTextAreaElement>('[aria-label="Main reply"]')!;
 const click = async (selector: string) => act(async () => host.querySelector<HTMLButtonElement>(selector)!.click());
+/** The pill pressed from the keyboard — Enter or Space on it, which is a
+ *  click with no pointer behind it. */
+const summon = () => act(async () => pill().click());
 const advance = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
 const pointer = (node: Element, type: string, init: MouseEventInit = {}) =>
   act(async () => { node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, ...init })); });
@@ -90,7 +93,7 @@ describe("the door", () => {
   it("moves the native window from every outer edge without dismissing the front door", async () => {
     await render();
     expect(host.querySelector('[data-window-drag-edge]')).toBeNull();
-    await click('[aria-label="Open front door"]');
+    await summon();
     for (const edge of ["top", "left", "right", "bottom"]) {
       const handle = host.querySelector<HTMLElement>(`[data-window-drag-edge="${edge}"]`)!;
       await act(async () => {
@@ -108,7 +111,7 @@ describe("the door", () => {
 
   it("leaves typing, text selection and secondary clicks outside the window-drag behavior", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     await act(async () => {
       main().dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
       host.querySelector('[data-window-drag-edge="left"]')!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2 }));
@@ -120,7 +123,7 @@ describe("the door", () => {
     const onOpen = vi.fn();
     await render(<Harness onOpen={onOpen}/>);
     host.querySelector<HTMLButtonElement>("#document-focus")!.focus();
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(onOpen).toHaveBeenLastCalledWith(true);
     expect(pose()).toBe("conversation");
     expect(document.activeElement).toBe(main());
@@ -133,7 +136,7 @@ describe("the door", () => {
     const documentButton = host.querySelector<HTMLButtonElement>("#document-focus")!;
     documentButton.focus();
     const draft = main();
-    await click('[aria-label="Open front door"]');
+    await summon();
     await key(draft, { key: "Escape" });
     expect(pose()).toBe("notch");
     expect(document.activeElement).toBe(documentButton);
@@ -152,14 +155,14 @@ describe("the door", () => {
     await act(async () => header.focus());
     // A click never focuses a button in the app's webview: the pill opens
     // the door with the caret still on the header.
-    await click('[aria-label="Open front door"]');
+    await summon();
     await key(main(), { key: "Escape" });
     expect(document.activeElement).toBe(header);
   });
 
   it("preserves the front door when a menu consumes Escape", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     const menu = document.createElement("div"); menu.setAttribute("role", "menu"); document.body.append(menu);
     try {
       await key(main(), { key: "Escape" });
@@ -172,7 +175,7 @@ describe("the door", () => {
   it("dismisses on a full press and release on the empty paper, preserving the draft and returning focus", async () => {
     await render();
     host.querySelector<HTMLButtonElement>("#document-focus")!.focus();
-    await click('[aria-label="Open front door"]');
+    await summon();
     const backdrop = host.querySelector<HTMLDivElement>(".rl-monochat-conversation")!;
     await act(async () => {
       main().dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
@@ -190,7 +193,7 @@ describe("the door", () => {
 
   it("does not dismiss for text selection ending outside or an outside click that belongs to a menu", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     const backdrop = host.querySelector<HTMLDivElement>(".rl-frontdoor-focus")!;
     await act(async () => {
       main().dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
@@ -209,7 +212,7 @@ describe("the door", () => {
   it("closes on surface navigation without losing the draft or stealing new focus", async () => {
     await render();
     const draft = main();
-    await click('[aria-label="Open front door"]');
+    await summon();
     await act(async () => { const nav = host.querySelector<HTMLButtonElement>("#navigate")!; nav.focus(); nav.click(); });
     expect(pose()).toBe("notch");
     expect(document.activeElement?.id).toBe("navigate");
@@ -218,7 +221,7 @@ describe("the door", () => {
 
   it("an owner that closes the door and navigates in one go is navigation too: focus lands in the new surface's main area", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(document.activeElement).toBe(main());
     // The recents swallow mousedown, so the caret is still in the composer.
     await click("#open-recent");
@@ -234,7 +237,7 @@ describe("the door", () => {
   it("keeps a live layer of its own — the tour — out of the inert sweep", async () => {
     const tour = document.createElement("div"); tour.dataset.rlModalLayer = ""; host.append(tour);
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(host.querySelector("article")!.inert).toBe(true);
     expect(tour.inert).toBeFalsy();
   });
@@ -242,7 +245,7 @@ describe("the door", () => {
   it("leaves a notice that rises over it — the decision countdown — pressable", async () => {
     const banner = document.createElement("div"); banner.dataset.rlOverDoor = ""; host.prepend(banner);
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(host.querySelector("header")!.inert).toBe(true);
     expect(banner.inert).toBeFalsy();
   });
@@ -258,7 +261,7 @@ describe("the door", () => {
     }
     await render(<SavedChat/>);
     host.querySelector<HTMLButtonElement>("#saved-chat-source")!.focus();
-    await click('[aria-label="Open front door"]');
+    await summon();
     // The caret goes into the chat's own composer.
     expect(document.activeElement).toBe(host.querySelector('[aria-label="Saved reply"]'));
     await key(host.querySelector("textarea")!, { key: "Escape" });
@@ -269,7 +272,7 @@ describe("the door", () => {
   it("a chat in the room wears a heading with the one New", async () => {
     const onNewChat = vi.fn();
     await render(<Harness/>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(host.querySelector(".rl-monochat-new")).toBeNull();
     await render(<Harness onNewChat={onNewChat}/>);
     expect(host.querySelector(".rl-monochat-heading")?.textContent).toContain("Plan");
@@ -283,7 +286,7 @@ describe("the door", () => {
     await render();
     await act(async () => { window.dispatchEvent(new MouseEvent("pointermove", { clientX: 8, clientY: 12 })); vi.advanceTimersByTime(20); });
     expect(host.querySelector<HTMLElement>(".rl-portal-membrane")!.style.length).toBe(0);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(pose()).toBe("conversation");
   });
 });
@@ -492,7 +495,7 @@ describe("the compact card", () => {
       await act(async () => field.blur());
       await pointer(card()!, "pointerout", { relatedTarget: document.body }); await advance(800);
       expect(card()).not.toBeNull();
-      await click('[aria-label="Collapse Redline"]');
+      await click('[aria-label="Collapse"]');
       expect(card()).toBeNull();
     }
   });
@@ -637,32 +640,44 @@ describe("the pill", () => {
     expect(skin.style.getPropertyValue("--portal-pull")).toBe("0.000");
   });
 
-  it("says when Redline is working", async () => {
-    await render(<Harness busy/>);
-    expect(pill().getAttribute("aria-label")).toBe("Open front door, working");
-    expect(pill().textContent).toContain("Working");
-  });
-
-  it("wears a dot while a draft is waiting", async () => {
+  // 10/11: it says what it opens, in the door's one name, and carries the
+  // brand as the mark — never the word "Redline", tricolour bars or a count.
+  it("is named for what it opens, and its name starts with what it shows", async () => {
     await render();
-    expect(host.querySelector(".rl-monochat-draft")).toBeNull();
-    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Half a thought"));
-    expect(host.querySelector(".rl-monochat-draft")).not.toBeNull();
-    expect(pill().getAttribute("aria-label")).toBe("Open front door, draft saved");
-    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "  "));
-    expect(host.querySelector(".rl-monochat-draft")).toBeNull();
+    expect(pill().getAttribute("aria-label")).toBe("Plan a build");
+    expect(pill().textContent).toBe("Plan a build");
+    expect(pill().title).toBe("Plan a build (Shift+Enter)");
+    expect(pill().getAttribute("aria-keyshortcuts")).toBe("Shift+Enter");
   });
 
-  it("counts the plans that arrived while you were busy, and opens nothing for them", async () => {
-    await render(<Harness arrivals={0}/>);
-    expect(host.querySelector(".rl-monochat-news")).toBeNull();
-    await render(<Harness arrivals={2}/>);
-    expect(host.querySelector(".rl-monochat-news")?.textContent).toBe("2");
-    expect(pill().getAttribute("aria-label")).toBe("Open front door, 2 new plans");
-    expect(pose()).toBe("notch");
-    expect(card()).toBeNull();
-    await render(<Harness arrivals={1}/>);
-    expect(pill().getAttribute("aria-label")).toBe("Open front door, 1 new plan");
+  it("offers to continue a waiting draft", async () => {
+    await render();
+    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Half a thought"));
+    expect(pill().getAttribute("aria-label")).toBe("Continue draft");
+    expect(pill().textContent).toBe("Continue draft");
+    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "  "));
+    expect(pill().getAttribute("aria-label")).toBe("Plan a build");
+  });
+
+  it("says when Redline is working, and still what a press does", async () => {
+    await render(<Harness busy/>);
+    expect(pill().getAttribute("aria-label")).toBe("Working, plan a build");
+    expect(pill().textContent).toBe("Working");
+    // The mark's strike spins while it works.
+    expect(pill().querySelector(".rl-pulse-blades")?.getAttribute("data-state")).toBe("thinking");
+  });
+
+  it("wears the mark and its label, and nothing else: no bars, no dot, no count", async () => {
+    await render();
+    const skin = host.querySelector<HTMLElement>(".rl-portal-membrane")!;
+    const marks = skin.querySelectorAll("svg");
+    expect(marks).toHaveLength(1);
+    expect(marks[0].getAttribute("aria-hidden")).toBe("true");
+    expect(marks[0].hasAttribute("role")).toBe(false);
+    expect(marks[0].querySelector(".rl-pulse-blades")?.getAttribute("data-state")).toBe("idle");
+    expect(Array.from(skin.children).map(child => child.tagName.toLowerCase() + (child.className && typeof child.className === "string" ? `.${child.className}` : ""))).toEqual(["svg", "span.rl-pill-label"]);
+    await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Half a thought"));
+    expect(skin.querySelector(".rl-monochat-signal, .rl-monochat-draft, .rl-monochat-news")).toBeNull();
   });
 });
 
@@ -680,7 +695,7 @@ describe("the door's flights", () => {
   it("a click puts the caret at the end of the draft", async () => {
     await render();
     main().setSelectionRange(0, 0);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(document.activeElement).toBe(main());
     expect([main().selectionStart, main().selectionEnd]).toEqual([15, 15]);
   });
@@ -714,7 +729,7 @@ describe("the door's flights", () => {
     const calls = flights();
     boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     const flight = calls.filter(call => call.element === room());
     expect(flight[0].frames[0].transform).toBe(inverseTransform(rect(PILL), rect(COMPOSER)));
     expect(flight[1].frames).toEqual([{ opacity: 0.35 }, { opacity: 1, offset: 0.35 }]);
@@ -724,7 +739,7 @@ describe("the door's flights", () => {
     const calls = flights();
     boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
     await render(<Harness>{welcomeDoor}</Harness>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     calls.length = 0;
     await key(main(), { key: "Escape" });
     const layer = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
@@ -749,7 +764,7 @@ describe("the door's flights", () => {
     const calls = flights();
     boxes({ ".rl-frontdoor": COMPOSER, ".rl-portal-membrane": PILL });
     await render(<Harness>{welcomeDoor}</Harness>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(document.activeElement).toBe(main());
     calls.length = 0;
     await click("#hand-off");
@@ -781,7 +796,7 @@ describe("the door's flights", () => {
   it("a room holding a chat rises, and leaves without carrying anything back", async () => {
     const calls = flights();
     await render(<Harness onNewChat={() => {}}/>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(calls[0].frames[0]).toMatchObject({ transform: "translate3d(0, 16px, 0) scale(.985)", opacity: 0 });
     expect(Number(calls[0].options.duration)).toBeLessThanOrEqual(300);
     await key(main(), { key: "Escape" });
@@ -792,7 +807,7 @@ describe("the door's flights", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
     const calls = flights();
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(calls.map(call => call.frames)).toEqual([[{ opacity: 0 }, { opacity: 1 }]]);
     expect(calls[0].options.duration).toBe(ISLAND_FADE_MS);
     await key(main(), { key: "Escape" });
@@ -803,7 +818,7 @@ describe("the door's flights", () => {
 
   it("the pill springs no card while the door is on its way back into it", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     await key(main(), { key: "Escape" });
     await rest();
     expect(card()).toBeNull();
@@ -822,11 +837,11 @@ describe("modal manners", () => {
       {/* An inline editor that calls itself a dialog, open in the work behind. */}
       <section><div role="dialog" aria-label="Annotation"><textarea aria-label="Annotation body"/></div></section>
     </>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(host.querySelector("section")!.inert).toBe(true);
     await key(main(), { key: "Escape" });
     expect(pose()).toBe("notch");
-    await click('[aria-label="Open front door"]');
+    await summon();
     const paper = host.querySelector<HTMLElement>(".rl-frontdoor-focus")!;
     await pointer(paper, "pointerdown", { button: 0 });
     await pointer(paper, "click", { button: 0 });
@@ -835,7 +850,7 @@ describe("modal manners", () => {
 
   it("Esc closes the door with the caret nowhere at all", async () => {
     await render();
-    await click('[aria-label="Open front door"]');
+    await summon();
     await act(async () => main().blur());
     await key(document.body, { key: "Escape" });
     expect(pose()).toBe("notch");
@@ -846,7 +861,7 @@ describe("modal manners", () => {
     window.addEventListener("keydown", behind); window.addEventListener("keyup", released);
     try {
       await render();
-      await click('[aria-label="Open front door"]');
+      await summon();
       const space = await key(main(), { key: " ", code: "Space" });
       expect(behind).not.toHaveBeenCalled();
       // The space itself still goes in.
@@ -874,14 +889,14 @@ describe("modal manners", () => {
     const status = host.querySelector<HTMLElement>('[role="status"]')!;
     expect(status.getAttribute("aria-live")).toBe("polite");
     expect(status.textContent).toBe("Plan launched. Redline is planning it in the terminal.");
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(status.inert).toBeFalsy();
     expect(host.querySelector("article")!.inert).toBe(true);
   });
 
   it("a chat in the room is titled by a heading", async () => {
     await render(<Harness onNewChat={() => {}}/>);
-    await click('[aria-label="Open front door"]');
+    await summon();
     expect(host.querySelector(".rl-monochat-heading h2")?.textContent).toBe("Plan");
   });
 });
