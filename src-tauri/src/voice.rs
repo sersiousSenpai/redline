@@ -93,6 +93,8 @@ it in plain prose.\n\
 - Anything more (steps, a table, code, the detail behind your take) goes after \
 a line containing only ⟦screen⟧. Everything after that line is shown as \
 markdown and never spoken. Leave it out when the spoken part says it all.\n\
+- Say numbers in words; exact figures, identifiers and paths go after ⟦screen⟧. \
+A reply may open with ⟦tone: calm⟧ (calm, gentle, slow, brisk, upbeat or excited).\n\
 - Before you use a tool, say one short sentence about what you are checking.\n\
 - A turn may open with bracketed lines from Redline: what they are looking at, \
 what they selected, where playback stopped. That is context, not their words; \
@@ -2325,6 +2327,9 @@ mod tests {
             assert!(p.contains("read aloud"), "{key}");
             assert!(p.contains("at most three short sentences, about 60 words"), "{key}");
             assert!(p.contains("a line containing only ⟦screen⟧"), "{key}");
+            // The studio voice can't say an identifier, and takes a tone.
+            assert!(p.contains("Say numbers in words; exact figures, identifiers"), "{key}");
+            assert!(p.contains("⟦tone: calm⟧"), "{key}");
             assert!(p.contains("never spoken"), "{key}");
             assert!(p.contains("Before you use a tool, say one short sentence"), "{key}");
             // The panel's hidden context is named as context, not speech.

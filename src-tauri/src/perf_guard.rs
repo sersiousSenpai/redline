@@ -683,6 +683,32 @@ mod tests {
         );
     }
 
+    /// The studio voice's audio streams over one raw-byte Channel per request,
+    /// never a global event per chunk (~10 a second while it speaks), and the
+    /// command that starts it only queues: it may not block or go `(async)`.
+    #[test]
+    fn studio_audio_streams_over_a_channel() {
+        let src = include_str!("tts_studio.rs");
+        assert!(
+            src.contains("let on_audio: Channel<Response>") && src.contains("ch.send(Response::new(frame))"),
+            "tts_studio.rs: studio audio must stream as raw frames over the request's Channel"
+        );
+        let events: Vec<&str> = src
+            .split("emit(\"")
+            .skip(1)
+            .chain(src.split("events.push((\"").skip(1))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            events.iter().all(|e| *e == "studio-status" || *e == "studio-setup"),
+            "tts_studio.rs: only state changes and install progress go out as events, not audio: {events:?}"
+        );
+        assert!(
+            src.contains("#[tauri::command]\npub fn tts_studio("),
+            "tts_studio.rs: `tts_studio` must stay a plain command that returns at once"
+        );
+    }
+
     /// A streamed reply's `{surface}-delta` events are a global `app.emit`,
     /// not a Channel — rule 3's documented exception, which holds only while
     /// `turn::DeltaPacer` coalesces them to one per 33 ms per turn. Every arm

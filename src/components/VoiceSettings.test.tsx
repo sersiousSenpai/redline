@@ -18,19 +18,26 @@ let whisperModels = [
   { id: "base", present: true, bytes: 147_964_211, partial: 0 },
   { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
 ];
+let savedEngine = "kokoro";
+let studioSupported = false;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args: Record<string, unknown>) => {
     invoked.push({ cmd, args: args ?? {} });
     if (cmd === "tts_get_settings")
       return Promise.resolve({
-        engine: "kokoro",
+        engine: savedEngine,
         hasOpenaiKey: false,
         openaiVoice: "alloy",
         kokoroVoice: savedVoice,
         hasElevenKey: false,
         elevenVoice: "21m00Tcm4TlvDq8ikWAM",
         pythonPath: "",
+        studioModel: "1.7B-CustomVoice-8bit",
+        studioVoice: "aiden",
+        studioStyle: "",
       });
+    if (cmd === "tts_studio" && args.op === "status")
+      return Promise.resolve({ supported: studioSupported });
     if (cmd === "tts_kokoro_status")
       return Promise.resolve({
         modelPresent: true,
@@ -76,6 +83,16 @@ vi.mock("../audio/cloudTts", () => ({
   }),
 }));
 
+// The studio voice's card (its own tests): here, only what it hands back.
+vi.mock("./StudioVoiceCard", () => ({
+  StudioVoiceCard: ({ prefs, onChange }: { prefs: { voice: string }; onChange: (p: object) => void }) =>
+    createElement(
+      "button",
+      { type: "button", onClick: () => onChange({ ...prefs, voice: "serena", style: "calm" }) },
+      `studio card: ${prefs.voice}`,
+    ),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { VoiceSettings } from "./VoiceSettings";
@@ -98,6 +115,8 @@ beforeEach(() => {
   ];
   handlers.clear();
   savedVoice = "am_adam";
+  savedEngine = "kokoro";
+  studioSupported = false;
   localStorage.clear();
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -110,9 +129,12 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+const saved: unknown[][] = [];
 async function mount() {
   await act(async () => {
-    root.render(createElement(VoiceSettings, { onClose: () => {}, onSaved: () => {} }));
+    root.render(
+      createElement(VoiceSettings, { onClose: () => {}, onSaved: (...a: unknown[]) => saved.push(a) }),
+    );
   });
   await flush();
 }
@@ -243,5 +265,36 @@ describe("Whisper model choice", () => {
     await mount();
     await pick("turbo");
     expect(button("Resume download (200.0 MB of 574.0 MB)")).toBeTruthy();
+  });
+});
+
+describe("the studio voice", () => {
+  const engines = () => [...host.querySelector("select")!.options].map((o) => o.value);
+
+  it("is offered only on a Mac that can run it", async () => {
+    await mount();
+    expect(engines()).not.toContain("studio");
+    act(() => root.unmount());
+    root = createRoot(host);
+    studioSupported = true;
+    await mount();
+    expect(engines()).toContain("studio");
+  });
+
+  it("opens its card when chosen, and saves its voice and style with the rest", async () => {
+    savedEngine = "studio";
+    saved.length = 0;
+    await mount();
+    await flush();
+    expect(host.textContent).toContain("studio card: aiden");
+    await act(async () => button("studio card: aiden").click());
+    await act(async () => button("Save").click());
+    await flush();
+    expect(invoked).toContainEqual({
+      cmd: "tts_studio",
+      args: { op: "prefs", args: { voice: "serena", style: "calm" } },
+    });
+    expect(invoked.find((c) => c.cmd === "tts_set_settings")!.args.engine).toBe("studio");
+    expect(saved).toEqual([["studio", "calm"]]);
   });
 });

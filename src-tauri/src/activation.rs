@@ -357,7 +357,7 @@ pub struct RestartPreflight {
 }
 
 /// The filesystem `path` lives on has this much room.
-fn free_bytes(path: &Path) -> Option<u64> {
+pub(crate) fn free_bytes(path: &Path) -> Option<u64> {
     let probe = if path.exists() { path } else { path.parent()? };
     let c = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };

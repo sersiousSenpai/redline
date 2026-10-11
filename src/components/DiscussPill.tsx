@@ -24,6 +24,8 @@ import { setVoiceAway, useVoiceAway } from "../audio/voiceAway";
 // It also carries the state of a voice turn left running when the panel
 // closed (`voiceAway`): a breathing mark while the agent works, a dot once its
 // reply is waiting. States, never segments — one click still opens the panel.
+// And a 150 ms hover on it is intent to talk: the studio voice starts loading
+// its model then (Rust ignores the warm for any other engine).
 
 /** The flat/stowed poses' left offset (also in .rl-discuss-pill CSS). */
 const FULL_LEFT = 16;
@@ -62,6 +64,7 @@ export function DiscussPill({
   voiceKey?: string;
 }) {
   const pillRef = useRef<HTMLButtonElement | null>(null);
+  const warmRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const tracked = useVoiceAway();
   const awayKey = tracked?.state === "thinking" ? tracked.key : null;
   // Another plan's waiting reply is that plan's news, not this one's.
@@ -139,6 +142,11 @@ export function DiscussPill({
       ref={pillRef}
       type="button"
       onClick={onClick}
+      onPointerEnter={(e) => {
+        if (e.pointerType === "mouse" && !e.buttons)
+          warmRef.current = setTimeout(() => void invoke("tts_studio", { op: "warm" }).catch(() => {}), 150);
+      }}
+      onPointerLeave={() => clearTimeout(warmRef.current)}
       title={label}
       aria-label={label}
       className="rl-discuss-pill absolute flex items-center gap-1.5 rounded-full"

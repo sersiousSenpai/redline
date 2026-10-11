@@ -45,6 +45,20 @@ export async function invoke(command: string, args?: unknown) {
       return [];
     case "tts_get_settings":
       return { engine: "system" };
+    // The studio voice: installed, its model still loading, Kokoro not set
+    // up — so its stand-in is the (fake) system voice.
+    case "tts_studio": {
+      const op = (args as { op?: string } | undefined)?.op;
+      if (op === "status")
+        return {
+          supported: true, model: "1.7B-CustomVoice-8bit", installed: true, runtimeCurrent: true,
+          models: { "1.7B-CustomVoice-8bit": { speedRatio: 0.27 } }, state: "loading", reason: null,
+          installing: false, speedRatio: 0.27, slow: false, pressure: 1, kokoro: false,
+        };
+      if (op === "preflight")
+        return { blockers: [], ramBytes: 48e9, freeMemoryBytes: 20e9, freeDiskBytes: 200e9, needDiskBytes: 4.5e9, needMemoryBytes: 4.2e9 };
+      return null;
+    }
     case "dictation_stop":
       return qa.__qaDictated;
     case "delete_comment":
@@ -58,6 +72,9 @@ export async function listen(event: string, fn: Handler) {
   set.add(fn);
   handlers.set(event, set);
   return () => set.delete(fn);
+}
+export class Channel {
+  onmessage: (data: ArrayBuffer) => void = noop;
 }
 export async function emit() {}
 export async function once() { return noop; }

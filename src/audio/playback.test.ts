@@ -108,6 +108,49 @@ describe("Playback", () => {
     expect(stall).toHaveBeenCalledTimes(1);
   });
 
+  it("knows what was heard: exactly where the driver keeps a timeline, else the whole clip", () => {
+    const p = new Playback();
+    const { driver, finish } = fakeDriver();
+    const opts = { rate: 1, voiceURI: null };
+    // A driver that can't tell: the clip sounding is the best guess.
+    const plain = p.wrap(driver);
+    plain.speak("One sentence.", opts, () => {});
+    expect(p.heard()).toBe("One sentence.");
+    finish();
+    expect(p.heard()).toBeNull();
+    // One that can: its words, or the clip before when none of this one yet.
+    let heard = "";
+    const timed = p.wrap({ ...driver, heard: () => heard });
+    timed.speak("First clip.", opts, () => {});
+    timed.speak("The second clip is longer.", opts, () => {});
+    expect(p.heard()).toBe("");
+    heard = "First";
+    expect(p.heard()).toBe("First");
+    heard = "";
+    finish();
+    expect(p.heard()).toBe("First clip.");
+    heard = "The second";
+    expect(p.heard()).toBe("The second");
+    // A new run of speech starts from nothing heard.
+    finish();
+    timed.speak("Next reply.", opts, () => {});
+    heard = "";
+    expect(p.heard()).toBe("");
+  });
+
+  it("passes the reply's start, its end of text and its timeline through", () => {
+    const begin = vi.fn();
+    const flush = vi.fn();
+    const p = new Playback();
+    const d = p.wrap({ ...fakeDriver().driver, beginTurn: begin, flush, heard: () => "x" });
+    const q = new SpeechQueue({ driver: d });
+    q.primeTurn();
+    q.flush();
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(d.heard!()).toBe("x");
+  });
+
   it("forgets everything on cancel and says it is idle", () => {
     const idle = vi.fn();
     const p = new Playback({ onIdle: idle });

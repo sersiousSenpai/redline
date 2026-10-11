@@ -143,6 +143,7 @@ mod state;
 mod term_attention;
 mod thumbs;
 mod tts;
+mod tts_studio;
 mod turn;
 mod update;
 mod userconfig;
@@ -13133,6 +13134,7 @@ pub fn run() {
             tts::tts_kokoro_status,
             tts::tts_kokoro_install,
             tts::tts_kokoro_warm,
+            tts_studio::tts_studio,
             dictation::dictation_start,
             dictation::dictation_stop,
             dictation::dictation_cycle,
@@ -13545,8 +13547,14 @@ pub fn run() {
 
             // Voice TTS: engine choice + API key in app_settings, synth made
             // from Rust (cloud OpenAI, or the local Kokoro sidecar). The Kokoro
-            // model lives under the app data dir.
-            app.manage(tts::TtsState::new(db.clone(), data_dir.clone()));
+            // model lives under the app data dir, as does the studio voice,
+            // whose state changes and install progress go out as events.
+            let tts = tts::TtsState::new(db.clone(), data_dir.clone());
+            let events = app.handle().clone();
+            tts.studio().on_event(move |event, payload| {
+                let _ = events.emit(event, payload);
+            });
+            app.manage(tts);
 
             // Active browser tab tracker — shared with the daemon's
             // `/v1/browser/*` routes through `AppState`.
@@ -14078,6 +14086,7 @@ pub fn run() {
                 }
                 if let Some(tts) = app_handle.try_state::<tts::TtsState>() {
                     tts.kokoro_kill();
+                    tts.studio().kill();
                 }
             }
         });

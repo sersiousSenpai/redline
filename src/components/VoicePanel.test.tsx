@@ -25,8 +25,42 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     // open, exactly like dictation.rs, so a test sees a re-arm that never armed.
     micOpen: false,
     armed: 0,
+    engine: "system",
   },
 }));
+// The studio voice's driver, recording what it is handed (studioTts.ts has
+// its own tests).
+interface StudioSpoken {
+  text: string;
+  tone?: string | null;
+  done: () => void;
+}
+const studio = vi.hoisted(() => ({
+  drivers: [] as Array<{ opts: Record<string, unknown>; spoken: StudioSpoken[]; heard: string }>,
+  warmed: 0,
+  surfaces: [] as Array<[string, boolean]>,
+}));
+vi.mock("../audio/studioTts", () => ({
+  studioTtsDriver: (opts: Record<string, unknown>) => {
+    const d = { opts, spoken: [] as StudioSpoken[], heard: "" };
+    studio.drivers.push(d);
+    return {
+      speak: (text: string, o: { tone?: string | null }, done: () => void) =>
+        d.spoken.push({ text, tone: o.tone, done }),
+      cancel: () => {
+        d.spoken.length = 0;
+      },
+      pause: () => {},
+      resume: () => {},
+      heard: () => d.heard,
+    };
+  },
+  warmStudio: async () => {
+    studio.warmed += 1;
+  },
+  studioSurface: (surface: string, open: boolean) => studio.surfaces.push([surface, open]),
+}));
+vi.mock("./StudioVoiceCard", () => ({ StudioVoiceCard: () => null }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (ev: string, fn: Handler) => {
     const set = handlers.get(ev) ?? new Set<Handler>();
@@ -53,7 +87,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "comment_offers_pending":
         return [];
       case "tts_get_settings":
-        return { engine: "system" };
+        return { engine: script.engine, studioStyle: "calm" };
       case "dictation_start":
         if (!script.micOpen) {
           script.micOpen = true;
@@ -182,6 +216,10 @@ beforeEach(() => {
   script.status = { up: true, inFlight: false, generation: 1, turn: 0 };
   script.micOpen = false;
   script.armed = 0;
+  script.engine = "system";
+  studio.drivers.length = 0;
+  studio.warmed = 0;
+  studio.surfaces.length = 0;
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -733,5 +771,72 @@ describe("hands-free", () => {
     expect(script.armed).toBe(2);
     // Re-armed just after the agent's voice: the pre-roll would hold its end.
     expect(named("dictation_start").map(([, a]) => a)).toEqual([{ preroll: true }, { preroll: false }]);
+  });
+});
+
+// --- the studio voice -------------------------------------------------------------
+
+describe("the studio voice", () => {
+  const live = () => studio.drivers[studio.drivers.length - 1];
+
+  it("speaks through its own driver, warming the model as the panel opens", async () => {
+    script.engine = "studio";
+    await mount();
+    await wait();
+    expect(studio.drivers).toHaveLength(1);
+    expect(live().opts.style).toBe("calm");
+    expect(studio.warmed).toBe(1);
+    expect(studio.surfaces).toEqual([[`voice:${SID}`, true]]);
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "⟦tone: upbeat⟧ The plan has three parts. Let me check." });
+    expect(live().spoken.map((x) => [x.text, x.tone])).toEqual([["The plan has three parts.", "upbeat"]]);
+    expect(utterances).toEqual([]); // not the system voice
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await wait();
+    expect(studio.surfaces).toEqual([
+      [`voice:${SID}`, true],
+      [`voice:${SID}`, false],
+    ]);
+  });
+
+  it("says quietly why its stand-in is reading, and stops saying it when it speaks again", async () => {
+    script.engine = "studio";
+    await mount();
+    await wait();
+    const typing = input();
+    typing.focus();
+    const onFallback = live().opts.onFallback as (n: string | null) => void;
+    await act(async () => onFallback("Studio voice warming · Kokoro reading"));
+    const chip = host.querySelector("[data-studio-chip]")!;
+    expect(chip.textContent).toBe("Studio voice warming · Kokoro reading");
+    expect(chip.getAttribute("role")).toBe("status");
+    expect(document.activeElement).toBe(typing);
+    await act(async () => onFallback(null));
+    expect(host.querySelector("[data-studio-chip]")).toBeNull();
+  });
+
+  it("tells the agent exactly how far the listener got", async () => {
+    script.engine = "studio";
+    await mount();
+    await wait();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "First, the ownership globs are guesses. Second, check attribution." });
+    live().heard = "First, the ownership";
+    await holdToTalk("Add them as feedback.");
+    await emit("voice-interrupted", { ...of(1), text: "First, the ownership globs are guesses.", streamedChars: 40, messageId: "m1", killed: false });
+    await wait();
+    expect(sends()[1].context).toContain('You were interrupted after saying: "First, the ownership"');
+  });
+
+  it("keeps the speed slider off: it can't change speed without changing pitch", async () => {
+    script.engine = "studio";
+    await mount();
+    await wait();
+    await act(async () => button("Voice settings").click());
+    await wait();
+    const slider = host.querySelector("input[aria-label='Speech speed']") as HTMLInputElement;
+    expect(slider.disabled).toBe(true);
+    expect(host.textContent).toContain("pick Slow or Brisk as its style");
   });
 });

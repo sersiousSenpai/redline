@@ -144,16 +144,26 @@ export function takeFirstChunk(
  * The minimal slice of `window.speechSynthesis` that `SpeechQueue` needs.
  * `speak(text, …, onDone)` must invoke `onDone` when the utterance finishes
  * (or errors), so the queue can track outstanding speech for the state flag.
+ *
+ * `opts.tone` is the reply's ⟦tone: …⟧ (voiceStream.ts), for an engine that
+ * can take one; the others ignore it, as they do the optional hooks below.
  */
 export interface SpeechDriver {
   speak(
     text: string,
-    opts: { rate: number; voiceURI: string | null },
+    opts: { rate: number; voiceURI: string | null; tone?: string | null },
     onDone: () => void,
   ): void;
   cancel(): void;
   pause(): void;
   resume(): void;
+  /** A new reply begins (`SpeechQueue.primeTurn`). */
+  beginTurn?(): void;
+  /** Nothing more is coming for now (`SpeechQueue.flush`): say anything held. */
+  flush?(): void;
+  /** What of the clip sounding now has been heard so far; null when the
+   *  driver can't tell. */
+  heard?(): string | null;
 }
 
 /**
@@ -173,6 +183,8 @@ export class SpeechQueue {
   // Bumped by every cancel. A sentence's `onDone` only counts if no cancel has
   // happened since it was spoken.
   private epoch = 0;
+  // The reply's ⟦tone⟧, until the next reply or cancel.
+  private tone: string | null = null;
   prefs: VoicePrefs;
 
   constructor(opts?: {
@@ -204,6 +216,13 @@ export class SpeechQueue {
    *  first full sentence), so audio starts sooner. */
   primeTurn(): void {
     this.firstChunkPending = true;
+    this.tone = null;
+    this.driver.beginTurn?.();
+  }
+
+  /** The tone the reply asked for (⟦tone: …⟧), for what is spoken from now. */
+  setTone(tone: string | null): void {
+    this.tone = tone;
   }
 
   /** Append streamed text; speak any sentences that are now complete. */
@@ -227,6 +246,7 @@ export class SpeechQueue {
     const tail = this.buffer.trim();
     this.buffer = "";
     if (tail) this.speakNow(tail);
+    this.driver.flush?.();
   }
 
   /** Stop immediately and drop any buffered/queued speech (Stop / barge-in). */
@@ -235,6 +255,7 @@ export class SpeechQueue {
     this.outstanding = 0;
     this.epoch += 1;
     this.firstChunkPending = false;
+    this.tone = null;
     this.driver.cancel();
     this.setState("idle");
   }
@@ -260,7 +281,7 @@ export class SpeechQueue {
     const epoch = this.epoch;
     this.driver.speak(
       sentence,
-      { rate: this.prefs.rate, voiceURI: this.prefs.voiceURI },
+      { rate: this.prefs.rate, voiceURI: this.prefs.voiceURI, tone: this.tone },
       () => {
         // A sentence from before the last cancel finishing late (a stopped
         // clip's 'ended', the system voice erroring out its queue) belongs to a

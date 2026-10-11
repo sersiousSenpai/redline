@@ -477,12 +477,20 @@ export function ChatRoom({
     "redline.chat.speakReplies",
     false,
   );
+  // Why the studio voice's stand-in reads, shown until the studio voice speaks
+  // again, unless another notice has taken its place by then.
+  const studioNote = useRef<string | null>(null);
   const readAloud = useReadAloud({
     enabled: speakReplies,
     liveText,
     streaming,
     threadKey: companionId,
     onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
+    onFallback: (n) => {
+      const shown = studioNote.current;
+      studioNote.current = n;
+      setNotice((cur) => n ?? (cur === shown ? null : cur));
+    },
   });
   // Stop what is being read, else flip reading aloud — and turning it on is
   // the moment to start the voice engine, never the chat's mount.

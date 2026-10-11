@@ -4,7 +4,8 @@
 // A voice reply carries two channels in one stream (the contract is
 // `SPOKEN_RULES` in voice.rs): a few sentences for the ear, then — after a
 // line holding only ⟦screen⟧ — detail for the eye that is never spoken. A
-// sentence about one plan section is followed by ⟦§<anchorId>⟧. This module is
+// sentence about one plan section is followed by ⟦§<anchorId>⟧, and a reply
+// may open with ⟦tone: calm⟧ for a voice that can take one. This module is
 // the one reader of that contract: speech gets the spoken part with every
 // marker taken out, the transcript renders the screen part as markdown and the
 // markers as section chips. It is pure, so a reply stored raw renders the same
@@ -12,6 +13,11 @@
 
 /** The line that ends the spoken part. */
 export const SCREEN_MARKER = "⟦screen⟧";
+
+/** How far an opened ⟦ may run without its ⟧ and still be a marker: every
+ *  real one is shorter, and text after a stray ⟦ is spoken, not held back
+ *  for the rest of the reply. */
+const MARKER_MAX = 40;
 
 /** A section marker in the spoken part, and where it sat. */
 export interface SectionMark {
@@ -29,11 +35,15 @@ export interface VoiceReply {
   marks: SectionMark[];
   /** Every section the reply names, once each, in order — its chips. */
   sections: string[];
+  /** The spoken part's ⟦tone: …⟧, lowercased ("calm, warm"); null when it
+   *  has none, or one that isn't plain words. */
+  tone: string | null;
 }
 
 // A marker together with the whitespace before it, so "the risk ⟦§A⟧." reads
 // "the risk." rather than "the risk ."
-const MARKER = /\s*⟦([^⟦⟧]*)⟧/g;
+const MARKER = new RegExp(`\\s*⟦([^⟦⟧]{0,${MARKER_MAX}})⟧`, "g");
+const TONE = /^tone\s*:\s*([a-z][a-z ,]*)$/;
 
 /**
  * Split a reply — whole, or as much of it as has streamed — into its two
@@ -63,7 +73,7 @@ export function splitReply(raw: string): VoiceReply {
   for (const m of [...marks, ...screen.marks]) {
     if (!sections.includes(m.anchorId)) sections.push(m.anchorId);
   }
-  return { spoken: text, screen: screen.text.trim(), marks, sections };
+  return { spoken: text, screen: screen.text.trim(), marks, sections, tone: spoken.tone };
 }
 
 /**
@@ -77,16 +87,21 @@ export function spokenPause(raw: string): boolean {
 }
 
 /** Cut a marker that opened and has not closed: mid-stream it is still
- *  arriving, and in a finished reply it is malformed and never worth saying. */
+ *  arriving, and in a finished reply it is malformed and never worth saying.
+ *  One that ran past `MARKER_MAX` without closing was never a marker. */
 function withoutOpenMarker(text: string): string {
   const open = text.lastIndexOf("⟦");
-  return open !== -1 && text.indexOf("⟧", open) === -1 ? text.slice(0, open) : text;
+  return open !== -1 && text.indexOf("⟧", open) === -1 && text.length - open <= MARKER_MAX + 1
+    ? text.slice(0, open)
+    : text;
 }
 
-/** Remove every closed marker, recording where each `⟦§…⟧` sat. Any other
- *  bracketed token is dropped too: nothing in ⟦…⟧ is ever meant to be read. */
-function strip(text: string): { text: string; marks: SectionMark[] } {
+/** Remove every closed marker, recording where each `⟦§…⟧` sat and the first
+ *  `⟦tone: …⟧`. Any other bracketed token is dropped too: nothing in ⟦…⟧ is
+ *  ever meant to be read. */
+function strip(text: string): { text: string; marks: SectionMark[]; tone: string | null } {
   const marks: SectionMark[] = [];
+  let tone: string | null = null;
   let out = "";
   let last = 0;
   for (const m of text.matchAll(MARKER)) {
@@ -96,7 +111,8 @@ function strip(text: string): { text: string; marks: SectionMark[] } {
     if (body.startsWith("§") && body.length > 1) {
       marks.push({ anchorId: body.slice(1).trim(), at: out.length });
     }
+    tone ??= TONE.exec(body.toLowerCase())?.[1].trim() ?? null;
   }
   out += text.slice(last);
-  return { text: out, marks };
+  return { text: out, marks, tone };
 }

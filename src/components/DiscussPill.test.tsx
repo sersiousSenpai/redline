@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   ),
 }));
 
+import { invoke } from "@tauri-apps/api/core";
 import { DiscussPill } from "./DiscussPill";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 
@@ -107,5 +108,41 @@ describe("DiscussPill states", () => {
     expect(host.querySelectorAll("button")).toHaveLength(1);
     await act(async () => pill().click());
     expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DiscussPill warms the studio voice on a hover", () => {
+  const pointer = (type: "pointerover" | "pointerout", pointerType = "mouse", buttons = 0) => {
+    const e = new Event(type, { bubbles: true });
+    Object.assign(e, { pointerType, buttons });
+    act(() => {
+      pill().dispatchEvent(e);
+    });
+  };
+  const warms = () => vi.mocked(invoke).mock.calls.filter(([c, a]) => c === "tts_studio" && (a as { op: string }).op === "warm");
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(invoke).mockClear();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("after a 150 ms dwell of the mouse, never for a pass over it", () => {
+    pointer("pointerover");
+    vi.advanceTimersByTime(100);
+    pointer("pointerout");
+    vi.advanceTimersByTime(500);
+    expect(warms()).toEqual([]);
+    pointer("pointerover");
+    vi.advanceTimersByTime(150);
+    expect(warms()).toHaveLength(1);
+  });
+
+  it("not for a touch, nor a drag across it", () => {
+    pointer("pointerover", "touch");
+    pointer("pointerout", "touch");
+    pointer("pointerover", "mouse", 1);
+    vi.advanceTimersByTime(500);
+    expect(warms()).toEqual([]);
   });
 });

@@ -74,6 +74,34 @@ describe("splitReply", () => {
   it("renders a reply stored raw exactly as it rendered live", () => {
     expect(splitReply(REPLY.trim())).toEqual(splitReply(REPLY));
   });
+
+  it("reads the reply's tone, whichever delta closes its marker, and never says it", () => {
+    const raw = "⟦tone: Calm, warm⟧ Mostly, yes. The replay is safe.";
+    for (let i = 1; i < raw.length; i++) {
+      const part = splitReply(raw.slice(0, i));
+      expect(part.spoken.includes("⟦") || part.spoken.includes("tone"), `at ${i}`).toBe(false);
+      expect(part.tone).toBe(i >= raw.indexOf("⟧") + 1 ? "calm, warm" : null);
+    }
+    expect(splitReply(raw).spoken).toBe("Mostly, yes. The replay is safe.");
+    // Not plain words: no tone, and still never spoken.
+    expect(splitReply("⟦tone: 50%⟧ Sure.")).toMatchObject({ spoken: "Sure.", tone: null });
+    // Only the spoken part's tone counts.
+    expect(splitReply("Sure.\n⟦screen⟧\n⟦tone: upbeat⟧").tone).toBeNull();
+  });
+
+  it("holds an open marker for 40 characters at most, then speaks what follows it", () => {
+    const stray = "Use the ⟦ bracket to open a section in the editor, then type its name.";
+    // Within reach of a ⟧ it may be a marker still arriving…
+    expect(splitReply(stray.slice(0, 30)).spoken).toBe("Use the");
+    // …past it, it never was one, and the spoken text only grew.
+    expect(splitReply(stray).spoken).toBe(stray);
+    let prev = "";
+    for (let i = 1; i <= stray.length; i++) {
+      const spoken = splitReply(stray.slice(0, i)).spoken;
+      expect(spoken.startsWith(prev), `at ${i}`).toBe(true);
+      prev = spoken;
+    }
+  });
 });
 
 describe("spokenPause", () => {

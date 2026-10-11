@@ -73,6 +73,10 @@ export class Playback {
   private seq = 0;
   private paused = false;
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
+  // The wrapped driver's own account of the clip sounding, where it keeps one,
+  // and the last clip that finished in this run of speech.
+  private heardNow?: () => string | null;
+  private lastHeard = "";
 
   constructor(private readonly opts: PlaybackOptions = {}) {}
 
@@ -110,8 +114,24 @@ export class Playback {
     return this.queue.length > 0;
   }
 
+  /** What the listener has heard of the clip sounding now: exact where the
+   *  driver keeps a timeline (the studio voice), else the whole clip. When
+   *  none of it has sounded yet, the clip before it in this run of speech;
+   *  "" when nothing at all has. */
+  heard(): string | null {
+    const head = this.queue[0];
+    if (!head) return null;
+    const part = this.heardNow?.();
+    if (part == null) return head.text;
+    return part || this.lastHeard;
+  }
+
   wrap(driver: SpeechDriver): SpeechDriver {
+    this.heardNow = driver.heard?.bind(driver);
     return {
+      beginTurn: () => driver.beginTurn?.(),
+      flush: () => driver.flush?.(),
+      heard: () => driver.heard?.() ?? null,
       speak: (text, opts, onDone) => {
         const epoch = this.epoch;
         const clip: Queued = { seq: ++this.seq, text, marks: [], rate: opts.rate, end: -1 };
@@ -173,10 +193,11 @@ export class Playback {
   private finish(seq: number): void {
     const i = this.queue.findIndex((c) => c.seq === seq);
     if (i === -1) return;
-    this.queue.splice(i, 1);
+    const [done] = this.queue.splice(i, 1);
     if (i !== 0) return;
     this.clearStall();
     const next = this.queue[0];
+    this.lastHeard = next ? done.text : "";
     if (next) this.start(next);
     else this.opts.onIdle?.();
   }
@@ -184,6 +205,7 @@ export class Playback {
   private reset(): void {
     this.epoch += 1;
     this.queue = [];
+    this.lastHeard = "";
     this.narration = "";
     this.marks = [];
     this.cursor = 0;
