@@ -85,8 +85,9 @@ export type ChatEvent =
   /** Starting a mission from regular browsing carries the tabs AND the
    *  shared chat (BC-4). */
   | { type: "mission-started-from-regular"; missionId: string }
-  /** The missions and mosaics that exist, each once its list has loaded
-   *  (null until then): a deleted one's shared chat is forgotten. */
+  /** The missions or mosaics that exist, from a fresh read of their list
+   *  (null: a kind this read says nothing about): a deleted one's shared
+   *  chat is forgotten. */
   | { type: "workspaces-listed"; missions: readonly WorkspaceKey[] | null; mosaics: readonly WorkspaceKey[] | null };
 
 export interface ResolvedConversation {
@@ -265,8 +266,8 @@ function step(w: ChatWorld, e: ChatEvent): ChatWorld {
 }
 
 /** Each workspace's shared chat while its workspace exists. Regular browsing
- *  and the workspace on screen always keep theirs, and a kind whose list has
- *  not loaded keeps all of its own. Nothing to forget is the same object, so
+ *  and the workspace on screen always keep theirs, and a kind the read did
+ *  not list keeps all of its own. Nothing to forget is the same object, so
  *  the slice (and storage) stay as they were. */
 function liveShared(w: ChatWorld, missions: readonly WorkspaceKey[] | null, mosaics: readonly WorkspaceKey[] | null): ChatWorld["shared"] {
   const alive = (workspace: WorkspaceKey) => {

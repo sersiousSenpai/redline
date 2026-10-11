@@ -45,9 +45,9 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   the tab on screen and the workspace, plus a slice only the reducer
   writes. A handler that moves the conversation dispatches an event; it
   never sets the anchor, the flip or a shared thread itself. Each
-  workspace's shared thread persists until its workspace is gone: once the
-  mission and mosaic lists load, the pane dispatches `workspaces-listed` and
-  the reducer forgets the rest.
+  workspace's shared thread persists until its workspace is gone: as a fresh
+  read of the mission or the mosaic list arrives, the pane dispatches
+  `workspaces-listed` for that kind and the reducer forgets the rest of it.
 - A turn's target page, scope and workspace are captured when the user sends.
   The backend never reads the globally active tab or mission for a turn that
   carries a target. Both of the turn's rows keep the targeted tab

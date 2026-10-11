@@ -617,6 +617,60 @@ describe("mosaics", () => {
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent?.startsWith("Stock News"))!.click());
   }
   const stageSections = () => [...host.querySelectorAll("section")].map((section) => section.getAttribute("aria-label"));
+  const followed = () => JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!) as Record<string, string>;
+  async function openManager() {
+    await act(async () => (host.querySelector('[aria-label="Page menu"]') as HTMLButtonElement).click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Mosaics…")!.click());
+    await settle();
+  }
+
+  it("forgets a deleted mosaic's shared chat once the manager reads their list", async () => {
+    linkedModeOn();
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "mosaic:news": "news-chat", "mosaic:gone": "gone-chat" }));
+    await mount();
+    expect(followed()["mosaic:gone"]).toBe("gone-chat");
+    await openManager();
+    expect(followed()).toEqual({ regular: "kept", "mosaic:news": "news-chat" });
+  });
+
+  it("keeps every mosaic's shared chat when their list fails to load", async () => {
+    linkedModeOn();
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "mosaic:news": "news-chat" }));
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: { label: string }) => command === "browser_workspace_list" ? Promise.reject(new Error("offline")) : base(command, args));
+    await mount();
+    await openManager();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("could not be loaded");
+    expect(followed()["mosaic:news"]).toBe("news-chat");
+  });
+
+  it("keeps a mosaic saved after its list loaded when the pane next renders", async () => {
+    linkedModeOn();
+    // What the pane saves is what it loads back.
+    const saved = new Map<string, unknown>();
+    mocks.save.mockImplementation(async (id: string, body: unknown) => { saved.set(id, body); });
+    const regular = mocks.load.getMockImplementation()!;
+    mocks.load.mockImplementation(async (id: string) => saved.get(id) ?? regular(id));
+    await mount();
+    await openManager();
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent === "Save these pages as a mosaic")!.click());
+    const name = document.querySelector<HTMLInputElement>('[role="dialog"] input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Morning");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent === "Save mosaic")!.click());
+    for (let i = 0; i < 4; i++) await settle();
+    const id = [...saved.keys()].find((key) => key.startsWith("mosaic:"))!;
+    expect(followed()[id]).toBeTruthy();
+    // Back to regular browsing; the list the manager read before the save
+    // does not speak for the mosaic made since.
+    await act(async () => (host.querySelector('[aria-label="Close Morning"]') as HTMLButtonElement).click());
+    for (let i = 0; i < 2; i++) await settle();
+    mocks.mission = { missions: [{ missionId: "m-new", title: "New" }] };
+    await mount();
+    expect(followed()[id]).toBeTruthy();
+  });
 
   it("opens a saved 3×3 as nine live, sized tiles created in staggered batches, and closing restores the regular pages", async () => {
     await mount();

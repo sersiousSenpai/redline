@@ -776,15 +776,14 @@ function BrowserPaneBase({
   // workspace to return to when it closes (regular browsing or a mission).
   const [mosaicsOpen, setMosaicsOpen] = useState(false);
   const [mosaicList, setMosaicList] = useState<MosaicSummary[] | null>(null);
-  // A deleted mission's or mosaic's shared chat is forgotten once its list
-  // has loaded and says so; the persisted map holds only live workspaces.
+  // A deleted mission's or mosaic's shared chat is forgotten once a fresh
+  // read of its list says so; the persisted map holds only live workspaces.
+  // Each list speaks for its own kind as it arrives, and only then: the
+  // mosaics' is read when their manager opens (`refreshMosaics`), so sending
+  // it again later would forget a mosaic saved since.
   useEffect(() => {
-    dispatchChat({
-      type: "workspaces-listed",
-      missions: mission.missionsLoaded ? mission.missions.map((m) => m.missionId) : null,
-      mosaics: mosaicList?.map((m) => m.id) ?? null,
-    });
-  }, [mission.missionsLoaded, mission.missions, mosaicList, dispatchChat]);
+    if (mission.missionsLoaded) dispatchChat({ type: "workspaces-listed", missions: mission.missions.map((m) => m.missionId), mosaics: null });
+  }, [mission.missionsLoaded, mission.missions, dispatchChat]);
   const [mosaicError, setMosaicError] = useState<string | null>(null);
   const [mosaicEdit, setMosaicEdit] = useState<{ draft: MosaicDraft; previous: Mosaic | null } | null>(null);
   const [activeMosaic, setActiveMosaic] = useState<Mosaic | null>(null);
@@ -2011,7 +2010,11 @@ function BrowserPaneBase({
   // mission; closing it returns to where you were.
   const refreshMosaics = () => {
     setMosaicError(null);
-    void listMosaics().then(setMosaicList).catch((error) => { setMosaicList((prev) => prev ?? []); setMosaicError(`Saved mosaics could not be loaded. ${String(error)}`); });
+    // A read that failed says nothing about which mosaics exist.
+    void listMosaics().then((list) => {
+      setMosaicList(list);
+      dispatchChat({ type: "workspaces-listed", missions: null, mosaics: list.map((m) => m.id) });
+    }).catch((error) => { setMosaicList((prev) => prev ?? []); setMosaicError(`Saved mosaics could not be loaded. ${String(error)}`); });
   };
   const openMosaicManager = () => { setMosaicsOpen(true); refreshMosaics(); };
   const openMosaic = async (id: string) => {
