@@ -14,7 +14,9 @@
 //!     setting picks one; base.en is used whenever turbo isn't on disk.
 //!   - **The resident model** — a lazily-loaded `WhisperContext` kept warm behind
 //!     a `Mutex`, loaded while the user is still speaking (`warm`), so only a
-//!     first-ever release waits on it. Released on app exit (`RunEvent::Exit`).
+//!     first-ever release waits on it. Released after `IDLE_UNLOAD` without a
+//!     capture ([`IdleWatch`]) — turbo is 0.6 GB — and on app exit
+//!     (`RunEvent::Exit`); the next capture loads it again as it starts.
 //!   - **Inference** — [`WhisperState::transcribe`] turns one accumulated
 //!     utterance (16 kHz mono `f32`) into text. It is blocking (whisper.cpp is
 //!     CPU/GPU-bound), so it runs on the blocking pool, under `dictation_stop`.
@@ -41,7 +43,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -229,6 +231,79 @@ pub fn decode_threads(cores: usize) -> i32 {
 
 // --- State ----------------------------------------------------------------
 
+/// How long the resident model stays loaded without a capture. Turbo holds
+/// 0.6 GB, beside the studio voice's 4.2 GB and local polish's 1.9 GB, which
+/// unload after their own idle times; a capture loads it again as it starts
+/// (`warm`), so the load overlaps the user speaking.
+#[cfg(any(target_os = "macos", test))]
+const IDLE_UNLOAD: Duration = Duration::from_secs(300);
+
+/// How long is left before something last used at `last` has been idle for
+/// `after`, at `now`; `None` once it has.
+#[cfg(any(target_os = "macos", test))]
+fn idle_left(last: Instant, now: Instant, after: Duration) -> Option<Duration> {
+    (last + after)
+        .checked_duration_since(now)
+        .filter(|left| !left.is_zero())
+}
+
+/// The resident model's idle unload. Each use — a capture starting, a decode —
+/// restarts the clock, and the first use after a load starts a watch thread
+/// that empties the model's slot once the clock runs out. A slot in use right
+/// then (a decode holds its lock) counts as a use. The thread sleeps until the
+/// clock could have run out, and ends with the unload.
+#[cfg(any(target_os = "macos", test))]
+struct IdleWatch {
+    after: Duration,
+    /// The last use, and whether a watch thread is running.
+    state: Mutex<(Instant, bool)>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl IdleWatch {
+    fn new(after: Duration) -> Self {
+        Self {
+            after,
+            state: Mutex::new((Instant::now(), false)),
+        }
+    }
+
+    /// A use, now: `true` when no watch is running, and the caller must start
+    /// one (`watch`).
+    fn touch(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.0 = Instant::now();
+        !std::mem::replace(&mut state.1, true)
+    }
+
+    /// Watch `slot` until its clock runs out, then empty it.
+    fn watch<T>(&self, slot: &Mutex<Option<T>>) {
+        loop {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let wait = match idle_left(state.0, Instant::now(), self.after) {
+                Some(left) => left,
+                None => {
+                    let model = match slot.try_lock() {
+                        Ok(model) => Some(model),
+                        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+                        Err(std::sync::TryLockError::WouldBlock) => None,
+                    };
+                    if let Some(mut model) = model {
+                        *model = None;
+                        state.1 = false;
+                        return;
+                    }
+                    // In use right now (a decode holds it): that is a use.
+                    state.0 = Instant::now();
+                    self.after
+                }
+            };
+            drop(state);
+            std::thread::sleep(wait);
+        }
+    }
+}
+
 /// The model resident in memory, and which one it is.
 #[cfg(target_os = "macos")]
 struct Loaded {
@@ -248,11 +323,14 @@ pub struct WhisperState {
     /// One model download at a time: two clicks must not write the same `.part`.
     download: Arc<AsyncMutex<()>>,
     /// The resident whisper.cpp model, loaded on first use and kept warm across
-    /// utterances. `None` until first use / after teardown. `WhisperContext`
-    /// is `Send + Sync` (the crate guarantees it), so it lives behind a plain
-    /// `Mutex` in shared state.
+    /// utterances. `None` until first use, after `IDLE_UNLOAD` without one, and
+    /// after teardown. `WhisperContext` is `Send + Sync` (the crate guarantees
+    /// it), so it lives behind a plain `Mutex` in shared state.
     #[cfg(target_os = "macos")]
     ctx: Arc<Mutex<Option<Loaded>>>,
+    /// Unloads `ctx` once it goes unused.
+    #[cfg(target_os = "macos")]
+    idle: Arc<IdleWatch>,
 }
 
 impl WhisperState {
@@ -264,6 +342,8 @@ impl WhisperState {
             download: Arc::new(AsyncMutex::new(())),
             #[cfg(target_os = "macos")]
             ctx: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "macos")]
+            idle: Arc::new(IdleWatch::new(IDLE_UNLOAD)),
         }
     }
 
@@ -338,6 +418,8 @@ impl WhisperState {
         self.load_into(&mut guard).map(|_| ())
     }
 
+    /// Load the selected model into `guard` unless it is the one there, and
+    /// count it used: the idle clock restarts.
     #[cfg(target_os = "macos")]
     fn load_into<'g>(&self, guard: &'g mut Option<Loaded>) -> Result<&'g WhisperContext, String> {
         let model = self
@@ -353,6 +435,12 @@ impl WhisperState {
             )
             .map_err(|e| format!("failed to load the Whisper model: {e}"))?;
             *guard = Some(Loaded { id: model.id, ctx });
+        }
+        if self.idle.touch() {
+            // A plain thread, asleep but for a check when the clock could
+            // have run out, gone with the unload.
+            let (idle, ctx) = (self.idle.clone(), self.ctx.clone());
+            std::thread::spawn(move || idle.watch(&ctx));
         }
         Ok(&guard.as_ref().expect("loaded above").ctx)
     }
@@ -619,6 +707,51 @@ mod tests {
     fn engine_defaults_to_auto() {
         let ws = test_state();
         assert_eq!(ws.engine_setting(), "auto");
+    }
+
+    #[test]
+    fn the_idle_clock_runs_from_the_last_use() {
+        let at = Instant::now();
+        let minute = Duration::from_secs(60);
+        assert_eq!(idle_left(at, at, IDLE_UNLOAD), Some(IDLE_UNLOAD));
+        assert_eq!(idle_left(at, at + 4 * minute, IDLE_UNLOAD), Some(minute));
+        assert_eq!(idle_left(at, at + 5 * minute, IDLE_UNLOAD), None, "five minutes without a capture");
+        assert_eq!(idle_left(at, at + 6 * minute, IDLE_UNLOAD), None);
+        // A capture three minutes in starts the clock again.
+        let again = at + 3 * minute;
+        assert_eq!(idle_left(again, at + 5 * minute, IDLE_UNLOAD), Some(3 * minute));
+    }
+
+    /// The watch on a stand-in slot: emptied once it has gone unused for the
+    /// idle time, kept while each use restarts the clock or while it is in
+    /// use, and one watch at a time, gone with the unload.
+    #[test]
+    fn the_resident_model_goes_once_it_is_idle() {
+        let idle = Arc::new(IdleWatch::new(Duration::from_millis(400)));
+        let slot = Arc::new(Mutex::new(Some("turbo")));
+        assert!(idle.touch(), "the first use after a load starts the watch");
+        let watching = {
+            let (idle, slot) = (idle.clone(), slot.clone());
+            std::thread::spawn(move || idle.watch(&slot))
+        };
+        // Uses closer together than the idle time keep it.
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!idle.touch(), "one watch at a time");
+            assert!(slot.lock().unwrap().is_some());
+        }
+        // In use as the clock runs out: kept, and the clock starts again.
+        let held = Instant::now();
+        let decoding = slot.lock().unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(decoding.is_some());
+        assert!(idle.state.lock().unwrap().0 > held, "in use counts as a use");
+        drop(decoding);
+        watching.join().unwrap();
+        assert!(slot.lock().unwrap().is_none(), "unloaded once idle");
+        // Loaded again, the next use watches anew.
+        *slot.lock().unwrap() = Some("turbo");
+        assert!(idle.touch());
     }
 
     #[test]
