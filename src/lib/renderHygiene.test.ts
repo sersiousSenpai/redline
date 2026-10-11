@@ -27,6 +27,13 @@ describe("the shell keeps its memoized children's props stable", () => {
     },
   );
 
+  it("the browser pane hands its memoized page chat no inline closure or object", () => {
+    const pane = read("src/components/BrowserPane.tsx");
+    const start = pane.indexOf("<BrowserChat\n");
+    expect(start).toBeGreaterThan(-1);
+    expect(pane.slice(start, pane.indexOf("/>", start))).not.toMatch(/=>|=\{\{/);
+  });
+
   it("each session row is memoized, with id-based handlers", () => {
     const sidebar = read("src/components/SessionSidebar.tsx");
     expect(sidebar).toContain("const SessionRow = memo(SessionRowBase);");

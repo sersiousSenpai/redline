@@ -438,6 +438,12 @@ export const BrowserChat = memo(function BrowserChat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed, loaded]);
 
+  // Stable, so a settled message sits out every render that isn't about it:
+  // a stream delta re-renders the live reply, never the transcript.
+  const resendRef = useRef((body: string) => { jumpToEnd(); send(body); });
+  resendRef.current = (body: string) => { jumpToEnd(); send(body); };
+  const resend = useCallback((body: string) => resendRef.current(body), []);
+
   /** One send from the composer: its chips and its text, as one message. */
   function sendDraft() {
     const text = composeTurn(chips, draft);
@@ -603,10 +609,7 @@ export const BrowserChat = memo(function BrowserChat({
               onOpenLink={onOpenLink}
               onAddToMission={onAddToMission}
               onAddToCart={onAddToCart}
-              onResend={() => {
-                jumpToEnd();
-                send(m.body);
-              }}
+              onResend={resend}
             />
           ))
         )}
@@ -665,7 +668,9 @@ export const BrowserChat = memo(function BrowserChat({
   );
 });
 
-function MessageBubble({
+// Memoized: every prop holds still while a reply streams, so the transcript
+// is not re-rendered per delta.
+const MessageBubble = memo(function MessageBubble({
   msg,
   agent,
   seat,
@@ -684,7 +689,8 @@ function MessageBubble({
   onOpenLink?: (url: string) => void;
   onAddToMission?: (markdown: string, targetBrowseId?: string | null) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
-  onResend?: () => void;
+  /** Send this message's body again. */
+  onResend?: (body: string) => void;
   /** This row's settled meter — the byline, the steps and the tail it keeps. */
   meter?: TurnMeter | null;
   /** This turn's context restarted (compaction or a fresh CLI session). */
@@ -694,8 +700,9 @@ function MessageBubble({
     // The context it carried reads back as the chips it was sent with
     // (BC-40); the card shows the rest as the user wrote it.
     const parts = userTurnParts(msg.body);
+    const sendAgain = onResend && (() => onResend(msg.body));
     return (
-      <UserTurn body={parts.text} unsent={msg.status === "unsent"} onResend={onResend} onOpenLink={onOpenLink}
+      <UserTurn body={parts.text} unsent={msg.status === "unsent"} onResend={sendAgain} onOpenLink={onOpenLink}
         context={<TurnContext chips={parts.chips} pictures />}
       />
     );
@@ -731,7 +738,7 @@ function MessageBubble({
       <WorkRows rows={workRows(meter?.steps ?? [])} />
     </ReplyBlock>
   );
-}
+});
 
 /** A settled reply's actions, in its tail row, in the order `replyActions`
  *  gives them: copy the whole message (covers prose, where per-block buttons

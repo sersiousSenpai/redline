@@ -23,7 +23,8 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string, targetBrowseId?: string | null) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
+// Memoized, as the real one is, so a render here is a change of props.
+vi.mock("./BrowserChat", async () => ({ BrowserChat: (await import("react")).memo((props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string, targetBrowseId?: string | null) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
   mocks.chatRenders.push(`${props.conversation.kind}:${props.conversation.browseId}`);
   const action = props.pageActions?.get(props.conversation.targetLabel);
   return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}
@@ -31,7 +32,7 @@ vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: s
     <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button>
     <button onClick={() => void props.onAddToMission?.("An older finding", document.body.dataset.pinTarget)}>Pin older reply</button>
     <button onClick={props.taskList?.onOpen}>Open task list</button><button onClick={props.mission?.onSynthesize}>Synthesize</button></div>;
-} }));
+}) }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 
@@ -331,6 +332,21 @@ describe("linked mode decides tab chat vs shared chat", () => {
     expect(addFinding).toHaveBeenLastCalledWith({ body: "An older finding", browseId: "gone", sourceUrl: null, sourceTitle: null });
     delete document.body.dataset.pinTarget;
   });
+});
+
+it("re-renders the memoized page chat only when what it is handed changes", async () => {
+  mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits", goal: "Compare token buckets" }, findings: [] };
+  await mount();
+  const target = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
+  const other = target === "browser-t-one" ? "browser-t-two" : "browser-t-one";
+  mocks.chatRenders = [];
+  // Another tab's title moves the pane, not the chat.
+  await event("browser-page-event", { label: other, kind: "state", url: "https://elsewhere.test/", title: "Elsewhere" });
+  expect(host.querySelector(`[data-tab-id="${other.replace("browser-", "")}"] .rb-tab-title`)?.textContent).toBe("Elsewhere");
+  expect(mocks.chatRenders).toEqual([]);
+  // The page the chat follows is the chat's business.
+  await event("browser-page-event", { label: target, kind: "state", url: "https://retitled.test/", title: "Retitled" });
+  expect(mocks.chatRenders.length).toBeGreaterThan(0);
 });
 
 describe("the agent acting on a page", () => {

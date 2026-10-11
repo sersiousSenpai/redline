@@ -271,11 +271,13 @@ describe("the page chat's UI laws", () => {
     expect(providerAlwaysWraps && gatedOff, "Send to Claude Code / Open in Drafter are dead props").toBe(false);
   });
   it("BC-24 Add to mission records the page the reply was about, not the anchored tab", () => {
-    const pin = pane.slice(pane.indexOf("onAddToMission={"), pane.indexOf("/>", pane.indexOf("onAddToMission={")));
+    // The pane's handler, handed to the chat while a mission is active.
+    expect(pane).toContain("onAddToMission={mission.activeMission ? chatHandlers.addToMission : undefined}");
+    const pin = pane.slice(pane.indexOf("addToMission: (body"), pane.indexOf("});", pane.indexOf("addToMission: (body")));
     expect(pin).not.toMatch(/sourceUrl:\s*discussionTab\.url/);
     // The tab its turn targeted, which the message keeps, so an older reply
     // in a shared chat is not filed under the tab on screen now.
-    expect(pin).toMatch(/\(body, targetBrowseId\) =>/);
+    expect(pin).toMatch(/\(body: string, targetBrowseId\?: string \| null\) =>/);
     expect(pin).toContain("t.browseId === targetBrowseId");
     expect(chat).toMatch(/onAddToMission\?\.\(body, targetBrowseId\)/);
     pinnedBy("src/components/BrowserPane.lifecycle.test.tsx", "pins an older shared-chat reply to the page its turn targeted");
