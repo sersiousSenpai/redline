@@ -19,7 +19,12 @@ import {
   KOKORO_VOICES,
   splitBlend,
 } from "../audio/kokoroVoices";
-import { polishEnabled, setPolishEnabled } from "../audio/dictationPolish";
+import {
+  polishEnabled,
+  polishLocalOnly,
+  setPolishEnabled,
+  setPolishLocalOnly,
+} from "../audio/dictationPolish";
 import { loadVoicePrefs } from "../audio/speech";
 import { HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "../audio/voiceHotkey";
 import {
@@ -40,9 +45,13 @@ import {
 } from "../audio/turnModel";
 
 // The studio voice's card: install, voice and style. A chunk of its own, as
-// most people never pick it.
+// most people never pick it; local dictation polish, on the same runtime,
+// comes from that chunk too.
 const StudioVoiceCard = lazy(() =>
   import("./StudioVoiceCard").then((m) => ({ default: m.StudioVoiceCard })),
+);
+const LocalPolish = lazy(() =>
+  import("./StudioVoiceCard").then((m) => ({ default: m.LocalPolish })),
 );
 
 /** TTS engines the panel can select. `system` is the built-in (free, robotic)
@@ -143,8 +152,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [progress, setProgress] = useState<KokoroSetup | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The studio voice is offered only where it can run: Apple Silicon on
-  // macOS 14 or later.
+  // The studio voice, and local polish on its runtime, are offered only
+  // where they can run: Apple Silicon on macOS 14 or later.
   const [studioSupported, setStudioSupported] = useState(false);
   const [studio, setStudio] = useState<StudioPrefs>({
     model: "1.7B-CustomVoice-8bit",
@@ -163,8 +172,10 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
   // The key held to dictate anywhere (per machine, like the voice prefs).
   const [holdKey, setHoldKey] = useState<HoldKey>(loadHoldKey);
-  // The AI polish dictated text gets once it is in (per machine too).
+  // The AI polish dictated text gets once it is in (per machine too), and
+  // whether it may fall back to the cloud model.
   const [polish, setPolish] = useState(polishEnabled);
+  const [localOnly, setLocalOnly] = useState(polishLocalOnly);
 
   useEffect(() => {
     let alive = true;
@@ -324,6 +335,7 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       await invoke("dictation_set_engine", { engine: dictationEngine, whisperModel });
       saveHoldKey(holdKey);
       setPolishEnabled(polish);
+      setPolishLocalOnly(localOnly);
       onSaved(engine, studio.style);
       onClose();
     } catch (e) {
@@ -593,12 +605,38 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             <span style={muted}>
               A moment after longer dictations land, a fast Claude model tidies their
               punctuation and false starts — only the text goes to it, never the
-              audio. With local polish installed (the Studio voice's settings), a
-              model on this Mac does it instead, unless it can't answer in time.
-              ⌘Z takes a polish back. Spoken turns are never polished.
+              audio. With local polish installed{studioSupported ? " (below)" : ""}, a
+              model on this Mac does it instead, and the Claude model steps in only
+              when it can't answer in time. ⌘Z takes a polish back. Spoken turns are
+              never polished.
             </span>
           </span>
         </label>
+        <label
+          className="flex items-start gap-2"
+          style={{ cursor: polish ? "pointer" : "default", marginLeft: "22px", opacity: polish ? 1 : 0.6 }}
+        >
+          <input
+            type="checkbox"
+            checked={localOnly}
+            disabled={!polish}
+            onChange={(e) => setLocalOnly(e.target.checked)}
+            style={{ marginTop: "2px" }}
+          />
+          <span className="flex flex-col gap-0.5">
+            <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>Only on this Mac</span>
+            <span style={muted}>
+              Never send dictated text to the Claude model to polish it. When local
+              polish isn't installed, or can't answer in time, the words stay as
+              dictation's own rules cleaned them.
+            </span>
+          </span>
+        </label>
+        {studioSupported && (
+          <Suspense fallback={null}>
+            <LocalPolish onError={setError} />
+          </Suspense>
+        )}
         <span style={muted}>
           Which recognizer transcribes your speech when you dictate. Both run
           fully on your Mac — no audio ever leaves the device. Whisper is a
@@ -1056,9 +1094,9 @@ function GradeBadge({ grade }: { grade: string }) {
 }
 
 /** The optional end-of-turn model for hands-free (`turnModel.ts`): a download,
- *  then a switch. It runs on the Kokoro voice's runtime, so it is offered
- *  only once that is installed. Switched on, it applies from the next time
- *  hands-free listens; switched off, at once. */
+ *  then a switch. It runs on the Kokoro voice's runtime or the studio voice's
+ *  (local polish's), so it is offered once either is installed. Switched on,
+ *  it applies from the next time hands-free listens; switched off, at once. */
 function TurnModelSetting() {
   const [status, setStatus] = useState<TurnModelStatus | null>(null);
   const [wanted, setWanted] = useState(turnModelWanted);
@@ -1067,11 +1105,21 @@ function TurnModelSetting() {
 
   useEffect(() => {
     let alive = true;
-    void turnModel("status")
-      .then((s) => alive && setStatus(s))
-      .catch(() => {});
+    const read = () =>
+      void turnModel("status")
+        .then((s) => alive && setStatus(s))
+        .catch(() => {});
+    read();
+    // A runtime installed while settings are open (Kokoro's, or the studio
+    // one the voice or local polish brings) offers it at once.
+    const subs = ["kokoro-setup", "studio-setup"].map((name) =>
+      listen<{ phase: string }>(name, (e) => {
+        if (e.payload.phase === "done") read();
+      }),
+    );
     return () => {
       alive = false;
+      for (const p of subs) void p.then((un) => un());
     };
   }, []);
 

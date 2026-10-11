@@ -46,8 +46,9 @@ interface TourStep {
   lead?: ReactNode;
   /** Structured rows (modes, comment types, actions) — visually separated. */
   bullets?: Bullet[];
-  /** Keyboard-shortcut rows, rendered as keycaps + an action label. */
-  shortcuts?: Shortcut[];
+  /** Keyboard-shortcut rows, rendered as keycaps + an action label. Read as
+   *  the step shows: they name keys the user may have changed since. */
+  shortcuts?: () => Shortcut[];
   /** Supporting detail, shown muted below the lead/bullets. */
   body?: ReactNode;
   /** Preferred side of the anchor for the card; ignored for centered steps. */
@@ -299,7 +300,7 @@ const STEPS: TourStep[] = [
         every pane back to its resting shape.
       </>
     ),
-    shortcuts: tourShortcuts(),
+    shortcuts: tourShortcuts,
   },
   {
     id: "finish",
@@ -575,7 +576,7 @@ export function OnboardingTour({ onClose, onAnchorChange }: OnboardingTourProps)
           )}
           {step.shortcuts && (
             <div className="flex flex-col" style={{ gap: 6 }}>
-              {step.shortcuts.map((s) => (
+              {step.shortcuts().map((s) => (
                 <div
                   key={s.text}
                   className="flex items-center"

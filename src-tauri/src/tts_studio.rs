@@ -848,18 +848,23 @@ impl Studio {
     /// Load the polish model, and build its prompt for `vocab`, ahead of a
     /// dictation's polish: a dictation started into a composer that polishes.
     /// Nothing when it isn't installed, or is ready for this vocabulary.
-    pub(crate) fn warm_polish(&self, vocab: &Value) -> Result<(), String> {
+    /// `false` when it isn't installed: the cleanup child will polish, and the
+    /// frontend warms that instead.
+    pub(crate) fn warm_polish(&self, vocab: &Value) -> Result<bool, String> {
         let inner = &self.0;
         let mut out = Out::default();
         let warmed = {
             let mut core = inner.lock();
+            if !inner.polish_installed(&mut core) {
+                return Ok(false);
+            }
             let current = match core.polish_model {
                 Model::Loading => true,
                 Model::Ready => core.polish_vocab == *vocab,
                 Model::Off | Model::Unloaded => false,
             };
-            if current || !inner.polish_installed(&mut core) {
-                return Ok(());
+            if current {
+                return Ok(true);
             }
             inner.can_polish(&mut core).and_then(|()| {
                 let line = json!({"op": "warmup", "slot": "polish", "vocab": vocab});
@@ -868,7 +873,7 @@ impl Studio {
                 if core.polish_model != Model::Ready {
                     core.polish_model = Model::Loading;
                 }
-                Ok(())
+                Ok(true)
             })
         };
         inner.flush(out);
@@ -929,6 +934,17 @@ impl Studio {
             "speedRatio": speed, "slow": speed.is_some_and(|r| r > MAX_SPEED_RATIO),
             "pressure": (inner.pressure)(),
         })
+    }
+
+    /// The runtime's interpreter, once it is built from this binary's lock:
+    /// numpy and onnxruntime are in it, so the end-of-turn model can run on it
+    /// where Kokoro's runtime isn't installed (turn_scorer.rs).
+    pub(crate) fn python(&self) -> Option<PathBuf> {
+        let inner = &self.0;
+        let mut core = inner.lock();
+        let record = core.record.get_or_insert_with(|| read_record(&inner.dir));
+        let python = inner.dir.join("venv/bin/python3");
+        (record["lock"] == lock_hash().as_str() && python.exists()).then_some(python)
     }
 
     /// Whether `model` (else the selected one; the polish model's id for
@@ -1838,7 +1854,7 @@ fn read_record(dir: &Path) -> Value {
 
 /// Names the embedded lock in `install.json`, so a Redline that pins other
 /// packages rebuilds the runtime (and keeps the models).
-fn lock_hash() -> String {
+pub(crate) fn lock_hash() -> String {
     format!("{:x}", Sha256::digest(LOCK_Z))
 }
 
@@ -1911,7 +1927,7 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   progress and the outcome on `studio-setup`; `cancel` stops it (its
 ///   outcome is the error `cancelled`), and installing again resumes.
 /// - `warm`: pre-warm on intent, `args` `{always?}`; or the polish model's,
-///   `args` `{polish: true, vocab}`.
+///   `args` `{polish: true, vocab}`, answering whether it is installed.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
 /// - `remove` (`args` `{polish?}`: local polish, else the voice; the last
 ///   of the two takes the runtime with it).
@@ -1962,7 +1978,9 @@ pub fn tts_studio(
             studio.set_prefs(&args)?;
             studio.install(false)
         }
-        "warm" if args["polish"] == true => studio.warm_polish(&args["vocab"])?,
+        // Whether local polish will do it: the frontend warms the cleanup
+        // child when it won't.
+        "warm" if args["polish"] == true => return studio.warm_polish(&args["vocab"]).map(Value::Bool),
         "warm" => studio.warm(args["always"] == true)?,
         "cancel" => studio.cancel_install(),
         "surface" => studio.surface(
@@ -2706,7 +2724,7 @@ for line in sys.stdin:
             "stale .deflate"
         );
         let pins: Vec<&str> = lock.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(pins.len(), 34);
+        assert_eq!(pins.len(), 37);
         for pin in &pins {
             let (name, rest) = pin.split_once("==").unwrap();
             assert!(
@@ -2717,6 +2735,9 @@ for line in sys.stdin:
         assert!(pins.iter().any(|p| p.starts_with("mlx-audio==0.5.8 ")));
         // The polish model's runtime: the mlx-lm it was measured on.
         assert!(pins.iter().any(|p| p.starts_with("mlx-lm==0.32.0 ")));
+        // The end-of-turn model's, where Kokoro isn't installed: the
+        // onnxruntime it was measured on.
+        assert!(pins.iter().any(|p| p.starts_with("onnxruntime==1.27.0 ")));
         assert!(inflate(SIDECAR_Z).contains(r#""ops": ["speak", "polish","#));
     }
 
@@ -2953,6 +2974,34 @@ for line in sys.stdin:
         );
     }
 
+    /// Local polish is the runtime and its own model: its install fetches
+    /// nothing of the voice's, and it polishes where no voice is installed
+    /// (Voice settings offers it whatever the speaking engine).
+    #[tokio::test]
+    async fn local_polish_needs_only_the_runtime_and_its_own_model() {
+        assert!(shared_of(&POLISH).is_empty(), "no speech tokenizer");
+        let voice_files: Vec<&str> = SHARED
+            .iter()
+            .chain(VARIANTS.iter().flat_map(|v| v.own))
+            .map(|(_, c)| c.sha256)
+            .collect();
+        assert!(POLISH.own.iter().all(|(_, c)| !voice_files.contains(&c.sha256)));
+        let (studio, _, _) = fake_studio("polish-alone", FAST, normal_pressure);
+        studio
+            .0
+            .record(&|r| r["models"] = json!({POLISH.id: {}}))
+            .unwrap();
+        assert_eq!(studio.status()["installed"], false, "no voice");
+        let (channel, _) = recorder();
+        assert_eq!(
+            studio.speak("Hello.", 1, &json!({}), channel).unwrap_err(),
+            NOT_INSTALLED
+        );
+        assert_eq!(studio.warm_polish(&json!(["QueueTray"])), Ok(true));
+        let frames = finished(&polish(&studio, "um so the QueueTray moves", 2)).await;
+        assert_eq!(outcome(&frames[0])["type"], "polished");
+    }
+
     /// A dictation warms the polish model ahead of its polish: once per
     /// vocabulary, and apart from the voice, whose state and surfaces hear
     /// nothing of it.
@@ -2961,8 +3010,8 @@ for line in sys.stdin:
         let (studio, dir, seen) = fake_studio("polish-warm", FAST, normal_pressure);
         install_polish(&studio);
         let vocab = json!(["QueueTray"]);
-        studio.warm_polish(&vocab).unwrap();
-        studio.warm_polish(&vocab).unwrap();
+        assert_eq!(studio.warm_polish(&vocab), Ok(true), "local polish will do it");
+        assert_eq!(studio.warm_polish(&vocab), Ok(true));
         until("the polish model", || polish_ready(&studio)).await;
         studio.warm_polish(&vocab).unwrap();
         studio.warm_polish(&json!(["TalkPanel"])).unwrap();
@@ -3040,7 +3089,7 @@ for line in sys.stdin:
                 .unwrap_err(),
             POLISH_NOT_INSTALLED
         );
-        studio.warm_polish(&json!([])).unwrap();
+        assert_eq!(studio.warm_polish(&json!([])), Ok(false), "the cleanup child will polish");
         assert!(!polish_installed(&studio));
         install_polish(&studio);
         assert!(polish_installed(&studio));

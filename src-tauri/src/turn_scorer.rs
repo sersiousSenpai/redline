@@ -7,13 +7,14 @@
 //!
 //! The model is Smart Turn v3.1 (BSD-2-Clause, Daily): a Whisper-tiny encoder
 //! with a linear head, 8.7 MB of int8 ONNX, reading the last 8 s of the
-//! capture's audio. It runs in a Python process of its own on the Kokoro
-//! runtime's interpreter, which already has numpy and onnxruntime, so a
-//! question never waits behind a sentence being synthesized, and the binary
-//! carries only this glue and the small script. The script computes the
-//! model's input — Whisper's 80-bin log-mel over an 8 s window, zero-padded
-//! at the start and normalized — in numpy, matching the reference code's
-//! transformers feature extractor to 1e-5, so transformers isn't needed.
+//! capture's audio. It runs in a Python process of its own on a local voice's
+//! runtime — Kokoro's, else the studio voice's — each of which has numpy and
+//! onnxruntime, so a question never waits behind a sentence being
+//! synthesized, and the binary carries only this glue and the small script.
+//! The script computes the model's input — Whisper's 80-bin log-mel over an
+//! 8 s window, zero-padded at the start and normalized — in numpy, matching
+//! the reference code's transformers feature extractor to 1e-5, so
+//! transformers isn't needed.
 //!
 //! On the dictation test set a question takes 14.5 ms here, p95 (20–32 ms
 //! with Kokoro synthesizing beside it), and as the endpointer uses it, it
@@ -21,9 +22,13 @@
 //! 16%.
 //!
 //! It is downloaded on demand, pinned by revision, size and SHA-256
-//! (`pinned_fetch`). With no Kokoro runtime, no model, or a process that
+//! (`pinned_fetch`). With neither runtime, no model, or a process that
 //! doesn't answer in time, there is no score, and the endpointer keeps its
-//! silence rule. The process exits when its stdin closes, with Redline.
+//! silence rule. A question is never waited on: a scorer busy with another
+//! (or starting) answers no score at once, and the question's write and its
+//! answer share one deadline, so a process that stops reading is ended
+//! rather than holding a thread. The process exits when its stdin closes,
+//! with Redline.
 //!
 //! One command, `turn_scorer({ op })`, run on the blocking pool:
 //! - `status`: whether the runtime and the model are there, and the process
@@ -44,6 +49,7 @@ use serde::Serialize;
 use crate::dictation::DictationState;
 use crate::dictation_whisper;
 use crate::pinned_fetch::{self, Pinned};
+use crate::tts_studio::Studio;
 
 const MODEL: Pinned = Pinned {
     url: "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.1-cpu.onnx",
@@ -57,8 +63,9 @@ const SCRIPT: &str = include_str!("../resources/turn_scorer.py");
 const AUDIO_MS: f64 = 8_000.0;
 /// Loading the model on spawn gets this long.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
-/// An answer slower than this is no use to a pause being timed; the process
-/// is taken for wedged and restarted on the next warm.
+/// A question written and answered slower than this is no use to a pause
+/// being timed; the process is taken for wedged, ended, and restarted on the
+/// next warm.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(300);
 /// A download that goes this long without a byte is given up.
 const DOWNLOAD_STALL: Duration = Duration::from_secs(30);
@@ -90,6 +97,11 @@ impl Scorer {
             let _ = child.kill();
             return Err("the end-of-turn model has no pipes".to_string());
         };
+        // A question's write waits on `poll`, against its deadline (`send`).
+        if !nonblocking(&stdin) {
+            let _ = child.kill();
+            return Err("the end-of-turn model's pipe can't be made non-blocking".to_string());
+        }
         let mut scorer = Self {
             child,
             stdin,
@@ -118,7 +130,7 @@ impl Scorer {
                 return Ok(String::from_utf8_lossy(&line[..end]).into_owned());
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            if !readable(&self.stdout, left)? {
+            if !ready(&self.stdout, false, left)? {
                 return Err(false);
             }
             let mut chunk = [0u8; 512];
@@ -127,6 +139,27 @@ impl Scorer {
                 Ok(n) => self.pending.extend_from_slice(&chunk[..n]),
             }
         }
+    }
+
+    /// Write all of `bytes` by `deadline`: `false` once the process has
+    /// stopped reading (the pipe stayed full) or has closed it. The pipe
+    /// doesn't block (`spawn`), so a full one is waited on with `poll`.
+    fn send(&mut self, mut bytes: &[u8], deadline: Instant) -> bool {
+        while !bytes.is_empty() {
+            match self.stdin.write(bytes) {
+                Ok(0) => return false,
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if ready(&self.stdin, true, left) != Ok(true) {
+                        return false;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
 
     fn alive(&mut self) -> bool {
@@ -143,11 +176,13 @@ impl Scorer {
         for s in pcm {
             request.extend_from_slice(&s.to_le_bytes());
         }
-        self.stdin
-            .write_all(&request)
-            .and_then(|()| self.stdin.flush())
-            .ok()?;
+        // One deadline for the question and its answer: 8 s of audio is
+        // 256 KB, four times what the pipe holds, so a process that stops
+        // reading would otherwise hold this thread for good.
         let deadline = Instant::now() + ANSWER_TIMEOUT;
+        if !self.send(&request, deadline) {
+            return None;
+        }
         loop {
             let line = self.line(deadline).ok()?;
             // An answer to a question given up on, or a library's chatter.
@@ -172,19 +207,19 @@ impl Drop for Scorer {
     }
 }
 
-/// Whether `stdout` has something to read (or has closed) within `wait`;
-/// `Err(true)` when it can't be waited on.
+/// Whether `pipe` is ready within `wait` — to `write` into (there is room,
+/// or it has closed), else to read from (there is something, or it has
+/// closed); `Err(true)` when it can't be waited on.
 #[cfg(unix)]
-fn readable(stdout: &ChildStdout, wait: Duration) -> Result<bool, bool> {
-    use std::os::fd::AsRawFd;
+fn ready(pipe: &impl std::os::fd::AsRawFd, write: bool, wait: Duration) -> Result<bool, bool> {
     let ms = wait.as_millis().min(i32::MAX as u128) as i32;
     loop {
         let mut fd = libc::pollfd {
-            fd: stdout.as_raw_fd(),
-            events: libc::POLLIN,
+            fd: pipe.as_raw_fd(),
+            events: if write { libc::POLLOUT } else { libc::POLLIN },
             revents: 0,
         };
-        // SAFETY: one pollfd for a descriptor `stdout` keeps open for the call.
+        // SAFETY: one pollfd for a descriptor `pipe` keeps open for the call.
         match unsafe { libc::poll(&mut fd, 1, ms) } {
             0 => return Ok(false),
             n if n > 0 => return Ok(true),
@@ -195,8 +230,25 @@ fn readable(stdout: &ChildStdout, wait: Duration) -> Result<bool, bool> {
 }
 
 #[cfg(not(unix))]
-fn readable(_stdout: &ChildStdout, _wait: Duration) -> Result<bool, bool> {
+fn ready<T>(_pipe: &T, _write: bool, _wait: Duration) -> Result<bool, bool> {
     Err(true)
+}
+
+/// Make writes to `stdin` return at once when the pipe is full.
+#[cfg(unix)]
+fn nonblocking(stdin: &ChildStdin) -> bool {
+    use std::os::fd::AsRawFd;
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fcntl on a descriptor `stdin` keeps open for the calls.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+    }
+}
+
+#[cfg(not(unix))]
+fn nonblocking(_stdin: &ChildStdin) -> bool {
+    false
 }
 
 /// The capture's kept audio as the model reads it: 16 kHz mono 16-bit.
@@ -214,7 +266,8 @@ fn pcm_16k(tail: Option<(Vec<f32>, f64)>) -> Option<Vec<i16>> {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnScorerReply {
-    /// The Kokoro runtime is installed: the model can run.
+    /// A runtime it runs on is installed (Kokoro's, or the studio voice's):
+    /// the model can run.
     runtime: bool,
     /// The model is downloaded.
     model: bool,
@@ -226,7 +279,10 @@ pub struct TurnScorerReply {
 
 pub struct TurnScorerState {
     dir: PathBuf,
-    python: PathBuf,
+    /// Kokoro's interpreter: the model's first choice.
+    kokoro: PathBuf,
+    /// The studio voice, whose runtime is the second.
+    studio: Studio,
     http: reqwest::Client,
     proc: Mutex<Option<Scorer>>,
     /// One download at a time: two clicks must not write the same `.part`.
@@ -234,12 +290,13 @@ pub struct TurnScorerState {
 }
 
 impl TurnScorerState {
-    /// The model lives in `<app data>/turn`; `python` is the Kokoro runtime's
-    /// interpreter.
-    pub fn new(data_dir: &Path, python: PathBuf) -> Self {
+    /// The model lives in `<app data>/turn`, and runs on `kokoro` (the Kokoro
+    /// runtime's interpreter), else on `studio`'s runtime.
+    pub fn new(data_dir: &Path, kokoro: PathBuf, studio: Studio) -> Self {
         Self {
             dir: data_dir.join("turn"),
-            python,
+            kokoro,
+            studio,
             http: reqwest::Client::new(),
             proc: Mutex::new(None),
             download: Mutex::new(()),
@@ -250,16 +307,25 @@ impl TurnScorerState {
         self.dir.join(MODEL_FILE)
     }
 
+    /// The interpreter the model runs on, chosen as it starts: Kokoro's when
+    /// that voice is installed, else the studio voice's runtime once it is
+    /// built from this binary's lock (an older one has no onnxruntime).
+    fn python(&self) -> Option<PathBuf> {
+        if self.kokoro.exists() {
+            return Some(self.kokoro.clone());
+        }
+        self.studio.python()
+    }
+
     fn status(&self, score: Option<f32>) -> TurnScorerReply {
         TurnScorerReply {
-            runtime: self.python.exists(),
+            runtime: self.python().is_some(),
             model: self.model_path().exists(),
+            // Busy, answering or starting: it is taken as up, never waited on.
             warm: self
                 .proc
-                .lock()
-                .unwrap()
-                .as_mut()
-                .is_some_and(Scorer::alive),
+                .try_lock()
+                .map_or(true, |mut p| p.as_mut().is_some_and(Scorer::alive)),
             score,
         }
     }
@@ -290,9 +356,12 @@ impl TurnScorerState {
             return Ok(());
         }
         *proc = None;
-        if !self.python.exists() {
-            return Err("the end-of-turn model needs the Kokoro voice installed".to_string());
-        }
+        let Some(python) = self.python() else {
+            return Err(
+                "the end-of-turn model needs the Kokoro voice or the studio voice installed"
+                    .to_string(),
+            );
+        };
         let model = self.model_path();
         if !model.exists() {
             return Err("the end-of-turn model isn't downloaded".to_string());
@@ -302,15 +371,19 @@ impl TurnScorerState {
             std::fs::write(&script, SCRIPT)
                 .map_err(|e| format!("couldn't write the end-of-turn model's script: {e}"))?;
         }
-        *proc = Some(Scorer::spawn(&self.python, &script, &model)?);
+        *proc = Some(Scorer::spawn(&python, &script, &model)?);
         Ok(())
     }
 
-    /// Ask about `pcm`; a process that didn't answer is ended, for the next
-    /// warm to restart.
+    /// Ask about `pcm`. A scorer busy with another question, or starting, is
+    /// no score at once: the pause being timed can't wait for it. A process
+    /// that didn't take the question or answer it in time is ended, for the
+    /// next warm to restart.
     fn score(&self, pcm: Option<Vec<i16>>) -> Option<f32> {
         let pcm = pcm?;
-        let mut proc = self.proc.lock().unwrap();
+        let Ok(mut proc) = self.proc.try_lock() else {
+            return None;
+        };
         let score = proc.as_mut()?.score(&pcm);
         if score.is_none() {
             *proc = None;
@@ -358,13 +431,17 @@ mod tests {
     /// script run in the interpreter's place: it reads each question's header
     /// line and samples, and answers by its `mode` file — 0.97 (the
     /// default), `stale` (an answer to the question before, then this one's),
-    /// `nan` (it could not score), or `hang` (never). With `broken` beside it, it fails to load
-    /// and says so; with `dead`, it exits without a word.
+    /// `nan` (it could not score), or `hang` (never). With `broken` beside it,
+    /// it fails to load and says so; with `dead`, it exits without a word;
+    /// with `slow`, it takes a second to load; with `deaf`, it loads and then
+    /// never reads a question.
     const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 if [ -e "$dir/dead" ]; then exit 1; fi
 if [ -e "$dir/broken" ]; then echo "error bad model file"; exit 0; fi
+if [ -e "$dir/slow" ]; then sleep 1; fi
 echo ready
+if [ -e "$dir/deaf" ]; then exec sleep 30; fi
 while read -r id n; do
   dd bs=1 count=$((2 * n)) of=/dev/null 2>/dev/null
   echo "$id $n" >> "$dir/asked.log"
@@ -377,19 +454,32 @@ while read -r id n; do
 done
 "#;
 
+    /// The studio voice of the app data in `data`, as it is on disk.
+    fn studio_of(data: &Path) -> Studio {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        Studio::new(data, reqwest::Client::new(), db)
+    }
+
+    /// Put the fake in an interpreter's place at `python`.
+    #[cfg(unix)]
+    fn place_fake(python: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(python, FAKE).unwrap();
+        std::fs::set_permissions(python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// A scorer whose interpreter is the fake, with its model in place.
     #[cfg(unix)]
     fn fake(label: &str) -> (TurnScorerState, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let data =
             std::env::temp_dir().join(format!("redline-turn-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(data.join("turn")).unwrap();
         let python = data.join("fake-python");
-        std::fs::write(&python, FAKE).unwrap();
-        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        place_fake(&python);
         std::fs::write(data.join("turn").join(MODEL_FILE), b"").unwrap();
-        (TurnScorerState::new(&data, python), data)
+        (TurnScorerState::new(&data, python, studio_of(&data)), data)
     }
 
     #[cfg(unix)]
@@ -449,6 +539,82 @@ done
         assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
     }
 
+    /// The bug this guards against: 8 s of audio is 256 KB, four times what
+    /// the pipe holds, so a process that stopped reading held the asking
+    /// thread in its write for good, and every later question queued behind
+    /// it on the lock.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_stops_reading_costs_a_question_its_deadline_not_a_thread() {
+        let (state, data) = fake("deaf");
+        std::fs::write(data.join("deaf"), "").unwrap();
+        state.warm().unwrap();
+        let asked = Instant::now();
+        assert_eq!(state.score(Some(vec![0; 128_000])), None);
+        assert!(asked.elapsed() < ANSWER_TIMEOUT * 3, "{:?}", asked.elapsed());
+        assert!(!state.status(None).warm, "ended, not left holding a write");
+        // The next warm starts one that reads (a short question: the stand-in
+        // reads a byte at a time).
+        std::fs::remove_file(data.join("deaf")).unwrap();
+        state.warm().unwrap();
+        assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_scorer_is_no_score_at_once() {
+        let (state, data) = fake("busy");
+        std::fs::write(data.join("slow"), "").unwrap();
+        let state = std::sync::Arc::new(state);
+        let starting = {
+            let state = state.clone();
+            std::thread::spawn(move || state.warm())
+        };
+        // The start holds the process's lock while the model loads.
+        while state.proc.try_lock().is_ok() {
+            std::thread::yield_now();
+        }
+        let asked = Instant::now();
+        assert_eq!(state.score(Some(vec![0; 100])), None);
+        assert!(asked.elapsed() < Duration::from_millis(50), "{:?}", asked.elapsed());
+        assert!(state.status(None).runtime, "nor does the status wait on it");
+        starting.join().unwrap().unwrap();
+        assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_runs_on_kokoro_s_runtime_else_the_studio_voice_s() {
+        let data =
+            std::env::temp_dir().join(format!("redline-turn-runtimes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(data.join("turn")).unwrap();
+        std::fs::write(data.join("turn").join(MODEL_FILE), b"").unwrap();
+        let kokoro = data.join("kokoro/venv/bin/python3");
+        let studio = data.join("voice-studio/venv/bin/python3");
+        // Each state reads the studio voice's install as it is now.
+        let state = || TurnScorerState::new(&data, kokoro.clone(), studio_of(&data));
+        assert_eq!(state().python(), None, "neither is installed");
+        assert!(!state().status(None).runtime);
+
+        // A studio runtime built from an older lock has no onnxruntime.
+        place_fake(&studio);
+        let record = data.join("voice-studio/install.json");
+        std::fs::write(&record, r#"{"lock": "older", "models": {}}"#).unwrap();
+        assert_eq!(state().python(), None);
+        let current = serde_json::json!({"lock": crate::tts_studio::lock_hash(), "models": {}});
+        std::fs::write(&record, current.to_string()).unwrap();
+        let only_studio = state();
+        assert_eq!(only_studio.python(), Some(studio.clone()));
+        assert!(only_studio.status(None).runtime);
+        only_studio.warm().unwrap();
+        assert_eq!(only_studio.score(Some(vec![0; 100])), Some(0.97));
+
+        // With Kokoro installed too, Kokoro's.
+        place_fake(&kokoro);
+        assert_eq!(state().python(), Some(kokoro));
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_score_it_could_not_compute_is_no_score() {
@@ -474,7 +640,7 @@ done
     #[test]
     fn without_the_runtime_or_the_model_it_is_unavailable() {
         let data = std::env::temp_dir().join(format!("redline-turn-none-{}", std::process::id()));
-        let state = TurnScorerState::new(&data, data.join("no-python"));
+        let state = TurnScorerState::new(&data, data.join("no-python"), studio_of(&data));
         assert_eq!(
             state.status(None),
             TurnScorerReply {
@@ -529,7 +695,7 @@ done
         let data =
             std::env::temp_dir().join(format!("redline-turn-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
-        let state = TurnScorerState::new(&data, data.join("no-python"));
+        let state = TurnScorerState::new(&data, data.join("no-python"), studio_of(&data));
         let wrong = Pinned {
             url,
             bytes: served.len() as u64,
@@ -561,7 +727,7 @@ done
     }
 
     /// The real model on the real runtime, on the dictation test set: run with
-    /// `REDLINE_TURN_PYTHON=<Kokoro venv python3> REDLINE_TURN_MODEL=<model.onnx>
+    /// `REDLINE_TURN_PYTHON=<a Kokoro or studio venv's python3> REDLINE_TURN_MODEL=<model.onnx>
     /// REDLINE_TURN_CLIPS=<dir of *-fin.wav and *-unf.wav> cargo test --lib
     /// turn_scorer -- --ignored --nocapture`. Prints the round trip's p50/p95.
     #[test]
@@ -573,7 +739,7 @@ done
         let data = std::env::temp_dir().join(format!("redline-turn-real-{}", std::process::id()));
         std::fs::create_dir_all(data.join("turn")).unwrap();
         std::fs::copy(&model, data.join("turn").join(MODEL_FILE)).unwrap();
-        let state = TurnScorerState::new(&data, python);
+        let state = TurnScorerState::new(&data, python, studio_of(&data));
         let loaded = Instant::now();
         state.warm().unwrap();
         println!("load {} ms", loaded.elapsed().as_millis());

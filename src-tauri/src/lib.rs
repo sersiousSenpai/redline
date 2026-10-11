@@ -13565,8 +13565,13 @@ pub fn run() {
                 let _ = events.emit(event, payload);
             });
             // The optional end-of-turn model for hands-free voice: a process
-            // of its own on the Kokoro runtime's interpreter.
-            app.manage(turn_scorer::TurnScorerState::new(&data_dir, tts.venv_python()));
+            // of its own on the Kokoro runtime's interpreter, else the studio
+            // voice's.
+            app.manage(turn_scorer::TurnScorerState::new(
+                &data_dir,
+                tts.venv_python(),
+                tts.studio().clone(),
+            ));
             app.manage(tts);
 
             // Active browser tab tracker — shared with the daemon's

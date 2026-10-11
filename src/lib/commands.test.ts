@@ -177,8 +177,9 @@ describe("tour wiring", () => {
     join(process.cwd(), "src/components/SettingsMenu.tsx"),
     "utf8",
   );
-  it("the shortcuts step reads the keymap registry, not a copy", () => {
-    expect(tour).toContain("tourShortcuts()");
+  it("the shortcuts step reads the keymap registry, not a copy, as it shows", () => {
+    // Not at load: the dictation key may have changed since.
+    expect(tour).toContain("shortcuts: tourShortcuts,");
   });
   it("has the landing step", () => {
     expect(tour).toContain('id: "landing"');

@@ -4,8 +4,9 @@
 // The studio voice's settings card against a scripted `tts_studio`: what it
 // costs, what this Mac lacks in words, the install from first byte to "Studio
 // voice ready." (cancelled and resumed on the way), the previews, the model,
-// the way back out, and the local dictation polish beside it.
-import { act, createElement } from "react";
+// the way back out; and the local dictation polish row, on the same runtime,
+// which the Dictation section shows whatever the speaking engine.
+import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -47,7 +48,7 @@ vi.mock("../audio/studioTts", async (original) => ({
   }),
 }));
 
-import { StudioVoiceCard, type StudioPrefs } from "./StudioVoiceCard";
+import { LocalPolish, StudioVoiceCard, type StudioPrefs } from "./StudioVoiceCard";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -69,20 +70,28 @@ const button = (text: string) =>
   [...host.querySelectorAll("button")].find(
     (b) => b.textContent?.includes(text) || b.getAttribute("aria-label") === text,
   ) as HTMLButtonElement | undefined;
-async function render() {
+/** The studio card, the local polish row, or both (Voice settings with the
+ *  studio voice as the engine). */
+async function render(...parts: Array<"card" | "polish">) {
+  const shown = parts.length ? parts : ["card"];
+  const onError = (m: string) => errors.push(m);
+  const card = createElement(StudioVoiceCard, {
+    key: "card",
+    prefs,
+    onChange: (p: StudioPrefs) => {
+      prefs = p;
+    },
+    onError,
+  });
+  const polish = createElement(LocalPolish, { key: "polish", onError });
   await act(async () =>
     root.render(
-      createElement(StudioVoiceCard, {
-        prefs,
-        onChange: (p: StudioPrefs) => {
-          prefs = p;
-        },
-        onError: (m: string) => errors.push(m),
-      }),
+      createElement(Fragment, null, shown.includes("card") && card, shown.includes("polish") && polish),
     ),
   );
   await flush();
 }
+const polishRow = () => host.querySelector("[data-studio-polish]")!.textContent!;
 
 beforeEach(() => {
   rust.calls.length = 0;
@@ -160,8 +169,7 @@ describe("StudioVoiceCard", () => {
     expect(button("Install the studio voice")!.disabled).toBe(true);
     rust.calls.length = 0;
     await act(async () => button("Check again")!.click());
-    // The voice's check, and the local polish's.
-    expect(ops()).toEqual(["status", "preflight", "preflight"]);
+    expect(ops()).toEqual(["status", "preflight"]);
   });
 
   it("ends an install warm, saying so in the chosen voice, and then offers each voice to hear", async () => {
@@ -224,48 +232,79 @@ describe("StudioVoiceCard", () => {
     expect(ops()).toContain("remove");
   });
 
-  it("offers local polish as a download of its own, installed beside the voice", async () => {
+  it("points to local polish under Dictation, where it no longer lives in the card", async () => {
     await render();
-    const row = () => host.querySelector("[data-studio-polish]")!.textContent!;
-    expect(row()).toContain("Polish dictation locally — 1.7 GB download, about 1.9 GB of memory while in use");
+    expect(host.querySelector("[data-studio-polish]")).toBeNull();
+    expect(host.querySelector("[data-studio-polish-pointer]")!.textContent).toContain("under Dictation, below");
+    expect(ops()).toEqual(["status", "preflight"]);
+  });
+});
+
+describe("LocalPolish", () => {
+  it("is a download of its own: the runtime and its model, without the voice", async () => {
+    await render("polish");
+    expect(polishRow()).toContain("Polish dictation locally1.7 GB download, about 1.9 GB of memory while in use");
+    expect(polishRow()).toContain("✓ This Mac can run it");
+    expect(rust.calls).toContainEqual(["tts_studio", { op: "preflight", args: { model: POLISH } }]);
     await act(async () => button("Install local polish (1.7 GB)")!.click());
     expect(rust.calls).toContainEqual(["tts_studio", { op: "install", args: { polish: true } }]);
     await fire("studio-setup", { phase: "model", received: 0.87e9, total: 1.74e9, polish: true });
     const bar = host.querySelector('[role=progressbar][aria-label="Local polish install"]')!;
     expect(bar.getAttribute("aria-valuenow")).toBe("50");
-    expect(row()).toContain("Downloading the polish model… 0.9 GB of 1.7 GB");
+    expect(polishRow()).toContain("Downloading the polish model… 0.9 GB of 1.7 GB");
+    await act(async () => button("Cancel")!.click());
+    await fire("studio-setup", { phase: "error", message: "cancelled", polish: true });
+    expect(polishRow()).toContain("Install paused. What it downloaded is kept.");
+    await act(async () => button("Resume install")!.click());
+    rust.status = { ...rust.status, runtimeCurrent: true, models: { [POLISH]: {} } };
+    await fire("studio-setup", { phase: "done", polish: true });
+    await flush();
+    expect(samples).toEqual([]);
+    expect(polishRow()).toContain("✓ Dictation is polished on this Mac");
+  });
+
+  it("and the voice's install, each waiting for the other", async () => {
+    await render("card", "polish");
+    await act(async () => button("Install local polish (1.7 GB)")!.click());
+    await fire("studio-setup", { phase: "model", received: 0.87e9, total: 1.74e9, polish: true });
     // The voice's install isn't the one running, and waits for it.
     expect(host.querySelector('[aria-label="Studio voice install"]')).toBeNull();
     expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(true);
     rust.status = { ...rust.status, runtimeCurrent: true, models: { [POLISH]: {} } };
     await fire("studio-setup", { phase: "done", polish: true });
     await flush();
-    expect(samples).toEqual([]);
-    expect(row()).toContain("✓ Dictation is polished on this Mac");
     expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(false);
+    await act(async () => button("Install the studio voice (3.1 GB)")!.click());
+    await fire("studio-setup", { phase: "model", received: 1e9, total: 3.1e9 });
+    expect(host.querySelector('[aria-label="Local polish install"]')).toBeNull();
+    expect(host.querySelector("[aria-label='Studio voice install']")).not.toBeNull();
   });
 
-  it("shows a local polish install it reopens on in the polish row", async () => {
+  it("shows an install it reopens on", async () => {
     rust.status = { ...rust.status, installing: POLISH };
-    await render();
+    await render("card", "polish");
     expect(host.querySelector('[role=progressbar][aria-label="Local polish install"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Studio voice install"]')).toBeNull();
     expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(true);
   });
 
-  it("puts what this Mac lacks for local polish in its own words", async () => {
+  it("waits while a voice install it reopens on runs", async () => {
+    rust.status = { ...rust.status, installing: EIGHT };
+    await render("polish");
+    expect(button("Install local polish (1.7 GB)")!.disabled).toBe(true);
+  });
+
+  it("puts what this Mac lacks for it in its own words", async () => {
     rust.polishPreflight = { ...rust.polishPreflight, blockers: ["ram"], ramBytes: 4e9 };
-    await render();
-    expect(host.querySelector("[data-studio-polish]")!.textContent).toContain(
-      "Needs 8.0 GB of memory; this Mac has 4.0 GB.",
-    );
+    await render("card", "polish");
+    expect(polishRow()).toContain("Needs 8.0 GB of memory; this Mac has 4.0 GB.");
     expect(button("Install local polish (1.7 GB)")!.disabled).toBe(true);
     expect(button("Install the studio voice (3.1 GB)")!.disabled).toBe(false);
   });
 
   it("removes only local polish, after asking", async () => {
     rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
-    await render();
+    await render("card", "polish");
     await act(async () => button("Remove local polish…")!.click());
     expect(host.textContent).toContain("Remove local polish (1.7 GB)?");
     expect(button("Remove the studio voice…")).toBeDefined();
@@ -278,24 +317,50 @@ describe("StudioVoiceCard", () => {
 
   it("says what stays: the runtime goes with the last of the voice and local polish", async () => {
     rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
-    await render();
+    await render("card", "polish");
     await act(async () => button("Remove the studio voice…")!.click());
     expect(host.textContent).toContain("Remove the studio voice? Local polish stays.");
     act(() => root.unmount());
     root = createRoot(host);
     rust.status = { ...rust.status, installed: false, models: { [POLISH]: {} } };
-    await render();
+    await render("polish");
     await act(async () => button("Remove local polish…")!.click());
     expect(host.textContent).toContain("Remove local polish and everything it downloaded?");
   });
 
-  it("credits what it downloads, with the licenses the audit corrected", async () => {
-    await render();
-    const about = host.querySelector("details")!.textContent!;
-    expect(about).toContain("Qwen3-TTS by the Qwen team (Alibaba Cloud, Apache-2.0)");
-    expect(about).toContain("GCC runtime libraries (GPL-3.0-or-later with the GCC runtime library exception)");
-    expect(about).toContain("libquadmath (LGPL-2.1-or-later)");
-    expect(about).toContain("BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0");
-    expect(about).toContain("Qwen3.5-2B by the Qwen team (Apache-2.0)");
+  it("and says it again once the other is removed beside it", async () => {
+    rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render("card", "polish");
+    // Local polish goes: the voice is now the last, and takes the runtime.
+    rust.status = { ...rust.status, models: { [EIGHT]: {} } };
+    await act(async () => button("Remove local polish…")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Remove local polish"] button')!.click());
+    await flush();
+    await act(async () => button("Remove the studio voice…")!.click());
+    expect(host.textContent).toContain("Remove the studio voice and everything it downloaded?");
+    // And the other way round.
+    act(() => root.unmount());
+    root = createRoot(host);
+    rust.status = { ...rust.status, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render("card", "polish");
+    rust.status = { ...rust.status, installed: false, models: { [POLISH]: {} } };
+    await act(async () => button("Remove the studio voice…")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Remove the studio voice"] button')!.click());
+    await flush();
+    await act(async () => button("Remove local polish…")!.click());
+    expect(host.textContent).toContain("Remove local polish and everything it downloaded?");
+  });
+
+  it("credits what it downloads, apart from the voice", async () => {
+    await render("card", "polish");
+    const [voice, polish] = [...host.querySelectorAll("details")].map((d) => d.textContent!);
+    expect(voice).toContain("Qwen3-TTS by the Qwen team (Alibaba Cloud, Apache-2.0)");
+    expect(voice).toContain("GCC runtime libraries (GPL-3.0-or-later with the GCC runtime library exception)");
+    expect(voice).toContain("libquadmath (LGPL-2.1-or-later)");
+    expect(voice).toContain("BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0");
+    expect(voice).not.toContain("Qwen3.5");
+    expect(polish).toContain("Qwen3.5-2B by the Qwen team (Apache-2.0)");
+    expect(polish).toContain("mlx-lm (MIT) with Jinja2 and MarkupSafe (BSD-3-Clause)");
+    expect(polish).toContain("VOICE_ENGINE_NOTICES.md");
   });
 });

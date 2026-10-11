@@ -22,7 +22,7 @@ let savedEngine = "kokoro";
 let studioSupported = false;
 // The `voiceVocab` ui pref.
 let vocabBlob: string | null = null;
-// The end-of-turn model: the Kokoro runtime it needs, and whether it is downloaded.
+// The end-of-turn model: a runtime it runs on, and whether it is downloaded.
 let turnRuntime = true;
 let turnModelPresent = false;
 vi.mock("@tauri-apps/api/core", () => ({
@@ -94,7 +94,8 @@ vi.mock("../audio/cloudTts", () => ({
   }),
 }));
 
-// The studio voice's card (its own tests): here, only what it hands back.
+// The studio voice's card and the local polish row (their own tests): here,
+// only what the card hands back, and where the row is shown.
 vi.mock("./StudioVoiceCard", () => ({
   StudioVoiceCard: ({ prefs, onChange }: { prefs: { voice: string }; onChange: (p: object) => void }) =>
     createElement(
@@ -102,13 +103,14 @@ vi.mock("./StudioVoiceCard", () => ({
       { type: "button", onClick: () => onChange({ ...prefs, voice: "serena", style: "calm" }) },
       `studio card: ${prefs.voice}`,
     ),
+  LocalPolish: () => createElement("div", { "data-local-polish": "" }, "local polish row"),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { VoiceSettings } from "./VoiceSettings";
 import { loadHoldKey, saveHoldKey } from "../audio/voiceHotkey";
-import { polishEnabled } from "../audio/dictationPolish";
+import { polishEnabled, polishLocalOnly } from "../audio/dictationPolish";
 import { learnPair, updateVocabStore } from "../audio/vocab";
 
 const flush = () =>
@@ -336,16 +338,47 @@ describe("dictation key", () => {
 });
 
 describe("dictation polish", () => {
+  const box = (text: string) =>
+    [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
+      b.closest("label")!.textContent!.includes(text),
+    )!;
+
   it("is on by default, and turned off with the rest on Save", async () => {
     await mount();
-    const box = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
-      b.closest("label")!.textContent!.includes("Polish dictated text"),
-    )!;
-    expect(box.checked).toBe(true);
-    await act(async () => box.click());
+    expect(box("Polish dictated text").checked).toBe(true);
+    await act(async () => box("Polish dictated text").click());
     expect(polishEnabled()).toBe(true);
+    expect(box("Only on this Mac").disabled, "nothing to keep local").toBe(true);
     await save();
     expect(polishEnabled()).toBe(false);
+  });
+
+  it("may use the Claude model until it is kept on this Mac, saved with the rest", async () => {
+    await mount();
+    expect(box("Only on this Mac").checked).toBe(false);
+    expect(box("Only on this Mac").disabled).toBe(false);
+    await act(async () => box("Only on this Mac").click());
+    expect(polishLocalOnly()).toBe(false);
+    await save();
+    expect(polishLocalOnly()).toBe(true);
+  });
+
+  it("offers local polish in Dictation whatever the speaking engine, where it can run", async () => {
+    studioSupported = true;
+    for (const engine of ["kokoro", "system", "studio"]) {
+      savedEngine = engine;
+      await mount();
+      await flush();
+      expect(host.querySelectorAll("[data-local-polish]"), engine).toHaveLength(1);
+      expect(host.textContent).toContain("With local polish installed (below)");
+      act(() => root.unmount());
+      root = createRoot(host);
+    }
+    studioSupported = false;
+    await mount();
+    await flush();
+    expect(host.querySelector("[data-local-polish]")).toBeNull();
+    expect(host.textContent, "nothing below to point to").not.toContain("(below)");
   });
 });
 
@@ -397,10 +430,29 @@ describe("end-of-turn model", () => {
       b.closest("label")!.textContent!.includes("Listen for when I've finished"),
     )!;
 
-  it("is offered only with the Kokoro runtime it runs on", async () => {
+  it("is offered only with a runtime it runs on (Kokoro's or the studio voice's)", async () => {
     turnRuntime = false;
     await mount();
     expect(host.textContent).not.toContain("End of turn");
+  });
+
+  it("is offered as soon as one is installed with settings open", async () => {
+    for (const install of ["studio-setup", "kokoro-setup"]) {
+      turnRuntime = false;
+      await mount();
+      // An install still under way, or one that stopped, brings no runtime.
+      await act(async () => fire(install, { phase: "model", received: 1, total: 2 }));
+      await act(async () => fire(install, { phase: "error", message: "cancelled" }));
+      await flush();
+      expect(host.textContent, install).not.toContain("End of turn");
+      turnRuntime = true;
+      await act(async () => fire(install, { phase: "done", polish: true, received: 0, total: 0 }));
+      await flush();
+      expect(host.textContent, install).toContain("End of turn (hands-free)");
+      act(() => root.unmount());
+      root = createRoot(host);
+      handlers.clear();
+    }
   });
 
   it("downloads on request, then is on, and can be switched off", async () => {

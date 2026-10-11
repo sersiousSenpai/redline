@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveHoldKey } from "../audio/holdKey";
 import { OnboardingTour } from "./OnboardingTour";
 
 // The first-run tour rides over the live app, so it must never take what the
@@ -60,6 +61,26 @@ describe("the onboarding tour", () => {
     expect(status()).toMatch(/step 3 of \d+:/);
     key(document.body, "ArrowLeft");
     expect(status()).toMatch(/step 2 of \d+:/);
+  });
+
+  it("names the dictation key chosen by the time the tour opens, not when it first loaded", () => {
+    const shortcuts = () => {
+      act(() => root.unmount());
+      root = createRoot(host);
+      act(() => root.render(<OnboardingTour onClose={onClose} onAnchorChange={onAnchorChange} />));
+      for (let i = 0; i < 30 && !/Keyboard shortcuts$/.test(status() ?? ""); i++) key(document.body, "ArrowRight");
+      return host.querySelector('[role="dialog"]')!.textContent!;
+    };
+    try {
+      saveHoldKey("MetaRight");
+      expect(shortcuts()).toContain("right ⌘");
+      saveHoldKey("off");
+      const off = shortcuts();
+      expect(off).toContain("Snap the layout back");
+      expect(off).not.toContain("Dictate");
+    } finally {
+      saveHoldKey("AltRight");
+    }
   });
 
   it("lets the pointer through to the region it lights, and nowhere else", () => {

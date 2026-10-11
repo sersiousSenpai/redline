@@ -12,14 +12,16 @@
 //
 // The engine sits behind `PolishEngine` (`polishEngine` below picks one). The
 // local polish model comes first: a small model in the studio voice's sidecar
-// (tts_studio.rs), installed from the studio voice's settings card, that never
-// sends the words anywhere. Without it — or when it can't answer within its
-// budget, about 0.7 s — the fixed cleanup child does it (voice.rs
-// `voice_clean`: a fast model with no tools, kept warm). Both are told that
-// the speaker is never talking to them and given the vocabulary's spellings,
-// and the local one's every reply is checked in the sidecar as well. What
-// comes back is checked here before it is used: an answer, a summary or a
-// rewrite in place of a polish is thrown away.
+// (tts_studio.rs), installed from Voice settings' Dictation section whatever
+// the speaking engine, that never sends the words anywhere. Without it — or
+// when it can't answer within its budget, about 0.7 s — the fixed cleanup
+// child does it (voice.rs `voice_clean`: a fast model with no tools, kept
+// warm), unless the user keeps polish on this Mac (`polishLocalOnly`): then
+// the words stay as the rules cleaned them. Both are told that the speaker is
+// never talking to them and given the vocabulary's spellings, and the local
+// one's every reply is checked in the sidecar as well. What comes back is
+// checked here before it is used: an answer, a summary or a rewrite in place
+// of a polish is thrown away.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 
@@ -35,9 +37,11 @@ export interface PolishEngine {
 /** How many of the vocabulary's terms ride along: its ranked head. */
 const SPELLINGS = 60;
 
-/** The fixed cleanup child. */
-export const cleanupChild: PolishEngine = {
+/** The fixed cleanup child. Warming it starts the process (an empty text),
+ *  so the first polish of a session doesn't wait out its cold start. */
+export const cleanupChild: Required<PolishEngine> = {
   polish: (text, vocab) => invoke<string>("voice_clean", { text, vocab: vocab.slice(0, SPELLINGS) }),
+  warm: () => void invoke("voice_clean", { text: "" }).catch(() => {}),
 };
 
 /** The terms the local model is given: the head, as the sidecar takes them
@@ -55,8 +59,9 @@ export const LOCAL_LIMIT_MS = 8000;
 /** The local polish model. Its reply is one frame on a Channel: the
  *  generation's low 32 bits, flags, then the outcome as JSON. Anything but a
  *  polish — not installed, slow, failed, cancelled — rejects. A reply the
- *  sidecar refused comes back as the words unchanged. */
-export const localModel: Required<PolishEngine> = {
+ *  sidecar refused comes back as the words unchanged. Its warm-up answers
+ *  whether it is installed and can load, so it will be the one to polish. */
+export const localModel = {
   polish: (text, vocab) =>
     new Promise<string>((resolve, reject) => {
       // From the app-wide counter, so a speech driver's cancel never matches it.
@@ -83,15 +88,26 @@ export const localModel: Required<PolishEngine> = {
         reject(e);
       });
     }),
-  warm: (vocab) =>
-    void invoke("tts_studio", { op: "warm", args: { polish: true, vocab: localSpellings(vocab) } }).catch(() => {}),
-};
+  warm: (vocab: readonly string[]) =>
+    invoke<boolean>("tts_studio", { op: "warm", args: { polish: true, vocab: localSpellings(vocab) } }).catch(
+      () => false,
+    ),
+} satisfies PolishEngine;
 
 /** What dictation polishes with: the local model, which Rust refuses at once
- *  when it isn't installed, else — and whenever it fails — the cleanup child. */
+ *  when it isn't installed, else — and whenever it fails — the cleanup child,
+ *  unless polish stays on this Mac. Each warms for a dictation that will be
+ *  polished: the local model when it is installed, else the cleanup child. */
 export const polishEngine: PolishEngine = {
-  polish: (text, vocab) => localModel.polish(text, vocab).catch(() => cleanupChild.polish(text, vocab)),
-  warm: (vocab) => localModel.warm(vocab),
+  polish: (text, vocab) =>
+    localModel.polish(text, vocab).catch((e: unknown) => {
+      if (polishLocalOnly()) throw e;
+      return cleanupChild.polish(text, vocab);
+    }),
+  warm: (vocab) =>
+    void localModel.warm(vocab).then((local) => {
+      if (!local && !polishLocalOnly()) cleanupChild.warm(vocab);
+    }),
 };
 
 /** Shorter dictations are left as the rules made them. */
@@ -114,6 +130,28 @@ export function polishEnabled(): boolean {
 export function setPolishEnabled(on: boolean): void {
   try {
     localStorage.setItem(PREF, on ? "on" : "off");
+  } catch {
+    /* best-effort, like the voice prefs */
+  }
+}
+
+const LOCAL_PREF = "redline.dictation.polishLocalOnly";
+
+/** Polish only on this Mac: no cloud fallback, so a slow or missing local
+ *  model leaves the words as the rules cleaned them. Off unless the user
+ *  turns it on (per machine). */
+export function polishLocalOnly(): boolean {
+  try {
+    return localStorage.getItem(LOCAL_PREF) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setPolishLocalOnly(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(LOCAL_PREF, "1");
+    else localStorage.removeItem(LOCAL_PREF);
   } catch {
     /* best-effort, like the voice prefs */
   }
