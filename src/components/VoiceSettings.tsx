@@ -605,9 +605,10 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
             <span style={muted}>
               A moment after longer dictations land, a fast Claude model tidies their
               punctuation and false starts — only the text goes to it, never the
-              audio. With local polish installed (below), a model on this Mac does it
-              instead, and the Claude model steps in only when it can't answer in
-              time. ⌘Z takes a polish back. Spoken turns are never polished.
+              audio. With local polish installed{studioSupported ? " (below)" : ""}, a
+              model on this Mac does it instead, and the Claude model steps in only
+              when it can't answer in time. ⌘Z takes a polish back. Spoken turns are
+              never polished.
             </span>
           </span>
         </label>
@@ -625,9 +626,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <span className="flex flex-col gap-0.5">
             <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>Only on this Mac</span>
             <span style={muted}>
-              Never send dictated text to the Claude model. When local polish isn't
-              installed, or can't answer in time, the words stay as dictation's own
-              rules cleaned them.
+              Never send dictated text to the Claude model to polish it. When local
+              polish isn't installed, or can't answer in time, the words stay as
+              dictation's own rules cleaned them.
             </span>
           </span>
         </label>
@@ -1104,11 +1105,21 @@ function TurnModelSetting() {
 
   useEffect(() => {
     let alive = true;
-    void turnModel("status")
-      .then((s) => alive && setStatus(s))
-      .catch(() => {});
+    const read = () =>
+      void turnModel("status")
+        .then((s) => alive && setStatus(s))
+        .catch(() => {});
+    read();
+    // A runtime installed while settings are open (Kokoro's, or the studio
+    // one the voice or local polish brings) offers it at once.
+    const subs = ["kokoro-setup", "studio-setup"].map((name) =>
+      listen<{ phase: string }>(name, (e) => {
+        if (e.payload.phase === "done") read();
+      }),
+    );
     return () => {
       alive = false;
+      for (const p of subs) void p.then((un) => un());
     };
   }, []);
 

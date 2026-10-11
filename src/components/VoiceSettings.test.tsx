@@ -370,6 +370,7 @@ describe("dictation polish", () => {
       await mount();
       await flush();
       expect(host.querySelectorAll("[data-local-polish]"), engine).toHaveLength(1);
+      expect(host.textContent).toContain("With local polish installed (below)");
       act(() => root.unmount());
       root = createRoot(host);
     }
@@ -377,6 +378,7 @@ describe("dictation polish", () => {
     await mount();
     await flush();
     expect(host.querySelector("[data-local-polish]")).toBeNull();
+    expect(host.textContent, "nothing below to point to").not.toContain("(below)");
   });
 });
 
@@ -432,6 +434,25 @@ describe("end-of-turn model", () => {
     turnRuntime = false;
     await mount();
     expect(host.textContent).not.toContain("End of turn");
+  });
+
+  it("is offered as soon as one is installed with settings open", async () => {
+    for (const install of ["studio-setup", "kokoro-setup"]) {
+      turnRuntime = false;
+      await mount();
+      // An install still under way, or one that stopped, brings no runtime.
+      await act(async () => fire(install, { phase: "model", received: 1, total: 2 }));
+      await act(async () => fire(install, { phase: "error", message: "cancelled" }));
+      await flush();
+      expect(host.textContent, install).not.toContain("End of turn");
+      turnRuntime = true;
+      await act(async () => fire(install, { phase: "done", polish: true, received: 0, total: 0 }));
+      await flush();
+      expect(host.textContent, install).toContain("End of turn (hands-free)");
+      act(() => root.unmount());
+      root = createRoot(host);
+      handlers.clear();
+    }
   });
 
   it("downloads on request, then is on, and can be switched off", async () => {
