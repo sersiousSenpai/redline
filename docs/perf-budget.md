@@ -703,6 +703,33 @@ bypasses, `dev_server_set_thumb`, `self_develop_discard`, `context_search`,
 `memory_restore`), left because removing them strands database code or
 touches files other lanes own.
 
+### Wave 2 on top (measured 2026-10-10)
+
+The voice lanes merged onto that room in the order below. Boot JS and dist
+come from a `git archive` build of each merge commit (the `0aaf46b` row
+reproduces the figures above exactly). A lane's binary delta is its own
+embedded build against the base it was built on; the dictation lane never
+built one, so its figure is an estimate. The last two rows are embedded
+builds of the integration branch itself.
+
+| Merge | Release binary | Boot JS | Dist total |
+|---|---|---|---|
+| `0aaf46b` | 41,358,384 B | 659,336 B | 9,474,702 B |
+| `perf/size-room` | −1,356,704 B | −25,801 B | −149,917 B |
+| `fix/wave1-residuals` | +16,656 B | +1,304 B | +1,921 B |
+| `feat/voice-mic` | +17,280 B | 0 | +865 B |
+| `feat/voice-studio` | +133,456 B | +195 B | +21,725 B |
+| `feat/dictation-everywhere` | about +3 KB | +67 B | +45,483 B |
+| `feat/voice-polish` | +33,072 B | +3 B | +3,040 B |
+| `feat/voice-eot` | +32,896 B | 0 | +6,797 B |
+| All merged (`e5038c9`) | 40,284,736 B | 635,104 B | 9,404,616 B |
+| One download helper (`pinned_fetch.rs`) | 40,234,848 B (−49,888 B) | 635,104 B | 9,404,616 B |
+
+That leaves 1,165,152 B of binary, 24,896 B of boot JS and 45,384 B of dist
+under the unchanged ceilings. The download row folds tts.rs's own resumable
+fetch, with its async file writes, into the one Whisper and the end-of-turn
+model already used.
+
 ### Build Redline (measured 2026-09-16)
 
 Three points, on one machine, same day:
