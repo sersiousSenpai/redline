@@ -750,6 +750,31 @@ describe("the floating replacement composer", () => {
     }
   });
 
+  it("measures a title against its column, not against the narrower cut it is showing", async () => {
+    // 70 characters: two lines of a 300 px column (40 a line), four of the
+    // 150 px an entry shrinks to around a short cut.
+    const title = "Voice runtime: keep barge-in from killing the warm session on a resume";
+    const style = document.createElement("style");
+    style.textContent = ".rl-fd-recent-title { line-height: 20px; } .rl-fd-recent-chips { grid-template-columns: 40px 300px 300px; }";
+    document.head.append(style);
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (!this.classList.contains("rl-fd-recent-title")) return proto.call(this);
+      // The title on screen is as wide as what it shows; a probe, as wide as
+      // it is told.
+      const width = this.style.visibility === "hidden" ? parseFloat(this.style.width) : 150;
+      const lines = Math.ceil((this.textContent ?? "").length / Math.floor(width / 7.5));
+      return { top: 0, bottom: lines * 20, height: lines * 20, left: 0, right: width, width, x: 0, y: 0, toJSON() {} } as DOMRect;
+    });
+    try {
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: [{ kind: "plan", id: "s1", label: title, detail: "" }] });
+      expect(host.querySelector(".rl-fd-recent-title")!.textContent!.replace(/‑/g, "-")).toBe(title);
+    } finally {
+      vi.restoreAllMocks();
+      style.remove();
+    }
+  });
+
   it("a recent pill opens that place and never launches or steals focus", async () => {
     const onOpenRecent = vi.fn();
     const onLaunch = vi.fn();

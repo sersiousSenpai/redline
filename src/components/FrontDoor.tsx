@@ -737,13 +737,17 @@ export function FrontDoor(props: FrontDoorProps) {
   // are the first thing to go.
   const recentsHidden = hasText || !!offer || tight;
 
-  // Each title is measured on a hidden copy of itself at its own width, never
-  // on the title on screen, which may be showing a cut.
+  // Each title is measured on a hidden copy of itself, never on the title on
+  // screen, which may be showing a cut — and at its column's width, not the
+  // title's: an entry is only as wide as what it shows, so a cut made in a
+  // narrower column would otherwise never grow back.
   const fitTitles = () => {
     const next: Record<string, string> = {};
+    const table = recentsRef.current?.querySelector<HTMLElement>(".rl-fd-recent-chips");
+    const column = table ? parseFloat(getComputedStyle(table).gridTemplateColumns.split(" ")[1]) : NaN;
     for (const title of recentsRef.current?.querySelectorAll<HTMLElement>(".rl-fd-recent-title") ?? []) {
       const button = title.parentElement, full = button?.getAttribute("aria-label");
-      const width = title.getBoundingClientRect().width, line = parseFloat(getComputedStyle(title).lineHeight);
+      const width = column > 0 ? column : title.getBoundingClientRect().width, line = parseFloat(getComputedStyle(title).lineHeight);
       if (!button || !full || !width || !line) continue;
       const probe = title.cloneNode(false) as HTMLElement;
       probe.style.cssText = `position:absolute;visibility:hidden;width:${width}px`;
