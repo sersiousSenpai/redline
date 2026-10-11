@@ -837,6 +837,18 @@ function VoicePanelBase({
   // When the user stops or talks over a reply, the rest of it — still
   // streaming in — must not be spoken. Cleared when a new turn begins.
   const discardSpeechRef = useRef(false);
+  // A talk the hold-to-dictate key started over a reply holds the reply
+  // rather than stopping it. The key is Right ⌥, which on many layouts also
+  // types a character (AltGr): held a beat too long before that character,
+  // it starts a capture the character then cancels. So the reply's sound
+  // pauses the moment the capture starts — the talk takes the floor for the
+  // ear as fast as ever, and the mic never hears the agent — and what more
+  // streams in waits here (`raw`, and whether the turn has ended: `final`).
+  // The reply stops for good once the capture hears a word, or its release
+  // brings one: the one sign no key click, fan or keystroke gives. Cancelled
+  // or empty, it plays on from where it paused. `paused`: ⏸ had paused it
+  // already, so it stays paused.
+  const heldRef = useRef<{ raw: string | null; final: boolean; paused: boolean } | null>(null);
 
   // What is actually being heard (playback.ts). Its callbacks dispatch through
   // a ref, like the endpointer's, so they always run the latest handlers.
@@ -885,13 +897,19 @@ function VoicePanelBase({
     [playback],
   );
 
-  /** Speak whatever of the live reply's spoken part is new — never the
-   *  ⟦screen⟧ detail, never a marker. The held-back tail is spoken at the
-   *  end (`final`), and as soon as the spoken part pauses (`spokenPause`). */
+  /** Speak whatever of the live reply's spoken part (`raw` is the reply so
+   *  far) is new — never the ⟦screen⟧ detail, never a marker. The held-back
+   *  tail is spoken at the end (`final`), and as soon as the spoken part
+   *  pauses (`spokenPause`). A held reply keeps it for later. */
   const speakLive = useCallback(
-    (final: boolean) => {
+    (raw: string, final: boolean) => {
       if (discardSpeechRef.current) return;
-      const raw = rawRef.current;
+      const held = heldRef.current;
+      if (held) {
+        held.raw = raw;
+        held.final ||= final;
+        return;
+      }
       const reply = splitReply(raw);
       queueRef.current?.setTone(reply.tone);
       const base = spokenLenRef.current;
@@ -995,6 +1013,7 @@ function VoicePanelBase({
   // of a reply still streaming in. A read-back the user cut short adds nothing.
   const stopSpeech = useCallback(() => {
     discardSpeechRef.current = true;
+    heldRef.current = null;
     readingRef.current = null;
     autoAddArmedRef.current = false;
     if (explicitRef.current.size) setExplicit(new Set());
@@ -1343,9 +1362,10 @@ function VoicePanelBase({
     [sessionId, takeContext, dispatch, sendToSession, sendInterrupt, noteGeneration, setTranscript, setOutbox, restoreDraft],
   );
 
-  // The next waiting turn goes out once nothing is running.
+  // The next waiting turn goes out once nothing is running — nor held: what
+  // the talk holding it says goes first.
   const drain = useCallback(() => {
-    if (turnRef.current.phase !== "idle") return;
+    if (turnRef.current.phase !== "idle" || heldRef.current) return;
     const [next, ...rest] = outboxRef.current;
     if (!next) return;
     setOutbox(rest);
@@ -1383,6 +1403,19 @@ function VoicePanelBase({
     dispatch({ type: "interrupt" });
     sendInterrupt();
   }, [cutNote, stopSpeech, dispatch, sendInterrupt]);
+
+  // A talk the hold key started over a reply: pause it (see `heldRef`).
+  const holdReply = useCallback(() => {
+    if (heldRef.current) return;
+    const queue = queueRef.current;
+    heldRef.current = { raw: null, final: false, paused: queue?.getState() === "paused" };
+    queue?.pause();
+  }, []);
+
+  // The talk heard a word: it takes the floor, as a talk over a reply does.
+  const takeFloor = useCallback(() => {
+    if (heldRef.current) stopReply();
+  }, [stopReply]);
 
   // --- Offered items ---------------------------------------------------------
 
@@ -1430,6 +1463,19 @@ function VoicePanelBase({
       if (due.has(o.id) && !o.stale) addOffer(o);
     }
   }, [addOffer, setExplicit]);
+
+  // The talk holding a reply heard nothing (the key typed a character, Esc,
+  // a tap): the reply plays on from where it paused, says what came in
+  // meanwhile, and what waited behind it goes.
+  const releaseReply = useCallback(() => {
+    const held = heldRef.current;
+    if (!held) return;
+    heldRef.current = null;
+    if (!held.paused) queueRef.current?.resume();
+    if (held.raw !== null) speakLive(held.raw, held.final);
+    if (autoAddArmedRef.current && !playback.busy()) runAutoAdd();
+    drain();
+  }, [speakLive, playback, runAutoAdd, drain]);
 
   /** A spoken yes or no to what the agent offered in its last reply, handled
    *  here instead of becoming a turn. The agent hears about it next turn. */
@@ -1515,8 +1561,8 @@ function VoicePanelBase({
   // --- Stream events -----------------------------------------------------------
   // Handlers read everything through refs or stable callbacks, so the
   // listeners are wired once per session.
-  const streamRef = useRef({ speakLive, runAutoAdd });
-  streamRef.current = { speakLive, runAutoAdd };
+  const streamRef = useRef({ speakLive, runAutoAdd, takeFloor, releaseReply });
+  streamRef.current = { speakLive, runAutoAdd, takeFloor, releaseReply };
   useEffect(() => {
     // `listen()` is async; under StrictMode the cleanup runs before these
     // resolve, so guard with `disposed` and immediately unlisten anything that
@@ -1547,7 +1593,7 @@ function VoicePanelBase({
           dispatch({ type: "text", id });
           rawRef.current += e.payload.text;
           setStreaming(rawRef.current);
-          streamRef.current.speakLive(false);
+          streamRef.current.speakLive(rawRef.current, false);
         }),
       );
       add(
@@ -1563,8 +1609,7 @@ function VoicePanelBase({
           if (!accepts(turnRef.current, id)) return;
           const body = e.payload.body || rawRef.current;
           const messageId = e.payload.messageId ?? undefined;
-          rawRef.current = body;
-          streamRef.current.speakLive(true);
+          streamRef.current.speakLive(body, true);
           rawRef.current = "";
           setStreaming("");
           setTranscript((t) => [...t, { role: "agent", text: body, id: messageId }]);
@@ -1578,10 +1623,11 @@ function VoicePanelBase({
           }
           if (!discardSpeechRef.current) {
             setLastSpoken(splitReply(body).spoken);
-            // An explicit capture is added once its read-back has played.
+            // An explicit capture is added once its read-back has played
+            // (a held reply's, once it plays on).
             if (explicitRef.current.size) {
               autoAddArmedRef.current = true;
-              if (!playbackRef.current?.busy()) streamRef.current.runAutoAdd();
+              if (!playbackRef.current?.busy() && !heldRef.current) streamRef.current.runAutoAdd();
             }
           } else if (explicitRef.current.size) {
             // Its speech was silenced (settings opened over it): nobody heard
@@ -2039,7 +2085,10 @@ function VoicePanelBase({
       },
       partial: (text) => {
         setPartial(text);
-        if (text.trim()) captureRef.current.heard = true;
+        if (text.trim()) {
+          captureRef.current.heard = true;
+          streamRef.current.takeFloor();
+        }
         if (handsFreeRef.current && hfArmedRef.current) {
           endpointRef.current?.partial(text);
         }
@@ -2064,6 +2113,7 @@ function VoicePanelBase({
           return;
         }
         talkingRef.current = false;
+        streamRef.current.releaseReply();
         // Likewise the capture a failed task leaves open, or the next press
         // would start nothing.
         broker.cancel(VOICE_OWNER);
@@ -2081,6 +2131,7 @@ function VoicePanelBase({
       // capture is over. Hands-free listens again once the mic is free.
       preempted: () => {
         talkingRef.current = false;
+        streamRef.current.releaseReply();
         if (hfArmedRef.current) {
           hfArmedRef.current = false;
           rearmDelayRef.current = 1000;
@@ -2130,8 +2181,10 @@ function VoicePanelBase({
   // Push-to-talk: press → stop whatever is running and listen; release →
   // (after a short tail) → transcribe → send, unless it was no speech at all.
   // `since` is when the hold began (a key hold counts from its keydown).
+  // `held`: the hold-to-dictate key started it, which may yet type a
+  // character — what is running is held, not stopped (`heldRef`).
   const startTalk = useCallback(
-    (since = Date.now()) => {
+    (since = Date.now(), held = false) => {
       // Hands-free owns the mic while it's on — manual push-to-talk is suspended.
       if (handsFreeRef.current) return;
       if (talkingRef.current) return;
@@ -2153,16 +2206,20 @@ function VoicePanelBase({
       const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
       // Talking over the agent: silence it and stop its turn in place, so it
       // stops generating what nobody will hear — its memory stays whole.
-      if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
+      if (turnRef.current.phase !== "idle" || playback.busy()) {
+        if (held) holdReply();
+        else stopReply();
+      }
       setListening(true);
       setPartial("");
       void broker.start(VOICE_OWNER, { kind: "hold", preroll }).catch((e) => {
         talkingRef.current = false;
         setListening(false);
+        releaseReply();
         setError(String(e));
       });
     },
-    [playback, stopReply],
+    [playback, stopReply, holdReply, releaseReply],
   );
 
   const stopTalk = useCallback(() => {
@@ -2183,13 +2240,19 @@ function VoicePanelBase({
           // In any mode — in the Walkthrough this is exactly the §1e
           // interjection signal — but never a tap, a cough or a silence.
           const capture = { text, heldMs, heard: captureRef.current.heard };
-          if (!isNonSpeech(capture)) submitSpoken(text);
+          if (isNonSpeech(capture)) return releaseReply();
+          takeFloor();
+          submitSpoken(text);
         })
-        .catch((e) => setError(String(e)));
+        .catch((e) => {
+          releaseReply();
+          setError(String(e));
+        });
     }, CAPTURE_TAIL_MS);
-  }, [submitSpoken]);
+  }, [submitSpoken, takeFloor, releaseReply]);
 
-  // Esc on the hold-to-dictate key's turn: nothing is sent.
+  // Esc on the hold-to-dictate key's turn, or a character typed with the key
+  // (AltGr): nothing is sent, and a reply the talk held plays on.
   const cancelTalk = useCallback(() => {
     if (handsFreeRef.current) return;
     if (stopTimerRef.current) {
@@ -2200,12 +2263,15 @@ function VoicePanelBase({
     setListening(false);
     setPartial("");
     broker.cancel(VOICE_OWNER);
-  }, []);
+    releaseReply();
+  }, [releaseReply]);
 
   // The hold-to-dictate key, with nothing that takes text focused (or focus
-  // in this panel), is a turn here: the panel's own push-to-talk.
+  // in this panel), is a turn here: the panel's own push-to-talk, holding
+  // what is running until it hears a word.
   useEffect(
-    () => registerTurnTaker({ key: sessionId, start: startTalk, stop: stopTalk, cancel: cancelTalk }),
+    () =>
+      registerTurnTaker({ key: sessionId, start: (since) => startTalk(since, true), stop: stopTalk, cancel: cancelTalk }),
     [sessionId, startTalk, stopTalk, cancelTalk],
   );
 

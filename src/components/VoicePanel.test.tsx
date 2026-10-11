@@ -145,6 +145,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { VoicePanel } from "./VoicePanel";
 import { strip } from "./DictationStrip";
 import { broker } from "../audio/dictationBroker";
+import { installDictation } from "../audio/dictationHost";
 import { composerAt } from "../audio/dictationTarget";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import type { Section } from "../types";
@@ -1020,6 +1021,89 @@ describe("reading the plan aloud", () => {
     expect(heard[before]).toBe("Here is the short version.");
     const after = named("tts_synth").slice(asked).map(([, a]) => String(a?.text));
     expect(after.filter((text) => planSaid.test(text))).toEqual([]);
+  });
+});
+
+// --- the hold-to-dictate key over a reply --------------------------------------------
+
+describe("the hold-to-dictate key over a reply", () => {
+  /** A key on what has focus, as the window hears it. */
+  function key(type: "keydown" | "keyup", code: string, init: KeyboardEventInit = {}) {
+    const ev = new KeyboardEvent(type, { code, bubbles: true, cancelable: true, ...init });
+    act(() => {
+      (document.activeElement ?? document.body).dispatchEvent(ev);
+    });
+    return ev;
+  }
+
+  async function replying() {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "First, the ownership globs are guesses. Second, check" });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    input().focus();
+    calls.length = 0;
+    synthCalls.length = 0;
+  }
+
+  it("lets a slow AltGr keystroke in the box type its character, the reply playing on", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    // Held past its threshold: the panel listens, and the reply is paused,
+    // not stopped — what streams in meanwhile waits.
+    expect(names()).toContain("dictation_start");
+    expect(synthCalls).toEqual(["pause"]);
+    await emit("voice-delta", { ...of(1), text: " attribution is missing. Third, the end" });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    // The character: it goes on to the box, which keeps the caret…
+    const typed = key("keydown", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(50);
+    expect(typed.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(input());
+    // …and the reply plays on from where it paused, saying what came in.
+    expect(names()).toContain("dictation_kill_all");
+    expect(names()).not.toContain("voice_interrupt");
+    expect(synthCalls).toEqual(["pause", "resume"]);
+    expect(spoken()).toBe("First, the ownership globs are guesses. Second, check attribution is missing.");
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check attribution is missing. Third, the end.", messageId: "m1" });
+    expect(spoken()).toContain("Third, the end.");
+    expect(host.textContent).not.toContain("(interrupted)");
+    expect(sends()).toEqual([]);
+  });
+
+  it("stops the reply in place once its capture hears a word, and sends what was said", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    expect(names()).not.toContain("voice_interrupt");
+    await emit("dictation-partial", { owner: "voice", text: "wait which" });
+    expect(names()).toContain("voice_interrupt");
+    expect(utterances).toEqual([]);
+    script.dictated = "Wait, which globs?";
+    await wait(150);
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    await emit("voice-interrupted", { ...of(1), text: "First, the ownership globs are guesses.", streamedChars: 40, messageId: "m1", killed: false });
+    await wait();
+    expect(sends().map((x) => x.text)).toEqual(["Wait, which globs?"]);
+    expect(sends()[0].context).toContain('You were interrupted after saying: "First, the ownership globs are guesses."');
+  });
+
+  it("…or once its release brings words the live transcript missed", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(450);
+    script.dictated = "Focus on the rollout first.";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(names()).toContain("voice_interrupt");
+    await emit("voice-interrupted", { ...of(1), text: "First, the ownership globs are guesses.", streamedChars: 40, messageId: "m1", killed: false });
+    await wait();
+    expect(sends().map((x) => x.text)).toEqual(["Focus on the rollout first."]);
   });
 });
 

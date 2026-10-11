@@ -46,6 +46,7 @@ async function screenshot(name) { const shot = await cdp.call("Page.captureScree
 async function rect(selector) { return cdp.evaluate(`(() => {const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom,right:r.right};})()`); }
 const calls = (name) => cdp.evaluate(`window.__qaCalls.filter(c => c[0] === ${JSON.stringify(name)}).map(c => c[1] ?? null)`);
 const panelText = () => cdp.evaluate("document.querySelector('[data-tour=voice]').textContent");
+async function key(type, code, key, opts = {}) { await cdp.call("Input.dispatchKeyEvent", { type, code, key, ...opts }); }
 /** The composer's one button (SendStopButton), and the reply on its way. */
 const PRIMARY = "[data-tour=voice] form .rl-send";
 const LIVE = "[data-tour=voice] [data-reply=live]";
@@ -190,6 +191,34 @@ try {
   check("…and the next Summarize is the next thing heard", (await cdp.evaluate(`window.__qaSpoken[${reading.length}]`)) === "Here is the short version.", await cdp.evaluate("window.__qaSpoken"));
   await emit("voice-done", { ...summary, body: "Here is the short version. It ships behind a flag.", messageId: "m-sum", timing: {} });
   await delay(1600);
+
+  // A slow AltGr keystroke in the box: Right ⌥ held past its threshold, then
+  // the key it types with ("œ"). The reply pauses while the key is down, then
+  // plays on, nothing stopped, and the character lands in the box.
+  await enter("Name the risks");
+  const risks = turn(await cdp.evaluate("window.__qaTurn"));
+  await emit("voice-delta", { ...risks, text: "The first risk is a double apply. The second is a stale offer. " });
+  await cdp.evaluate("document.querySelector(\"input[aria-label='Type a message to the voice agent']\").focus(); window.__qaCalls.length = 0");
+  const heardBefore = await cdp.evaluate("window.__qaSpoken.length");
+  await key("rawKeyDown", "AltRight", "Alt", { modifiers: 1, windowsVirtualKeyCode: 18, location: 2 });
+  await delay(320);
+  check("A slow AltGr: the held key starts the panel's capture", (await calls("dictation_start")).length === 1);
+  // What streams in meanwhile waits for the key to be done.
+  await emit("voice-delta", { ...risks, text: "The third is a lost note. " });
+  await key("keyDown", "KeyQ", "œ", { modifiers: 1, text: "œ", unmodifiedText: "q", windowsVirtualKeyCode: 81 });
+  await key("keyUp", "KeyQ", "œ", { modifiers: 1, windowsVirtualKeyCode: 81 });
+  await key("keyUp", "AltRight", "Alt", { windowsVirtualKeyCode: 18, location: 2 });
+  await settle();
+  await delay(1600);
+  check("…its character is typed into the box", (await cdp.evaluate("document.querySelector(\"input[aria-label='Type a message to the voice agent']\").value")) === "œ");
+  check("…the capture is dropped and the reply never stopped", (await calls("dictation_kill_all")).length >= 1 && (await calls("voice_interrupt")).length === 0);
+  const heardSince = () => cdp.evaluate(`window.__qaSpoken.slice(${heardBefore}).join(' ')`);
+  check("…and it plays on, saying what streamed in meanwhile", (await heardSince()).includes("The second is a stale offer."), await heardSince());
+  await screenshot("07c-altgr");
+  await emit("voice-done", { ...risks, body: "The first risk is a double apply. The second is a stale offer. The third is a lost note.", messageId: "m-risks", timing: {} });
+  check("…to its end, settling unmarked", (await heardSince()).includes("The third is a lost note.") && !(await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().textContent.includes('(interrupted)')")), await heardSince());
+  await cdp.evaluate("(() => { const i = document.querySelector(\"input[aria-label='Type a message to the voice agent']\"); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, ''); i.dispatchEvent(new Event('input', { bubbles: true })); i.blur(); })()");
+  await delay(2600);
 
   // Space talks only from inside the panel, and only once held.
   await cdp.evaluate("[...document.querySelectorAll('[data-tour=voice] [data-reply]')].pop().querySelector('.rl-reply-byline').setAttribute('data-qa', 'byline')");
