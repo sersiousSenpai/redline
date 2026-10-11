@@ -1122,6 +1122,96 @@ describe("the hold-to-dictate key over a reply", () => {
     await wait();
     expect(sends().map((x) => x.text)).toEqual(["Focus on the rollout first."]);
   });
+
+  it("tells the agent how much was heard of a reply that ended while the key held it", async () => {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    await emit("voice-delta", { ...of(1), text: "First, the ownership globs are guesses. " });
+    expect(spoken()).toBe("First, the ownership globs are guesses.");
+    await finishSpeech();
+    input().focus();
+    calls.length = 0;
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    // The rest of it lands, and the turn ends, while the key holds it.
+    await emit("voice-delta", { ...of(1), text: "Second, check attribution is missing." });
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check attribution is missing.", messageId: "m1" });
+    expect(utterances).toEqual([]);
+    await emit("dictation-partial", { owner: "voice", text: "hold on" });
+    script.dictated = "Hold on, which globs?";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    // Nothing of the rest is said, and the agent hears where the user got to.
+    expect(utterances).toEqual([]);
+    expect(sends().map((x) => x.text)).toEqual(["Hold on, which globs?"]);
+    expect(sends()[0].context).toContain('You were interrupted after saying: "First, the ownership globs are guesses."');
+  });
+
+  it("…or that none of it was, when the agent was still thinking as the key went down", async () => {
+    installDictation(() => null);
+    await mount();
+    await summarize();
+    input().focus();
+    calls.length = 0;
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-delta", { ...of(1), text: "It ships in two waves." });
+    await emit("voice-done", { ...of(1), body: "It ships in two waves.", messageId: "m1" });
+    await emit("dictation-partial", { owner: "voice", text: "why" });
+    script.dictated = "Why two waves?";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(utterances).toEqual([]);
+    expect(sends().map((x) => x.text)).toEqual(["Why two waves?"]);
+    expect(sends()[0].context).toContain("You were interrupted before they heard any of your reply");
+  });
+
+  it("sends what was typed meanwhile once the talk that held the reply turns out to be nothing", async () => {
+    await replying();
+    await type("And the rollout?");
+    await submit();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check it.", messageId: "m1" });
+    // The turn is over, but what was typed waits on what the talk says.
+    expect(sends()).toEqual([]);
+    // A sound the live transcript took for a word, then nothing at the end.
+    await emit("dictation-partial", { owner: "voice", text: "hm" });
+    script.dictated = "";
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(sends().map((x) => x.text)).toEqual(["And the rollout?"]);
+  });
+
+  it("says nothing from a panel that closed while the key held its reply", async () => {
+    await replying();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-delta", { ...of(1), text: " attribution is missing. Third" });
+    // The dock switches context mid-hold: the panel goes, the key comes up.
+    await act(async () => root.render(<></>));
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(450);
+    expect(utterances).toEqual([]);
+    expect(sends()).toEqual([]);
+  });
+
+  it("…nor sends what was typed there when the key's character cancels the talk after", async () => {
+    await replying();
+    await type("And the rollout?");
+    await submit();
+    key("keydown", "AltRight", { key: "Alt", altKey: true });
+    await wait(300);
+    await emit("voice-done", { ...of(1), body: "First, the ownership globs are guesses. Second, check it.", messageId: "m1" });
+    await act(async () => root.render(<></>));
+    key("keydown", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "KeyQ", { key: "œ", altKey: true });
+    key("keyup", "AltRight", { key: "Alt" });
+    await wait(50);
+    expect(sends()).toEqual([]);
+    expect(utterances).toEqual([]);
+  });
 });
 
 // --- hands-free -----------------------------------------------------------------------

@@ -1385,6 +1385,16 @@ function VoicePanelBase({
     // voice), else the whole clip that was sounding.
     const heard = playing && playback.heard();
     if (heard) return `You were interrupted after saying: "${tail(heard, 160)}"`;
+    // A reply the hold key held, more of it in (or all of it, the turn over)
+    // than went to speech: they heard what went before the hold.
+    const held = heldRef.current?.raw;
+    const whole = !playing && held != null ? splitReply(held).spoken : "";
+    if (whole.length > spokenLenRef.current) {
+      const said = whole.slice(0, spokenLenRef.current);
+      return said.trim()
+        ? `You were interrupted after saying: "${tail(said, 160)}"`
+        : "You were interrupted before they heard any of your reply";
+    }
     const phase = turnRef.current.phase;
     if (playing || phase === "streaming") return "You were interrupted before they heard any of your reply";
     if (phase !== "idle") return "You were interrupted before you said anything";
@@ -1466,14 +1476,16 @@ function VoicePanelBase({
 
   // The talk holding a reply heard nothing (the key typed a character, Esc,
   // a tap): the reply plays on from where it paused, says what came in
-  // meanwhile, and what waited behind it goes.
+  // meanwhile, and what waited behind it goes — as it does behind a talk
+  // whose first word stopped the reply, then came to nothing.
   const releaseReply = useCallback(() => {
     const held = heldRef.current;
-    if (!held) return;
     heldRef.current = null;
-    if (!held.paused) queueRef.current?.resume();
-    if (held.raw !== null) speakLive(held.raw, held.final);
-    if (autoAddArmedRef.current && !playback.busy()) runAutoAdd();
+    if (held) {
+      if (!held.paused) queueRef.current?.resume();
+      if (held.raw !== null) speakLive(held.raw, held.final);
+      if (autoAddArmedRef.current && !playback.busy()) runAutoAdd();
+    }
     drain();
   }, [speakLive, playback, runAutoAdd, drain]);
 
@@ -2151,6 +2163,10 @@ function VoicePanelBase({
         clearTimeout(holdTimerRef.current);
         holdTimerRef.current = null;
       }
+      // A hold-key talk still under way goes with the panel: its release, or
+      // a character cancelling it, says and sends nothing from here.
+      talkingRef.current = false;
+      heldRef.current = null;
       hfArmedRef.current = false;
       endpointRef.current?.reset();
       void turnModel("stop").catch(() => {});
@@ -2255,6 +2271,8 @@ function VoicePanelBase({
   // (AltGr): nothing is sent, and a reply the talk held plays on.
   const cancelTalk = useCallback(() => {
     if (handsFreeRef.current) return;
+    // Nothing under way (a panel that closed mid-hold): nothing to cancel.
+    if (!talkingRef.current && !stopTimerRef.current) return;
     if (stopTimerRef.current) {
       clearTimeout(stopTimerRef.current);
       stopTimerRef.current = null;
