@@ -349,6 +349,28 @@ describe("interrupting a reply", () => {
     expect(voiceRs).toContain('format!("{words}\\n{INTERRUPTED_MARK}")');
   });
 
+  it("starts without the warm mic's pre-roll when it would hold the agent's own voice", async () => {
+    await mount();
+    await holdToTalk("Focus on rollout.");
+    await emit("voice-delta", { ...of(1), text: "Rollout goes in two waves. Then the flag flips." });
+    await wait();
+    expect(utterances).not.toHaveLength(0);
+    // Talking over the spoken reply: the moment before the press is its voice.
+    await holdToTalk("Wait, which flag?");
+    await emit("voice-interrupted", { ...of(1), text: "Rollout goes in two waves.", streamedChars: 26, messageId: "m1", killed: false });
+    await emit("voice-done", { ...of(2), body: "The rollout flag.", messageId: "m2" });
+    await finishSpeech();
+    // Long enough after it went quiet, the moment before a press is the user's.
+    await wait(600);
+    await holdToTalk("And the second wave?");
+    expect(sends().map((s) => s.text)).toEqual(["Focus on rollout.", "Wait, which flag?", "And the second wave?"]);
+    expect(named("dictation_start").map(([, a]) => a)).toEqual([
+      { preroll: true },
+      { preroll: false },
+      { preroll: true },
+    ]);
+  });
+
   it("a quick tap of the talk button during thinking sends nothing", async () => {
     await mount();
     await summarize();
@@ -709,5 +731,7 @@ describe("hands-free", () => {
     await wait(400);
     expect(named("dictation_start")).toHaveLength(2);
     expect(script.armed).toBe(2);
+    // Re-armed just after the agent's voice: the pre-roll would hold its end.
+    expect(named("dictation_start").map(([, a]) => a)).toEqual([{ preroll: true }, { preroll: false }]);
   });
 });

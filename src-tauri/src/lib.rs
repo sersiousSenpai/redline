@@ -101,6 +101,7 @@ mod capture_ocr;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
+mod pinned_fetch;
 mod plan_meter;
 mod polis_host;
 /// Where the Polis Memory crates' sources are (asked of `cargo metadata`);
@@ -8987,6 +8988,9 @@ struct UiPrefs {
     /// reopening the dialog.
     seat_assign_prefs: Option<String>,
     review_pose: Option<String>,
+    /// The user's dictation vocabulary (their own words and the corrections
+    /// learned from them) — an opaque JSON blob owned by `src/audio/vocab.ts`.
+    voice_vocab: Option<String>,
 }
 
 /// `key` → `app_settings` row; the allowlist keeps this command from becoming
@@ -8999,6 +9003,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
         "lint" => Some("redline.ui.lint"),
         "workspaceNudge" => Some("redline.ui.workspaceNudge"),
         "seatAssignPrefs" => Some("redline.ui.seatAssignPrefs"),
+        "voiceVocab" => Some("redline.ui.voiceVocab"),
         _ => None,
     }
 }
@@ -9012,6 +9017,7 @@ fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
         lint: settings.db.get_setting("redline.ui.lint"),
         workspace_nudge: settings.db.get_setting("redline.ui.workspaceNudge"),
         seat_assign_prefs: settings.db.get_setting("redline.ui.seatAssignPrefs"),
+        voice_vocab: settings.db.get_setting("redline.ui.voiceVocab"),
     }
 }
 
@@ -12481,6 +12487,10 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browse_thread_harness",
     "browse_thread_set_harness",
     "companion_build_activity",
+    // Reads the settings and checks the model files on disk.
+    "dictation_status",
+    // Waits for the main thread to end the capture, then for Whisper.
+    "dictation_stop",
     "draft_source_add",
     "draft_source_delete",
     "draft_source_import_file",
@@ -12645,6 +12655,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "unwatch_hook_conflicts",
     "watch_hook_conflicts",
     "work_ready_count",
+    // Drives a model download to its end.
+    "whisper_install",
 ];
 
 /// Sync commands that leave the main thread but keep the order their calls
@@ -13125,9 +13137,8 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cycle,
             dictation::dictation_kill_all,
+            dictation::dictation_status,
             dictation_whisper::whisper_install,
-            dictation_whisper::whisper_model_present,
-            dictation_whisper::dictation_get_engine,
             dictation_whisper::dictation_set_engine,
             devmap::dev_servers_scan,
             devmap::dev_server_stop,
