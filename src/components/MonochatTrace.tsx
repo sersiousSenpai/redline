@@ -36,7 +36,7 @@ export function MonochatTrace({ conversationId, busy, open: controlledOpen, onOp
   if (controlledOpen !== undefined && !open) return null;
   return <div className="rl-monochat-observability">
     {controlledOpen === undefined && <button type="button" className="rl-monochat-trace-toggle" aria-expanded={open} onClick={() => setOpen(!open)}><Activity size={12}/> Activity & usage</button>}
-    {open && <section ref={panelRef} className="rl-monochat-traces" role="dialog" aria-label="Activity and usage" onKeyDown={event => {
+    {open && <section ref={panelRef} className="rl-monochat-traces" role="dialog" aria-label="Activity and usage" data-rl-island-owned onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); }
     }}>
       <button type="button" onClick={() => setOpen(false)} style={{ float: "right" }} aria-label="Close activity">Close</button>

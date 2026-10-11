@@ -525,6 +525,40 @@ describe("the compact card", () => {
     expect(card()).toBeNull();
   });
 
+  it("a dialog that is part of the work never holds it back; a modal, a menu or its own picker does", async () => {
+    // A review's inline annotation editor calls itself a dialog, and it is
+    // not over anything: the pill still springs the card, and a press
+    // elsewhere still closes it.
+    await render(<>
+      <Harness/>
+      <section><div role="dialog" aria-label="Annotation"><textarea aria-label="Annotation body"/></div></section>
+    </>);
+    await rest();
+    expect(card()).not.toBeNull();
+    await pointer(host.querySelector("#document-focus")!, "pointerdown");
+    expect(card()).toBeNull();
+    for (const attributes of [{ role: "dialog", "aria-modal": "true" }, { role: "menu" }, { "data-rl-modal-layer": "" }]) {
+      const overlay = document.createElement("div");
+      for (const [name, value] of Object.entries(attributes)) overlay.setAttribute(name, value);
+      document.body.append(overlay);
+      try {
+        await pointer(pill(), "pointerout", { relatedTarget: document.body }); await advance(400);
+        await rest();
+        expect(card()).toBeNull();
+      } finally { overlay.remove(); }
+    }
+    // The card's own picker (a mode or activity panel in its composer) is
+    // dismissed before the card: the first press outside is the picker's.
+    await pointer(pill(), "pointerout", { relatedTarget: document.body }); await advance(400);
+    await rest();
+    const picker = document.createElement("div"); picker.setAttribute("role", "dialog"); picker.setAttribute("data-rl-island-owned", ""); card()!.append(picker);
+    await pointer(host.querySelector("#document-focus")!, "pointerdown");
+    expect(card()).not.toBeNull();
+    picker.remove();
+    await pointer(host.querySelector("#document-focus")!, "pointerdown");
+    expect(card()).toBeNull();
+  });
+
   it("Esc closes it with the caret inside, or the pointer on it — and the terminal under it never hears that Esc", async () => {
     await render();
     const terminal = document.createElement("textarea"); terminal.className = "xterm-helper-textarea"; document.body.append(terminal);

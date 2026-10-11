@@ -11,6 +11,8 @@ import type { CSSProperties, ReactNode } from "react";
 interface MenuSurfaceProps {
   children: ReactNode;
   role?: string;
+  /** A dialog the rest of the app waits behind (`aria-modal`). */
+  modal?: boolean;
   ariaLabel?: string;
   className?: string;
   style?: CSSProperties;
@@ -21,6 +23,7 @@ interface MenuSurfaceProps {
 export function MenuSurface({
   children,
   role = "menu",
+  modal,
   ariaLabel,
   className,
   style,
@@ -29,6 +32,7 @@ export function MenuSurface({
   return (
     <div
       role={role}
+      aria-modal={modal || undefined}
       aria-label={ariaLabel}
       className={className}
       style={{

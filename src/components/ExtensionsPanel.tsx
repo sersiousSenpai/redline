@@ -379,6 +379,7 @@ function ConsentDialog({
     >
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={`Install ${entry.name}`}
         onClick={(e) => e.stopPropagation()}
         className="font-sans"
@@ -1133,6 +1134,7 @@ export function ExtensionsPanel() {
         >
           <div
             role="dialog"
+            aria-modal="true"
             aria-label="Extensions"
             onClick={(e) => e.stopPropagation()}
             style={{

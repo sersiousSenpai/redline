@@ -81,6 +81,7 @@ export function CommandPalette({ open, commands, onClose }: CommandPaletteProps)
     >
       <MenuSurface
         role="dialog"
+        modal
         ariaLabel="Command palette"
         className="absolute flex flex-col overflow-hidden"
         style={{

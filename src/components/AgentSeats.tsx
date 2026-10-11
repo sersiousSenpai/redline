@@ -1318,6 +1318,7 @@ export function AgentSeats() {
         >
           <div
             role="dialog"
+            aria-modal="true"
             aria-label="Agent Seats"
             onClick={(e) => e.stopPropagation()}
             style={{
