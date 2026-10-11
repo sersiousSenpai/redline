@@ -27,14 +27,6 @@ export function taskListBlock(markdown: string): ContextBlock {
   return { id: "tasks", heading: "Task list", body: markdown };
 }
 
-export function planBlock(plan: { sessionId: string; version: number; title: string | null; markdown: string }): ContextBlock {
-  return {
-    id: "plan",
-    heading: `This plan (v${plan.version}${plan.title ? `, ${plan.title}` : ""})`,
-    body: `Plan session: ${plan.sessionId}\n\n${plan.markdown}`,
-  };
-}
-
 /** A reference, not the contents: the agent can read the file itself, and an
  *  inlined copy would go stale the moment the user saves. */
 export function fileBlock(path: string): ContextBlock {
@@ -112,8 +104,8 @@ export function diffBlock(review: {
 }
 
 /** What a chat hasn't been handed yet, as one attachment, remembered as
- *  handed. Keyed per chat on each block's content: an unchanged plan rides one
- *  turn rather than every turn, and a revised one goes again. `context` is
+ *  handed. Keyed per chat on each block's content: an unchanged draft rides one
+ *  turn rather than every turn, and an edited one goes again. `context` is
  *  null when there is nothing new; `contextAll`, every pressed block, rides
  *  along when it says more, for a send that starts a fresh CLI session. Call
  *  it for every send, blocks or not: each one records what was pressed. */

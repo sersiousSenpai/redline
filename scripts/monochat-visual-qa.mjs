@@ -182,7 +182,8 @@ try {
     check(`${size} a resting pointer springs the compact card out without taking focus`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
     check(`${size} the card is bounded, centred and above the pill`, peek?.within && Math.abs(peek.x + peek.width/2 - width/2) < 1 && peek.width <= 641 && peek.bottom <= pill.y + 1, { peek, pill });
     check(`${size} the card is a region named by its heading`, await cdp.evaluate("(() => { const c=document.querySelector('.rl-monochat-float'); return c.getAttribute('role')==='region' && document.getElementById(c.getAttribute('aria-labelledby'))?.tagName==='H2'; })()"));
-    check(`${size} the card carries the surface's chip, pressed`, await cdp.evaluate("[...document.querySelectorAll('.rl-monochat-float .rl-context-chips button')].map(b=>b.textContent+':'+b.getAttribute('aria-pressed')).join()==='This plan · v3:true'"));
+    // A plan on screen offers no chip (10/11): nothing rides along unseen.
+    check(`${size} the card on a plan carries no context chip`, await cdp.evaluate("!document.querySelector('.rl-monochat-float .rl-context-chips button')"));
     check(`${size} the card holds no headline, recents or History`, await cdp.evaluate("!document.querySelector('.rl-monochat-float h1, .rl-monochat-float [aria-label=\"Jump back in\"], .rl-monochat-float [aria-label=\"Conversation history\"]')"));
     check(`${size} the card never scrolls sideways`, await cdp.evaluate("(() => { const c=document.querySelector('.rl-monochat-float'); return c.scrollWidth <= c.clientWidth && getComputedStyle(c).overflowX==='hidden'; })()"));
     check(`${size} the pill stays a live target while the card is out`, await cdp.evaluate("getComputedStyle(document.querySelector('.rl-monochat-notch')).visibility==='visible'"));

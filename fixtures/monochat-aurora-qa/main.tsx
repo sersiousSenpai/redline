@@ -53,7 +53,7 @@ function Fixture() {
   const cardDestination = destination === "run" ? "run" : "plan";
   const renderComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: Parameters<NonNullable<React.ComponentProps<typeof ChatRoom>["composer"]>["render"]>[1]) => {
     const card = where === "card";
-    const chips = visibleChips(surfaceChips(surfaceOf(surface), { page: { title: "LiDAR-GS", url: "https://github.com/x/lidar-gs" }, tasks: true, plan: { version: 3, title: "Auth rewrite" } }), where === "chat" ? "chat" : card ? cardDestination : destination);
+    const chips = visibleChips(surfaceChips(surfaceOf(surface), { page: { title: "LiDAR-GS", url: "https://github.com/x/lidar-gs" }, tasks: true }), where === "chat" ? "chat" : card ? cardDestination : destination);
     return <FrontDoor floating welcome={where === "door"} recents={recents} onOpenRecent={recent => { if (recent.kind === "chat") openChat(recent.id); }}
       chips={<SurfaceChips chips={chips} pressed={chip => isChipPressed(chip, presses, surface)} onToggle={chip => setPresses(p => toggleChip(p, surface, chip))}/>}
       autoFocusOnShow={where === "door" ? open : where === "chat" && roomChat} accessories={accessories} workbench={workbench}

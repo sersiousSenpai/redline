@@ -7542,11 +7542,9 @@ function App() {
   // effect — and that must not read as anything at all.
   const islandSurfaceKey = `${mainSurface}:${activeId ?? ""}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}`;
   const doorNavKey = `${mainSurface}:${mainSurface === "drafter" ? drafterDraftId ?? "" : ""}:${doorTrip}`;
-  const viewedPlan = sessionReady && activeId ? viewedRevision ?? null : null;
   const contextChips = surfaceChips(activeSurface, {
     page: browserIslandPage,
     tasks: !!browserDock.cartId,
-    plan: viewedPlan ? { version: viewedPlan.versionNumber, title: activePlanTitle } : null,
     file: plateMode === "file" ? activeFile : null,
     draft: !!drafterDraftId,
     diff: codeReview.repo && codeReview.diff ? { repo: codeReview.repo } : null,
@@ -7560,7 +7558,7 @@ function App() {
     if (pressed.length === 0) return [];
     const builders = await import("./lib/contextBlocks").catch(() => null);
     if (!builders) return [];
-    const { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock } = builders;
+    const { diffBlock, draftBlock, fileBlock, pageBlock, taskListBlock } = builders;
     const read = async (id: ContextBlock["id"]): Promise<ContextBlock | null> => {
       switch (id) {
         case "page": {
@@ -7578,10 +7576,6 @@ function App() {
           ]);
           return view ? taskListBlock(renderListMarkdown(view.list, view.items)) : null;
         }
-        case "plan":
-          return viewedPlan && activeId
-            ? planBlock({ sessionId: activeId, version: viewedPlan.versionNumber, title: activePlanTitle, markdown: viewedPlan.rawPlanMarkdown })
-            : null;
         case "file":
           return activeFile ? fileBlock(activeFile) : null;
         case "draft": {

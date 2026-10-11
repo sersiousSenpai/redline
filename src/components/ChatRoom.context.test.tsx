@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 
-const PLAN = "## Context — This plan (v3, Warm chat)\n\nPlan session: s-7\n\n# Warm chat";
+const DRAFT = "## Context — This draft\n\n# Warm chat\n\nKeep the session warm between turns.";
 
 async function render(props: Partial<ChatRoomProps> = {}, typed = "is this sound?") {
   writeSharedDraft("test.chatComposer", typed);
@@ -67,24 +67,24 @@ async function submit() {
 
 describe("chat context, out of band", () => {
   it("reads the card's chips per send and passes them as `context`, never in the bubble", async () => {
-    const contextFor = vi.fn(async () => ({ context: PLAN }));
+    const contextFor = vi.fn(async () => ({ context: DRAFT }));
     await render({ contextFor });
     const { text, opts } = await submit();
     expect(opts.localBody).toBe("is this sound?");
-    expect(text).not.toContain("Plan session");
+    expect(text).not.toContain("Keep the session warm");
     // Read as the send goes out, not when the room rendered.
     expect(contextFor).not.toHaveBeenCalled();
     const args = await cfg.current!.buildSendArgs(text, opts.extra);
     expect(contextFor).toHaveBeenCalledTimes(1);
-    expect(args).toMatchObject({ companionId: "chat-1", text: "is this sound?", mode: "chat", context: PLAN, contextAll: null });
+    expect(args).toMatchObject({ companionId: "chat-1", text: "is this sound?", mode: "chat", context: DRAFT, contextAll: null });
   });
 
   it("passes every pressed chip as `contextAll`, for a send that starts a fresh session", async () => {
     const PAGE = "## Context — This page (Docs)\n\nhttps://docs.test";
-    // The plan went out on an earlier turn; this send adds only the page.
-    await render({ contextFor: async () => ({ context: PAGE, contextAll: `${PLAN}\n\n${PAGE}` }) });
+    // The draft went out on an earlier turn; this send adds only the page.
+    await render({ contextFor: async () => ({ context: PAGE, contextAll: `${DRAFT}\n\n${PAGE}` }) });
     const args = await cfg.current!.buildSendArgs("and now?", { mode: "chat" });
-    expect(args).toMatchObject({ context: PAGE, contextAll: `${PLAN}\n\n${PAGE}` });
+    expect(args).toMatchObject({ context: PAGE, contextAll: `${DRAFT}\n\n${PAGE}` });
   });
 
   it("attaches nothing without a source, or when the read fails", async () => {
@@ -102,16 +102,16 @@ describe("chat context, out of band", () => {
 
   it("sends the seed with the attachment read when it left the card", async () => {
     const contextFor = vi.fn(async () => ({ context: "a later read" }));
-    await render({ seed: "what about the beta?", seedId: "seed-1", seedContext: PLAN, contextFor }, "");
+    await render({ seed: "what about the beta?", seedId: "seed-1", seedContext: DRAFT, contextFor }, "");
     const [text, opts] = lastSend();
     expect(text).toBe("what about the beta?");
     const args = await cfg.current!.buildSendArgs(text, (opts as { extra?: unknown }).extra);
-    expect(args.context).toBe(PLAN);
+    expect(args.context).toBe(DRAFT);
     expect(contextFor).not.toHaveBeenCalled();
   });
 
   it("a seed with nothing attached stays empty-handed", async () => {
-    const contextFor = vi.fn(async () => ({ context: PLAN }));
+    const contextFor = vi.fn(async () => ({ context: DRAFT }));
     await render({ seed: "hello", seedId: "seed-2", contextFor }, "");
     const [text, opts] = lastSend();
     const args = await cfg.current!.buildSendArgs(text, (opts as { extra?: unknown }).extra);

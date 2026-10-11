@@ -4,11 +4,11 @@
 // What the Front Door's composer can attach from the surface you are standing
 // on — in the door, the pill's compact card, or a chat.
 //
-// Every surface offers its own "this thing" chip — the page, the plan, the
-// open file, the draft, the diff — and a pressed chip rides along with
-// whatever the composer sends. Explicit by design: nothing is attached that the
-// user was not shown and left pressed, and a surface with nothing selectable
-// on screen offers no chip at all rather than one that attaches nothing.
+// A surface offers its own "this thing" chip — the page, the open file, the
+// draft, the diff — and a pressed chip rides along with whatever the composer
+// sends. Explicit by design: nothing is attached that the user was not shown
+// and left pressed, and a surface with nothing selectable on screen offers no
+// chip at all rather than one that attaches nothing.
 //
 // Pure. App reads the sources when something is sent (`gatherContext`); this
 // module decides which chips exist, which are pressed, and how the blocks are
@@ -26,7 +26,7 @@ export interface BrowserIslandPage {
   selection?: string;
 }
 
-export type ContextChipId = "page" | "tasks" | "plan" | "file" | "draft" | "diff";
+export type ContextChipId = "page" | "tasks" | "file" | "draft" | "diff";
 
 export interface ContextChip {
   id: ContextChipId;
@@ -42,7 +42,6 @@ export interface ChipSources {
   page?: { title: string; url: string } | null;
   /** The browser tab's working list exists. */
   tasks?: boolean;
-  plan?: { version: number; title: string | null } | null;
   file?: string | null;
   draft?: boolean;
   diff?: { repo: string } | null;
@@ -60,10 +59,12 @@ export function surfaceChips(surface: SurfaceInfo, sources: ChipSources): Contex
         chips.push({ id: "tasks", label: "Task list", title: "This tab's working list", defaultOn: false });
       return chips;
     }
+    // No chip, and nothing rides along unseen either (10/11): a plan started
+    // while reading an older one is a new piece of work, not a revision of
+    // it. A chat still knows which plan is on screen from its surface line
+    // and can read it over the bridge.
     case "plan":
-      return sources.plan
-        ? [{ id: "plan", label: `This plan · v${sources.plan.version}`, title: sources.plan.title ?? "The plan on screen", defaultOn: true }]
-        : [];
+      return [];
     // The file viewer reports itself as the terminal-ish surface.
     case "terminal":
       return sources.file
@@ -143,7 +144,7 @@ export interface ContextBlock {
   body: string;
 }
 
-/** Per block. A whole plan or draft fits comfortably; a pathological one is
+/** Per block. A whole draft or task list fits comfortably; a pathological one is
  *  cut with a note rather than silently swamping the prompt. */
 export const CONTEXT_BLOCK_MAX = 40_000;
 

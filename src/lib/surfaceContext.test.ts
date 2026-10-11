@@ -19,7 +19,9 @@ import {
   type ContextChip,
   type SentContext,
 } from "./surfaceContext";
-import { diffBlock, draftBlock, fileBlock, pageBlock, planBlock, taskListBlock, unsentAttachment } from "./contextBlocks";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { diffBlock, draftBlock, fileBlock, pageBlock, taskListBlock, unsentAttachment } from "./contextBlocks";
 
 const surface = (kind: SurfaceInfo["kind"], over: Partial<SurfaceInfo> = {}): SurfaceInfo => ({
   kind, id: null, label: null, detail: null, projectPath: null, updatedAt: 0, ...over,
@@ -27,7 +29,6 @@ const surface = (kind: SurfaceInfo["kind"], over: Partial<SurfaceInfo> = {}): Su
 const everything: ChipSources = {
   page: { title: "LiDAR-GS", url: "https://github.com/x/lidar-gs" },
   tasks: true,
-  plan: { version: 3, title: "Auth rewrite" },
   file: "/repo/src/main.rs",
   draft: true,
   diff: { repo: "/repo" },
@@ -42,7 +43,6 @@ describe("surfaceChips — one 'this thing' chip per surface", () => {
   });
 
   it("each document-like surface offers its own, pressed by default", () => {
-    expect(chipSet("plan")).toEqual([["plan", "This plan · v3", true]]);
     expect(chipSet("terminal")).toEqual([["file", "This file", true]]);
     expect(chipSet("drafter")).toEqual([["draft", "This draft", true]]);
     expect(chipSet("review")).toEqual([["diff", "This diff", true]]);
@@ -53,9 +53,28 @@ describe("surfaceChips — one 'this thing' chip per surface", () => {
       expect(chipSet(kind)).toEqual([]);
   });
 
+  // 10/11: "This plan · v3" is gone from the card and the door, and nothing
+  // rides along in its place — a plan started while reading another is new
+  // work, and a chat learns the plan on screen from its surface line.
+  it("a plan on screen offers no chip, so no send attaches it", () => {
+    expect(chipSet("plan")).toEqual([]);
+    for (const destination of ["plan", "run", "drafter", "chat"] as const)
+      expect(visibleChips(surfaceChips(surface("plan"), everything), destination)).toEqual([]);
+  });
+
+  it("nothing builds or reads a plan block any more", () => {
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    const gather = app.slice(app.indexOf("const gatherContext = async"), app.indexOf("const launchFromFrontDoor = async"));
+    expect(gather).not.toMatch(/case "plan"|planBlock|rawPlanMarkdown/);
+    expect(readFileSync(join(process.cwd(), "src/lib/contextBlocks.ts"), "utf8")).not.toContain("planBlock");
+    // Nothing in the app names a plan chip.
+    const sources = (dir: string): string[] => readdirSync(join(process.cwd(), dir), { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? sources(join(dir, entry.name)) : /\.(tsx?|css)$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name) ? [join(dir, entry.name)] : []);
+    for (const file of sources("src")) expect(readFileSync(join(process.cwd(), file), "utf8"), file).not.toContain("This plan ·");
+  });
+
   it("never offers a chip with nothing behind it", () => {
     expect(chipSet("browser", { page: { title: "", url: "" } })).toEqual([]);
-    expect(chipSet("plan", {})).toEqual([]);
     expect(chipSet("terminal", { file: null })).toEqual([]);
     expect(chipSet("drafter", { draft: false })).toEqual([]);
     expect(chipSet("review", { diff: null })).toEqual([]);
@@ -71,24 +90,24 @@ describe("surfaceChips — one 'this thing' chip per surface", () => {
 });
 
 describe("chip presses", () => {
-  const plan: ContextChip = { id: "plan", label: "This plan · v3", title: "", defaultOn: true };
+  const page: ContextChip = { id: "page", label: "This page", title: "", defaultOn: true };
   const tasks: ContextChip = { id: "tasks", label: "Task list", title: "", defaultOn: false };
   const none = { surfaceKey: "", on: {} };
 
   it("start from each chip's default", () => {
-    expect(isChipPressed(plan, none, "document:a")).toBe(true);
+    expect(isChipPressed(page, none, "browser:a")).toBe(true);
     expect(isChipPressed(tasks, none, "browser::")).toBe(false);
   });
 
   it("toggle for the surface they were pressed on", () => {
-    const off = toggleChip(none, "document:a", plan);
-    expect(isChipPressed(plan, off, "document:a")).toBe(false);
-    expect(isChipPressed(plan, toggleChip(off, "document:a", plan), "document:a")).toBe(true);
+    const off = toggleChip(none, "browser:a", page);
+    expect(isChipPressed(page, off, "browser:a")).toBe(false);
+    expect(isChipPressed(page, toggleChip(off, "browser:a", page), "browser:a")).toBe(true);
   });
 
   it("reset to the defaults when the surface changes", () => {
-    const off = toggleChip(none, "document:a", plan);
-    expect(isChipPressed(plan, off, "document:b")).toBe(true);
+    const off = toggleChip(none, "browser:a", page);
+    expect(isChipPressed(page, off, "browser:b")).toBe(true);
     // A toggle on the new surface starts from ITS defaults, not the old map.
     const on = toggleChip(off, "browser::", tasks);
     expect(on).toEqual({ surfaceKey: "browser::", on: { tasks: true } });
@@ -136,11 +155,11 @@ describe("withContext — the generalised browser island prompt", () => {
 
   it("renders one section per block, in order", () => {
     const text = renderContextBlocks([
-      planBlock({ sessionId: "s1", version: 3, title: "Auth rewrite", markdown: "# Plan\nSteps" }),
+      draftBlock("# Plan\nSteps"),
       fileBlock("/repo/src/main.rs"),
     ]);
     expect(text).toBe(
-      "## Context — This plan (v3, Auth rewrite)\n\nPlan session: s1\n\n# Plan\nSteps\n\n" +
+      "## Context — This draft\n\n# Plan\nSteps\n\n" +
         "## Context — This file (main.rs)\n\nPath: /repo/src/main.rs\n\nThe user has this file open. Read it from disk; its contents are not inlined here.",
     );
   });
@@ -156,7 +175,7 @@ describe("truncation", () => {
     expect(capped.length).toBeLessThan(CONTEXT_BLOCK_MAX + 100);
   });
 
-  it("applies per block, so one huge plan doesn't crowd out the rest", () => {
+  it("applies per block, so one huge draft doesn't crowd out the rest", () => {
     const text = renderContextBlocks([draftBlock("d".repeat(CONTEXT_BLOCK_MAX * 2)), taskListBlock("- [ ] keep me")]);
     expect(text).toContain("[Truncated:");
     expect(text).toContain("- [ ] keep me");
@@ -208,85 +227,85 @@ describe("diffBlock — the review's shape, not its bytes", () => {
 });
 
 describe("unsentAttachment — a chat's attachments, once per version", () => {
-  const plan = (version: number, markdown = "# Auth rewrite\n- step one") =>
-    planBlock({ sessionId: "s-1", version, title: "Auth rewrite", markdown });
+  /** The Drafter's document at one of its saves. */
+  const draft = (save: number, markdown = "# Auth rewrite\n- step one") => draftBlock(`${markdown}\n\nSave ${save}`);
   const page = pageBlock({ label: "browser-1", title: "Docs", url: "https://docs.test" });
   const attach = (sent: Map<string, SentContext>, chatId: string, provider: string, blocks: ContextBlock[]) =>
     unsentAttachment(sent, chatId, provider, blocks).context;
 
   it("hands a chat each block once, and nothing when nothing changed", () => {
     const sent = new Map<string, SentContext>();
-    const first = attach(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(first).toBe(renderContextBlocks([plan(3), page]));
-    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    const first = attach(sent, "chat-1", "claude-code", [draft(3), page]);
+    expect(first).toBe(renderContextBlocks([draft(3), page]));
+    expect(attach(sent, "chat-1", "claude-code", [draft(3), page])).toBeNull();
   });
 
-  it("sends only the block that changed — a revision, or an edit at the same version", () => {
+  it("sends only the block that changed — a later save, or an edit to the same one", () => {
     const sent = new Map<string, SentContext>();
-    attach(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(attach(sent, "chat-1", "claude-code", [plan(4), page])).toBe(renderContextBlocks([plan(4)]));
-    const edited = plan(4, "# Auth rewrite\n- step one\n- step two");
+    attach(sent, "chat-1", "claude-code", [draft(3), page]);
+    expect(attach(sent, "chat-1", "claude-code", [draft(4), page])).toBe(renderContextBlocks([draft(4)]));
+    const edited = draft(4, "# Auth rewrite\n- step one\n- step two");
     expect(attach(sent, "chat-1", "claude-code", [edited, page])).toBe(renderContextBlocks([edited]));
   });
 
   it("carries every pressed block alongside, for a send that starts a fresh session", () => {
     const sent = new Map<string, SentContext>();
     // Everything is new: `context` already says it all.
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toEqual({ context: renderContextBlocks([plan(3)]), contextAll: null });
-    // The plan went out already; the page is new.
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3), page])).toEqual({
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [draft(3)])).toEqual({ context: renderContextBlocks([draft(3)]), contextAll: null });
+    // The draft went out already; the page is new.
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [draft(3), page])).toEqual({
       context: renderContextBlocks([page]),
-      contextAll: renderContextBlocks([plan(3), page]),
+      contextAll: renderContextBlocks([draft(3), page]),
     });
     // Nothing new, still pressed.
-    expect(unsentAttachment(sent, "chat-1", "claude-code", [plan(3)])).toEqual({ context: null, contextAll: renderContextBlocks([plan(3)]) });
+    expect(unsentAttachment(sent, "chat-1", "claude-code", [draft(3)])).toEqual({ context: null, contextAll: renderContextBlocks([draft(3)]) });
     expect(unsentAttachment(sent, "chat-1", "claude-code", [])).toEqual({ context: null, contextAll: null });
   });
 
   it("remembers per chat, and forgets a chat whose attachment was lost", () => {
     const sent = new Map<string, SentContext>();
-    attach(sent, "chat-1", "claude-code", [plan(3)]);
+    attach(sent, "chat-1", "claude-code", [draft(3)]);
     // Another conversation has never seen it.
-    expect(attach(sent, "chat-2", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-2", "claude-code", [draft(3)])).toBe(renderContextBlocks([draft(3)]));
     // A send that never arrived: the next one carries everything again.
     forgetSent(sent, "chat-1", "unsent");
-    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [draft(3)])).toBe(renderContextBlocks([draft(3)]));
   });
 
   it("starts over when the chat moves to another provider, and again when it moves back", () => {
     // A provider switch is a fresh CLI session either way (companion.rs's
     // handoff), so the first turn on the new provider carries everything.
     const sent = new Map<string, SentContext>();
-    attach(sent, "chat-1", "claude-code", [plan(3), page]);
-    expect(attach(sent, "chat-1", "codex", [plan(3), page])).toBe(renderContextBlocks([plan(3), page]));
-    expect(attach(sent, "chat-1", "codex", [plan(3), page])).toBeNull();
-    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    attach(sent, "chat-1", "claude-code", [draft(3), page]);
+    expect(attach(sent, "chat-1", "codex", [draft(3), page])).toBe(renderContextBlocks([draft(3), page]));
+    expect(attach(sent, "chat-1", "codex", [draft(3), page])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [draft(3)])).toBe(renderContextBlocks([draft(3)]));
   });
 
   it("a fresh session holds exactly what was pressed when it started", () => {
     const sent = new Map<string, SentContext>();
-    attach(sent, "chat-1", "claude-code", [plan(3), page]);
+    attach(sent, "chat-1", "claude-code", [draft(3), page]);
     // A rotation: the backend hands the new session `contextAll`, every
     // pressed block, on the turn that starts it — nothing is lost, and
     // nothing goes twice.
-    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [draft(3), page])).toBeNull();
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBeNull();
+    expect(attach(sent, "chat-1", "claude-code", [draft(3), page])).toBeNull();
     // A block handed to the old session but not pressed when the new one
     // started never reached the new one, so it goes again when pressed.
-    attach(sent, "chat-1", "claude-code", [plan(3)]);
+    attach(sent, "chat-1", "claude-code", [draft(3)]);
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(attach(sent, "chat-1", "claude-code", [plan(3), page])).toBe(renderContextBlocks([page]));
+    expect(attach(sent, "chat-1", "claude-code", [draft(3), page])).toBe(renderContextBlocks([page]));
   });
 
   it("a turn with nothing pressed still counts, and a send that never arrived is always forgotten", () => {
     const sent = new Map<string, SentContext>();
-    attach(sent, "chat-1", "claude-code", [plan(3)]);
+    attach(sent, "chat-1", "claude-code", [draft(3)]);
     expect(attach(sent, "chat-1", "claude-code", [])).toBeNull();
     forgetSent(sent, "chat-1", "fresh-session");
-    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [draft(3)])).toBe(renderContextBlocks([draft(3)]));
     forgetSent(sent, "chat-1", "unsent");
-    expect(attach(sent, "chat-1", "claude-code", [plan(3)])).toBe(renderContextBlocks([plan(3)]));
+    expect(attach(sent, "chat-1", "claude-code", [draft(3)])).toBe(renderContextBlocks([draft(3)]));
     // Forgetting a chat that was never handed anything is harmless.
     forgetSent(sent, "chat-9", "fresh-session");
     expect(sent.has("chat-9")).toBe(false);
