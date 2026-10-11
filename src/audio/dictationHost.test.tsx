@@ -708,6 +708,22 @@ describe("the reply to a turn sent in the background", () => {
     expect(strip.get()).toMatchObject({ phase: "notice", copy: "is the replay safe on remote" });
   });
 
+  it("is left to the panel when it opens on the conversation while the words are said", async () => {
+    pill();
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    mic.say("is the replay safe");
+    taker = { key: "plan-1", start: vi.fn(), stop: vi.fn(), cancel: vi.fn() };
+    now += 1500;
+    press({ type: "up", at: now });
+    await settle();
+    expect(voiceCalls().map(([cmd]) => cmd)).toEqual(["voice_session_start", "voice_send"]);
+    expect(away.expect).not.toHaveBeenCalled();
+    expect(voiceCaption.get()).toBeNull();
+  });
+
   it("is hushed by the next hold, and handed to the panel that opens on its conversation", async () => {
     talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
     await hold("is the replay safe on remote");

@@ -344,7 +344,11 @@ export class DictationHost {
 
   /** A captioned capture that sends nothing: the pill's caption goes. */
   private uncaption(s: Session): void {
-    if (s.captioned && voiceCaption.get()?.key === s.talk!.key && voiceCaption.get()?.phase === "hearing") voiceCaption.set(null);
+    if (s.captioned) this.uncaptionKey(s.talk!.key);
+  }
+
+  private uncaptionKey(key: string): void {
+    if (voiceCaption.get()?.key === key && voiceCaption.get()?.phase === "hearing") voiceCaption.set(null);
   }
 
   /** Change the strip — only while it is this host's, or nobody's: the voice
@@ -455,9 +459,13 @@ export class DictationHost {
   private async sendTurn(talk: TalkContext, text: string, captioned: boolean): Promise<void> {
     const call = this.deps.invoke;
     const send = () => call<TurnId | null>("voice_send", { sessionId: talk.key, text, label: text });
-    voiceCaption.set(captionFor(talk.key, "thinking", Date.now()));
-    const away = await this.deps.away().catch(() => null);
-    this.replying = away;
+    // The panel opened on it while the words were said: it shows and speaks
+    // the reply itself.
+    const panel = this.deps.taker()?.key === talk.key;
+    if (panel) this.uncaptionKey(talk.key);
+    else voiceCaption.set(captionFor(talk.key, "thinking", Date.now()));
+    const away = panel ? null : await this.deps.away().catch(() => null);
+    if (away) this.replying = away;
     try {
       await call("voice_session_start", { sessionId: talk.key, planMarkdown: talk.markdown(), cwd: talk.cwd });
       // Listening before it goes: the reply's first words can't be missed.
