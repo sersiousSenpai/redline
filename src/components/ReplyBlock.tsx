@@ -26,15 +26,16 @@
 //! - **Text.** `StreamingText` live, `MarkdownView` settled — byte-identical
 //!   markup for a body with no diagram.
 //! - **Tail row.** One fixed height in both phases. Live it is the turn's one
-//!   status line (`chatProgress`, the shared shimmer, `role="status"`) and
-//!   nothing else; settled it is the surface's actions (on hover, on focus,
-//!   and always on the latest reply), the ⋯ that opens the raw-stream
-//!   inspector, and one ellipsized meter line.
+//!   status line (`chatProgress`, the shared shimmer, `role="status"`), and
+//!   on a hover or focus the ⋯ to the raw stream; settled it is the surface's
+//!   actions (on hover, on focus, and always on the latest reply), the ⋯,
+//!   and one ellipsized meter line. A raw stream opened on a live reply stays
+//!   open on the reply it settles into.
 //!
 //! No box, no caret, no second indicator, and no Stop: Stop is the
 //! composer's primary button (`SendStopButton`).
 
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MoreHorizontal } from "lucide-react";
 
 import { MarkdownView } from "./MarkdownView";
@@ -58,6 +59,10 @@ import "./ReplyBlock.css";
 /** The raw-wire pane. Lazy on purpose — it is devtools, most turns never open
  *  it, and `boot.test.ts` pins that no module reaches it statically. */
 const StreamInspector = lazy(() => import("./StreamInspector"));
+
+/** Threads whose raw stream was open on a live reply as it went: the reply it
+ *  settles into, mounting in the same commit, opens it again. */
+const handedOver = new Set<string>();
 
 export interface ReplyBlockProps {
   phase: "live" | "settled";
@@ -126,6 +131,22 @@ export function ReplyBlock({
   const live = phase === "live";
   const [stepsOpen, setStepsOpen] = useState(false);
   const [inspecting, setInspecting] = useState(false);
+  // A raw stream watched on a live reply is not shut on the turn's last lines:
+  // the live block leaves it to its thread as it goes, and the settled block
+  // taking its place picks it up (a commit runs removals' layout cleanups
+  // before additions' layout effects). Unclaimed, it lapses with the task.
+  const wire = inspect ? `${inspect.surface}\u0000${inspect.key}` : null;
+  const watching = useRef(inspecting);
+  watching.current = inspecting;
+  useLayoutEffect(() => {
+    if (!wire) return;
+    if (!live && handedOver.delete(wire)) setInspecting(true);
+    return () => {
+      if (!live || !watching.current) return;
+      handedOver.add(wire);
+      queueMicrotask(() => handedOver.delete(wire));
+    };
+  }, [wire, live]);
   // When the reply last grew: the tail reads "Writing the reply" until a
   // newer step arrives. Kept off state, because the text re-renders this
   // block every frame anyway.
@@ -193,6 +214,11 @@ export function ReplyBlock({
             startedAt={startedAt}
             retrying={retrying}
             lastOutputAt={output.current.at}
+            more={inspect && (
+              <div className="rl-reply-actions">
+                <ReplyMore inspecting={inspecting} onInspect={() => setInspecting((on) => !on)} />
+              </div>
+            )}
           />
         ) : (
           <>
@@ -225,10 +251,10 @@ function swapped(seat: string | null, model: string): boolean {
 }
 
 /** The live tail: the turn's one status line, with its elapsed clock on the
- *  right where the settled meter will sit. Its own component so the
- *  one-second clock re-renders a phrase, never the reply's text. The clock
- *  sits outside the live region, so a screen reader hears the phrase change
- *  and not every second. */
+ *  right where the settled meter will sit, and `more` (the ⋯) between them.
+ *  Its own component so the one-second clock re-renders a phrase, never the
+ *  reply's text. The clock sits outside the live region, so a screen reader
+ *  hears the phrase change and not every second. */
 function LiveStatus({
   activity,
   meter,
@@ -236,6 +262,7 @@ function LiveStatus({
   startedAt,
   retrying,
   lastOutputAt,
+  more,
 }: {
   activity: readonly Activity[];
   meter: TurnMeter | null;
@@ -243,6 +270,7 @@ function LiveStatus({
   startedAt: number | null;
   retrying: boolean;
   lastOutputAt: number;
+  more?: ReactNode;
 }) {
   const [mountedAt] = useState(Date.now);
   const [now, setNow] = useState(Date.now);
@@ -265,6 +293,7 @@ function LiveStatus({
           <span className="rl-working-glint" data-label={label} aria-hidden />
         </span>
       </span>
+      {more}
       <span className="rl-reply-meter" aria-hidden>
         {quiet ? `quiet ${elapsedLabel(progress.quietFor)} · ${progress.elapsed}` : progress.elapsed}
       </span>

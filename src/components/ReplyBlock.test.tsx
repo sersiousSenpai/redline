@@ -230,6 +230,34 @@ describe("the tail row", () => {
     expect(host.querySelector("[data-inspector]")).not.toBeNull();
   });
 
+  it("reaches the raw stream from a live reply too, and keeps it open as the reply settles", async () => {
+    const live = { phase: "live", byline: "Claude", text: "Because", meter: meter(), startedAt: 1_000, inspect: { surface: "companion", key: "chat-1" } } as const;
+    const open = async () => {
+      await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="More for this reply"]')!.click());
+      const show = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((b) => b.textContent?.includes("Show the raw stream"))!;
+      await act(async () => show.click());
+    };
+    await render(live);
+    const tail = host.querySelector("[data-reply-tail]")!;
+    // Still the turn's one status line, with the ⋯ beside its clock.
+    expect(tail.querySelectorAll("[role=status]")).toHaveLength(1);
+    expect(tail.querySelector('.rl-reply-actions [aria-label="More for this reply"]')).not.toBeNull();
+    await open();
+    expect(host.querySelector('[data-reply="live"] [data-inspector]')).not.toBeNull();
+    // The surface swaps the live block for the settled row (a remount, as
+    // at done): the row it settled into keeps the raw stream open...
+    const settled = { ...live, phase: "settled", activity: undefined, startedAt: undefined } as const;
+    await act(async () => root.render(<div key="settled"><ReplyBlock {...settled} /></div>));
+    expect(host.querySelector('[data-reply="settled"] [data-inspector]')).not.toBeNull();
+    // ...and only that row: an older row of the thread mounting later doesn't.
+    await act(async () => root.render(<div key="settled"><ReplyBlock {...settled} /><ReplyBlock {...settled} /></div>));
+    expect(host.querySelectorAll("[data-inspector]")).toHaveLength(1);
+    // A live reply whose stream was shut hands nothing over.
+    await act(async () => root.render(<div key="live"><ReplyBlock {...live} /></div>));
+    await act(async () => root.render(<div key="again"><ReplyBlock {...settled} /></div>));
+    expect(host.querySelector("[data-inspector]")).toBeNull();
+  });
+
   it("offers no ⋯ where the surface captures nothing", async () => {
     await render({ phase: "settled", byline: "Claude", text: REPLY, meter: meter() });
     expect(host.querySelector('[aria-label="More for this reply"]')).toBeNull();
@@ -293,6 +321,8 @@ describe("the stylesheet", () => {
 
   it("reveals the actions by opacity, never by taking or giving space", () => {
     expect(rule(".rl-reply-actions")).toMatch(/opacity: 0;/);
+    // A live reply's ⋯ waits for a hover or focus even when it is the newest.
+    expect(css).toMatch(/\.rl-reply\[data-reply="live"\]:not\(:hover, :focus-within\) \.rl-reply-actions \{ opacity: 0; \}/);
     expect(css).not.toMatch(/\.rl-reply-actions[^{]*\{[^}]*display: none/);
   });
 

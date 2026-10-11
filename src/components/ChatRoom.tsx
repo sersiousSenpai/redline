@@ -718,7 +718,8 @@ export function ChatRoom({
           {streaming && (
             // The reply as it will settle: the same skeleton, and its tail is
             // the turn's one status line. It streams plain; the settled row
-            // draws a diagram the stream showed as its fence.
+            // draws a diagram the stream showed as its fence. Its ⋯ reaches
+            // the raw stream mid-turn — a new thread's first turn included.
             <ReplyBlock
               phase="live"
               byline={providerByline(meter, provider)}
@@ -729,6 +730,7 @@ export function ChatRoom({
               startedAt={startedAt}
               status={retrieving}
               room={roomy}
+              inspect={{ surface: "companion", key: companionId }}
             />
           )}
           {/* In-turn notices end the thread, quietly: a bar above it would

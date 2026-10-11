@@ -111,6 +111,13 @@ describe("the chat as a brainstorm room", () => {
     expect(host.querySelector("[data-streaming]")!.getAttribute("data-room")).toBe("true");
   });
 
+  it("reaches the raw stream from a reply still streaming, a new thread's first included", async () => {
+    turn.messages = [{ id: "u1", role: "user", body: "Should the chat be warm?", status: "complete" }];
+    turn.status = "streaming";
+    await render();
+    expect(host.querySelector('[data-reply="live"] [data-reply-tail] [aria-label="More for this reply"]')).not.toBeNull();
+  });
+
   it("lists what the last turn injected in a collapsible Context chip", async () => {
     contextReply.value = {
       companionId: "chat-1", delivery: "delta", briefBytes: 900, memory: "Found 2 notes", at: 1,
