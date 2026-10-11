@@ -328,6 +328,29 @@ describe("LocalPolish", () => {
     expect(host.textContent).toContain("Remove local polish and everything it downloaded?");
   });
 
+  it("and says it again once the other is removed beside it", async () => {
+    rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render("card", "polish");
+    // Local polish goes: the voice is now the last, and takes the runtime.
+    rust.status = { ...rust.status, models: { [EIGHT]: {} } };
+    await act(async () => button("Remove local polish…")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Remove local polish"] button')!.click());
+    await flush();
+    await act(async () => button("Remove the studio voice…")!.click());
+    expect(host.textContent).toContain("Remove the studio voice and everything it downloaded?");
+    // And the other way round.
+    act(() => root.unmount());
+    root = createRoot(host);
+    rust.status = { ...rust.status, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render("card", "polish");
+    rust.status = { ...rust.status, installed: false, models: { [POLISH]: {} } };
+    await act(async () => button("Remove the studio voice…")!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Remove the studio voice"] button')!.click());
+    await flush();
+    await act(async () => button("Remove local polish…")!.click());
+    expect(host.textContent).toContain("Remove local polish and everything it downloaded?");
+  });
+
   it("credits what it downloads, apart from the voice", async () => {
     await render("card", "polish");
     const [voice, polish] = [...host.querySelectorAll("details")].map((d) => d.textContent!);

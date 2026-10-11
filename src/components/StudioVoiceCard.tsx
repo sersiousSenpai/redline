@@ -132,9 +132,15 @@ function blocker(code: string, p: Preflight, use: string): string {
   }
 }
 
+/** A remove, told to both parts: what the other's Remove says (and whether
+ *  it takes the runtime) changes with it, and Rust says nothing when no
+ *  process was running. */
+const REMOVED = "rl-studio-removed";
+const removed = () => window.dispatchEvent(new Event(REMOVED));
+
 /** Each install's last progress — the voice's and local polish's — from
- *  `studio-setup`. `changed` runs as an install ends (with its last event) or
- *  the process changes. */
+ *  `studio-setup`. `changed` runs as an install ends (with its last event),
+ *  the process changes, or either is removed. */
 function useStudioSetup(changed: (ended?: Setup) => void) {
   const [setup, setSetup] = useState<Setup | null>(null);
   const [polishSetup, setPolishSetup] = useState<Setup | null>(null);
@@ -149,8 +155,11 @@ function useStudioSetup(changed: (ended?: Setup) => void) {
       }),
       listen("studio-status", () => hear.current()),
     ];
+    const onRemoved = () => hear.current();
+    window.addEventListener(REMOVED, onRemoved);
     return () => {
       for (const p of subs) void p.then((un) => un());
+      window.removeEventListener(REMOVED, onRemoved);
     };
   }, []);
   return { setup, setSetup, polishSetup, setPolishSetup };
@@ -343,7 +352,7 @@ export function StudioVoiceCard({
     void invoke("tts_studio", { op: "remove" })
       .then(() => {
         setSetup(null);
-        refresh();
+        removed();
       })
       .catch((e) => onError(String(e)));
   };
@@ -563,7 +572,7 @@ export function LocalPolish({ onError }: { onError: (msg: string) => void }) {
     void invoke("tts_studio", { op: "remove", args: { polish: true } })
       .then(() => {
         setSetup(null);
-        refresh();
+        removed();
       })
       .catch((e) => onError(String(e)));
 
