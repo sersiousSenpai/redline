@@ -23,7 +23,7 @@
 
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { nextGeneration } from "./cloudTts";
+import { nextGeneration } from "./generation";
 
 export interface PolishEngine {
   /** Polish dictated `text`, spelling the terms in `vocab` exactly as given. */

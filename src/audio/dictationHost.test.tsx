@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -609,5 +611,26 @@ describe("with nothing that takes text focused", () => {
   it("offers the words for copying when there is no conversation to send them to", async () => {
     await hold("remember to rerun the size check");
     expect(strip.get()).toMatchObject({ phase: "notice", copy: "remember to rerun the size check" });
+  });
+});
+
+describe("its chunk", () => {
+  it("loads with the terminal without the speech engines", () => {
+    // App.tsx loads it at every launch; the speech drivers load once Redline
+    // speaks. Its static imports, then (a type or a lazy import costs nothing).
+    const reached = new Set<string>();
+    const walk = (file: string) => {
+      if (reached.has(file)) return;
+      reached.add(file);
+      const from = /^\s*(?:import|export)\s+(?!type\b)(?:[^"';]*?\sfrom\s+)?"(\.[^"]+)"/gm;
+      for (const [, rel] of readFileSync(file, "utf8").matchAll(from)) {
+        const base = join(dirname(file), rel);
+        const hit = [`${base}.ts`, `${base}.tsx`].find((f) => existsSync(f));
+        if (hit) walk(hit);
+      }
+    };
+    walk("src/audio/dictationHost.ts");
+    expect(reached).toContain("src/audio/generation.ts");
+    expect([...reached].filter((f) => /\/(cloudTts|studioTts|speech|useReadAloud)\.ts$/.test(f))).toEqual([]);
   });
 });

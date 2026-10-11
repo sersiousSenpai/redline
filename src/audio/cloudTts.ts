@@ -30,6 +30,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { nextGeneration } from "./generation";
 import { clampRate, type SpeechDriver } from "./speech";
 
 interface TtsAudio {
@@ -52,12 +53,6 @@ const CANCELLED = "cancelled";
 /** What the settings ▶ says in a voice being auditioned. */
 const VOICE_SAMPLE =
   "Here's how I'll sound reading your plan back to you. Tell me what to change, and we'll work through it.";
-
-// Generations are unique across every driver in the app, because `tts_cancel`
-// is app-wide: cancelling the voice panel's reply must never drop a chat's read
-// aloud. Seeding from the clock keeps two windows' counters apart as well.
-let lastGeneration = Date.now();
-export const nextGeneration = () => ++lastGeneration;
 
 function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
