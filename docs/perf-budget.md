@@ -724,9 +724,9 @@ builds of the integration branch itself.
 | `feat/voice-eot` | +32,896 B | 0 | +6,797 B |
 | All merged (`e5038c9`) | 40,284,736 B | 635,104 B | 9,404,616 B |
 | One download helper (`pinned_fetch.rs`) | 40,234,848 B (−49,888 B) | 635,104 B | 9,404,616 B |
-| Final fixes (`f055a10`..`9cf7a11`) | 40,284,672 B (+49,824 B) | 636,044 B (+940 B) | 9,420,081 B (+15,465 B) |
+| Final fixes (`f055a10`..`59f3ebe`) | 40,284,672 B (+49,824 B) | 636,044 B (+940 B) | 9,420,190 B (+15,574 B) |
 
-That leaves 1,115,328 B of binary, 23,956 B of boot JS and 29,919 B of dist
+That leaves 1,115,328 B of binary, 23,956 B of boot JS and 29,810 B of dist
 under the unchanged ceilings. The download row folds tts.rs's own resumable
 fetch, with its async file writes, into the one Whisper and the end-of-turn
 model already used. The final fixes are Kokoro's hash-pinned lock and its
