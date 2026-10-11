@@ -211,4 +211,33 @@ describe("the Context chip", () => {
       Object.assign(turn, { status: "idle", liveText: "" });
     }
   });
+
+  it("shuts on the first Esc wherever the caret is, before the door hears it", async () => {
+    // A click never focuses a button in WebKit, so the caret is still in the
+    // composer when the list is open; the door listens on the document.
+    await render({}, "");
+    await act(async () => listeners.get("companion-context")!({ payload: CONTEXT }));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-chat-context] button")!.click());
+    const composer = document.createElement("textarea");
+    host.append(composer);
+    composer.focus();
+    const door = vi.fn();
+    document.addEventListener("keydown", door);
+    try {
+      const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => composer.dispatchEvent(escape));
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+      expect(door).not.toHaveBeenCalled();
+      // Shut, it leaves the next Esc to the door.
+      await act(async () => composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      expect(door).toHaveBeenCalledTimes(1);
+      // An IME's Esc cancels its composition, nothing else.
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-chat-context] button")!.click());
+      await act(async () => composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, isComposing: true })));
+      expect(host.querySelector("[data-chat-context-panel]")).not.toBeNull();
+    } finally {
+      document.removeEventListener("keydown", door);
+      composer.remove();
+    }
+  });
 });

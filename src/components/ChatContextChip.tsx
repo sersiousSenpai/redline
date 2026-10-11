@@ -29,14 +29,28 @@ export function ChatContextChip({
   const list = useRef<HTMLDivElement>(null);
   const id = useId();
   // An overlay closes on a press anywhere else (which still lands) or Esc.
+  // Esc shuts the list first wherever the caret is — a click never focuses
+  // the chip in WebKit, so it is usually still in the composer — and the
+  // room (or the door around it) hears the next one.
   useEffect(() => {
     if (!open) return;
     const away = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (!chip.current?.contains(target) && !list.current?.contains(target)) setOpen(false);
     };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (list.current?.contains(document.activeElement)) chip.current?.focus();
+      setOpen(false);
+    };
     document.addEventListener("pointerdown", away, true);
-    return () => document.removeEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", escape, true);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", escape, true);
+    };
   }, [open]);
   const parts = contextSummary(context);
   if (parts.length === 0) return null;
@@ -46,15 +60,6 @@ export function ChatContextChip({
       data-chat-context
       className="font-sans"
       style={{ display: "contents" }}
-      onKeyDown={(event) => {
-        // Esc shuts the list first; the room (or the door around it) hears
-        // the next one.
-        if (event.key !== "Escape" || !open) return;
-        event.preventDefault();
-        event.stopPropagation();
-        setOpen(false);
-        chip.current?.focus();
-      }}
     >
       <button
         ref={chip}
