@@ -123,6 +123,8 @@ impl Scorer {
     /// The next line from the model's stdout, waiting until `deadline`:
     /// `Err(true)` once it has closed, `Err(false)` at the deadline. Read on
     /// the asking thread, with `poll` for the deadline: no reader thread.
+    /// Nothing more is read once the deadline has passed, so a process that
+    /// keeps writing lines that aren't the answer can't hold the thread.
     fn line(&mut self, deadline: Instant) -> Result<String, bool> {
         loop {
             if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
@@ -130,7 +132,7 @@ impl Scorer {
                 return Ok(String::from_utf8_lossy(&line[..end]).into_owned());
             }
             let left = deadline.saturating_duration_since(Instant::now());
-            if !ready(&self.stdout, false, left)? {
+            if left.is_zero() || !ready(&self.stdout, false, left)? {
                 return Err(false);
             }
             let mut chunk = [0u8; 512];
@@ -431,10 +433,11 @@ mod tests {
     /// script run in the interpreter's place: it reads each question's header
     /// line and samples, and answers by its `mode` file — 0.97 (the
     /// default), `stale` (an answer to the question before, then this one's),
-    /// `nan` (it could not score), or `hang` (never). With `broken` beside it,
-    /// it fails to load and says so; with `dead`, it exits without a word;
-    /// with `slow`, it takes a second to load; with `deaf`, it loads and then
-    /// never reads a question.
+    /// `nan` (it could not score), `hang` (never), or `chatter` (a library's
+    /// lines, as fast as the pipe takes them, and no answer). With `broken`
+    /// beside it, it fails to load and says so; with `dead`, it exits without
+    /// a word; with `slow`, it takes a second to load; with `deaf`, it loads
+    /// and then never reads a question.
     const FAKE: &str = r#"#!/bin/sh
 dir=$(dirname "$0")
 if [ -e "$dir/dead" ]; then exit 1; fi
@@ -449,6 +452,7 @@ while read -r id n; do
     stale) echo "$((id - 1)) 100"; echo "$id 800" ;;
     nan) echo "$id -" ;;
     hang) ;;
+    chatter) yes "warning: a library says something" ;;
     *) echo "$id 970" ;;
   esac
 done
@@ -558,6 +562,20 @@ done
         std::fs::remove_file(data.join("deaf")).unwrap();
         state.warm().unwrap();
         assert_eq!(state.score(Some(vec![0; 100])), Some(0.97));
+    }
+
+    /// Lines that keep coming, none of them the answer, are no answer either:
+    /// the deadline holds while there is always more to read.
+    #[cfg(unix)]
+    #[test]
+    fn endless_chatter_is_no_answer_in_time() {
+        let (state, data) = fake("chatter");
+        std::fs::write(data.join("mode"), "chatter").unwrap();
+        state.warm().unwrap();
+        let asked = Instant::now();
+        assert_eq!(state.score(Some(vec![0; 100])), None);
+        assert!(asked.elapsed() < ANSWER_TIMEOUT * 3, "{:?}", asked.elapsed());
+        assert!(!state.status(None).warm, "taken for wedged");
     }
 
     #[cfg(unix)]
