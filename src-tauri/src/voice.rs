@@ -1293,7 +1293,12 @@ async fn clean_within(
     let mut guard = voice.cleanup.lock().await;
     // Behind on two replies: slow twice running is wedged, not cold, and a
     // fresh child answers sooner than one still working through old turns.
-    if guard.as_ref().is_some_and(|p| p.owed >= CLEANUP_OWED_LIMIT) {
+    // One that has exited is replaced here too, so a warm-up finds it, not
+    // the polish that follows.
+    if guard
+        .as_mut()
+        .is_some_and(|p| p.owed >= CLEANUP_OWED_LIMIT || !matches!(p.child.try_wait(), Ok(None)))
+    {
         *guard = None;
     }
     if guard.is_none() {
@@ -2343,6 +2348,49 @@ mod tests {
         assert_eq!(clean_within(&voice, "", &[], quick).await, Ok(String::new()));
         assert!(clean_within(&voice, "four", &[], quick).await.is_ok());
         seen("spawn\nturn\nturn\nspawn\nturn\nturn\n").await;
+
+        voice.kill_all();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A child that has exited (the CLI crashed, or was killed) is replaced as
+    /// the next dictation starts, so its polish isn't the one that finds out.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cleanup_child_that_exited_is_replaced_by_the_warm_up() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("redline-clean-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        let bin = dir.join("claude");
+        // With `die` beside it, the stand-in answers one turn and exits.
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho spawn >> '{log}'\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"type\":\"user\"'*)\n      printf '%s\\n' '{reply}'\n      [ -e '{die}' ] && exit 0 ;;\n  esac\ndone\n",
+                log = log.display(),
+                die = dir.join("die").display(),
+                reply = result("Tidied."),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let voice = VoiceState::new(Arc::new(Database::open_in_memory().unwrap()));
+        voice.claude_bin.set(bin.to_string_lossy().into_owned()).unwrap();
+        let quick = Duration::from_millis(1500);
+
+        std::fs::write(dir.join("die"), "").unwrap();
+        assert_eq!(clean_within(&voice, "one", &[], quick).await, Ok("Tidied.".to_string()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while voice.cleanup.lock().await.as_mut().unwrap().child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "the stand-in never exited");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(dir.join("die")).unwrap();
+        assert_eq!(clean_within(&voice, "", &[], quick).await, Ok(String::new()));
+        assert!(matches!(voice.cleanup.lock().await.as_mut().unwrap().child.try_wait(), Ok(None)));
+        assert_eq!(clean_within(&voice, "two", &[], quick).await, Ok("Tidied.".to_string()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "spawn\nspawn\n");
 
         voice.kill_all();
         std::fs::remove_dir_all(dir).unwrap();
