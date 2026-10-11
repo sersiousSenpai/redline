@@ -221,8 +221,11 @@ export class DictationHost {
     // its prompt for this vocabulary, while the user is still speaking.
     if (s.composer?.spec.polish && polishEnabled()) this.deps.polish.warm?.(vocab);
     setDictationLive(targetElement(target));
-    // Speaking over a reply still being said hushes it: the mic would hear it.
-    this.replying?.hush();
+    // Speaking over a reply still being said: it pauses at once, as the mic
+    // would hear it, and stops for good once the capture hears a word. The
+    // key may yet type a character (AltGr), and a capture that comes to
+    // nothing lets it play on (`end`).
+    this.replying?.hold();
     const verb = !turn ? "insert" : talk ? "send" : "copy";
     if (captioned) voiceCaption.set(captionFor(talk!.key, "hearing", since));
     else
@@ -329,7 +332,10 @@ export class DictationHost {
   private partial(text: string): void {
     const s = this.session;
     if (!s || s.over || s.taker) return;
-    if (text.trim()) s.heard = true;
+    if (text.trim() && !s.heard) {
+      s.heard = true;
+      this.replying?.hush();
+    }
     if (s.captioned) voiceCaption.update(s.talk!.key, { text });
     else this.show({ text });
   }
@@ -383,6 +389,9 @@ export class DictationHost {
     const text = said.trim();
     // A tap, a cough, a breath: the transcriber's filler is not words.
     if (isNonSpeech({ text: spokenBreaks(said).trim(), heldMs, heard: s.heard })) return this.notice("Didn't catch that");
+    // Words, even ones the live transcript missed: a reply the capture paused
+    // stops for good.
+    this.replying?.hush();
     if (s.target.kind === "turn") {
       if (s.talk) return this.sendTurn(s.talk, text, s.captioned);
       return this.nowhere(text, "No text box to type into");
@@ -536,6 +545,8 @@ export class DictationHost {
     this.uncaption(s);
     if (this.session !== s) return;
     this.session = null;
+    // A reply this capture paused, and nothing heard stopped, plays on.
+    this.replying?.playOn();
     setDictationLive(null);
     if (strip.get()?.phase !== "notice") this.show(null);
     this.hotkey.dispatch({ type: "settled" });

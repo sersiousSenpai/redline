@@ -72,7 +72,7 @@ let mic: ReturnType<typeof nativeMic>;
 let host: DictationHost;
 let polish: { polish: ReturnType<typeof vi.fn>; warm: ReturnType<typeof vi.fn> };
 /** The background reply (awayReply.ts), as the host drives it. */
-let away: Record<"expect" | "sent" | "drop" | "hush" | "release", ReturnType<typeof vi.fn>>;
+let away: Record<"expect" | "sent" | "drop" | "hold" | "playOn" | "hush" | "release", ReturnType<typeof vi.fn>>;
 let talk: TalkContext | null;
 let taker: TurnTaker | null;
 let root: Root;
@@ -84,7 +84,7 @@ beforeEach(() => {
   appInvoke.mockImplementation(async () => null);
   localStorage.clear();
   polish = { polish: vi.fn(async () => ""), warm: vi.fn() };
-  away = { expect: vi.fn(async () => {}), sent: vi.fn(), drop: vi.fn(), hush: vi.fn(), release: vi.fn() };
+  away = { expect: vi.fn(async () => {}), sent: vi.fn(), drop: vi.fn(), hold: vi.fn(), playOn: vi.fn(), hush: vi.fn(), release: vi.fn() };
   mic = nativeMic();
   talk = null;
   taker = null;
@@ -724,18 +724,52 @@ describe("the reply to a turn sent in the background", () => {
     expect(voiceCaption.get()).toBeNull();
   });
 
-  it("is hushed by the next hold, and handed to the panel that opens on its conversation", async () => {
+  it("is paused by the next hold, hushed once it hears a word, and handed to the panel that opens on its conversation", async () => {
     talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    // The turn whose reply is then being said.
     await hold("is the replay safe on remote");
-    expect(away.hush).not.toHaveBeenCalled();
+    expect(away.hold).not.toHaveBeenCalled();
+    away.hush.mockClear();
     press({ type: "down", at: now, source: APP_KEYS, solo: true });
     press({ type: "elapsed", at: now + HOLD_MS });
     await settle();
+    expect(away.hold).toHaveBeenCalledOnce();
+    expect(away.hush).not.toHaveBeenCalled();
+    // The first word stops it for good, and only the first.
+    mic.say("and on");
+    mic.say("and on local");
     expect(away.hush).toHaveBeenCalledOnce();
     press({ type: "escape", at: now });
     await settle();
     host.release("plan-1");
     expect(away.release).toHaveBeenCalledWith("plan-1");
+  });
+
+  // The hold key is Right ⌥, which on many layouts types a character (AltGr):
+  // held a beat too long before it, it starts a capture the character cancels.
+  it("plays on after a slow AltGr keystroke, or any hold that hears nothing", async () => {
+    talk = { key: "plan-1", markdown: () => "# Plan", cwd: null };
+    // The turn whose reply is then being said.
+    await hold("is the replay safe on remote");
+    away.hush.mockClear();
+    away.playOn.mockClear();
+    press({ type: "down", at: now, source: APP_KEYS, solo: true });
+    press({ type: "elapsed", at: now + HOLD_MS });
+    await settle();
+    expect(away.hold).toHaveBeenCalledOnce();
+    expect(press({ type: "other", at: now + 300 })).toBe(false);
+    await settle();
+    expect(away.playOn).toHaveBeenCalledOnce();
+    expect(away.hush).not.toHaveBeenCalled();
+    // Released with nothing said: "Didn't catch that", and it plays on.
+    await hold("", { heard: false, ms: 200 });
+    expect(away.playOn).toHaveBeenCalledTimes(2);
+    expect(away.hush).not.toHaveBeenCalled();
+    // Words only the release brought stop it before the turn goes.
+    await hold("and on local", { heard: false });
+    expect(away.hush).toHaveBeenCalledOnce();
+    const expected = away.expect.mock.invocationCallOrder;
+    expect(away.hush.mock.invocationCallOrder[0]).toBeLessThan(expected[expected.length - 1]);
   });
 });
 

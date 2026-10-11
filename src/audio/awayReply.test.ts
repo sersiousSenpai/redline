@@ -8,13 +8,14 @@ import { captionFor, voiceCaption } from "./voiceCaption";
 
 type Handler = (e: { payload: unknown }) => void;
 
-/** voice.rs's events, a speech engine whose sentences end when told, and the
- *  window Esc is pressed in. */
+/** voice.rs's events, a speech engine whose sentences end when told (and
+ *  what it was told besides), and the window Esc is pressed in. */
 function rig(engine = "kokoro") {
   const handlers = new Map<string, Handler[]>();
   const calls: [string, Record<string, unknown> | undefined][] = [];
   const spoken: string[] = [];
   const playing: (() => void)[] = [];
+  const controls: string[] = [];
   const drivers: SpeechDriver[] = [];
   const surfaces: [string, boolean][] = [];
   const warmed: string[] = [];
@@ -24,9 +25,12 @@ function rig(engine = "kokoro") {
       spoken.push(text);
       playing.push(onDone);
     },
-    cancel: () => void (playing.length = 0),
-    pause() {},
-    resume() {},
+    cancel() {
+      playing.length = 0;
+      controls.push("cancel");
+    },
+    pause: () => void controls.push("pause"),
+    resume: () => void controls.push("resume"),
   });
   const deps: AwayDeps = {
     invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
@@ -51,6 +55,7 @@ function rig(engine = "kokoro") {
     away,
     calls,
     spoken,
+    controls,
     drivers,
     surfaces,
     warmed,
@@ -186,6 +191,75 @@ describe("a reply to a turn sent with the panel closed", () => {
     r.away.release("plan-1");
     expect(voiceCaption.get()).toBeNull();
     expect(r.calls.some(([cmd]) => cmd === "voice_interrupt")).toBe(false);
+  });
+
+  it("pauses for a hold of the key, and plays on from where it paused when the hold comes to nothing", async () => {
+    const r = rig();
+    await send(r);
+    r.emit("voice-delta", { ...turn(5), text: "First sentence. Second one. " });
+    await flush();
+    const said = [...r.spoken];
+    expect(said).toEqual(["First sentence."]);
+    r.away.hold();
+    expect(r.controls).toEqual(["pause"]);
+    // What streams in, and the turn's end, wait; the caption stays as it was.
+    r.emit("voice-delta", { ...turn(5), text: "Third one. " });
+    r.emit("voice-done", { ...turn(5), body: "First sentence. Second one. Third one." });
+    await flush();
+    expect(r.spoken).toEqual(said);
+    vi.advanceTimersByTime(LINGER_MS * 2);
+    expect(voiceCaption.get()).toMatchObject({ phase: "speaking", text: said[0] });
+    r.away.playOn();
+    await flush();
+    expect(r.controls).toEqual(["pause", "resume"]);
+    expect(r.spoken).toEqual(["First sentence.", "Second one.", "Third one."]);
+    // Said to its end, it settles as any reply does.
+    for (let i = 0; i < r.spoken.length; i++) await r.end();
+    expect(voiceCaption.get()).toMatchObject({ phase: "done", text: "Third one." });
+    vi.advanceTimersByTime(LINGER_MS);
+    expect(voiceCaption.get()).toBeNull();
+    expect(r.calls.some(([cmd]) => cmd === "voice_interrupt")).toBe(false);
+  });
+
+  it("is hushed once the hold hears a word, the caption it froze going with it", async () => {
+    const r = rig();
+    await send(r);
+    r.emit("voice-delta", { ...turn(5), text: "First sentence. Second one. " });
+    await flush();
+    const said = r.spoken.length;
+    r.away.hold();
+    r.away.hush();
+    expect(r.controls).toEqual(["pause", "cancel"]);
+    expect(voiceCaption.get()).toBeNull();
+    r.emit("voice-delta", { ...turn(5), text: "Third one. " });
+    await flush();
+    // The capture's end has nothing left to play on.
+    r.away.playOn();
+    await flush();
+    expect(r.spoken).toHaveLength(said);
+  });
+
+  it("leaves a hold's own caption to it, and puts the reply's back when the hold sends nothing", async () => {
+    const r = rig();
+    await send(r);
+    r.emit("voice-delta", { ...turn(5), text: "First sentence. Second one. " });
+    await flush();
+    const speaking = voiceCaption.get();
+    r.away.hold();
+    // A hold sending a turn to the same conversation shows its hearing.
+    const hearing = captionFor("plan-1", "hearing", 0);
+    voiceCaption.set(hearing);
+    await r.end();
+    expect(voiceCaption.get()).toBe(hearing);
+    // The key typed a character: the hold's caption goes, the reply's is back.
+    voiceCaption.set(null);
+    r.away.playOn();
+    expect(voiceCaption.get()).toBe(speaking);
+    // A hold that heard a word keeps the hearing caption the new turn needs.
+    r.away.hold();
+    voiceCaption.set(hearing);
+    r.away.hush();
+    expect(voiceCaption.get()).toBe(hearing);
   });
 
   it("goes at once when the turn fails or its child exits", async () => {

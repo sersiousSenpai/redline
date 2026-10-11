@@ -19,8 +19,10 @@
 // once the turn has ended and the last one has been said, `done` for
 // `LINGER_MS`, and then the caption goes. Esc stops the reply — the speech,
 // and the turn if it is still running — and the caption goes at once. A new
-// hold of the key hushes it, and the panel opening on its conversation takes
-// it over.
+// hold of the key pauses it, and hushes it once the hold hears a word: on
+// many layouts the key also types a character (AltGr), and a hold that comes
+// to nothing lets it play on. The panel opening on its conversation takes it
+// over.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -29,7 +31,7 @@ import type { Activity } from "../lib/turnMeter";
 import { browserSpeechDriver, loadVoicePrefs, SpeechQueue, type SpeechDriver, type SpeechState } from "./speech";
 import { sameTurn, type TurnId } from "./turnState";
 import { savedEngineDriver, warmEngine } from "./useReadAloud";
-import { voiceCaption } from "./voiceCaption";
+import { voiceCaption, type VoiceCaption } from "./voiceCaption";
 import { splitReply, spokenPause } from "./voiceStream";
 
 /** How long the caption stays once the reply has been said. */
@@ -117,6 +119,9 @@ export class AwayReply {
   private linger: ReturnType<typeof setTimeout> | undefined;
   /** The studio voice surface held open while a reply is followed. */
   private surface: string | null = null;
+  /** A hold of the key over the reply (`hold`), and the reply's caption it
+   *  found showing, frozen until the hold ends. */
+  private held: { caption: VoiceCaption | null } | null = null;
 
   constructor(private readonly deps: AwayDeps) {}
 
@@ -148,10 +153,41 @@ export class AwayReply {
     if (this.turn?.key === key) this.close(this.turn);
   }
 
-  /** A new hold of the key: stop saying the last reply, at once. */
+  /** A new hold of the key, which may yet type a character: the reply's
+   *  sound pauses at once — the mic must not hear it — and what streams in
+   *  meanwhile waits, its caption as it was. A hold that hears a word stops
+   *  it (`hush`); one that comes to nothing lets it play on (`playOn`). */
+  hold(): void {
+    const t = this.turn;
+    if (!t || this.held) return;
+    const c = voiceCaption.get();
+    this.held = { caption: c?.key === t.key ? c : null };
+    clearTimeout(this.linger);
+    this.queue?.pause();
+  }
+
+  /** The hold came to nothing (the key typed a character, Esc, a tap): the
+   *  reply plays on from where it paused, says what came in meanwhile, and
+   *  has its caption back if the hold's own took its place. */
+  playOn(): void {
+    const held = this.held;
+    const t = this.turn;
+    this.held = null;
+    if (!held || !t) return;
+    if (!voiceCaption.get() && held.caption) voiceCaption.set(held.caption);
+    this.queue?.resume();
+    this.speak(t, t.ended);
+    this.finish(t);
+  }
+
+  /** A new turn is going, or the hold that paused the reply heard a word:
+   *  stop saying it, at once. The caption a hold froze goes with it. */
   hush(): void {
+    const frozen = this.held?.caption;
+    this.held = null;
     clearTimeout(this.linger);
     this.queue?.cancel();
+    if (frozen && voiceCaption.get() === frozen) voiceCaption.set(null);
     if (this.turn) this.leave();
     this.turn = null;
   }
@@ -237,7 +273,7 @@ export class AwayReply {
   private apply(t: Following, ev: AwayEvent): void {
     switch (ev.kind) {
       case "meter":
-        if (voiceCaption.get()?.phase === "thinking") voiceCaption.update(t.key, { activity: ev.e.activity ?? null });
+        if (!this.held && voiceCaption.get()?.phase === "thinking") voiceCaption.update(t.key, { activity: ev.e.activity ?? null });
         return;
       case "delta":
         t.raw += ev.e.text;
@@ -258,10 +294,11 @@ export class AwayReply {
   }
 
   /** Speak what is new of the reply's spoken part: never the ⟦screen⟧ detail,
-   *  never a marker. The held-back tail goes once the spoken part pauses. */
+   *  never a marker. The held-back tail goes once the spoken part pauses. A
+   *  held reply keeps it for `playOn`. */
   private speak(t: Following, final: boolean): void {
     const q = this.queue;
-    if (!q) return;
+    if (!q || this.held) return;
     const reply = splitReply(t.raw);
     q.setTone(reply.tone);
     const fresh = reply.spoken.slice(t.spokenLen);
@@ -274,7 +311,7 @@ export class AwayReply {
 
   private sentence(text: string | null): void {
     const t = this.turn;
-    if (!t) return;
+    if (!t || this.held) return;
     if (text) {
       t.said = text;
       voiceCaption.update(t.key, { phase: "speaking", text });
@@ -285,9 +322,10 @@ export class AwayReply {
     if (s === "idle" && this.turn) this.finish(this.turn);
   }
 
-  /** Once the turn has ended and nothing is left to say: done, and then gone. */
+  /** Once the turn has ended and nothing is left to say: done, and then gone.
+   *  Not while a hold has it paused, with more perhaps to say. */
   private finish(t: Following): void {
-    if (!t.ended || this.queue?.getState() === "speaking") return;
+    if (!t.ended || this.held || this.queue?.getState() === "speaking") return;
     if (voiceCaption.get()?.phase !== "done") voiceCaption.update(t.key, { phase: "done", text: t.said });
     clearTimeout(this.linger);
     this.linger = setTimeout(() => {
@@ -300,6 +338,7 @@ export class AwayReply {
     const c = voiceCaption.get();
     if (c?.key === t.key && c.phase !== "hearing") voiceCaption.set(null);
     if (this.turn === t) {
+      this.held = null;
       this.leave();
       this.turn = null;
     }
