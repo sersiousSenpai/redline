@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { AnchorPill } from "./AnchorPill";
 import { AttachmentChips } from "./AttachmentChips";
 
@@ -93,6 +94,8 @@ export function CommentComposer({
   // Drag a screenshot onto the composer, or ⌘V one in: "make it look like
   // this" is the feedback this unlocks.
   const files = useAttachmentCapture(sessionId);
+  // Dictated into (the hold key): its fields keep the words, polished.
+  useDictationComposer(files.hostRef, { polish: true });
   // A cross-out: the composer was opened pre-set to delete the span.
   const isCrossOut = presetRevised === "";
 

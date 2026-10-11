@@ -13,7 +13,7 @@ vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (config: { buildSendArgs
 } }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
 vi.mock("./StreamingText", () => ({ StreamingText: () => null }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", error: null, toggle: () => {} }) }));
+vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
 import { BrowserChat } from "./BrowserChat";
 import type { ResolvedConversation } from "../lib/browserChat/scope";
 

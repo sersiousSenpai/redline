@@ -381,6 +381,8 @@ import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
 import { isDockKey, isNeedsYouKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { loadDictation } from "./lib/dictationComposer";
+import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
 import {
   TOC_RAIL_W,
@@ -2798,6 +2800,9 @@ function App() {
   // away would kill every PTY in it and lose the scrollback.
   const [terminalMounted, setTerminalMounted] = useState(false);
   const terminalsRef = useRef<TerminalTabsHandle | null>(null);
+  /** Where a dictation with nowhere to type goes (set beside the dock's
+   *  contexts below). */
+  const talkRef = useRef<TalkContext | null>(null);
   /** Resolvers waiting for the dock's imperative handle to exist. */
   const terminalWaitersRef = useRef<((h: TerminalTabsHandle | null) => void)[]>(
     [],
@@ -2859,9 +2864,13 @@ function App() {
       ).cancelIdleCallback?.(id);
   }, [shellReady, terminalMounted]);
 
-  // The dock is live: xterm is loaded and a PTY can be opened in it.
+  // The dock is live: xterm is loaded and a PTY can be opened in it. The
+  // hold-to-dictate key loads on the same idle beat — a chunk the first
+  // paint never needs.
   useEffect(() => {
-    if (terminalMounted) markOnce("rl:terminal-ready");
+    if (!terminalMounted) return;
+    markOnce("rl:terminal-ready");
+    void loadDictation().then((m) => m.installDictation(() => talkRef.current));
   }, [terminalMounted]);
 
   // ⌘⇧J and the footer's "N need you": reveal the dock (out from under the
@@ -4909,9 +4918,17 @@ function App() {
   const voiceDocked = !conversationExpanded && dockOpen && dockContext != null;
   const planVoiceOpen = voiceDocked && dockContext?.kind === "voice";
   planVoiceOpenRef.current = planVoiceOpen;
-  // One native capture at a time. The mic belongs to the dock only while the
-  // dock is holding a conversation `voice.rs` will actually take.
-  const dockOwnsMic = voiceDocked && dockContext?.voiceCapable === true;
+  // The conversation a dictation with nowhere to type becomes a turn in: the
+  // plan's or the Drafter's voice, whether or not its panel is open. Read when
+  // a dictation starts, so it is a ref, never a dependency.
+  const talk = dockContexts.find((c) => c.kind === "voice" || c.kind === "drafter");
+  talkRef.current = talk
+    ? {
+        key: talk.key,
+        markdown: talk.kind === "drafter" ? () => getDrafterLiveMarkdown() || drafterMarkdown : () => latest?.rawPlanMarkdown ?? "",
+        cwd: talk.kind === "drafter" ? drafterProjectPath : null,
+      }
+    : null;
   // Putting the conversation away — from the column or from the room. One
   // action, because "close" must not mean two different things depending on
   // the pose: whichever you were in, you end up back where you were without it.
@@ -8337,9 +8354,6 @@ function App() {
                   .slice(0, 4)
                   .map((c) => ({ id: c.companionId, title: c.title })) : undefined}
                 onOpenChat={where === "door" ? openChat : undefined}
-                // One native capture at a time, no session id — the voice
-                // panel owns the mic whenever it is open.
-                dictationEnabled={!dockOwnsMic && shown}
               />
     );
   };
@@ -10853,7 +10867,6 @@ function App() {
               // whatever folder the user is browsing; HOME when
               // there is none.
               cwd={chatCwd}
-              dictationEnabled={!dockOwnsMic && (roomChat || chatDocked)}
               // The room reads at plate scale; the dock's column at its own.
               expanded={roomChat}
               onDraft={markdown => { void sendBrowserToDrafter(markdown); }}

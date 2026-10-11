@@ -58,10 +58,11 @@ describe("front door shortcut in embedded page frames", () => {
       { kind: "interaction", value: "pointerdown" },
       { kind: "interaction", value: "touchstart" },
     ]);
-    // The main frame has the page's own signals for that.
+    // The main frame has the page's own signals for that: its presses are
+    // heard only for the dictation key (below).
     const main = frame({ main: true });
-    expect(main.listeners.has("pointerdown")).toBe(false);
-    expect(main.window.addEventListener).toHaveBeenCalledTimes(1);
+    main.listeners.get("pointerdown")!({ isTrusted: true });
+    expect(main.postMessage).not.toHaveBeenCalled();
   });
   it("leaves composition, ordinary Enter and modified shortcuts alone", () => {
     const { postMessage, key } = frame();
@@ -72,5 +73,66 @@ describe("front door shortcut in embedded page frames", () => {
     const repeated = key({ repeat: true });
     expect(repeated.preventDefault).toHaveBeenCalledOnce();
     expect(postMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("the dictation key in embedded page frames", () => {
+  const voice = (postMessage: ReturnType<typeof vi.fn>) =>
+    postMessage.mock.calls.map(([raw]) => JSON.parse(raw)).filter((m) => m.kind === "voice").map((m) => m.value);
+
+  it("says when a right-hand modifier goes down alone and comes up, and keeps nothing from the page", () => {
+    const { postMessage, key, listeners } = frame({ main: true });
+    const down = key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false, target: { tagName: "BODY" } });
+    expect(down.preventDefault).not.toHaveBeenCalled();
+    // A key-repeat says nothing more.
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false, repeat: true });
+    listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    expect(voice(postMessage)).toEqual(["down:AltRight", "up"]);
+  });
+
+  it("says when the main frame's focus takes text, where Redline can type into it", () => {
+    const main = frame({ main: true });
+    for (const target of [{ tagName: "TEXTAREA" }, { tagName: "INPUT", selectionStart: 0 }, { tagName: "DIV", isContentEditable: true }]) {
+      main.key({ code: "MetaRight", key: "Meta", metaKey: true, shiftKey: false, target });
+      main.listeners.get("keyup")!({ code: "MetaRight", isTrusted: true });
+    }
+    // A checkbox is an input that takes no text.
+    main.key({ code: "MetaRight", key: "Meta", metaKey: true, shiftKey: false, target: { tagName: "INPUT", selectionStart: null } });
+    expect(voice(main.postMessage)).toEqual(["field:MetaRight", "up", "field:MetaRight", "up", "field:MetaRight", "up", "down:MetaRight"]);
+    // A sub-frame's field is out of Redline's reach: just a press.
+    const sub = frame();
+    sub.key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false, target: { tagName: "TEXTAREA" } });
+    expect(voice(sub.postMessage)).toEqual(["down:AltRight"]);
+  });
+
+  it("passes AltGr typing through, saying another key joined the hold", () => {
+    const { postMessage, key, listeners } = frame({ main: true });
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false });
+    const typed = key({ code: "KeyL", key: "@", altKey: true, shiftKey: false });
+    expect(typed.preventDefault).not.toHaveBeenCalled();
+    listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    expect(voice(postMessage)).toEqual(["down:AltRight", "other", "up"]);
+  });
+
+  it("says a click joined the hold: the key modifies it (Option-click, Command-click)", () => {
+    const { postMessage, key, listeners } = frame({ main: true });
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false });
+    listeners.get("pointerdown")!({ isTrusted: true });
+    listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    listeners.get("pointerdown")!({ isTrusted: true });
+    expect(voice(postMessage)).toEqual(["down:AltRight", "press", "up"]);
+  });
+
+  it("reports a modifier held with others as no hold, Esc on its own, and a release lost to a blur", () => {
+    const { postMessage, key, listeners } = frame({ main: true });
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false, metaKey: true });
+    listeners.get("keyup")!({ code: "AltRight", isTrusted: true });
+    key({ code: "Escape", key: "Escape", shiftKey: false });
+    key({ code: "Escape", key: "Escape", shiftKey: false, isComposing: true });
+    key({ code: "ControlRight", key: "Control", ctrlKey: true, shiftKey: false });
+    listeners.get("blur")!({});
+    // An untrusted key is the page's own script.
+    key({ code: "AltRight", key: "Alt", altKey: true, shiftKey: false, isTrusted: false });
+    expect(voice(postMessage)).toEqual(["other", "up", "escape", "down:ControlRight", "up"]);
   });
 });

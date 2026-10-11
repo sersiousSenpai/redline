@@ -10,6 +10,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import { useDictationComposer } from "../lib/dictationComposer";
 import * as Y from "yjs";
 
 import type { ParagraphDiff, SubBlockDiffEntry } from "../diff";
@@ -321,6 +322,10 @@ function PlanEditorBase({
     [ydoc, collabHandle],
   );
   const scheduleRef = useRef<(() => void) | null>(null);
+  // Dictated into (the hold key): the words go in at the caret as a tracked
+  // edit. Never polished: a model never silently rewrites plan text.
+  const hostRef = useRef<HTMLDivElement>(null);
+  useDictationComposer(hostRef, {});
 
   const editor = useEditor(
     {
@@ -685,7 +690,7 @@ function PlanEditorBase({
   }, [editor, searchQuery, syncSearchState]);
 
   return (
-    <div className="rl-editor-host">
+    <div ref={hostRef} className="rl-editor-host">
       {searchOpen && (
         <PlanSearchBox
           query={searchQuery}

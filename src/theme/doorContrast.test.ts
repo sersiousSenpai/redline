@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// Every text the Front Door, its compact card and the chat chrome paint
-// reaches 4.5:1 — WCAG 2.x AA for body text — in all fifteen themes (10/10
-// design, decision 12). A glyph that is a control's only label (send ↑, ×)
-// is held to the 3:1 non-text floor instead.
+// Every text the Front Door, its compact card, the dictation strip that
+// floats over them and the chat chrome paint reaches 4.5:1 — WCAG 2.x AA for
+// body text — in all fifteen themes (10/10 design, decision 12). A glyph that
+// is a control's only label (send ↑, ×) is held to the 3:1 non-text floor
+// instead.
 //
 // The colours are read from the stylesheets that declare them, not restated
 // here: each entry names the rule that sets a text's colour, the rule that
@@ -103,7 +104,7 @@ interface Pair {
   /** 3 for a glyph that is a control's only label (WCAG 1.4.11). */
   min?: number;
 }
-const ISLAND = "components/MonochatIsland.css", CARD = "components/MonochatCard.css", MENU = "components/ComposerMenu.css", APP = "styles.css";
+const ISLAND = "components/MonochatIsland.css", CARD = "components/MonochatCard.css", MENU = "components/ComposerMenu.css", APP = "styles.css", STRIP = "components/DictationStrip.css";
 /** Where a door or card text takes its colour (and any fade), what it sits on,
  *  and the surface under that. The door's paper backdrop is `--color-paper`;
  *  the card, the door's composer box and the pill are `--color-bg-elevated`. */
@@ -128,6 +129,10 @@ const TEXTS: Pair[] = [
   { what: "the pill's count of plans that arrived", color: [ISLAND, ".rl-monochat-news"], background: [ISLAND, ".rl-monochat-news"], on: "color-bg-elevated" },
   { what: "a launch in flight, in the door", color: [APP, ".rl-fd-flight-open"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
   { what: "where that launch is running", color: [APP, ".rl-fd-detail"], opacity: [APP, ".rl-fd-flight-open .rl-fd-detail"], background: [APP, ".rl-fd-flight"], on: "color-paper" },
+  // The dictation strip, over the door's box, the card or any composer.
+  { what: "the words being dictated", color: [STRIP, ".rl-dictation-text"], background: [STRIP, ".rl-dictation-strip"], on: "color-paper" },
+  { what: "the dictation strip's hint", color: [STRIP, ".rl-dictation-hint"], background: [STRIP, ".rl-dictation-strip"], on: "color-paper" },
+  { what: "the dictation strip's Copy", color: [STRIP, ".rl-dictation-copy"], background: [STRIP, ".rl-dictation-copy"], on: "color-bg-elevated" },
 ];
 
 const REPLY = "components/ReplyBlock.css", WORK = "components/ChatWorkbench.css", PAGE = "components/BrowserChat.css", BROWSER = "components/BrowserWorkspace.css";

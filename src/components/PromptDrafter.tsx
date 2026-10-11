@@ -53,6 +53,7 @@ import {
 } from "../lib/launch";
 import type { ReadinessItem } from "../lib/readiness";
 import { useTextSelection } from "../hooks/useTextSelection";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { usePoll } from "../hooks/usePoll";
 import type { CommentHighlightRange } from "../editor/extensions/CommentHighlights";
 import type { DraftComment } from "../types";
@@ -813,6 +814,9 @@ function PromptDrafterBase({
   const workspaceRef = useRef<HTMLDivElement>(null);
   // The page sheet — what the floating Discuss pill measures itself against.
   const pageRef = useRef<HTMLDivElement>(null);
+  // Dictated into (the hold key): the words go in at the caret as the
+  // editor's own edit, then get the polish — a separate undo step.
+  useDictationComposer(pageRef, { polish: true });
   const [selection, clearSelection] = useTextSelection(workspaceRef, true);
   const [commentDraft, setCommentDraft] = useState<string | null>(null);
   // The ✦ Ask-agent composer over the same selection snapshot — a typed

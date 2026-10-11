@@ -20,11 +20,15 @@
 //      dictation_start);
 //   4. its acronyms, which recognizers mostly spell out right unaided;
 //   5. file names, the plan's and then any the caller adds — rarely said
-//      aloud as written.
+//      aloud as written;
+//   6. names from the memory index (the class titles of what the user has
+//      planned and decided), which a long plan crowds out first.
 // Within each source, the most frequent first.
 //
 // The user's words are stored in the settings database as the `voiceVocab`
-// ui pref, so they survive a cache clear and travel with the database.
+// ui pref, so they survive a cache clear and travel with the database. Every
+// change goes through `updateVocabStore`, which tells the dictation host and
+// an open Settings › Vocabulary at once.
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -51,6 +55,8 @@ export interface VocabSources {
   plan?: string;
   /** More of the session's project identifiers, such as its file names. */
   identifiers?: string[];
+  /** Names from the memory index (`memoryVocab`). */
+  memory?: string[];
   /** The user's stored words and learned corrections. */
   store?: VocabStore;
 }
@@ -167,6 +173,14 @@ export function planVocab(markdown: string): PlanVocab {
   for (const key of named.keys()) if (!midSentence.has(key)) named.delete(key);
   // "SIZE", "USER": a heading's capitals, not an acronym.
   for (const key of acronyms.keys()) if (ordinary(key)) acronyms.delete(key);
+  // `browserChat` where the prose also says "browser chat": the words are how
+  // people talk, and a recognizer (or the rules) told the name would join
+  // them into it.
+  const spoken = prose.toLowerCase();
+  for (const [key, { term }] of code) {
+    const words = term.split(/(?=[A-Z])/).map((w) => w.toLowerCase());
+    if (/^[a-z]/.test(term) && words.length > 1 && new RegExp(`\\b${words.join("\\s+")}\\b`).test(spoken)) code.delete(key);
+  }
   return { names: ranked(named), code: ranked(code), acronyms: ranked(acronyms), files: ranked(files) };
 }
 
@@ -188,7 +202,21 @@ export function buildVocab(sources: VocabSources, cap = VOCAB_CAP): string[] {
   const plan = planVocab(sources.plan ?? "");
   for (const t of [...plan.names, ...plan.code, ...plan.acronyms, ...plan.files]) add(t);
   for (const t of sources.identifiers ?? []) add(t);
+  for (const t of sources.memory ?? []) add(t);
   return out;
+}
+
+/** The names in the memory index's class titles. Each title is read as a
+ *  sentence of its own, so a capital counts only where it is not the
+ *  sentence's — except a title opening on two or more capitalized words,
+ *  which is a name ("Front Door return"): a lone first word ("Voice agent")
+ *  may be one or not, and a wrong one would recase that word everywhere. */
+export function memoryVocab(titles: string[]): string[] {
+  const v = planVocab(titles.map((t) => `${t.trim()}.`).join("\n"));
+  const opening = titles
+    .map((t) => /^[A-Z][a-z][a-zA-Z]*(?: [A-Z][a-z][a-zA-Z]*){1,2}\b/.exec(t.trim())?.[0])
+    .filter((run): run is string => !!run && !run.split(" ").some((w) => COMMON.has(w.toLowerCase())));
+  return [...v.names, ...opening, ...v.code, ...v.acronyms];
 }
 
 /** The stored words, tolerating a missing or damaged blob. */
@@ -224,6 +252,12 @@ export function removeWord(store: VocabStore, word: string): VocabStore {
   };
 }
 
+/** Forget the correction learned for `heard`. */
+export function forgetPair(store: VocabStore, heard: string): VocabStore {
+  const key = heard.trim().toLowerCase();
+  return { ...store, pairs: store.pairs.filter((p) => p.heard.toLowerCase() !== key) };
+}
+
 /** Learn that `heard` meant `meant`. A newer correction of the same heard
  *  text replaces the older one. */
 export function learnPair(store: VocabStore, heard: string, meant: string, at: number): VocabStore {
@@ -243,6 +277,19 @@ export async function loadVocabStore(): Promise<VocabStore> {
   }
 }
 
-export async function saveVocabStore(store: VocabStore): Promise<void> {
-  await invoke("set_ui_pref", { key: "voiceVocab", value: JSON.stringify(store) });
+const listeners = new Set<(store: VocabStore) => void>();
+
+/** Hear every saved change to the user's words. */
+export function onVocabStore(fn: (store: VocabStore) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+/** Change the stored words: read fresh, so a pair learned while Settings is
+ *  open and a word removed there never undo each other. */
+export async function updateVocabStore(change: (store: VocabStore) => VocabStore): Promise<VocabStore> {
+  const next = change(await loadVocabStore());
+  await invoke("set_ui_pref", { key: "voiceVocab", value: JSON.stringify(next) });
+  for (const fn of listeners) fn(next);
+  return next;
 }

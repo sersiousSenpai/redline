@@ -1,6 +1,5 @@
 // Synthetic boundary: no user database, model calls, or profile writes.
 export function useReadAloud() { return { speaking: false, stop: () => {}, speak: () => {} }; }
-export function useDictation() { return { listening: false, partial: "", toggle: () => {} }; }
 export async function listen() { return () => {}; }
 export async function emit() {} export async function emitTo() {} export async function once() { return () => {}; }
 export async function open() { return null; } export async function openUrl() {}

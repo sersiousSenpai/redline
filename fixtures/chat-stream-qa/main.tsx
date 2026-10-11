@@ -53,12 +53,12 @@ function DoorChat({ room }: { room: boolean }) {
     attachments={[]} onAttachmentsChange={noop} readiness={[]} onFix={async () => true} pending={null} onLaunch={noop} onRun={noop} refusal={null}
     onDrafter={noop} onChat={noop} chatEnabled destination="chat" onDestinationChange={noop}
     backend={choice} onBackendChange={setChoice} modelCatalogs={{}} onNeedModels={noop} onRefreshModels={noop} modelStatus={{ refreshing: false, checkedAt: 1790708400000 }}
-    onCancelPending={noop} onRevealPending={noop} onCreateProject={async () => null} focusNonce={0} consumeSeed={() => ""} dictationEnabled={false} chats={[{ id: "qa", title: "Streaming QA" }]} onOpenChat={noop}/>;
+    onCancelPending={noop} onRevealPending={noop} onCreateProject={async () => null} focusNonce={0} consumeSeed={() => ""} chats={[{ id: "qa", title: "Streaming QA" }]} onOpenChat={noop}/>;
   return <>
     <main className="qa-plate">Synthetic plate</main>
     <footer className="qa-footer"/>
     <div data-qa-scene ref={setSlot} className={`qa-door-chat rl-frontdoor-chat-slot ${room ? "is-room" : "is-card"}`}/>
-    {slot && createPortal(<ChatRoom companionId="qa" onSelectChat={noop} onEmpty={noop} cwd={null} dictationEnabled={false} onClose={noop} expanded={room}
+    {slot && createPortal(<ChatRoom companionId="qa" onSelectChat={noop} onEmpty={noop} cwd={null} onClose={noop} expanded={room}
       harness={choice} composer={{ draftKey: FRONT_DOOR_TEXT_KEY, render: composer }}/>, slot)}
   </>;
 }

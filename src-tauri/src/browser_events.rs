@@ -49,6 +49,12 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
             if selectors.len() > 8 || selectors.iter().any(|selector| selector.as_str().is_none_or(|s| s.len() > 4096)) { return None; }
         }
         "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door"].contains(&value.get("value")?.as_str()?) { return None; } }
+        // The hold-to-dictate key, pressed in the page (browser_frontdoor_shortcut.js).
+        "voice" => {
+            let v = value.get("value")?.as_str()?;
+            let code = v.strip_prefix("down:").or_else(|| v.strip_prefix("field:"));
+            if !matches!(v, "up" | "other" | "press" | "escape") && !code.is_some_and(|c| matches!(c, "AltRight" | "MetaRight" | "ControlRight")) { return None; }
+        }
         "focus" | "interaction" => {}
         _ => return None,
     }
@@ -73,12 +79,23 @@ fn signal_for_pane(raw: &str) -> Option<Value> {
 
 fn signal_for_frame(raw: &str, main_frame: bool) -> Option<Value> {
     let value = signal_for_pane(raw)?;
-    // Subframes may summon the front door, and say they were pressed (the
-    // island's card closes on a press anywhere in the page). All other
-    // browser actions and page-state updates remain restricted to the main
-    // frame.
+    // Subframes may summon the front door, say they were pressed (the
+    // island's card closes on a press anywhere in the page), and hold the
+    // dictation key (a field in a frame has the keyboard as much as the page
+    // does). All other browser actions and page-state updates remain
+    // restricted to the main frame.
     let press = value["kind"] == "interaction" && (value["value"] == "pointerdown" || value["value"] == "touchstart");
-    (main_frame || press || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
+    (main_frame || press || value["kind"] == "voice" || (value["kind"] == "shortcut" && value["value"] == "open-front-door")).then_some(value)
+}
+/// The dictation key a page says went down (`down:` or `field:`), if that is
+/// what `value` is. Any script in the page can post what the page script
+/// posts, and such a press opens the microphone and can have the words typed
+/// into the page — so the pane takes one only while that key really is down
+/// and that page has the keyboard (`native`).
+fn voice_press(value: &Value) -> Option<&str> {
+    if value["kind"] != "voice" { return None; }
+    let v = value["value"].as_str()?;
+    v.strip_prefix("down:").or_else(|| v.strip_prefix("field:"))
 }
 #[cfg(target_os = "macos")]
 mod native {
@@ -89,8 +106,25 @@ mod native {
     use objc2::rc::Retained;
     use objc2::runtime::{NSObject, ProtocolObject};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSString};
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSView};
     use objc2_web_kit::{WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView};
     use tauri::Emitter;
+    /// The dictation key's modifier is down now (either side: the page's own
+    /// keydown said which).
+    fn key_down(code: &str) -> bool {
+        let flag = match code {
+            "AltRight" => NSEventModifierFlags::Option,
+            "MetaRight" => NSEventModifierFlags::Command,
+            _ => NSEventModifierFlags::Control,
+        };
+        NSEvent::modifierFlags_class().contains(flag)
+    }
+    /// The page has the keyboard: its webview (or a view inside it) is the
+    /// key window's first responder.
+    fn has_keyboard(view: &WKWebView) -> bool {
+        let Some(window) = view.window() else { return false; };
+        window.isKeyWindow() && window.firstResponder().and_then(|r| r.downcast::<NSView>().ok()).is_some_and(|r| r.isDescendantOf(view))
+    }
     struct Ivars { app: tauri::AppHandle, label: String, throttle: RefCell<(Instant, u32)> }
     define_class!(
         #[unsafe(super(NSObject))]
@@ -110,6 +144,7 @@ mod native {
                 let Some(raw) = body.downcast_ref::<NSString>() else { return; };
                 let main_frame = message.frameInfo().isMainFrame();
                 let Some(mut value) = signal_for_frame(&raw.to_string(), main_frame) else { return; };
+                if voice_press(&value).is_some_and(|code| !key_down(code) || !message.webView().is_some_and(|view| has_keyboard(&view))) { return; }
                 // An embed's press puts the island's card away, but never
                 // interrupts the agent's page actions: that stays the page's.
                 if value["kind"] == "shortcut" || (value["kind"] == "interaction" && main_frame) { note_input(&self.ivars().label); }
@@ -204,6 +239,40 @@ mod tests {
             r#"{"kind":"focus"}"#,
         ] { assert!(signal_for_frame(raw, false).is_none()); }
         assert!(signal_for_frame(r#"{"kind":"shortcut","value":"close-tab"}"#, true).is_some());
+    }
+
+    #[test]
+    fn the_dictation_key_comes_from_any_frame_with_only_its_own_values() {
+        for raw in [
+            r#"{"kind":"voice","value":"down:AltRight"}"#,
+            r#"{"kind":"voice","value":"field:MetaRight"}"#,
+            r#"{"kind":"voice","value":"down:ControlRight"}"#,
+            r#"{"kind":"voice","value":"up"}"#,
+            r#"{"kind":"voice","value":"other"}"#,
+            r#"{"kind":"voice","value":"press"}"#,
+            r#"{"kind":"voice","value":"escape"}"#,
+        ] {
+            assert!(signal_for_frame(raw, false).is_some(), "{raw}");
+        }
+        for raw in [
+            r#"{"kind":"voice","value":"down:KeyA"}"#,
+            r#"{"kind":"voice","value":"field:"}"#,
+            r#"{"kind":"voice","value":"send"}"#,
+            r#"{"kind":"voice"}"#,
+        ] {
+            assert!(parse_signal(raw).is_none(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn only_a_press_of_the_dictation_key_waits_on_the_real_key() {
+        let press = |raw: &str| parse_signal(raw).and_then(|value| voice_press(&value).map(str::to_owned));
+        assert_eq!(press(r#"{"kind":"voice","value":"down:AltRight"}"#).as_deref(), Some("AltRight"));
+        assert_eq!(press(r#"{"kind":"voice","value":"field:MetaRight"}"#).as_deref(), Some("MetaRight"));
+        // Ending or cancelling a capture opens nothing.
+        for raw in [r#"{"kind":"voice","value":"up"}"#, r#"{"kind":"voice","value":"other"}"#, r#"{"kind":"voice","value":"press"}"#, r#"{"kind":"voice","value":"escape"}"#, r#"{"kind":"shortcut","value":"new-tab"}"#] {
+            assert_eq!(press(raw), None, "{raw}");
+        }
     }
 
     #[test]

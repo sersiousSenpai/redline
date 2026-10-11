@@ -20,9 +20,13 @@ let whisperModels = [
 ];
 let savedEngine = "kokoro";
 let studioSupported = false;
+// The `voiceVocab` ui pref.
+let vocabBlob: string | null = null;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args: Record<string, unknown>) => {
     invoked.push({ cmd, args: args ?? {} });
+    if (cmd === "get_ui_prefs") return Promise.resolve({ voiceVocab: vocabBlob });
+    if (cmd === "set_ui_pref" && args.key === "voiceVocab") vocabBlob = args.value as string;
     if (cmd === "tts_get_settings")
       return Promise.resolve({
         engine: savedEngine,
@@ -96,6 +100,9 @@ vi.mock("./StudioVoiceCard", () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { VoiceSettings } from "./VoiceSettings";
+import { loadHoldKey, saveHoldKey } from "../audio/voiceHotkey";
+import { polishEnabled } from "../audio/dictationPolish";
+import { learnPair, updateVocabStore } from "../audio/vocab";
 
 const flush = () =>
   act(async () => {
@@ -117,6 +124,7 @@ beforeEach(() => {
   savedVoice = "am_adam";
   savedEngine = "kokoro";
   studioSupported = false;
+  vocabBlob = null;
   localStorage.clear();
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -296,5 +304,80 @@ describe("the studio voice", () => {
     });
     expect(invoked.find((c) => c.cmd === "tts_set_settings")!.args.engine).toBe("studio");
     expect(saved).toEqual([["studio", "calm"]]);
+  });
+});
+
+describe("dictation key", () => {
+  it("offers the hold key, Right Option by default, and saves a change with the rest", async () => {
+    await mount();
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Dictation key"]')!;
+    expect(select.value).toBe("AltRight");
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Right ⌥ Option", "Right ⌘ Command", "Right ⌃ Control", "Off"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "MetaRight");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // Not until Save.
+    expect(loadHoldKey()).toBe("AltRight");
+    await save();
+    expect(loadHoldKey()).toBe("MetaRight");
+    expect(localStorage.getItem("redline.dictation.key")).toBe("MetaRight");
+    saveHoldKey("AltRight");
+  });
+});
+
+describe("dictation polish", () => {
+  it("is on by default, and turned off with the rest on Save", async () => {
+    await mount();
+    const box = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
+      b.closest("label")!.textContent!.includes("Polish dictated text"),
+    )!;
+    expect(box.checked).toBe(true);
+    await act(async () => box.click());
+    expect(polishEnabled()).toBe(true);
+    await save();
+    expect(polishEnabled()).toBe(false);
+  });
+});
+
+describe("vocabulary", () => {
+  const words = () => [...host.querySelectorAll('[aria-label="Your words"] li')].map((li) => li.firstChild!.textContent);
+  const pairs = () => [...host.querySelectorAll('[aria-label="Learned corrections"] li')].map((li) => li.textContent!.replace("×", ""));
+
+  it("adds and removes words as they are changed, without waiting for Save", async () => {
+    vocabBlob = JSON.stringify({ words: ["Tauri"], pairs: [] });
+    await mount();
+    expect(words()).toEqual(["Tauri"]);
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="Add a vocabulary word"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Kokoro");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("Add").click());
+    await flush();
+    expect(words()).toEqual(["Kokoro", "Tauri"]);
+    expect(JSON.parse(vocabBlob!).words).toEqual(["Kokoro", "Tauri"]);
+    expect(input.value).toBe("");
+    await act(async () => button("Remove Tauri").click());
+    await flush();
+    expect(words()).toEqual(["Kokoro"]);
+  });
+
+  it("lists the corrections learned, shows one learned while open, and forgets one", async () => {
+    vocabBlob = JSON.stringify({ words: [], pairs: [{ heard: "civ core", meant: "Kokoro", at: 1 }] });
+    await mount();
+    expect(pairs()).toEqual(["civ core→Kokoro"]);
+    // Dictation learns another while the settings are open.
+    await act(async () => void (await updateVocabStore((s) => learnPair(s, "tory", "Tauri", 2))));
+    expect(pairs()).toEqual(["tory→Tauri", "civ core→Kokoro"]);
+    await act(async () => button("Forget civ core → Kokoro").click());
+    await flush();
+    expect(pairs()).toEqual(["tory→Tauri"]);
+    expect(JSON.parse(vocabBlob!).pairs).toEqual([{ heard: "tory", meant: "Tauri", at: 2 }]);
+  });
+
+  it("says how a correction is learned while there are none", async () => {
+    await mount();
+    expect(host.querySelector('[aria-label="Vocabulary"]')!.textContent).toContain("None yet.");
   });
 });
