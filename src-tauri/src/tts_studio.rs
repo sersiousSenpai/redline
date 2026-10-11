@@ -985,10 +985,12 @@ impl Studio {
         self.0.stop_install.store(true, Ordering::Relaxed);
     }
 
-    /// Stop the process and delete everything under `voice-studio/`, in the
-    /// background; an install started meanwhile waits for it to finish.
-    /// With `polish`, only the polish model: the sidecar lets go of it and
-    /// the voice speaks on.
+    /// Remove the studio voice, or with `polish` local polish, in the
+    /// background; an install started meanwhile waits for it to finish. The
+    /// last of the two to go takes everything under `voice-studio/` with it,
+    /// the runtime too. While the voice stays, the sidecar lets go of the
+    /// polish model and speaks on; while local polish stays, the process
+    /// stops and the voice's models go.
     pub(crate) fn remove(&self, polish: bool) -> Result<(), String> {
         let mut out = Out::default();
         let doomed = {
@@ -996,18 +998,31 @@ impl Studio {
             if core.installing.is_some() {
                 return Err(INSTALLING.into());
             }
-            let doomed = if polish {
+            let dir = &self.0.dir;
+            let models = dir.join("models");
+            // The other of the two is installed, and keeps the runtime.
+            let other = core.record.get_or_insert_with(|| read_record(dir))["models"]
+                .as_object()
+                .is_some_and(|m| m.keys().any(|id| (id == POLISH.id) != polish));
+            let doomed = if !other {
+                core.stop("removed", &mut out);
+                core.record = Some(json!({}));
+                vec![dir.clone()]
+            } else if polish {
                 self.0.record_in(&mut core, &|r| {
                     if let Some(models) = r["models"].as_object_mut() {
                         models.remove(POLISH.id);
                     }
                 })?;
                 core.send_line(json!({"op": "unload", "slot": "polish"}));
-                self.0.dir.join("models").join(POLISH.id)
+                vec![models.join(POLISH.id)]
             } else {
+                self.0.record_in(&mut core, &|r| {
+                    r["models"] = json!({POLISH.id: r["models"][POLISH.id].take()});
+                })?;
                 core.stop("removed", &mut out);
-                core.record = Some(json!({}));
-                self.0.dir.clone()
+                let voice = VARIANTS.iter().map(|v| v.id).chain(["shared"]);
+                voice.map(|d| models.join(d)).collect()
             };
             // Counted before this returns, so an install asked for next waits.
             self.0.removing.fetch_add(1, Ordering::SeqCst);
@@ -1016,7 +1031,9 @@ impl Studio {
         self.0.flush(out);
         let inner = self.0.clone();
         background(Box::new(move || {
-            let _ = std::fs::remove_dir_all(&doomed);
+            for dir in &doomed {
+                let _ = std::fs::remove_dir_all(dir);
+            }
             inner.removing.fetch_sub(1, Ordering::SeqCst);
         }));
         Ok(())
@@ -1916,7 +1933,8 @@ fn sysctl_int(name: &str) -> Option<u64> {
 /// - `warm`: pre-warm on intent, `args` `{always?}`; or the polish model's,
 ///   `args` `{polish: true, vocab}`.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
-/// - `remove` (`args` `{polish?}`: only the polish model).
+/// - `remove` (`args` `{polish?}`: local polish, else the voice; the last
+///   of the two takes the runtime with it).
 ///
 /// A plain command that never blocks (the install and the removal run on
 /// threads of their own), so calls keep their order: one piece of speech
@@ -3150,6 +3168,37 @@ for line in sys.stdin:
         let spoke = finished(&say(&studio, "Still here.", 3)).await;
         assert_eq!(outcome(spoke.last().unwrap())["type"], "end");
         assert_eq!(log_lines(&dir, "spawns.log").len(), 1, "never restarted");
+    }
+
+    /// The voice and local polish share the runtime: removing the voice
+    /// leaves local polish working on it, and the last of the two to go
+    /// takes everything with it.
+    #[tokio::test]
+    async fn the_last_of_the_voice_and_local_polish_takes_the_runtime() {
+        let (studio, _, seen) = fake_studio("polish-last", FAST, normal_pressure);
+        install_polish(&studio);
+        let root = studio.0.dir.clone();
+        let models = root.join("models");
+        for d in [VARIANTS[0].id, "shared", POLISH.id] {
+            std::fs::create_dir_all(models.join(d)).unwrap();
+            std::fs::write(models.join(d).join("model.safetensors"), b"weights").unwrap();
+        }
+        finished(&say(&studio, "Before.", 1)).await;
+        studio.remove(false).unwrap();
+        let voice_gone =
+            || !models.join(VARIANTS[0].id).exists() && !models.join("shared").exists();
+        until("the voice's files to go", voice_gone).await;
+        assert_eq!(studio.status()["installed"], false);
+        assert_eq!(
+            status_events(&seen).last().unwrap(),
+            &json!({"state": "off", "reason": "removed"})
+        );
+        assert!(models.join(POLISH.id).exists() && root.join("venv").exists());
+        let reply = finished(&polish(&studio, "um the tray", 2)).await;
+        assert_eq!(outcome(&reply[0])["text"], "The tray.");
+        studio.remove(true).unwrap();
+        until("everything to go", || !root.exists()).await;
+        assert!(!polish_installed(&studio));
     }
 
     /// The polish model is checked for what it needs, not the voice's 16 GB

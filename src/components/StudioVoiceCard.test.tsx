@@ -218,6 +218,7 @@ describe("StudioVoiceCard", () => {
     const styles = [...host.querySelectorAll("select option")].map((o) => o.textContent);
     expect(styles).toEqual(["Natural", "Calm", "Gentle", "Slow", "Brisk", "Upbeat", "Excited"]);
     await act(async () => button("Remove the studio voice…")!.click());
+    expect(host.textContent).toContain("Remove the studio voice and everything it downloaded?");
     expect(ops()).not.toContain("remove");
     await act(async () => button("Remove")!.click());
     expect(ops()).toContain("remove");
@@ -273,6 +274,19 @@ describe("StudioVoiceCard", () => {
     await act(async () => confirm.click());
     expect(rust.calls).toContainEqual(["tts_studio", { op: "remove", args: { polish: true } }]);
     expect(ops().filter((o) => o === "remove")).toHaveLength(1);
+  });
+
+  it("says what stays: the runtime goes with the last of the voice and local polish", async () => {
+    rust.status = { ...rust.status, installed: true, runtimeCurrent: true, models: { [EIGHT]: {}, [POLISH]: {} } };
+    await render();
+    await act(async () => button("Remove the studio voice…")!.click());
+    expect(host.textContent).toContain("Remove the studio voice? Local polish stays.");
+    act(() => root.unmount());
+    root = createRoot(host);
+    rust.status = { ...rust.status, installed: false, models: { [POLISH]: {} } };
+    await render();
+    await act(async () => button("Remove local polish…")!.click());
+    expect(host.textContent).toContain("Remove local polish and everything it downloaded?");
   });
 
   it("credits what it downloads, with the licenses the audit corrected", async () => {

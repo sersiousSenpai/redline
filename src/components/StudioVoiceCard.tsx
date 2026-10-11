@@ -204,6 +204,8 @@ export function StudioVoiceCard({
   // One install at a time: the other's button waits.
   const busy = installing || polishing;
   const installed = !!status?.runtimeCurrent && !!status.models?.[model.id];
+  // The runtime goes with the last of the voice and local polish (Rust `remove`).
+  const anyVoice = Object.keys(status?.models ?? {}).some((id) => id !== POLISH.id);
   const stoppedEarly = setup?.phase === "error" ? setup.message ?? "" : null;
   const speed = status?.models?.[model.id]?.speedRatio ?? null;
 
@@ -473,7 +475,13 @@ export function StudioVoiceCard({
 
       {installed &&
         !busy &&
-        confirm("voice", "Remove the studio voice and everything it downloaded?", "Remove the studio voice…")}
+        confirm(
+          "voice",
+          polishInstalled
+            ? "Remove the studio voice? Local polish stays."
+            : "Remove the studio voice and everything it downloaded?",
+          "Remove the studio voice…",
+        )}
 
       <div className="flex flex-col gap-1.5" data-studio-polish>
         <span style={label}>Dictation polish</span>
@@ -485,7 +493,13 @@ export function StudioVoiceCard({
         {polishInstalled ? (
           <>
             <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>✓ Dictation is polished on this Mac</span>
-            {confirm("polish", `Remove local polish (${POLISH.download})?`, "Remove local polish…")}
+            {confirm(
+              "polish",
+              anyVoice
+                ? `Remove local polish (${POLISH.download})?`
+                : "Remove local polish and everything it downloaded?",
+              "Remove local polish…",
+            )}
           </>
         ) : polishing ? (
           progress(polishSetup, "Local polish install", "Downloading the polish model…")
