@@ -455,7 +455,8 @@ struct CleanupProc {
     stdout: Lines<BufReader<ChildStdout>>,
     /// Turns written whose `result` has not been read yet. A call that timed
     /// out leaves its reply in the pipe; the next call skips it rather than
-    /// killing a child that was merely slow (a cold one routinely is).
+    /// killing a child that was merely slow (a cold one routinely is) — up to
+    /// `CLEANUP_OWED_LIMIT`.
     owed: usize,
 }
 
@@ -1263,30 +1264,47 @@ pub fn voice_thread(
 /// Polish dictated text via the warm cleanup child, spelling `vocab`'s terms
 /// (the ranked head of the capture's vocabulary) exactly as given.
 /// **Best-effort**: the caller keeps the words as they were on any `Err`.
-/// Returns the cleaned text, or an empty string for empty input. A timeout
-/// keeps the warm child (its late reply is skipped next time); an I/O error or
-/// a failed turn drops it so the next call respawns a fresh one.
+/// Returns the cleaned text. Empty text is a warm-up: it starts the child, if
+/// none is running, and returns an empty string — a dictation that will be
+/// polished does this as it starts, so the first polish doesn't wait out a
+/// cold start. A timeout keeps the warm child (its late reply is skipped next
+/// time) unless it was already a reply behind; an I/O error or a failed turn
+/// drops it so the next call respawns a fresh one.
 #[tauri::command]
 pub async fn voice_clean(
     voice: tauri::State<'_, VoiceState>,
     text: String,
     vocab: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let raw = text.trim();
-    if raw.is_empty() {
-        return Ok(String::new());
-    }
-    let turn = cleanup_turn_text(raw, vocab.as_deref().unwrap_or_default());
+    clean_within(&voice, &text, vocab.as_deref().unwrap_or_default(), CLEANUP_TIMEOUT).await
+}
 
+/// `voice_clean`, with its reply awaited at most `timeout`.
+async fn clean_within(
+    voice: &VoiceState,
+    text: &str,
+    vocab: &[String],
+    timeout: Duration,
+) -> Result<String, String> {
+    let raw = text.trim();
     // Resolve the binary *before* taking the cleanup lock (it may shell out).
     let claude_bin = voice.claude_bin().await?;
 
     let mut guard = voice.cleanup.lock().await;
+    // Behind on two replies: slow twice running is wedged, not cold, and a
+    // fresh child answers sooner than one still working through old turns.
+    if guard.as_ref().is_some_and(|p| p.owed >= CLEANUP_OWED_LIMIT) {
+        *guard = None;
+    }
     if guard.is_none() {
         *guard = Some(spawn_cleanup(&claude_bin)?);
     }
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    let turn = cleanup_turn_text(raw, vocab);
 
-    match tokio::time::timeout(CLEANUP_TIMEOUT, run_cleanup_turn(guard.as_mut().unwrap(), &turn)).await {
+    match tokio::time::timeout(timeout, run_cleanup_turn(guard.as_mut().unwrap(), &turn)).await {
         Ok(result) => {
             if result.is_err() {
                 // The child is gone or the reader lost its place: start clean.
@@ -1365,6 +1383,9 @@ fn spawn_cleanup(claude_bin: &str) -> Result<CleanupProc, String> {
 /// raw). Tight enough not to stall the hands-free loop; a cold child that
 /// misses it is kept warm for the next call.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
+/// Replies a child may owe before it is replaced: one missed reply is a cold
+/// start, two a child that has stopped keeping up.
+const CLEANUP_OWED_LIMIT: usize = 2;
 
 /// Write one turn to the cleanup child and read back the authoritative
 /// `result` line. The child stays alive between calls (the reader is left
@@ -2267,6 +2288,64 @@ mod tests {
         let mut owed = 2;
         assert_eq!(read_cleanup_result(&mut lines, &mut owed).await, Ok("New dictation.".into()));
         assert_eq!(owed, 0);
+    }
+
+    /// Against a stand-in `claude` that answers each turn, or with `hang`
+    /// beside it, never: an empty text starts the child and writes nothing; a
+    /// child one reply behind is kept, as a cold one; two behind, it is
+    /// replaced by the next call, which the new child answers.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cleanup_child_two_replies_behind_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("redline-clean-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("log");
+        let bin = dir.join("claude");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho spawn >> '{log}'\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"type\":\"user\"'*)\n      echo turn >> '{log}'\n      [ -e '{hang}' ] || printf '%s\\n' '{reply}' ;;\n  esac\ndone\n",
+                log = log.display(),
+                hang = dir.join("hang").display(),
+                reply = result("Tidied."),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let voice = VoiceState::new(Arc::new(Database::open_in_memory().unwrap()));
+        voice.claude_bin.set(bin.to_string_lossy().into_owned()).unwrap();
+        let seen = |want: &str| {
+            let log = log.clone();
+            let want = want.to_string();
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while std::fs::read_to_string(&log).unwrap_or_default() != want {
+                    assert!(Instant::now() < deadline, "{:?}", std::fs::read_to_string(&log));
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let quick = Duration::from_millis(300);
+
+        assert_eq!(clean_within(&voice, "  ", &[], quick).await, Ok(String::new()));
+        seen("spawn\n").await;
+        std::fs::write(dir.join("hang"), "").unwrap();
+        assert!(clean_within(&voice, "one", &[], quick).await.is_err());
+        assert!(clean_within(&voice, "two", &[], quick).await.is_err());
+        seen("spawn\nturn\nturn\n").await;
+        std::fs::remove_file(dir.join("hang")).unwrap();
+        let text = clean_within(&voice, "three", &[], quick).await;
+        assert_eq!(text, Ok("Tidied.".to_string()));
+        seen("spawn\nturn\nturn\nspawn\nturn\n").await;
+        assert_eq!(voice.cleanup.lock().await.as_ref().map(|p| p.owed), Some(0));
+        // Warming a child that keeps up starts nothing new.
+        assert_eq!(clean_within(&voice, "", &[], quick).await, Ok(String::new()));
+        assert!(clean_within(&voice, "four", &[], quick).await.is_ok());
+        seen("spawn\nturn\nturn\nspawn\nturn\nturn\n").await;
+
+        voice.kill_all();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

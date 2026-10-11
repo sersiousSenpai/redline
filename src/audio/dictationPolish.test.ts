@@ -54,6 +54,11 @@ describe("the cleanup child", () => {
     expect(await cleanupChild.polish("so the tray", vocab)).toBe("polished");
     expect(invoke).toHaveBeenCalledWith("voice_clean", { text: "so the tray", vocab: vocab.slice(0, 60) });
   });
+
+  it("warms with an empty text, which starts the process and polishes nothing", () => {
+    cleanupChild.warm([]);
+    expect(invoke).toHaveBeenCalledWith("voice_clean", { text: "" });
+  });
 });
 
 describe("what comes back", () => {
@@ -119,6 +124,7 @@ function localModel() {
   const asked: Asked[] = [];
   invoke.mockImplementation(async (cmd: string, args?: Args) => {
     if (cmd === "voice_clean") return "From the cleanup child.";
+    if (cmd === "tts_studio" && args?.op === "warm") return true;
     if (cmd === "tts_studio" && args?.op === "polish") {
       const channel = args.onAudio as { onmessage: (data: ArrayBuffer) => void };
       asked.push({ args: args.args as Asked["args"], reply: (data) => channel.onmessage(data) });
@@ -193,5 +199,21 @@ describe("the engine", () => {
     await Promise.resolve();
     expect(invoke).toHaveBeenCalledWith("tts_studio", { op: "warm", args: { polish: true, vocab: ["QueueTray", "Kokoro"] } });
     expect(asked[0].args.vocab).toEqual(["QueueTray", "Kokoro"]);
+    expect(cleanupCalls()).toEqual([]);
+  });
+
+  it("warms the cleanup child instead when local polish isn't installed", async () => {
+    invoke.mockImplementation(async (cmd: string, args?: Args) => (cmd === "tts_studio" && args?.op === "warm" ? false : ""));
+    polishEngine.warm!(VOCAB);
+    await vi.waitFor(() => expect(cleanupCalls()).toEqual([["voice_clean", { text: "" }]]));
+  });
+
+  it("or when the local model can't be had now", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "tts_studio") throw "memory_pressure";
+      return "";
+    });
+    polishEngine.warm!(VOCAB);
+    await vi.waitFor(() => expect(cleanupCalls()).toEqual([["voice_clean", { text: "" }]]));
   });
 });

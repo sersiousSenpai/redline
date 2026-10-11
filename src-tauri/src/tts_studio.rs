@@ -848,18 +848,23 @@ impl Studio {
     /// Load the polish model, and build its prompt for `vocab`, ahead of a
     /// dictation's polish: a dictation started into a composer that polishes.
     /// Nothing when it isn't installed, or is ready for this vocabulary.
-    pub(crate) fn warm_polish(&self, vocab: &Value) -> Result<(), String> {
+    /// `false` when it isn't installed: the cleanup child will polish, and the
+    /// frontend warms that instead.
+    pub(crate) fn warm_polish(&self, vocab: &Value) -> Result<bool, String> {
         let inner = &self.0;
         let mut out = Out::default();
         let warmed = {
             let mut core = inner.lock();
+            if !inner.polish_installed(&mut core) {
+                return Ok(false);
+            }
             let current = match core.polish_model {
                 Model::Loading => true,
                 Model::Ready => core.polish_vocab == *vocab,
                 Model::Off | Model::Unloaded => false,
             };
-            if current || !inner.polish_installed(&mut core) {
-                return Ok(());
+            if current {
+                return Ok(true);
             }
             inner.can_polish(&mut core).and_then(|()| {
                 let line = json!({"op": "warmup", "slot": "polish", "vocab": vocab});
@@ -868,7 +873,7 @@ impl Studio {
                 if core.polish_model != Model::Ready {
                     core.polish_model = Model::Loading;
                 }
-                Ok(())
+                Ok(true)
             })
         };
         inner.flush(out);
@@ -1922,7 +1927,7 @@ fn sysctl_int(name: &str) -> Option<u64> {
 ///   progress and the outcome on `studio-setup`; `cancel` stops it (its
 ///   outcome is the error `cancelled`), and installing again resumes.
 /// - `warm`: pre-warm on intent, `args` `{always?}`; or the polish model's,
-///   `args` `{polish: true, vocab}`.
+///   `args` `{polish: true, vocab}`, answering whether it is installed.
 /// - `surface`: `args` `{surface, open}`, a voice surface opened or closed.
 /// - `remove` (`args` `{polish?}`: local polish, else the voice; the last
 ///   of the two takes the runtime with it).
@@ -1973,7 +1978,9 @@ pub fn tts_studio(
             studio.set_prefs(&args)?;
             studio.install(false)
         }
-        "warm" if args["polish"] == true => studio.warm_polish(&args["vocab"])?,
+        // Whether local polish will do it: the frontend warms the cleanup
+        // child when it won't.
+        "warm" if args["polish"] == true => return studio.warm_polish(&args["vocab"]).map(Value::Bool),
         "warm" => studio.warm(args["always"] == true)?,
         "cancel" => studio.cancel_install(),
         "surface" => studio.surface(
@@ -2975,8 +2982,8 @@ for line in sys.stdin:
         let (studio, dir, seen) = fake_studio("polish-warm", FAST, normal_pressure);
         install_polish(&studio);
         let vocab = json!(["QueueTray"]);
-        studio.warm_polish(&vocab).unwrap();
-        studio.warm_polish(&vocab).unwrap();
+        assert_eq!(studio.warm_polish(&vocab), Ok(true), "local polish will do it");
+        assert_eq!(studio.warm_polish(&vocab), Ok(true));
         until("the polish model", || polish_ready(&studio)).await;
         studio.warm_polish(&vocab).unwrap();
         studio.warm_polish(&json!(["TalkPanel"])).unwrap();
@@ -3054,7 +3061,7 @@ for line in sys.stdin:
                 .unwrap_err(),
             POLISH_NOT_INSTALLED
         );
-        studio.warm_polish(&json!([])).unwrap();
+        assert_eq!(studio.warm_polish(&json!([])), Ok(false), "the cleanup child will polish");
         assert!(!polish_installed(&studio));
         install_polish(&studio);
         assert!(polish_installed(&studio));

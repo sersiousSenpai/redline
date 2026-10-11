@@ -35,9 +35,11 @@ export interface PolishEngine {
 /** How many of the vocabulary's terms ride along: its ranked head. */
 const SPELLINGS = 60;
 
-/** The fixed cleanup child. */
-export const cleanupChild: PolishEngine = {
+/** The fixed cleanup child. Warming it starts the process (an empty text),
+ *  so the first polish of a session doesn't wait out its cold start. */
+export const cleanupChild: Required<PolishEngine> = {
   polish: (text, vocab) => invoke<string>("voice_clean", { text, vocab: vocab.slice(0, SPELLINGS) }),
+  warm: () => void invoke("voice_clean", { text: "" }).catch(() => {}),
 };
 
 /** The terms the local model is given: the head, as the sidecar takes them
@@ -55,8 +57,9 @@ export const LOCAL_LIMIT_MS = 8000;
 /** The local polish model. Its reply is one frame on a Channel: the
  *  generation's low 32 bits, flags, then the outcome as JSON. Anything but a
  *  polish — not installed, slow, failed, cancelled — rejects. A reply the
- *  sidecar refused comes back as the words unchanged. */
-export const localModel: Required<PolishEngine> = {
+ *  sidecar refused comes back as the words unchanged. Its warm-up answers
+ *  whether it is installed and can load, so it will be the one to polish. */
+export const localModel = {
   polish: (text, vocab) =>
     new Promise<string>((resolve, reject) => {
       // From the app-wide counter, so a speech driver's cancel never matches it.
@@ -83,15 +86,22 @@ export const localModel: Required<PolishEngine> = {
         reject(e);
       });
     }),
-  warm: (vocab) =>
-    void invoke("tts_studio", { op: "warm", args: { polish: true, vocab: localSpellings(vocab) } }).catch(() => {}),
-};
+  warm: (vocab: readonly string[]) =>
+    invoke<boolean>("tts_studio", { op: "warm", args: { polish: true, vocab: localSpellings(vocab) } }).catch(
+      () => false,
+    ),
+} satisfies PolishEngine;
 
 /** What dictation polishes with: the local model, which Rust refuses at once
- *  when it isn't installed, else — and whenever it fails — the cleanup child. */
+ *  when it isn't installed, else — and whenever it fails — the cleanup child.
+ *  Each warms for a dictation that will be polished: the local model when it
+ *  is installed, else the cleanup child. */
 export const polishEngine: PolishEngine = {
   polish: (text, vocab) => localModel.polish(text, vocab).catch(() => cleanupChild.polish(text, vocab)),
-  warm: (vocab) => localModel.warm(vocab),
+  warm: (vocab) =>
+    void localModel.warm(vocab).then((local) => {
+      if (!local) cleanupChild.warm(vocab);
+    }),
 };
 
 /** Shorter dictations are left as the rules made them. */
