@@ -1056,9 +1056,9 @@ function GradeBadge({ grade }: { grade: string }) {
 }
 
 /** The optional end-of-turn model for hands-free (`turnModel.ts`): a download,
- *  then a switch. It runs on the Kokoro voice's runtime, so it is offered
- *  only once that is installed. Switched on, it applies from the next time
- *  hands-free listens; switched off, at once. */
+ *  then a switch. It runs on the Kokoro voice's runtime or the studio voice's
+ *  (local polish's), so it is offered once either is installed. Switched on,
+ *  it applies from the next time hands-free listens; switched off, at once. */
 function TurnModelSetting() {
   const [status, setStatus] = useState<TurnModelStatus | null>(null);
   const [wanted, setWanted] = useState(turnModelWanted);

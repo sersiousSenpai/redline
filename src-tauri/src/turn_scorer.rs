@@ -7,13 +7,14 @@
 //!
 //! The model is Smart Turn v3.1 (BSD-2-Clause, Daily): a Whisper-tiny encoder
 //! with a linear head, 8.7 MB of int8 ONNX, reading the last 8 s of the
-//! capture's audio. It runs in a Python process of its own on the Kokoro
-//! runtime's interpreter, which already has numpy and onnxruntime, so a
-//! question never waits behind a sentence being synthesized, and the binary
-//! carries only this glue and the small script. The script computes the
-//! model's input — Whisper's 80-bin log-mel over an 8 s window, zero-padded
-//! at the start and normalized — in numpy, matching the reference code's
-//! transformers feature extractor to 1e-5, so transformers isn't needed.
+//! capture's audio. It runs in a Python process of its own on a local voice's
+//! runtime — Kokoro's, else the studio voice's — each of which has numpy and
+//! onnxruntime, so a question never waits behind a sentence being
+//! synthesized, and the binary carries only this glue and the small script.
+//! The script computes the model's input — Whisper's 80-bin log-mel over an
+//! 8 s window, zero-padded at the start and normalized — in numpy, matching
+//! the reference code's transformers feature extractor to 1e-5, so
+//! transformers isn't needed.
 //!
 //! On the dictation test set a question takes 14.5 ms here, p95 (20–32 ms
 //! with Kokoro synthesizing beside it), and as the endpointer uses it, it
@@ -21,7 +22,7 @@
 //! 16%.
 //!
 //! It is downloaded on demand, pinned by revision, size and SHA-256
-//! (`pinned_fetch`). With no Kokoro runtime, no model, or a process that
+//! (`pinned_fetch`). With neither runtime, no model, or a process that
 //! doesn't answer in time, there is no score, and the endpointer keeps its
 //! silence rule. A question is never waited on: a scorer busy with another
 //! (or starting) answers no score at once, and the question's write and its
@@ -48,6 +49,7 @@ use serde::Serialize;
 use crate::dictation::DictationState;
 use crate::dictation_whisper;
 use crate::pinned_fetch::{self, Pinned};
+use crate::tts_studio::Studio;
 
 const MODEL: Pinned = Pinned {
     url: "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.1-cpu.onnx",
@@ -264,7 +266,8 @@ fn pcm_16k(tail: Option<(Vec<f32>, f64)>) -> Option<Vec<i16>> {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnScorerReply {
-    /// The Kokoro runtime is installed: the model can run.
+    /// A runtime it runs on is installed (Kokoro's, or the studio voice's):
+    /// the model can run.
     runtime: bool,
     /// The model is downloaded.
     model: bool,
@@ -276,7 +279,10 @@ pub struct TurnScorerReply {
 
 pub struct TurnScorerState {
     dir: PathBuf,
-    python: PathBuf,
+    /// Kokoro's interpreter: the model's first choice.
+    kokoro: PathBuf,
+    /// The studio voice, whose runtime is the second.
+    studio: Studio,
     http: reqwest::Client,
     proc: Mutex<Option<Scorer>>,
     /// One download at a time: two clicks must not write the same `.part`.
@@ -284,12 +290,13 @@ pub struct TurnScorerState {
 }
 
 impl TurnScorerState {
-    /// The model lives in `<app data>/turn`; `python` is the Kokoro runtime's
-    /// interpreter.
-    pub fn new(data_dir: &Path, python: PathBuf) -> Self {
+    /// The model lives in `<app data>/turn`, and runs on `kokoro` (the Kokoro
+    /// runtime's interpreter), else on `studio`'s runtime.
+    pub fn new(data_dir: &Path, kokoro: PathBuf, studio: Studio) -> Self {
         Self {
             dir: data_dir.join("turn"),
-            python,
+            kokoro,
+            studio,
             http: reqwest::Client::new(),
             proc: Mutex::new(None),
             download: Mutex::new(()),
@@ -300,9 +307,19 @@ impl TurnScorerState {
         self.dir.join(MODEL_FILE)
     }
 
+    /// The interpreter the model runs on, chosen as it starts: Kokoro's when
+    /// that voice is installed, else the studio voice's runtime once it is
+    /// built from this binary's lock (an older one has no onnxruntime).
+    fn python(&self) -> Option<PathBuf> {
+        if self.kokoro.exists() {
+            return Some(self.kokoro.clone());
+        }
+        self.studio.python()
+    }
+
     fn status(&self, score: Option<f32>) -> TurnScorerReply {
         TurnScorerReply {
-            runtime: self.python.exists(),
+            runtime: self.python().is_some(),
             model: self.model_path().exists(),
             // Busy, answering or starting: it is taken as up, never waited on.
             warm: self
@@ -339,9 +356,12 @@ impl TurnScorerState {
             return Ok(());
         }
         *proc = None;
-        if !self.python.exists() {
-            return Err("the end-of-turn model needs the Kokoro voice installed".to_string());
-        }
+        let Some(python) = self.python() else {
+            return Err(
+                "the end-of-turn model needs the Kokoro voice or the studio voice installed"
+                    .to_string(),
+            );
+        };
         let model = self.model_path();
         if !model.exists() {
             return Err("the end-of-turn model isn't downloaded".to_string());
@@ -351,7 +371,7 @@ impl TurnScorerState {
             std::fs::write(&script, SCRIPT)
                 .map_err(|e| format!("couldn't write the end-of-turn model's script: {e}"))?;
         }
-        *proc = Some(Scorer::spawn(&self.python, &script, &model)?);
+        *proc = Some(Scorer::spawn(&python, &script, &model)?);
         Ok(())
     }
 
@@ -434,19 +454,32 @@ while read -r id n; do
 done
 "#;
 
+    /// The studio voice of the app data in `data`, as it is on disk.
+    fn studio_of(data: &Path) -> Studio {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        Studio::new(data, reqwest::Client::new(), db)
+    }
+
+    /// Put the fake in an interpreter's place at `python`.
+    #[cfg(unix)]
+    fn place_fake(python: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::fs::write(python, FAKE).unwrap();
+        std::fs::set_permissions(python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     /// A scorer whose interpreter is the fake, with its model in place.
     #[cfg(unix)]
     fn fake(label: &str) -> (TurnScorerState, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let data =
             std::env::temp_dir().join(format!("redline-turn-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(data.join("turn")).unwrap();
         let python = data.join("fake-python");
-        std::fs::write(&python, FAKE).unwrap();
-        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        place_fake(&python);
         std::fs::write(data.join("turn").join(MODEL_FILE), b"").unwrap();
-        (TurnScorerState::new(&data, python), data)
+        (TurnScorerState::new(&data, python, studio_of(&data)), data)
     }
 
     #[cfg(unix)]
@@ -549,6 +582,39 @@ done
 
     #[cfg(unix)]
     #[test]
+    fn it_runs_on_kokoro_s_runtime_else_the_studio_voice_s() {
+        let data =
+            std::env::temp_dir().join(format!("redline-turn-runtimes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(data.join("turn")).unwrap();
+        std::fs::write(data.join("turn").join(MODEL_FILE), b"").unwrap();
+        let kokoro = data.join("kokoro/venv/bin/python3");
+        let studio = data.join("voice-studio/venv/bin/python3");
+        // Each state reads the studio voice's install as it is now.
+        let state = || TurnScorerState::new(&data, kokoro.clone(), studio_of(&data));
+        assert_eq!(state().python(), None, "neither is installed");
+        assert!(!state().status(None).runtime);
+
+        // A studio runtime built from an older lock has no onnxruntime.
+        place_fake(&studio);
+        let record = data.join("voice-studio/install.json");
+        std::fs::write(&record, r#"{"lock": "older", "models": {}}"#).unwrap();
+        assert_eq!(state().python(), None);
+        let current = serde_json::json!({"lock": crate::tts_studio::lock_hash(), "models": {}});
+        std::fs::write(&record, current.to_string()).unwrap();
+        let only_studio = state();
+        assert_eq!(only_studio.python(), Some(studio.clone()));
+        assert!(only_studio.status(None).runtime);
+        only_studio.warm().unwrap();
+        assert_eq!(only_studio.score(Some(vec![0; 100])), Some(0.97));
+
+        // With Kokoro installed too, Kokoro's.
+        place_fake(&kokoro);
+        assert_eq!(state().python(), Some(kokoro));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_score_it_could_not_compute_is_no_score() {
         let (state, data) = fake("nan");
         std::fs::write(data.join("mode"), "nan").unwrap();
@@ -572,7 +638,7 @@ done
     #[test]
     fn without_the_runtime_or_the_model_it_is_unavailable() {
         let data = std::env::temp_dir().join(format!("redline-turn-none-{}", std::process::id()));
-        let state = TurnScorerState::new(&data, data.join("no-python"));
+        let state = TurnScorerState::new(&data, data.join("no-python"), studio_of(&data));
         assert_eq!(
             state.status(None),
             TurnScorerReply {
@@ -627,7 +693,7 @@ done
         let data =
             std::env::temp_dir().join(format!("redline-turn-install-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
-        let state = TurnScorerState::new(&data, data.join("no-python"));
+        let state = TurnScorerState::new(&data, data.join("no-python"), studio_of(&data));
         let wrong = Pinned {
             url,
             bytes: served.len() as u64,
@@ -659,7 +725,7 @@ done
     }
 
     /// The real model on the real runtime, on the dictation test set: run with
-    /// `REDLINE_TURN_PYTHON=<Kokoro venv python3> REDLINE_TURN_MODEL=<model.onnx>
+    /// `REDLINE_TURN_PYTHON=<a Kokoro or studio venv's python3> REDLINE_TURN_MODEL=<model.onnx>
     /// REDLINE_TURN_CLIPS=<dir of *-fin.wav and *-unf.wav> cargo test --lib
     /// turn_scorer -- --ignored --nocapture`. Prints the round trip's p50/p95.
     #[test]
@@ -671,7 +737,7 @@ done
         let data = std::env::temp_dir().join(format!("redline-turn-real-{}", std::process::id()));
         std::fs::create_dir_all(data.join("turn")).unwrap();
         std::fs::copy(&model, data.join("turn").join(MODEL_FILE)).unwrap();
-        let state = TurnScorerState::new(&data, python);
+        let state = TurnScorerState::new(&data, python, studio_of(&data));
         let loaded = Instant::now();
         state.warm().unwrap();
         println!("load {} ms", loaded.elapsed().as_millis());

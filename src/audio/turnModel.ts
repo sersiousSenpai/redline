@@ -3,7 +3,8 @@
 //
 // The optional end-of-turn model (`turn_scorer.rs`): a small on-device model
 // that hears whether the user has finished speaking, in a process of its own
-// on the Kokoro runtime. Downloading it in voice settings turns it on for
+// on a local voice's runtime: Kokoro's, else the studio voice's (which local
+// polish installs too). Downloading it in voice settings turns it on for
 // hands-free; it can be switched off there and stays downloaded.
 
 import { invoke } from "@tauri-apps/api/core";
@@ -11,7 +12,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Scorer } from "./endpoint";
 
 export interface TurnModelStatus {
-  /** The Kokoro runtime is installed, so the model can run. */
+  /** A runtime it runs on is installed (Kokoro's, or the studio voice's), so
+   *  the model can run. */
   runtime: boolean;
   /** The model is downloaded. */
   model: boolean;

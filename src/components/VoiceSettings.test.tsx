@@ -22,7 +22,7 @@ let savedEngine = "kokoro";
 let studioSupported = false;
 // The `voiceVocab` ui pref.
 let vocabBlob: string | null = null;
-// The end-of-turn model: the Kokoro runtime it needs, and whether it is downloaded.
+// The end-of-turn model: a runtime it runs on, and whether it is downloaded.
 let turnRuntime = true;
 let turnModelPresent = false;
 vi.mock("@tauri-apps/api/core", () => ({
@@ -397,7 +397,7 @@ describe("end-of-turn model", () => {
       b.closest("label")!.textContent!.includes("Listen for when I've finished"),
     )!;
 
-  it("is offered only with the Kokoro runtime it runs on", async () => {
+  it("is offered only with a runtime it runs on (Kokoro's or the studio voice's)", async () => {
     turnRuntime = false;
     await mount();
     expect(host.textContent).not.toContain("End of turn");

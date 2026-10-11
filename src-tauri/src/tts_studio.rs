@@ -931,6 +931,17 @@ impl Studio {
         })
     }
 
+    /// The runtime's interpreter, once it is built from this binary's lock:
+    /// numpy and onnxruntime are in it, so the end-of-turn model can run on it
+    /// where Kokoro's runtime isn't installed (turn_scorer.rs).
+    pub(crate) fn python(&self) -> Option<PathBuf> {
+        let inner = &self.0;
+        let mut core = inner.lock();
+        let record = core.record.get_or_insert_with(|| read_record(&inner.dir));
+        let python = inner.dir.join("venv/bin/python3");
+        (record["lock"] == lock_hash().as_str() && python.exists()).then_some(python)
+    }
+
     /// Whether `model` (else the selected one; the polish model's id for
     /// it) can be installed here, with the numbers behind it. Each of
     /// `blockers` is a code the settings card words: `unsupported` (not Apple
@@ -1838,7 +1849,7 @@ fn read_record(dir: &Path) -> Value {
 
 /// Names the embedded lock in `install.json`, so a Redline that pins other
 /// packages rebuilds the runtime (and keeps the models).
-fn lock_hash() -> String {
+pub(crate) fn lock_hash() -> String {
     format!("{:x}", Sha256::digest(LOCK_Z))
 }
 
@@ -2706,7 +2717,7 @@ for line in sys.stdin:
             "stale .deflate"
         );
         let pins: Vec<&str> = lock.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(pins.len(), 34);
+        assert_eq!(pins.len(), 37);
         for pin in &pins {
             let (name, rest) = pin.split_once("==").unwrap();
             assert!(
@@ -2717,6 +2728,9 @@ for line in sys.stdin:
         assert!(pins.iter().any(|p| p.starts_with("mlx-audio==0.5.8 ")));
         // The polish model's runtime: the mlx-lm it was measured on.
         assert!(pins.iter().any(|p| p.starts_with("mlx-lm==0.32.0 ")));
+        // The end-of-turn model's, where Kokoro isn't installed: the
+        // onnxruntime it was measured on.
+        assert!(pins.iter().any(|p| p.starts_with("onnxruntime==1.27.0 ")));
         assert!(inflate(SIDECAR_Z).contains(r#""ops": ["speak", "polish","#));
     }
 
