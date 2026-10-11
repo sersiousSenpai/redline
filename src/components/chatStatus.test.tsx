@@ -75,7 +75,7 @@ interface Surface {
 }
 const SURFACES: Surface[] = [
   { name: "ChatRoom", queues: true, render: () => createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, dictationEnabled: false, onClose: noop }) },
-  { name: "BrowserChat", queues: true, mic: true, render: () => createElement(BrowserChat, { conversation: { kind: "tab", browseId: "b-1", title: "Page", targetLabel: "browser-b1", targetTitle: "Page", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }, workspace: "regular", onClose: noop }) },
+  { name: "BrowserChat", queues: true, mic: true, render: () => createElement(BrowserChat, { conversation: { kind: "tab", browseId: "b-1", title: "Page", targetLabel: "browser-b1", targetBrowseId: "b-1", targetTitle: "Page", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }, workspace: "regular", onClose: noop }) },
   { name: "MissionChat", queues: true, render: () => createElement(MissionChat, { mission, findings: [], onClose: noop, onRemoveFinding: noop, onEditGoal: noop }) },
   { name: "MemoryAsk", queues: true, render: () => createElement(MemoryAsk, { onCite: noop }) },
   { name: "CommentThread report view", queues: false, render: () => createElement(CommentThread, { sessionId: "s-1", comment, autoOpen: true }) },

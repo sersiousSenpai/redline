@@ -53,7 +53,7 @@ import {
 } from "./lib/landing";
 import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
-import { arrivalFocus, arrivalMessage, isWritingKey, writingNow } from "./lib/planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow } from "./lib/planArrival";
 import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
@@ -348,7 +348,7 @@ import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
-import { MonochatIsland } from "./components/MonochatIsland";
+import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -431,7 +431,7 @@ import {
   panelMask,
   panelsMasked,
 } from "./lib/immersive";
-import type { SwapRect } from "./lib/springSwap";
+import { boxOf, type SwapRect } from "./lib/springSwap";
 import { SpringSwap } from "./components/SpringSwap";
 import { settingsRow } from "./components/SettingsMenu";
 // A Settings row: lazy, in the rows' shared chunk (the header builds the rest).
@@ -750,9 +750,20 @@ function App() {
     return false;
   });
   // Fresh view of it for listeners: the open door is where you are, caret
-  // or not, so a plan arriving flashes over it.
+  // or not, so a plan arriving flashes over it — unless it is the one you
+  // launched from it (`doorLaunchRef`).
   const frontDoorOpenRef = useRef(frontDoorOpen);
   frontDoorOpenRef.current = frontDoorOpen;
+  // The plan launch the open door is showing in place since its ⏎. When that
+  // plan lands with nothing new begun in the door, the door hands off into it
+  // (`doorHandoff`): it fades where it is while the plan springs out of its
+  // composer. Cleared when the door closes or takes up a chat.
+  const doorLaunchRef = useRef<string | null>(null);
+  const [doorHandoff, setDoorHandoff] = useState(false);
+  useEffect(() => {
+    if (frontDoorOpen) setDoorHandoff(false);
+    else doorLaunchRef.current = null;
+  }, [frontDoorOpen]);
   // The pill's compact card, sprung out by a hover. Never open at launch and
   // never re-opened by coming back to a surface.
   const [doorCompact, setDoorCompact] = useState(false);
@@ -4077,9 +4088,10 @@ function App() {
           setChatReceipts(previous => ({ ...previous, [chatId]: { ...previous[chatId], instruction: previous[chatId]?.instruction ?? "", status: "done", launchId: payload.launchId ?? undefined, sessionId: payload.sessionId, title } }));
           // The chat turns into its plan in place only while you sit idle
           // in it: the agent picks the moment, minutes later.
-          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)) {
-            const receipt = document.querySelector(`[data-chat-plan-receipt="${CSS.escape(chatId)}"]`)?.getBoundingClientRect();
-            if (receipt && receipt.width > 0) setPlanSwap({ launchId: payload.launchId!, from: { left: receipt.left, top: receipt.top, width: receipt.width, height: receipt.height } });
+          const receipt = `[data-chat-plan-receipt="${CSS.escape(chatId)}"]`;
+          if (!writing && dockScopeRef.current === "home" && currentChatIdRef.current === chatId && document.querySelector(receipt)) {
+            const from = boxOf(receipt);
+            if (from) setPlanSwap({ launchId: payload.launchId!, from });
             selectSurfaceRef.current("document");
             focusIntercepted();
           } else {
@@ -4096,7 +4108,30 @@ function App() {
           plateMode: plateModeRef.current,
           viewedVersion: viewedVersionRef.current,
           writing,
+          ownDoorLaunch: ownDoorLaunch({
+            open: frontDoorOpenRef.current,
+            showing: doorLaunchRef.current,
+            draft: getFrontDoorText(),
+            attachments: frontDoorAttachmentsRef.current.length,
+            typedAt: typedAtRef.current,
+            choosing: hasChildOverlay(),
+          }, payload.launchId, Date.now()),
         });
+        if (focus === "handoff") {
+          // The plan you launched with ⏎ from the door you are still in: that
+          // was the gesture, and this is what it asked for. The door hands
+          // off into it — the plan springs out of the composer its sentence
+          // left while the door fades where it is — and the caret goes to the
+          // plan. Said politely, as any arrival on screen is.
+          const from = boxOf(".rl-frontdoor-focus[data-open='true'] .rl-fd-island");
+          if (from) setPlanSwap({ launchId: payload.launchId!, from });
+          setDoorHandoff(true);
+          setFrontDoorOpen(false);
+          selectSurfaceRef.current("document");
+          focusIntercepted();
+          announceDoor(arrivalMessage(title));
+          return;
+        }
         if (focus === "focus" && !paneMaskedRef.current) {
           // On the document surface: on screen now. From the Front Door the
           // plate turns into the plan, which is the point of launching one.
@@ -6886,6 +6921,11 @@ function App() {
     } catch (err) {
       console.error("claim_review failed", err);
     }
+    // A press on the banner, which rises over the door: a trip the user
+    // asked for, so the door and its card step aside for the plan.
+    tripDoor();
+    selectSurfaceRef.current("document");
+    selectSessions();
     setActiveId(dw.sessionId);
     void loadSession(dw.sessionId);
     setDecisionWindow(null);
@@ -7458,6 +7498,7 @@ function App() {
     setFrontDoorAttachments([]);
     setFrontDoorCombine([]);
     setCombinePreview(null);
+    return r.launchId;
   };
 
   // ── What the island attaches ───────────────────────────────────────────
@@ -7533,7 +7574,9 @@ function App() {
     // on top of them rather than the thing being launched. The plans are its
     // context, so the chips sit this one out.
     if (mode === "plan" && frontDoorCombine.length > 0) {
-      await launchCombine(projectOverride);
+      const launchId = await launchCombine(projectOverride);
+      // Launched from the open door, it is handed off into like any plan.
+      if (launchId && frontDoorOpenRef.current) doorLaunchRef.current = launchId;
       return;
     }
     const text = getFrontDoorText(), attachments = frontDoorAttachments;
@@ -7580,6 +7623,9 @@ function App() {
       // composer would relaunch on the next ⏎.
       setFrontDoorText("");
       setFrontDoorAttachments([]);
+      // A plan launched from the open door: the door shows it in place, and
+      // hands off into the plan when it lands (`doorLaunchRef`).
+      if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
       // Handed off: the compact card shrinks back into the pill, which shows
       // the work. The open door shows it in place.
       setDoorCompact(false);
@@ -7609,9 +7655,7 @@ function App() {
     // Measured HERE, synchronously, while the island is still on screen — one
     // render later it is gone. This is the box the Drafter springs out of:
     // the door's composer (a chat's in the dock is not the one sending).
-    const island = document.querySelector(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
-    const r = island?.getBoundingClientRect();
-    const from = r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
+    const from = boxOf(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
     frontDoorLaunchingRef.current = true;
     // Everything else lands in ONE batch once the context is read, so the
     // card never shows a cleared composer while the Drafter is on its way.
@@ -7670,6 +7714,8 @@ function App() {
     // The door GROWS into the chat in place — the composer you were typing in
     // is the bottom of the thread you are now inside — and `selectSurface` is
     // deliberately not called, because nothing is being navigated away from.
+    // A plan launched from it earlier then lands as any other would.
+    doorLaunchRef.current = null;
     setFrontDoorOpen(true);
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
@@ -7705,6 +7751,7 @@ function App() {
   // `Chats ▾`). The dock comes forward wherever the user happens to be — a
   // conversation is not a place you navigate to any more.
   const openChat = (id: string) => {
+    doorLaunchRef.current = null;
     setFrontDoorDest("chat");
     setChatId(id);
     setChatSeed(null);
@@ -8500,6 +8547,7 @@ function App() {
             onOpen={openDecisionForReview}
             onApprove={approveFromDecision}
             onExpire={dismissDecisionWindow}
+            raised={frontDoorOpen || doorCompact}
           />
         </Suspense>
       )}
@@ -10755,6 +10803,7 @@ function App() {
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
         onOpenChange={setFrontDoorOpen}
+        handoff={doorHandoff}
         compactOpen={doorCompact}
         onCompactChange={setDoorCompact}
         compact={doorCompact && renderMonochatComposer("card")}

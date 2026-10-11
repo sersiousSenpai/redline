@@ -415,9 +415,134 @@ pub fn thumbs_prune(
     Ok(removed)
 }
 
+/// The page chat's screenshots (📷 in its composer), `chat-<uuid>.png`: the
+/// third writer in this directory. A sent message names its picture by path,
+/// so a file no message names any more is dead weight. Until it is a week old
+/// it may still be a chip in an unsent draft, which lives in the frontend's
+/// storage, out of reach here.
+const CHAT_SHOT_PREFIX: &str = "chat-";
+const CHAT_SHOT_GRACE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+/// At most this many go in one pass: a slow trickle, never a stall.
+const CHAT_PRUNE_MAX: usize = 200;
+
+/// Every chat-screenshot key `text` names (`…/thumbs/chat-<uuid>.png`).
+fn chat_shot_keys(text: &str, keys: &mut std::collections::HashSet<String>) {
+    for (at, _) in text.match_indices(CHAT_SHOT_PREFIX) {
+        let tail = &text[at..];
+        let len = tail
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(tail.len());
+        if tail[len..].starts_with(".png") {
+            keys.insert(tail[..len].to_string());
+        }
+    }
+}
+
+/// Delete chat screenshots that no message references, once they are past
+/// the grace, at most `max` of them. Fails closed: if the messages can't be
+/// read, nothing is deleted. Returns how many went.
+fn prune_chat_shots_in(
+    dir: &std::path::Path,
+    db: &crate::db::Database,
+    now: std::time::SystemTime,
+    max: usize,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let stale: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let key = path.file_name()?.to_str()?.strip_suffix(".png")?.to_string();
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            let old = now.duration_since(modified).is_ok_and(|age| age > CHAT_SHOT_GRACE);
+            (key.starts_with(CHAT_SHOT_PREFIX) && valid_key(&key) && old).then_some((key, path))
+        })
+        .collect();
+    if stale.is_empty() {
+        return 0;
+    }
+    let mut referenced = std::collections::HashSet::new();
+    match db.texts_mentioning(&format!("{CHAT_SHOT_PREFIX}%.png")) {
+        Ok(texts) => texts.iter().for_each(|text| chat_shot_keys(text, &mut referenced)),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read which messages hold a screenshot; keeping them all");
+            return 0;
+        }
+    }
+    stale
+        .into_iter()
+        .filter(|(key, _)| !referenced.contains(key))
+        .take(max)
+        .filter(|(_, path)| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
+/// The once-per-boot sweep of chat screenshots (`postboot`), off the main
+/// thread and after the reveal.
+pub fn prune_chat_shots(app: &AppHandle, db: &crate::db::Database) {
+    let Ok(dir) = app.path().app_data_dir().map(|d| d.join("thumbs")) else {
+        return;
+    };
+    let removed = prune_chat_shots_in(&dir, db, std::time::SystemTime::now(), CHAT_PRUNE_MAX);
+    if removed > 0 {
+        tracing::info!(removed, "pruned chat screenshots no message references");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screenshot goes only when it is old enough that no draft can still
+    /// hold it, and no message names it — and the sweep never reaches another
+    /// writer's files, nor more than its cap in one pass.
+    #[test]
+    fn chat_screenshots_go_only_when_old_and_unreferenced() {
+        let dir = std::env::temp_dir().join(format!("redline-thumbs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - CHAT_SHOT_GRACE - std::time::Duration::from_secs(60);
+        let file = |name: &str, at: std::time::SystemTime| {
+            let path = dir.join(name);
+            std::fs::write(&path, b"png").unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(at).unwrap();
+        };
+        file("chat-sent.png", old);
+        file("chat-dead-1.png", old);
+        file("chat-dead-2.png", old);
+        file("chat-fresh.png", now);
+        file("p3000-abcd1234.png", old);
+        file("tab-t116.png", old);
+        let db = crate::db::Database::open_in_memory().unwrap();
+        db.insert_browse_message(&crate::state::BrowseMessage {
+            id: "u1".into(),
+            browse_id: "tab".into(),
+            role: "user".into(),
+            body: format!("[Screenshot · tab 1 — Docs: {}, 1200×800 — read the file to see it]\n\nWhat is this?", dir.join("chat-sent.png").display()),
+            status: "complete".into(),
+            created_at: 1,
+            backend: None,
+            target_browse_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(prune_chat_shots_in(&dir, &db, now, 1), 1, "one pass takes at most its cap");
+        assert_eq!(prune_chat_shots_in(&dir, &db, now, 10), 1);
+        assert_eq!(prune_chat_shots_in(&dir, &db, now, 10), 0, "nothing left to take");
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["chat-fresh.png", "chat-sent.png", "p3000-abcd1234.png", "tab-t116.png"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_message_names_its_screenshots_by_path() {
+        let mut keys = std::collections::HashSet::new();
+        chat_shot_keys("see /a/thumbs/chat-1f2e-9a.png, chat- alone and chat-y.jpg", &mut keys);
+        assert_eq!(keys.into_iter().collect::<Vec<_>>(), ["chat-1f2e-9a"]);
+    }
 
     /// A live bug: `thumbs/` has two writers — the Localhost dashboard
     /// (`p<port>-<hash>`) and BrowserPane's drag stand-ins (`tab-<id>`) — and

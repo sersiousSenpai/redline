@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  boxOf,
   fadeOutKeyframes,
   flipBackKeyframes,
   flipKeyframes,
@@ -128,6 +129,19 @@ describe("the island's flights", () => {
     const frames = flipBackKeyframes(ISLAND, HOST);
     expect(frames[0]).toEqual({ transform: "none", opacity: 1 });
     expect(frames[frames.length - 1]).toEqual({ transform: inverseTransform(ISLAND, HOST), opacity: 0 });
+  });
+});
+
+describe("boxOf", () => {
+  it("measures what a spring starts from, and nothing that isn't laid out", () => {
+    document.body.innerHTML = '<div class="island"></div><div class="gone"></div>';
+    const island = document.querySelector(".island")!;
+    island.getBoundingClientRect = () => ({ left: 420, top: 300, width: 560, height: 120 }) as DOMRect;
+    expect(boxOf(".island")).toEqual(ISLAND);
+    // jsdom lays nothing out: a zero box is no place to spring from.
+    expect(boxOf(".gone")).toBeNull();
+    expect(boxOf(".missing")).toBeNull();
+    document.body.innerHTML = "";
   });
 });
 

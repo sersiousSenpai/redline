@@ -94,6 +94,9 @@ pub struct QueuedBrowseSend {
     snapshot: Option<String>,
     cwd: Option<String>,
     target_label: Option<String>,
+    /// The targeted tab's own `browse_id`, written onto both of the turn's
+    /// rows: the page a shared chat's message was about.
+    target_browse_id: Option<String>,
     following_tabs: bool,
     /// The mission the user sent from, captured at send time (BC-13).
     mission: Option<Mission>,
@@ -156,11 +159,12 @@ impl BrowseState {
             .map_err(|e| format!("failed to resolve the `claude` CLI: {e}"))
     }
 
-    /// Load a tab's persisted discussion history (oldest first). Lets the daemon
-    /// serve `/v1/browser/thread` so one tab's browse agent can read what was
+    /// What was discussed about a tab (oldest first): its own thread and the
+    /// shared-chat turns sent against it. Lets the daemon serve
+    /// `/v1/browser/thread` so one tab's browse agent can read what was
     /// discussed on another, without exposing the private `db` handle.
     pub fn load_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
-        self.db.load_browse_thread(browse_id)
+        self.db.load_browse_thread_about(browse_id)
     }
 
     /// Whether a browse turn is currently streaming for this tab's discussion
@@ -260,6 +264,7 @@ impl BrowseState {
             status: "complete".to_string(),
             created_at: now_millis(),
             backend: None,
+            target_browse_id: None,
         };
         if let Err(e) = self.db.insert_browse_message(&user_msg) {
             tracing::warn!(error = %e, "failed to persist consult check-in");
@@ -340,7 +345,7 @@ impl BrowseState {
                     Some("180s consult ceiling"),
                 );
                 let why = "the colleague took too long to respond".to_string();
-                finish_error(&app, &self.db, &browse_id, &why);
+                finish_error(&app, &self.db, &browse_id, None, &why);
                 return Err(why);
             }
         };
@@ -363,13 +368,13 @@ impl BrowseState {
         }
         if let Some(err) = outcome.errored {
             let why = describe_turn_error(&self.db, &browse_id, provider, &err);
-            finish_error(&app, &self.db, &browse_id, &why);
+            finish_error(&app, &self.db, &browse_id, None, &why);
             return Err(why);
         }
         if let Some(text) = outcome.final_text {
             if text.trim().is_empty() {
                 let why = "the colleague produced an empty reply".to_string();
-                finish_error(&app, &self.db, &browse_id, &why);
+                finish_error(&app, &self.db, &browse_id, None, &why);
                 return Err(why);
             }
             let msg = BrowseMessage {
@@ -380,6 +385,7 @@ impl BrowseState {
                 status: "complete".to_string(),
                 created_at: now_millis(),
                 backend: Some(provider.backend().to_string()),
+                target_browse_id: None,
             };
             if let Err(e) = self.db.insert_browse_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist consult reply");
@@ -404,7 +410,7 @@ impl BrowseState {
         } else {
             "the colleague ended without producing a reply".to_string()
         };
-        finish_error(&app, &self.db, &browse_id, &why);
+        finish_error(&app, &self.db, &browse_id, None, &why);
         Err(why)
     }
 
@@ -880,12 +886,14 @@ pub async fn browse_send(
     let message_id = uuid::Uuid::new_v4().to_string();
     let active_id = app.state::<crate::ActiveMission>().active_id();
     let mission = captured_browse_mission(&browse.db, workspace_id.as_deref(), active_id.as_deref())?;
+    let target_browse_id = target_label.as_deref().and_then(|label| tab_browse_id(&app, label));
     let payload = QueuedBrowseSend {
         message_id: message_id.clone(),
         text: text.clone(),
         snapshot,
         cwd,
         target_label,
+        target_browse_id: target_browse_id.clone(),
         following_tabs: following_tabs.unwrap_or(false),
         mission,
     };
@@ -914,6 +922,7 @@ pub async fn browse_send(
                     status: "queued".to_string(),
                     created_at: now_millis(),
                     backend: None,
+                    target_browse_id,
                 };
                 browse
                     .db
@@ -946,6 +955,7 @@ pub async fn browse_send(
         status: "complete".to_string(),
         created_at: now_millis(),
         backend: None,
+        target_browse_id,
     };
     browse
         .db
@@ -1086,6 +1096,17 @@ fn validate_harness(
     })
 }
 
+/// The `browse_id` of the tab whose webview is `label`, from the frontend's
+/// mirrored tab list (suspended tabs included). `None` for a label no open
+/// tab has.
+fn tab_browse_id(app: &AppHandle, label: &str) -> Option<String> {
+    app.try_state::<crate::BrowserTabs>()?
+        .get()
+        .into_iter()
+        .find(|tab| tab.label == label)
+        .map(|tab| tab.browse_id)
+}
+
 /// How a turn's tail names its scope: a tab's own chat is pinned to its page,
 /// a shared chat follows the tab on screen (`contract.json` `scopePhrases`).
 fn scope_phrase(following_tabs: bool) -> &'static str {
@@ -1125,6 +1146,7 @@ fn start_browse_turn(
             snapshot,
             cwd,
             target_label,
+            target_browse_id,
             following_tabs,
             mission,
         } = payload;
@@ -1218,7 +1240,7 @@ fn start_browse_turn(
             return Ok(());
         }
         tauri::async_runtime::spawn(read_browse(
-            app, browse, buf, token, browse_id, TurnRun { provider, resumed }, io,
+            app, browse, buf, token, browse_id, TurnRun { provider, resumed, target: target_browse_id }, io,
         ));
         Ok(())
     })
@@ -1360,11 +1382,13 @@ enum AgentIo {
     },
 }
 
-/// Which provider a turn ran on, and whether it resumed a session.
-#[derive(Clone, Copy)]
+/// Which provider a turn ran on, whether it resumed a session, and the tab it
+/// was sent against.
 struct TurnRun {
     provider: Provider,
     resumed: bool,
+    /// Kept on the turn's reply (or error) row.
+    target: Option<String>,
 }
 
 /// What one agent stream produced. Shared by the turn and the consult.
@@ -1753,7 +1777,8 @@ async fn read_browse(
 ) {
     let db = browse.db.clone();
     let outcome = drive_agent(&app, &browse_id, &buf, io).await;
-    let TurnRun { provider, resumed } = run;
+    let TurnRun { provider, resumed, target } = run;
+    let target = target.as_deref();
     let cli = provider.cli();
 
     // ABOVE the terminal branch, so success, error and cancelled all book.
@@ -1798,14 +1823,14 @@ async fn read_browse(
             // Transient API errors keep the session and ask for a retry; only an
             // explicit context overflow resets the session to start fresh.
             let why = describe_turn_error(&db, &browse_id, provider, &err);
-            let row = finish_error(&app, &db, &browse_id, &why);
+            let row = finish_error(&app, &db, &browse_id, target, &why);
             crate::meter::attach(&db, "browse", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = outcome.final_text {
             if text.trim().is_empty() {
                 let row =
-                    finish_error(&app, &db, &browse_id, &format!("{cli} produced an empty reply"));
+                    finish_error(&app, &db, &browse_id, target, &format!("{cli} produced an empty reply"));
                 crate::meter::attach(&db, "browse", &row, &settled);
                 break 'terminal;
             }
@@ -1817,6 +1842,7 @@ async fn read_browse(
                 status: "complete".to_string(),
                 created_at: now_millis(),
                 backend: Some(provider.backend().to_string()),
+                target_browse_id: target.map(str::to_string),
             };
             if let Err(e) = db.insert_browse_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
@@ -1849,7 +1875,7 @@ async fn read_browse(
         } else {
             format!("{cli} ended without producing a reply")
         };
-        let row = finish_error(&app, &db, &browse_id, &why);
+        let row = finish_error(&app, &db, &browse_id, target, &why);
         crate::meter::attach(&db, "browse", &row, &settled);
     }
 
@@ -1857,6 +1883,7 @@ async fn read_browse(
     // head, so no concurrent send can slip in between the terminal above and
     // the start below.
     if let Some((queued, payload, slot)) = next {
+        let queued_target = payload.target_browse_id.clone();
         if let Err(e) = db.set_thread_message_status("browse", &queued.message_id, "complete") {
             tracing::warn!(error = %e, "failed to flip a drained browse row");
         }
@@ -1884,6 +1911,7 @@ async fn read_browse(
                 &app,
                 &db,
                 &browse_id,
+                queued_target.as_deref(),
                 &format!("your queued message wasn't sent: {e}"),
             );
         }
@@ -1917,8 +1945,9 @@ fn describe_turn_error(db: &Database, browse_id: &str, provider: Provider, error
     )
 }
 
-/// Persist a failed turn as a terminal `error` row and emit `browse-error`.
-fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) -> String {
+/// Persist a failed turn as a terminal `error` row, against the tab its turn
+/// targeted, and emit `browse-error`.
+fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, target: Option<&str>, error: &str) -> String {
     let msg = BrowseMessage {
         id: uuid::Uuid::new_v4().to_string(),
         browse_id: browse_id.to_string(),
@@ -1927,6 +1956,7 @@ fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) ->
         status: "error".to_string(),
         created_at: now_millis(),
         backend: None,
+        target_browse_id: target.map(str::to_string),
     };
     if let Err(e) = db.insert_browse_message(&msg) {
         tracing::warn!(error = %e, "failed to persist error browse message");
@@ -2356,6 +2386,7 @@ mod tests {
             status: status.into(),
             created_at: 0,
             backend: backend.map(Into::into),
+            target_browse_id: None,
         }
     }
 

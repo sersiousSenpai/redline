@@ -784,9 +784,15 @@ pub async fn tts_kokoro_status(tts: tauri::State<'_, TtsState>) -> Result<Kokoro
 ///
 /// An install that only has the int8 model then fetches the fp32 one in the
 /// background of this call (`kokoro-setup` phase `upgrade`), which is why
-/// every caller fires it and forgets it rather than awaiting it.
+/// every caller fires it and forgets it rather than awaiting it. Only the
+/// voice panel and its settings start that 325 MB download: a chat's
+/// read-aloud warms with `upgrade: false`.
 #[tauri::command]
-pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>, app: AppHandle) -> Result<(), String> {
+pub async fn tts_kokoro_warm(
+    tts: tauri::State<'_, TtsState>,
+    app: AppHandle,
+    upgrade: Option<bool>,
+) -> Result<(), String> {
     let engine = tts.db.get_setting(SETTING_ENGINE).unwrap_or_default();
     if engine != "kokoro" || !tts.model_present() {
         return Ok(());
@@ -799,7 +805,7 @@ pub async fn tts_kokoro_warm(tts: tauri::State<'_, TtsState>, app: AppHandle) ->
     }
     // Every panel open warms, so only the first one with nothing downloading
     // starts the upgrade; a failed one is tried again on a later open.
-    if tts.needs_model_upgrade() && tts.model_dl.try_lock().is_ok() {
+    if upgrade.unwrap_or(true) && tts.needs_model_upgrade() && tts.model_dl.try_lock().is_ok() {
         if let Err(e) = ensure_current_model(&tts, &app, "upgrade").await {
             tracing::warn!(target: "kokoro", "model upgrade failed, keeping the int8 model: {e}");
         }

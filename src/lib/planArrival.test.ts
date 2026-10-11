@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { afterEach, describe, expect, it } from "vitest";
-import { arrivalFocus, arrivalMessage, isWritingKey, writingNow, WRITING_MS, type ArrivalState } from "./planArrival";
+import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow, WRITING_MS, type ArrivalState, type DoorAtArrival } from "./planArrival";
 
 const at = (over: Partial<ArrivalState>): ArrivalState => ({
   activeId: null,
@@ -52,6 +52,47 @@ describe("arrivalFocus", () => {
     expect(arrivalFocus(at({ writing: true }))).toBe("flash");
     expect(arrivalFocus(at({ writing: true, mainSurface: "browser" }))).toBe("flash");
     expect(arrivalFocus(at({ writing: true, activeId: "A", plateMode: "plan", mainSurface: "drafter" }))).toBe("flash");
+  });
+});
+
+describe("your own launch from the door", () => {
+  // The ⏎ itself is the last key typed: minutes before the plan lands.
+  const NOW = 600_000;
+  const door: DoorAtArrival = { open: true, showing: "L1", draft: "", attachments: 0, typedAt: NOW - 120_000, choosing: false };
+  const own = (d: DoorAtArrival, launchId: string | null) => ownDoorLaunch(d, launchId, NOW);
+
+  it("hands off into the plan: ⏎ was the gesture, wherever the door was opened", () => {
+    // The open door always counts as writing; a handoff wins over that.
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true }))).toBe("handoff");
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, activeId: "A", plateMode: "plan" }))).toBe("handoff");
+    expect(arrivalFocus(at({ writing: true, ownDoorLaunch: true, mainSurface: "browser" }))).toBe("handoff");
+  });
+
+  it("is the launch the open door is showing, with nothing new begun there", () => {
+    expect(own(door, "L1")).toBe(true);
+    // Someone else's plan, or one with no launch behind it, still flashes.
+    expect(own(door, "L2")).toBe(false);
+    expect(own(door, null)).toBe(false);
+    expect(own({ ...door, showing: null }, null)).toBe(false);
+    // A door closed since, or one where a new draft was begun, keeps to the
+    // flash: the door stays, and so does the sentence.
+    expect(own({ ...door, open: false }, "L1")).toBe(false);
+    expect(own({ ...door, draft: "And then the docs" }, "L1")).toBe(false);
+    expect(own({ ...door, draft: "  " }, "L1")).toBe(true);
+    expect(own({ ...door, attachments: 1 }, "L1")).toBe(false);
+  });
+
+  it("is never a door someone is typing in, even with its box empty again", () => {
+    // A sentence typed and cleared, or a word still in the input method's
+    // hands, is composing (R12): the door stays and the plan flashes.
+    expect(own({ ...door, typedAt: NOW - 800 }, "L1")).toBe(false);
+    expect(own({ ...door, typedAt: NOW - WRITING_MS + 1 }, "L1")).toBe(false);
+    expect(own({ ...door, typedAt: NOW - WRITING_MS }, "L1")).toBe(true);
+  });
+
+  it("is never a door someone is choosing in: a menu of its is open", () => {
+    // Picking the project or the model for what comes next is begun too.
+    expect(own({ ...door, choosing: true }, "L1")).toBe(false);
   });
 });
 

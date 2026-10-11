@@ -21,6 +21,7 @@ const between = (from: string, to: string) => {
 
 describe("a plan arriving while you are busy flashes", () => {
   const arrival = between("const planUnlisten =", "const detachedUnlisten =");
+  const handoff = () => arrival.slice(arrival.indexOf('if (focus === "handoff") {'), arrival.indexOf("return;", arrival.indexOf('if (focus === "handoff") {')));
 
   it("asks whether you are writing, and which version you are reading, at the moment it lands", () => {
     expect(arrival).toContain("const writing = frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now());");
@@ -29,6 +30,32 @@ describe("a plan arriving while you are busy flashes", () => {
     expect(focus).toContain("writing,");
     // The writing clock counts keys aimed at text fields, app-wide.
     expect(app).toMatch(/if \(isWritingKey\(event\.target\)\) typedAtRef\.current = Date\.now\(\);/);
+  });
+
+  it("hands off into the plan you launched from the door you are still in, and only that one", () => {
+    // The rule is planArrival's (`ownDoorLaunch`), read at the moment it lands.
+    const focus = arrival.slice(arrival.indexOf("const focus = arrivalFocus({"), arrival.indexOf('if (focus === "handoff")'));
+    expect(focus).toMatch(/ownDoorLaunch: ownDoorLaunch\(\{\s*open: frontDoorOpenRef\.current,\s*showing: doorLaunchRef\.current,\s*draft: getFrontDoorText\(\),\s*attachments: frontDoorAttachmentsRef\.current\.length,\s*typedAt: typedAtRef\.current,\s*choosing: hasChildOverlay\(\),\s*\}, payload\.launchId, Date\.now\(\)\)/);
+    // The door closes into the plan, which springs out of its composer, and
+    // says so; nothing else of the door's is touched.
+    const block = handoff();
+    expect(block).toContain('boxOf(".rl-frontdoor-focus[data-open=\'true\'] .rl-fd-island")');
+    expect(block).toContain("setPlanSwap(");
+    expect(block).toContain("setDoorHandoff(true);");
+    expect(block).toContain("setFrontDoorOpen(false);");
+    expect(block).toContain("focusIntercepted();");
+    expect(block).toContain("announceDoor(arrivalMessage(title));");
+    expect(block).not.toMatch(/setDoorCompact\(|tripDoor\(|setFrontDoorText\(/);
+    // Only ⏎ in the OPEN door marks its launch — a combination of plans as
+    // much as a sentence — and a chat taken up there since lets the plan land
+    // like any other.
+    const launch = between("const launchFromFrontDoor = async", "} finally {");
+    expect(launch).toContain('if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;');
+    expect(launch).toMatch(/const launchId = await launchCombine\(projectOverride\);\s*(\/\/.*\s*)*if \(launchId && frontDoorOpenRef\.current\) doorLaunchRef\.current = launchId;/);
+    expect(between("const launchCombine = async", "\n  };")).toContain("return r.launchId;");
+    expect(between("const openChat = (id: string) => {", "};")).toContain("doorLaunchRef.current = null;");
+    expect(between("const chatFromFrontDoor = async () => {", "setFrontDoorOpen(true);")).toContain("doorLaunchRef.current = null;");
+    expect(app.slice(app.indexOf("<MonochatIsland"), app.indexOf("</MonochatIsland>"))).toContain("handoff={doorHandoff}");
   });
 
   it("a chat turns into its plan in place only while you sit idle in it", () => {
@@ -55,8 +82,9 @@ describe("a plan arriving while you are busy flashes", () => {
     // A trip the user asked for: the door and its card step aside, and the
     // caret lands in the main area, even on the surface already showing.
     expect(open).toContain("tripDoor();");
-    // Nowhere else does an arrival close the door or the card.
-    const rest = arrival.replace(open, "");
+    // Nowhere else does an arrival close the door or the card, but for the
+    // door's handoff into the plan its own ⏎ launched (below).
+    const rest = arrival.replace(open, "").replace(handoff(), "");
     expect(rest).not.toMatch(/setFrontDoorOpen\(|setDoorCompact\(|tripDoor\(/);
     // The notice is read where it can be seen: on the browser, above the page.
     expect(arrival).toContain('mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}');
@@ -96,6 +124,14 @@ describe("the decision countdown never brings Redline forward", () => {
     expect(decision).toContain("noticeWhenAway(");
     expect(decision).not.toMatch(/unminimize|setFocus/);
     expect(app).not.toMatch(/\.unminimize\(\)|getCurrentWindow\(\)\.setFocus\(\)|w\.setFocus\(\)/);
+  });
+
+  it("is never hidden under the open door or the pill's card, and its Open puts them aside", () => {
+    expect(between("<DecisionWindowBanner", "/>")).toContain("raised={frontDoorOpen || doorCompact}");
+    // Open is a press on the banner — a gesture, so a trip like any other.
+    const open = between("const openDecisionForReview = async () => {", "};");
+    expect(open).toContain("tripDoor();");
+    expect(open).toContain('selectSurfaceRef.current("document");');
   });
 
   it("no webview may bring the window forward at all, nor a web page in the browser", () => {

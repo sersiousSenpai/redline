@@ -51,7 +51,7 @@ function button(label: string): HTMLButtonElement {
 async function click(label: string) { await act(async () => button(label).click()); }
 /** A tab's own chat on the page it is about, as the structure layer resolves it. */
 const tabChat = (over: Partial<ResolvedConversation> = {}): ResolvedConversation => ({
-  kind: "tab", browseId: "thread", title: "Source page", targetLabel: "browser-page", targetTitle: "Source page", targetNumber: 1,
+  kind: "tab", browseId: "thread", title: "Source page", targetLabel: "browser-page", targetBrowseId: "page", targetTitle: "Source page", targetNumber: 1,
   scope: "pinned-page", anchoredFrom: null, exception: false, ...over,
 });
 const sharedChat = (over: Partial<ResolvedConversation> = {}) => tabChat({ kind: "shared", title: "Browser chat", scope: "following-tabs", ...over });
@@ -75,6 +75,24 @@ describe("page conversation header", () => {
     await show({ conversation: sharedChat({ targetLabel: "browser-b" }) });
     expect(await sendTurn("Compare this page")).toMatchObject({ targetLabel: "browser-b", snapshot: "snapshot:browser-b" });
     expect(captureMock.mock.calls.map(([label]) => label)).toEqual(["browser-a", "browser-b"]);
+  });
+
+  it("keeps the page each row was about, and pins a reply to that page after you move on (BC-24)", async () => {
+    await show({ conversation: sharedChat({ targetLabel: "browser-a", targetBrowseId: "a" }) });
+    // Yours is about the page you send against…
+    expect(config.current!.makeMessage({ id: "u", role: "user", body: "Hi", status: "complete" }).targetBrowseId).toBe("a");
+    await sendTurn("What is on this page?");
+    // …and the reply about the page its turn was sent against, though the
+    // chat now follows another tab.
+    turn.status = "streaming";
+    await show({ conversation: sharedChat({ targetLabel: "browser-b", targetBrowseId: "b" }) });
+    expect(config.current!.makeMessage({ id: "r", role: "assistant", body: "A table", status: "complete" }).targetBrowseId).toBe("a");
+    turn.status = "idle";
+    const pin = vi.fn(async () => true);
+    turn.messages = [{ id: "r", browseId: "thread", role: "assistant", body: "A table", status: "complete", createdAt: 1, targetBrowseId: "a" }];
+    await show({ conversation: sharedChat({ targetLabel: "browser-b", targetBrowseId: "b" }), onAddToMission: pin });
+    await act(async () => host.querySelector<HTMLButtonElement>('[title="Pin this reply to the active mission"]')!.click());
+    expect(pin).toHaveBeenCalledWith("A table", "a");
   });
 
   it("re-grounds the turn after a send that never reached the backend", async () => {

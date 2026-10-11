@@ -149,6 +149,10 @@ pub fn run(app: AppHandle) {
         if crate::activation::background_effects_allowed() {
             if let Some(store) = app.try_state::<SessionStore>() {
                 crate::mission_capture::resume(app.clone(), store.database());
+                // Chat screenshots no message names any more, bounded per
+                // boot. Nobody waits on it, so it goes last.
+                let (app, db) = (app.clone(), store.database());
+                tokio::task::spawn_blocking(move || crate::thumbs::prune_chat_shots(&app, &db));
             }
         }
         // Log it if the page's renderer bloats (docs/perf-budget.md rule 7).

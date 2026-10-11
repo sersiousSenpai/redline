@@ -122,9 +122,16 @@ describe("the skill and the prompt teach what the backend does", () => {
     expect(fnBody(browseRs, "consult_framing")).toContain("Companion");
     for (const phrase of contract.consultMustNotMention) expect(browseRs).not.toContain(phrase);
   });
-  // Open, needs a schema decision: in linked mode the discussion about a tab
-  // lives in the shared chat, so this check-in reads that tab's empty thread.
-  it.todo("BC-22 /thread?tab= also returns the shared-chat turns that targeted that tab");
+  it("BC-22 /thread?tab= also returns the shared-chat turns that targeted that tab", () => {
+    // In linked mode the discussion about a tab lives in the shared chat:
+    // each turn's rows keep the tab they were sent against (schema v9), and
+    // the check-in reads them beside the tab's own thread.
+    expect(fnBody(libRs, "handle_browser_thread")).toContain("browse.load_thread(");
+    expect(browseRs).toMatch(/pub fn load_thread\([^)]*\)[^{]*\{\s*self\.db\.load_browse_thread_about\(/);
+    expect(fnBody(browseRs, "browse_send")).toContain("target_browse_id");
+    pinnedBy("src-tauri/src/db.rs", "fn a_tabs_thread_includes_the_shared_chat_turns_about_it");
+    pinnedBy("src-tauri/src/db.rs", "fn a_v8_database_gains_the_browse_message_target");
+  });
   it("BC-23 pinned by browse.rs first_turn_prompt_embeds_active_mission_goal", () => pinnedBy("src-tauri/src/browse.rs", "fn first_turn_prompt_embeds_active_mission_goal"));
   it("BC-17 pinned by browse.rs project_cards_are_once_per_session_and_never_match_snapshot_text", () => pinnedBy("src-tauri/src/browse.rs", "fn project_cards_are_once_per_session_and_never_match_snapshot_text"));
   it("BC-18 pinned by browse.rs provider-switch tests", () => {
@@ -253,6 +260,12 @@ describe("the page chat's UI laws", () => {
   it("BC-24 Add to mission records the page the reply was about, not the anchored tab", () => {
     const pin = pane.slice(pane.indexOf("onAddToMission={"), pane.indexOf("/>", pane.indexOf("onAddToMission={")));
     expect(pin).not.toMatch(/sourceUrl:\s*discussionTab\.url/);
+    // The tab its turn targeted, which the message keeps, so an older reply
+    // in a shared chat is not filed under the tab on screen now.
+    expect(pin).toMatch(/\(body, targetBrowseId\) =>/);
+    expect(pin).toContain("t.browseId === targetBrowseId");
+    expect(chat).toMatch(/onAddToMission\?\.\(body, targetBrowseId\)/);
+    pinnedBy("src/components/BrowserPane.lifecycle.test.tsx", "pins an older shared-chat reply to the page its turn targeted");
   });
   it("BC-11 the grounding watermark moves only once a send succeeds", () => {
     const build = chat.slice(chat.indexOf("buildSendArgs:"), chat.indexOf("makeMessage:"));

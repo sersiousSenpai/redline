@@ -8,7 +8,7 @@ description: >-
   markdown pipeline (tables, mermaid, fenced code, callouts). Covers which tool
   to use for which job (the browser bridge vs WebSearch vs WebFetch), driving
   discipline, and answer formatting.
-version: 9
+version: 10
 ---
 
 # Redline browser page-discussion
@@ -103,9 +103,9 @@ tabs by it when talking to them. The bridge endpoints (in your prompt) let you:
   the label an action needs.
 - **Look at a specific tab** — `/snapshot?tab=<n>` reads it in place.
 - **See what was discussed there** — `/thread?tab=<n>` returns that tab's own
-  chat. Reading it is almost always enough to answer "what's going on over
-  there". In a shared chat, what you discussed about a tab is in your own
-  thread, not there.
+  chat and any shared chat's turns about that tab, each message tagged with
+  the `browseId` of the thread it is in. Reading it is almost always enough
+  to answer "what's going on over there".
 - **Open something new** — `/open` makes a fresh tab and shows it; the user's
   other tabs stay open, and the reply carries the new tab's label. Use this for
   "open … and compare."

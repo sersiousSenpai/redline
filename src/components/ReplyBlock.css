@@ -30,7 +30,7 @@
   line-height: 1.4;
   letter-spacing: 0.07em;
   text-transform: uppercase;
-  color: var(--color-info);
+  color: var(--color-info-text);
 }
 .rl-reply[data-room] .rl-reply-byline { font-size: 11px; }
 .rl-reply-byline[data-error] { color: var(--color-ink-muted); }
@@ -69,7 +69,7 @@
   font-size: calc(12.5px * var(--rl-discussion-zoom, 1));
   line-height: 1.5;
   white-space: pre-wrap;
-  color: var(--color-warning);
+  color: var(--color-warning-text);
 }
 
 /* The tail: one height whatever it holds — the live status and clock, or the
@@ -86,7 +86,7 @@
 }
 .rl-reply[data-room] .rl-reply-tail { height: 28px; font-size: 12px; }
 .rl-reply-status { min-width: 0; overflow: hidden; white-space: nowrap; }
-.rl-reply-status[data-stalled] { color: var(--color-warning); }
+.rl-reply-status[data-stalled] { color: var(--color-warning-text); }
 /* The meter takes only the room the actions leave: it ellipsizes away before
    an action is pushed out of reach. */
 .rl-reply-meter {
@@ -100,7 +100,7 @@
   font-variant-numeric: tabular-nums;
 }
 .rl-reply[data-room] .rl-reply-meter { font-size: 11px; }
-.rl-reply-truncated { color: var(--color-warning); font-weight: 600; }
+.rl-reply-truncated { color: var(--color-warning-text); font-weight: 600; }
 /* A narrow panel or a large text size can make the actions wider than the
    row. The row keeps its height and scrolls sideways instead (its bar
    hidden: `rl-hide-scroll-x`), so the last action and the ⋯ stay reachable by
@@ -138,11 +138,11 @@
 .rl-reply-action:hover:not(:disabled),
 .rl-reply-action:focus-visible {
   color: var(--color-ink);
-  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+  background: var(--color-hover-wash);
 }
 .rl-reply-action:focus-visible { outline-offset: -2px; }
 .rl-reply-action:disabled { opacity: 0.45; cursor: default; }
-.rl-reply-action[data-tone="info"] { color: var(--color-info); }
+.rl-reply-action[data-tone="info"] { color: var(--color-info-text); }
 
 /* The user's turn: a compact card, no byline. */
 .rl-user-turn {
@@ -162,9 +162,30 @@
   margin: 0;
   font-size: calc(11.5px * var(--rl-discussion-zoom, 1));
   line-height: 1.5;
-  color: var(--color-warning);
+  color: var(--color-warning-text);
   overflow-wrap: anywhere;
 }
+/* A turn that didn't simply succeed (TurnNotes): "wasn't sent · resend"
+   under the user's card, "⟳ Retry" under a failed reply. */
+.rl-turn-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  align-self: flex-start;
+  font-size: 10.5px;
+  color: var(--color-warning-text);
+}
+.rl-turn-note-action {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-info-text);
+  cursor: pointer;
+}
+.rl-turn-note-action:hover { opacity: 0.8; }
 
 @media (prefers-reduced-motion: reduce) {
   .rl-reply-actions { transition: none; }

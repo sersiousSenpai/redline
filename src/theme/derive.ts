@@ -35,8 +35,17 @@ export interface ThemeTokens {
   "color-info": string;
   "color-warning": string;
   "color-success": string;
+  /** The info and warning accents as TEXT (a reply's byline, a stalled
+   *  status): the accent itself where it reads at 4.5:1 on the page and the
+   *  raised surfaces, else pulled toward the ink until it does. */
+  "color-info-text": string;
+  "color-warning-text": string;
   "color-bg-elevated": string;
   "color-on-accent": string;
+  /** What is drawn on an info fill (the composer's send button) and on a
+   *  warning fill (a comment discussion's "Attach to next submit"). */
+  "color-on-info": string;
+  "color-on-warning": string;
   "color-code-bg": string;
   "color-code-fg": string;
   /** highlight.js token palette. The code surface stays the theme's own, so on
@@ -49,6 +58,9 @@ export interface ThemeTokens {
   "color-hl-title": string;
   "color-hl-variable": string;
   "color-hl-deletion": string;
+  /** The wash under a control the pointer is on: 7% of the ink, or less on
+   *  a theme whose ink would read under 4.5:1 through it. */
+  "color-hover-wash": string;
   "color-commented-bg": string;
   "color-commented-bar": string;
   "color-selection": string;
@@ -144,6 +156,12 @@ function wcagContrast(a: string, b: string): number {
  * `onto` names every surface the color is also read on, checked by the WCAG
  * formula proper: the muted ink sits on raised cards and composers as much as
  * on the page, and there Homebrew and Terminal fell under the floor.
+ *
+ * An accent used as text is the same search the other way round: the ink
+ * blended all the way toward the accent (`maxT` 1) is the accent itself, kept
+ * exactly where it reads; where it doesn't — Silver Aerogel's blue is 2.1:1 on
+ * its grey paper, Blossom's yellow 1.8:1 — it stays only as close to the
+ * accent as `onto` allows. It is not read on itself, so `onSurface` is off.
  */
 function mutedInk(
   ink: string,
@@ -151,9 +169,10 @@ function mutedInk(
   maxT: number,
   minContrast: number,
   onto: string[] = [],
+  onSurface = true,
 ): string {
   const legible = (color: string) =>
-    contrastRatio(color, surface) >= minContrast &&
+    (!onSurface || contrastRatio(color, surface) >= minContrast) &&
     onto.every((s) => wcagContrast(color, s) >= minContrast);
   if (legible(mix(ink, surface, maxT))) return mix(ink, surface, maxT);
   // Binary-search the blend amount; contrast is monotonic in t.
@@ -167,12 +186,36 @@ function mutedInk(
   return mix(ink, surface, lo);
 }
 
+/** How much of the ink a hover wash may carry: up to `maxAlpha`, in whole
+ *  percents, while the ink itself still reads at `minContrast` through it on
+ *  every surface in `onto`. Red Sand's ink is 4.7:1 on its raised surface, so
+ *  the usual 7% wash would take a label under the floor there. */
+function hoverAlpha(ink: string, onto: string[], maxAlpha: number, minContrast: number): number {
+  for (let percent = Math.round(maxAlpha * 100); percent > 0; percent--) {
+    const alpha = percent / 100;
+    if (onto.every((s) => wcagContrast(ink, mix(s, ink, alpha)) >= minContrast)) return alpha;
+  }
+  return 0;
+}
+
+/** The first of `candidates` that reads at 4.5:1 on `fill`. Where none does —
+ *  Red Sand's dark red paper is 4.2:1 on its light blue — the one that reads
+ *  best, taken toward black or white (whichever is further from `fill`) only
+ *  as far as 4.5:1 needs: still the theme's colour, and a label can sit on
+ *  the fill as well as a glyph. */
+function onFill(fill: string, candidates: string[]): string {
+  const best = candidates.find((c) => wcagContrast(c, fill) >= 4.5) ??
+    candidates.reduce((best, c) => (wcagContrast(c, fill) > wcagContrast(best, fill) ? c : best));
+  const extreme = wcagContrast("#000000", fill) > wcagContrast("#ffffff", fill) ? "#000000" : "#ffffff";
+  return mutedInk(extreme, best, 1, 4.5, [fill], false);
+}
+
 export function deriveTokens(base: ThemeBase): ThemeTokens {
   const { bg, fg } = base;
   const isDark = luminance(bg) < 0.5;
 
-  // Every theme's accents (info/warning/success) are saturated/dark enough
-  // that white reads cleanly on accent-filled buttons across all 10 themes.
+  // White on accent-filled buttons. Not every theme's blue is dark enough for
+  // it, so what sits on an info fill is checked (`color-on-info`).
   const onAccent = "#ffffff";
 
   const anchorBg = mix(bg, fg, 0.12);
@@ -224,8 +267,18 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-info": base.blue,
     "color-warning": base.yellow,
     "color-success": base.green,
+    // Text, so held to the body-text floor on the page and on raised cards
+    // (a comment's thread sits on one) — the fills and rules keep the hue.
+    "color-info-text": mutedInk(fg, base.blue, 1, 4.5, [bg, elevated], false),
+    "color-warning-text": mutedInk(fg, base.yellow, 1, 4.5, [bg, elevated], false),
     "color-bg-elevated": elevated,
     "color-on-accent": onAccent,
+    // White, unless the theme's blue is too light for it (Aurora's is
+    // 2.0:1): then whichever of the theme's own paper and ink reads there,
+    // at 4.5:1 so a button's label can use it too.
+    "color-on-info": onFill(base.blue, [onAccent, bg, fg]),
+    // White is under 3:1 on twelve themes' yellows.
+    "color-on-warning": onFill(base.yellow, [onAccent, bg, fg]),
     // Dark themes get a subtly elevated code surface; light themes keep the
     // code surface equal to the page so the code area looks unified with the
     // rest of the UI and the dark syntax palette reads at full contrast
@@ -239,6 +292,7 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-hl-title": hl.title,
     "color-hl-variable": hl.variable,
     "color-hl-deletion": hl.deletion,
+    "color-hover-wash": rgba(fg, hoverAlpha(fg, [bg, elevated], 0.07, 4.5)),
     "color-commented-bg": rgba(base.selection, 0.22),
     "color-commented-bar": rgba(base.selection, 0.85),
     // Dark backgrounds need a punchier overlay to read as vibrant.

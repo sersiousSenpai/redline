@@ -53,6 +53,14 @@ export function inverseTransform(from: SwapRect, host: SwapRect): string {
   return `translate(${round(dx)}px, ${round(dy)}px) scale(${round(sx, 4)}, ${round(sy, 4)})`;
 }
 
+/** The box of the first element `selector` matches, measured now — what a
+ *  spring starts from — or null when nothing there is laid out. Measured on
+ *  the gesture (or the arrival), before the render that takes it away. */
+export function boxOf(selector: string): SwapRect | null {
+  const r = document.querySelector(selector)?.getBoundingClientRect();
+  return r && r.width > 0 ? { left: r.left, top: r.top, width: r.width, height: r.height } : null;
+}
+
 /** Is this worth springing?
  *
  *  Two ways it isn't: reduced motion, or a starting box already most of the

@@ -11,25 +11,14 @@
 //
 // A send queued behind a running reply is not a note on a row: it waits in
 // the tray above the composer (`QueueTray`).
+//
+// Both are drawn in the accents as text (`.rl-turn-note`, ReplyBlock.css),
+// which every theme holds at 4.5:1.
 
 export function RetryNote({ onRetry }: { onRetry: () => void }) {
   return (
-    <span className="inline-flex items-center gap-1.5 mt-0.5 self-start">
-      <button
-        type="button"
-        onClick={onRetry}
-        title="Send that message again"
-        className="hover:opacity-80"
-        style={{
-          fontSize: "10.5px",
-          fontWeight: 600,
-          color: "var(--color-info)",
-          background: "transparent",
-          border: "none",
-          padding: 0,
-          cursor: "pointer",
-        }}
-      >
+    <span className="rl-turn-note">
+      <button type="button" onClick={onRetry} title="Send that message again" className="rl-turn-note-action">
         ⟳ Retry
       </button>
     </span>
@@ -38,27 +27,10 @@ export function RetryNote({ onRetry }: { onRetry: () => void }) {
 
 export function UnsentNote({ onResend }: { onResend?: () => void }) {
   return (
-    <span
-      className="inline-flex items-center gap-1.5 mt-0.5 self-start"
-      style={{ fontSize: "10.5px", color: "var(--color-warning)" }}
-    >
+    <span className="rl-turn-note">
       wasn't sent
       {onResend && (
-        <button
-          type="button"
-          onClick={onResend}
-          title="Send this message again"
-          className="hover:opacity-80"
-          style={{
-            fontSize: "10.5px",
-            fontWeight: 600,
-            color: "var(--color-info)",
-            background: "transparent",
-            border: "none",
-            padding: 0,
-            cursor: "pointer",
-          }}
-        >
+        <button type="button" onClick={onResend} title="Send this message again" className="rl-turn-note-action">
           resend
         </button>
       )}

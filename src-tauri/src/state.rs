@@ -779,6 +779,11 @@ pub struct BrowseMessage {
     /// page chat could run on Codex — those were all Claude.
     #[serde(default)]
     pub backend: Option<String>,
+    /// The tab (its `browse_id`) the turn was sent against: the page a
+    /// shared chat's message was about, which its own thread can't say.
+    /// `None` on rows from before it was kept, and on a consult's.
+    #[serde(default)]
+    pub target_browse_id: Option<String>,
 }
 
 /// A browse chat's own provider/model/effort pick, stored beside its session

@@ -26,7 +26,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
 
 const onPage = (targetLabel: string): ResolvedConversation => ({
-  kind: "shared", browseId: "same-thread", title: "Browser chat", targetLabel, targetTitle: "Page", targetNumber: 1,
+  kind: "shared", browseId: "same-thread", title: "Browser chat", targetLabel, targetBrowseId: targetLabel.replace("browser-", ""), targetTitle: "Page", targetNumber: 1,
   scope: "following-tabs", anchoredFrom: null, exception: false,
 });
 

@@ -94,6 +94,8 @@ export interface ResolvedConversation {
   title: string;
   /** The page a turn grounds on and acts on: always the tab on screen (BC-12). */
   targetLabel: string;
+  /** That tab's own thread key, which the turn's rows keep (BC-24). */
+  targetBrowseId: string;
   targetTitle: string;
   /** 1-based strip position of the target, which is what the user calls it (BC-1). */
   targetNumber: number;
@@ -136,6 +138,7 @@ export function resolveConversation(w: ChatWorld): ResolvedConversation | null {
     browseId: own ? discussion.browseId : sharedId!,
     title: own ? discussion.title : SHARED_TITLE,
     targetLabel: `browser-${active.id}`,
+    targetBrowseId: active.browseId,
     targetTitle: active.title,
     targetNumber: w.tabs.indexOf(active) + 1,
     scope: own ? "pinned-page" : "following-tabs",

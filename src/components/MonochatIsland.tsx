@@ -8,7 +8,7 @@ import { FRONT_DOOR_TEXT_KEY } from "../lib/frontDoor";
 import { isFrontDoorKey } from "../lib/keymap";
 import { isEditableTarget } from "../lib/landing";
 import { SHELL_EDGE } from "../lib/paneLayout";
-import { DOOR_CLOSE_MS, DOOR_GROW_MS, flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
+import { DOOR_CLOSE_MS, DOOR_GROW_MS, fadeOutKeyframes, flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, SWAP_OUT_EASING, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
 import type { CardRelease } from "./MonochatCard";
 import "./MonochatIsland.css";
@@ -26,8 +26,10 @@ import "./MonochatIsland.css";
 // Both poses come out of the pill and go back into it. The door springs from
 // the card it grows out of (draft, caret and selection carried over), else
 // from the pill; the paper fades in behind it, the welcome a beat later.
-// Closing, it falls back toward the pill while the paper fades. On the empty
-// plate the composer never moves at all — engaging it only brings the paper.
+// Closing, it falls back toward the pill while the paper fades — except when
+// it hands off into the plan it launched, which springs out of its composer
+// while the door fades where it is. On the empty plate the composer never
+// moves at all — engaging it only brings the paper.
 
 export type LandingFit = "full" | "pills" | "bare" | "none";
 
@@ -63,8 +65,9 @@ const loadCard = () => import("./MonochatCard");
 const MonochatCard = lazy(loadCard);
 
 /** A menu, picker or dialog layered over the island owns the pointer and Esc.
- *  Not one the open door's sweep left inert behind it: that one is under. */
-const hasChildOverlay = () => Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]')).some(overlay => !overlay.closest("[inert]"));
+ *  Not one the open door's sweep left inert behind it: that one is under.
+ *  Also how a plan arriving finds someone choosing in the door. */
+export const hasChildOverlay = () => Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]:not(.rl-frontdoor-focus), dialog[open]')).some(overlay => !overlay.closest("[inert]"));
 /** Not in the chat slot while it is folded away (`hidden`). */
 const shown = (element: Element) => !element.closest("[hidden]");
 /** The composer the door puts the caret in — a chat's own when it holds one. */
@@ -89,10 +92,13 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, arrivals = 0, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, arrivals = 0, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The door is closing into the plan it launched: it fades where it is, as
+   *  the plan springs out of its composer, and the caret goes to the plan. */
+  handoff?: boolean;
   /** The compact card. Its content is rendered while it is open, and held as
    *  it last was while the card goes back into the pill. */
   compactOpen?: boolean;
@@ -312,12 +318,13 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     // its controls unavailable while the opaque front door owns the screen.
     // A modal layer of its own — a dialog, or the tour that wraps one — stays
     // live above it, and so does a status line: it has nothing to press, and
-    // silencing it would swallow what it says.
+    // silencing it would swallow what it says. So does a notice that rises
+    // over the door because it can't wait (the decision countdown).
     const restored: Array<[HTMLElement, boolean]> = [];
     let branch: HTMLElement | null = layer.current;
     while (branch && branch !== document.body) {
       for (const sibling of Array.from(branch.parentElement?.children ?? [])) {
-        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer], [role="status"]')) {
+        if (sibling !== branch && sibling instanceof HTMLElement && !sibling.matches('script, style, [role="dialog"], dialog, [data-rl-modal-layer], [data-rl-over-door], [role="status"]')) {
           restored.push([sibling, sibling.inert]); sibling.inert = true;
         }
       }
@@ -386,6 +393,9 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     if (shell?.animate) {
       flight.current = [
         reduced ? shell.animate([{ opacity: 1 }, { opacity: 0 }], { duration: ISLAND_FADE_MS, fill: "forwards" })
+          // Handing off, the box stays where the plan springs from: the door
+          // steps back and away under it, gone well before the spring lands.
+          : handoff ? shell.animate(fadeOutKeyframes(), { duration: DOOR_CLOSE_MS, easing: SWAP_OUT_EASING, fill: "forwards" })
           : !composer || !from ? shell.animate([{ opacity: 0 }, { opacity: 0 }], { duration: DOOR_CLOSE_MS, fill: "forwards" })
           : shell.animate(flipBackKeyframes(from, aim(shell, composer)), { duration: DOOR_CLOSE_MS, easing: ISLAND_EASE_IN, fill: "forwards" }),
       ];
@@ -422,12 +432,12 @@ export function MonochatIsland({ open, onOpenChange, compactOpen = false, onComp
     } else if (!open && previousOpen.current) {
       // A chat carried out to the dock took its focused composer with it,
       // which leaves the caret nowhere: that is the door's to hand back too —
-      // to where it was, else the pill; after navigation, or with where it
-      // was gone, to the new surface's main area.
+      // to where it was, else the pill; after navigation, a handoff into the
+      // plan, or with where it was gone, to the new surface's main area.
       const active = document.activeElement;
       if (!active || active === document.body || layer.current?.contains(active)) {
         const remembered = returnFocus.current;
-        if (navigated.current || remembered && !remembered.isConnected) focusMain();
+        if (navigated.current || handoff || remembered && !remembered.isConnected) focusMain();
         else if (remembered) remembered.focus({ preventScroll: true });
         else if (!visible) launcher.current?.focus({ preventScroll: true });
         else (active as HTMLElement | null)?.blur();

@@ -5,6 +5,8 @@
 // as a reproduction of "it streams one response and then stops" (a Space press
 // anywhere killed the warm child, a typed follow-up vanished, a capture note
 // fired on any comment change) and now pins the fixed behaviour.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -332,6 +334,19 @@ describe("interrupting a reply", () => {
     expect(host.textContent).toContain("(interrupted)");
     expect(host.querySelector("p[style*='danger']")).toBeNull();
     expect(input().disabled).toBe(false);
+  });
+
+  it("a reply cut off before a reload still says so after it, and once", async () => {
+    // As voice.rs stores it: the words, then the mark on a line of its own.
+    script.thread = [{ id: "m1", sessionKey: SID, role: "agent", text: "The gist is\n⟦interrupted⟧", createdAt: 1 }];
+    await mount();
+    expect(host.textContent).toContain("The gist is");
+    expect(host.textContent).not.toContain("⟦");
+    expect(host.textContent!.match(/\(interrupted\)/g)).toHaveLength(1);
+    // The mark is the one voice.rs writes.
+    const voiceRs = readFileSync(join(process.cwd(), "src-tauri/src/voice.rs"), "utf8");
+    expect(voiceRs).toContain('const INTERRUPTED_MARK: &str = "⟦interrupted⟧";');
+    expect(voiceRs).toContain('format!("{words}\\n{INTERRUPTED_MARK}")');
   });
 
   it("a quick tap of the talk button during thinking sends nothing", async () => {

@@ -16,18 +16,25 @@
 .rl-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-queue-text:hover, .rl-queue-text:focus { white-space: pre-wrap; overflow-wrap: anywhere; }
 .rl-queue-row button { flex: none; min-height: 24px; padding: 0 7px; border: 0; border-radius: 6px; background: none; color: var(--color-ink-muted); font-size: 11px; cursor: pointer; }
-.rl-queue-row button:hover:not(:disabled), .rl-queue-row button:focus-visible { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 7%, transparent); }
+.rl-queue-row button:hover:not(:disabled), .rl-queue-row button:focus-visible { color: var(--color-ink); background: var(--color-hover-wash); }
 .rl-queue-row button:disabled { opacity: .4; cursor: default; }
 .rl-queue-row .rl-queue-x { min-width: 24px; font-size: 14px; }
+/* The room a flex thread leaves for the pill at its end (the page chat's and
+   the mission's): a box after the newest message, never the scroller's own
+   padding-bottom, which some WebKit builds leave out of what a flex scroller
+   scrolls, putting the newest line under the pill (chat-stream-visual-qa's
+   queue-clear-webkit). With the thread's 10px gap above it, 36px in all. */
+.rl-thread-clearance::after { content: ""; flex: none; height: 26px; }
 /* The composer's one primary button (SendStopButton): send ↑, queue ↑ or
-   stop ■ in one fixed slot, so the field beside it never changes width. */
-.rl-send { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 999px; background: var(--color-info); color: var(--color-on-accent); cursor: pointer; }
+   stop ■ in one fixed slot, so the field beside it never changes width. Its
+   glyph is `--color-on-info`: white is under 3:1 on the lighter blues. */
+.rl-send { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 999px; background: var(--color-info); color: var(--color-on-info); cursor: pointer; }
 .rl-send[aria-disabled="true"] { opacity: .45; cursor: default; }
 .rl-send[data-send="stop"] { background: var(--color-ink); color: var(--color-paper); }
 /* The mic face is quieter than send: nothing is waiting to go yet. Hot, it
    takes the accent and breathes, still while reduced motion is on. */
 .rl-send[data-send="mic"] { background: color-mix(in srgb, var(--color-ink) 9%, transparent); color: var(--color-ink); }
-.rl-send[data-listening] { position: relative; background: var(--color-info); color: var(--color-on-accent); }
+.rl-send[data-listening] { position: relative; background: var(--color-info); color: var(--color-on-info); }
 .rl-send[data-listening]::after { content: ""; position: absolute; inset: -4px; border: 2px solid color-mix(in srgb, var(--color-info) 40%, transparent); border-radius: inherit; animation: rl-send-listening 1.4s ease-in-out infinite; }
 @keyframes rl-send-listening { 50% { opacity: .35; transform: scale(1.1); } }
 @media (prefers-reduced-motion: reduce) { .rl-send[data-listening]::after { animation: none; } }
@@ -39,7 +46,7 @@
 .rl-chat-mode-menu label { display: flex; width: 100%; justify-content: space-between; gap: 8px; font-size: 12px; }
 .rl-chat-mode-menu select { max-width: 175px; color: var(--color-ink); background: var(--color-paper); border: 1px solid var(--color-rule); }
 .rl-chat-mode-picker button[aria-pressed=true] { border-color: var(--color-info); background: color-mix(in srgb,var(--color-info) 10%,var(--color-paper)); }
-.rl-chat-mode-chip.is-build, .rl-chat-build-warning { color: var(--color-warning); }
+.rl-chat-mode-chip.is-build, .rl-chat-build-warning { color: var(--color-warning-text); }
 .rl-chat-build-warning { display: block; font-size: 11px; }
 .rl-changes-card { padding: 12px; border: 1px solid var(--color-rule); border-radius: 9px; font-size: 12px; margin: 8px 0; background: var(--color-paper); }
 .rl-changes-card ul { list-style: none; padding: 0; overflow-wrap: anywhere; }

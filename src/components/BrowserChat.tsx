@@ -62,7 +62,7 @@ interface BrowserChatProps {
   onOpenLink?: (url: string) => void;
   /** Pin an assistant reply to the active mission ("I like this part"). Present
    *  only when a mission is active; the parent attaches the page it was about. */
-  onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  onAddToMission?: (markdown: string, targetBrowseId?: string | null) => void | Promise<boolean>;
   /** Append an assistant reply to the workspace Cart, creating it if needed. */
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
   /** Text handed to the composer once, on mount or when the nonce changes —
@@ -121,6 +121,7 @@ function lastReplyBackend(messages: readonly BrowseMessage[]): string | null {
 interface SentTurn {
   agent: string;
   targetLabel: string;
+  targetBrowseId: string;
 }
 
 /** One step of the live turn, the same whichever copy of the ring it is read from. */
@@ -260,7 +261,7 @@ export const BrowserChat = memo(function BrowserChat({
         const target = conversation;
         // A send that starts at once is the turn in flight from this moment;
         // one queued behind a reply is filed under its row by `onSent`.
-        const sent: SentTurn = { agent, targetLabel: target.targetLabel };
+        const sent: SentTurn = { agent, targetLabel: target.targetLabel, targetBrowseId: target.targetBrowseId };
         if (status !== "streaming") lastStarted.current = sent;
         // A chat showing an inherited pick stores it before its first turn,
         // and runs on the default when that write fails.
@@ -281,7 +282,9 @@ export const BrowserChat = memo(function BrowserChat({
         builtFor.current.set(args, sent);
         return args;
       },
-      makeMessage: ({ id, role, body, status, backend }) => ({
+      // The page a row was about, as the backend stores it: yours is the
+      // page you send against, a reply's the page its turn targeted.
+      makeMessage: ({ id, role, body, status, backend }): BrowseMessage => ({
         id,
         browseId,
         role,
@@ -289,6 +292,7 @@ export const BrowserChat = memo(function BrowserChat({
         status,
         createdAt: Date.now(),
         backend: backend ?? null,
+        targetBrowseId: role === "user" ? conversation.targetBrowseId : (inFlight?.targetBrowseId ?? null),
       }),
       // The backend has the turn, so the page it carried is grounded.
       onSent: (args, outcome) => {
@@ -301,7 +305,7 @@ export const BrowserChat = memo(function BrowserChat({
   // The turn in flight answers the newest of your messages in the thread
   // (a queued one joins it as its turn starts). After a remount nothing is
   // known of it, and the chat's own pick and page stand in.
-  const inFlight = streaming ? (sentFor.current.get(lastUserId(messages) ?? "") ?? lastStarted.current) : null;
+  const inFlight: SentTurn | null = streaming ? (sentFor.current.get(lastUserId(messages) ?? "") ?? lastStarted.current) : null;
 
   // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
   // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
@@ -578,9 +582,9 @@ export const BrowserChat = memo(function BrowserChat({
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        // The bottom padding keeps the status rail's pills clear of the
-        // newest line: the rail overlays the thread rather than shrinking it.
-        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 pb-9"
+        // The end spacer keeps the status rail's pills clear of the newest
+        // line: the rail overlays the thread rather than shrinking it.
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden rl-thin-scroll-y flex flex-col gap-2.5 px-3 pt-3 rl-thread-clearance"
         data-browser-chat-messages
       >
         {!loaded ? null : messages.length === 0 && status === "idle" ? (
@@ -678,7 +682,7 @@ function MessageBubble({
   /** The model this chat asked for, if it named one. */
   seat: string | null;
   onOpenLink?: (url: string) => void;
-  onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  onAddToMission?: (markdown: string, targetBrowseId?: string | null) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
   onResend?: () => void;
   /** This row's settled meter — the byline, the steps and the tail it keeps. */
@@ -715,6 +719,7 @@ function MessageBubble({
             actions={actions}
             messageId={msg.id}
             body={msg.body}
+            targetBrowseId={msg.targetBrowseId ?? null}
             onAddToMission={onAddToMission}
             onAddToCart={onAddToCart}
           />
@@ -737,13 +742,16 @@ function MessageActions({
   actions,
   messageId,
   body,
+  targetBrowseId,
   onAddToMission,
   onAddToCart,
 }: {
   actions: readonly ReplyAction[];
   messageId: string;
   body: string;
-  onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  /** The page the reply was about, which a pin records (BC-24). */
+  targetBrowseId: string | null;
+  onAddToMission?: (markdown: string, targetBrowseId?: string | null) => void | Promise<boolean>;
   onAddToCart?: (markdown: string) => void | Promise<boolean>;
 }) {
   const [copied, setCopied] = useState(false);
@@ -758,7 +766,7 @@ function MessageActions({
   const pin = () => {
     // Truthful feedback: a pin that didn't reach the DB must not flash
     // "Pinned ✓" — that silence is how a broken pin flow goes unnoticed.
-    void Promise.resolve(onAddToMission?.(body)).then((ok) => {
+    void Promise.resolve(onAddToMission?.(body, targetBrowseId)).then((ok) => {
       setPinned(ok === false ? "failed" : "ok");
       window.setTimeout(() => setPinned("idle"), 1400);
     });

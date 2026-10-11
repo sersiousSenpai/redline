@@ -3,7 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DecisionWindowBanner } from "./DecisionWindowBanner";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { DecisionWindowBanner, RAISED_Z } from "./DecisionWindowBanner";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement;
@@ -37,5 +39,33 @@ describe("the decision countdown", () => {
     expect(host.querySelector('[role="region"]')!.getAttribute("aria-label")).toBe("Plan decision");
     act(() => { vi.advanceTimersByTime(16_000); });
     expect(onExpire).toHaveBeenCalledTimes(1);
+  });
+
+  it("rises over the open door and the pill's card, pressable and without taking the caret", () => {
+    const event = { sessionId: "s", version: 3, deadlineMs: Date.now() + 20_000, windowSecs: 20 };
+    const region = () => host.querySelector<HTMLElement>('[role="region"]')!;
+    act(() => root.render(<DecisionWindowBanner event={event} onOpen={() => {}} onApprove={() => {}} onExpire={() => {}} />));
+    // At rest it is a strip in the flow under the header, under any menu.
+    expect(region().style.zIndex).toBe("");
+    // The door's inert sweep spares it (MonochatIsland), raised or not.
+    expect(region().hasAttribute("data-rl-over-door")).toBe(true);
+    const before = document.activeElement;
+    act(() => root.render(<DecisionWindowBanner event={event} onOpen={() => {}} onApprove={() => {}} onExpire={() => {}} raised />));
+    expect(region().style.position).toBe("relative");
+    expect(Number(region().style.zIndex)).toBe(RAISED_Z);
+    expect(document.activeElement).toBe(before);
+    // Above both: the door's layer and the dock the card springs from.
+    const island = readFileSync(join(process.cwd(), "src/components/MonochatIsland.css"), "utf8");
+    for (const selector of [".rl-frontdoor-focus", ".rl-frontdoor-dock"]) {
+      const rule = new RegExp(`^\\${selector} \\{[^}]*z-index: (\\d+)`, "m").exec(island);
+      expect(rule, selector).not.toBeNull();
+      expect(RAISED_Z).toBeGreaterThan(Number(rule![1]));
+    }
+    // Never over a toast, though: one placed at the top would hide under it.
+    // Level is enough, because App mounts the toast after the banner.
+    const toast = /^\.rl-toast \{[^}]*z-index: (\d+)/m.exec(readFileSync(join(process.cwd(), "src/styles.css"), "utf8"));
+    expect(RAISED_Z).toBeLessThanOrEqual(Number(toast![1]));
+    const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(app.indexOf("<DecisionWindowBanner")).toBeLessThan(app.indexOf("<RedlineToast"));
   });
 });

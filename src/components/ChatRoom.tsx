@@ -484,6 +484,16 @@ export function ChatRoom({
     threadKey: companionId,
     onError: (m) => setNotice(`🔇 The voice engine failed, so the system voice is reading — ${m}`),
   });
+  // Stop what is being read, else flip reading aloud — and turning it on is
+  // the moment to start the voice engine, never the chat's mount.
+  const toggleReadAloud = () => {
+    if (readAloud.speaking) {
+      readAloud.stop();
+      return;
+    }
+    if (!speakReplies) readAloud.warm();
+    setSpeakReplies((value) => !value);
+  };
   const dictation = useDictation({
     enabled: dictationEnabled && !composer,
     onFinal: (spoken) =>
@@ -606,7 +616,7 @@ export function ChatRoom({
       else if (value === "activity") setActivityOpen(true);
       else if (value === "rename") rename(companionId, me?.title ?? "Chat");
       else if (value === "delete") remove(companionId);
-      else if (value === "voice") { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(previous => !previous); }
+      else if (value === "voice") toggleReadAloud();
       else continueAs(value as ContinueDestination);
     }}>More</ComposerMenu>
   </>;
@@ -816,7 +826,7 @@ export function ChatRoom({
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
-            {!modelControls && <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={() => { if (readAloud.speaking) readAloud.stop(); else setSpeakReplies(value => !value); }} />}
+            {!modelControls && <ToolbarButton label={readAloud.speaking ? "🔊 Stop" : "🔊"} title="Read replies aloud" on={speakReplies} onClick={toggleReadAloud} onPointerEnter={readAloud.warm} />}
             {modelControls ?? <ModelChip model={me?.model ?? null} effort={me?.effort ?? null} onChange={setModel} />}
             {modelControls && <MonochatTrace conversationId={companionId} busy={streaming}/>}
             {mode !== "chat" && <ProjectPicker value={project?.path ?? planningProject} onChange={path => setProject({ path })} options={projectOptions} />}
@@ -952,12 +962,14 @@ function ToolbarButton({
   label,
   title,
   onClick,
+  onPointerEnter,
   disabled,
   on,
 }: {
   label: ReactNode;
   title: string;
   onClick: () => void;
+  onPointerEnter?: () => void;
   disabled?: boolean;
   /** A toggle that is currently ON — tinted rather than merely pressed, the
    *  same signal the browser chrome's pills use. */
@@ -968,6 +980,7 @@ function ToolbarButton({
       type="button"
       className="font-sans"
       onClick={onClick}
+      onPointerEnter={onPointerEnter}
       disabled={disabled}
       title={title}
       // The compact pose is an icon and nothing else, so the accessible name
@@ -978,17 +991,14 @@ function ToolbarButton({
         padding: "3px 10px",
         borderRadius: 999,
         cursor: disabled ? "default" : "pointer",
-        border: "1px solid var(--color-rule)",
+        // One shorthand either way: a `borderColor` dropped from under
+        // `border` when the toggle turns off would take the rule's colour
+        // with it.
+        border: `1px solid ${on ? "var(--color-info)" : "var(--color-rule)"}`,
         background: "transparent",
-        color: "var(--color-ink)",
+        color: on ? "var(--color-info-text)" : "var(--color-ink)",
         opacity: disabled ? 0.45 : 1,
         whiteSpace: "nowrap",
-        ...(on
-          ? {
-              color: "var(--color-info)",
-              borderColor: "var(--color-info)",
-            }
-          : null),
       }}
       aria-pressed={on}
     >
@@ -1026,7 +1036,7 @@ function IconButton({
         cursor: disabled ? "default" : "pointer",
         border: "1px solid var(--color-rule)",
         background: hot ? "var(--color-info)" : "transparent",
-        color: hot ? "var(--color-on-accent)" : "var(--color-ink-muted)",
+        color: hot ? "var(--color-on-info)" : "var(--color-ink-muted)",
         opacity: disabled ? 0.45 : 1,
       }}
     >

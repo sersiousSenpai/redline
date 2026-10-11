@@ -810,6 +810,9 @@ export interface BrowseMessage {
    *  Null on user and error rows, and on replies from before a page chat
    *  could run on Codex — those were all Claude. */
   backend?: string | null;
+  /** The tab (its `browseId`) the turn was sent against: the page a shared
+   *  chat's message was about. Null on rows from before it was kept. */
+  targetBrowseId?: string | null;
 }
 
 /** A browser tab's **working list** — the punch list built while clicking
