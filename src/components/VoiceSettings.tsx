@@ -588,8 +588,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
               A moment after longer dictations land, a fast Claude model tidies their
               punctuation and false starts — only the text goes to it, never the
               audio. With local polish installed (the Studio voice's settings), a
-              model on this Mac does it instead. ⌘Z takes a polish back. Spoken
-              turns are never polished.
+              model on this Mac does it instead, unless it can't answer in time.
+              ⌘Z takes a polish back. Spoken turns are never polished.
             </span>
           </span>
         </label>

@@ -479,8 +479,8 @@ export function StudioVoiceCard({
         <span style={label}>Dictation polish</span>
         <span style={muted}>
           Polish dictation locally — {POLISH.download} download, about {POLISH.memory} of
-          memory while in use. Longer dictations are then tidied on this Mac by a small
-          model, and their words never leave it.
+          memory while in use. Longer dictations are then tidied by a small model on this
+          Mac, and go to the Claude model only when it can't answer in time.
         </span>
         {polishInstalled ? (
           <>
