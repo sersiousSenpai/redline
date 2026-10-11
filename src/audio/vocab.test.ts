@@ -22,6 +22,8 @@ import {
   onVocabStore,
   parseVocabStore,
   planVocab,
+  projectVocab,
+  PROJECT_RANKED,
   removeWord,
   updateVocabStore,
   VOCAB_CAP,
@@ -75,7 +77,7 @@ describe("buildVocab", () => {
   };
 
   it("ranks the user's words, newest correction first, then the plan's names, code names, acronyms and files", () => {
-    const vocab = buildVocab({ plan: PLAN, store, identifiers: ["check-size.mjs", "VoicePanel"] });
+    const vocab = buildVocab({ plan: PLAN, store });
     expect(vocab).toEqual([
       "Tauri",
       "Kokoro",
@@ -88,9 +90,19 @@ describe("buildVocab", () => {
       "PCM",
       "VoicePanel.tsx",
       "tts.rs",
-      "check-size.mjs",
     ]);
     expect(vocab.filter((t) => t.toLowerCase() === "kokoro"), "no repeats, whatever the case").toHaveLength(1);
+  });
+
+  it("puts the plan's code names the project has first, then the project's latest, then the rest", () => {
+    const project = ["DiscussPill", "useStickToBottom", "ReplyBlock", ...Array.from({ length: 30 }, (_, i) => `Old${i}Thing`)];
+    const vocab = buildVocab({ plan: PLAN, identifiers: project });
+    expect(vocab.slice(0, 7)).toEqual(["Kokoro", "Front Door", "useStickToBottom", "DiscussPill", "ReplyBlock", "Old0Thing", "Old1Thing"]);
+    // The plan's other code names, after the project's latest (of which
+    // useStickToBottom was already in).
+    expect(vocab.indexOf("VoicePanel")).toBe(2 + PROJECT_RANKED);
+    // And the project's older names last.
+    expect(vocab.slice(-2)).toEqual(["Old28Thing", "Old29Thing"]);
   });
 
   it("caps the list and never lets a long plan crowd out the user's words", () => {
@@ -100,6 +112,14 @@ describe("buildVocab", () => {
     expect(vocab.slice(0, 3)).toEqual(["Tauri", "Kokoro", "Qwen"]);
     expect(buildVocab({ plan: PLAN }, 3)).toHaveLength(3);
     expect(buildVocab({})).toEqual([]);
+  });
+});
+
+describe("projectVocab", () => {
+  it("keeps the file names that are code names, once, in the order given", () => {
+    expect(
+      projectVocab(["VoicePanel.tsx", "tts.rs", "dictation_whisper.rs", "README.md", "VoicePanel.test.tsx", "check-size.mjs", "useStickToBottom.ts"]),
+    ).toEqual(["VoicePanel", "dictation_whisper", "useStickToBottom"]);
   });
 });
 

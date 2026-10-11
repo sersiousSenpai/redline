@@ -16,10 +16,14 @@
 //   5. numbers and dates: "seven hundred milliseconds" → "700 milliseconds",
 //      "twenty twenty six" → "2026", "October tenth" → "October 10"; a lone
 //      small number in prose ("one owner") stays a word;
-//   6. vocabulary spelling: the capture's terms, ranked, win over the
+//   6. near-homophones of the vocabulary's names: what a recognizer that
+//      didn't know a name wrote for it, when it sounds like the name and is
+//      spelled nearly like it ("the Coro sidecar" → "the Kokoro sidecar",
+//      "used stick to bottom" → "useStickToBottom");
+//   7. vocabulary spelling: the capture's terms, ranked, win over the
 //      recognizer's casing ("kokoro" → "Kokoro", "use stick to bottom" →
 //      "useStickToBottom");
-//   7. spacing.
+//   8. spacing.
 // `fitToContext` then fits the result to the text around the caret.
 
 import { layoutCommands } from "./voiceIntents";
@@ -286,6 +290,134 @@ function vocabulary(text: string, vocab: readonly string[]): string {
   return t.replace(/(.)/g, (_, c: string) => placed[c.charCodeAt(0) - 0xe100]);
 }
 
+// --- Near-homophones ----------------------------------------------------------
+
+/** Consonant classes, by how a recognizer confuses them. */
+const SOUNDS: Record<string, string> = {
+  b: "P", p: "P", f: "F", v: "F", c: "K", g: "K", k: "K", q: "K", s: "S", z: "S",
+  d: "T", t: "T", j: "J", l: "L", m: "N", n: "N", r: "R",
+};
+
+/** How a word sounds, roughly: its consonant classes in order, a repeat
+ *  merged even across a vowel, vowels and h, w, y dropped but for a leading
+ *  vowel. "Kokoro", "Coro" and "Cocoro" all sound KR; "coral" sounds KRL. */
+export function soundKey(word: string): string {
+  const w = word
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+    .replace(/ph/g, "f")
+    .replace(/gh/g, "")
+    .replace(/c(?=[eiy])/g, "s")
+    .replace(/g(?=[eiy])/g, "j")
+    .replace(/x/g, "ks");
+  let key = /^[aeiou]/.test(w) ? "A" : "";
+  for (const ch of w) {
+    const k = SOUNDS[ch];
+    if (k && !key.endsWith(k)) key += k;
+  }
+  return key;
+}
+
+/** Letter edits from `a` to `b`. */
+function edits(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const up = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return row[b.length];
+}
+
+/** How far a near-homophone may be spelled from the name, in letter edits
+ *  over the name's length: a word capitalized mid-sentence (the recognizer
+ *  heard a name it didn't know) up to half, one edit for a name of four
+ *  letters; words run together, which a recognizer rarely splits by
+ *  accident, one edit. */
+const NAME_EDITS = 0.5;
+/** Words a run of words never starts or ends on: "the studio voice" is
+ *  never a name's three parts. */
+const GLUE = new Set("a an and as at be by for from in into is it of on or the to with".split(" "));
+
+interface SoundsLike {
+  term: string;
+  /** Its letters, lowercased. */
+  letters: string;
+  key: string;
+  /** The words it is said as ("useStickToBottom": use stick to bottom). */
+  parts: number;
+}
+
+/** The terms worth listening for: names and code names, never an everyday
+ *  word or an acronym — a recognizer spells those right, or as letters. */
+function soundsLike(vocab: readonly string[]): SoundsLike[] {
+  const out: SoundsLike[] = [];
+  for (const term of vocab) {
+    if (!/[A-Z_]/.test(term.slice(1)) && !/^[A-Z][a-z]/.test(term)) continue;
+    if (/^[A-Z0-9]+s?$/.test(term)) continue;
+    const letters = term.toLowerCase().replace(/[^a-z]/g, "");
+    const key = soundKey(term);
+    if (letters.length < 4 || key.length < 2) continue;
+    out.push({ term, letters, key, parts: term.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_]+/).length });
+  }
+  return out;
+}
+
+/** Put a vocabulary name where the recognizer wrote what it sounded like
+ *  (step 6): what sounds like the name (`soundKey`) and is spelled close to
+ *  it — a word capitalized mid-sentence (`NAME_EDITS`), or a run of no more
+ *  words than the name has parts, one letter from it run together. Nothing
+ *  that already spells one of the terms is touched. A run said as words keeps them, as
+ *  the spelling step does: "reply black" becomes "reply block", never
+ *  "ReplyBlock"; a lowerCamel or snake_case name is never prose. */
+function homophones(text: string, vocab: readonly string[]): string {
+  const terms = soundsLike(vocab);
+  if (!terms.length) return text;
+  const spelled = new Set(vocab.map((v) => v.toLowerCase().replace(/[^a-z]/g, "")));
+  // Words at the even indices, what separates them at the odd ones.
+  const parts = text.split(/(\s+)/);
+  const word = (k: number) => parts[2 * k] ?? "";
+  const gap = (k: number) => parts[2 * k + 1] ?? "";
+  const count = (parts.length + 1) / 2;
+  let out = "";
+  for (let i = 0; i < count; ) {
+    let taken = 0;
+    for (let n = Math.min(4, count - i); n >= 1 && !taken; n--) {
+      // One phrase: spaces between its words, punctuation only at its end.
+      if (Array.from({ length: n - 1 }, (_, k) => gap(i + k)).some((g) => !/^ +$/.test(g))) continue;
+      const span = Array.from({ length: n }, (_, k) => word(i + k));
+      const tail = /[^\p{L}\p{N}]*$/u.exec(span[n - 1])![0];
+      span[n - 1] = span[n - 1].slice(0, span[n - 1].length - tail.length);
+      if (span.some((w) => !/^\p{L}[\p{L}']*$/u.test(w))) continue;
+      if (n > 1 && (GLUE.has(span[0].toLowerCase()) || GLUE.has(span[n - 1].toLowerCase()))) continue;
+      const letters = span.join("").toLowerCase();
+      if (spelled.has(letters)) continue;
+      const key = soundKey(letters);
+      // A sentence's first word is capitalized whatever it is.
+      const opens = i === 0 || /[.!?:]["')\]]*$|^-$/.test(word(i - 1)) || gap(i - 1).includes("\n");
+      // A name the recognizer didn't know: one capital, then lowercase.
+      const named = n === 1 && !opens && /^\p{Lu}\p{Ll}+$/u.test(span[0]);
+      const limit = (t: SoundsLike) =>
+        n > 1 ? 1 : !named ? -1 : t.letters.length > 4 ? Math.floor(t.letters.length * NAME_EDITS) : 1;
+      const t = terms.find((t) => n <= t.parts && t.key === key && edits(letters, t.letters) <= limit(t));
+      if (!t) continue;
+      const prose = n > 1 && /^[A-Z][a-z]+(?:[A-Z][a-z]+)+$/.test(t.term);
+      out += (prose ? t.term.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase() : t.term) + tail + gap(i + n - 1);
+      taken = n;
+    }
+    if (!taken) {
+      out += word(i) + gap(i);
+      taken = 1;
+    }
+    i += taken;
+  }
+  return out;
+}
+
 function tidy(text: string): string {
   return text
     .replace(/[ \t]{2,}/g, " ")
@@ -317,7 +449,7 @@ export function cleanupDictation(raw: string, opts: CleanupOptions = {}): string
   t = layoutCommands(t);
   t = punctuation(t);
   t = numbers(t);
-  if (opts.vocab?.length) t = vocabulary(t, opts.vocab);
+  if (opts.vocab?.length) t = vocabulary(homophones(t, opts.vocab), opts.vocab);
   return tidy(t);
 }
 

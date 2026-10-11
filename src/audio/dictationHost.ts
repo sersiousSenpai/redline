@@ -58,7 +58,16 @@ import type { AwayReply } from "./awayReply";
 import { captionFor, voiceCaption } from "./voiceCaption";
 import { APP_KEYS, VoiceHotkey, type KeySource } from "./voiceHotkey";
 import { readIntents } from "./voiceIntents";
-import { buildVocab, learnPair, loadVocabStore, memoryVocab, onVocabStore, updateVocabStore, type VocabStore } from "./vocab";
+import {
+  buildVocab,
+  learnPair,
+  loadVocabStore,
+  memoryVocab,
+  onVocabStore,
+  projectVocab,
+  updateVocabStore,
+  type VocabStore,
+} from "./vocab";
 import { watchCorrections, type Correction, type CorrectionWatch } from "./vocabLearn";
 
 /** The owner every dictation captures as (the key, a mic button). */
@@ -115,7 +124,8 @@ export interface HostDeps {
   away: () => Promise<AwayReply>;
 }
 
-/** How long the memory index's names are reused before they are read again. */
+/** How long the memory index's names, and a project's, are reused before
+ *  they are read again. */
 const MEMORY_FRESH_MS = 10 * 60_000;
 /** How long a conversation a background turn woke stays up for the next
  *  one once its reply is done: then its child is let go, as closing its
@@ -132,6 +142,9 @@ export class DictationHost {
   private store: VocabStore = { words: [], pairs: [] };
   private memory: string[] = [];
   private memoryAt = -Infinity;
+  /** The project's code names, as last read, and the project being read. */
+  private project: { cwd: string; names: string[]; at: number } | null = null;
+  private projectAsked: string | null = null;
   private levels: number[] = [];
   /** Conversations a background turn woke, each with its timer to sleep. */
   private woken = new Map<string, ReturnType<typeof setTimeout>>();
@@ -180,7 +193,12 @@ export class DictationHost {
       return;
     }
     const talk = this.deps.conversation();
-    const vocab = buildVocab({ plan: talk?.markdown(), store: this.store, memory: this.memory });
+    const vocab = buildVocab({
+      plan: talk?.markdown(),
+      store: this.store,
+      identifiers: this.projectNames(talk?.cwd),
+      memory: this.memory,
+    });
     const turn = target.kind === "turn";
     // A turn with the Discuss pill on screen: the pill shows it.
     const captioned = turn && !!talk && !!this.deps.doc.querySelector(".rl-discuss-pill");
@@ -539,7 +557,29 @@ export class DictationHost {
     return doc.querySelector(".rl-discuss-pill");
   }
 
+  /** The code names of the project in `cwd`, as last read: asked for again
+   *  in the background when they are stale, or another project's. */
+  private projectNames(cwd: string | null | undefined): string[] {
+    if (!cwd) return [];
+    const known = this.project?.cwd === cwd ? this.project : null;
+    if ((!known || Date.now() - known.at >= MEMORY_FRESH_MS) && this.projectAsked !== cwd) {
+      this.projectAsked = cwd;
+      void this.deps
+        .invoke<string[] | null>("dictation_identifiers", { cwd })
+        .then((files) => {
+          this.project = { cwd, names: projectVocab(files ?? []), at: Date.now() };
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (this.projectAsked === cwd) this.projectAsked = null;
+        });
+    }
+    return known?.names ?? [];
+  }
+
   private async refreshStore(): Promise<void> {
+    // The next dictation's project, read ahead of it.
+    this.projectNames(this.deps.conversation()?.cwd);
     this.store = await loadVocabStore();
     // The memory index's names, read again now and then: its titles change
     // as the user plans, not between two dictations.

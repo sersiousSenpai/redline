@@ -97,6 +97,46 @@ describe("cleanupDictation", () => {
     expect(cleanupDictation("it works", { vocab })).toBe("it works");
   });
 
+  it("puts a name where the recognizer wrote what it sounded like", () => {
+    const vocab = ["Kokoro", "Tauri", "CoreML", "ReplyBlock", "DiscussPill"];
+    expect(cleanupDictation("The Coro sidecar in tts dot rs needs a timeout", { vocab })).toBe(
+      "The Kokoro sidecar in tts.rs needs a timeout",
+    );
+    expect(cleanupDictation("check why the Tori build fails", { vocab })).toBe("check why the Tauri build fails");
+    expect(cleanupDictation("it runs on the neural engine with corn ML", { vocab })).toBe(
+      "it runs on the neural engine with CoreML",
+    );
+    // A name said as words stays words, as the spelling step leaves them.
+    expect(cleanupDictation("let the reply black keep its byline", { vocab })).toBe("let the reply block keep its byline");
+    expect(cleanupDictation("move the discuss bill state", { vocab })).toBe("move the discuss pill state");
+    // Lines and bullets said aloud stay where they were.
+    expect(cleanupDictation("first point new line bullet ask the Coro sidecar", { vocab })).toBe(
+      "first point.\n- Ask the Kokoro sidecar",
+    );
+  });
+
+  it("leaves what only sounds like a name", () => {
+    const vocab = ["Kokoro", "Polis", "chatStatus", "Macs", "IDEs", "tts_studio_voice", "TalkPanel", "Drafter", "ChatRoom"];
+    for (const said of [
+      // Everyday words, lowercase as the recognizer wrote them.
+      "the coral reef needs a polish",
+      // A sentence's first word is capitalized whatever it is.
+      "Coro is the opening word",
+      // Two edits from a code name, as words.
+      "the chat stays open",
+      // Short names take one edit, and capitals are letters, not a name.
+      "on an Apple M3 Max with message IDs",
+      // A run never starts or ends on a little word, nor runs past the name.
+      "add the studio voice",
+      "rename the voice panel to talk panel",
+      "open the Drafter",
+      // One letter off as words, but sounding apart: "that room" is no ChatRoom.
+      "the voice lanes merged onto that room",
+    ]) {
+      expect(cleanupDictation(said, { vocab }), said).toBe(cleanupDictation(said, {}));
+    }
+  });
+
   it("applies learned corrections first", () => {
     expect(cleanupDictation("the civ core sidecar", { pairs: [{ heard: "civ core", meant: "Kokoro" }] })).toBe(
       "the Kokoro sidecar",

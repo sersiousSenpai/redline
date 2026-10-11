@@ -12492,6 +12492,8 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     // Waits for the main thread to end the utterance, then for its final
     // transcript.
     "dictation_cycle",
+    // Runs git in the project.
+    "dictation_identifiers",
     // Reads the settings and checks the model files on disk.
     "dictation_status",
     // Waits for the main thread to end the capture, then for Whisper.
@@ -13146,6 +13148,7 @@ pub fn run() {
             dictation::dictation_cycle,
             dictation::dictation_kill_all,
             dictation::dictation_status,
+            dictation::dictation_identifiers,
             dictation_whisper::whisper_install,
             turn_scorer::turn_scorer,
             dictation_whisper::dictation_set_engine,

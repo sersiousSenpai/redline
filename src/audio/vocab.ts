@@ -16,14 +16,19 @@
 //      so a long plan never crowds them out;
 //   2. names the open plan capitalizes for their own sake ("Kokoro",
 //      "Front Door");
-//   3. the code names it mentions, the project's identifiers (VoicePanel,
-//      dictation_start);
-//   4. its acronyms, which recognizers mostly spell out right unaided;
-//   5. file names, the plan's and then any the caller adds — rarely said
-//      aloud as written;
-//   6. names from the memory index (the class titles of what the user has
+//   3. the code names it mentions that the project's own files are named
+//      after (VoicePanel) — a name both said in the plan and real in the code;
+//   4. the project's code names it doesn't mention, those of the files
+//      changed most lately first (`projectVocab`), up to `PROJECT_RANKED`;
+//   5. the rest of the plan's code names (dictation_start, an API's names);
+//   6. its acronyms, which recognizers mostly spell out right unaided;
+//   7. file names, the plan's and then the rest of the project's — rarely
+//      said aloud as written;
+//   8. names from the memory index (the class titles of what the user has
 //      planned and decided), which a long plan crowds out first.
-// Within each source, the most frequent first.
+// Within each source, the most frequent first. Whisper's prompt takes only
+// the first `PROMPT_TERMS` (dictation_whisper.rs): more terms than that
+// measured worse.
 //
 // The user's words are stored in the settings database as the `voiceVocab`
 // ui pref, so they survive a cache clear and travel with the database. Every
@@ -35,6 +40,8 @@ import { invoke } from "@tauri-apps/api/core";
 /** At most this many terms reach the recognizers per capture (dictation.rs
  *  caps at the same number). */
 export const VOCAB_CAP = 150;
+/** How many of the project's own names rank above the rest of the plan's. */
+export const PROJECT_RANKED = 24;
 
 /** A correction the user made to a dictated word: what the recognizer wrote,
  *  and what they meant. */
@@ -53,7 +60,8 @@ export interface VocabStore {
 export interface VocabSources {
   /** The open plan's (or draft's) markdown. */
   plan?: string;
-  /** More of the session's project identifiers, such as its file names. */
+  /** The session's project's code names, the most lately changed first
+   *  (`projectVocab`). */
   identifiers?: string[];
   /** Names from the memory index (`memoryVocab`). */
   memory?: string[];
@@ -75,6 +83,9 @@ const FILE_NAME =
  *  (dictation_start). */
 const CODE =
   /\b(?=[A-Za-z0-9]*[a-z])[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+/** A whole word that is a code name, as `CODE` finds them in text. */
+const CODE_NAME =
+  /^(?:(?=[A-Za-z0-9]*[a-z])[A-Za-z][a-z0-9]*[A-Z][A-Za-z0-9]*|[a-z][a-z0-9]*(?:_[a-z0-9]+)+)$/;
 /** Two to six capitals, maybe with a trailing digit (MLX, PCM, JSON, TTS). */
 const ACRONYM = /\b[A-Z]{2,6}[0-9]?\b/g;
 /** A run of capitalized words (Front Door, Neural Engine, Kokoro). */
@@ -184,6 +195,21 @@ export function planVocab(markdown: string): PlanVocab {
   return { names: ranked(named), code: ranked(code), acronyms: ranked(acronyms), files: ranked(files) };
 }
 
+/** The project's code names among its file names (`dictation_identifiers`,
+ *  the most lately changed first): VoicePanel.tsx is VoicePanel,
+ *  dictation_whisper.rs is dictation_whisper, and README.md is no name. */
+export function projectVocab(files: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    const stem = file.split(".")[0];
+    if (!CODE_NAME.test(stem) || stem.length > TERM_MAX || seen.has(stem.toLowerCase())) continue;
+    seen.add(stem.toLowerCase());
+    out.push(stem);
+  }
+  return out;
+}
+
 /** The ranked vocabulary for one capture (see the ranking at the top). */
 export function buildVocab(sources: VocabSources, cap = VOCAB_CAP): string[] {
   const out: string[] = [];
@@ -200,8 +226,12 @@ export function buildVocab(sources: VocabSources, cap = VOCAB_CAP): string[] {
   for (const p of [...(store?.pairs ?? [])].sort((a, b) => b.at - a.at)) add(p.meant);
   for (const w of store?.words ?? []) add(w);
   const plan = planVocab(sources.plan ?? "");
-  for (const t of [...plan.names, ...plan.code, ...plan.acronyms, ...plan.files]) add(t);
-  for (const t of sources.identifiers ?? []) add(t);
+  const project = sources.identifiers ?? [];
+  const real = new Set(project.map((t) => t.toLowerCase()));
+  for (const t of plan.names) add(t);
+  for (const t of plan.code) if (real.has(t.toLowerCase())) add(t);
+  for (const t of project.slice(0, PROJECT_RANKED)) add(t);
+  for (const t of [...plan.code, ...plan.acronyms, ...plan.files, ...project]) add(t);
   for (const t of sources.memory ?? []) add(t);
   return out;
 }

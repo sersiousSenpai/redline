@@ -169,16 +169,21 @@ pub fn plan_decode(pcm: &[f32], vocab: &[String]) -> Option<DecodePlan> {
 /// The longest prompt worth building: whisper.cpp conditions on at most the
 /// last 224 tokens of it, and a term is rarely shorter than 4 bytes a token.
 const PROMPT_MAX_BYTES: usize = 1_000;
+/// The most terms a prompt names. On the shared dictation test set, the 74
+/// terms its phrases are about made the best prompt for both models, and
+/// the same followed by 76 more did worse; of a plan's own ranked terms, its
+/// first 40 did worse than its first 75.
+const PROMPT_TERMS: usize = 75;
 
 /// The vocabulary as Whisper's initial prompt: the terms as a comma list, the
 /// most important (the front of `vocab`, which arrives ranked) LAST, because
 /// whisper.cpp keeps the tail of a long prompt and the tail sits nearest the
-/// audio. Terms that would push it past `PROMPT_MAX_BYTES` are left out, the
-/// least important first.
+/// audio. Only the first `PROMPT_TERMS`, and of those none that would push
+/// it past `PROMPT_MAX_BYTES`, the least important left out first.
 pub fn vocab_prompt(vocab: &[String]) -> Option<String> {
     let mut kept: Vec<&str> = Vec::new();
     let mut bytes = 0;
-    for term in vocab {
+    for term in vocab.iter().take(PROMPT_TERMS) {
         if bytes + term.len() + 2 > PROMPT_MAX_BYTES {
             break;
         }
@@ -718,7 +723,12 @@ mod tests {
         let prompt = vocab_prompt(&vocab).unwrap();
         assert!(prompt.len() <= PROMPT_MAX_BYTES + 2, "{}", prompt.len());
         assert!(prompt.ends_with("Term001, Term000."), "rank 0 sits nearest the audio");
-        assert!(!prompt.contains("Term299"), "the least important are the ones left out");
+        assert!(prompt.starts_with(" Term074, "), "the first PROMPT_TERMS");
+        // Long terms reach the byte limit first.
+        let long: Vec<String> = (0..300).map(|i| format!("{}{i:03}", "x".repeat(40))).collect();
+        let prompt = vocab_prompt(&long).unwrap();
+        assert!(prompt.len() <= PROMPT_MAX_BYTES + 2 && prompt.matches(", ").count() < PROMPT_TERMS - 1);
+        assert!(prompt.ends_with("x000."));
     }
 
     #[test]

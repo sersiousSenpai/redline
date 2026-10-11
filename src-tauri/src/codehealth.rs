@@ -155,7 +155,7 @@ pub struct GitState {
     pub is_dirty: bool,
 }
 
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = std::process::Command::new("/usr/bin/git")
         .arg("-C")
         .arg(dir)

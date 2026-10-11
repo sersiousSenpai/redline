@@ -112,9 +112,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** What the host asked of the app, past loading the user's words and the
- *  memory index's names. */
-const voiceCalls = () => appInvoke.mock.calls.filter(([cmd]) => cmd !== "get_ui_prefs" && cmd !== "classmem_tree");
+/** What the host asked of the app, past loading the user's words, the
+ *  memory index's names and the project's. */
+const voiceCalls = () =>
+  appInvoke.mock.calls.filter(([cmd]) => cmd !== "get_ui_prefs" && cmd !== "classmem_tree" && cmd !== "dictation_identifiers");
 
 /** The key, as the window would hear it. */
 function press(e: HotkeyEvent): boolean {
@@ -540,6 +541,22 @@ describe("the vocabulary", () => {
     await composer();
     await hold("check the smart turn model");
     expect(mic.calls[0][1]?.vocab).toEqual(["Tauri", "Kokoro", "Smart Turn"]);
+  });
+});
+
+describe("the project's names", () => {
+  it("are read once per project, and ranked in from the next capture on", async () => {
+    appInvoke.mockImplementation(async (cmd: string) =>
+      cmd === "dictation_identifiers" ? ["DiscussPill.tsx", "README.md", "tts.rs"] : null,
+    );
+    talk = { key: "plan-1", markdown: () => "Keep Tauri warm.", cwd: "/repo" };
+    await composer();
+    await hold("check the discuss pill");
+    await hold("and the discuss pill again");
+    const asked = appInvoke.mock.calls.filter(([cmd]) => cmd === "dictation_identifiers");
+    expect(asked).toEqual([["dictation_identifiers", { cwd: "/repo" }]]);
+    const starts = mic.calls.filter(([cmd]) => cmd === "dictation_start");
+    expect(starts.pop()![1]?.vocab).toEqual(["Tauri", "DiscussPill"]);
   });
 });
 

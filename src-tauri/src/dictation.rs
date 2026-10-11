@@ -1148,6 +1148,53 @@ pub fn dictation_status(
     }
 }
 
+/// How many of the project's last commits rank its files for the vocabulary.
+const NAMES_COMMITS: &str = "200";
+/// The most file names handed over.
+const NAMES_MAX: usize = 2_000;
+
+/// The project's files by name, for dictation's vocabulary (vocab.ts keeps
+/// those that read as code names): every file git tracks in `cwd`, those its
+/// last `NAMES_COMMITS` commits changed most often first, each name once.
+/// Empty outside a git work tree.
+#[tauri::command]
+pub fn dictation_identifiers(cwd: String) -> Vec<String> {
+    let dir = std::path::Path::new(&cwd);
+    let changed = crate::codehealth::git(dir, &["log", "-n", NAMES_COMMITS, "--name-only", "--format="]);
+    let tracked = crate::codehealth::git(dir, &["ls-files"]);
+    project_names(changed.as_deref().unwrap_or(""), tracked.as_deref().unwrap_or(""))
+}
+
+/// `dictation_identifiers` over git's output: file names, the most changed
+/// first (a tie in the order git listed them), then the rest as tracked.
+fn project_names(changed: &str, tracked: &str) -> Vec<String> {
+    let name = |path: &str| path.rsplit('/').next().unwrap_or(path).trim().to_string();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for path in changed.lines().filter(|l| !l.trim().is_empty()) {
+        let n = name(path);
+        match at.get(&n) {
+            Some(&i) => counts[i].1 += 1,
+            None => {
+                at.insert(n.clone(), counts.len());
+                counts.push((n, 1));
+            }
+        }
+    }
+    // A stable sort keeps the first-listed (most recent) ahead in a tie.
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out: Vec<String> = counts.into_iter().map(|(n, _)| n).collect();
+    for path in tracked.lines().filter(|l| !l.trim().is_empty()) {
+        let n = name(path);
+        if !at.contains_key(&n) {
+            at.insert(n.clone(), 0);
+            out.push(n);
+        }
+    }
+    out.truncate(NAMES_MAX);
+    out
+}
+
 // --- Native capture (macOS) ------------------------------------------------
 
 /// Gate capture behind speech-recognition authorization. On the main thread.
@@ -1801,15 +1848,49 @@ mod tests {
 
     /// A stop or a cycle waits for the main thread to end its capture: on the
     /// main thread itself it would wait forever. An install drives a download
-    /// of hundreds of megabytes to its end, and the status is asked per turn.
+    /// of hundreds of megabytes to its end, the status is asked per turn, and
+    /// the project's names wait on git.
     #[test]
     fn the_stop_the_install_and_the_status_run_off_the_main_thread() {
         let pool = crate::codehealth::command_list(include_str!("lib.rs"), "OFF_MAIN_COMMANDS");
-        for name in ["dictation_stop", "dictation_cycle", "whisper_install", "dictation_status"] {
+        for name in ["dictation_stop", "dictation_cycle", "whisper_install", "dictation_status", "dictation_identifiers"] {
             assert!(pool.iter().any(|n| n == name), "lib.rs: `{name}` must be in OFF_MAIN_COMMANDS");
         }
         let src = include_str!("dictation.rs");
         assert!(src.contains("#[tauri::command]\npub fn dictation_stop("), "a plain command the pool runs");
+    }
+
+    #[test]
+    fn the_project_names_its_most_changed_files_first_each_once() {
+        let changed = "src/VoicePanel.tsx\nsrc/tts.rs\n\nsrc/VoicePanel.tsx\nsrc-tauri/src/tts.rs\nsrc/audio/vocab.ts\n";
+        let tracked = "README.md\nsrc/VoicePanel.tsx\nsrc/DiscussPill.tsx\n";
+        assert_eq!(
+            project_names(changed, tracked),
+            ["VoicePanel.tsx", "tts.rs", "vocab.ts", "README.md", "DiscussPill.tsx"]
+        );
+        assert!(project_names("", "").is_empty(), "outside a work tree");
+    }
+
+    /// Git in a real (temporary) repository: what a capture gets.
+    #[test]
+    fn the_project_names_come_from_git() {
+        let tmp = crate::git_test_support::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| crate::git_test_support::git(dir, args);
+        let commit = |message: &str| {
+            git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-qam", message])
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("src/VoicePanel.tsx"), "a").unwrap();
+        std::fs::write(dir.join("notes.md"), "a").unwrap();
+        git(&["add", "."]);
+        commit("one");
+        std::fs::write(dir.join("src/VoicePanel.tsx"), "b").unwrap();
+        commit("two");
+        assert_eq!(dictation_identifiers(dir.to_string_lossy().into()), ["VoicePanel.tsx", "notes.md"]);
+        let elsewhere = crate::git_test_support::TempDir::new().unwrap();
+        assert!(dictation_identifiers(elsewhere.path().to_string_lossy().into()).is_empty());
     }
 
     #[test]
