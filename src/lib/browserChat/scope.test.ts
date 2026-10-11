@@ -172,6 +172,18 @@ describe("workspaces", () => {
     w = run(w, { type: "workspace-swapped", workspace: "regular", tabs: [tab("one")], activeId: "t-one" });
     expect(thread(w)).toBe(regular);
   });
+  it("BC-4 a deleted mission's or mosaic's shared chat is forgotten once its list has loaded", () => {
+    let w = run(world(), mode);
+    w = { ...w, shared: { ...w.shared, m1: "s1", gone: "s2", "mosaic:grid": "s3", "mosaic:old": "s4" } };
+    // Unknown yet: nothing goes, and the slice is the same object.
+    expect(run(w, { type: "workspaces-listed", missions: null, mosaics: null }).shared).toBe(w.shared);
+    const listed = run(w, { type: "workspaces-listed", missions: ["m1"], mosaics: ["mosaic:grid"] });
+    expect(Object.keys(listed.shared).sort()).toEqual(["m1", "mosaic:grid", "regular"]);
+    expect(listed.shared.regular).toBe(w.shared.regular);
+    // The workspace on screen keeps its own, listed or not.
+    const here = run({ ...w, workspace: "gone" }, { type: "workspaces-listed", missions: [], mosaics: null });
+    expect(Object.keys(here.shared).sort()).toEqual(["gone", "mosaic:grid", "mosaic:old", "regular"]);
+  });
   it("BC-8 a workspace swap drops any flip and lands on the mode's choice", () => {
     let w = run(world(), flip);
     w = run(w, { type: "workspace-swapped", workspace: "mosaic:grid", tabs: [tab("cell")], activeId: "t-cell" });

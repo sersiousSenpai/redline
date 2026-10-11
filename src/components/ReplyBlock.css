@@ -118,6 +118,9 @@
 .rl-reply:hover .rl-reply-actions,
 .rl-reply:focus-within .rl-reply-actions,
 .rl-reply:last-child .rl-reply-actions { opacity: 1; }
+/* Live, the ⋯ waits for a hover or focus even on the newest reply: the tail
+   is the turn's status line first. */
+.rl-reply[data-reply="live"]:not(:hover, :focus-within) .rl-reply-actions { opacity: 0; }
 .rl-reply-action {
   display: inline-flex;
   align-items: center;

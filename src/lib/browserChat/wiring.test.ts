@@ -165,6 +165,19 @@ describe("the activity line names what the agent is doing", () => {
     expect(pane).toMatch(/pageActions=\{pageActions\.running\}/);
     expect(pane).toMatch(/<BrowserTabRail[^>]*acting=\{/);
   });
+  it("BC-41 every accepted action is answered, and its dot is its own turn's to clear", () => {
+    // A request dropped mid-action (Stop kills the agent's curl) still
+    // acknowledges an outcome: the guard is armed before the page's queue is
+    // awaited, and settled only once an outcome has been reported.
+    const execute = fnBody(actionsRs, "execute");
+    expect(execute.indexOf("let mut owed = Owed {")).toBeGreaterThan(-1);
+    expect(execute.indexOf("let mut owed = Owed {")).toBeLessThan(execute.indexOf("queue.serial.lock()"));
+    expect(actionsRs).toMatch(/impl<R: Fn\(&ActionResult\)> Drop for Owed<R>/);
+    // The acknowledgement names the turns driving the page; the dots clear
+    // by them, not on any turn ending.
+    expect(actionsRs).toContain("browse.turns_targeting(&request.label)");
+    expect(read("src/hooks/usePageActions.ts")).toContain("[...by].every((turn) => ended.has(turn))");
+  });
   it("BC-34 BC-41 what an action did is written onto the turn that targets its page, so the row outlives a relaunch", () => {
     // Every outcome path reports, and reporting writes the step.
     expect(fnBody(actionsRs, "report")).toContain("note_action(");
@@ -258,11 +271,13 @@ describe("the page chat's UI laws", () => {
     expect(providerAlwaysWraps && gatedOff, "Send to Claude Code / Open in Drafter are dead props").toBe(false);
   });
   it("BC-24 Add to mission records the page the reply was about, not the anchored tab", () => {
-    const pin = pane.slice(pane.indexOf("onAddToMission={"), pane.indexOf("/>", pane.indexOf("onAddToMission={")));
+    // The pane's handler, handed to the chat while a mission is active.
+    expect(pane).toContain("onAddToMission={mission.activeMission ? chatHandlers.addToMission : undefined}");
+    const pin = pane.slice(pane.indexOf("addToMission: (body"), pane.indexOf("});", pane.indexOf("addToMission: (body")));
     expect(pin).not.toMatch(/sourceUrl:\s*discussionTab\.url/);
     // The tab its turn targeted, which the message keeps, so an older reply
     // in a shared chat is not filed under the tab on screen now.
-    expect(pin).toMatch(/\(body, targetBrowseId\) =>/);
+    expect(pin).toMatch(/\(body: string, targetBrowseId\?: string \| null\) =>/);
     expect(pin).toContain("t.browseId === targetBrowseId");
     expect(chat).toMatch(/onAddToMission\?\.\(body, targetBrowseId\)/);
     pinnedBy("src/components/BrowserPane.lifecycle.test.tsx", "pins an older shared-chat reply to the page its turn targeted");

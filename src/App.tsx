@@ -1515,10 +1515,23 @@ function App() {
   // The open door is holding the chat rather than its own composer.
   const roomChat = frontDoorOpen && chatInRoom && !!chatId;
   const chatTarget = roomChat ? chatRegularSlot : chatDockSlot;
+  // A move lays the host out afresh, and a scroller laid out afresh starts at
+  // its top: carried between the room and the dock, the thread would open on
+  // its first message. It keeps its place — the end if it was there.
+  const chatScroll = useRef<{ thread: HTMLElement; top: number; end: boolean } | null>(null);
   useLayoutEffect(() => {
     const target = chatTarget;
-    if (target) target.appendChild(chatHost); else chatHost.remove();
-    return () => { if (chatHost.parentElement === target) chatHost.remove(); };
+    if (!target) { chatHost.remove(); return; }
+    target.appendChild(chatHost);
+    const kept = chatScroll.current;
+    chatScroll.current = null;
+    if (kept?.thread.isConnected) kept.thread.scrollTop = kept.end ? kept.thread.scrollHeight : kept.top;
+    return () => {
+      if (chatHost.parentElement !== target) return;
+      const thread = chatHost.querySelector<HTMLElement>("[data-chat-messages]");
+      if (thread) chatScroll.current = { thread, top: thread.scrollTop, end: thread.scrollHeight - thread.scrollTop - thread.clientHeight < 4 };
+      chatHost.remove();
+    };
   }, [chatTarget, chatHost]);
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
   // design — a seed that outlived a restart would re-send an old sentence into
@@ -8236,14 +8249,20 @@ function App() {
     selectSurface("browser");
   };
   // Leaving the room carries its chat into the conversation dock, still
-  // open — however the room was left. Not over a dock already holding the
-  // surface's own conversation: that would end a voice discussion mid-thought,
-  // and the dock's strip has the chat a click away. The door, shut, goes back
-  // to being its own composer for the next summons. A chat minted for a door
-  // shut while it was being made lands in the room late: it is carried too.
+  // open — however the room was left: the door shut on it, or kept but handed
+  // back to its own composer (⌘⇧N, a plan sent to the door). Not over a dock
+  // already holding the surface's own conversation: that would end a voice
+  // discussion mid-thought, and the dock's strip has the chat a click away.
+  // The door, shut, goes back to being its own composer for the next summons.
+  // A chat minted for a door shut while it was being made lands in the room
+  // late: it is carried too. The room's New lets go of the chat instead (it
+  // stays in History), so there is nothing to carry.
+  const roomHeldChat = useRef(false);
   useEffect(() => {
-    if (frontDoorOpen || !chatInRoom) return;
-    setChatInRoom(false);
+    const left = chatInRoom ? !frontDoorOpen : roomHeldChat.current;
+    roomHeldChat.current = chatInRoom && frontDoorOpen;
+    if (!left) return;
+    if (chatInRoom) setChatInRoom(false);
     // A surface with no dock has nowhere to show it: no pin is left behind.
     if (!chatId || dockOpen || !dockScopeRef.current) return;
     setConversationPin("companion");

@@ -66,25 +66,43 @@ function ExploredRow({ row }: { row: Extract<WorkRow, { kind: "explored" }> }) {
 
 /** Data URLs for attachment files, read once per path: a card that remounts
  *  (a tab switch, a reload of the thread) draws its picture from memory. The
- *  newest few are kept; an older one is read again if it scrolls back. */
+ *  newest few are kept, by count and by size (a full-window screenshot is
+ *  megabytes as a URL); an older one is read again if it scrolls back. */
 const pictures = new Map<string, Promise<string | null>>();
+const pictureSizes = new Map<string, number>();
 const PICTURES_KEEP = 24;
+const PICTURE_CHARS_KEEP = 16_000_000;
 /** A picture file's bytes as a URL an <img> can draw. */
 export function pictureUrl(path: string, base64: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return `data:image/${{ jpg: "jpeg", jpeg: "jpeg", gif: "gif", webp: "webp" }[ext] ?? "png"};base64,${base64}`;
 }
 function picture(path: string): Promise<string | null> {
-  let read = pictures.get(path);
-  if (!read) {
-    read = invoke<{ data: string | null }>("read_file_base64", { path }).then(
-      (file) => (file.data ? pictureUrl(path, file.data) : null),
-      () => null,
-    );
-    if (pictures.size >= PICTURES_KEEP) pictures.delete(pictures.keys().next().value!);
-    pictures.set(path, read);
-  }
+  const kept = pictures.get(path);
+  if (kept) return kept;
+  const read = invoke<{ data: string | null }>("read_file_base64", { path }).then(
+    (file) => (file.data ? pictureUrl(path, file.data) : null),
+    () => null,
+  );
+  pictures.set(path, read);
+  void read.then((url) => {
+    if (pictures.get(path) !== read) return;
+    pictureSizes.set(path, url?.length ?? 0);
+    trimPictures();
+  });
+  trimPictures();
   return read;
+}
+/** Oldest first, down to the count and the size; the newest always stays. */
+function trimPictures() {
+  let size = 0;
+  for (const chars of pictureSizes.values()) size += chars;
+  for (const path of pictures.keys()) {
+    if (pictures.size === 1 || (pictures.size <= PICTURES_KEEP && size <= PICTURE_CHARS_KEEP)) return;
+    size -= pictureSizes.get(path) ?? 0;
+    pictureSizes.delete(path);
+    pictures.delete(path);
+  }
 }
 
 /** A screenshot or an image in a box of its final size before the picture

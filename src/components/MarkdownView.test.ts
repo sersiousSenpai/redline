@@ -197,4 +197,17 @@ describe("the reply stylesheet", () => {
     expect(compact.body).toContain("font-size: calc(13.5px * var(--rl-discussion-zoom, 1));");
     expect(compact.at).toBeGreaterThan(base.at);
   });
+
+  it("scales a discussion's headings with its text size too, at the base scale's steps", () => {
+    // At A+ a fixed 13.5px heading read smaller than the 20px body under it.
+    for (const [tag, px] of [["h1", "16px"], ["h2", "14.5px"], ["h3", "13.5px"]]) {
+      const base = rule(`.rl-md ${tag}`);
+      expect(base.body).toContain(`font-size: ${px};`);
+      const compact = rule(`.rl-md-compact ${tag}`);
+      expect(compact.body).toContain(`font-size: calc(${px} * var(--rl-discussion-zoom, 1));`);
+      expect(compact.at).toBeGreaterThan(base.at);
+    }
+    const minor = rule(".rl-md-compact h4,\n.rl-md-compact h5,\n.rl-md-compact h6");
+    expect(minor.body).toContain("font-size: calc(13px * var(--rl-discussion-zoom, 1));");
+  });
 });

@@ -1095,50 +1095,6 @@ pub struct MissionMessage {
     pub created_at: i64,
 }
 
-/// A **Linked discussion**: ONE continuous conversation that follows the user
-/// across every browser tab. Unlike a page discussion (one tab) or a mission
-/// (one fixed goal), it has no goal — it is a spanning conversation. Backed by
-/// the `linked_sessions` table; the agent's own resumable `claude` session id
-/// lives on the row (`claude_session_id`), so re-opening resumes it. When a
-/// tab's context gets heavy the linked agent "checks in with a colleague" — the
-/// tab's own browse (`browse_id`) discussion — via `/v1/linked/consult`. See
-/// `src-tauri/src/linked.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Linked {
-    pub linked_id: String,
-    pub title: String,
-    /// "active" | "archived".
-    pub status: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-/// One turn in a linked discussion. Mirrors `MissionMessage`, but each turn is
-/// **tab-tagged**: the `tab_*` fields snapshot which tab the user was on when
-/// they sent (or the assistant answered) the turn, so the UI can show "on tab
-/// N — Title" per message. Rows are terminal (`complete` | `error`); live
-/// streaming text is frontend-only state. The resumable session id lives on the
-/// `linked_sessions` row, not here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LinkedMessage {
-    pub id: String,
-    pub linked_id: String,
-    /// "user" | "assistant".
-    pub role: String,
-    pub body: String,
-    /// "complete" | "error".
-    pub status: String,
-    /// Which tab this turn was on (nullable — the first turn may precede any tab
-    /// context). `tab_n` is the 1-based tab-strip ordinal at turn time.
-    pub tab_browse_id: Option<String>,
-    pub tab_n: Option<i64>,
-    pub tab_title: Option<String>,
-    pub tab_url: Option<String>,
-    pub created_at: i64,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewCommentRequest {

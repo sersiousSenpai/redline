@@ -136,6 +136,7 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
         // the true elapsed wait rather than restarting it.
         <ReplyBlock
           phase="live"
+          inspect={{ surface: "fork", key: annotationId }}
           byline={provider}
           seat={seat}
           text={liveText}

@@ -3,8 +3,9 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowseMessage } from "../types";
-const { turn, invokeMock, config, captureMock, dictation } = vi.hoisted(() => ({
+const { turn, invokeMock, config, captureMock, dictation, markdown } = vi.hoisted(() => ({
   dictation: { listening: false, toggle: vi.fn() },
+  markdown: { renders: 0 },
   config: { current: null as null | {
     buildSendArgs: (text: string) => Promise<Record<string, unknown>>;
     onSent?: (args: Record<string, unknown>, outcome?: { started: boolean; queued: boolean; messageId: string }) => void;
@@ -27,7 +28,7 @@ vi.mock("../lib/dictationComposer", async (actual) => ({
 }));
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: (options: typeof config.current) => { config.current = options; return turn; } }));
 vi.mock("../lib/domSnapshot", () => ({ captureSnapshotOrCached: captureMock }));
-vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
+vi.mock("./MarkdownView", () => ({ MarkdownView: () => { markdown.renders++; return null; } }));
 vi.mock("./StreamingText", () => ({ StreamingText: ({ text, className }: { text: string; className?: string }) => <div className={className}>{text}</div> }));
 import { BrowserChat } from "./BrowserChat";
 import { placeText, targetFor } from "../audio/dictationTarget";
@@ -65,6 +66,34 @@ async function sendTurn(text: string) {
   config.current!.onSent?.(args);
   return args;
 }
+describe("the transcript while a reply streams", () => {
+  it("re-renders the live reply per delta and no settled message", async () => {
+    turn.messages = [
+      { id: "u1", browseId: "thread", role: "user", body: "What does it cost?", status: "complete", createdAt: 1 },
+      { id: "a1", browseId: "thread", role: "assistant", body: "Prior answer", status: "complete", createdAt: 2 },
+      { id: "u2", browseId: "thread", role: "user", body: "And yearly?", status: "complete", createdAt: 3 },
+    ];
+    Object.assign(turn, { status: "streaming", liveText: "It" });
+    const onClose = () => {};
+    await show({ onClose });
+    const settled = markdown.renders;
+    expect(settled).toBe(3);
+    for (const text of ["It is", "It is $8", "It is $8 a seat"]) {
+      turn.liveText = text;
+      await show({ onClose, linkedMode: text.length % 2 === 0 });
+    }
+    expect(host.querySelector('[data-reply="live"]')?.textContent).toContain("It is $8 a seat");
+    expect(markdown.renders).toBe(settled);
+  });
+
+  it("reaches the raw stream from the reply still streaming, a tab's first turn included", async () => {
+    turn.messages = [{ id: "u1", browseId: "thread", role: "user", body: "What does it cost?", status: "complete", createdAt: 1 }];
+    Object.assign(turn, { status: "streaming", liveText: "It" });
+    await show();
+    expect(host.querySelector('[data-reply="live"] [data-reply-tail] [aria-label="More for this reply"]')).not.toBeNull();
+  });
+});
+
 describe("page conversation header", () => {
   it("re-grounds a shared conversation when the targeted page changes", async () => {
     turn.messages = [{ id: "prior", browseId: "thread", role: "assistant", body: "Prior answer", status: "complete", createdAt: 1 }];

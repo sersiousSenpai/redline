@@ -241,6 +241,7 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
             // until the answer starts.
             <ReplyBlock
               phase="live"
+              inspect={{ surface: "memchat", key: "memchat" }}
               byline={BYLINE}
               text={liveText}
               meter={meter}

@@ -15,7 +15,9 @@ export function ChatModePicker({ mode, onModeChange, assignee, onAssigneeChange,
   return <div className="rl-chat-mode-picker" onKeyDown={event => { if (event.key === "Escape") setOpen(false); }}>
     <button type="button" className={`rl-chat-mode-chip is-${mode}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => { setOpen(value => !value); onOpen?.(); }} title="Switch mode (⇧Tab)">{label} ▾</button>
     {warning && <span className="rl-chat-build-warning" role="status">{warning}</span>}
-    {open && <div className="rl-chat-mode-menu" role="dialog" aria-label="Chat workbench mode">
+    {/* Not modal, but it owns the pointer and Esc while it is up: the island
+        dismisses it before itself (MonochatIsland's `hasChildOverlay`). */}
+    {open && <div className="rl-chat-mode-menu" role="dialog" aria-label="Chat workbench mode" data-rl-island-owned>
       <fieldset><legend>Mode</legend>{(["chat", "plan", "build"] as const).map(value => <button key={value} type="button" aria-pressed={mode === value} onClick={() => onModeChange(value)}>{value === "chat" ? "Chat" : value === "plan" ? "Plan" : "Build"}</button>)}</fieldset>
       {mode === "build" && <fieldset><legend>Assignee</legend><button type="button" aria-pressed={assignee === "chat"} onClick={() => onAssigneeChange("chat")}>This chat</button><button type="button" aria-pressed={assignee === "agent"} onClick={() => onAssigneeChange("agent")}>New agent</button></fieldset>}
       {delegate && <fieldset><legend>Harness / model / effort</legend>

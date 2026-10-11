@@ -11,7 +11,7 @@ use crate::state::{
     AttachState, BrowseHarness, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
     Comment, CommentAttachment,
     CommentKind, CommentOffer, ResearchLink,
-    CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
+    CommentScope, CommentSelection, CommentStatus, EditPayload, Mission,
     MissionFinding, MissionMessage, PushRecord, Resolution, ReviewAnnotation, ReviewQuestion,
     ReviewSession, Revision, RoundHistoryEntry, SessionStatus, StructuralPayload,
     ThreadMessage, VoiceMessage,
@@ -1422,7 +1422,8 @@ impl Database {
             -- resumable `claude` session id lives on the row; `linked_messages`
             -- are the chat turns (terminal rows, mirroring mission_messages) and
             -- carry a per-turn tab tag (which tab the user was on). Consults into
-            -- a tab's context reuse that tab's own browse thread. See linked.rs.
+            -- a tab's context reuse that tab's own browse thread. Retired: nothing
+            -- writes these tables now, and their rows stay for the record.
             CREATE TABLE IF NOT EXISTS linked_sessions (
                 linked_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -6814,220 +6815,6 @@ impl Database {
                 body: row.get(3)?,
                 status: row.get(4)?,
                 created_at: row.get(5)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    // --- Linked discussions ------------------------------------------------
-    // One continuous conversation spanning all browser tabs (no goal). Mirrors
-    // the mission helpers above but keyed by `linked_id`; turns carry a tab tag.
-    // See linked.rs.
-
-    pub fn insert_linked(&self, l: &Linked) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO linked_sessions
-                (linked_id, title, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![l.linked_id, l.title, l.status, l.created_at, l.updated_at],
-        )?;
-        Ok(())
-    }
-
-    /// Linked discussions newest-first (active before archived, then recency),
-    /// for the start/switch/resume menu.
-    pub fn list_linked(&self) -> rusqlite::Result<Vec<Linked>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT linked_id, title, status, created_at, updated_at
-             FROM linked_sessions
-             ORDER BY (status = 'active') DESC, updated_at DESC, created_at DESC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Linked {
-                linked_id: row.get(0)?,
-                title: row.get(1)?,
-                status: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    pub fn get_linked_session(&self, linked_id: &str) -> Option<String> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT claude_session_id FROM linked_sessions WHERE linked_id = ?1",
-            params![linked_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    }
-
-    pub fn set_linked_session(
-        &self,
-        linked_id: &str,
-        claude_session_id: &str,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE linked_sessions SET claude_session_id = ?2 WHERE linked_id = ?1",
-            params![linked_id, claude_session_id],
-        )?;
-        Ok(())
-    }
-
-    /// Forget a linked discussion's `claude` session so the next turn starts
-    /// fresh — the context-overflow recovery. Also nulls the conversion fork
-    /// source: re-forking a browse session AFTER the linked chat has lived its
-    /// own life would resurrect a stale context, not recover this one.
-    pub fn clear_linked_session(&self, linked_id: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE linked_sessions
-                SET claude_session_id = NULL, fork_from_session_id = NULL
-              WHERE linked_id = ?1",
-            params![linked_id],
-        )?;
-        Ok(())
-    }
-
-    /// Insert a linked discussion converted from a per-tab browse chat,
-    /// recording its provenance and the browse `claude` session its first turn
-    /// will fork from (`--resume <sid> --fork-session`).
-    pub fn insert_linked_converted(
-        &self,
-        l: &Linked,
-        browse_id: &str,
-        origin: &str,
-        fork_from_session_id: &str,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO linked_sessions
-                (linked_id, title, status, created_at, updated_at,
-                 converted_from_browse_id, converted_origin, fork_from_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                l.linked_id,
-                l.title,
-                l.status,
-                l.created_at,
-                l.updated_at,
-                browse_id,
-                origin,
-                fork_from_session_id
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// The browse session the linked chat's FIRST turn should fork from, plus
-    /// the human origin descriptor for the prompt ("tab 2 — Title") — `Some`
-    /// only while that first turn hasn't landed (`claude_session_id` still
-    /// NULL), so a failed first turn re-forks and an established chat never
-    /// re-forks.
-    pub fn get_linked_fork_from(&self, linked_id: &str) -> Option<(String, Option<String>)> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT fork_from_session_id, converted_origin FROM linked_sessions
-              WHERE linked_id = ?1 AND claude_session_id IS NULL",
-            params![linked_id],
-            |row| {
-                Ok(row
-                    .get::<_, Option<String>>(0)?
-                    .map(|sid| (sid, row.get::<_, Option<String>>(1).unwrap_or(None))))
-            },
-        )
-        .ok()
-        .flatten()
-    }
-
-    /// Save a linked discussion's tab workspace (JSON). Like the mission helper,
-    /// this does NOT bump `updated_at` — tab churn shouldn't reorder the list.
-    pub fn set_linked_tabs(&self, linked_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE linked_sessions SET tabs_json = ?2 WHERE linked_id = ?1",
-            params![linked_id, tabs_json],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_linked_tabs(&self, linked_id: &str) -> Option<String> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT tabs_json FROM linked_sessions WHERE linked_id = ?1",
-            params![linked_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    }
-
-    /// Hard-delete a linked discussion and its chat. Does NOT touch any tab's
-    /// browse thread — consults live in those tabs' own discussions, which the
-    /// user may still want.
-    pub fn delete_linked(&self, linked_id: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM linked_messages WHERE linked_id = ?1",
-            params![linked_id],
-        )?;
-        tx.execute(
-            "DELETE FROM linked_sessions WHERE linked_id = ?1",
-            params![linked_id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn insert_linked_message(&self, msg: &LinkedMessage) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO linked_messages
-                (id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                msg.id,
-                msg.linked_id,
-                msg.role,
-                msg.body,
-                msg.status,
-                msg.tab_browse_id,
-                msg.tab_n,
-                msg.tab_title,
-                msg.tab_url,
-                msg.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn load_linked_thread(&self, linked_id: &str) -> rusqlite::Result<Vec<LinkedMessage>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at
-             FROM linked_messages
-             WHERE linked_id = ?1
-             ORDER BY created_at, id",
-        )?;
-        let rows = stmt.query_map(params![linked_id], |row| {
-            Ok(LinkedMessage {
-                id: row.get(0)?,
-                linked_id: row.get(1)?,
-                role: row.get(2)?,
-                body: row.get(3)?,
-                status: row.get(4)?,
-                tab_browse_id: row.get(5)?,
-                tab_n: row.get(6)?,
-                tab_title: row.get(7)?,
-                tab_url: row.get(8)?,
-                created_at: row.get(9)?,
             })
         })?;
         rows.collect()
@@ -16475,19 +16262,15 @@ body.
             target_browse_id: None,
         })
         .unwrap();
-        db.insert_linked_message(&crate::state::LinkedMessage {
-            id: "ql".to_string(),
-            linked_id: "l-1".to_string(),
-            role: "user".to_string(),
-            body: "queued linked".to_string(),
-            status: "queued".to_string(),
-            tab_browse_id: None,
-            tab_n: None,
-            tab_title: None,
-            tab_url: None,
-            created_at: 10,
-        })
-        .unwrap();
+        // The retired linked discussion's table keeps the rows it holds, and
+        // its kind stays mapped for them; nothing writes one now, so seed raw.
+        db.lock_conn()
+            .execute(
+                "INSERT INTO linked_messages (id, linked_id, role, body, status, created_at)
+                 VALUES ('ql', 'l-1', 'user', 'queued linked', 'queued', 10)",
+                [],
+            )
+            .unwrap();
         db.insert_mission_message(&crate::state::MissionMessage {
             id: "qm".to_string(),
             mission_id: "m-1".to_string(),
@@ -16508,6 +16291,16 @@ body.
         .unwrap();
     }
 
+    /// The seeded linked rows' statuses, oldest first.
+    fn linked_statuses(db: &Database) -> Vec<String> {
+        let conn = db.read_conn();
+        let mut stmt = conn
+            .prepare("SELECT status FROM linked_messages WHERE linked_id = 'l-1' ORDER BY created_at, id")
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+        rows.collect::<rusqlite::Result<_>>().unwrap()
+    }
+
     #[test]
     fn set_thread_message_status_flips_across_the_kind_map() {
         let db = Database::open_in_memory().unwrap();
@@ -16524,7 +16317,7 @@ body.
             );
         }
         assert_eq!(db.load_browse_thread("tab-1").unwrap()[0].status, "complete");
-        assert_eq!(db.load_linked_thread("l-1").unwrap()[0].status, "complete");
+        assert_eq!(linked_statuses(&db), ["complete"]);
         assert_eq!(db.load_mission_thread("m-1").unwrap()[0].status, "complete");
         assert_eq!(db.load_mem_chat_thread("memchat").unwrap()[0].status, "complete");
         // A miss and an unknown kind both report false, never error.
@@ -16541,7 +16334,7 @@ body.
         assert!(!db.delete_thread_message("browse", "qb").unwrap(), "already gone");
         assert!(!db.delete_thread_message("martian", "ql").unwrap());
         // The other surfaces' rows are untouched.
-        assert_eq!(db.load_linked_thread("l-1").unwrap().len(), 1);
+        assert_eq!(linked_statuses(&db).len(), 1);
     }
 
     #[test]
@@ -16564,7 +16357,7 @@ body.
         let browse = db.load_browse_thread("tab-1").unwrap();
         assert_eq!(browse[0].status, "unsent");
         assert_eq!(browse[1].status, "complete");
-        assert_eq!(db.load_linked_thread("l-1").unwrap()[0].status, "unsent");
+        assert_eq!(linked_statuses(&db), ["unsent"]);
         assert_eq!(db.load_mission_thread("m-1").unwrap()[0].status, "unsent");
         assert_eq!(db.load_mem_chat_thread("memchat").unwrap()[0].status, "unsent");
         // Idempotent: nothing left to flip.

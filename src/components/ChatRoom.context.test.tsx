@@ -28,6 +28,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("./MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div>{body}</div> }));
 vi.mock("./StreamingText", () => ({ StreamingText: ({ text }: { text: string }) => <div>{text}</div> }));
 import { ChatRoom, type ChatRoomProps, type ChatWorkbenchComposer } from "./ChatRoom";
+import { hasChildOverlay } from "./MonochatIsland";
 import { writeSharedDraft } from "../hooks/useSharedDraft";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -165,5 +166,83 @@ describe("chat context, out of band", () => {
     emit("chat-1", "full");
     expect(onContextLost).toHaveBeenCalledTimes(1);
     expect(onContextLost).toHaveBeenLastCalledWith("fresh-session");
+  });
+});
+
+// A new chat learns its context during its first turn. The chip that says so
+// arrives in the header row and its list hangs over the thread: nothing
+// arriving then may push the reply down under the reader.
+describe("the Context chip", () => {
+  const CONTEXT = {
+    companionId: "chat-1", delivery: "full", briefBytes: 900, memory: null, at: 1,
+    brief: { plans: [{ sessionId: "s-7", title: "Warm chat", project: "redline", status: "approved", day: "2026-10-02" }], repos: [], readyCount: 0, ready: [], pages: [], decisions: [], mission: null },
+  };
+
+  it("arrives in the header mid-turn, and lists over the thread rather than moving it", async () => {
+    Object.assign(turn, { status: "streaming", liveText: "Looking at the plan" });
+    try {
+      await render({}, "");
+      const room = host.querySelector("[data-chat-room]")!;
+      const before = Array.from(room.children);
+      const unmoved = () => {
+        const now = Array.from(room.children);
+        expect(now.length).toBe(before.length);
+        now.forEach((row, i) => expect(row).toBe(before[i]));
+      };
+      await act(async () => listeners.get("companion-context")!({ payload: CONTEXT }));
+      unmoved();
+      const chip = host.querySelector<HTMLButtonElement>("[data-chat-context] button")!;
+      expect(chip.closest("[data-chat-toolbar]")).not.toBeNull();
+      expect(chip.textContent).toBe("Context· 1 plan");
+
+      await act(async () => chip.click());
+      const list = host.querySelector<HTMLElement>("[data-chat-context-panel]")!;
+      expect(list.closest("[data-chat-toolbar]")).not.toBeNull();
+      expect(list.style.position).toBe("absolute");
+      unmoved();
+      // Open, it is over the room like a menu: the door's paper and the
+      // pill's hover card leave the first press and Esc to it.
+      expect(hasChildOverlay()).toBe(true);
+      // Esc shuts the list and goes no further; a press elsewhere shuts it too.
+      const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => list.dispatchEvent(escape));
+      expect(escape.defaultPrevented).toBe(true);
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+      expect(hasChildOverlay()).toBe(false);
+      await act(async () => chip.click());
+      await act(async () => document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true })));
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+    } finally {
+      Object.assign(turn, { status: "idle", liveText: "" });
+    }
+  });
+
+  it("shuts on the first Esc wherever the caret is, before the door hears it", async () => {
+    // A click never focuses a button in WebKit, so the caret is still in the
+    // composer when the list is open; the door listens on the document.
+    await render({}, "");
+    await act(async () => listeners.get("companion-context")!({ payload: CONTEXT }));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-chat-context] button")!.click());
+    const composer = document.createElement("textarea");
+    host.append(composer);
+    composer.focus();
+    const door = vi.fn();
+    document.addEventListener("keydown", door);
+    try {
+      const escape = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+      await act(async () => composer.dispatchEvent(escape));
+      expect(host.querySelector("[data-chat-context-panel]")).toBeNull();
+      expect(door).not.toHaveBeenCalled();
+      // Shut, it leaves the next Esc to the door.
+      await act(async () => composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      expect(door).toHaveBeenCalledTimes(1);
+      // An IME's Esc cancels its composition, nothing else.
+      await act(async () => host.querySelector<HTMLButtonElement>("[data-chat-context] button")!.click());
+      await act(async () => composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, isComposing: true })));
+      expect(host.querySelector("[data-chat-context-panel]")).not.toBeNull();
+    } finally {
+      document.removeEventListener("keydown", door);
+      composer.remove();
+    }
   });
 });

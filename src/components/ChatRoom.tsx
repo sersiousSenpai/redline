@@ -635,11 +635,12 @@ export function ChatRoom({
       {actionError && <p role="alert">{actionError}</p>}
     </BrowserDialog>}
     <div data-chat-room data-room={roomy || undefined} data-chat-empty={!!composer && loaded && messages.length === 0 && status === "idle" && !receipt} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" style={{ height: "100%", background: "var(--color-paper)" }}>
-      {/* Header: which chat, on what model, and the two ways out of it. */}
+      {/* Header: which chat, what it was handed, and the two ways out of it.
+          The Context chip's list hangs from this row over the thread. */}
       <div
         ref={headerRef}
         data-chat-toolbar
-        className="flex min-w-0 shrink-0 items-center gap-2 px-3 py-2"
+        className="relative flex min-w-0 shrink-0 items-center gap-2 px-3 py-2"
         style={{ borderBottom: "1px solid var(--color-rule)", flexWrap: "nowrap" }}
       >
         {<ChatsMenu
@@ -665,10 +666,9 @@ export function ChatRoom({
         >
           {me?.title ?? "Chat"}
         </span>
+        {context && <ChatContextChip context={context} onOpenPlan={onOpenPlan} maxWidth={columnWidth} />}
         <ToolbarButton label={compact ? <X size={13} strokeWidth={2} /> : "Close"} title="Close chat" onClick={onClose} />
       </div>
-
-      {context && <ChatContextChip context={context} onOpenPlan={onOpenPlan} maxWidth={columnWidth} />}
 
       {/* Thread */}
       <div
@@ -718,7 +718,8 @@ export function ChatRoom({
           {streaming && (
             // The reply as it will settle: the same skeleton, and its tail is
             // the turn's one status line. It streams plain; the settled row
-            // draws a diagram the stream showed as its fence.
+            // draws a diagram the stream showed as its fence. Its ⋯ reaches
+            // the raw stream mid-turn — a new thread's first turn included.
             <ReplyBlock
               phase="live"
               byline={providerByline(meter, provider)}
@@ -729,6 +730,7 @@ export function ChatRoom({
               startedAt={startedAt}
               status={retrieving}
               room={roomy}
+              inspect={{ surface: "companion", key: companionId }}
             />
           )}
           {/* In-turn notices end the thread, quietly: a bar above it would

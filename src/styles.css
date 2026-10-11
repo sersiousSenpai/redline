@@ -1793,6 +1793,21 @@ p.rl-block-modified {
 .rl-md-compact > div:first-child > p:first-child {
   font-size: calc(13.5px * var(--rl-discussion-zoom, 1));
 }
+/* Its headings too, at the base scale's steps. */
+.rl-md-compact h1 {
+  font-size: calc(16px * var(--rl-discussion-zoom, 1));
+}
+.rl-md-compact h2 {
+  font-size: calc(14.5px * var(--rl-discussion-zoom, 1));
+}
+.rl-md-compact h3 {
+  font-size: calc(13.5px * var(--rl-discussion-zoom, 1));
+}
+.rl-md-compact h4,
+.rl-md-compact h5,
+.rl-md-compact h6 {
+  font-size: calc(13px * var(--rl-discussion-zoom, 1));
+}
 
 /* The chat room at plate scale: roomy prose for a full-width conversation,
  * like a desktop chat app. The docked/compact poses keep .rl-md-compact; the

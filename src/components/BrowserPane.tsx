@@ -10,6 +10,7 @@ import { shortcutTabId } from "../lib/browseChatState";
 import { dockDescriptor, resolveConversation, type ChatEvent } from "../lib/browserChat/scope";
 import { seedPolicy, type SeedSource } from "../lib/browserChat/turn";
 import { useChatWorld } from "../hooks/useChatWorld";
+import { useStableHandlers, useStableValue } from "../hooks/useStable";
 import { ensureCart } from "../lib/browseCart";
 import { createNativeBrowserGeometry, fullWindowRect, measureNativeBrowserRect } from "../lib/nativeBrowserGeometry";
 import { useVideoFullscreen } from "../hooks/useVideoFullscreen";
@@ -524,7 +525,9 @@ function BrowserPaneBase({
   // that moves the conversation dispatches an event, and nothing here derives
   // a thread id. See lib/browserChat/README.md.
   const { world: chatWorld, dispatch: dispatchChat } = useChatWorld({ workspace: workspaceKey, tabs, activeId }, newBrowseId);
-  const conversation = resolveConversation(chatWorld);
+  // By value: the world is rebuilt every render, and the memoized page chat
+  // takes this as a prop.
+  const conversation = useStableValue(resolveConversation(chatWorld));
   const [addr, setAddr] = useState(
     () =>
       initialTabsRef.current!.find((t) => t.id === initialActiveRef.current)
@@ -773,6 +776,14 @@ function BrowserPaneBase({
   // workspace to return to when it closes (regular browsing or a mission).
   const [mosaicsOpen, setMosaicsOpen] = useState(false);
   const [mosaicList, setMosaicList] = useState<MosaicSummary[] | null>(null);
+  // A deleted mission's or mosaic's shared chat is forgotten once a fresh
+  // read of its list says so; the persisted map holds only live workspaces.
+  // Each list speaks for its own kind as it arrives, and only then: the
+  // mosaics' is read when their manager opens (`refreshMosaics`), so sending
+  // it again later would forget a mosaic saved since.
+  useEffect(() => {
+    if (mission.missionsLoaded) dispatchChat({ type: "workspaces-listed", missions: mission.missions.map((m) => m.missionId), mosaics: null });
+  }, [mission.missionsLoaded, mission.missions, dispatchChat]);
   const [mosaicError, setMosaicError] = useState<string | null>(null);
   const [mosaicEdit, setMosaicEdit] = useState<{ draft: MosaicDraft; previous: Mosaic | null } | null>(null);
   const [activeMosaic, setActiveMosaic] = useState<Mosaic | null>(null);
@@ -1999,7 +2010,11 @@ function BrowserPaneBase({
   // mission; closing it returns to where you were.
   const refreshMosaics = () => {
     setMosaicError(null);
-    void listMosaics().then(setMosaicList).catch((error) => { setMosaicList((prev) => prev ?? []); setMosaicError(`Saved mosaics could not be loaded. ${String(error)}`); });
+    // A read that failed says nothing about which mosaics exist.
+    void listMosaics().then((list) => {
+      setMosaicList(list);
+      dispatchChat({ type: "workspaces-listed", missions: null, mosaics: list.map((m) => m.id) });
+    }).catch((error) => { setMosaicList((prev) => prev ?? []); setMosaicError(`Saved mosaics could not be loaded. ${String(error)}`); });
   };
   const openMosaicManager = () => { setMosaicsOpen(true); refreshMosaics(); };
   const openMosaic = async (id: string) => {
@@ -2338,6 +2353,57 @@ function BrowserPaneBase({
     ensureLive(id);
   };
   const openResearch = () => setMissionMenuOpen(true);
+  // The page chat is memoized. What it is handed keeps its identity across
+  // the pane's own renders (a title, a dot, a layout tick) unless it really
+  // changed: handlers through refs, the rail's cards by value. A handler
+  // whose absence means something is passed or left out at the prop.
+  const chatHandlers = useStableHandlers({
+    toggleTabChat,
+    toggleLinkedMode,
+    research: openResearch,
+    openLink: openSource,
+    addToCart: addReplyToCart,
+    close: () => setChatHere({ open: false }),
+    seedConsumed: () => setChatSeed(null),
+    // The element picker runs on a web page only; it attaches what is
+    // picked as a chip (BC-15, BC-40).
+    pickElement: () => void picker.start((tabs.find((t) => t.id === activeId) ?? tabs[0]).url),
+    openTaskList: () => setChatHere({ open: true, pill: "cart" }),
+    openMission: () => setChatHere({ open: true, pill: "mission" }),
+    // The mission's synthesis is its orchestrator's turn: Synthesize opens
+    // the Mission panel and starts it there.
+    synthesize: () => {
+      setSynthesizeAsked(true);
+      setChatHere({ open: true, pill: "mission" });
+    },
+    addToMission: (body: string, targetBrowseId?: string | null) => {
+      // The page the reply was about is the tab its turn targeted, which the
+      // message keeps — in a shared chat that is not the tab on screen once
+      // you have moved on, and never the tab the conversation is anchored to
+      // (BC-24). A row from before that was kept falls back to the page on
+      // screen. The pin is keyed by that page's tab, which is what a jump
+      // and the page capture both read.
+      const page = targetBrowseId
+        ? tabs.find((t) => t.browseId === targetBrowseId)
+        : tabs.find((t) => t.label === conversation?.targetLabel);
+      // Returns whether the pin reached the DB, so the button can say "Pin
+      // failed" instead of lying.
+      return mission.addFinding({
+        body,
+        browseId: page?.browseId ?? targetBrowseId ?? null,
+        sourceUrl: page?.url ?? null,
+        sourceTitle: page?.title ?? null,
+      });
+    },
+  });
+  const chatTaskList = useStableValue({ nonce: listReloadKey, onOpen: chatHandlers.openTaskList });
+  const chatMission = useStableValue(mission.activeMission ? {
+    title: mission.activeMission.title,
+    goal: mission.activeMission.goal,
+    findings: mission.findings.length,
+    onOpen: chatHandlers.openMission,
+    onSynthesize: chatHandlers.synthesize,
+  } : null);
 
   return (
     <div className="rb-workspace">
@@ -2447,57 +2513,20 @@ function BrowserPaneBase({
                   conversation={conversation}
                   workspace={workspaceKey}
                   linkedMode={chatWorld.linkedMode}
-                  onToggleTabChat={toggleTabChat}
-                  onToggleLinkedMode={toggleLinkedMode}
-                  onResearch={openResearch}
+                  onToggleTabChat={chatHandlers.toggleTabChat}
+                  onToggleLinkedMode={chatHandlers.toggleLinkedMode}
+                  onResearch={chatHandlers.research}
                   pageActions={pageActions.running}
-                  // The element picker runs on a web page only; it attaches
-                  // what is picked as a chip (BC-15, BC-40).
-                  onPickElement={/^https?:\/\//i.test(activeTab.url) ? () => void picker.start(activeTab.url) : undefined}
-                  taskList={{ nonce: listReloadKey, onOpen: () => setChatHere({ open: true, pill: "cart" }) }}
-                  mission={mission.activeMission ? {
-                    title: mission.activeMission.title,
-                    goal: mission.activeMission.goal,
-                    findings: mission.findings.length,
-                    onOpen: () => setChatHere({ open: true, pill: "mission" }),
-                    // The mission's synthesis is its orchestrator's turn:
-                    // Synthesize opens the Mission panel and starts it there.
-                    onSynthesize: () => {
-                      setSynthesizeAsked(true);
-                      setChatHere({ open: true, pill: "mission" });
-                    },
-                  } : null}
+                  onPickElement={/^https?:\/\//i.test(activeTab.url) ? chatHandlers.pickElement : undefined}
+                  taskList={chatTaskList}
+                  mission={chatMission}
                   projectDir={projectDir}
-                  onClose={() => setChatHere({ open: false })}
-                  onOpenLink={openSource}
+                  onClose={chatHandlers.close}
+                  onOpenLink={chatHandlers.openLink}
                   seed={chatSeed}
-                  onSeedConsumed={() => setChatSeed(null)}
-                  onAddToCart={addReplyToCart}
-                  onAddToMission={
-                    mission.activeMission
-                      ? (body, targetBrowseId) => {
-                          // The page the reply was about is the tab its turn
-                          // targeted, which the message keeps — in a shared
-                          // chat that is not the tab on screen once you have
-                          // moved on, and never the tab the conversation is
-                          // anchored to (BC-24). A row from before that was
-                          // kept falls back to the page on screen. The pin is
-                          // keyed by that page's tab, which is what a jump
-                          // and the page capture both read.
-                          const page = targetBrowseId
-                            ? tabs.find((t) => t.browseId === targetBrowseId)
-                            : tabs.find((t) => t.label === conversation.targetLabel);
-                          // Returns whether the pin reached the DB, so the
-                          // button can say "Pin failed" instead of lying.
-                          return mission.addFinding({
-                            body,
-                            browseId: page?.browseId ?? targetBrowseId ?? null,
-                            sourceUrl: page?.url ?? null,
-                            sourceTitle: page?.title ?? null,
-                          });
-                        }
-                      : undefined
-                  }
+                  onSeedConsumed={chatHandlers.seedConsumed}
+                  onAddToCart={chatHandlers.addToCart}
+                  onAddToMission={mission.activeMission ? chatHandlers.addToMission : undefined}
                 />
                   </div>
                 </div>

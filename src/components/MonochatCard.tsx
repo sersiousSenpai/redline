@@ -4,6 +4,8 @@ import { ChevronDown } from "lucide-react";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import { flipBackKeyframes, flipKeyframes, ISLAND_EASE_IN, ISLAND_FADE_MS, ISLAND_SPRING_MS, SWAP_SPRING, type SwapRect } from "../lib/springSwap";
 import { isTitleBarPress } from "../lib/windowDrag";
+// A menu, picker or modal layered over the card owns the pointer and Esc.
+import { hasChildOverlay } from "./MonochatIsland";
 import "./MonochatCard.css";
 
 // The island's compact pose: the small composer that springs out of the footer
@@ -38,8 +40,6 @@ const CONTENT_OUT_MS = 100;
  *  spring is still on its way in. */
 const CORNER_MS = 300;
 
-/** A menu, picker or dialog layered over the card owns the pointer and Esc. */
-const hasChildOverlay = () => !!document.querySelector('[role="menu"], [role="dialog"], dialog[open]');
 const box = (r: DOMRect): SwapRect => ({ left: r.left, top: r.top, width: r.width, height: r.height });
 
 /** The card's last word on its way out — back into the pill, or into the door

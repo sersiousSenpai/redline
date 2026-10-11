@@ -336,7 +336,10 @@ impl NativeTurn {
                     }
                 }
                 step.activity = match kind {
-                    "commandExecution" => Some("Reading or inspecting the workspace".into()),
+                    // A bridge call is named for what it does, as a Claude
+                    // turn's is ("reading tab 2…", "clicking…"); any other
+                    // command is a look around the workspace.
+                    "commandExecution" => Some(bridge_label(p.pointer("/item/command")).unwrap_or_else(|| "Reading or inspecting the workspace".into())),
                     "webSearch" => Some("Searching the web".into()),
                     "mcpToolCall" => Some("Using a connected tool".into()),
                     _ => None,
@@ -466,6 +469,18 @@ fn native_meter(
     meter.thinking_tokens = Some(count("reasoningOutputTokens"));
     meter.rev = rev;
     meter
+}
+
+/// A shell command's bridge call in the page agent's words
+/// (`claude_proc::page_status_label`). The app-server sends the command as
+/// one line; an argv is joined the same way.
+fn bridge_label(command: Option<&Value>) -> Option<String> {
+    let line = match command? {
+        Value::String(line) => line.clone(),
+        Value::Array(argv) => argv.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
+        _ => return None,
+    };
+    crate::claude_proc::page_status_label(&line)
 }
 
 #[cfg(test)]
@@ -607,5 +622,17 @@ mod tests {
             &json!({"method":"turn/started","params":{"threadId":"t","turn":{"id":"foreign"}}}),
         );
         assert_eq!(t.turn_id.as_deref(), Some("u"));
+    }
+    /// A Codex page chat's activity line names its bridge calls as a Claude
+    /// turn's does, from the command as one line or as its argv.
+    #[test]
+    fn a_bridge_command_is_named_for_what_it_does() {
+        let mut t = turn();
+        t.thread_id = Some("t".into());
+        t.turn_id = Some("u".into());
+        let mut started = |id: &str, command: Value| t.observe(&json!({"method":"item/started","params":{"threadId":"t","turnId":"u","item":{"id":id,"type":"commandExecution","command":command}}})).activity;
+        assert_eq!(started("read", json!("/bin/zsh -lc \"curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=2'\"")).as_deref(), Some("reading tab 2…"));
+        assert_eq!(started("act", json!(["bash", "-lc", r#"curl -s http://127.0.0.1:7676/v1/browser/action -X POST -d '{"operation":{"kind":"click"}}'"#])).as_deref(), Some("clicking…"));
+        assert_eq!(started("look", json!("rg -n seat_burn src")).as_deref(), Some("Reading or inspecting the workspace"));
     }
 }

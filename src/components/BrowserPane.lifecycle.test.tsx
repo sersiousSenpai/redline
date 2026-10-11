@@ -23,7 +23,8 @@ vi.mock("@tauri-apps/api/webview", () => ({ Webview: class {
   async hide() { this.log.push("hide"); this.visible = false; }
 } }));
 vi.mock("../hooks/useMission", () => ({ useMission: () => ({ activeMissionId: null, activeMission: null, missions: [], missionsLoaded: true, findings: [], error: null, closeMission: () => {}, ...mocks.mission }) }));
-vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string, targetBrowseId?: string | null) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
+// Memoized, as the real one is, so a render here is a change of props.
+vi.mock("./BrowserChat", async () => ({ BrowserChat: (await import("react")).memo((props: { conversation: { kind: string; browseId: string; targetLabel: string }; onToggleTabChat?: () => void; onToggleLinkedMode?: () => void; onOpenLink?: (url: string) => void; onAddToMission?: (body: string, targetBrowseId?: string | null) => unknown; seed?: { text: string; source: { kind: string } }; pageActions?: ReadonlyMap<string, { kind: string; tab: number | null }>; onPickElement?: () => void; taskList?: { onOpen: () => void }; mission?: { title: string; onSynthesize: () => void } | null }) => {
   mocks.chatRenders.push(`${props.conversation.kind}:${props.conversation.browseId}`);
   const action = props.pageActions?.get(props.conversation.targetLabel);
   return <div data-conversation={props.conversation.browseId} data-label={props.conversation.targetLabel} data-seed={props.seed?.text} data-seed-source={props.seed?.source.kind}
@@ -31,7 +32,7 @@ vi.mock("./BrowserChat", () => ({ BrowserChat: (props: { conversation: { kind: s
     <button onClick={() => props.onOpenLink?.(document.body.dataset.link!)}>Reply link</button><button onClick={() => void props.onAddToMission?.("A finding")}>Pin reply</button>
     <button onClick={() => void props.onAddToMission?.("An older finding", document.body.dataset.pinTarget)}>Pin older reply</button>
     <button onClick={props.taskList?.onOpen}>Open task list</button><button onClick={props.mission?.onSynthesize}>Synthesize</button></div>;
-} }));
+}) }));
 import { BrowserPane } from "./BrowserPane";
 import { Webview as MockWebview } from "@tauri-apps/api/webview";
 
@@ -280,6 +281,15 @@ describe("linked mode decides tab chat vs shared chat", () => {
     expect(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!)).toEqual({ regular: "kept" });
   });
 
+  it("forgets the shared chat of a mission that no longer exists, and keeps a mosaic's until their list says", async () => {
+    linkedModeOn();
+    mocks.mission = { missions: [{ missionId: "m-live", title: "Live" }] };
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "m-live": "a", "m-gone": "b", "mosaic:grid": "c" }));
+    await mount();
+    expect(conversation()).toBe("kept");
+    expect(JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!)).toEqual({ regular: "kept", "m-live": "a", "mosaic:grid": "c" });
+  });
+
   it("opens a link from a reply beside the conversation, and selects a page that is already open", async () => {
     await mount();
     document.body.dataset.link = "https://three.test/";
@@ -324,17 +334,32 @@ describe("linked mode decides tab chat vs shared chat", () => {
   });
 });
 
+it("re-renders the memoized page chat only when what it is handed changes", async () => {
+  mocks.mission = { activeMission: { missionId: "m1", title: "Rate limits", goal: "Compare token buckets" }, findings: [] };
+  await mount();
+  const target = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
+  const other = target === "browser-t-one" ? "browser-t-two" : "browser-t-one";
+  mocks.chatRenders = [];
+  // Another tab's title moves the pane, not the chat.
+  await event("browser-page-event", { label: other, kind: "state", url: "https://elsewhere.test/", title: "Elsewhere" });
+  expect(host.querySelector(`[data-tab-id="${other.replace("browser-", "")}"] .rb-tab-title`)?.textContent).toBe("Elsewhere");
+  expect(mocks.chatRenders).toEqual([]);
+  // The page the chat follows is the chat's business.
+  await event("browser-page-event", { label: target, kind: "state", url: "https://retitled.test/", title: "Retitled" });
+  expect(mocks.chatRenders.length).toBeGreaterThan(0);
+});
+
 describe("the agent acting on a page", () => {
   it("dots the tab and names the action in the chat while it runs, and clears the dot when the turn ends", async () => {
     await mount();
     const label = dock.querySelector("[data-label]")!.getAttribute("data-label")!;
     const tab = () => host.querySelector(`[data-tab-id="${label.replace("browser-", "")}"]`)!;
-    await event("browser-action", { label, kind: "click", tab: 1, status: "running" });
+    await event("browser-action", { label, kind: "click", tab: 1, status: "running", turns: ["one"] });
     expect(tab().hasAttribute("data-agent-acting")).toBe(true);
     expect(tab().getAttribute("aria-label")).toContain("the agent is acting on this page");
     expect(dock.querySelector("[data-page-action]")?.getAttribute("data-page-action")).toBe("click:1");
     // Done: the chat's live line moves on, the dot stays until the turn ends.
-    await event("browser-action", { label, kind: "click", tab: 1, status: "completed" });
+    await event("browser-action", { label, kind: "click", tab: 1, status: "completed", turns: ["one"] });
     expect(dock.querySelector("[data-page-action]")).toBeNull();
     expect(tab().hasAttribute("data-agent-acting")).toBe(true);
     await event("browse-done", { browseId: "one" });
@@ -592,6 +617,60 @@ describe("mosaics", () => {
     await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent?.startsWith("Stock News"))!.click());
   }
   const stageSections = () => [...host.querySelectorAll("section")].map((section) => section.getAttribute("aria-label"));
+  const followed = () => JSON.parse(localStorage.getItem("redline.browser.followByWorkspace")!) as Record<string, string>;
+  async function openManager() {
+    await act(async () => (host.querySelector('[aria-label="Page menu"]') as HTMLButtonElement).click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Mosaics…")!.click());
+    await settle();
+  }
+
+  it("forgets a deleted mosaic's shared chat once the manager reads their list", async () => {
+    linkedModeOn();
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "mosaic:news": "news-chat", "mosaic:gone": "gone-chat" }));
+    await mount();
+    expect(followed()["mosaic:gone"]).toBe("gone-chat");
+    await openManager();
+    expect(followed()).toEqual({ regular: "kept", "mosaic:news": "news-chat" });
+  });
+
+  it("keeps every mosaic's shared chat when their list fails to load", async () => {
+    linkedModeOn();
+    localStorage.setItem("redline.browser.followByWorkspace", JSON.stringify({ regular: "kept", "mosaic:news": "news-chat" }));
+    const base = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: { label: string }) => command === "browser_workspace_list" ? Promise.reject(new Error("offline")) : base(command, args));
+    await mount();
+    await openManager();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("could not be loaded");
+    expect(followed()["mosaic:news"]).toBe("news-chat");
+  });
+
+  it("keeps a mosaic saved after its list loaded when the pane next renders", async () => {
+    linkedModeOn();
+    // What the pane saves is what it loads back.
+    const saved = new Map<string, unknown>();
+    mocks.save.mockImplementation(async (id: string, body: unknown) => { saved.set(id, body); });
+    const regular = mocks.load.getMockImplementation()!;
+    mocks.load.mockImplementation(async (id: string) => saved.get(id) ?? regular(id));
+    await mount();
+    await openManager();
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent === "Save these pages as a mosaic")!.click());
+    const name = document.querySelector<HTMLInputElement>('[role="dialog"] input')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Morning");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((button) => button.textContent === "Save mosaic")!.click());
+    for (let i = 0; i < 4; i++) await settle();
+    const id = [...saved.keys()].find((key) => key.startsWith("mosaic:"))!;
+    expect(followed()[id]).toBeTruthy();
+    // Back to regular browsing; the list the manager read before the save
+    // does not speak for the mosaic made since.
+    await act(async () => (host.querySelector('[aria-label="Close Morning"]') as HTMLButtonElement).click());
+    for (let i = 0; i < 2; i++) await settle();
+    mocks.mission = { missions: [{ missionId: "m-new", title: "New" }] };
+    await mount();
+    expect(followed()[id]).toBeTruthy();
+  });
 
   it("opens a saved 3×3 as nine live, sized tiles created in staggered batches, and closing restores the regular pages", async () => {
     await mount();

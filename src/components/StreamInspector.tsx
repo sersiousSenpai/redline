@@ -28,6 +28,12 @@ export interface InspectView {
  *  polls on demand cannot flood the renderer the way a per-line emit would. */
 const POLL_MS = 700;
 
+/** Panes open, app-wide: capture stays on while any is. A pane handed from a
+ *  live reply to the reply it settled into closes and opens in one task, so
+ *  turning capture off waits that task out — the ring it was reading lives. */
+let panes = 0;
+let offTimer = 0;
+
 /** Pretty-print one line if it parses, so a 4 KB `init` is readable. */
 function pretty(line: string): string {
   try {
@@ -83,15 +89,20 @@ export default function StreamInspector({
     [surface, turnKey],
   );
 
-  // Opening the pane is what turns capture ON; closing it turns it off again
-  // and frees the ring. The cleanup runs on unmount too, so navigating away
-  // cannot leave a buffer filling behind the user's back.
+  // Opening the pane is what turns capture ON; closing the last one turns it
+  // off again and frees the ring. The cleanup runs on unmount too, so
+  // navigating away cannot leave a buffer filling behind the user's back.
   useEffect(() => {
     alive.current = true;
+    panes++;
+    window.clearTimeout(offTimer);
     void invoke("inspect_set", { on: true }).then(pull).catch(() => {});
     return () => {
       alive.current = false;
-      void invoke("inspect_set", { on: false }).catch(() => {});
+      if (--panes > 0) return;
+      offTimer = window.setTimeout(() => {
+        if (panes === 0) void invoke("inspect_set", { on: false }).catch(() => {});
+      }, 0);
     };
   }, [pull]);
   usePoll(pull, POLL_MS, { pauseWhenHidden: true, leading: false }, [pull]);

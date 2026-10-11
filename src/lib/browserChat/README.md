@@ -44,7 +44,10 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
 - BrowserPane holds the world through `hooks/useChatWorld`: its own tabs,
   the tab on screen and the workspace, plus a slice only the reducer
   writes. A handler that moves the conversation dispatches an event; it
-  never sets the anchor, the flip or a shared thread itself.
+  never sets the anchor, the flip or a shared thread itself. Each
+  workspace's shared thread persists until its workspace is gone: as a fresh
+  read of the mission or the mosaic list arrives, the pane dispatches
+  `workspaces-listed` for that kind and the reducer forgets the rest of it.
 - A turn's target page, scope and workspace are captured when the user sends.
   The backend never reads the globally active tab or mission for a turn that
   carries a target. Both of the turn's rows keep the targeted tab
@@ -65,7 +68,10 @@ reads `contract.json` and `skills/browse/SKILL.md` with `include_str!` from
   (`browser_actions::outcome_step` → `BrowseState::note_action`), in the
   words `contract.json`'s `actionOutcomes` gives, so the row reads the same
   after a relaunch. Rows go under the text: a step never moves text already
-  written.
+  written. Every accepted action is answered, even when its request is
+  dropped mid-way, and its acknowledgement names the turns running against
+  the page: a tab's dot clears when those turns have ended, never when any
+  turn does.
 - Context in the composer is a chip that rides the message as text; read a
   message back into its chips with `userTurnParts`, never by matching its
   body in a component.

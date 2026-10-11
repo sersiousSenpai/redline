@@ -84,7 +84,11 @@ export type ChatEvent =
   | { type: "workspace-swapped"; workspace: WorkspaceKey; tabs: readonly ChatTab[]; activeId: string }
   /** Starting a mission from regular browsing carries the tabs AND the
    *  shared chat (BC-4). */
-  | { type: "mission-started-from-regular"; missionId: string };
+  | { type: "mission-started-from-regular"; missionId: string }
+  /** The missions or mosaics that exist, from a fresh read of their list
+   *  (null: a kind this read says nothing about): a deleted one's shared
+   *  chat is forgotten. */
+  | { type: "workspaces-listed"; missions: readonly WorkspaceKey[] | null; mosaics: readonly WorkspaceKey[] | null };
 
 export interface ResolvedConversation {
   kind: "tab" | "shared";
@@ -256,7 +260,24 @@ function step(w: ChatWorld, e: ChatEvent): ChatWorld {
       // regular shared chat goes with them; regular starts fresh (BC-4).
       if (w.workspace !== "regular") return w;
       return { ...w, workspace: e.missionId, flipFor: null, shared: { ...w.shared, [e.missionId]: w.shared.regular, regular: undefined } };
+    case "workspaces-listed":
+      return { ...w, shared: liveShared(w, e.missions, e.mosaics) };
   }
+}
+
+/** Each workspace's shared chat while its workspace exists. Regular browsing
+ *  and the workspace on screen always keep theirs, and a kind the read did
+ *  not list keeps all of its own. Nothing to forget is the same object, so
+ *  the slice (and storage) stay as they were. */
+function liveShared(w: ChatWorld, missions: readonly WorkspaceKey[] | null, mosaics: readonly WorkspaceKey[] | null): ChatWorld["shared"] {
+  const alive = (workspace: WorkspaceKey) => {
+    const kind = workspaceKind(workspace);
+    if (kind === "regular" || workspace === w.workspace) return true;
+    const known = kind === "mosaic" ? mosaics : missions;
+    return !known || known.includes(workspace);
+  };
+  const workspaces = Object.keys(w.shared);
+  return workspaces.every(alive) ? w.shared : Object.fromEntries(workspaces.filter(alive).map((workspace) => [workspace, w.shared[workspace]]));
 }
 
 export function reduceChatWorld(w: ChatWorld, e: ChatEvent, mint: () => string): ChatWorld {
