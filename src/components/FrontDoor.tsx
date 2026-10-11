@@ -204,8 +204,13 @@ export interface FrontDoorProps {
 const BROWSE_MAX = 10;
 const BROWSE_ROW = 36;
 const BROWSE_GAP = 0;
-/** Breathing room under the last page: the list ends well short of the edge. */
-const BROWSE_AIR = 72;
+/** Breathing room under the last page: a row's pitch and a gap, so the list
+ *  ends well short of the edge without costing a row it has room for (72 here
+ *  dropped Searches altogether beside a sidebar and an open dock). */
+const BROWSE_AIR = 48;
+/** How far short of a whole row the free space may fall and still show it: a
+ *  list top a fraction of a pixel lower never drops the last row. */
+const BROWSE_SLACK = 0.5;
 /** Composer bottom → page list top when the list has no box yet: the gap to
  *  the recents, the Plans row, the row gap, the Chats row, the gap to
  *  Searches, its head and the head's gap. Only a first guess; the real top
@@ -783,13 +788,17 @@ export function FrontDoor(props: FrontDoorProps) {
       // The list grows DOWN from a top that does not depend on how many rows
       // it holds, so measuring from it is stable. Before it has a box, fall
       // back to the composer's bottom plus the rows above it. Where it is
-      // laid out, that is — not where a glide of the room (a translation, as
-      // a door engaged on the plate goes home) has it this frame.
-      const room = layer?.querySelector<HTMLElement>(".rl-monochat");
-      const drift = room ? Number(/^matrix\(1, 0, 0, 1, [^,]+, ([^)]+)\)$/.exec(getComputedStyle(room).transform)?.[1] ?? 0) : 0;
-      const listTop = (browseListRef.current?.getBoundingClientRect().top || root.getBoundingClientRect().bottom + BROWSE_ABOVE) - drift;
+      // laid out, that is — not where this frame has it: a glide of the room
+      // (a translation, as a door engaged on the plate goes home), and the
+      // recents' own drop as they come back from a zoom, would each read as
+      // a lower top and cost a row that stays lost once they settle.
+      const shift = (element: Element | null | undefined) =>
+        element ? Number(/^matrix\(1, 0, 0, 1, [^,]+, ([^)]+)\)$/.exec(getComputedStyle(element).transform)?.[1] ?? 0) : 0;
+      const drift = shift(layer?.querySelector(".rl-monochat"));
+      const list = browseListRef.current?.getBoundingClientRect().top;
+      const listTop = list ? list - drift - shift(recentsRef.current) : root.getBoundingClientRect().bottom + BROWSE_ABOVE - drift;
       const free = bounds.bottom - listTop - BROWSE_AIR;
-      const rows = Math.floor((free + BROWSE_GAP) / (BROWSE_ROW + BROWSE_GAP));
+      const rows = Math.floor((free + BROWSE_GAP + BROWSE_SLACK) / (BROWSE_ROW + BROWSE_GAP));
       setBrowseRoom(Math.max(0, Math.min(BROWSE_MAX, rows)));
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(measure); };
@@ -1181,7 +1190,8 @@ export function FrontDoor(props: FrontDoorProps) {
             {r.kind === "browse" ? (
               <>
                 <span className="rl-fd-browse-title">{r.label}</span>
-                {r.host && <span className="rl-fd-browse-host" aria-hidden="true">{r.host}</span>}
+                {/* Where it lives, unless its title already is where it lives. */}
+                {r.host && r.host !== r.label && <span className="rl-fd-browse-host" aria-hidden="true">{r.host}</span>}
               </>
             ) : (
               <span className="rl-fd-recent-title">{fitted[r.label] ?? keepHyphens(r.label)}</span>

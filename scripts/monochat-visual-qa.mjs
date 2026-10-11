@@ -91,7 +91,7 @@ try {
   // The zoom, frame by frame: the island, the paper, the welcome, the caret,
   // the page rows, the chrome around the door, and what animates.
   const zoomProbe = `(() => { const l = document.querySelector('.rl-frontdoor-focus'), i = l.querySelector('.rl-fd-island'), c = l.querySelector('.rl-frontdoor'), r = i.getBoundingClientRect(), d = c.getBoundingClientRect(); const look = (s) => { const e = document.querySelector(s); if (!e) return null; const st = getComputedStyle(e); return { o: +Number(st.opacity).toFixed(3), v: st.visibility }; }; const rect = (s) => { const e = document.querySelector(s); if (!e) return null; const b = e.getBoundingClientRect(); return [b.x, b.y, b.width, b.height].map(n => +n.toFixed(1)).join(','); };
-    return { x: r.x, y: r.y, w: r.width, h: r.height, cx: d.x + d.width / 2, cy: d.y + d.height / 2, paper: +Number(getComputedStyle(l, '::before').opacity).toFixed(3), zoom: l.hasAttribute('data-zoom'), hero: look('.rl-fd-welcome-hero'), recents: look('.rl-fd-recents'), rows: l.querySelectorAll('.rl-fd-browse').length, active: document.activeElement === l.querySelector('.rl-fd-input'), chrome: [rect('.rl-app-header'), rect('.rl-app-footer'), rect('.qa-sidebar'), rect('.rl-term-dock')].join('|'),
+    return { x: r.x, y: r.y, w: r.width, h: r.height, cx: d.x + d.width / 2, cy: d.y + d.height / 2, paper: +Number(getComputedStyle(l, '::before').opacity).toFixed(3), zoom: l.hasAttribute('data-zoom'), hero: look('.rl-fd-welcome-hero'), recents: look('.rl-fd-recents'), ret: look('.rl-frontdoor-return'), rows: l.querySelectorAll('.rl-fd-browse').length, active: document.activeElement === l.querySelector('.rl-fd-input'), chrome: [rect('.rl-app-header'), rect('.rl-app-footer'), rect('.qa-sidebar'), rect('.rl-term-dock')].join('|'),
       moves: document.querySelector('.rl-monochat').getAnimations().map(a => a.transitionProperty ?? [...new Set(a.effect.getKeyframes().flatMap(k => Object.keys(k).filter(p => !['offset', 'easing', 'composite', 'computedOffset'].includes(p))))].join('+')),
       geometry: l.getAnimations({ subtree: true }).filter(a => /^(top|left|right|bottom|inset|width|height|margin|padding)/.test(a.transitionProperty ?? '')).map(a => a.transitionProperty) }; })()`;
   const zoomIn = async (tag) => {
@@ -114,6 +114,7 @@ try {
     check(`${tag}: and ends centred in the window`, Math.abs(after.cx - (await cdp.evaluate('innerWidth')) / 2) <= 1 && Math.abs(after.cy - (await cdp.evaluate('innerHeight')) / 2) <= 1, after);
     check(`${tag}: the caret is in the box on every frame from the press`, pressed >= 0 && frames.slice(pressed + 1).every(f => f.active) && after.active, frames.map(f => f.active));
     check(`${tag}: the header, footer, sidebar and dock never move`, frames.every(f => f.chrome === before.chrome) && after.chrome === before.chrome, { before: before.chrome, after: after.chrome });
+    check(`${tag}: ⌄ fades in behind the paper, never ahead of it`, frames.every(f => !f.ret || f.ret.o <= f.paper + 0.02) && frames.some(f => f.ret && f.ret.o > 0 && f.ret.o < 1) && after.ret?.o === 1, frames.map(f => [f.t - t0, f.paper, f.ret?.o]));
     check(`${tag}: the welcome recedes on the press, and the paper covers the window, by 240 ms`, late.length > 0 && late.every(f => f.hero.o === 0 && f.hero.v === 'hidden' && (!f.recents || (f.recents.o === 0 && f.recents.v === 'hidden')) && f.paper === 1), late.map(f => [f.t - t0, f.hero, f.recents, f.paper]));
     report.zoom = { ...report.zoom, [`${tag}-in`]: { before: [before.x, before.y], held: [held.x, held.y], after: [after.x, after.y], film: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.paper, f.hero.o]) } };
     return { frames: frames.concat([after]), rest: before };
@@ -126,6 +127,7 @@ try {
     const frames = await cdp.evaluate('window.__qaZoomOut'), after = await cdp.evaluate(zoomProbe);
     const t0 = frames[0].t;
     check(`${tag}: Esc brings the box home by 320 ms and the welcome back by 400 ms, with no flight toward the pill`, await cdp.evaluate(`${pose}==='entry' && !document.querySelector('.rl-frontdoor-focus[data-closing]') && !document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')`) && Math.abs(after.x - rest.x) < 1 && Math.abs(after.y - rest.y) < 1 && frames.filter(f => f.t - t0 >= 320).every(f => Math.abs(f.x - rest.x) < 1 && Math.abs(f.y - rest.y) < 1) && frames.filter(f => f.t - t0 >= 400).every(f => f.hero.o === rest.hero.o && f.recents?.o === rest.recents?.o), { rest: [rest.x, rest.y, rest.hero.o, rest.recents?.o], film: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.hero.o, f.recents?.o]) });
+    check(`${tag}: ⌄ fades out ahead of the paper — gone by 160 ms, never on its first frame`, frames.some(f => f.ret && f.ret.o > 0 && f.ret.o < 1) && frames.filter(f => f.t - t0 >= 160).every(f => !f.ret || f.ret.o === 0) && frames.every(f => !f.ret || f.ret.o <= f.paper + 0.02) && !after.ret, frames.map(f => [f.t - t0, f.paper, f.ret?.o]));
     check(`${tag}: the page rows hold the count they rested with on every frame`, frames.every(f => f.rows === rest.rows) && after.rows === rest.rows, { rest: rest.rows, film: frames.map(f => f.rows) });
     report.zoom = { ...report.zoom, [`${tag}-out`]: frames.map(f => [f.t - t0, Math.round(f.x), Math.round(f.y), f.paper, f.hero.o]) };
   };
@@ -230,6 +232,10 @@ try {
     check(`${size} a resting pointer springs the compact card out without taking focus`, await cdp.evaluate(cardOpen) && await cdp.evaluate("document.activeElement.id==='qa-document-focus'"));
     check(`${size} the card is bounded, centred and above the pill`, peek?.within && Math.abs(peek.x + peek.width/2 - width/2) < 1 && peek.width <= 641 && peek.bottom <= pill.y + 1, { peek, pill });
     check(`${size} the card is a region named by its heading`, await cdp.evaluate("(() => { const c=document.querySelector('.rl-monochat-float'); return c.getAttribute('role')==='region' && document.getElementById(c.getAttribute('aria-labelledby'))?.tagName==='H2'; })()"));
+    // 10/11: the pill under it says "Plan a build" with the mark; the card
+    // never says it again. Its ⌄ sits on the field's first line, clear of its text.
+    const cardHead = await cdp.evaluate("(() => { const c=document.querySelector('.rl-monochat-float'), h=document.getElementById(c.getAttribute('aria-labelledby')), b=c.querySelector('[aria-label=Collapse]').getBoundingClientRect(), f=c.querySelector('.rl-fd-input'), r=f.getBoundingClientRect(), s=getComputedStyle(f), line=parseFloat(s.lineHeight), first=r.top+parseFloat(s.paddingTop)+line/2; return { heading: h.textContent, shown: [h.getBoundingClientRect().width, h.getBoundingClientRect().height], marks: c.querySelectorAll('.rl-float-heading svg:not(.lucide-chevron-down)').length, chevron: b.top+b.height/2, first, clear: r.right-parseFloat(s.paddingRight) <= b.left + 1 }; })()");
+    check(`${size} the card's heading is for a screen reader only — no repeat of the pill, no second mark — and its ⌄ sits on the field's first line`, cardHead.heading === 'Plan a build' && cardHead.shown[0] <= 1 && cardHead.shown[1] <= 1 && cardHead.marks === 0 && Math.abs(cardHead.chevron - cardHead.first) <= 2 && cardHead.clear, cardHead);
     // A plan on screen offers no chip (10/11): nothing rides along unseen.
     check(`${size} the card on a plan carries no context chip`, await cdp.evaluate("!document.querySelector('.rl-monochat-float .rl-context-chips button')"));
     check(`${size} the card holds no headline, recents or History`, await cdp.evaluate("!document.querySelector('.rl-monochat-float h1, .rl-monochat-float [aria-label=\"Jump back in\"], .rl-monochat-float [aria-label=\"Conversation history\"]')"));
@@ -438,15 +444,22 @@ try {
   })()`;
   // Whole, or cut after a whole word of the label with "…".
   const wholeWords = (entry) => entry.text === entry.label || (entry.text.endsWith('…') && entry.label.split(' ').some((_, i, words) => words.slice(0, i + 1).join(' ').replace(/[\s,;:·—–-]+$/u, '') === entry.text.slice(0, -1)));
-  for (const [width, height] of [[1440, 900], [1100, 760]]) for (const shell of [false, true]) for (const set of ["long", "vlong"]) {
-    if (set === "vlong" && shell) continue;
-    const tag = `${width}x${height}-recents-${set}${shell ? "-shell" : ""}`;
-    await boot(width, height, `recents=${set}${shell ? "&shell=1" : ""}`);
+  // Real lengths (and a page with no title): the page rows each layout keeps,
+  // pinned so a change to the rhythm above can never silently drop Searches
+  // again (BROWSE_AIR 72 left 3 · 1 · 0 · 0). One run in the Redline theme,
+  // where the muted ink is the full ink.
+  const REAL_ROWS = { "1440x900": 4, "1100x760": 2, "900x700": 1, "1440x900-shell": 1 };
+  const runs = [];
+  for (const [width, height] of [[1440, 900], [1100, 760]]) for (const shell of [false, true]) for (const set of ["long", "vlong"]) if (!(set === "vlong" && shell)) runs.push({ width, height, shell, set });
+  runs.push({ width: 1440, height: 900, shell: false, set: "real" }, { width: 1100, height: 760, shell: false, set: "real", theme: "redline" }, { width: 900, height: 700, shell: false, set: "real" }, { width: 1440, height: 900, shell: true, set: "real" });
+  for (const { width, height, shell, set, theme } of runs) {
+    const tag = `${width}x${height}-recents-${set}${shell ? "-shell" : ""}${theme ? `-${theme}` : ""}`;
+    await boot(width, height, `recents=${set}${shell ? "&shell=1" : ""}${theme ? `&theme=${theme}` : ""}`);
     const g = await cdp.evaluate(recentsGeometry);
     const entries = g.rows.flatMap(row => row.entries);
     await screenshot(tag);
     check(`${tag}: titles are whole, or cut only after a whole word`, entries.length >= 3 && entries.every(wholeWords), entries.map(e => [e.label, e.text]));
-    if (set === "long") check(`${tag}: no title is cut where its column has room`, entries.every(e => e.text === e.label && e.lines <= 2), entries.map(e => [e.text, e.lines]));
+    if (set !== "vlong") check(`${tag}: no title is cut where its column has room`, entries.every(e => e.text === e.label && e.lines <= 2), entries.map(e => [e.text, e.lines]));
     else check(`${tag}: a title past two lines is cut at a word, in two lines`, entries.some(e => e.text.endsWith('…')) && entries.every(e => e.lines <= 2), entries.map(e => [e.text, e.lines]));
     check(`${tag}: the two entry columns are even`, Math.abs(g.columns[1] - g.columns[2]) <= 1, g.columns);
     check(`${tag}: second entries share a column`, (() => { const second = g.rows.map(row => row.entries[1]).filter(Boolean); return second.length < 2 || Math.abs(second[0].x - second[1].x) <= 1; })(), g.rows.map(row => row.entries.map(e => e.x)));
@@ -457,9 +470,31 @@ try {
     }
     if (g.searches && !g.searches.empty) {
       check(`${tag}: the table → Searches is 20`, Math.abs(g.searches.head.y - g.table.bottom - 20) <= 1, { table: g.table.bottom, head: g.searches.head.y });
-      check(`${tag}: pages sit on a 36 px pitch, clear of the edge by 72`, g.pages.length > 0 && g.pages.every((p, i) => i === 0 || Math.abs(p.y - g.pages[i - 1].y - 36) <= 0.5) && g.pages.at(-1).bottom <= g.layerBottom - 72 + 0.5, { pages: g.pages.map(p => p.y), layerBottom: g.layerBottom });
+      check(`${tag}: pages sit on a 36 px pitch, clear of the edge by 48`, g.pages.length > 0 && g.pages.every((p, i) => i === 0 || Math.abs(p.y - g.pages[i - 1].y - 36) <= 0.5) && g.pages.at(-1).bottom <= g.layerBottom - 48 + 1, { pages: g.pages.map(p => p.y), layerBottom: g.layerBottom });
     } else check(`${tag}: with no page row to show, the section shows nothing`, !g.searches || g.searches.visibility === 'hidden', g.searches);
     check(`${tag}: nothing scrolls`, !g.scrolls);
+    if (set === "real") {
+      const key_ = `${width}x${height}${shell ? "-shell" : ""}`;
+      check(`${tag}: Searches keeps ${REAL_ROWS[key_]} page row${REAL_ROWS[key_] === 1 ? "" : "s"}`, g.pages.length === REAL_ROWS[key_] && !g.searches?.empty, { pages: g.pages.length, want: REAL_ROWS[key_], top: g.pages[0]?.y, layerBottom: g.layerBottom });
+      const rows = await cdp.evaluate("[...document.querySelectorAll('.rl-fd-browse')].map(b => [b.querySelector('.rl-fd-browse-title').textContent, b.querySelector('.rl-fd-browse-host')?.textContent ?? null])");
+      check(`${tag}: no page says where it lives twice`, rows.every(([title, where]) => where !== title), rows);
+      // Three levels: heads and hosts step back from the entries, in every
+      // theme — Redline's included, whose muted ink is its full ink.
+      const inks = await cdp.evaluate("(() => { const c = (s) => { const e = document.querySelector(s); return e ? getComputedStyle(e).color : null; }; return { head: c('.rl-fd-recent-head'), entry: c('.rl-fd-recent'), page: c('.rl-fd-browse'), host: c('.rl-fd-browse-host') }; })()");
+      check(`${tag}: heads and hosts are quieter than the entries`, inks.head !== inks.entry && inks.head === inks.host && inks.page === inks.entry, inks);
+      if (!shell && width === 1440) {
+        // The keyboard's place among them is a ring, on plans and pages alike.
+        await key('Tab','Tab',9);
+        const rings = [];
+        for (const selector of ['.rl-frontdoor-focus .rl-fd-recent', '.rl-frontdoor-focus .rl-fd-browse']) {
+          await cdp.evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`); await delay(250);
+          rings.push(await cdp.evaluate("(() => { const e = document.activeElement, s = getComputedStyle(e); return { focusVisible: e.matches(':focus-visible'), style: s.outlineStyle, width: s.outlineWidth, color: s.outlineColor, info: getComputedStyle(document.documentElement).getPropertyValue('--color-info').trim() }; })()"));
+          await screenshot(`${tag}-focus-${selector.includes('browse') ? 'page' : 'plan'}`);
+        }
+        check(`${tag}: a recent the keyboard is on wears a 2 px ring`, rings.every(r => r.focusVisible && r.style === 'solid' && r.width === '2px'), rings);
+        await cdp.evaluate("document.activeElement.blur()"); await settle();
+      }
+    }
     check(`${tag}: every recent is at least 24 × 24`, (await smallTargets('[aria-label="Jump back in"]')).length === 0, await smallTargets('[aria-label="Jump back in"]'));
     report.recents = { ...report.recents, [tag]: { columns: g.columns, rows: g.rows.map(row => row.entries.map(e => [e.text, e.lines])), pages: g.pages.length } };
     // The zoom from here, where the box has furthest to go.
@@ -472,6 +507,21 @@ try {
     // a double-click's second press lands in the box (not on the paper,
     // which closes the door), and a chip's menu opened from the resting box
     // stays on its chip — the box waits under it and glides once it goes.
+    if (set === "real" && shell) {
+      // Engaged by a key, the box waits for the welcome to fade where it
+      // stands, then glides: the headline and recents never ride along.
+      await cdp.evaluate("document.querySelector('.rl-frontdoor-focus .rl-fd-input').focus()"); await settle();
+      const restAt = await bounds('.rl-frontdoor-focus .rl-fd-island');
+      await film('__qaKeyed', `(() => { const r = document.querySelector('.rl-frontdoor-focus .rl-fd-island').getBoundingClientRect(), h = getComputedStyle(document.querySelector('.rl-fd-welcome-hero')), w = getComputedStyle(document.querySelector('.rl-fd-recents')); return { x: r.x, y: r.y, hero: +Number(h.opacity).toFixed(3), recents: +Number(w.opacity).toFixed(3), open: document.querySelector('.rl-frontdoor-focus').dataset.open }; })()`, 48);
+      await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "P", code: "KeyP", windowsVirtualKeyCode: 80, text: "P", unmodifiedText: "P" });
+      await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "P", code: "KeyP", windowsVirtualKeyCode: 80 });
+      await delay(800); await settle();
+      const keyed = (await cdp.evaluate('window.__qaKeyed')).filter(f => f.open === 'true');
+      const moved = keyed.filter(f => Math.abs(f.x - restAt.x) > 1 || Math.abs(f.y - restAt.y) > 1);
+      check(`${tag}: engaged by a key, the welcome fades where it stands before the box moves`, keyed.length > 3 && moved.length > 0 && moved.every(f => f.hero <= 0.12 && f.recents <= 0.12) && await cdp.evaluate(`(() => { const r = document.querySelector('.rl-frontdoor-focus .rl-frontdoor').getBoundingClientRect(); return Math.abs(r.x + r.width / 2 - innerWidth / 2) <= 1 && Math.abs(r.y + r.height / 2 - innerHeight / 2) <= 1; })()`), keyed.map(f => [f.t, Math.round(f.x), Math.round(f.y), f.hero, f.recents]));
+      await key('Escape','Escape',27); await delay(500);
+      await cdp.evaluate("window.__qa.setText('')"); await delay(300); await settle();
+    }
     if (set === "long" && shell) {
       const field = '.rl-frontdoor-focus .rl-fd-input';
       const centred = `(() => { const r = document.querySelector('.rl-frontdoor-focus .rl-frontdoor').getBoundingClientRect(); return Math.abs(r.x + r.width / 2 - innerWidth / 2) <= 1 && Math.abs(r.y + r.height / 2 - innerHeight / 2) <= 1; })()`;

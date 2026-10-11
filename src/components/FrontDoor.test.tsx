@@ -611,16 +611,29 @@ describe("the floating replacement composer", () => {
     expect(host.textContent).not.toContain("Your harnesses");
   });
 
+  it("an untitled page, labelled with where it lives, says it once", async () => {
+    await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: [
+      { kind: "browse", id: "b1", label: "LiDAR-GS", detail: "", url: "https://github.com/x/lidar-gs", host: "github.com" },
+      // As doorRecents labels a tab with no title (no host of its own)...
+      { kind: "browse", id: "b2", label: "github.com", detail: "", url: "https://github.com/x/untitled" },
+      // ...and as an older caller might still hand one over.
+      { kind: "browse", id: "b3", label: "w3.org", detail: "", url: "https://www.w3.org/", host: "w3.org" },
+    ] });
+    const rows = Array.from(host.querySelectorAll<HTMLButtonElement>(".rl-fd-browse")).map((b) => b.textContent);
+    expect(rows).toEqual(["LiDAR-GSgithub.com", "github.com", "w3.org"]);
+  });
+
   it("lays out only as many pages as fit below the composer — never a scroll", async () => {
     const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
-    // A 300px layer whose composer ends at 100px: room for a few rows only.
+    // A 312px layer whose composer ends at 100px: room for a few rows only.
     const layer = document.createElement("div");
     layer.className = "rl-frontdoor-focus";
     document.body.appendChild(layer);
     const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
     const proto = HTMLElement.prototype.getBoundingClientRect;
+    let layerBottom = 312;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      if (this === layer) return rect(0, 300) as DOMRect;
+      if (this === layer) return rect(0, layerBottom) as DOMRect;
       if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
       // The page list starts under the chip rows.
       if (this.classList.contains("rl-fd-browse-list")) return rect(120, 120) as DOMRect;
@@ -629,9 +642,47 @@ describe("the floating replacement composer", () => {
     try {
       layer.appendChild(host);
       await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
-      // (300 − 120 list top − 72 breathing room) / 36 per row → 3.
-      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(3);
+      // (312 − 120 list top − 48 breathing room) / 36 per row → 4: the air
+      // is a row's pitch and a gap, not two rows' worth (72 left 3 here).
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(4);
       expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(false);
+      // A list top a fraction of a pixel low never costs the last row...
+      const resize = () => act(async () => { window.dispatchEvent(new Event("resize")); await new Promise((r) => requestAnimationFrame(() => r(null))); });
+      layerBottom = 120 + 48 + 36 - 0.4;
+      await resize();
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(1);
+      // ...but one that is short of a row by more is not shown.
+      layerBottom = 120 + 48 + 36 - 1;
+      await resize();
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(0);
+    } finally {
+      vi.restoreAllMocks();
+      document.body.appendChild(host);
+      layer.remove();
+    }
+  });
+
+  it("measures the list where it is laid out, not where the recents' drop has it this frame", async () => {
+    const pages = Array.from({ length: 10 }, (_, i) => ({ kind: "browse" as const, id: `b${i}`, label: `Page ${i}`, detail: "", url: `https://p${i}.dev` }));
+    const layer = document.createElement("div");
+    layer.className = "rl-frontdoor-focus";
+    document.body.appendChild(layer);
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
+    const proto = HTMLElement.prototype.getBoundingClientRect;
+    // Room for exactly four rows below a list laid out at 120 — read 6 px
+    // lower while the recents come back up from a zoom (MonochatIsland.css).
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this === layer) return rect(0, 120 + 48 + 4 * 36) as DOMRect;
+      if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
+      if (this.classList.contains("rl-fd-browse-list")) return rect(126, 126) as DOMRect;
+      return proto.call(this);
+    });
+    try {
+      layer.appendChild(host);
+      await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
+      host.querySelector<HTMLElement>(".rl-fd-recents")!.style.transform = "matrix(1, 0, 0, 1, 0, 6)";
+      await act(async () => { window.dispatchEvent(new Event("resize")); await new Promise((r) => requestAnimationFrame(() => r(null))); });
+      expect(host.querySelectorAll(".rl-fd-browse").length).toBe(4);
     } finally {
       vi.restoreAllMocks();
       document.body.appendChild(host);
@@ -684,7 +735,7 @@ describe("the floating replacement composer", () => {
     document.body.appendChild(layer);
     const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top, left: 0, right: 0, width: 0, x: 0, y: top, toJSON() {} });
     const proto = HTMLElement.prototype.getBoundingClientRect;
-    let layerBottom = 300;
+    let layerBottom = 290;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       if (this === layer) return rect(0, layerBottom) as DOMRect;
       if (this.classList.contains("rl-frontdoor")) return rect(0, 100) as DOMRect;
@@ -694,13 +745,13 @@ describe("the floating replacement composer", () => {
       layer.appendChild(host);
       // The composer ends at 100: 12 to the recents, a 24 px Plans row, 12,
       // a 24 px Chats row, 20 to Searches, its 16 px head and 4 → 212. Then
-      // 300 − 212 − 72 leaves room for no 36 px row.
+      // 290 − 212 − 48 leaves room for no 36 px row.
       await mount({ floating: true, welcome: true, onOpenRecent: () => {}, recents: pages });
       expect(host.querySelectorAll(".rl-fd-browse").length).toBe(0);
       // The section stays mounted, so the list keeps a top to measure from.
       expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(true);
-      // A taller layer: (372 − 212 − 72) / 36 → 2.
-      layerBottom = 372;
+      // A taller layer: (350 − 212 − 48) / 36 → 2.
+      layerBottom = 350;
       await act(async () => { window.dispatchEvent(new Event("resize")); await new Promise((r) => requestAnimationFrame(() => r(null))); });
       expect(host.querySelectorAll(".rl-fd-browse").length).toBe(2);
       expect(host.querySelector(".rl-fd-browse-section")!.hasAttribute("data-empty")).toBe(false);

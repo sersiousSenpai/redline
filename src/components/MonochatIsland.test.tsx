@@ -178,6 +178,41 @@ describe("the door", () => {
     expect(document.activeElement).toBe(header);
   });
 
+  it("its ⌄ fades in behind the paper, and out as a stand-in that never takes the pointer", async () => {
+    await render();
+    const back = () => host.querySelector<HTMLElement>(".rl-frontdoor-return");
+    expect(back()).toBeNull();
+    await summon();
+    expect(back()?.tagName).toBe("BUTTON");
+    expect(back()?.getAttribute("aria-label")).toBe("Return to workspace");
+    await act(async () => back()!.click());
+    expect(pose()).toBe("notch");
+    // The button went with the door — as it always has, so a pointer resting
+    // where it was never hands the pill a hover it did not make — and a
+    // stand-in fades out in its place: nothing to press, read or reach.
+    const ghost = back()!;
+    expect(ghost.tagName).toBe("SPAN");
+    expect(ghost.hasAttribute("data-leaving")).toBe(true);
+    expect(ghost.getAttribute("aria-hidden")).toBe("true");
+    expect(host.querySelector('[aria-label="Return to workspace"]')).toBeNull();
+    await advance(119);
+    expect(back()).not.toBeNull();
+    await advance(1);
+    expect(back()).toBeNull();
+    // Reopened while it fades: the button, at once.
+    await summon();
+    await key(main(), { key: "Escape" });
+    expect(back()?.tagName).toBe("SPAN");
+    await summon();
+    expect(back()?.tagName).toBe("BUTTON");
+    await advance(500);
+    expect(back()?.tagName).toBe("BUTTON");
+    // The fades are the stylesheet's: in 80 ms behind the paper, out in 120.
+    const css = readFileSync(join(process.cwd(), "src/components/MonochatIsland.css"), "utf8");
+    expect(css).toMatch(/\.rl-frontdoor-return \{[^}]*animation: rl-return-in 200ms ease-out 80ms backwards; \}/);
+    expect(css).toMatch(/\.rl-frontdoor-return\[data-leaving\] \{ pointer-events: none; animation: rl-return-out 120ms ease-in forwards; \}/);
+  });
+
   it("preserves the front door when a menu consumes Escape", async () => {
     await render();
     await summon();
@@ -937,7 +972,7 @@ describe("the door's flights", () => {
     expect(calls.filter(call => call.element === room())).toEqual([]);
   });
 
-  it("summoned from the keyboard on the plate, it glides at once", async () => {
+  it("summoned from the keyboard on the plate, it glides once its welcome has faded where it stood", async () => {
     const calls = flights();
     boxes(PLATE);
     await render(<Harness landing/>);
@@ -946,6 +981,11 @@ describe("the door's flights", () => {
     const flight = calls.filter(call => call.element === room());
     expect(flight).toHaveLength(1);
     expect(flight[0].animation.pause).not.toHaveBeenCalled();
+    // Not held: it plays — after the welcome's 160 ms fade is down to a
+    // tenth, so the headline and recents recede in place rather than ride
+    // along with the box. Held at its start meanwhile; 440 ms in all.
+    expect(flight[0].frames).toEqual([{ transform: "translate3d(130px, 14px, 0)" }, { transform: "none" }]);
+    expect(flight[0].options).toEqual({ duration: 340, easing: "cubic-bezier(.2,.8,.2,1)", delay: 100, fill: "backwards" });
     expect(zoomed()).toBe(true);
   });
 

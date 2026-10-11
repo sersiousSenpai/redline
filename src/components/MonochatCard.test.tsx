@@ -173,13 +173,17 @@ it("an old draft pins nothing; using it does", () => {
   expect(onClose).not.toHaveBeenCalled();
 });
 
-it("is a region named by its own heading: what it is for, with the mark", () => {
+it("is a region named by its own heading, which only a screen reader hears: the pill under it already says it", () => {
   render();
   const heading = document.getElementById(card().getAttribute("aria-labelledby")!);
   expect(heading?.tagName).toBe("H2");
   expect(heading?.textContent).toBe("Plan a build");
-  expect(heading?.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  expect(heading?.classList.contains("sr-only")).toBe(true);
+  // No mark on the card: the brand is the pill's.
+  expect(card().querySelector(".rl-float-heading svg:not(.lucide-chevron-down)")).toBeNull();
   expect(card().getAttribute("role")).toBe("region");
+  // Collapse is still there, in the corner.
+  expect(card().querySelector('.rl-float-heading button[aria-label="Collapse"]')).not.toBeNull();
 });
 
 it("covers what is under it for a dropped file, and never scrolls sideways", () => {

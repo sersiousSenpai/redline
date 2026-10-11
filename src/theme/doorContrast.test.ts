@@ -89,7 +89,7 @@ function evaluate(value: string, tokens: Record<string, string>): RGBA {
 }
 
 type Rule = [file: string, selector: string];
-type Surface = "color-paper" | "color-bg-elevated";
+type Surface = "color-paper" | "color-bg-elevated" | "color-canvas";
 interface Pair {
   what: string;
   /** The rule that sets its colour, or the colour it inherits. */
@@ -107,16 +107,19 @@ interface Pair {
 const ISLAND = "components/MonochatIsland.css", CARD = "components/MonochatCard.css", MENU = "components/ComposerMenu.css", APP = "styles.css", STRIP = "components/DictationStrip.css";
 /** Where a door or card text takes its colour (and any fade), what it sits on,
  *  and the surface under that. The door's paper backdrop is `--color-paper`;
- *  the card, the door's composer box and the pill are `--color-bg-elevated`. */
+ *  the card, the door's composer box and the pill are `--color-bg-elevated`.
+ *  The recents are also read at rest, before the paper comes up: on the plate
+ *  (paper) or, around it, the hull (`--color-canvas`). */
+const RESTING: Surface[] = ["color-paper", "color-canvas"];
 const TEXTS: Pair[] = [
   { what: "the door's headline", color: [ISLAND, ".rl-fd-title"], on: "color-paper" },
   { what: "the door's subline", color: [APP, ".rl-fd-sub"], on: "color-paper" },
-  { what: "a recents head", color: [ISLAND, ".rl-fd-recent-head"], on: "color-paper" },
+  { what: "a recents head", color: [ISLAND, ".rl-fd-recent-head"], on: RESTING },
   // A title takes its entry's ink (`--fd-item`): brighter than the heads,
   // quieter than the sentence being typed.
-  { what: "a recent plan or chat's title", color: [ISLAND, ".rl-monochat .rl-fd-recent.rl-fd-suggestion"], on: "color-paper" },
-  { what: "a recent page", color: [ISLAND, ".rl-fd-browse"], on: "color-paper" },
-  { what: "a recent page's host", color: [ISLAND, ".rl-fd-browse-host"], on: "color-paper" },
+  { what: "a recent plan or chat's title", color: [ISLAND, ".rl-monochat .rl-fd-recent.rl-fd-suggestion"], on: RESTING },
+  { what: "a recent page", color: [ISLAND, ".rl-fd-browse"], on: RESTING },
+  { what: "a recent page's host", color: [ISLAND, ".rl-fd-browse-host"], on: RESTING },
   { what: "the room's heading and its New", color: [ISLAND, ".rl-monochat-heading"], on: "color-paper" },
   { what: "a context chip, in the door", color: [ISLAND, ".rl-context-chips button"], on: "color-paper" },
   { what: "a context chip, in the card", color: [ISLAND, ".rl-context-chips button"], on: "color-bg-elevated" },
@@ -222,7 +225,7 @@ function shortfalls(pairs: readonly Pair[], tokens: Record<string, string>): str
       const ink = evaluate(colorOf(color)!, tokens);
       const fade = opacity ? Number(declared(...opacity, "opacity") ?? 1) : 1;
       const ratio = contrast(over([ink[0], ink[1], ink[2], ink[3] * fade], ground), ground);
-      if (ratio < min) short.push(`${what}${surface === "color-paper" ? "" : " (raised)"}: ${ratio.toFixed(2)}`);
+      if (ratio < min) short.push(`${what}${surface === "color-paper" ? "" : surface === "color-canvas" ? " (hull)" : " (raised)"}: ${ratio.toFixed(2)}`);
     }
   }
   return short;
@@ -238,14 +241,34 @@ function readsEveryRule(pairs: readonly Pair[]) {
 }
 
 /** The door's own custom properties, declared on its room and read like a
- *  theme's tokens: `--fd-item` is the recents' ink. */
-const ROOM_TOKENS: Record<string, string> = { "fd-item": declared(ISLAND, ".rl-monochat", "--fd-item")! };
+ *  theme's tokens: `--fd-item` is the recents' ink, `--fd-quiet` their heads'
+ *  and a page's host's. */
+const ROOM_TOKENS: Record<string, string> = { "fd-item": declared(ISLAND, ".rl-monochat", "--fd-item")!, "fd-quiet": declared(ISLAND, ".rl-monochat", "--fd-quiet")! };
 const tokensOf = (theme: (typeof THEMES)[number]): Record<string, string> => ({ ...(deriveTokens(theme.base) as unknown as Record<string, string>), ...ROOM_TOKENS });
 
 describe("the door and its card are legible in every theme", () => {
   it("reads every rule it checks", () => {
     readsEveryRule(TEXTS);
     expect(ROOM_TOKENS["fd-item"]).toMatch(/^color-mix\(/);
+    expect(ROOM_TOKENS["fd-quiet"]).toBe("var(--color-ink-quiet)");
+  });
+
+  // Three levels in every theme: the heads and a page's host step back from
+  // the titles they label. Where the muted ink has to be the full ink to read
+  // on a raised card (Redline, Novel, Ocean, Red Sand), the heads were the
+  // titles' own colour and the recents read as one block.
+  it.each(THEMES.map((theme) => [theme.name, theme] as const))("%s: the recents' heads and hosts are quieter than their titles", (_name, theme) => {
+    const tokens = tokensOf(theme);
+    const ratio = (rule: Rule, surface: Surface) => {
+      const ground = evaluate(`var(--${surface})`, tokens);
+      return contrast(over(evaluate(colorOf(rule)!, tokens), ground), ground);
+    };
+    for (const surface of RESTING) {
+      const title = ratio([ISLAND, ".rl-monochat .rl-fd-recent.rl-fd-suggestion"], surface);
+      for (const quiet of [[ISLAND, ".rl-fd-recent-head"], [ISLAND, ".rl-fd-browse-host"]] as Rule[]) {
+        expect(title / ratio(quiet, surface), `${quiet[1]} on ${surface}`).toBeGreaterThanOrEqual(1.15);
+      }
+    }
   });
 
   it.each(THEMES.map((theme) => [theme.name, theme] as const))("%s: every text reaches 4.5:1", (_name, theme) => {

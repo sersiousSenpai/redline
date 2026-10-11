@@ -24,7 +24,7 @@ export interface DoorRecent {
   /** Browse only: reopens the page when its tab has since closed. */
   url?: string;
   /** Browse only: where the page lives, without "www." — its row's quiet
-   *  second word. */
+   *  second word. None when the page has no title and the host is its label. */
   host?: string;
   /** Browse only: an explicit research link — reopening it shows its answer. */
   research?: boolean;
@@ -401,10 +401,12 @@ export function doorRecents(
     .filter((t) => !isBlank(t.url))
     .slice(0, browseLimit)
     .map((t): DoorRecent => {
-      const label = t.title?.trim() || hostOf(t.url);
+      const title = t.title?.trim();
+      const label = title || hostOf(t.url);
       // The hover says where it lives and, when known, what it was for.
       const why = t.plan ? `\nResearch for “${t.plan}”` : t.mission ? `\nFrom the “${t.mission}” mission` : "";
-      return { kind: "browse", id: t.browseId, label, detail: `${label}\n${t.url}${why}`, url: t.url, host: hostOf(t.url), research: t.research };
+      // A page with no title is labelled with its host: it has no other.
+      return { kind: "browse", id: t.browseId, label, detail: `${label}\n${t.url}${why}`, url: t.url, host: title ? hostOf(t.url) : undefined, research: t.research };
     });
   return [...plans, ...chats, ...tabs];
 }

@@ -30,7 +30,13 @@
 /* Entry and focused chat share geometry so a click cannot move the caret. */
 .rl-monochat-content, .rl-monochat-conversation { height: 100%; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .rl-monochat-content { outline: none; }
-.rl-frontdoor-return { position: fixed; left: 50%; bottom: var(--portal-return-bottom, 12px); transform: translateX(-50%); width: 144px; height: 32px; border-radius: 18px; display: grid; place-items: center; background: var(--color-bg-elevated); border: 1px solid var(--color-rule); color: var(--color-ink-muted); cursor: pointer; z-index: 2; }
+/* ⌄ comes in with the paper, a beat behind it and never ahead of it, and
+   goes a beat ahead of it — as a stand-in that never takes the pointer
+   (`data-leaving`, MonochatIsland). */
+.rl-frontdoor-return { position: fixed; left: 50%; bottom: var(--portal-return-bottom, 12px); transform: translateX(-50%); width: 144px; height: 32px; border-radius: 18px; display: grid; place-items: center; background: var(--color-bg-elevated); border: 1px solid var(--color-rule); color: var(--color-ink-muted); cursor: pointer; z-index: 2; animation: rl-return-in 200ms ease-out 80ms backwards; }
+.rl-frontdoor-return[data-leaving] { pointer-events: none; animation: rl-return-out 120ms ease-in forwards; }
+@keyframes rl-return-in { from { opacity: 0; } }
+@keyframes rl-return-out { to { opacity: 0; } }
 .rl-frontdoor-return:hover, .rl-frontdoor-return:focus-visible { color: var(--color-ink); border-color: var(--color-info); }
 /* A chat in the room: its heading replaces the chat's own toolbar. */
 .rl-monochat-heading { display: flex; align-items: center; gap: 2px; flex-shrink: 0; padding: 0 8px 8px; color: var(--color-ink-muted); font-size: 11px; }
@@ -49,6 +55,8 @@
 @media (prefers-reduced-motion: reduce) { .rl-frontdoor-focus *, .rl-monochat-notch * { transition: none !important; animation: none !important; } }
 .rl-frontdoor-focus[data-reduced="true"] *, .rl-monochat-notch[data-reduced="true"] * { transition: none !important; animation: none !important; }
 .rl-frontdoor-focus[data-reduced="true"]::before { transition: opacity 120ms linear; }
+.rl-frontdoor-focus[data-reduced="true"] .rl-frontdoor-return { animation: rl-return-in 120ms linear backwards !important; }
+.rl-frontdoor-focus[data-reduced="true"] .rl-frontdoor-return[data-leaving] { animation: rl-return-out 120ms linear forwards !important; }
 .rl-monochat-observability { font-size: 10px; }
 .rl-monochat-trace-toggle { display: flex; gap: 5px; align-items: center; border: 0; background: none; color: var(--color-ink-muted); cursor: pointer; }
 .rl-monochat-traces { position: absolute; inset: 45px 12px 12px; z-index: 3; padding: 15px; border: 1px solid var(--color-rule); border-radius: 14px; background: var(--color-bg-elevated); box-shadow: 0 12px 40px #0004; overflow: auto; }
@@ -118,7 +126,11 @@
    the width it rested at, so its trip to the window's centre is a pure
    translation (a FLIP in MonochatIsland, after the press lets go: the inset
    glide this replaces moved the box 27px under a held caret). */
-.rl-frontdoor-focus[data-landed]::before { transform-origin: 0 0; transform: var(--fd-paper-from, none); transition: opacity 200ms ease-in, transform 260ms cubic-bezier(.4,0,.2,1); }
+/* Its edge is feathered — a halo of the paper itself, static (the transform
+   only scales what is painted once) — so the sweep reads as light spreading
+   over the chrome, not a panel's straight edge wiping across its text. Open,
+   the halo lies past the window's edges. */
+.rl-frontdoor-focus[data-landed]::before { transform-origin: 0 0; transform: var(--fd-paper-from, none); transition: opacity 200ms ease-in, transform 260ms cubic-bezier(.4,0,.2,1); box-shadow: 0 0 48px 24px var(--color-paper); }
 .rl-frontdoor-focus[data-landed][data-open="true"]::before { transform: none; transition: opacity 220ms ease-out, transform 300ms cubic-bezier(.2,.8,.2,1); }
 /* A chat the room holds has no box to glide: it keeps the window's width. */
 .rl-frontdoor-focus[data-landed][data-open="true"] .rl-monochat:not([data-chat]) { width: min(800px, calc(100% - var(--fd-rest-left, 0px) - var(--fd-rest-right, 0px) - 48px)); }
@@ -187,20 +199,26 @@
   --fd-edge: calc(8px + 1px + var(--fd-island-pad-x));
   --fd-text: 5px;
   --fd-item: color-mix(in srgb, var(--color-ink-muted) 60%, var(--color-ink));
+  /* The heads and a page's host: quieter than the entries in every theme —
+     even where the muted ink is the full ink (derive.ts). */
+  --fd-quiet: var(--color-ink-quiet);
 }
 /* 12 below the composer's own 8: 20 from the box. */
 .rl-monochat .rl-floating-composer > .rl-fd-recents { top: calc(100% + 12px); display: flex; flex-direction: column; gap: 20px; padding: 0 var(--fd-edge); }
 /* One table for Plans and Chats: head | first | second, the two entry
    columns even halves of what the head leaves. The rows and their item lists
    are `display: contents`, so every entry sits in a SHARED column and the
-   second entries line up whatever the first ones measure. */
+   second entries line up whatever the first ones measure. 40 between the
+   entry columns, so a full first title never runs on into the second; the
+   head gives 16 of that back, keeping its entries 24 from it. */
 .rl-fd-recent-chips {
   display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
-  justify-content: stretch; align-items: baseline; gap: 12px 24px;
+  justify-content: stretch; align-items: baseline; gap: 12px 40px;
 }
 .rl-fd-recent-row { display: contents; }
-/* Full muted ink: thinned any further, the heads drop under 4.5:1 on paper. */
-.rl-fd-recent-head { grid-column: 1; padding-left: var(--fd-text); font-size: 10.5px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--color-ink-muted); text-align: left; }
+/* The quiet ink is solved for 4.5:1 on the paper and the hull it is read on. */
+.rl-fd-recent-head { grid-column: 1; padding-left: var(--fd-text); font-size: 10.5px; line-height: 16px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; color: var(--fd-quiet); text-align: left; }
+.rl-fd-recent-chips .rl-fd-recent-head { margin-right: -16px; }
 .rl-fd-recent-items { display: contents; }
 /* 24 px tall for the pointer (WCAG 2.5.8). A title takes up to two lines of
    its column, balanced, and past that is cut at a word (FrontDoor's
@@ -221,6 +239,9 @@
 .rl-monochat .rl-fd-recent.rl-fd-suggestion:hover, .rl-monochat .rl-fd-recent.rl-fd-suggestion:focus-visible {
   background: none; color: var(--color-ink); outline: none;
 }
+/* The keyboard's place is a ring, not only a brighter line: in the themes
+   whose entries are already the full ink the line was all that changed. */
+.rl-monochat .rl-fd-recent.rl-fd-suggestion:focus-visible { outline: 2px solid var(--color-info); outline-offset: 3px; border-radius: 4px; }
 .rl-fd-recent:hover .rl-fd-recent-title, .rl-fd-recent:focus-visible .rl-fd-recent-title {
   text-decoration-color: color-mix(in srgb, var(--color-info) 60%, transparent);
 }
@@ -240,8 +261,9 @@
   transition: color 160ms ease, border-color 160ms ease;
 }
 .rl-fd-browse-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-fd-browse-host { flex: none; font-size: 11px; color: var(--color-ink-muted); }
+.rl-fd-browse-host { flex: none; font-size: 11px; color: var(--fd-quiet); }
 .rl-fd-browse:hover, .rl-fd-browse:focus-visible {
   color: var(--color-ink); border-color: color-mix(in srgb, var(--color-info) 50%, transparent); outline: none;
 }
+.rl-fd-browse:focus-visible { outline: 2px solid var(--color-info); outline-offset: -2px; border-radius: 6px; }
 .rl-monochat[data-pose="entry"] .rl-fd-browse { pointer-events: auto; }

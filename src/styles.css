@@ -117,6 +117,7 @@ html[data-theme="aurora"] .rl-plate::after {
   --color-paper: #1a1a1f;
   --color-ink: #fafafa;
   --color-ink-muted: #a4a4a5;
+  --color-ink-quiet: #959597;
   --color-rule: #424246;
 
   --color-anchor-bg: #343439;

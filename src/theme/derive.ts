@@ -19,6 +19,11 @@ export interface ThemeTokens {
   "color-paper": string;
   "color-ink": string;
   "color-ink-muted": string;
+  /** Secondary text read only on the page and the hull, never on a raised
+   *  surface: the Front Door's recents heads and a page's host. Where the
+   *  muted ink has to stay at full ink to read on raised cards (Redline,
+   *  Novel, Ocean, Red Sand), this one still steps back from it. */
+  "color-ink-quiet": string;
   "color-rule": string;
   /** The hull: the canvas visible in the shell's gutters and edge ring, a step
    *  behind the paper so the panes read as inset plates on it. */
@@ -220,6 +225,10 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
 
   const anchorBg = mix(bg, fg, 0.12);
   const elevated = mix(bg, fg, 0.07);
+  // Dark themes deepen toward black so the paper plates lift off the hull;
+  // light themes tint faintly toward ink (going darker would read as a
+  // different, muddier palette rather than a recess).
+  const canvas = isDark ? mix(bg, "#000000", 0.35) : mix(bg, fg, 0.05);
 
   // highlight.js token palette. Dark themes keep the warm light-on-dark
   // pastels; light themes use a saturated dark "linting" palette so code reads
@@ -252,11 +261,14 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     // WCAG AA floor for body text, on the page and on the raised surfaces it
     // also sits on; well-separated themes are unaffected.
     "color-ink-muted": mutedInk(fg, bg, 0.45, 4.5, [bg, elevated]),
+    // The same muting, held to 4.5:1 by the WCAG formula proper on the two
+    // surfaces it is read on — the paper (an open door, the plate it rests
+    // on) and the hull — and not on raised ones, which is what pins the muted
+    // ink at full ink on four themes and flattens the door's recents to one
+    // level there.
+    "color-ink-quiet": mutedInk(fg, bg, 0.45, 4.5, [bg, canvas], false),
     "color-rule": mix(fg, bg, 0.82),
-    // Dark themes deepen toward black so the paper plates lift off the hull;
-    // light themes tint faintly toward ink (going darker would read as a
-    // different, muddier palette rather than a recess).
-    "color-canvas": isDark ? mix(bg, "#000000", 0.35) : mix(bg, fg, 0.05),
+    "color-canvas": canvas,
     "color-plate-border": mix(fg, bg, 0.85),
     "color-plate-glow": isDark ? base.blue : "transparent",
     "color-anchor-bg": anchorBg,

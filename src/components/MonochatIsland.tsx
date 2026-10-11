@@ -71,9 +71,16 @@ const ROOM_RISE_MS = 260;
 const GLIDE_IN_MS = 340;
 const GLIDE_OUT_MS = 300;
 const GLIDE_EASE = "cubic-bezier(.2,.8,.2,1)";
+/** Engaged by a key, the box waits this long before it glides: the welcome
+ *  (a 160 ms fade, MonochatIsland.css) is down to a tenth by then, so it
+ *  recedes where it stood instead of travelling with the box. A press needs
+ *  no wait — it holds the glide well past that (`GLIDE_BEAT_MS`). */
+const GLIDE_DELAY_MS = 100;
 /** After a press in the resting box lets go, how long the box waits for the
  *  double-click's second press before it glides. */
 const GLIDE_BEAT_MS = 300;
+/** The door's ⌄ fading out once it shuts (MonochatIsland.css). */
+const RETURN_OUT_MS = 120;
 /** What a held glide listens to, to know the pointer is done with the box. */
 const GLIDE_WAITS = ["pointerdown", "pointerup", "pointercancel", "keyup", "focusin"];
 
@@ -209,6 +216,11 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   useNativeOverlayRegion(launcher, !visible);
   // The door on its way back toward the pill: still painted, already inert.
   const [closing, setClosing] = useState(false);
+  // The ⌄ fading out after the door shuts — a stand-in that never takes the
+  // pointer. The button itself still goes the moment the door does: a node
+  // left under a resting pointer that stopped taking it would hand the pill
+  // a hover no pointer made, and a Shift+Enter in a field would go to the pill.
+  const [returnOut, setReturnOut] = useState(false);
   const flight = useRef<Animation[]>([]);
   // The card a door is growing out of: where to spring from, and the
   // selection its field had.
@@ -446,9 +458,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     const centre = restCentre.current;
     return centre ? { x: centre.x - window.innerWidth / 2, y: centre.y - window.innerHeight / 2 } : null;
   };
-  const glide = (shell: HTMLElement, from: { x: number; y: number }, duration: number) => {
+  const glide = (shell: HTMLElement, from: { x: number; y: number }, duration: number, delay = 0) => {
     if (Math.abs(from.x) + Math.abs(from.y) < 1) return null;
-    const flight = shell.animate([{ transform: `translate3d(${from.x}px, ${from.y}px, 0)` }, { transform: "none" }], { duration, easing: GLIDE_EASE });
+    // Held where it starts while it waits (`backwards`).
+    const flight = shell.animate([{ transform: `translate3d(${from.x}px, ${from.y}px, 0)` }, { transform: "none" }], delay ? { duration, easing: GLIDE_EASE, delay, fill: "backwards" } : { duration, easing: GLIDE_EASE });
     flight.onfinish = settle;
     return flight;
   };
@@ -471,9 +484,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       const offset = landed && composer ? travel() : null;
       if (offset) {
         if (reduced) { flight.current = [shell.animate([{ opacity: 0 }, { opacity: 1 }], ISLAND_FADE_MS)]; return; }
-        const flown = glideIn.current = glide(shell, offset, GLIDE_IN_MS);
+        const pressed = summon.current === "press";
+        const flown = glideIn.current = glide(shell, offset, GLIDE_IN_MS, pressed ? 0 : GLIDE_DELAY_MS);
         flight.current = flown ? [flown] : [];
-        if (flown && summon.current === "press") { flown.pause(); held.current = flown; }
+        if (flown && pressed) { flown.pause(); held.current = flown; }
         return;
       }
       if (reduced) {
@@ -535,6 +549,12 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     }
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  useLayoutEffect(() => {
+    if (open || !previousOpen.current) return;
+    setReturnOut(true);
+    const timer = window.setTimeout(() => setReturnOut(false), RETURN_OUT_MS);
+    return () => { window.clearTimeout(timer); setReturnOut(false); };
   }, [open]);
   // Back at the pill: the layer goes, and its flight with it, in one frame —
   // and the zoom it held on the way.
@@ -789,7 +809,9 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
           <div data-window-drag-edge="right" onMouseDown={dragWindow} style={{ position: "absolute", top: "var(--portal-drag-top, 28px)", bottom: SHELL_EDGE, right: 0, width: SHELL_EDGE, pointerEvents: "auto" }}/>
           <div data-window-drag-edge="bottom" onMouseDown={dragWindow} style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: SHELL_EDGE, pointerEvents: "auto" }}/>
         </div>}
-        {open && <button className="rl-frontdoor-return" type="button" onClick={() => onOpenChange(false)} aria-label="Return to workspace" title="Return to workspace (Esc)"><ChevronDown size={18}/></button>}
+        {/* In a beat behind the paper, out ahead of it (MonochatIsland.css). */}
+        {open ? <button className="rl-frontdoor-return" type="button" onClick={() => onOpenChange(false)} aria-label="Return to workspace" title="Return to workspace (Esc)"><ChevronDown size={18}/></button>
+          : returnOut && <span className="rl-frontdoor-return" data-leaving aria-hidden="true"><ChevronDown size={18}/></span>}
       <div ref={room} className="rl-monochat" data-pose={open ? "conversation" : landed ? "entry" : "notch"} data-reduced={reduced} data-chat={onNewChat ? true : undefined}>
         <div ref={body} id="rl-monochat-content" className="rl-monochat-content" tabIndex={-1} aria-label={`Conversation · ${context}`} {...engaging}>
           {open && onNewChat && <div className="rl-monochat-heading">

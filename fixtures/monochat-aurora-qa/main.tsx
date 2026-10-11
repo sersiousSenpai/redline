@@ -19,7 +19,7 @@ import type { DoorRecent } from "../../src/lib/doorRecents";
 import type { ThemeName } from "../../src/theme/themes";
 import "../../src/styles.css";
 import "./fixture.css";
-// `?recents=long|vlong` swaps in titles as long as real ones run, `?shell=1`
+// `?recents=long|vlong|real` swaps in titles as long as real ones run, `?shell=1`
 // puts a sessions sidebar beside the plate and opens the terminal dock under
 // it, and `?theme=` boots another theme.
 const query = new URLSearchParams(location.search);
@@ -56,7 +56,18 @@ const VLONG: DoorRecent[] = [
   { kind: "chat", id: "qa", label: "Why does the pill say Redline?", detail: "Chat — Why does the pill say Redline?" },
   ...pages,
 ];
-const recents = query.get("recents") === "long" ? LONG : query.get("recents") === "vlong" ? VLONG : SHORT;
+// Lengths as real ones run, and a tab with no title, which doorRecents labels
+// with its host (and so gives no host of its own).
+const REAL: DoorRecent[] = [
+  { kind: "plan", id: "s1", label: "Bring back the full-page Front Door, with a compact composer out of the pill", detail: "Plan · redline — Front Door" },
+  { kind: "plan", id: "s2", label: "Voice turn: never hold a question past its deadline", detail: "Plan · redline — Voice turn" },
+  { kind: "chat", id: "qa", label: "Why does the pill say Redline?", detail: "Chat — Why does the pill say Redline?" },
+  { kind: "chat", id: "c2", label: "Door polish check-in", detail: "Chat — Door polish check-in" },
+  ...([["LiDAR-GS: Gaussian splatting with LiDAR depth priors — GitHub", "https://github.com/x/lidar-gs"], ["Kokoro TTS — local open-weight speech", "https://huggingface.co/hexgrad/Kokoro-82M"], ["WCAG 2.5.8 Target Size (Minimum)", "https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum"], ["", "https://github.com/x/untitled"], ["Designing calm interfaces: focus, recession and the empty page", "https://calmtech.com/"]] as const)
+    .map(([title, url], i): DoorRecent => { const host = new URL(url).hostname.replace(/^www\./, ""); return { kind: "browse", id: `r${i}`, label: title || host, detail: "", url, host: title ? host : undefined }; }),
+];
+const SETS: Record<string, DoorRecent[]> = { long: LONG, vlong: VLONG, real: REAL };
+const recents = SETS[query.get("recents") ?? ""] ?? SHORT;
 const shell = query.get("shell") === "1";
 const surfaceOf = (name: string): SurfaceInfo => ({
   kind: name === "Document" ? "plan" : name === "Browser" ? "browser" : "welcome",

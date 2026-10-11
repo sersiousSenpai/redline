@@ -1,18 +1,22 @@
-/* The compact card: a heading, the surface's context chips and a flattened
-   composer, springing up out of the footer pill. It sits in the pill's dock
-   (a fixed, centred 160px box), so it is centred by a negative margin rather
-   than a transform: the spring animates `transform` from the pill's box (top-
-   left origin, see springSwap.ts) and has to own it outright.
+/* The compact card: the surface's context chips and a flattened composer,
+   its collapse ⌄ in the corner and its heading for a screen reader only,
+   springing up out of the footer pill. It sits in the pill's dock (a fixed,
+   centred 160px box), so it is centred by a negative margin rather than a
+   transform: the spring animates `transform` from the pill's box (top-left
+   origin, see springSwap.ts) and has to own it outright.
 
    Scrolls down only. `overflow-y: auto` alone computes overflow-x to auto too,
    and the armed send button's 1.04 scale pokes past the right edge: a
    classic-scrollbar Mac then grows a horizontal scrollbar under the composer,
    lifting it on the first keystroke. */
-.rl-monochat-float { position:absolute; bottom:44px; left:50%; width:min(640px,calc(100vw - 40px)); margin-left:calc(min(640px,calc(100vw - 40px)) / -2); max-height:min(420px,calc(100dvh - 96px)); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; padding:10px 14px 14px; border:1px solid var(--color-rule); border-radius:14px; background:var(--color-bg-elevated); color:var(--color-ink); box-shadow:0 12px 48px #0005; transform-origin:top left; pointer-events:auto; }
+.rl-monochat-float { position:absolute; bottom:44px; left:50%; width:min(640px,calc(100vw - 40px)); margin-left:calc(min(640px,calc(100vw - 40px)) / -2); max-height:min(420px,calc(100dvh - 96px)); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--color-rule); border-radius:14px; background:var(--color-bg-elevated); color:var(--color-ink); box-shadow:0 12px 48px #0005; transform-origin:top left; pointer-events:auto; }
 /* On its way back into the pill: it already let go. */
 .rl-monochat-float[data-leaving] { pointer-events:none; }
-.rl-float-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; color:var(--color-ink-muted); font-size:11px; }
-.rl-float-heading h2 { display:flex; align-items:center; gap:6px; margin:0; font:inherit; }
+/* Out of flow, ⌄ centred on the composer's first line (14 + 4 + 3 + 11 down);
+   the field keeps its text clear of it. */
+.rl-float-heading { position:absolute; top:20px; right:10px; z-index:1; color:var(--color-ink-muted); font-size:11px; }
+/* Where context chips lead (a browser page's), it sits on their row instead. */
+.rl-monochat-float:has(.rl-context-chips button) .rl-float-heading { top:14px; }
 .rl-float-heading button { display:grid; place-items:center; width:24px; height:24px; border:0; border-radius:5px; background:none; color:inherit; cursor:pointer; }
 .rl-float-heading button:hover, .rl-float-heading button:focus-visible { color:var(--color-ink); background:color-mix(in srgb, var(--color-ink) 7%, transparent); outline:none; }
 .rl-monochat-float textarea { max-height:120px; }
@@ -22,7 +26,7 @@
    measures itself into (`is-compact` pads the glass it no longer has). */
 .rl-monochat-float .rl-floating-composer.rl-frontdoor { width:100%; max-width:none; padding:0; margin:0; min-height:0; max-height:none; opacity:1; animation:none; justify-content:flex-start; }
 .rl-monochat-float .rl-floating-composer .rl-fd-island { padding:4px 0 0; border:0; background:transparent; box-shadow:none; border-radius:0; backdrop-filter:none; -webkit-backdrop-filter:none; transform:none; }
-.rl-monochat-float .rl-fd-input { min-height:40px; font-size:15px; line-height:1.5; padding:3px 4px 10px; }
+.rl-monochat-float .rl-fd-input { min-height:40px; font-size:15px; line-height:1.5; padding:3px 30px 10px 4px; }
 .rl-monochat-float .rl-fd-tools { flex-wrap:wrap; gap:7px; }
 .rl-monochat-float .rl-fd-tools>div[data-no-drag] { max-width:220px; }
 .rl-monochat-float .rl-fd-strip { margin-top:8px; }
