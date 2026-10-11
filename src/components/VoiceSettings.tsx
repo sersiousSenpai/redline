@@ -5,6 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { playVoiceSample } from "../audio/cloudTts";
+import type {
+  DictationEngine,
+  DictationStatus,
+  WhisperModelId,
+  WhisperModelStatus,
+} from "../audio/dictationTypes";
 import {
   describeVoice,
   gradeRank,
@@ -13,7 +19,18 @@ import {
   KOKORO_VOICES,
   splitBlend,
 } from "../audio/kokoroVoices";
+import { polishEnabled, setPolishEnabled } from "../audio/dictationPolish";
 import { loadVoicePrefs } from "../audio/speech";
+import { HOLD_KEYS, loadHoldKey, saveHoldKey, type HoldKey } from "../audio/voiceHotkey";
+import {
+  addWord,
+  forgetPair,
+  loadVocabStore,
+  onVocabStore,
+  removeWord,
+  updateVocabStore,
+  type VocabStore,
+} from "../audio/vocab";
 import type { StudioPrefs } from "./StudioVoiceCard";
 
 // The studio voice's card: install, voice and style. A chunk of its own, as
@@ -27,10 +44,6 @@ const StudioVoiceCard = lazy(() =>
  *  `studio` is the most natural, a 3 GB local model on Apple Silicon; `openai`
  *  and `elevenlabs` are premium cloud voices (each needs the user's own key). */
 export type TtsEngine = "system" | "kokoro" | "studio" | "openai" | "elevenlabs";
-
-/** Dictation (speech-to-text) backends. `auto` prefers local Whisper when its
- *  model is installed and falls back to Apple; the other two force one. */
-export type DictationEngine = "auto" | "apple" | "whisper";
 
 interface TtsSettings {
   engine: string;
@@ -78,6 +91,11 @@ const ELEVEN_VOICES: { id: string; label: string }[] = [
 const ELEVEN_MODEL = "eleven_turbo_v2_5";
 
 const mb = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
+
+const WHISPER_MODELS: Record<WhisperModelId, { name: string; note: string }> = {
+  base: { name: "Whisper base", note: "quick" },
+  turbo: { name: "Whisper large turbo", note: "best with names and code terms" },
+};
 
 const label: React.CSSProperties = {
   fontSize: "12px",
@@ -130,12 +148,17 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
 
   // Dictation (microphone → text). Independent of the TTS engine above: this is
   // which recognizer transcribes your speech. `auto` prefers local Whisper once
-  // its model is downloaded, else Apple's built-in on-device recognizer.
+  // a model is downloaded, else Apple's built-in on-device recognizer.
   const [dictationEngine, setDictationEngine] =
     useState<DictationEngine>("auto");
-  const [whisperPresent, setWhisperPresent] = useState(false);
+  const [whisperModel, setWhisperModel] = useState<WhisperModelId>("base");
+  const [whisperModels, setWhisperModels] = useState<WhisperModelStatus[]>([]);
   const [whisperInstalling, setWhisperInstalling] = useState(false);
   const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
+  // The key held to dictate anywhere (per machine, like the voice prefs).
+  const [holdKey, setHoldKey] = useState<HoldKey>(loadHoldKey);
+  // The AI polish dictated text gets once it is in (per machine too).
+  const [polish, setPolish] = useState(polishEnabled);
 
   useEffect(() => {
     let alive = true;
@@ -163,17 +186,17 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     };
   }, []);
 
-  // Load the dictation engine + Whisper model presence once.
+  // Load the dictation engine, the Whisper model choice and what's installed once.
   useEffect(() => {
     let alive = true;
-    void Promise.all([
-      invoke<string>("dictation_get_engine").catch(() => "auto"),
-      invoke<boolean>("whisper_model_present").catch(() => false),
-    ]).then(([eng, present]) => {
-      if (!alive) return;
-      setDictationEngine((eng as DictationEngine) || "auto");
-      setWhisperPresent(present);
-    });
+    void invoke<DictationStatus>("dictation_status")
+      .then((s) => {
+        if (!alive) return;
+        setDictationEngine(s.engine || "auto");
+        setWhisperModel(s.whisperModel || "base");
+        setWhisperModels(s.whisperModels);
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };
@@ -230,8 +253,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     setError(null);
     setWhisperProgress(null);
     try {
-      await invoke("whisper_install");
-      setWhisperPresent(await invoke<boolean>("whisper_model_present"));
+      await invoke("whisper_install", { model: whisperModel });
+      setWhisperModels((await invoke<DictationStatus>("dictation_status")).whisperModels);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -292,7 +315,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         });
       }
       // Dictation engine is a separate setting from the TTS engine above.
-      await invoke("dictation_set_engine", { engine: dictationEngine });
+      await invoke("dictation_set_engine", { engine: dictationEngine, whisperModel });
+      saveHoldKey(holdKey);
+      setPolishEnabled(polish);
       onSaved(engine, studio.style);
       onClose();
     } catch (e) {
@@ -301,6 +326,11 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       setSaving(false);
     }
   };
+
+  const chosenWhisper = whisperModels.find((m) => m.id === whisperModel);
+  const whisperPresent = !!chosenWhisper?.present;
+  // What dictation runs until the chosen model is downloaded.
+  const whisperFallback = whisperModels.find((m) => m.present);
 
   const kokoroReady =
     !!kokoroStatus && kokoroStatus.modelPresent && kokoroStatus.pythonReady;
@@ -526,6 +556,41 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         style={{ borderTop: "1px solid var(--color-rule)" }}
       >
         <span style={label}>Dictation (microphone → text)</span>
+        <label className="flex flex-col gap-1">
+          <span style={muted}>
+            Hold this key anywhere in Redline and speak: your words go into the
+            text box you are in, or to the plan's discussion. Double-tap it to
+            keep the mic open.
+          </span>
+          <select
+            value={holdKey}
+            onChange={(e) => setHoldKey(e.target.value as HoldKey)}
+            aria-label="Dictation key"
+            style={field}
+          >
+            {HOLD_KEYS.map((k) => (
+              <option key={k.key} value={k.key}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-start gap-2" style={{ cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={polish}
+            onChange={(e) => setPolish(e.target.checked)}
+            style={{ marginTop: "2px" }}
+          />
+          <span className="flex flex-col gap-0.5">
+            <span style={{ fontSize: "12px", color: "var(--color-ink)" }}>Polish dictated text</span>
+            <span style={muted}>
+              A moment after longer dictations land, a fast Claude model tidies their
+              punctuation and false starts — only the text goes to it, never the
+              audio. ⌘Z takes a polish back. Spoken turns are never polished.
+            </span>
+          </span>
+        </label>
         <span style={muted}>
           Which recognizer transcribes your speech when you dictate. Both run
           fully on your Mac — no audio ever leaves the device. Whisper is a
@@ -543,9 +608,26 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           <option value="apple">Apple — built-in, no download</option>
         </select>
 
+        {(dictationEngine === "whisper" || dictationEngine === "auto") && (
+          <select
+            value={whisperModel}
+            onChange={(e) => setWhisperModel(e.target.value as WhisperModelId)}
+            // A download in flight belongs to the model it started for.
+            disabled={whisperInstalling}
+            aria-label="Whisper model"
+            style={field}
+          >
+            {whisperModels.map((m) => (
+              <option key={m.id} value={m.id}>
+                {`${WHISPER_MODELS[m.id].name} — ${Math.round(m.bytes / 1_000_000)} MB, ${WHISPER_MODELS[m.id].note}`}
+              </option>
+            ))}
+          </select>
+        )}
         {(dictationEngine === "whisper" || dictationEngine === "auto") &&
+          chosenWhisper &&
           (whisperPresent
-            ? statusRow(true, "Whisper model installed")
+            ? statusRow(true, `${WHISPER_MODELS[chosenWhisper.id].name} installed`)
             : (
                 <div className="flex flex-col gap-1.5">
                   <button
@@ -566,7 +648,9 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                   >
                     {whisperInstalling
                       ? "Downloading…"
-                      : "Download Whisper model (~140 MB)"}
+                      : chosenWhisper.partial > 0
+                        ? `Resume download (${mb(chosenWhisper.partial)} of ${mb(chosenWhisper.bytes)})`
+                        : `Download ${WHISPER_MODELS[chosenWhisper.id].name} (${mb(chosenWhisper.bytes)})`}
                   </button>
                   {whisperInstalling && (
                     <div className="flex flex-col gap-1">
@@ -598,14 +682,23 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
                       </span>
                     </div>
                   )}
-                  {dictationEngine === "auto" && !whisperInstalling && (
+                  {!whisperInstalling && whisperFallback ? (
                     <span style={muted}>
-                      Until the model is downloaded, dictation uses Apple.
+                      Until it is downloaded, dictation uses {WHISPER_MODELS[whisperFallback.id].name}.
                     </span>
+                  ) : (
+                    dictationEngine === "auto" &&
+                    !whisperInstalling && (
+                      <span style={muted}>
+                        Until the model is downloaded, dictation uses Apple.
+                      </span>
+                    )
                   )}
                 </div>
               ))}
       </div>
+
+      <Vocabulary onError={setError} />
 
       {error && (
         <p style={{ color: "var(--color-danger, #c0392b)", fontSize: "12px", marginTop: "10px" }}>
@@ -646,6 +739,120 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+/** Settings › Vocabulary: the words dictation leans toward and spells the
+ *  user's way, and the corrections it has learned from them. Each change is
+ *  saved as it is made (and a pair learned meanwhile shows up), since the
+ *  dictation host reads the store on its own. */
+function Vocabulary({ onError }: { onError: (msg: string) => void }) {
+  const [store, setStore] = useState<VocabStore | null>(null);
+  const [word, setWord] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void loadVocabStore().then((s) => alive && setStore(s));
+    const off = onVocabStore(setStore);
+    return () => {
+      alive = false;
+      off();
+    };
+  }, []);
+  const change = (fn: (s: VocabStore) => VocabStore) =>
+    void updateVocabStore(fn).catch((e) => onError(String(e)));
+  const add = () => {
+    if (!word.trim()) return;
+    change((s) => addWord(s, word));
+    setWord("");
+  };
+  const chip: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "2px",
+    fontSize: "12px",
+    padding: "1px 2px 1px 8px",
+    borderRadius: "10px",
+    border: "1px solid var(--color-rule)",
+    background: "var(--color-paper)",
+    color: "var(--color-ink)",
+  };
+  const remove: React.CSSProperties = {
+    minWidth: "24px",
+    minHeight: "24px",
+    border: "none",
+    background: "transparent",
+    color: "var(--color-ink-muted, #888)",
+    cursor: "pointer",
+  };
+  return (
+    <div
+      className="flex flex-col gap-2 mt-4 pt-4"
+      style={{ borderTop: "1px solid var(--color-rule)" }}
+      aria-label="Vocabulary"
+      role="group"
+    >
+      <span style={label}>Vocabulary</span>
+      <span style={muted}>
+        Names and code terms dictation should hear and spell your way. The
+        open plan's names are added for you on every dictation.
+      </span>
+      <form
+        className="flex items-center gap-1.5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          add();
+        }}
+      >
+        <input
+          value={word}
+          onChange={(e) => setWord(e.target.value)}
+          placeholder="Add a word or name…"
+          aria-label="Add a vocabulary word"
+          spellCheck={false}
+          style={field}
+        />
+        <button
+          type="submit"
+          disabled={!word.trim()}
+          className="rounded-sm px-2.5 py-1"
+          style={{ fontSize: "12px", border: "1px solid var(--color-rule)", background: "transparent", color: "var(--color-ink)", cursor: "pointer" }}
+        >
+          Add
+        </button>
+      </form>
+      {store && store.words.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5" aria-label="Your words">
+          {store.words.map((w) => (
+            <li key={w} style={chip}>
+              {w}
+              <button type="button" style={remove} aria-label={`Remove ${w}`} title="Remove" onClick={() => change((s) => removeWord(s, w))}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <span style={{ ...label, fontWeight: 500, marginTop: "4px" }}>Learned from your corrections</span>
+      {store && store.pairs.length > 0 ? (
+        <ul className="flex flex-col gap-1" aria-label="Learned corrections">
+          {store.pairs.map((p) => (
+            <li key={p.heard} className="flex items-center gap-1.5" style={{ fontSize: "12px", color: "var(--color-ink)" }}>
+              <span style={{ color: "var(--color-ink-muted, #888)" }}>{p.heard}</span>
+              <span aria-hidden>→</span>
+              <span className="flex-1 min-w-0">{p.meant}</span>
+              <button type="button" style={remove} aria-label={`Forget ${p.heard} → ${p.meant}`} title="Forget" onClick={() => change((s) => forgetPair(s, p.heard))}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <span style={muted}>
+          None yet. Correct a word Redline dictated within half a minute, and
+          it learns the spelling for next time.
+        </span>
+      )}
     </div>
   );
 }

@@ -18,7 +18,7 @@ vi.mock("../audio/useReadAloud", () => ({
     return { speaking: false, stop: () => {} };
   },
 }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
+vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (cmd: string, args: Record<string, unknown>) => {
     calls.push({ cmd, args });
@@ -55,7 +55,7 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi
 
 async function render(props: Partial<ChatRoomProps> = {}) {
   await act(async () => root.render(<ChatRoom companionId="chat-1" cwd="/Users/me/redline" onSelectChat={() => {}} onEmpty={() => {}}
-    dictationEnabled={false} onClose={() => {}} {...props} />));
+    onClose={() => {}} {...props} />));
 }
 const button = (label: string) => Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(b => b.textContent === label);
 

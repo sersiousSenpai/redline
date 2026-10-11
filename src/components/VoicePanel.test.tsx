@@ -24,6 +24,8 @@ const { handlers, calls, script } = vi.hoisted(() => ({
     micOpen: false,
     armed: 0,
     engine: "system",
+    // Another owner (a dictation) holds the mic: an open start is refused.
+    taken: null as string | null,
   },
 }));
 // The studio voice's driver, recording what it is handed (studioTts.ts has
@@ -87,6 +89,8 @@ vi.mock("@tauri-apps/api/core", () => ({
       case "tts_get_settings":
         return { engine: script.engine, studioStyle: "calm" };
       case "dictation_start":
+        // Refused a beat later, as over IPC: the panel renders in between.
+        if (script.taken && args?.kind === "open") return new Promise((r) => setTimeout(() => r({ granted: false, holder: script.taken }), 5));
         if (!script.micOpen) {
           script.micOpen = true;
           script.armed += 1;
@@ -107,6 +111,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import { VoicePanel } from "./VoicePanel";
+import { strip } from "./DictationStrip";
+import { broker } from "../audio/dictationBroker";
+import { composerAt } from "../audio/dictationTarget";
 import { getVoiceAway, setVoiceAway } from "../audio/voiceAway";
 import type { Section } from "../types";
 
@@ -190,7 +197,7 @@ async function holdToTalk(text: string, opts: { heard?: boolean; holdMs?: number
   script.dictated = text;
   const talk = button("Hold to talk");
   await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-  if (opts.heard ?? true) await emit("dictation-partial", { text });
+  if (opts.heard ?? true) await emit("dictation-partial", { owner: "voice", text });
   await wait(opts.holdMs ?? 320);
   await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
   await wait(400);
@@ -207,7 +214,8 @@ function space(type: "keydown" | "keyup", target: EventTarget) {
 let scrolled: Element[];
 beforeEach(() => {
   calls.length = 0;
-  handlers.clear();
+  // The dictation broker is the app's one, and listens once for good.
+  for (const ev of [...handlers.keys()]) if (!ev.startsWith("dictation-")) handlers.delete(ev);
   script.turn = 0;
   script.dictated = "";
   script.thread = [];
@@ -218,6 +226,7 @@ beforeEach(() => {
   studio.drivers.length = 0;
   studio.warmed = 0;
   studio.surfaces.length = 0;
+  script.taken = null;
   utterances = [];
   setVoiceAway(null);
   scrolled = [];
@@ -253,6 +262,57 @@ afterEach(async () => {
 });
 
 // --- Space ---------------------------------------------------------------------
+
+describe("the input row", () => {
+  it("is one row: the box, the mic and the send button, and the panel is where what is said becomes a turn", async () => {
+    await mount();
+    const row = input().form!;
+    expect([...row.children].map((c) => c.getAttribute("aria-label") ?? c.textContent)).toEqual([
+      "Type a message to the voice agent",
+      "Hold to talk",
+      "Send",
+    ]);
+    expect(input().placeholder).toBe("Ask, or hold ⌥ to talk…");
+    // The hold-to-dictate key, even from the typed box, is a turn here.
+    expect(composerAt(input())?.spec.turn).toBe(true);
+  });
+
+  it("shows its own capture on the dictation strip over the row, the waveform and the words, and takes it down after", async () => {
+    await mount();
+    script.dictated = "is the replay safe";
+    const talk = button("Hold to talk");
+    await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
+    expect(strip.get()).toMatchObject({ owner: "voice", phase: "listening", text: "", hint: "release to send" });
+    // Over the row above the input, short of its Hands-free switch: in
+    // hands-free the panel listens most of the time, and that is the way out.
+    vi.spyOn(input().form!, "getBoundingClientRect").mockReturnValue(new DOMRect(10, 500, 340, 32));
+    vi.spyOn(document.querySelector('[role="switch"]')!, "getBoundingClientRect").mockReturnValue(new DOMRect(260, 466, 90, 26));
+    const anchor = strip.get()?.anchor;
+    expect(anchor && "rect" in anchor ? anchor.rect() : null).toEqual(new DOMRect(10, 500, 242, 32));
+    await emit("dictation-partial", { owner: "voice", text: "is the replay" });
+    await emit("dictation-level", { owner: "voice", rms: -20, peak: -6, ms: 50 });
+    expect(strip.get()?.text).toBe("is the replay");
+    expect(strip.get()?.levels).toHaveLength(1);
+    // Another capture's level never draws here.
+    await emit("dictation-level", { owner: "dictation", rms: -20, peak: -6, ms: 100 });
+    expect(strip.get()?.levels).toHaveLength(1);
+    await wait(320);
+    await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
+    await wait(400);
+    expect(strip.get()).toBeNull();
+    expect(sends().map((s) => s.text)).toEqual(["is the replay safe"]);
+  });
+
+  it("never takes down a strip that is not its own", async () => {
+    await mount();
+    const other = { owner: "dictation", phase: "listening" as const, text: "into a comment", levels: [], anchor: null, hint: "" };
+    strip.set(other);
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    expect(strip.get()).toBe(other);
+    strip.set(null);
+  });
+});
 
 describe("Space to talk", () => {
   it("does nothing with focus outside the panel, and never blocks Space there", async () => {
@@ -301,7 +361,7 @@ describe("Space to talk", () => {
     expect(down.defaultPrevented).toBe(true);
     await wait(280);
     expect(names()).toContain("dictation_start");
-    await emit("dictation-partial", { text: "what does section two do" });
+    await emit("dictation-partial", { owner: "voice", text: "what does section two do" });
     await wait(200);
     space("keyup", window);
     await wait(400);
@@ -323,7 +383,7 @@ describe("interrupting a reply", () => {
     expect(names()).toContain("voice_interrupt");
     expect(names()).not.toContain("voice_session_stop");
     expect(names()).not.toContain("voice_session_start");
-    await emit("dictation-partial", { text: "actually focus on rollout" });
+    await emit("dictation-partial", { owner: "voice", text: "actually focus on rollout" });
     await wait(320);
     await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
     await wait(400);
@@ -370,6 +430,28 @@ describe("interrupting a reply", () => {
     expect(host.textContent).toContain("(interrupted)");
     expect(host.querySelector("p[style*='danger']")).toBeNull();
     expect(input().disabled).toBe(false);
+  });
+
+  it("starts without the warm mic's pre-roll when it would hold the agent's own voice", async () => {
+    await mount();
+    await holdToTalk("Focus on rollout.");
+    await emit("voice-delta", { ...of(1), text: "Rollout goes in two waves. Then the flag flips." });
+    await wait();
+    expect(utterances).not.toHaveLength(0);
+    // Talking over the spoken reply: the moment before the press is its voice.
+    await holdToTalk("Wait, which flag?");
+    await emit("voice-interrupted", { ...of(1), text: "Rollout goes in two waves.", streamedChars: 26, messageId: "m1", killed: false });
+    await emit("voice-done", { ...of(2), body: "The rollout flag.", messageId: "m2" });
+    await finishSpeech();
+    // Long enough after it went quiet, the moment before a press is the user's.
+    await wait(600);
+    await holdToTalk("And the second wave?");
+    expect(sends().map((s) => s.text)).toEqual(["Focus on rollout.", "Wait, which flag?", "And the second wave?"]);
+    expect(named("dictation_start").map(([, a]) => a)).toEqual([
+      { owner: "voice", kind: "hold", preroll: true },
+      { owner: "voice", kind: "hold", preroll: false },
+      { owner: "voice", kind: "hold", preroll: true },
+    ]);
   });
 
   it("a quick tap of the talk button during thinking sends nothing", async () => {
@@ -693,7 +775,7 @@ describe("hands-free", () => {
     await wait(350);
     expect(script.armed).toBe(1);
     // A quiet room: the recognizer gives up on the live task.
-    await emit("dictation-error", { error: "No speech detected", domain: "kAFAssistantErrorDomain", code: 1110 });
+    await emit("dictation-error", { owner: "voice", error: "No speech detected", domain: "kAFAssistantErrorDomain", code: 1110 });
     expect(host.querySelector("[role='switch']")!.getAttribute("aria-checked")).toBe("true");
     expect(host.textContent).not.toContain("No speech detected");
     await wait(1100);
@@ -705,7 +787,7 @@ describe("hands-free", () => {
     await mount();
     const talk = button("Hold to talk");
     await act(async () => talk.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-    await emit("dictation-error", { error: "Speech service crashed", domain: "kAFAssistantErrorDomain", code: 1101 });
+    await emit("dictation-error", { owner: "voice", error: "Speech service crashed", domain: "kAFAssistantErrorDomain", code: 1101 });
     expect(host.textContent).toContain("Speech service crashed");
     await act(async () => talk.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
     await wait(400);
@@ -714,13 +796,42 @@ describe("hands-free", () => {
     expect(sends().map((s) => s.text)).toEqual(["Focus on rollout."]);
   });
 
+  it("waits out a dictation that took the mic, its strip untouched, then listens again", async () => {
+    await mount();
+    await act(async () => button("🎧 Hands-free: off").click());
+    await wait(350);
+    expect(script.armed).toBe(1);
+    // The hold key, with the caret in a comment box: the dictation takes the
+    // mic and shows its own strip.
+    script.taken = "dictation";
+    await emit("dictation-preempted", { owner: "voice", by: "dictation", text: "" });
+    const dictating = { owner: "dictation", phase: "listening" as const, text: "into the comment", levels: [], anchor: null, hint: "" };
+    act(() => strip.set(dictating));
+    const opens = () => named("dictation_start").filter(([, a]) => a?.kind === "open").length;
+    // A frame at a time, as the app renders: no re-arm flashing "listening"
+    // at it meanwhile, nor over its strip.
+    for (let ms = 0; ms < 2600; ms += 50) {
+      await wait(50);
+      expect(strip.get()).toBe(dictating);
+      expect(button("Hands-free status").getAttribute("aria-pressed")).toBe("false");
+    }
+    expect(opens()).toBe(1);
+    // It lets go: hands-free listens again.
+    script.taken = null;
+    act(() => strip.set(null));
+    await act(async () => void (await broker.stop("dictation")));
+    await wait(1100);
+    expect(opens()).toBe(2);
+    expect(script.armed).toBe(2);
+  });
+
   it("re-arms from the turn's end and the audio finishing, not a speech flag", async () => {
     await mount();
     await act(async () => button("🎧 Hands-free: off").click());
     await wait(350);
     // An utterance ends (the detector's silence), and goes out as a turn.
     script.dictated = "Is the replay safe?";
-    await emit("dictation-partial", { text: "is the replay safe" });
+    await emit("dictation-partial", { owner: "voice", text: "is the replay safe" });
     await wait(1900);
     expect(sends().map((s) => s.text)).toEqual(["Is the replay safe?"]);
     await emit("voice-delta", { ...of(1), text: "Mostly." });
@@ -732,6 +843,11 @@ describe("hands-free", () => {
     await wait(400);
     expect(named("dictation_start")).toHaveLength(2);
     expect(script.armed).toBe(2);
+    // Re-armed just after the agent's voice: the pre-roll would hold its end.
+    expect(named("dictation_start").map(([, a]) => a)).toEqual([
+      { owner: "voice", kind: "open", preroll: true },
+      { owner: "voice", kind: "open", preroll: false },
+    ]);
   });
 });
 

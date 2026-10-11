@@ -40,7 +40,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }) }));
 vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => ({ speaking: false, stop: () => {}, speak: () => {} }) }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
+vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
 vi.mock("./DiscussModelChip", () => ({ DiscussModelChip: () => null }));
 
 import { ChatRoom } from "./ChatRoom";
@@ -74,7 +74,7 @@ interface Surface {
   setup?: () => void;
 }
 const SURFACES: Surface[] = [
-  { name: "ChatRoom", queues: true, render: () => createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, dictationEnabled: false, onClose: noop }) },
+  { name: "ChatRoom", queues: true, render: () => createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, onClose: noop }) },
   { name: "BrowserChat", queues: true, mic: true, render: () => createElement(BrowserChat, { conversation: { kind: "tab", browseId: "b-1", title: "Page", targetLabel: "browser-b1", targetTitle: "Page", targetNumber: 1, scope: "pinned-page", anchoredFrom: null, exception: false }, workspace: "regular", onClose: noop }) },
   { name: "MissionChat", queues: true, render: () => createElement(MissionChat, { mission, findings: [], onClose: noop, onRemoveFinding: noop, onEditGoal: noop }) },
   { name: "MemoryAsk", queues: true, render: () => createElement(MemoryAsk, { onCite: noop }) },
@@ -196,7 +196,7 @@ describe("in-turn notices", () => {
   it("end the chat room's thread as a quiet note instead of a bar above it", async () => {
     Object.assign(turn, { messages: asked(), steerNotice: "Interrupted the previous turn and sent your instruction next" });
     try {
-      await mount(createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, dictationEnabled: false, onClose: noop }));
+      await mount(createElement(ChatRoom, { companionId: "chat-1", onSelectChat: noop, onEmpty: noop, cwd: null, onClose: noop }));
       const note = host.querySelector(".rl-thread-note")!;
       expect(note.textContent).toContain("Interrupted the previous turn");
       // Inside the scrolling thread, after the live reply.

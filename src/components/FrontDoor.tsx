@@ -19,7 +19,7 @@ import { ComposerMenu } from "./ComposerMenu";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
-import { useDictation } from "../lib/useDictation";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
@@ -190,8 +190,6 @@ export interface FrontDoorProps {
    *  buffered keystrokes. */
   focusNonce: number;
   consumeSeed: () => string;
-  /** False while the Voice panel owns the mic — one capture at a time. */
-  dictationEnabled: boolean;
   /** Recent chats — the contextual way BACK into a conversation. A chat is a
    *  place you return to, and without a way back the room would be reachable
    *  only by starting a new one. A way in, never furniture: the card's
@@ -268,7 +266,6 @@ export function FrontDoor(props: FrontDoorProps) {
     onCreateProject,
     focusNonce,
     consumeSeed,
-    dictationEnabled,
     chats = [],
     onOpenChat,
   } = props;
@@ -475,12 +472,6 @@ export function FrontDoor(props: FrontDoorProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchedAt]);
 
-  const dictation = useDictation({
-    enabled: dictationEnabled,
-    onFinal: (spoken) =>
-      setText((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
-  });
-
   // The island's growth into the document editor. Declared here, above the
   // send path, because `send` captures the FLIP's starting box on the gesture.
   const hasText = text.trim().length > 0;
@@ -638,6 +629,22 @@ export function FrontDoor(props: FrontDoorProps) {
     (destination === "run" && !runSupported(backend.backend))
       ? "plan"
       : destination;
+
+  // Dictation (the hold key, or the mic locking it open) writes into the box
+  // through its own onChange; the live strip sits over the island. "Send it"
+  // submits a chat's turn, never a launch; the door's resting box takes what
+  // is said with nothing focused; a card closed mid-capture keeps the words
+  // in the shared draft, as it keeps what was typed.
+  const dictation = useDictationComposer(
+    islandRef,
+    {
+      send: !!workbench || liveDestination === "chat",
+      polish: true,
+      fallback: !!welcome && visible,
+      keep: setText,
+    },
+    taRef,
+  );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (workbench && !e.nativeEvent.isComposing) {
@@ -901,11 +908,6 @@ export function FrontDoor(props: FrontDoorProps) {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
           />
-          {dictation.listening && (
-            <div className="rl-fd-partial">
-              {dictation.partial || "Listening…"}
-            </div>
-          )}
           <div className="rl-fd-tools">
             {workbench ? workbench.picker : <BackendMenu
               choice={backend}
@@ -988,22 +990,10 @@ export function FrontDoor(props: FrontDoorProps) {
               <Plus size={14} />
             </button>
 
-            {dictation.error && (
-              <span className="rl-fd-err" title={dictation.error}>
-                mic error
-              </span>
-            )}
             <button
               type="button"
               onClick={dictation.toggle}
-              disabled={!dictationEnabled}
-              title={
-                dictationEnabled
-                  ? dictation.listening
-                    ? "Stop dictating"
-                    : "Dictate"
-                  : "The voice panel is using the microphone"
-              }
+              title={dictation.listening ? "Stop dictating" : "Dictate"}
               className={`rl-fd-tool${dictation.listening ? " is-hot" : ""}`}
             >
               <Mic size={14} />

@@ -12,7 +12,7 @@ import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePoll } from "../hooks/usePoll";
-import { useDictation } from "../lib/useDictation";
+import { useDictationComposer } from "../lib/dictationComposer";
 import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt, resolveLaunchProject, type ProjectChoice } from "../lib/launch";
 import { CONTINUE_EVENT, handoffGate, prepareConversationPreview, type ContinueDestination, type ContinuationMessage } from "../lib/conversationContinuation";
@@ -122,8 +122,6 @@ export interface ChatRoomProps {
   onContextLost?: (why: import("../lib/surfaceContext").ContextLoss) => void;
   /** Working directory for the spawn (the agent's read-only file tools). */
   cwd: string | null;
-  /** False while the Voice panel owns the mic — one capture at a time. */
-  dictationEnabled: boolean;
   projectOptions?: ProjectOption[];
   lastLaunchProject?: string | null;
   onPlan?: (request: ChatPlanRequest) => void;
@@ -156,7 +154,6 @@ export function ChatRoom({
   onSelectChat,
   onEmpty,
   cwd,
-  dictationEnabled,
   projectOptions = NO_PROJECTS,
   lastLaunchProject = null,
   onPlan, receipt, onShowTerminal, onOpenPlan, onFix, onQueuePlan, queuedInstruction, onCancelQueuedPlan,
@@ -492,11 +489,10 @@ export function ChatRoom({
       setNotice((cur) => n ?? (cur === shown ? null : cur));
     },
   });
-  const dictation = useDictation({
-    enabled: dictationEnabled && !composer,
-    onFinal: (spoken) =>
-      setDraft((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
-  });
+  // Its own composer, when no launch composer is supplied: a chat box —
+  // "send it" sends, and kept words get the polish.
+  const composerFrameRef = useRef<HTMLDivElement>(null);
+  const dictation = useDictationComposer(composerFrameRef, { send: true, polish: true, keep: setDraft }, taRef);
 
   const attach = async () => {
     try {
@@ -735,6 +731,7 @@ export function ChatRoom({
       <QueueTray rows={queueRows} onRemove={id => { void removeQueue(id); }} onSteer={id => { void steer(id).catch(error => setNotice(String(error))); }} onPromote={id => { if (!id.startsWith("armed-")) void promote(id).catch(error => setNotice(String(error))); }} />
       {/* The floating launch composer owns input when supplied. */}
       {composer ? composer.render(conversationActions, { picker, mode, cycleMode: () => setMode(nextChatMode(mode)), onSubmit: steer => submit(mode, steer), project, onProjectChange: setProject, streaming, onStop: cancel }) : <div
+        ref={composerFrameRef}
         data-chat-composer
         className="min-w-0 shrink-0 py-2.5"
         style={{ borderTop: "1px solid var(--color-rule)", paddingInline: 20 }}
@@ -765,14 +762,6 @@ export function ChatRoom({
                   </button>
                 </span>
               ))}
-            </div>
-          )}
-          {dictation.listening && (
-            <div
-              className="font-sans mb-1"
-              style={{ fontSize: 11.5, color: "var(--color-ink-muted)", maxHeight: 60, overflowY: "auto" }}
-            >
-              {dictation.partial || "Listening…"}
             </div>
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
@@ -812,15 +801,8 @@ export function ChatRoom({
               icon={<Plus size={14} />}
             />
             <IconButton
-              title={
-                dictationEnabled
-                  ? dictation.listening
-                    ? "Stop dictating"
-                    : "Dictate"
-                  : "The voice panel is using the microphone"
-              }
+              title={dictation.listening ? "Stop dictating" : "Dictate"}
               onClick={dictation.toggle}
-              disabled={!dictationEnabled}
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
@@ -1009,20 +991,17 @@ function IconButton({
   title,
   onClick,
   icon,
-  disabled,
   hot,
 }: {
   title: string;
   onClick: () => void;
   icon: React.ReactNode;
-  disabled?: boolean;
   hot?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={disabled}
       title={title}
       style={{
         display: "flex",
@@ -1031,11 +1010,10 @@ function IconButton({
         width: 30,
         height: 30,
         borderRadius: 8,
-        cursor: disabled ? "default" : "pointer",
+        cursor: "pointer",
         border: "1px solid var(--color-rule)",
         background: hot ? "var(--color-info)" : "transparent",
         color: hot ? "var(--color-on-accent)" : "var(--color-ink-muted)",
-        opacity: disabled ? 0.45 : 1,
       }}
     >
       {icon}

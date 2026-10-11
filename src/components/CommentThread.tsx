@@ -8,6 +8,7 @@ import { useAgentTurn } from "../hooks/useAgentTurn";
 import { priorUserBody } from "../lib/agentTurn";
 import { RetryNote } from "./TurnNotes";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
+import { useDictationComposer } from "../lib/dictationComposer";
 // The rider note a transcript produces — also used to detect that an attached
 // rider is stale (the discussion continued after attaching).
 import { transcriptNote } from "../lib/attachmentNote";
@@ -975,6 +976,9 @@ function Composer({
 }) {
   const [draft, setDraft] = useSharedDraft(draftKey);
   const files = useAttachmentCapture(sessionId);
+  // Dictated into (the hold key): "send it" sends the reply, as Enter does,
+  // and words said as the box folds away are kept in its draft.
+  useDictationComposer(files.hostRef, { send: true, polish: true, keep: setDraft }, inputRef);
   const submit = () => {
     onSend(draft, files.attachments);
     setDraft("");

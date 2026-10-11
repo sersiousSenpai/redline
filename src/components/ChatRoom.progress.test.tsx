@@ -11,7 +11,7 @@ const { turn, cancel } = vi.hoisted(() => {
 vi.mock("../hooks/useAgentTurn", () => ({ useAgentTurn: () => turn }));
 vi.mock("../hooks/useStickToBottom", () => ({ useStickToBottom: () => ({ ref: { current: null }, onScroll: () => {}, stick: () => {} }) }));
 vi.mock("../audio/useReadAloud", () => ({ useReadAloud: () => ({ speaking: false, stop: () => {} }) }));
-vi.mock("../lib/useDictation", () => ({ useDictation: () => ({ listening: false, partial: "", toggle: () => {} }) }));
+vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => [] }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 vi.mock("./MarkdownView", () => ({ MarkdownView: () => null }));
@@ -29,7 +29,7 @@ beforeEach(() => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
 async function render() { await act(async () => root.render(createElement(ChatRoom, {
   companionId: "chat-1", onSelectChat: () => {}, onEmpty: () => {}, cwd: null,
-  dictationEnabled: false, onClose: () => {},
+  onClose: () => {},
 }))); }
 const primary = () => host.querySelector<HTMLButtonElement>("[data-chat-composer] .rl-send")!;
 describe("Chat room progress placement", () => {

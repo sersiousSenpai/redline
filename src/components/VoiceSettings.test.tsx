@@ -6,15 +6,27 @@ import { createRoot, type Root } from "react-dom/client";
 
 // The Kokoro voice picker: graded voices to audition with ▶, a blend, and the
 // rule that only the user's own pick ever changes the saved voice — someone on
-// am_adam (graded F+) is shown the grade, never moved off it.
+// am_adam (graded F+) is shown the grade, never moved off it. And the Whisper
+// model choice for dictation.
 
 const invoked: { cmd: string; args: Record<string, unknown> }[] = [];
 let savedVoice = "am_adam";
 let savedEngine = "kokoro";
 let studioSupported = false;
+// Set to hold `whisper_install` open until `finishInstall` is called.
+let holdInstall = false;
+let finishInstall: () => void = () => {};
+let whisperModels = [
+  { id: "base", present: true, bytes: 147_964_211, partial: 0 },
+  { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
+];
+// The `voiceVocab` ui pref.
+let vocabBlob: string | null = null;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string, args: Record<string, unknown>) => {
     invoked.push({ cmd, args: args ?? {} });
+    if (cmd === "get_ui_prefs") return Promise.resolve({ voiceVocab: vocabBlob });
+    if (cmd === "set_ui_pref" && args.key === "voiceVocab") vocabBlob = args.value as string;
     if (cmd === "tts_get_settings")
       return Promise.resolve({
         engine: savedEngine,
@@ -37,8 +49,19 @@ vi.mock("@tauri-apps/api/core", () => ({
         pythonPath: "/venv/bin/python3",
         detail: "Natural voice is ready.",
       });
-    if (cmd === "dictation_get_engine") return Promise.resolve("auto");
-    if (cmd === "whisper_model_present") return Promise.resolve(true);
+    if (cmd === "whisper_install" && holdInstall)
+      return new Promise<void>((resolve) => {
+        finishInstall = resolve;
+      });
+    if (cmd === "dictation_status")
+      return Promise.resolve({
+        holder: null,
+        engine: "auto",
+        whisperModel: "base",
+        whisperActive: "base",
+        whisperModels,
+        outputRoute: { kind: "speakers", transport: "builtin" },
+      });
     return Promise.resolve(null);
   }),
 }));
@@ -77,6 +100,9 @@ vi.mock("./StudioVoiceCard", () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import { VoiceSettings } from "./VoiceSettings";
+import { loadHoldKey, saveHoldKey } from "../audio/voiceHotkey";
+import { polishEnabled } from "../audio/dictationPolish";
+import { learnPair, updateVocabStore } from "../audio/vocab";
 
 const flush = () =>
   act(async () => {
@@ -89,10 +115,16 @@ let root: Root;
 beforeEach(() => {
   invoked.length = 0;
   samples.length = 0;
+  holdInstall = false;
+  whisperModels = [
+    { id: "base", present: true, bytes: 147_964_211, partial: 0 },
+    { id: "turbo", present: false, bytes: 574_041_195, partial: 0 },
+  ];
   handlers.clear();
   savedVoice = "am_adam";
   savedEngine = "kokoro";
   studioSupported = false;
+  vocabBlob = null;
   localStorage.clear();
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -221,5 +253,131 @@ describe("the studio voice", () => {
     });
     expect(invoked.find((c) => c.cmd === "tts_set_settings")!.args.engine).toBe("studio");
     expect(saved).toEqual([["studio", "calm"]]);
+  });
+});
+
+describe("Whisper model choice", () => {
+  const pick = async (value: string) => {
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Whisper model"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, value);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  };
+
+  it("offers the large model as a download, while base keeps dictating", async () => {
+    await mount();
+    expect(host.textContent).toContain("Whisper base installed");
+    await pick("turbo");
+    expect(host.textContent).toContain("Until it is downloaded, dictation uses Whisper base.");
+    whisperModels = [whisperModels[0], { ...whisperModels[1], present: true }];
+    await act(async () => button("Download Whisper large turbo (574.0 MB)").click());
+    await flush();
+    expect(invoked.find((c) => c.cmd === "whisper_install")!.args).toEqual({ model: "turbo" });
+    expect(host.textContent).toContain("Whisper large turbo installed");
+    await act(async () => button("Save").click());
+    await flush();
+    expect(invoked.find((c) => c.cmd === "dictation_set_engine")!.args).toEqual({
+      engine: "auto",
+      whisperModel: "turbo",
+    });
+  });
+
+  it("holds the model choice still while its download runs", async () => {
+    holdInstall = true;
+    await mount();
+    await pick("turbo");
+    await act(async () => button("Download Whisper large turbo (574.0 MB)").click());
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Whisper model"]')!;
+    expect(select.disabled).toBe(true);
+    await act(async () => fire("whisper-setup", { phase: "model", model: "turbo", received: 287_000_000, total: 574_041_195 }));
+    expect(host.textContent).toContain("287.0 MB / 574.0 MB");
+    whisperModels = [whisperModels[0], { ...whisperModels[1], present: true }];
+    await act(async () => finishInstall());
+    await flush();
+    expect(select.disabled).toBe(false);
+    expect(host.textContent).toContain("Whisper large turbo installed");
+  });
+
+  it("resumes a download an interruption left half done", async () => {
+    whisperModels = [whisperModels[0], { ...whisperModels[1], partial: 200_000_000 }];
+    await mount();
+    await pick("turbo");
+    expect(button("Resume download (200.0 MB of 574.0 MB)")).toBeTruthy();
+  });
+});
+
+describe("dictation key", () => {
+  it("offers the hold key, Right Option by default, and saves a change with the rest", async () => {
+    await mount();
+    const select = host.querySelector<HTMLSelectElement>('select[aria-label="Dictation key"]')!;
+    expect(select.value).toBe("AltRight");
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Right ⌥ Option", "Right ⌘ Command", "Right ⌃ Control", "Off"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, "MetaRight");
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // Not until Save.
+    expect(loadHoldKey()).toBe("AltRight");
+    await save();
+    expect(loadHoldKey()).toBe("MetaRight");
+    expect(localStorage.getItem("redline.dictation.key")).toBe("MetaRight");
+    saveHoldKey("AltRight");
+  });
+});
+
+describe("dictation polish", () => {
+  it("is on by default, and turned off with the rest on Save", async () => {
+    await mount();
+    const box = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((b) =>
+      b.closest("label")!.textContent!.includes("Polish dictated text"),
+    )!;
+    expect(box.checked).toBe(true);
+    await act(async () => box.click());
+    expect(polishEnabled()).toBe(true);
+    await save();
+    expect(polishEnabled()).toBe(false);
+  });
+});
+
+describe("vocabulary", () => {
+  const words = () => [...host.querySelectorAll('[aria-label="Your words"] li')].map((li) => li.firstChild!.textContent);
+  const pairs = () => [...host.querySelectorAll('[aria-label="Learned corrections"] li')].map((li) => li.textContent!.replace("×", ""));
+
+  it("adds and removes words as they are changed, without waiting for Save", async () => {
+    vocabBlob = JSON.stringify({ words: ["Tauri"], pairs: [] });
+    await mount();
+    expect(words()).toEqual(["Tauri"]);
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="Add a vocabulary word"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Kokoro");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button("Add").click());
+    await flush();
+    expect(words()).toEqual(["Kokoro", "Tauri"]);
+    expect(JSON.parse(vocabBlob!).words).toEqual(["Kokoro", "Tauri"]);
+    expect(input.value).toBe("");
+    await act(async () => button("Remove Tauri").click());
+    await flush();
+    expect(words()).toEqual(["Kokoro"]);
+  });
+
+  it("lists the corrections learned, shows one learned while open, and forgets one", async () => {
+    vocabBlob = JSON.stringify({ words: [], pairs: [{ heard: "civ core", meant: "Kokoro", at: 1 }] });
+    await mount();
+    expect(pairs()).toEqual(["civ core→Kokoro"]);
+    // Dictation learns another while the settings are open.
+    await act(async () => void (await updateVocabStore((s) => learnPair(s, "tory", "Tauri", 2))));
+    expect(pairs()).toEqual(["tory→Tauri", "civ core→Kokoro"]);
+    await act(async () => button("Forget civ core → Kokoro").click());
+    await flush();
+    expect(pairs()).toEqual(["tory→Tauri"]);
+    expect(JSON.parse(vocabBlob!).pairs).toEqual([{ heard: "tory", meant: "Tauri", at: 2 }]);
+  });
+
+  it("says how a correction is learned while there are none", async () => {
+    await mount();
+    expect(host.querySelector('[aria-label="Vocabulary"]')!.textContent).toContain("None yet.");
   });
 });

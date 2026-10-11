@@ -4,7 +4,6 @@ export const messages = [{id:"seed",role:"user",body:"How should we scope this?"
 export function useAgentTurn() { return { messages, liveText:"", status:"idle", loaded:true, send:(text,options)=>{window.__qaSend={text,options};}, cancel:noop, clear:noop, meters:{}, activity:[] }; }
 export function getCurrentWebview() { return {onDragDropEvent:async()=>noop}; }
 export function useReadAloud() { return { speaking: false, stop: noop, speak: noop }; }
-export function useDictation() { return { listening: false, partial: "", toggle: noop }; }
 export async function invoke(command: string) {
   if (command === "fork_thread_model") return [null,null];
   if (command === "get_agent_seats") return { seats: { fork_plan: { model:"opus",effort:"xhigh" } } };

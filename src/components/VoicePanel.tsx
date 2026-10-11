@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -25,6 +26,8 @@ import {
 import { cloudTtsDriver } from "../audio/cloudTts";
 import { UtteranceDetector, DEFAULT_VAD_SILENCE_MS } from "../audio/vad";
 import { Playback, type NarrationMark } from "../audio/playback";
+import { PREROLL_CLEAR_MS } from "../audio/dictationTypes";
+import { quietFor } from "../audio/audible";
 import { splitReply, spokenPause } from "../audio/voiceStream";
 import {
   IDLE_TURN,
@@ -39,8 +42,11 @@ import {
   isBenignDictationError,
   isNonSpeech,
   offerAnswer,
-  type DictationError,
 } from "../audio/utterance";
+import { broker } from "../audio/dictationBroker";
+import { mountStrip, registerTurnTaker } from "../audio/dictationHost";
+import { loadHoldKey } from "../audio/voiceHotkey";
+import { useDictationComposer } from "../lib/dictationComposer";
 import {
   holdPoint,
   pointAt,
@@ -66,6 +72,7 @@ import { useStickToBottom } from "../hooks/useStickToBottom";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
 import { MarkdownView } from "./MarkdownView";
+import { levelHeight, STRIP_BARS, strip, type StripAnchor } from "./DictationStrip";
 import { StreamingText } from "./StreamingText";
 
 // Every turn-scoped `voice-*` event names its child and its turn (see
@@ -112,10 +119,15 @@ interface VoiceCapturedEvent {
   body: string;
 }
 
-// Push-to-talk dictation events (no sessionId — one capture at a time).
-interface DictationTextEvent {
-  text: string;
-}
+/** The panel's captures' owner (dictationBroker.ts): its push-to-talk takes
+ *  the mic from anyone; hands-free listening yields to anyone. */
+const VOICE_OWNER = "voice";
+/** Whether another owner (a dictation) holds the mic now. */
+const micTaken = () => {
+  const holder = broker.current();
+  return holder !== null && holder !== VOICE_OWNER;
+};
+const onMicHolder = (fn: () => void) => broker.subscribe(fn);
 
 /** A capture confirmation's handles: Undo for a while, Show for good. */
 interface CaptureNote {
@@ -263,6 +275,23 @@ function isTalkZone(target: EventTarget | null, panel: HTMLElement): boolean {
 }
 
 const MUTED = "var(--color-ink-muted, #888)";
+
+/** The input row's mic: a 30 px target, red while it listens. */
+const MIC_BUTTON: React.CSSProperties = {
+  width: "30px",
+  height: "30px",
+  flexShrink: 0,
+  fontSize: "14px",
+  border: "1px solid var(--color-rule)",
+  background: "var(--color-anchor-bg)",
+  color: "var(--color-anchor-text)",
+  cursor: "pointer",
+  transition: "background 120ms ease",
+};
+const MIC_HOT: React.CSSProperties = { background: "var(--color-danger, #c0392b)", color: "#fff" };
+
+/** The dictation key's glyph, for the input's hint; none when it is off. */
+const TALK_KEY_GLYPH: Record<string, string> = { AltRight: "⌥", MetaRight: "⌘", ControlRight: "⌃" };
 
 const BYLINE: React.CSSProperties = {
   fontSize: "10px",
@@ -545,6 +574,8 @@ function VoicePanelBase({
 }: VoicePanelProps) {
   const isDrafter = sessionId.startsWith("drafter:");
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // The hold-to-dictate key is a turn here, even from the typed input.
+  useDictationComposer(panelRef, { turn: true });
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
   /** Something is playing or queued to play (from `Playback`, not the queue's
    *  own flag — a clip that never ends trips the stall watchdog instead of
@@ -694,6 +725,22 @@ function VoicePanelBase({
   // short beat so it finishes transcribing the tail of speech (the last word
   // lags the audio); re-pressing within that window cancels it and keeps going.
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The input row the strip sits over, and the waveform's latest levels.
+  const inputRowRef = useRef<HTMLFormElement | null>(null);
+  const levelsRef = useRef<number[]>([]);
+  // The strip covers the row above the input, but never its Hands-free
+  // switch: in hands-free the panel listens most of the time, and the switch
+  // is the way out.
+  const handsFreeSwitchRef = useRef<HTMLButtonElement | null>(null);
+  const stripAnchorRef = useRef<StripAnchor>({
+    rect() {
+      const row = inputRowRef.current?.getBoundingClientRect();
+      if (!row) return null;
+      const toggle = handsFreeSwitchRef.current?.getBoundingClientRect();
+      const right = toggle ? Math.min(row.right, toggle.left - 8) : row.right;
+      return new DOMRect(row.left, row.top, right - row.left, row.height);
+    },
+  });
   // A key-held talk (Space in the panel, or on the talk button): the timer is
   // the hold not yet long enough to count; `keyHeldRef` is one that counted.
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -749,9 +796,16 @@ function VoicePanelBase({
     stall: () => void;
   }>({ point: () => {}, idle: () => {}, stall: () => {} });
   const playbackRef = useRef<Playback | null>(null);
+  // When the agent's voice last went quiet (Infinity while it sounds): the
+  // warm mic's pre-roll, the moment before a capture starts, holds its end
+  // for a little while after.
+  const quietAtRef = useRef(0);
   if (!playbackRef.current) {
     playbackRef.current = new Playback({
-      onClipStart: () => setAudioBusy(true),
+      onClipStart: () => {
+        quietAtRef.current = Infinity;
+        setAudioBusy(true);
+      },
       onPoint: (marks) => playbackEventsRef.current.point(marks),
       onIdle: () => playbackEventsRef.current.idle(),
       onStall: () => playbackEventsRef.current.stall(),
@@ -1072,7 +1126,7 @@ function VoicePanelBase({
         setTimeout(() => {
           pendingStops.delete(sessionId);
           void invoke("voice_session_stop", { sessionId }).catch(() => {});
-          void invoke("dictation_kill_all").catch(() => {});
+          broker.cancel(VOICE_OWNER);
         }, 300),
       );
     };
@@ -1383,6 +1437,7 @@ function VoicePanelBase({
     },
     idle: () => {
       setAudioBusy(false);
+      if (quietAtRef.current === Infinity) quietAtRef.current = Date.now();
       readingRef.current = null;
       if (autoAddArmedRef.current) runAutoAdd();
     },
@@ -1725,13 +1780,25 @@ function VoicePanelBase({
     setError(null);
     setListening(true);
     setPartial("");
-    void invoke("dictation_start").catch((e) => {
-      hfArmedRef.current = false;
-      handsFreeRef.current = false;
-      setHandsFree(false);
-      setListening(false);
-      setError(String(e));
-    });
+    // Re-armed right after the agent spoke: the warm mic's last moments are
+    // its voice, never the user's first word.
+    const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
+    void broker.start(VOICE_OWNER, { kind: "open", preroll }).then(
+      (grant) => {
+        if (grant.granted) return;
+        // A dictation holds the mic: listen again once it is done.
+        hfArmedRef.current = false;
+        rearmDelayRef.current = 1000;
+        setListening(false);
+      },
+      (e) => {
+        hfArmedRef.current = false;
+        handsFreeRef.current = false;
+        setHandsFree(false);
+        setListening(false);
+        setError(String(e));
+      },
+    );
   }, []);
 
   // Tear the mic down and stop detecting (toggle off, error, or unmount).
@@ -1740,7 +1807,7 @@ function VoicePanelBase({
     vadRef.current?.reset();
     setListening(false);
     setPartial("");
-    void invoke("dictation_kill_all").catch(() => {});
+    broker.cancel(VOICE_OWNER);
   }, []);
 
   // VAD says the user paused → this is the end of an utterance. Close the mic
@@ -1753,7 +1820,7 @@ function VoicePanelBase({
       hfArmedRef.current = false;
       setListening(false);
       setUtterancePending(true);
-      void invoke<string>("dictation_stop")
+      void broker.stop(VOICE_OWNER)
         .then((finalText) => {
           setPartial("");
           const text = ((finalText || vadText) || "").trim();
@@ -1795,6 +1862,11 @@ function VoicePanelBase({
   // stall watchdog ends such a clip instead). The short delay leaves a natural
   // beat before listening resumes.
   const turnBusy = turn.phase !== "idle";
+  // A dictation holding the mic (the hold key, a composer's mic) is waited
+  // out, not asked every second: an ask flashed "listening" — over the
+  // dictation's own strip — and a refusal that never rendered left
+  // hands-free deaf for good.
+  const dictating = useSyncExternalStore(onMicHolder, micTaken, micTaken);
   useEffect(() => {
     if (
       !handsFree ||
@@ -1802,73 +1874,82 @@ function VoicePanelBase({
       turnBusy ||
       outbox.length > 0 ||
       utterancePending ||
-      audioBusy
+      audioBusy ||
+      dictating
     ) {
       return;
     }
     const t = setTimeout(() => armHandsFree(), rearmDelayRef.current);
     return () => clearTimeout(t);
-  }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, armHandsFree]);
+  }, [handsFree, listening, turnBusy, outbox.length, utterancePending, audioBusy, dictating, armHandsFree]);
 
-  // Live partial transcript + dictation errors from the native mic.
+  // Live partial transcript + dictation errors from the native mic: this
+  // panel's captures only (the broker routes by owner), so a dictation into
+  // a composer never paints here or feeds the end-of-utterance detector.
   useEffect(() => {
-    let disposed = false;
-    const unlisteners: UnlistenFn[] = [];
-    const add = (u: UnlistenFn) => {
-      if (disposed) u();
-      else unlisteners.push(u);
-    };
-    const wire = async () => {
-      add(
-        await listen<DictationTextEvent>("dictation-partial", (e) => {
-          setPartial(e.payload.text);
-          if (e.payload.text.trim()) captureRef.current.heard = true;
-          // In hands-free, the partial stream drives end-of-utterance detection.
+    const detach = broker.attach(VOICE_OWNER, {
+      // The strip's waveform: drawn straight onto it, never through a render.
+      level: (l) => {
+        if (strip.get()?.owner !== VOICE_OWNER) return;
+        levelsRef.current = [...levelsRef.current.slice(1 - STRIP_BARS), levelHeight(l.rms)];
+        strip.update({ levels: levelsRef.current });
+      },
+      partial: (text) => {
+        setPartial(text);
+        if (text.trim()) captureRef.current.heard = true;
+        // In hands-free, the partial stream drives end-of-utterance detection.
+        if (handsFreeRef.current && hfArmedRef.current) {
+          vadRef.current?.feed(text);
+        }
+      },
+      error: (e) => {
+        // "No speech detected" and its kin: the recognizer had nothing (more)
+        // to hear. A push-to-talk hold carries on to its release; hands-free
+        // listens again after a beat. Neither is worth a red line, and
+        // neither turns hands-free off.
+        if (isBenignDictationError(e)) {
           if (handsFreeRef.current && hfArmedRef.current) {
-            vadRef.current?.feed(e.payload.text);
+            hfArmedRef.current = false;
+            rearmDelayRef.current = 1000;
+            vadRef.current?.reset();
+            setListening(false);
+            setPartial("");
+            // The task is over but its capture is still open, and
+            // `dictation_start` does nothing while one is: close it, so
+            // the re-arm really listens.
+            broker.cancel(VOICE_OWNER);
           }
-        }),
-      );
-      add(
-        await listen<DictationError>("dictation-error", (e) => {
-          // "No speech detected" and its kin: the recognizer had nothing (more)
-          // to hear. A push-to-talk hold carries on to its release; hands-free
-          // listens again after a beat. Neither is worth a red line, and
-          // neither turns hands-free off.
-          if (isBenignDictationError(e.payload)) {
-            if (handsFreeRef.current && hfArmedRef.current) {
-              hfArmedRef.current = false;
-              rearmDelayRef.current = 1000;
-              vadRef.current?.reset();
-              setListening(false);
-              setPartial("");
-              // The task is over but its capture is still open, and
-              // `dictation_start` does nothing while one is: close it, so
-              // the re-arm really listens.
-              void invoke("dictation_kill_all").catch(() => {});
-            }
-            return;
-          }
-          talkingRef.current = false;
-          // Likewise the capture a failed task leaves open, or the next press
-          // would start nothing.
-          void invoke("dictation_kill_all").catch(() => {});
-          // A real mic error can't be auto-recovered cleanly, and re-arming
-          // would just loop, so drop out of hands-free and surface it.
+          return;
+        }
+        talkingRef.current = false;
+        // Likewise the capture a failed task leaves open, or the next press
+        // would start nothing.
+        broker.cancel(VOICE_OWNER);
+        // A real mic error can't be auto-recovered cleanly, and re-arming
+        // would just loop, so drop out of hands-free and surface it.
+        hfArmedRef.current = false;
+        handsFreeRef.current = false;
+        setHandsFree(false);
+        vadRef.current?.reset();
+        setListening(false);
+        setPartial("");
+        setError(e.error);
+      },
+      // A dictation took the mic (the hold key, a composer's mic): this
+      // capture is over. Hands-free listens again once the mic is free.
+      preempted: () => {
+        talkingRef.current = false;
+        if (hfArmedRef.current) {
           hfArmedRef.current = false;
-          handsFreeRef.current = false;
-          setHandsFree(false);
-          vadRef.current?.reset();
-          setListening(false);
-          setPartial("");
-          setError(e.payload.error);
-        }),
-      );
-    };
-    void wire();
+          rearmDelayRef.current = 1000;
+        }
+        vadRef.current?.reset();
+        setListening(false);
+        setPartial("");
+      },
+    });
     return () => {
-      disposed = true;
-      for (const u of unlisteners) u();
+      detach();
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current);
         stopTimerRef.current = null;
@@ -1923,12 +2004,16 @@ function VoicePanelBase({
       talkingRef.current = true;
       captureRef.current = { startedAt: since, heard: false };
       setError(null);
+      // Talking over the agent's voice (or a chat read aloud elsewhere): what
+      // the warm mic heard just before the press is that voice, not the
+      // user's first syllable.
+      const preroll = Date.now() - quietAtRef.current > PREROLL_CLEAR_MS && quietFor() > PREROLL_CLEAR_MS;
       // Talking over the agent: silence it and stop its turn in place, so it
       // stops generating what nobody will hear — its memory stays whole.
       if (turnRef.current.phase !== "idle" || playback.busy()) stopReply();
       setListening(true);
       setPartial("");
-      void invoke("dictation_start").catch((e) => {
+      void broker.start(VOICE_OWNER, { kind: "hold", preroll }).catch((e) => {
         talkingRef.current = false;
         setListening(false);
         setError(String(e));
@@ -1948,7 +2033,7 @@ function VoicePanelBase({
     stopTimerRef.current = setTimeout(() => {
       stopTimerRef.current = null;
       setListening(false);
-      void invoke<string>("dictation_stop")
+      void broker.stop(VOICE_OWNER)
         .then((finalText) => {
           setPartial("");
           const text = (finalText || "").trim();
@@ -1960,6 +2045,53 @@ function VoicePanelBase({
         .catch((e) => setError(String(e)));
     }, CAPTURE_TAIL_MS);
   }, [submitSpoken]);
+
+  // Esc on the hold-to-dictate key's turn: nothing is sent.
+  const cancelTalk = useCallback(() => {
+    if (handsFreeRef.current) return;
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
+    talkingRef.current = false;
+    setListening(false);
+    setPartial("");
+    broker.cancel(VOICE_OWNER);
+  }, []);
+
+  // The hold-to-dictate key, with nothing that takes text focused (or focus
+  // in this panel), is a turn here: the panel's own push-to-talk.
+  useEffect(
+    () => registerTurnTaker({ key: sessionId, start: startTalk, stop: stopTalk, cancel: cancelTalk }),
+    [sessionId, startTalk, stopTalk, cancelTalk],
+  );
+
+  // While this panel's own capture listens, the dictation strip over its
+  // input row shows it — the waveform and the words so far — and nothing in
+  // the panel moves. It never clears another capture's strip.
+  useEffect(() => {
+    if (!listening) {
+      levelsRef.current = [];
+      if (strip.get()?.owner === VOICE_OWNER) strip.set(null);
+      return;
+    }
+    mountStrip();
+    const next = {
+      owner: VOICE_OWNER,
+      phase: "listening" as const,
+      text: partial,
+      anchor: stripAnchorRef.current,
+      hint: handsFreeRef.current ? "pause to send" : "release to send",
+    };
+    if (strip.get()?.owner === VOICE_OWNER) strip.update(next);
+    else strip.set({ ...next, levels: levelsRef.current });
+  }, [listening, partial]);
+  useEffect(
+    () => () => {
+      if (strip.get()?.owner === VOICE_OWNER) strip.set(null);
+    },
+    [],
+  );
 
   // A key-held talk: Space with focus in the panel (off its controls), or on
   // the talk button itself. It counts once held KEY_HOLD_MS; released sooner,
@@ -2113,6 +2245,12 @@ function VoicePanelBase({
       ? "stop"
       : "send";
   const titlesForReplies = isDrafter ? null : titles;
+  const heldKey = TALK_KEY_GLYPH[loadHoldKey()];
+  const talkPlaceholder = handsFree
+    ? "Just talk, or type…"
+    : heldKey
+      ? `Ask, or hold ${heldKey} to talk…`
+      : "Ask, or hold 🎙️ to talk…";
 
   return (
     // A docked column, not a drawer: the panel fills the width its host dock
@@ -2476,14 +2614,24 @@ function VoicePanelBase({
             className="px-4 py-3 flex flex-col gap-2"
             style={{ borderTop: "1px solid var(--color-rule)" }}
           >
-            {/* Hands-free toggle — converse without holding a button. */}
-            <div className="flex items-center justify-between">
+            {/* Hands-free toggle — converse without holding a button — and
+                what the conversation is doing. */}
+            <div className="flex items-center justify-between gap-2">
               <span style={{ fontSize: "12px", color: MUTED }}>
-                {handsFree
-                  ? "Hands-free — just talk; it sends on a pause"
-                  : "Hold to talk, or go hands-free"}
+                {!handsFree
+                  ? "Hold to talk, or go hands-free"
+                  : listening
+                    ? "Hands-free — just talk; it sends on a pause"
+                    : waiting
+                      ? `${caption.text} (tap 🎙️ to interrupt)`
+                      : turn.phase === "streaming"
+                        ? "Answering… (tap 🎙️ to interrupt)"
+                        : speechState === "speaking" || speechState === "paused"
+                          ? "Speaking… (tap 🎙️ to interrupt)"
+                          : "Hands-free — getting ready to listen"}
               </span>
               <button
+                ref={handsFreeSwitchRef}
                 type="button"
                 onClick={toggleHandsFree}
                 role="switch"
@@ -2491,6 +2639,7 @@ function VoicePanelBase({
                 title="Toggle hands-free conversation"
                 className="rounded-full px-2.5 py-1 select-none"
                 style={{
+                  flexShrink: 0,
                   fontSize: "12px",
                   fontWeight: 600,
                   border: "1px solid var(--color-rule)",
@@ -2507,92 +2656,13 @@ function VoicePanelBase({
               </button>
             </div>
 
-            {/* Primary control: hands-free status (tap to interrupt) when on,
-                else the push-to-talk hold button. */}
-            {handsFree ? (
-              <button
-                type="button"
-                onClick={onHandsFreeButton}
-                title="Hands-free — tap to interrupt and listen"
-                aria-label="Hands-free status"
-                className="w-full rounded-md px-3 py-2.5 select-none"
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: listening
-                    ? "var(--color-danger, #c0392b)"
-                    : "var(--color-anchor-bg)",
-                  color: listening ? "#fff" : "var(--color-anchor-text)",
-                  cursor: "pointer",
-                  transition: "background 120ms ease",
-                }}
-              >
-                {listening
-                  ? "● Listening — just talk"
-                  : waiting
-                    ? `${caption.text} (tap to interrupt)`
-                    : turn.phase === "streaming"
-                      ? "Answering… (tap to interrupt)"
-                      : speechState === "speaking" || speechState === "paused"
-                        ? "🔊 Speaking… (tap to interrupt)"
-                        : "🎧 Hands-free on — getting ready to listen"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onMouseDown={() => startTalk()}
-                onMouseUp={stopTalk}
-                onMouseLeave={stopTalk}
-                onTouchStart={(e) => {
-                  e.preventDefault();
-                  startTalk();
-                }}
-                onTouchEnd={(e) => {
-                  e.preventDefault();
-                  stopTalk();
-                }}
-                // Space held on the button itself is a hold too — the key aimed
-                // at the thing. Its own press is left alone.
-                onKeyDown={(e) => {
-                  if (e.code === "Space" && !e.repeat) beginKeyHold();
-                }}
-                title="Hold to talk (or hold Space with the panel focused)"
-                aria-label="Hold to talk"
-                aria-pressed={listening}
-                className="w-full rounded-md px-3 py-2.5 select-none"
-                style={{
-                  fontSize: "14px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  background: listening
-                    ? "var(--color-danger, #c0392b)"
-                    : "var(--color-anchor-bg)",
-                  color: listening ? "#fff" : "var(--color-anchor-text)",
-                  cursor: "pointer",
-                  transition: "background 120ms ease",
-                }}
-              >
-                {listening ? "● Listening — release to send" : "🎙️ Hold to talk"}
-              </button>
-            )}
-            {listening && (
-              <p
-                style={{
-                  fontSize: "12px",
-                  fontStyle: "italic",
-                  color: MUTED,
-                  minHeight: "1.2em",
-                }}
-              >
-                {partial || "Listening…"}
-              </p>
-            )}
-
-            {/* Typed turn — chat into the same conversation when you don't
-                want to talk. Enter sends (or queues, while a reply runs); the
-                reply is spoken as usual. Never disabled. */}
+            {/* One input row: type, or hold the mic (or Space, or the
+                dictation key) and talk — released, it sends. Enter sends a
+                typed turn (or queues it while a reply runs); the reply is
+                spoken as usual. Never disabled. While the mic listens, the
+                dictation strip floats over this row with the words so far. */}
             <form
+              ref={inputRowRef}
               className="flex items-center gap-1.5"
               onSubmit={(e) => {
                 e.preventDefault();
@@ -2602,7 +2672,7 @@ function VoicePanelBase({
               <input
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
-                placeholder={busy ? "Type to queue a follow-up…" : "Or type instead…"}
+                placeholder={busy ? "Type to queue a follow-up…" : talkPlaceholder}
                 aria-label="Type a message to the voice agent"
                 spellCheck={false}
                 className="flex-1 rounded-md px-2.5 py-1.5"
@@ -2615,6 +2685,46 @@ function VoicePanelBase({
                   minWidth: 0,
                 }}
               />
+              {handsFree ? (
+                <button
+                  type="button"
+                  onClick={onHandsFreeButton}
+                  title="Hands-free — tap to interrupt and listen"
+                  aria-label="Hands-free status"
+                  aria-pressed={listening}
+                  className="rounded-md select-none"
+                  style={{ ...MIC_BUTTON, ...(listening ? MIC_HOT : null) }}
+                >
+                  🎙️
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onMouseDown={() => startTalk()}
+                  onMouseUp={stopTalk}
+                  onMouseLeave={stopTalk}
+                  onTouchStart={(e) => {
+                    e.preventDefault();
+                    startTalk();
+                  }}
+                  onTouchEnd={(e) => {
+                    e.preventDefault();
+                    stopTalk();
+                  }}
+                  // Space held on the button itself is a hold too — the key
+                  // aimed at the thing. Its own press is left alone.
+                  onKeyDown={(e) => {
+                    if (e.code === "Space" && !e.repeat) beginKeyHold();
+                  }}
+                  title="Hold to talk (or hold Space with the panel focused)"
+                  aria-label="Hold to talk"
+                  aria-pressed={listening}
+                  className="rounded-md select-none"
+                  style={{ ...MIC_BUTTON, ...(listening ? MIC_HOT : null) }}
+                >
+                  🎙️
+                </button>
+              )}
               <button
                 // Keyed by role: a stop that turns into a send must not be
                 // the same element mid-click.
