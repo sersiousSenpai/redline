@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:15:15.159Z",
+  "startedAt": "2026-10-18T09:20:00.312Z",
   "fixture": "fixtures/flow-convo-qa",
   "screenshots": [
     "4b-aurora.png",
@@ -102,7 +102,7 @@
       "details": {
         "expectArgs": {
           "terminalId": "term-qa",
-          "nonce": "138e1c14-560e-4213-81c8-ee2a5ed9bb81",
+          "nonce": "8936d721-7801-46cb-b0e8-7a54d6b37da7",
           "text": "Also check the D3 crash reports"
         },
         "submitArgs": {
@@ -980,7 +980,7 @@
   ],
   "errors": [],
   "sourceSha256": {
-    "src/shell/SessionConversation.tsx": "07a83636a8a89115a695c84496eebb6bdcf5cf72673c9359738c8a7b8c6d9697",
+    "src/shell/SessionConversation.tsx": "b32984febabd8ce7fe305e6a5ce641b0990ad2e072696c778c26c90c7fef389c",
     "src/shell/SessionComposer.tsx": "eaf0320e6a2c3143f87a678f46a9fdc645a5029e294cdbc07a5cb70e262d4052",
     "src/shell/AskCard.tsx": "38e9e7e5c11dff87583ba667b0031ddd98b627cb4a044d37163f30cb2f1a6720",
     "src/shell/conversation.css": "b221202883d835458025ba1d95f569f3b37de91363ef3007ae2f9947f0cdf676",
@@ -994,6 +994,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-convo-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:15:46.126Z",
+  "finishedAt": "2026-10-18T09:20:28.533Z",
   "passed": true
 }

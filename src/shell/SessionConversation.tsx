@@ -556,12 +556,13 @@ function SegmentView({
       )}
       <Items items={segment.shown} ended={turn.ended} projectPath={projectPath} />
       {segment.plan &&
-        (segment.plan.plan.toolUseId === plan.latest ? (
-          plan.open ? (
-            <PlanReady stats={plan.stats} onOpen={onOpenPlan} />
-          ) : (
-            <InlinePlan title={plan.title ?? segment.plan.plan.title} marks={plan.marks} onOpen={onOpenPlan} />
-          )
+        // The latest plan: "Plan ready" beside its open panel until it is
+        // answered, one inline line while the panel is closed. An earlier
+        // or answered one is a quiet line, with its outcome under it.
+        (segment.plan.plan.toolUseId === plan.latest && !plan.open ? (
+          <InlinePlan title={plan.title ?? segment.plan.plan.title} marks={plan.marks} onOpen={onOpenPlan} />
+        ) : segment.plan.plan.toolUseId === plan.latest && segment.plan.plan.outcome === null ? (
+          <PlanReady stats={plan.stats} onOpen={onOpenPlan} />
         ) : (
           <div className="rl-convo-quiet">
             <FilePenLine size={13} aria-hidden />
