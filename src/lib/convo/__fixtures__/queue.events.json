@@ -1,0 +1,9 @@
+[
+  { "id": "l01", "epoch": 0, "offset": 100, "ts": 1760774401000, "kind": "user_text", "text": "Refactor the parser", "promptId": "p-1" },
+  { "id": "l02", "epoch": 0, "offset": 400, "ts": 1760774402000, "kind": "queued", "op": "enqueue", "text": "also add tests" },
+  { "id": "l03", "epoch": 0, "offset": 600, "ts": 1760774403000, "kind": "queued", "op": "enqueue", "text": "and update the docs" },
+  { "id": "l04", "epoch": 0, "offset": 800, "ts": 1760774404000, "kind": "queued", "op": "enqueue", "text": "never mind the docs" },
+  { "id": "l05", "epoch": 0, "offset": 1000, "ts": 1760774405000, "kind": "queued", "op": "remove", "text": "and update the docs" },
+  { "id": "l06", "epoch": 0, "offset": 1200, "ts": 1760774406000, "kind": "queued", "op": "dequeue", "text": null },
+  { "id": "host:1", "epoch": 0, "offset": 1200, "ts": 1760774406100, "kind": "readiness", "ready": false, "blocker": "native_dialog" }
+]

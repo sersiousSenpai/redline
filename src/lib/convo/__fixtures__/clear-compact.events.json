@@ -1,0 +1,16 @@
+[
+  { "id": "host:1", "epoch": 0, "offset": 0, "ts": 1760774400000, "kind": "bound", "harness": "claude", "sessionId": "sess-a", "transcriptPath": null, "source": "startup" },
+  { "id": "l01", "epoch": 0, "offset": 100, "ts": 1760774401000, "kind": "user_text", "text": "Summarise the repo", "promptId": null },
+  { "id": "l02", "epoch": 0, "offset": 500, "ts": 1760774402000, "kind": "tool_use", "toolUseId": "toolu_20", "name": "Glob", "summary": "src/**/*.ts" },
+  { "id": "l03", "epoch": 0, "offset": 900, "ts": 1760774402500, "kind": "tool_result", "toolUseId": "toolu_20", "isError": false, "preview": "412 files" },
+  { "id": "l04", "epoch": 0, "offset": 1300, "ts": 1760774404000, "kind": "assistant_text", "text": "It is a Tauri app.", "model": "claude-sonnet-4-5" },
+  { "id": "l05", "epoch": 0, "offset": 1700, "ts": 1760774404500, "kind": "compact", "trigger": "auto" },
+  { "id": "l06", "epoch": 0, "offset": 2100, "ts": 1760774405000, "kind": "tool_use", "toolUseId": "toolu_21", "name": "Bash", "summary": "cargo test --lib" },
+  { "id": "l07", "epoch": 0, "offset": 2500, "ts": 1760774409000, "kind": "interrupted" },
+  { "id": "host:2", "epoch": 1, "offset": 0, "ts": 1760774410000, "kind": "epoch", "reason": "clear" },
+  { "id": "host:3", "epoch": 1, "offset": 0, "ts": 1760774410001, "kind": "bound", "harness": "claude", "sessionId": "sess-b", "transcriptPath": null, "source": "clear" },
+  { "id": "m01", "epoch": 1, "offset": 90, "ts": 1760774411000, "kind": "mode_change", "mode": "default" },
+  { "id": "m02", "epoch": 1, "offset": 300, "ts": 1760774412000, "kind": "user_text", "text": "Start over", "promptId": null },
+  { "id": "m03", "epoch": 1, "offset": 700, "ts": 1760774414000, "kind": "assistant_text", "text": "Fresh start.", "model": "claude-sonnet-4-5" },
+  { "id": "host:4", "epoch": 1, "offset": 700, "ts": 1760774414100, "kind": "turn_end", "durationMs": null }
+]
