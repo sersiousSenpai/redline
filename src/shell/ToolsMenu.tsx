@@ -19,7 +19,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { GitPullRequest, Globe, Monitor, Play, SquareTerminal, Wand } from "lucide-react";
+import { Brain, Columns2, Command, GitPullRequest, Globe, LogOut, Monitor, Play, Rows2, SquareTerminal, Users, Wand } from "lucide-react";
 import { useMenuOverlay } from "../components/menuOverlay";
 import { relativeTime, type MemoryStatus } from "../components/MemoryStatusPill";
 import type { ToolDescriptor, ToolId } from "../config/workspace";
@@ -32,6 +32,17 @@ const ICONS: Partial<Record<ToolId, typeof Globe>> = {
   servers: Monitor,
   runs: Play,
   terminals: SquareTerminal,
+};
+
+/** The utility rows' icons, here rather than in App so the boot path never
+ *  carries them; an id without one keeps the label column with a blank. */
+const EXTRA_ICONS: Record<string, typeof Globe> = {
+  palette: Command,
+  join: Users,
+  inspector: Brain,
+  tile: Columns2,
+  split: Rows2,
+  harness: LogOut,
 };
 
 /** A utility row under the tools: what classic's header carried. */
@@ -178,21 +189,29 @@ export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, ex
       {surfaces.length > 0 && more.length > 0 && <div className="rl-tools-menu-divider" role="separator" />}
       {more.map(row)}
       {extras.length > 0 && <div className="rl-tools-menu-divider" role="separator" />}
-      {extras.map((x) => (
-        <button
-          key={x.id}
-          type="button"
-          role="menuitem"
-          onClick={() => {
-            onClose();
-            x.onPick();
-          }}
-        >
-          <span>{x.label}</span>
-          <span className="rl-tools-menu-fill" />
-          {x.hint && <span className="rl-tools-menu-key">{x.hint}</span>}
-        </button>
-      ))}
+      {extras.map((x) => {
+        const Icon = EXTRA_ICONS[x.id];
+        return (
+          <button
+            key={x.id}
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              x.onPick();
+            }}
+          >
+            {Icon ? (
+              <Icon size={14} className="rl-tools-menu-icon" aria-hidden />
+            ) : (
+              <span className="rl-tools-menu-icon rl-tools-menu-blank" aria-hidden />
+            )}
+            <span>{x.label}</span>
+            <span className="rl-tools-menu-fill" />
+            {x.hint && <span className="rl-tools-menu-key">{x.hint}</span>}
+          </button>
+        );
+      })}
     </div>,
     document.body,
   );

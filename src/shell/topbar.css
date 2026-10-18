@@ -271,6 +271,9 @@
   flex: none;
   color: var(--color-ink-4);
 }
+.rl-tools-menu-blank {
+  width: 14px;
+}
 .rl-tools-menu-fill {
   flex: 1;
 }
