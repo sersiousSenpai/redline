@@ -172,6 +172,8 @@ export function FlowStartTools({ picker, model, mode, combining, onAttach, liste
         type="button"
         onClick={(e) => onStart(e.metaKey || e.ctrlKey)}
         disabled={!startable}
+        // Pressed on the resting screen it launches; it doesn't zoom first.
+        data-rl-door-go=""
         title={
           opening ? "Opening the conversation…"
           : combining > 0 ? `Combine ${combining} plans into one new plan (⏎)`

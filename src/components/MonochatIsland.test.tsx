@@ -472,6 +472,24 @@ describe("the flow shell", () => {
     expect(document.activeElement).toBe(stage);
   });
 
+  it("a send control in the resting box launches where it is: it engages nothing", async () => {
+    const onOpen = vi.fn();
+    await render(<Harness landing onOpen={onOpen}>
+      <div className="rl-frontdoor has-welcome">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Plan it"/><button id="start" data-rl-door-go="">Start plan</button></div>
+      </div>
+    </Harness>);
+    const start = host.querySelector<HTMLButtonElement>("#start")!;
+    await pointer(start, "pointerdown", { button: 0 });
+    await act(async () => start.focus());
+    await key(start, { key: "Enter" });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(pose()).toBe("entry");
+    // The box around it still engages.
+    await pointer(main(), "pointerdown", { button: 0 });
+    expect(pose()).toBe("conversation");
+  });
+
   it("shows the pill on a Tools page", async () => {
     await render(<Stage landing={false} pill/>);
     expect(pill().dataset.hidden).toBe("false");

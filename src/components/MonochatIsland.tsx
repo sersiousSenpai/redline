@@ -101,7 +101,13 @@ export const hasChildOverlay = () => Array.from(document.querySelectorAll(OVERLA
 /** The door's own composer box, and the context chips that ride with what it
  *  sends: where the caret is "in the box". A chat's composer is not it. */
 const BOX = ".has-welcome .rl-fd-island, .has-welcome .rl-context-chips";
-const inBox = (target: EventTarget | null) => !!(target as Element | null)?.closest?.(BOX);
+/** A send control in the box (`data-rl-door-go`, the start screen's Start)
+ *  is not the caret going into it: pressed at rest it launches where it is,
+ *  instead of zooming the door for the moment the launch takes. */
+const inBox = (target: EventTarget | null) => {
+  const element = target as Element | null;
+  return !!element?.closest?.(BOX) && !element.closest("[data-rl-door-go]");
+};
 /** A key that types into a field: what engages the resting door, and what
  *  moves the caret from the quiet room into its box. */
 const typing = (event: ReactKeyboardEvent) => !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing

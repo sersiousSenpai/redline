@@ -240,6 +240,11 @@ try {
   await press({ x: 120, y: 700 }); await delay(700); await settle();
   check("zoom: a tap outside the box dismisses, back to rest", await cdp.evaluate("(() => { const l = document.querySelector('.rl-frontdoor-focus'); return l.dataset.open === 'false' && !l.hasAttribute('data-zoom') && l.hasAttribute('data-landed'); })()"));
 
+  // ── Start, pressed at rest: it launches where it is ────────────────────
+  await press(await centre(".rl-fs-go")); await delay(400); await settle();
+  check("Start pressed on the resting screen launches the plan without zooming the door first", await cdp.evaluate("window.__qa.launched() === 'plan' && document.querySelector('.rl-frontdoor-focus').dataset.open === 'false' && !document.querySelector('.rl-frontdoor-focus').hasAttribute('data-zoom')"));
+  await cdp.evaluate(`window.__qa.setText(${JSON.stringify(SENTENCE)})`); await settle();
+
   // ── The modes, ⌘↩ and the keyboard ─────────────────────────────────────
   await press(await centre('.rl-fs-modes [data-mode="chat"]')); await delay(900); await key("Escape", "Escape", 27); await delay(600); await settle();
   check("Chat: its own hint, \"Start chat ↵\", a chat placeholder", await cdp.evaluate("document.querySelector('.rl-fs-modes [data-mode=chat]').getAttribute('aria-checked') === 'true' && document.querySelector('.rl-fs-hint').textContent.startsWith('Think it through with Claude.') && document.querySelector('.rl-fs-go').textContent === 'Start chat↵'"));
