@@ -124,6 +124,11 @@ describe("the sidebar's launch rows", () => {
     expect(rows[0]).toMatchObject({ terminalId: "T1", title: "Read the obsidian build log and plan the next roadmap steps", projectPath: "/p/din", startedAt: 100 });
   });
 
+  it("takes the CLI's own name for the session once it has one", () => {
+    const rows = sidebarLaunches([launch("T1"), launch("T2")], new Map(), new Map([["T2", "Din roadmap"]]));
+    expect(rows.map((r) => r.title)).toEqual(["Read the obsidian build log and plan the next roadmap steps", "Din roadmap"]);
+  });
+
   it("titles by the first line, cut to a row", () => {
     expect(launchTitle("\n\n  First line  \nsecond")).toBe("First line");
     expect(launchTitle("x".repeat(100))).toHaveLength(80);

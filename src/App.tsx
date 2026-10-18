@@ -392,6 +392,7 @@ import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
 import type { ConversationLayout } from "./shell/FlowStage";
 import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
 import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
+import { convoPrebind } from "./lib/convo/api";
 import { useStageDock } from "./lib/stageDock";
 const FlowStage = lazy(() => import("./shell/FlowStage"));
 const SessionConversation = lazy(() => import("./shell/SessionConversation"));
@@ -2471,6 +2472,7 @@ function App() {
   const {
     terminals: sessionTerminals,
     attention: terminalAttention,
+    titles: terminalTitles,
     bind: bindSessionTerminals,
   } = useSessionTerminals(flowShell);
   const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
@@ -2519,8 +2521,8 @@ function App() {
   // The sidebar's launch rows (its flow layout): `launches`, with
   // `activeLaunchId` and `selectFlowLaunch`.
   const flowSidebarLaunches = useMemo(
-    () => (flowShell ? sidebarLaunches(flowLaunches, terminalKinds) : []),
-    [flowShell, flowLaunches, terminalKinds],
+    () => (flowShell ? sidebarLaunches(flowLaunches, terminalKinds, terminalTitles) : []),
+    [flowShell, flowLaunches, terminalKinds, terminalTitles],
   );
   // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
   const { working: flowWorking, needs: flowNeeds } = useMemo(
@@ -2575,6 +2577,11 @@ function App() {
   // under the conversation.
   const stageTerminalId = stageTarget.kind === "start" ? null : stageTarget.terminalId;
   const flowTermStage = flowStageOwns && flowView === "terminal" && stageTerminalId !== null;
+  // Whether the conversation can be seen: on the stage, not under ⌘J's
+  // terminal, and not behind the full pose's Feedback tab.
+  const flowPanelTab = useFlow((s) => s.panelTab);
+  const flowConvoOnScreen =
+    flowStageOwns && flowView === "conversation" && !(flowPainted.pose === "full" && flowPanelTab === "feedback");
   const flowDockHidden = flowShell && mainSurface === "document" && !termFullscreenPref && !flowTermStage;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
@@ -6351,6 +6358,12 @@ function App() {
       fail("Couldn't open a terminal to resume in.");
       return;
     }
+    // Flow: the plan's conversation is this terminal's from now on — bound
+    // before the resumed CLI's SessionStart, so it binds the moment it does.
+    if (flowShell) {
+      bindSessionTerminals([{ sessionId, terminalId: id }]);
+      void convoPrebind(id, sessionId).catch(() => {});
+    }
     onRestore({
       type: "dispatched",
       sessionId,
@@ -8935,10 +8948,13 @@ function App() {
   const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : stageTarget.kind;
   const flowPlanId = flowTarget === "plan" && stageTarget.kind === "plan" ? stageTarget.sessionId : null;
   const flowTerminalId = flowTarget === "launch" || flowTarget === "plan" ? stageTerminalId : null;
+  // The CLI's own name for the session (`convo-title`) stands in until the
+  // plan brings a title of its own.
+  const flowCliTitle = stageTerminalId ? terminalTitles.get(stageTerminalId) ?? null : null;
   const flowTitle =
     flowTarget === "chat" ? flowChat?.title || "Chat"
-      : flowTarget === "plan" && flowSummary ? sessionTitle(flowSummary)
-        : flowTarget === "launch" && stageTarget.kind === "launch" ? launchTitle(stageTarget.prompt)
+      : flowTarget === "plan" && flowSummary ? (flowSummary.titleOverride || flowSummary.planTitle ? sessionTitle(flowSummary) : flowCliTitle ?? sessionTitle(flowSummary))
+        : flowTarget === "launch" && stageTarget.kind === "launch" ? flowCliTitle ?? launchTitle(stageTarget.prompt)
           : null;
   const flowMode = sessionMode({
     target: flowTarget,
@@ -11612,6 +11628,8 @@ function App() {
               // discussion surface): open beside the stage, or closed again.
               talking={voiceDocked}
               onTalk={flowTalk}
+              // Out of sight, its questions go to the terminal (lib/askRelease).
+              hidden={!flowConvoOnScreen}
             />
           </ErrorBoundary>
         </Suspense>,

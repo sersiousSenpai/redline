@@ -31,6 +31,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import type { TermAttention } from "../types";
+import {
+  CONVO_BOUND_EVENT,
+  CONVO_TITLE_EVENT,
+  type ConvoBoundNotice,
+  type ConvoTitleNotice,
+} from "./convo/types";
 import type { NeedReason } from "./sessionGroups";
 
 /** What the session stage shows. */
@@ -59,15 +65,6 @@ export interface FlowLaunch {
   /** The dock has reported this terminal live at least once. Until then an
    *  absent id is ignorance rather than news (the `launchLiveness` rule). */
   confirmed: boolean;
-}
-
-/** The `convo-bound` payload: the engine bound a terminal's CLI session to
- *  its transcript. Additive to the conversation contract, so typed here. */
-export interface ConvoBound {
-  terminalId: string;
-  sessionId: string;
-  harness: "claude" | "codex";
-  transcriptPath: string;
 }
 
 export type SessionTerminals = ReadonlyMap<string, string>;
@@ -198,12 +195,14 @@ export interface SidebarLaunch {
 export function sidebarLaunches(
   launches: readonly FlowLaunch[],
   kinds: ReadonlyMap<string, TermAttention["kind"]>,
+  titles: ReadonlyMap<string, string> = new Map(),
 ): SidebarLaunch[] {
   return launches.map((l) => {
     const kind = kinds.get(l.terminalId);
     return {
       terminalId: l.terminalId,
-      title: launchTitle(l.prompt),
+      // The CLI's own name for the session, once it has one (`convo-title`).
+      title: titles.get(l.terminalId) || launchTitle(l.prompt),
       startedAt: l.startedAt,
       projectPath: l.projectPath,
       // Nothing heard yet is a CLI still starting, which is work.
@@ -304,12 +303,15 @@ export function sidebarActivity(
 export function useSessionTerminals(enabled: boolean): {
   terminals: SessionTerminals;
   attention: ReadonlyMap<string, TermAttention>;
+  /** The CLIs' own names for their sessions, by terminal (`convo-title`). */
+  titles: ReadonlyMap<string, string>;
   bind: (pairs: readonly { sessionId: string | null; terminalId: string }[]) => void;
 } {
   const [terminals, setTerminals] = useState<SessionTerminals>(() => new Map());
   const [attention, setAttention] = useState<ReadonlyMap<string, TermAttention>>(
     () => new Map(),
   );
+  const [titles, setTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
   const bind = useCallback(
     (pairs: readonly { sessionId: string | null; terminalId: string }[]) =>
       setTerminals((prev) => bindTerminals(prev, pairs)),
@@ -328,7 +330,14 @@ export function useSessionTerminals(enabled: boolean): {
       setAttention((prev) => latestAttention(prev, rows));
     };
     keep(listen<TermAttention>("term-attention", (e) => take([e.payload])));
-    keep(listen<ConvoBound>("convo-bound", (e) => bind([e.payload])));
+    keep(listen<ConvoBoundNotice>(CONVO_BOUND_EVENT, (e) => bind([e.payload])));
+    keep(
+      listen<ConvoTitleNotice>(CONVO_TITLE_EVENT, (e) => {
+        const { terminalId, sessionId, title } = e.payload;
+        bind([{ sessionId, terminalId }]);
+        setTitles((prev) => (prev.get(terminalId) === title ? prev : new Map(prev).set(terminalId, title)));
+      }),
+    );
     void invoke<TermAttention[]>("term_attention_snapshot")
       .then((rows) => {
         if (!gone && Array.isArray(rows)) take(rows);
@@ -339,5 +348,5 @@ export function useSessionTerminals(enabled: boolean): {
       for (const u of unlisteners) u();
     };
   }, [enabled, bind]);
-  return { terminals, attention, bind };
+  return { terminals, attention, titles, bind };
 }
