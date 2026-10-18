@@ -54,6 +54,8 @@
   width: 24px;
   height: 24px;
   margin: 0 -4.5px;
+  /* The glyph centred half a pixel high, where the boards' icon font sits. */
+  padding-bottom: 2px;
   display: grid;
   place-items: center;
   border-radius: var(--rl-radius-row);
@@ -166,12 +168,13 @@
   background: currentColor;
 }
 
-/* Conversation | Terminal: 22px segments in a 2px-padded track. */
+/* Conversation | Terminal: 22px segments in a 2px-padded track. The boards
+   draw the track as its 1px outline, in the track colour (fill-3). */
 .rl-ftb-seg {
   flex: none;
   display: flex;
   padding: 2px;
-  border: 1px solid var(--color-rule);
+  border: 1px solid var(--color-fill-3);
   border-radius: var(--rl-radius-row);
   font-size: var(--rl-text-chip);
 }

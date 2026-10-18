@@ -62,6 +62,7 @@ export interface SettingsGearProps {
   /** The flow top bar's bare gear (see SettingsMenu's `compact`). */
   compact?: boolean;
   triggerClassName?: string;
+  icon?: ReactNode;
 }
 
 export function SettingsGear({
@@ -87,11 +88,13 @@ export function SettingsGear({
   surfacesPanel,
   compact,
   triggerClassName,
+  icon,
 }: SettingsGearProps) {
   return (
     <SettingsMenu
       compact={compact}
       triggerClassName={triggerClassName}
+      icon={icon}
       terminal={<TerminalSettings />}
       transparency={<TransparencySettings />}
       shell={<ShellSettings />}

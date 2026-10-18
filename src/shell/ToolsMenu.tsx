@@ -40,12 +40,12 @@ export interface ToolsMenuProps {
   onClose: () => void;
 }
 
-/** Below the trigger by the boards' 7px, its right edge 2px past the
- *  trigger's (board 4d: the menu at 44px down, 44px in). */
+/** Below the trigger by the boards' 7px, its right edge 1px past the
+ *  trigger's (board 4d: the open Tools box ends at 1234, the menu at 1235). */
 function placeUnder(anchor: HTMLElement | null): { top: number; right: number } {
   const r = anchor?.getBoundingClientRect();
   if (!r) return { top: 44, right: 44 };
-  return { top: r.bottom + 7, right: Math.max(8, window.innerWidth - r.right - 2) };
+  return { top: r.bottom + 7, right: Math.max(8, window.innerWidth - r.right - 1) };
 }
 
 export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, onClose }: ToolsMenuProps) {

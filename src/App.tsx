@@ -104,7 +104,7 @@ import { Header } from "./components/Header";
 import { FlowTopBar, togglePlanPanel } from "./shell/FlowTopBar";
 import { isFlowShell } from "./lib/shellFlag";
 import { toggleStage, toggleSidebar as toggleFlowSidebar, setPlanPose } from "./shell/flowState";
-import { launchTitle, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
+import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
 import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
 import { TOOL_DESCRIPTORS, toolForKey, toolSurfaces, type ToolId } from "./config/workspace";
 import { Button } from "./components/ui/Button";
@@ -8497,25 +8497,27 @@ function App() {
   });
   const flowTools = useMemo(() => toolSurfaces(effectiveWorkspace), [effectiveWorkspace]);
   const flowToolSurface = flowTools.find((t) => t.id === mainSurface)?.id ?? null;
-  // "● N needs you": held plans, terminals asking for something, and a
-  // blocking code-review request — never the session already on screen, and
-  // a held plan's own terminal once, as its plan.
-  const flowHeldElsewhere = summaries.filter((s) => s.held && s.sessionId !== activeId && !s.archivedAt);
-  const flowHeldTerms = new Set(flowHeldElsewhere.map((s) => s.heldTerminalId));
-  const flowTermsWaiting = flowNeedsYouTerms.filter((id) => id !== flowTerminalId && !flowHeldTerms.has(id));
-  const flowNeedsYou = flowHeldElsewhere.length + flowTermsWaiting.length + (codeReview.holdActive ? 1 : 0);
+  // "● N needs you" (lib/sessionMode `needsYou`): what waits on you anywhere
+  // but the session on screen.
+  const flowWaiting = needsYou({
+    summaries,
+    needsYouTerminals: flowNeedsYouTerms,
+    reviewHold: codeReview.holdActive,
+    activeSessionId: flowPlanId,
+    activeTerminalId: flowTerminalId,
+  });
   // A gesture, so a trip like any other: the door steps aside for it.
   const flowJumpToNeedsYou = () => {
-    const plan = flowHeldElsewhere[0];
+    const plan = flowWaiting.plans[0];
     if (plan) {
       tripDoor();
       selectSessions();
-      setActiveId(plan.sessionId);
+      setActiveId(plan);
       selectSurface("document");
-      setPlanPose(plan.sessionId, "split");
-    } else if (flowTermsWaiting.length > 0) {
+      setPlanPose(plan, "split");
+    } else if (flowWaiting.terminals.length > 0) {
       jumpToNeedsYou();
-    } else if (codeReview.holdActive) {
+    } else if (flowWaiting.review) {
       tripDoor();
       selectSurface("review");
     }
@@ -8661,7 +8663,7 @@ function App() {
           terminalId={flowTerminalId}
           toolSurface={flowToolSurface}
           onShowStage={showFlowStage}
-          needsYou={flowNeedsYou}
+          needsYou={flowWaiting.count}
           onJumpToNeedsYou={flowJumpToNeedsYou}
           tools={flowTools}
           liveRuns={summaries.filter((s) => isLiveRunState(s.runState)).length}

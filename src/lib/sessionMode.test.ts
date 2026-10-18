@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { launchTitle, modeColors, sessionMode, sessionTitle, type SessionModeInput } from "./sessionMode";
+import { launchTitle, modeColors, needsYou, sessionMode, sessionTitle, type SessionModeInput } from "./sessionMode";
 
 const v = (...ns: number[]) => ns.map((versionNumber) => ({ versionNumber, restored: false }));
 const plan = (over: Partial<SessionModeInput> = {}): SessionModeInput => ({
@@ -105,5 +105,60 @@ describe("titles", () => {
     const long = "x".repeat(120);
     expect(launchTitle(long)).toHaveLength(80);
     expect(launchTitle(long).endsWith("…")).toBe(true);
+  });
+});
+
+describe("needsYou: what waits on you, never the session on screen", () => {
+  const s = (sessionId: string, over: Partial<{ held: boolean; heldTerminalId: string | null; archivedAt: number | null }> = {}) => ({
+    sessionId,
+    held: false,
+    heldTerminalId: null,
+    archivedAt: null,
+    ...over,
+  });
+  const base = { summaries: [], needsYouTerminals: [], reviewHold: false, activeSessionId: null, activeTerminalId: null };
+
+  it("boards 4c / 4d: the open plan is held and nothing else waits — no pill", () => {
+    const r = needsYou({ ...base, summaries: [s("din", { held: true, heldTerminalId: "t1" })], activeSessionId: "din", activeTerminalId: "t1" });
+    expect(r.count).toBe(0);
+  });
+
+  it("board 5a: another session's question counts while you read Dialcrown", () => {
+    const r = needsYou({
+      ...base,
+      summaries: [s("dialcrown"), s("vehicles")],
+      needsYouTerminals: ["t-vehicles"],
+      activeSessionId: "dialcrown",
+      activeTerminalId: "t-dialcrown",
+    });
+    expect(r).toEqual({ count: 1, plans: [], terminals: ["t-vehicles"], review: false });
+  });
+
+  it("the active session's own terminal never counts, even when it asks", () => {
+    const r = needsYou({ ...base, needsYouTerminals: ["t1", "t2"], activeSessionId: "s1", activeTerminalId: "t1" });
+    expect(r.terminals).toEqual(["t2"]);
+    expect(r.count).toBe(1);
+  });
+
+  it("on the start screen everything waiting counts, the last plan you read included", () => {
+    const r = needsYou({ ...base, summaries: [s("s1", { held: true })], needsYouTerminals: ["t9"] });
+    expect(r.count).toBe(2);
+    expect(r.plans).toEqual(["s1"]);
+  });
+
+  it("a held plan elsewhere counts once, its blocked terminal folded into it", () => {
+    const r = needsYou({ ...base, summaries: [s("other", { held: true, heldTerminalId: "t2" })], needsYouTerminals: ["t2"], activeSessionId: "s1" });
+    expect(r).toEqual({ count: 1, plans: ["other"], terminals: [], review: false });
+  });
+
+  it("archived plans never count; a review hold always does", () => {
+    const r = needsYou({ ...base, summaries: [s("gone", { held: true, archivedAt: 5 })], reviewHold: true });
+    expect(r).toEqual({ count: 1, plans: [], terminals: [], review: true });
+  });
+
+  it("orders plans, then terminals, then the review — where the pill jumps first", () => {
+    const r = needsYou({ ...base, summaries: [s("a", { held: true }), s("b", { held: true })], needsYouTerminals: ["t1"], reviewHold: true });
+    expect([r.plans, r.terminals, r.review]).toEqual([["a", "b"], ["t1"], true]);
+    expect(r.count).toBe(4);
   });
 });

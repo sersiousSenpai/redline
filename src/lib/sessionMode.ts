@@ -129,3 +129,53 @@ export function launchTitle(prompt: string): string {
   const line = prompt.trim().split("\n", 1)[0]?.trim() ?? "";
   return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line || "New session";
 }
+
+// ── "● N needs you" ────────────────────────────────────────────────────────
+// The top bar's count of what is waiting on you somewhere else: held plans,
+// terminals blocked on a question or a permission, and a code-review request
+// holding its agent. Never the session on screen (boards 4c and 4d hold the
+// open plan and draw no pill; 5a counts another session's question while you
+// read Dialcrown), and a held plan's own terminal once, as its plan.
+
+export interface NeedsYouInput {
+  summaries: ReadonlyArray<{
+    sessionId: string;
+    held: boolean;
+    heldTerminalId?: string | null;
+    archivedAt?: number | null;
+  }>;
+  /** Terminals in the needs-you state proper, oldest first. */
+  needsYouTerminals: readonly string[];
+  /** A `/redline-code-review` request is holding its agent. */
+  reviewHold: boolean;
+  /** The plan session the stage shows, or null (start, a launch, a chat). */
+  activeSessionId: string | null;
+  /** The terminal the stage's session runs in, or null. */
+  activeTerminalId: string | null;
+}
+
+export interface NeedsYou {
+  count: number;
+  /** Where "● N needs you" goes first: held plans, then terminals, then the
+   *  review. */
+  plans: string[];
+  terminals: string[];
+  review: boolean;
+}
+
+export function needsYou(input: NeedsYouInput): NeedsYou {
+  const held = input.summaries.filter(
+    (s) => s.held && !s.archivedAt && s.sessionId !== input.activeSessionId,
+  );
+  const heldTerminals = new Set(held.map((s) => s.heldTerminalId).filter(Boolean));
+  const terminals = input.needsYouTerminals.filter(
+    (id) => id !== input.activeTerminalId && !heldTerminals.has(id),
+  );
+  const plans = held.map((s) => s.sessionId);
+  return {
+    count: plans.length + terminals.length + (input.reviewHold ? 1 : 0),
+    plans,
+    terminals,
+    review: input.reviewHold,
+  };
+}

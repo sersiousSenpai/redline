@@ -18,7 +18,7 @@
 //! through props.
 
 import { lazy, Suspense, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, FilePenLine, FileText, Hammer, MessageSquare, PanelLeft, PenLine, Terminal } from "lucide-react";
+import { ChevronDown, ChevronUp, FilePenLine, FileText, Hammer, MessageSquare, PanelLeft, PenLine, Settings, Terminal } from "lucide-react";
 import { SettingsGear, type SettingsGearProps } from "../components/SettingsGear";
 import type { ToolDescriptor, ToolId } from "../config/workspace";
 import { modeColors, type ModeKind, type SessionMode } from "../lib/sessionMode";
@@ -212,7 +212,7 @@ export function FlowTopBar({
         Tools
         {toolsOpen ? <ChevronUp size={12} aria-hidden /> : <ChevronDown size={12} aria-hidden />}
       </button>
-      <SettingsGear {...settings} compact triggerClassName="rl-ftb-icon" />
+      <SettingsGear {...settings} compact triggerClassName="rl-ftb-icon" icon={<Settings size={15} aria-hidden />} />
     </header>
       {/* Outside the header in the React tree too: a press in the menu must
           never bubble into the bar's window-drag handlers. */}
