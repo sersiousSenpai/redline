@@ -8,6 +8,7 @@ export { AlertSettings } from "./AlertSettings";
 export { FontPicker } from "./FontPicker";
 export { LintPicker } from "./LintPicker";
 export { ModeToggle } from "./ModeToggle";
+export { ShellSettings } from "./ShellSettings";
 export { SurfacesPanel } from "./SurfacesPanel";
 export { ThemePicker } from "./ThemePicker";
 export { TerminalSettings } from "./TerminalSettings";

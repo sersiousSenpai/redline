@@ -99,6 +99,13 @@ import {
 import { isLiveRunState } from "./lib/orchestration";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 import { Header } from "./components/Header";
+// The flow shell's top bar is the window-drag region, so unlike the other
+// flow pieces it loads with the app (see shell/FlowTopBar).
+import { FlowTopBar, togglePlanPanel } from "./shell/FlowTopBar";
+import { toggleStage, toggleSidebar as toggleFlowSidebar, setPlanPose } from "./shell/flowState";
+import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
+import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
+import { TOOL_DESCRIPTORS, toolForKey, toolSurfaces, type ToolId } from "./config/workspace";
 import { Button } from "./components/ui/Button";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
 // only mounts when the share dialog opens.
@@ -302,6 +309,7 @@ function prefetchSurfaceChunk(surface: string): void {
 }
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
+import { setSidebar as setFlowSidebar, useFlow } from "./shell/flowState";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
 import { useTextClearance } from "./hooks/useTextClearance";
 import { useDevServers } from "./hooks/useDevServers";
@@ -380,9 +388,9 @@ import type { TerminalTabsHandle } from "./components/TerminalTabs";
 // The flow shell's session stage: what it shows (lib/flowSessions), the plan
 // panel's pose rules (lib/flowPose) and its body, a lazy chunk the classic
 // shell never fetches.
-import { setStage, useFlow, type PlanPose } from "./shell/flowState";
+import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
 import type { ConversationLayout } from "./shell/FlowStage";
-import { deriveStageTarget, reduceLaunches, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
+import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
 import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
 import { useStageDock } from "./lib/stageDock";
 const FlowStage = lazy(() => import("./shell/FlowStage"));
@@ -972,7 +980,7 @@ function App() {
   // The four size keys below (plus BrowserPane's chat ratio) are written by
   // drag paths. Without a debounce every commit ran a synchronous
   // JSON.stringify + localStorage.setItem on the main thread mid-drag.
-  const [sidebarWidth, setSidebarWidth] = usePersistedState(
+  const [sidebarWidthPref, setSidebarWidth] = usePersistedState(
     "redline.sidebar.width",
     240,
     { debounceMs: 250 },
@@ -2078,6 +2086,9 @@ function App() {
     setFrontDoorOpen(value => !value);
   }, []);
   useEffect(() => {
+    // The flow shell's ⌘J is the stage's Conversation | Terminal instead
+    // (the flow keys below), the browser's forwarded ⌘J included.
+    if (isFlowShell()) return;
     const onKey = (e: KeyboardEvent) => {
       if (!isDockKey(e)) return;
       e.preventDefault();
@@ -2459,9 +2470,10 @@ function App() {
   }, [activeId]);
   const {
     terminals: sessionTerminals,
-    kinds: terminalKinds,
+    attention: terminalAttention,
     bind: bindSessionTerminals,
   } = useSessionTerminals(flowShell);
+  const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
   // A held plan names the terminal its CLI is waiting in.
   useEffect(() => {
     if (!flowShell) return;
@@ -2510,6 +2522,11 @@ function App() {
     () => (flowShell ? sidebarLaunches(flowLaunches, terminalKinds) : []),
     [flowShell, flowLaunches, terminalKinds],
   );
+  // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
+  const { working: flowWorking, needs: flowNeeds } = useMemo(
+    () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
+    [sessionTerminals, terminalAttention, flowLaunches],
+  );
   const activeLaunchId = stageTarget.kind === "launch" ? stageTarget.terminalId : null;
   const selectFlowLaunch = useCallback((terminalId: string) => {
     setFocusedLaunch(terminalId);
@@ -2530,6 +2547,23 @@ function App() {
       setFlowPainted((prev) => (prev.pose === pose && prev.layout === layout ? prev : { pose, layout })),
     [],
   );
+  // 4c: the split pose takes the sidebar's width for the plan, and gives it
+  // back on the way out — unless ⌘B moved it in between, which is the
+  // user's say. Through flow's own sidebar switch, so ⌘B works in the pose.
+  const splitFoldedSidebar = useRef(false);
+  const flowSplit = flowStageOwns && flowPainted.pose === "split";
+  useEffect(() => {
+    if (!flowShell) return;
+    if (flowSplit) {
+      if (getFlowState().sidebar) {
+        splitFoldedSidebar.current = true;
+        setFlowSidebar(false);
+      }
+    } else if (splitFoldedSidebar.current) {
+      splitFoldedSidebar.current = false;
+      if (!getFlowState().sidebar) setFlowSidebar(true);
+    }
+  }, [flowShell, flowSplit]);
   // The conversation is ONE mounted component in three places — the stage,
   // the split column, the full pose's Chat tab — like the chat room's host
   // below: the stage moves this node between them and the conversation in it
@@ -2567,10 +2601,13 @@ function App() {
     broken: immersiveBroken,
     enabled: workspaceImmersive(workspace),
   });
+  // Flow keeps its own sidebar switch (⌘B, shell/flowState), so the layout
+  // reads that instead of the classic shell's persisted collapse.
+  const flowSidebarOpen = useFlow((s) => s.sidebar);
   const baseShape = flowStageShape(
     effectiveShape(
       {
-        sidebarCollapsed: sidebarCollapsedPref,
+        sidebarCollapsed: isFlowShell() ? !flowSidebarOpen : sidebarCollapsedPref,
         paneCollapsed: paneCollapsedPref,
         paneFullscreen: paneFullscreenPref,
         termCollapsed: termCollapsedPref,
@@ -2579,12 +2616,7 @@ function App() {
       },
       immersive,
     ),
-    {
-      dockHidden: flowDockHidden,
-      // 4c: the split pose takes the sidebar's width for the plan; it comes
-      // back with full, closed, or a reveal.
-      sidebarHidden: flowStageOwns && flowPainted.pose === "split" && !panelBreaks.sidebar,
-    },
+    flowDockHidden,
   );
   // The second, NARROWER overlay: just the two side panels, leaving the header,
   // the footer and the terminal dock exactly where they are. The sessions list
@@ -2637,7 +2669,8 @@ function App() {
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    setSidebarCollapsed(false);
+    if (isFlowShell()) setFlowSidebar(true);
+    else setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
   const revealPane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -2655,7 +2688,8 @@ function App() {
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    setSidebarCollapsed(!sidebarCollapsed);
+    if (isFlowShell()) setFlowSidebar(sidebarCollapsed);
+    else setSidebarCollapsed(!sidebarCollapsed);
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -2840,6 +2874,10 @@ function App() {
   const [termNeedYou, setTermNeedYou] = useState(0);
   const termNeedYouRef = useRef(termNeedYou);
   termNeedYouRef.current = termNeedYou;
+  // The flow top bar's share: only terminals in needs-you proper (an agent
+  // blocked on a question or a permission), by id so the bar can leave out
+  // the session on screen.
+  const [flowNeedsYouTerms, setFlowNeedsYouTerms] = useState<string[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
   // Onboarding tour reveal/restore: the spotlight needs its target on-screen, so
@@ -3258,6 +3296,12 @@ function App() {
   const [winWidth, setWinWidth] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
+  // The flow sidebar is the boards' fixed column, not a dragged width: 232px
+  // of content plus 10px padding each side and its 1px rule at 1280, growing
+  // to 260px of content at 1600 (FlowSidebar.css). Classic keeps the drag.
+  const sidebarWidth = isFlowShell()
+    ? Math.min(281, Math.max(253, Math.round(winWidth * 0.1625) + 21))
+    : sidebarWidthPref;
 
   // The row's space model: the doc column floors at DOC_MIN and any pane
   // width past that becomes curtain overlay instead of flow. Stateless — it
@@ -6608,7 +6652,7 @@ function App() {
     }).then(() => null).catch((err: unknown) => String(err));
     if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
-    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
+    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, projectPath: req.projectPath, draftId: req.draftId, restore: req.restore };
     // Register before typing: an immediate intercept must be able to match the
     // launch. A run sends no plan, so it registers nothing for an intercept to
     // match and claims no decision window.
@@ -8185,7 +8229,14 @@ function App() {
   const paletteCommands = useMemo(
     () =>
       buildCommands({
-        surfaces: headerSurfaceList,
+        shell: isFlowShell() ? "flow" : "classic",
+        // The flow shell hints each Tool's ⌘ number beside its entry.
+        surfaces: isFlowShell()
+          ? headerSurfaceList.map((s) => {
+              const key = TOOL_DESCRIPTORS.find((t) => t.id === s.id)?.key;
+              return key ? { ...s, keys: ["⌘", String(key)] } : s;
+            })
+          : headerSurfaceList,
         currentSurface: mainSurface,
         sessions: summaries.map((s) => ({
           id: s.sessionId,
@@ -8271,6 +8322,17 @@ function App() {
             if (manifest) enterHarness(manifest);
           },
           exitHarness,
+          // Flow: ⌘J is the stage's Conversation | Terminal, ⌘B its sidebar
+          // and ⌘⌥B the active plan's panel.
+          ...(isFlowShell()
+            ? {
+                // The palette is a keyboard: the start screen arrives zoomed.
+                draftNewPlan: () => openStartScreen("key"),
+                toggleDock: toggleStage,
+                toggleSidebar: toggleFlowSidebar,
+                togglePlanPanel: activeId ? () => togglePlanPanel(activeId) : undefined,
+              }
+            : {}),
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -8278,6 +8340,7 @@ function App() {
       headerSurfaceList,
       mainSurface,
       summaries,
+      activeId,
       theme,
       font,
       perfProbe,
@@ -8591,11 +8654,67 @@ function App() {
     );
   };
 
+  // The flow sidebar's own rows: chats beside the plans, a project's "+",
+  // and the launch in flight until its plan arrives. The classic sidebar
+  // ignores all of these.
+  const flowSidebarHandlers = useStableHandlers({
+    // A click is a pointer summons: the start screen arrives quiet, the
+    // caret left where it was.
+    onNewSession: () => openStartScreen("pointer"),
+    onNewSessionIn: (path: string) => {
+      setFrontDoorProject({ path });
+      openStartScreen("pointer");
+    },
+    onSelectChat: openChat,
+    onRenameChat: (id: string, title: string) => {
+      invoke("companion_rename", { companionId: id, title, byUser: true })
+        .then(refreshChats, (e) => setToast(String(e), 6000));
+    },
+    onArchiveChat: (id: string, archived: boolean) => {
+      invoke("archive_companion", { companionId: id, archived }).then(() => {
+        if (archived && id === chatId) { setChatId(null); setChatSeed(null); }
+        refreshChats();
+      }, (e) => setToast(String(e), 6000));
+    },
+    onDeleteChat: (id: string) => {
+      invoke("companion_delete", { companionId: id }).then(() => {
+        if (id === chatId) { setChatId(null); setChatSeed(null); }
+        refreshChats();
+      }, (e) => setToast(String(e), 6000));
+    },
+  });
+  // What only the flow sidebar reads. The classic sidebar gets none of it,
+  // so a chats refresh or the door opening never re-renders it.
+  // Launches are the stage's registry (lib/flowSessions): every launch until
+  // its plan arrives or its terminal closes, the one on the stage active.
+  const flowSidebarData = useMemo(
+    () =>
+      isFlowShell()
+        ? {
+            layout: "flow" as const,
+            startActive: flowStartOnStage && !roomChat,
+            chats,
+            activeChatId: roomChat ? chatId : null,
+            launches: flowSidebarLaunches,
+            activeLaunchId,
+            onSelectLaunch: selectFlowLaunch,
+            working: flowWorking,
+            needs: flowNeeds,
+          }
+        : null,
+    [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, selectFlowLaunch, flowWorking, flowNeeds],
+  );
+
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
   // every shell render.
   const sidebarHandlers = useStableHandlers({
-    onSelect: setActiveId,
+    // Flow: a row puts its session on the stage, so the start screen gives
+    // way (as a door recent does).
+    onSelect: (id: string) => {
+      if (isFlowShell()) setFrontDoorOpen(false);
+      setActiveId(id);
+    },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
     onCombine: (ids: string[]) => void beginCombine(ids),
     onDelete: deleteSession,
@@ -8668,11 +8787,6 @@ function App() {
   ) : null;
 
   // ── The flow stage's props ───────────────────────────────────────────────
-  // The sidebar's launch rows, one stable object for its memoized props.
-  const flowSidebar = useMemo(
-    () => ({ launches: flowSidebarLaunches, activeLaunchId, onSelectLaunch: selectFlowLaunch }),
-    [flowSidebarLaunches, activeLaunchId, selectFlowLaunch],
-  );
   const stageHarness: "claude" | "codex" =
     stageTarget.kind === "launch"
       ? (flowLaunches.find((l) => l.terminalId === stageTarget.terminalId)?.harness ?? "claude")
@@ -8812,6 +8926,144 @@ function App() {
     );
   };
 
+  // ── The flow shell's top bar and keys (C1) ──────────────────────────────
+  // What the bar names: the session on the stage (its StageTarget), its mode,
+  // its plan and its terminal — or the chat the door is holding, or the
+  // start screen while the door is open.
+  const flowSummary = stageTarget.kind === "plan" ? summaries.find((s) => s.sessionId === stageTarget.sessionId) ?? null : null;
+  const flowChat = frontDoorOpen && chatInRoom && chatId ? chats.find((c) => c.companionId === chatId) ?? null : null;
+  const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : stageTarget.kind;
+  const flowPlanId = flowTarget === "plan" && stageTarget.kind === "plan" ? stageTarget.sessionId : null;
+  const flowTerminalId = flowTarget === "launch" || flowTarget === "plan" ? stageTerminalId : null;
+  const flowTitle =
+    flowTarget === "chat" ? flowChat?.title || "Chat"
+      : flowTarget === "plan" && flowSummary ? sessionTitle(flowSummary)
+        : flowTarget === "launch" && stageTarget.kind === "launch" ? launchTitle(stageTarget.prompt)
+          : null;
+  const flowMode = sessionMode({
+    target: flowTarget,
+    status: flowSummary?.status,
+    held: flowSummary?.held,
+    revising: waiting,
+    revisions: flowSummary?.revisions,
+    runState: flowSummary?.runState,
+  });
+  const flowTools = useMemo(() => toolSurfaces(effectiveWorkspace), [effectiveWorkspace]);
+  const flowToolSurface = flowTools.find((t) => t.id === mainSurface)?.id ?? null;
+  // "● N needs you" (lib/sessionMode `needsYou`): what waits on you anywhere
+  // but the session on screen.
+  const flowWaiting = needsYou({
+    summaries,
+    needsYouTerminals: flowNeedsYouTerms,
+    reviewHold: codeReview.holdActive,
+    activeSessionId: flowPlanId,
+    activeTerminalId: flowTerminalId,
+  });
+  // A gesture, so a trip like any other: the door steps aside for it.
+  const flowJumpToNeedsYou = () => {
+    const plan = flowWaiting.plans[0];
+    if (plan) {
+      tripDoor();
+      selectSessions();
+      setActiveId(plan);
+      selectSurface("document");
+      setPlanPose(plan, "split");
+    } else if (flowWaiting.terminals.length > 0) {
+      jumpToNeedsYou();
+    } else if (flowWaiting.review) {
+      tripDoor();
+      selectSurface("review");
+    }
+  };
+  const openFlowTool = (id: ToolId) => {
+    tripDoor();
+    if (id === "terminals") enterTermFullscreen();
+    else selectSurface(id);
+  };
+  const showFlowStage = () => {
+    if (mainSurface === "document") return;
+    tripDoor();
+    selectSurface("document");
+  };
+  // Mount-once listeners read the latest of these.
+  // ⌘N, File ▸ New Session and the ⌘⇧N alias are all keyboard summons of
+  // the start screen (the start lane's openStartScreen): it arrives with the
+  // caret in the box.
+  const flowNewSession = () => openStartScreen("key");
+  const flowKeysRef = useRef({ openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface });
+  flowKeysRef.current = { openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface };
+  useEffect(() => {
+    if (!isFlowShell()) return;
+    const keys = () => flowKeysRef.current;
+    const stage = () => {
+      keys().showStage();
+      toggleStage();
+    };
+    const planPanel = () => {
+      const id = keys().planId;
+      if (id) togglePlanPanel(id);
+    };
+    const tool = (n: number) => {
+      const id = toolForKey(keys().workspace, n);
+      if (id) keys().openTool(id);
+      return !!id;
+    };
+    // Capture phase, ahead of xterm's helper textarea (like ⌘⇧J): the shell
+    // never sees these. ⌘N and ⌘1–4 normally never get here — the native
+    // menu takes them first, browser page focused or not — but a page with
+    // no native menu still has them.
+    const onKey = (e: KeyboardEvent) => {
+      const claim = () => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      if (isStageKey(e)) {
+        claim();
+        stage();
+      } else if (isPlanPanelKey(e)) {
+        claim();
+        planPanel();
+      } else if (isSidebarKey(e)) {
+        // ⌘B is bold in a text editor, and the file tree on Code review.
+        if ((e.target as HTMLElement | null)?.isContentEditable || keys().surface === "review") return;
+        claim();
+        toggleFlowSidebar();
+      } else if (isNewSessionKey(e) || (e.metaKey && isNewPlanKey(e))) {
+        // ⌘⇧N too, the old chord, for one release — taken here, ahead of
+        // the classic listener, so it lands on the start screen rather than
+        // the door. (⌘ only: Ctrl+⇧N stays the terminal's.)
+        claim();
+        keys().newSession();
+      } else {
+        const n = toolKeyOf(e);
+        if (n && toolForKey(keys().workspace, n)) {
+          claim();
+          tool(n);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    // The same chords from inside a browser page (browser_signals.js →
+    // BrowserPane), where none of our listeners can hear the keyboard.
+    const fromPage: [string, () => void][] = [
+      ["redline:toggle-monochat", stage],
+      ["redline:toggle-sidebar", toggleFlowSidebar],
+      ["redline:toggle-plan-panel", planPanel],
+    ];
+    for (const [name, run] of fromPage) window.addEventListener(name, run);
+    // The native menu's accelerators (lib.rs `flow_menu`), installed now and
+    // taken out again by the Settings switch before it reloads to classic.
+    const onNew = listen("menu-new-session", () => keys().newSession());
+    const onSurface = listen<number>("menu-surface", (e) => void tool(e.payload));
+    void invoke("set_flow_menu", { enabled: true }).catch(() => {});
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      for (const [name, run] of fromPage) window.removeEventListener(name, run);
+      void onNew.then((un) => un());
+      void onSurface.then((un) => un());
+    };
+  }, []);
+
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
@@ -8863,6 +9115,52 @@ function App() {
           a native webview composites above all React DOM, so an overlaid
           header on the browser surface would simply be invisible. */}
       <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
+      {isFlowShell() ? (
+        <FlowTopBar
+          title={flowTitle}
+          mode={flowMode}
+          planSessionId={flowPlanId}
+          terminalId={flowTerminalId}
+          toolSurface={flowToolSurface}
+          onShowStage={showFlowStage}
+          needsYou={flowWaiting.count}
+          onJumpToNeedsYou={flowJumpToNeedsYou}
+          tools={flowTools}
+          liveRuns={summaries.filter((s) => isLiveRunState(s.runState)).length}
+          onOpenTool={openFlowTool}
+          settings={{
+            onOpenIntegrationHooks: hookConflicts.openDialog,
+            theme,
+            onThemeChange,
+            font,
+            onFontChange,
+            lint,
+            onLintChange,
+            mode,
+            onModeChange: changeMode,
+            flashEnabled,
+            onFlashEnabledChange: setFlashEnabled,
+            flashColor,
+            onFlashColorChange: setFlashColor,
+            flashSound,
+            onFlashSoundChange: setFlashSound,
+            flashSoundConfig,
+            onFlashSoundConfigChange: setFlashSoundConfig,
+            onFlashSoundPreview: (cfg) => playInterceptBeep(cfg),
+            onFlashTest: () => {
+              setFlashSeq((n) => n + 1);
+              if (flashSound) playInterceptBeep(flashSoundConfig);
+            },
+            surfacesPanel: (
+              <SurfacesPanel
+                workspace={effectiveWorkspace}
+                onUpdate={updateWorkspace}
+                harnessName={activeHarness ? activeHarness.manifest.name : null}
+              />
+            ),
+          }}
+        />
+      ) : (
       <Header
         onOpenIntegrationHooks={hookConflicts.openDialog}
         session={session}
@@ -8949,6 +9247,7 @@ function App() {
         onSnapBack={snapBack}
         onOpenPalette={() => setPaletteOpen(true)}
       />
+      )}
       </ChromeSlot>
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
@@ -9008,7 +9307,9 @@ function App() {
         // aside spill right OVER the doc, painted above it.
         <div
           ref={sidebarClipRef}
-          className="shrink-0 rl-sidebar-clip rl-plate"
+          // Flow's sidebar sits flush on the window with its own rule; the
+          // plate is classic's.
+          className={`shrink-0 rl-sidebar-clip${isFlowShell() ? "" : " rl-plate"}`}
           data-rl-pane
           // No `width` here on purpose: `applyLiveLayout` owns it, so a drag
           // frame never has to go through React and React never clobbers a
@@ -9024,7 +9325,8 @@ function App() {
           data-tour="sessions"
           className="flex flex-col shrink-0 rl-sidebar-aside"
         >
-          {openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
+          {/* Flow's sidebar is sessions only; folders open from the composer. */}
+          {!isFlowShell() && openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
             openFolders={openFolders}
             sidebarTab={sidebarTab}
             linkNav={linkNav}
@@ -9033,13 +9335,14 @@ function App() {
             onCloseFolder={closeFolder}
             onToggleLink={() => setLinkNav((v) => !v)}
           /></Suspense>}
-          {sidebarTab.kind === "sessions" ? (
+          {isFlowShell() || sidebarTab.kind === "sessions" ? (
             // Chunk warmed by the boot effect; null while it lands — the house
             // rule is a quietly blank plate, never a spinner.
             <Suspense fallback={null}>
             <SessionSidebar
               {...sidebarHandlers}
-              {...(flowShell ? flowSidebar : {})}
+              {...flowSidebarHandlers}
+              {...flowSidebarData}
               sessions={summaries}
               activeId={activeId}
               pendingCounts={pendingPerSession}
@@ -9064,7 +9367,7 @@ function App() {
         </aside>
         {/* In curtain state the flow boundary sits under the spilled aside, so
             the divider rides the curtain's visible right edge instead. */}
-        {liveFlags.curtainL && (
+        {liveFlags.curtainL && !isFlowShell() && (
           <div
             ref={sidebarCurtainDivRef}
             style={{
@@ -9091,8 +9394,10 @@ function App() {
         )}
         {/* Always in flow (its 6px is part of the space model); when the
             sidebar curtains it is painted over, and the absolute copy above
-            carries the affordance at the curtain's visible edge. */}
-        <PaneDivider
+            carries the affordance at the curtain's visible edge. The flow
+            shell has none: its sidebar is a fixed column with its own rule,
+            shown and hidden with ⌘B, and "+ New session" is its way in. */}
+        {!isFlowShell() && <PaneDivider
           orientation="vertical"
           side="leading"
           label="sidebar"
@@ -9111,7 +9416,7 @@ function App() {
             label: "Plan a build (⌘⇧N)",
             onClick: openFrontDoor,
           }}
-        />
+        />}
         <div
           ref={docColumnRef}
           className={`min-h-0 min-w-0 flex-1 overflow-hidden flex relative rl-doc-column${browserOpen ? "" : " rl-plate"}`}
@@ -10867,6 +11172,7 @@ function App() {
             onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}
             onNeedsYouChange={setTermNeedYou}
+            onNeedsYouIdsChange={isFlowShell() ? setFlowNeedsYouTerms : undefined}
             collapsed={termFullscreen || flowTermStage ? false : termCollapsed}
             solo={flowTermStage ? stageTerminalId : null}
             onActiveTabChange={setActiveTermId}

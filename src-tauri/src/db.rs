@@ -2975,7 +2975,7 @@ impl Database {
         let conn = self.read_conn();
         let mut stmt = conn.prepare(
             "SELECT companion_id, title, status, created_at, updated_at, model, effort,
-                    title_is_user_set
+                    title_is_user_set, archived_at, project_path
              FROM companion_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -2988,6 +2988,8 @@ impl Database {
                 model: r.get(5)?,
                 effort: r.get(6)?,
                 title_is_user_set: r.get::<_, i64>(7)? != 0,
+                archived_at: r.get(8)?,
+                project_path: r.get(9)?,
             })
         })?;
         rows.collect()
@@ -9839,6 +9841,40 @@ mod tests {
         assert!(!db.archive_session("flow", true).unwrap());
         assert!(db.archive_session("flow", false).unwrap());
         assert!(!db.archive_session("missing", true).unwrap());
+    }
+
+    /// The flow sidebar files a chat under its folder and folds an archived
+    /// one away, so the list carries both; a fresh chat carries neither.
+    #[test]
+    fn listed_chats_carry_their_folder_and_archive() {
+        let db = Database::open_in_memory().unwrap();
+        let chat = |id: &str| crate::state::Companion {
+            companion_id: id.into(),
+            title: "Chat".into(),
+            status: "active".into(),
+            created_at: 1,
+            updated_at: 1,
+            model: None,
+            effort: None,
+            title_is_user_set: false,
+            archived_at: None,
+            project_path: None,
+        };
+        db.insert_companion(&chat("a")).unwrap();
+        db.insert_companion(&chat("b")).unwrap();
+        assert!(db.set_companion_project("a", Some("/code/din")).unwrap());
+        assert!(db.archive_companion("a", true).unwrap());
+        let listed = db.list_companions().unwrap();
+        let a = listed.iter().find(|c| c.companion_id == "a").unwrap();
+        let b = listed.iter().find(|c| c.companion_id == "b").unwrap();
+        assert!(a.archived_at.is_some());
+        assert_eq!(a.project_path.as_deref(), Some("/code/din"));
+        assert_eq!((b.archived_at, b.project_path.as_deref()), (None, None));
+        // Absent, not null, on the wire: the frontend reads `archivedAt?`.
+        let wire = serde_json::to_value(b).unwrap();
+        assert!(wire.get("archivedAt").is_none() && wire.get("projectPath").is_none());
+        assert!(db.archive_companion("a", false).unwrap());
+        assert!(db.list_companions().unwrap().iter().all(|c| c.archived_at.is_none()));
     }
 
     // --- Backend provenance (which harness authored the plan) --------------

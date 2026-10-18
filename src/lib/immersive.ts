@@ -90,24 +90,15 @@ export function effectiveShape(pref: ShapeFlags, immersive: boolean): ShapeFlags
   return immersive ? { ...HIDDEN } : pref;
 }
 
-/** The flow shell's session stage, as one more overlay of the same law:
- *  - `dockHidden`: the stage never docks a terminal under the conversation —
- *    the session's PTY is the stage's own terminal view (⌘J) and the wall is
- *    the dock's fullscreen — so on the stage the dock folds away;
- *  - `sidebarHidden`: the split pose takes the sidebar's width for the plan
- *    (board 4c).
- *  Only hides, never writes, and returns `shape` itself when neither applies
- *  — which is always, on the classic shell. */
-export function flowStageShape(
-  shape: ShapeFlags,
-  i: { dockHidden: boolean; sidebarHidden: boolean },
-): ShapeFlags {
-  if (!i.dockHidden && !i.sidebarHidden) return shape;
-  return {
-    ...shape,
-    termCollapsed: shape.termCollapsed || i.dockHidden,
-    sidebarCollapsed: shape.sidebarCollapsed || i.sidebarHidden,
-  };
+/** The flow shell's session stage, as one more overlay of the same law: the
+ *  stage never docks a terminal under the conversation — the session's PTY
+ *  is the stage's own terminal view (⌘J) and the wall is the dock's
+ *  fullscreen — so on the stage the dock folds away. Only hides, never
+ *  writes, and returns `shape` itself when it doesn't apply — which is
+ *  always, on the classic shell. */
+export function flowStageShape(shape: ShapeFlags, dockHidden: boolean): ShapeFlags {
+  if (!dockHidden || shape.termCollapsed) return shape;
+  return { ...shape, termCollapsed: true };
 }
 
 // ---- The narrow mask: the two side panels, and nothing else -----------------

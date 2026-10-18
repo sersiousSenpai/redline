@@ -6,6 +6,9 @@ import type { TermAttention } from "../types";
 import {
   attentionKinds,
   bindTerminals,
+  latestAttention,
+  needReason,
+  sidebarActivity,
   deriveStageTarget,
   launchTitle,
   reduceLaunches,
@@ -145,11 +148,34 @@ describe("sessionId → terminalId", () => {
     expect(bindTerminals(a, [])).toBe(a);
   });
 
-  it("tracks each terminal's latest attention kind", () => {
-    const at = (terminalId: string, kind: "working" | "idle"): TermAttention => ({ terminalId, sessionId: null, at: 1, kind });
-    const a = attentionKinds(new Map(), [at("T1", "working")]);
-    expect(a.get("T1")).toBe("working");
-    expect(attentionKinds(a, [at("T1", "working")])).toBe(a);
-    expect(attentionKinds(a, [at("T1", "idle")]).get("T1")).toBe("idle");
+  it("keeps each terminal's newest transition, whatever order they land in", () => {
+    const at = (terminalId: string, kind: "working" | "idle", t: number): TermAttention => ({ terminalId, sessionId: null, at: t, kind });
+    const a = latestAttention(new Map(), [at("T1", "working", 5)]);
+    expect(latestAttention(a, [at("T1", "idle", 4)])).toBe(a);
+    const b = latestAttention(a, [at("T1", "idle", 6)]);
+    expect(attentionKinds(b).get("T1")).toBe("idle");
+  });
+});
+
+describe("the sidebar's spinners and needs", () => {
+  const entry = (terminalId: string, over: Partial<TermAttention> & { kind: TermAttention["kind"] }): TermAttention =>
+    ({ terminalId, sessionId: null, at: 1, ...over }) as TermAttention;
+
+  it("names why a CLI waits on you", () => {
+    expect(needReason(entry("T", { kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission to use Bash" }))).toBe("Permission");
+    expect(needReason(entry("T", { kind: "needs-you", reason: "permission_prompt", message: "Claude has a question for you" }))).toBe("Question");
+    expect(needReason(entry("T", { kind: "needs-you", reason: "elicitation_dialog", message: null }))).toBe("Question");
+    expect(needReason(entry("T", { kind: "working" }))).toBeNull();
+  });
+
+  it("keys plans by session and launches by terminal; an unheard launch is starting", () => {
+    const terminals = new Map([["S1", "T1"], ["S2", "T2"]]);
+    const attention = new Map<string, TermAttention>([
+      ["T1", entry("T1", { kind: "working" })],
+      ["T2", entry("T2", { kind: "needs-you", reason: "permission_prompt", message: "permission to use Edit" })],
+    ]);
+    const { working, needs } = sidebarActivity(terminals, attention, [launch("T9")]);
+    expect([...working].sort()).toEqual(["launch:T9", "plan:S1"]);
+    expect(needs).toEqual({ "plan:S2": "Permission" });
   });
 });

@@ -31,6 +31,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import type { TermAttention } from "../types";
+import type { NeedReason } from "./sessionGroups";
 
 /** What the session stage shows. */
 export type StageTarget =
@@ -235,33 +236,78 @@ export function bindTerminals(
   return next ?? prev;
 }
 
-/** The terminals' latest attention kinds, for the launch rows' spinners. */
-export function attentionKinds(
-  prev: ReadonlyMap<string, TermAttention["kind"]>,
+/** The terminals' latest attention entries: a newer transition (`at`)
+ *  replaces an older one, whichever order the snapshot and the live events
+ *  land in; the same `at` refills (a your-turn's excerpt arrives second). */
+export function latestAttention(
+  prev: ReadonlyMap<string, TermAttention>,
   entries: readonly TermAttention[],
-): ReadonlyMap<string, TermAttention["kind"]> {
-  let next: Map<string, TermAttention["kind"]> | null = null;
+): ReadonlyMap<string, TermAttention> {
+  let next: Map<string, TermAttention> | null = null;
   for (const e of entries) {
-    if ((next ?? prev).get(e.terminalId) === e.kind) continue;
+    const held = (next ?? prev).get(e.terminalId);
+    if (held && (held.at > e.at || held === e)) continue;
     next ??= new Map(prev);
-    next.set(e.terminalId, e.kind);
+    next.set(e.terminalId, e);
   }
   return next ?? prev;
+}
+
+/** The terminals' latest attention kinds, for the launch rows' spinners. */
+export function attentionKinds(
+  attention: ReadonlyMap<string, TermAttention>,
+): ReadonlyMap<string, TermAttention["kind"]> {
+  return new Map([...attention].map(([id, e]) => [id, e.kind]));
+}
+
+/** Why a CLI is waiting on you, in the sidebar's words. Claude reports an
+ *  AskUserQuestion and a tool approval alike as `permission_prompt`, so the
+ *  message tells them apart. */
+export function needReason(e: TermAttention): NeedReason | null {
+  if (e.kind !== "needs-you") return null;
+  if (e.reason === "permission_prompt") return /question/i.test(e.message ?? "") ? "Question" : "Permission";
+  return "Question";
+}
+
+/** The sidebar's row keys (`plan:<id>`, `launch:<terminalId>`) whose CLI is
+ *  mid-turn, and why each waiting one needs you. A launch nobody has heard
+ *  from yet is starting, which is work. */
+export function sidebarActivity(
+  terminals: SessionTerminals,
+  attention: ReadonlyMap<string, TermAttention>,
+  launches: readonly FlowLaunch[],
+): { working: ReadonlySet<string>; needs: Readonly<Record<string, NeedReason>> } {
+  const working = new Set<string>();
+  const needs: Record<string, NeedReason> = {};
+  const read = (key: string, entry: TermAttention | undefined, unheardIsWork: boolean) => {
+    if (!entry) {
+      if (unheardIsWork) working.add(key);
+      return;
+    }
+    if (entry.kind === "working") working.add(key);
+    const reason = needReason(entry);
+    if (reason) needs[key] = reason;
+  };
+  for (const [sessionId, terminalId] of terminals) read(`plan:${sessionId}`, attention.get(terminalId), false);
+  for (const l of launches) read(`launch:${l.terminalId}`, attention.get(l.terminalId), true);
+  return { working, needs };
 }
 
 /** App's `sessionId → terminalId` map and the terminals' attention kinds,
  *  kept from the hooks' `term-attention` events (seeded from the daemon's
  *  snapshot, so a reload starts from the truth) and the engine's
- *  `convo-bound`. Listener first, snapshot second; `bind` adds what App
+ *  `convo-bound`. Listener first, snapshot second — `convo-bound` is never
+ *  replayed to a late listener, so after a reload the snapshot is what knows
+ *  an existing plan's terminal; `bind` adds what App
  *  learns itself (a launch's plan arriving, a held plan's terminal).
  *  Inert when `enabled` is false: the classic shell never subscribes. */
 export function useSessionTerminals(enabled: boolean): {
   terminals: SessionTerminals;
-  kinds: ReadonlyMap<string, TermAttention["kind"]>;
+  attention: ReadonlyMap<string, TermAttention>;
   bind: (pairs: readonly { sessionId: string | null; terminalId: string }[]) => void;
 } {
   const [terminals, setTerminals] = useState<SessionTerminals>(() => new Map());
-  const [kinds, setKinds] = useState<ReadonlyMap<string, TermAttention["kind"]>>(
+  const [attention, setAttention] = useState<ReadonlyMap<string, TermAttention>>(
     () => new Map(),
   );
   const bind = useCallback(
@@ -279,7 +325,7 @@ export function useSessionTerminals(enabled: boolean): {
         .catch(() => {});
     const take = (rows: readonly TermAttention[]) => {
       bind(rows);
-      setKinds((prev) => attentionKinds(prev, rows));
+      setAttention((prev) => latestAttention(prev, rows));
     };
     keep(listen<TermAttention>("term-attention", (e) => take([e.payload])));
     keep(listen<ConvoBound>("convo-bound", (e) => bind([e.payload])));
@@ -293,5 +339,5 @@ export function useSessionTerminals(enabled: boolean): {
       for (const u of unlisteners) u();
     };
   }, [enabled, bind]);
-  return { terminals, kinds, bind };
+  return { terminals, attention, bind };
 }

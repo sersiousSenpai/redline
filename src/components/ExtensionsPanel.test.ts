@@ -137,8 +137,10 @@ describe("ExtensionsPanel source invariants", () => {
       "utf8",
     );
     expect(settings).toContain('<Row label="Extensions">{extensions}</Row>');
+    // Mounted by SettingsGear, the gear both shells' top bars render (it
+    // moved out of the classic Header when the flow top bar came to share it).
     const header = readFileSync(
-      join(process.cwd(), "src/components/Header.tsx"),
+      join(process.cwd(), "src/components/SettingsGear.tsx"),
       "utf8",
     );
     // Rendered into the same row, but LAZILY: the panel is one of the

@@ -319,18 +319,17 @@ describe("flowStageShape: the session stage's overlay", () => {
     docPinned: false,
   };
 
-  it("is the shape itself when nothing applies — always, on the classic shell", () => {
-    expect(flowStageShape(shape, { dockHidden: false, sidebarHidden: false })).toBe(shape);
+  it("is the shape itself when it doesn't apply — always, on the classic shell", () => {
+    expect(flowStageShape(shape, false)).toBe(shape);
   });
 
-  it("folds the dock away on the stage, and the sidebar in the split pose", () => {
-    expect(flowStageShape(shape, { dockHidden: true, sidebarHidden: false })).toEqual({ ...shape, termCollapsed: true });
-    expect(flowStageShape(shape, { dockHidden: false, sidebarHidden: true })).toEqual({ ...shape, sidebarCollapsed: true });
+  it("folds the dock away on the stage, and touches nothing else", () => {
+    expect(flowStageShape(shape, true)).toEqual({ ...shape, termCollapsed: true });
   });
 
-  it("only hides: a collapsed flag stays collapsed, and fullscreen is untouched", () => {
-    const wall = { ...shape, termCollapsed: true, termFullscreen: true, sidebarCollapsed: true };
-    expect(flowStageShape(wall, { dockHidden: false, sidebarHidden: false })).toBe(wall);
-    expect(flowStageShape(wall, { dockHidden: true, sidebarHidden: true })).toEqual(wall);
+  it("only hides: a collapsed dock stays collapsed, by identity, and fullscreen is untouched", () => {
+    const wall = { ...shape, termCollapsed: true, termFullscreen: true };
+    expect(flowStageShape(wall, true)).toBe(wall);
+    expect(flowStageShape({ ...shape, termFullscreen: true }, true)).toEqual({ ...shape, termFullscreen: true, termCollapsed: true });
   });
 });
