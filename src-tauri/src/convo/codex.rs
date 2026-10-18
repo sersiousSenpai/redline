@@ -699,6 +699,12 @@ fn scan_root() -> PathBuf {
     SCAN_ROOT.with(|root| root.borrow().clone())
 }
 
+/// A socket the launcher could have made: this user's, in a private
+/// directory of this user's.
+fn launcher_owned(socket: &Path) -> bool {
+    socket.parent().is_some_and(|dir| ours(dir, true)) && ours(socket, false)
+}
+
 /// Every launcher socket on this machine, newest directory first.
 fn launcher_sockets() -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(scan_root()) else { return Vec::new() };
@@ -706,9 +712,8 @@ fn launcher_sockets() -> Vec<PathBuf> {
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with(SOCKET_DIR_PREFIX))
         .map(|e| e.path())
-        .filter(|dir| ours(dir, true))
         .map(|dir| dir.join(SOCKET_NAME))
-        .filter(|socket| ours(socket, false))
+        .filter(|socket| launcher_owned(socket))
         .map(|socket| (std::fs::symlink_metadata(&socket).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), socket))
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0));
@@ -731,7 +736,9 @@ fn open(socket: &str, thread_id: &str) -> Result<SocketClient, String> {
 /// launcher didn't start (a direct run, a build, a `codex` typed by hand),
 /// whose in-process server no other client can reach.
 pub fn find(thread_id: &str, hint: Option<&str>) -> Option<(String, SocketClient)> {
-    let named = hint.filter(|s| Path::new(s).is_absolute()).map(str::to_string);
+    // The hook's header is checked like a scanned socket: the daemon takes it
+    // from whoever posts, so it gets no more trust than the directory scan.
+    let named = hint.filter(|s| Path::new(s).is_absolute() && launcher_owned(Path::new(s))).map(str::to_string);
     let scanned = launcher_sockets().into_iter().map(|p| p.to_string_lossy().into_owned());
     named.into_iter().chain(scanned).find_map(|socket| open(&socket, thread_id).ok().map(|client| (socket, client)))
 }
@@ -1028,4 +1035,9 @@ pub(super) fn unwrap_shell_for_test(command: &str) -> String {
 #[cfg(test)]
 pub(super) fn launcher_sockets_for_test() -> Vec<PathBuf> {
     launcher_sockets()
+}
+
+#[cfg(test)]
+pub(super) fn launcher_owned_for_test(socket: &Path) -> bool {
+    launcher_owned(socket)
 }

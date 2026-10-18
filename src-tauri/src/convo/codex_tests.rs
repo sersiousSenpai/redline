@@ -349,7 +349,11 @@ fn discovery_opens_only_private_sockets_of_this_user() {
     make("other.0001", 0o700, true);
     std::os::unix::fs::symlink(root.join("rlcx.good0001"), root.join("rlcx.link0001")).unwrap();
     codex::SCAN_ROOT.with(|r| *r.borrow_mut() = root.clone());
-    assert_eq!(codex::launcher_sockets_for_test(), [good]);
+    assert_eq!(codex::launcher_sockets_for_test(), [good.clone()]);
+    // A hook's socket header passes the same test before anything opens it.
+    assert!(codex::launcher_owned_for_test(&good));
+    assert!(!codex::launcher_owned_for_test(&root.join("rlcx.open0001").join(codex::SOCKET_NAME)));
+    assert!(!codex::launcher_owned_for_test(&root.join("rlcx.file0001").join(codex::SOCKET_NAME)));
     // A socket that isn't an app-server answers nothing: not this thread's.
     assert!(codex::find("t", None).is_none());
     std::fs::remove_dir_all(root).unwrap();
