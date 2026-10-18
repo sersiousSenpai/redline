@@ -247,6 +247,20 @@ describe("size guard", () => {
     expect(sw).toMatch(/import\(["']\.\/perfProbe["']\)/);
   });
 
+  it("keeps the flow conversation behind its own lazy chunk", () => {
+    // The session conversation (and its composer, ask cards and CSS) loads
+    // with the flow stage, never on the boot path: outside src/shell only a
+    // `lazy(() => import(…))` may reach it, and its tests.
+    const offenders = files
+      .filter(({ rel, text }) =>
+        !rel.startsWith("shell/") &&
+        !/\.test\.tsx?$/.test(rel) &&
+        /from\s+["'][^"']*shell\/(SessionConversation|SessionComposer|AskCard)["']/.test(text.replace(/import\s+type\s[^;]*;/g, "")),
+      )
+      .map(({ rel }) => rel);
+    expect(offenders, "import SessionConversation through React.lazy").toEqual([]);
+  });
+
   it("App.tsx reaches the section projections via sectionMaps, not docModel", () => {
     const app = files.find(({ rel }) => rel === "App.tsx");
     expect(app).toBeDefined();

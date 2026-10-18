@@ -1,0 +1,17 @@
+[
+  { "id": "host:1", "epoch": 0, "offset": 0, "ts": 1760774400000, "kind": "bound", "harness": "claude", "sessionId": "sess-din-1", "transcriptPath": "/Users/me/.claude/projects/-Users-me-projects-din/sess-din-1.jsonl", "source": "startup" },
+  { "id": "l01", "epoch": 0, "offset": 118, "ts": 1760774400100, "kind": "mode_change", "mode": "plan" },
+  { "id": "host:2", "epoch": 0, "offset": 118, "ts": 1760774400200, "kind": "readiness", "ready": true, "blocker": null },
+  { "id": "l02", "epoch": 0, "offset": 342, "ts": 1760774401000, "kind": "user_text", "text": "Read the obsidian build log and plan the next roadmap steps", "promptId": "p-1" },
+  { "id": "l03:0", "epoch": 0, "offset": 905, "ts": 1760774403000, "kind": "model_seen", "model": "claude-opus-4-5-20251101", "effort": "high" },
+  { "id": "l03:1", "epoch": 0, "offset": 905, "ts": 1760774403000, "kind": "thinking" },
+  { "id": "l04", "epoch": 0, "offset": 1460, "ts": 1760774405000, "kind": "tool_use", "toolUseId": "toolu_01", "name": "Read", "summary": "/Users/me/projects/din/docs/obsidian/build-log.md" },
+  { "id": "l05", "epoch": 0, "offset": 2210, "ts": 1760774405400, "kind": "tool_result", "toolUseId": "toolu_01", "isError": false, "preview": "# Build log" },
+  { "id": "l06", "epoch": 0, "offset": 9120, "ts": 1760774407000, "kind": "tool_use", "toolUseId": "toolu_02", "name": "Read", "summary": "/Users/me/projects/din/docs/obsidian/27 Retrieval.md" },
+  { "id": "l07", "epoch": 0, "offset": 9870, "ts": 1760774407300, "kind": "tool_result", "toolUseId": "toolu_02", "isError": false, "preview": "# 27 Retrieval" },
+  { "id": "l08", "epoch": 0, "offset": 14002, "ts": 1760774409000, "kind": "tool_use", "toolUseId": "toolu_03", "name": "Read", "summary": "/Users/me/projects/din/docs/obsidian/26 Backend.md" },
+  { "id": "l09", "epoch": 0, "offset": 14750, "ts": 1760774409200, "kind": "tool_result", "toolUseId": "toolu_03", "isError": false, "preview": "# 26 Backend" },
+  { "id": "l10", "epoch": 0, "offset": 18333, "ts": 1760774411000, "kind": "tool_use", "toolUseId": "toolu_04", "name": "Read", "summary": "/Users/me/projects/din/docs/obsidian/28 Roadmap.md" },
+  { "id": "l11", "epoch": 0, "offset": 19081, "ts": 1760774411350, "kind": "tool_result", "toolUseId": "toolu_04", "isError": false, "preview": "# 28 Roadmap" },
+  { "id": "l12", "epoch": 0, "offset": 25500, "ts": 1760774414000, "kind": "assistant_text", "text": "The build log stops at Track B. Track A is built but hasn't been compiled in Xcode, and there are two pending migrations. I'll plan from there: finish Track B, then work through the priority list in note 28.", "model": "claude-opus-4-5-20251101" }
+]
