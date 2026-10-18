@@ -1,0 +1,449 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* The flow Feedback tab (5a's right panel) and the plan's margin note (4c).
+   Sizes and copy are the boards'; every colour is a role token (BRIEF role
+   map), so all fifteen themes, light ones too, take the same layout. Where the
+   design sets a height beside a border it measured the box content-box, as
+   the board renders: those boxes say so. No transitions: nothing here moves. */
+
+/* ── The header row: Chat | Feedback N … All resolved ─────────────────── */
+
+.rl-fb-tabs {
+  box-sizing: content-box;
+  height: 48px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: var(--rl-text-chrome);
+}
+.rl-fb-tab {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-fb-tab[aria-selected="true"] {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+.rl-fb-tab:focus-visible,
+.rl-fb-action:focus-visible,
+.rl-fb-anchor:focus-visible,
+.rl-fb-more:focus-visible,
+.rl-fb-composer-button:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: 1px;
+}
+.rl-fb-tab-count {
+  color: var(--color-ink-4);
+}
+.rl-fb-tabs-status {
+  margin-left: auto;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+}
+
+/* ── The panel body ───────────────────────────────────────────────────── */
+
+.rl-fb-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: var(--color-ink);
+}
+.rl-fb-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: var(--rl-text-row);
+  line-height: 1.55;
+}
+.rl-fb-empty {
+  margin: 0;
+  padding: 2px 4px;
+  font-size: 12px;
+  color: var(--color-ink-4);
+}
+
+/* An open thread: the glass sheet's fill and rim. The rim stands in for the
+   board's 1px border, so the padding carries that pixel (14 + 1). The sheet's
+   drop shadow is for layers that float; this card sits in the list. */
+.rl-fb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 15px;
+  border-radius: var(--rl-radius-card);
+  --rl-glass-shadow: 0 0 0 transparent;
+  cursor: pointer;
+}
+.rl-fb-card.is-current {
+  --rl-glass-ring: var(--color-focus-rim);
+}
+/* A resolved thread, collapsed: paper and a hairline, two lines of the note. */
+.rl-fb-card.is-settled {
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+}
+
+.rl-fb-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+}
+.rl-fb-anchor {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-mode-plan-fg);
+  cursor: pointer;
+}
+.rl-fb-card.is-settled .rl-fb-anchor {
+  color: inherit;
+}
+.rl-fb-voice {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.rl-fb-status {
+  margin-left: auto;
+  flex: none;
+  white-space: nowrap;
+}
+.rl-fb-status[data-tone="build"] {
+  color: var(--color-mode-build-fg);
+}
+.rl-fb-status[data-tone="redline"] {
+  color: var(--color-mode-redline-fg);
+}
+
+.rl-fb-note {
+  color: var(--color-ink);
+}
+.rl-fb-card.is-settled .rl-fb-note {
+  color: var(--color-ink-3);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Markdown inside a thread reads at the card's size: no lead-paragraph lift,
+   no trailing gap. */
+.rl-fb-note .rl-md,
+.rl-fb-reply .rl-md,
+.rl-fb-followup .rl-md {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+.rl-fb-card .rl-md > p:first-child,
+.rl-fb-card .rl-md > div:first-child > p:first-child {
+  font-size: inherit;
+  font-weight: inherit;
+}
+.rl-fb-card .rl-md > :last-child,
+.rl-fb-card .rl-md p:last-child {
+  margin-bottom: 0;
+}
+.rl-fb-edit-preview del {
+  color: var(--color-ink-4);
+}
+.rl-fb-edit-preview ins {
+  text-decoration: none;
+  color: var(--color-mode-plan-fg);
+}
+
+/* Claude's reply, behind a 2px rule. */
+.rl-fb-reply {
+  display: flex;
+  gap: 10px;
+  padding-top: 2px;
+  color: var(--color-ink-3);
+}
+.rl-fb-reply-rule {
+  width: 2px;
+  flex: none;
+  border-radius: 1px;
+  background: var(--color-rule-strong);
+}
+.rl-fb-reply-body {
+  min-width: 0;
+  flex: 1;
+}
+/* Reopened: the earlier reply is context now, quieter than your follow-up —
+   in the muted ink, not by fading it under the contrast floor. */
+.rl-fb-reply.is-superseded {
+  color: var(--color-ink-4);
+}
+/* Your follow-up on a reopened thread: the reply's shape, on an amber rule. */
+.rl-fb-followup {
+  padding-left: 12px;
+  border-left: 2px solid var(--color-mode-redline-fg);
+  color: var(--color-ink);
+}
+.rl-fb-followup-label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: var(--rl-text-chip);
+  color: var(--color-warning-text);
+}
+
+/* ✓ Accept · Reopen … 💬 Discuss */
+.rl-fb-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 2px;
+  font-size: 12px;
+}
+.rl-fb-action {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+.rl-fb-action:hover:not(:disabled) {
+  background: var(--color-fill-1);
+}
+.rl-fb-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.rl-fb-action.is-primary {
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-weight: 600;
+}
+.rl-fb-action.is-primary:hover:not(:disabled) {
+  background: var(--color-ink);
+}
+.rl-fb-action.is-accept {
+  background: var(--color-mode-build-bg);
+  color: var(--color-mode-build-fg);
+}
+.rl-fb-action.is-danger {
+  color: var(--color-mode-danger-fg);
+}
+.rl-fb-action.is-discuss {
+  margin-left: auto;
+  padding: 0;
+  color: var(--color-ink-4);
+}
+.rl-fb-action.is-discuss:hover {
+  background: none;
+  color: var(--color-ink-3);
+}
+
+/* Reopen with a note, make it a change, edit a draft. */
+.rl-fb-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: auto;
+}
+.rl-fb-form textarea {
+  width: 100%;
+  min-height: 64px;
+  padding: 8px 10px;
+  border-radius: var(--rl-radius-menu-row);
+  border: 1px solid var(--color-rule-strong);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: inherit;
+  resize: vertical;
+}
+.rl-fb-form textarea::placeholder {
+  color: var(--color-ink-4);
+}
+.rl-fb-form textarea:focus {
+  outline: none;
+  border-color: var(--color-focus-rim);
+}
+.rl-fb-form-label {
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+}
+
+.rl-fb-more {
+  align-self: flex-start;
+  padding: 2px 4px;
+  font-size: 12px;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-fb-more:hover {
+  color: var(--color-ink-3);
+}
+
+/* The discussion under a thread keeps its own look and hairline; the card's
+   gap already spaces it. */
+.rl-fb-thread {
+  cursor: auto;
+}
+.rl-fb-thread:empty {
+  display: none;
+}
+.rl-fb-thread > * {
+  margin-top: 0;
+}
+
+/* ── The composer: 40px, r11, "Select text in the plan, or type feedback…" ── */
+
+.rl-fb-composer-wrap {
+  flex: none;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--color-rule);
+}
+/* The glass rim is the board's 1px border, so the box is 40 + 2 tall and the
+   text starts 14 + 1 in, as rendered there. */
+.rl-fb-composer {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 7px 0 15px;
+  border-radius: 11px;
+  --rl-glass-ring: var(--color-rule-strong);
+  --rl-glass-shadow: 0 0 0 transparent;
+  cursor: text;
+}
+.rl-fb-composer.is-focused {
+  --rl-glass-ring: var(--color-focus-rim);
+}
+.rl-fb-composer-anchor {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rl-text-chip);
+  color: var(--color-mode-plan-fg);
+}
+/* The hint and the box share one grid cell: the hint wraps the way the
+   board's does, and the box grows with what is typed. */
+.rl-fb-composer-field {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 13.5px;
+  line-height: 1.2;
+}
+.rl-fb-composer-field > * {
+  grid-area: 1 / 1;
+}
+.rl-fb-composer-hint {
+  color: var(--color-ink-4);
+  pointer-events: none;
+}
+.rl-fb-composer-field textarea {
+  width: 100%;
+  max-height: 132px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  line-height: inherit;
+  resize: none;
+  overflow-y: auto;
+}
+.rl-fb-composer-field textarea:focus {
+  outline: none;
+}
+.rl-fb-composer-field textarea::placeholder {
+  color: transparent;
+}
+.rl-fb-composer-model {
+  flex: none;
+  white-space: nowrap;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-3);
+}
+.rl-fb-composer-button {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+.rl-fb-composer-button:hover {
+  background: var(--color-fill-1);
+}
+.rl-fb-composer-button.is-send {
+  background: var(--color-ink);
+  color: var(--color-paper);
+}
+.rl-fb-composer-button.is-listening {
+  background: var(--color-mode-redline-bg);
+  color: var(--color-mode-redline-fg);
+}
+
+/* ── 4c: the margin note under a marked block ─────────────────────────── */
+
+.rl-margin-note {
+  align-self: flex-start;
+  display: flex;
+  width: fit-content;
+  gap: 10px;
+  max-width: 420px;
+  margin-left: 24px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  /* The board's warm hairline: the card's own fill, a breath of redline amber. */
+  border: 1px solid color-mix(in srgb, var(--color-mode-redline-fg) 9%, var(--color-bg-elevated));
+  font-family: var(--font-sans);
+  font-size: var(--rl-text-row);
+  line-height: 1.5;
+  color: var(--color-ink-2);
+  text-align: left;
+}
+button.rl-margin-note {
+  cursor: pointer;
+}
+.rl-margin-note-avatar {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--color-warning);
+  color: var(--color-on-warning);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rl-margin-note-body {
+  min-width: 0;
+}
