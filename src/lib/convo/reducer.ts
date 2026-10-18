@@ -725,7 +725,9 @@ export function convoView(state: ConvoState): ConvoView {
     .map(([, ask]) => ask)
     .sort((a, b) => compareKeys(a.key, b.key))
     .map((ask) => ask.value);
-  const first = state.events[0];
+  // The latest `bound` heads every snapshot whatever its offset (often 0, far
+  // behind the tail), so the history held begins at the first event after it.
+  const first = state.events.find((event) => event.kind !== "bound");
   return {
     blocks: blocks.map((block) => (block.kind === "turn" ? { kind: "turn", turn: finish(block.turn as Draft) } : block)),
     pending,

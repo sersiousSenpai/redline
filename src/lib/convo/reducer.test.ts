@@ -87,6 +87,12 @@ describe("merge: keyed upsert, ordered by (epoch, offset)", () => {
     expect(state.hasOlder).toBe(false);
     expect(convoView(state).oldest).toEqual({ epoch: 0, offset: 1 });
   });
+
+  it("pages back from the tail's first line, not the binding that heads it", () => {
+    const bound = ev("bound", 0, { kind: "bound", harness: "claude", sessionId: "s1", transcriptPath: null, source: "startup" });
+    const state = run({ type: "snapshot", snapshot: { subscriptionId: "s", events: [bound, b, c], hasOlder: true } });
+    expect(convoView(state).oldest).toEqual({ epoch: 0, offset: 20 });
+  });
 });
 
 describe("turns", () => {
