@@ -62,17 +62,16 @@ describe("the local queue", () => {
     expect(promoteSend(queue, "zz").map((x) => x.id)).toEqual(["a", "b", "c"]);
   });
 
-  it.each<[string, boolean, boolean, unknown, unknown, string | null]>([
-    ["ready, idle: the oldest", true, false, null, "r1", "a"],
-    ["not ready: nothing", false, false, null, "r1", null],
-    ["one already typing: nothing", true, true, null, "r1", null],
-    ["blocked on this same readiness: wait", true, false, "r1", "r1", null],
-    ["the host spoke again: try again", true, false, "r1", "r2", "a"],
-  ])("%s", (_label, ready, inFlight, heldBy, current, next) => {
-    expect(nextFlush([q("a"), q("b")], { ready, blocker: null }, { inFlight, heldBy, current })?.id ?? null).toBe(next);
+  it.each<[string, boolean, boolean, boolean, string | null]>([
+    ["ready, idle: the oldest", true, false, false, "a"],
+    ["not ready: nothing", false, false, false, null],
+    ["one already typing: nothing", true, true, false, null],
+    ["refused, and the host hasn't spoken since: wait", true, false, true, null],
+  ])("%s", (_label, ready, inFlight, held, next) => {
+    expect(nextFlush([q("a"), q("b")], { ready }, { inFlight, held })?.id ?? null).toBe(next);
   });
 
   it("an empty queue flushes nothing", () => {
-    expect(nextFlush([], { ready: true, blocker: null }, { inFlight: false, heldBy: null, current: null })).toBeNull();
+    expect(nextFlush([], { ready: true }, { inFlight: false, held: false })).toBeNull();
   });
 });

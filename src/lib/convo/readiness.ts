@@ -95,15 +95,18 @@ export function promoteSend(queue: readonly QueuedSend[], id: string): QueuedSen
 }
 
 /** The send to type next, or null: one at a time, in order, only while
- *  ready. `heldBy` is the readiness a blocked flush last saw — the queue
- *  waits for the host to say something new rather than retrying into the
- *  same wall. */
+ *  ready. `held`: the PTY refused the last try, and the host hasn't said
+ *  anything new about readiness since — the queue waits rather than
+ *  retrying into the same wall. */
 export function nextFlush(
   queue: readonly QueuedSend[],
-  readiness: Pick<ComposerReadiness, "ready" | "blocker">,
-  state: { inFlight: boolean; heldBy: unknown; current: unknown },
+  readiness: Pick<ComposerReadiness, "ready">,
+  state: { inFlight: boolean; held: boolean },
 ): QueuedSend | null {
-  if (!readiness.ready || state.inFlight || queue.length === 0) return null;
-  if (state.heldBy !== null && state.heldBy === state.current) return null;
+  if (!readiness.ready || state.inFlight || state.held || queue.length === 0) return null;
   return queue[0];
 }
+
+/** How long a refused queue waits for the host to speak before it tries
+ *  again anyway: a host that never sends `readiness` must not strand it. */
+export const HELD_RETRY_MS = 4_000;
