@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:53:34.130Z",
+  "startedAt": "2026-10-18T10:05:03.197Z",
   "fixture": "fixtures/flow-stage-qa",
   "screenshots": [
     "4c-aurora.png",
@@ -1960,6 +1960,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-stage-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:53:47.967Z",
+  "finishedAt": "2026-10-18T10:05:16.927Z",
   "passed": true
 }
