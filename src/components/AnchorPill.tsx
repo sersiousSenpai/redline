@@ -12,28 +12,16 @@ interface AnchorPillProps {
 }
 
 export function AnchorPill({ anchorId, label }: AnchorPillProps) {
-  if (label && isFlowShell()) {
-    return (
-      <span
-        className="inline-block rounded-sm px-1.5 py-0.5 text-[11px] select-none"
-        style={{
-          background: "var(--color-anchor-bg)",
-          color: "var(--color-anchor-text)",
-        }}
-      >
-        {label}
-      </span>
-    );
-  }
+  const human = !!label && isFlowShell();
   return (
     <span
-      className="font-mono inline-block rounded-sm px-1.5 py-0.5 text-[10px] tracking-wide select-none"
+      className={`${human ? "text-[11px]" : "font-mono text-[10px] tracking-wide"} inline-block rounded-sm px-1.5 py-0.5 select-none`}
       style={{
         background: "var(--color-anchor-bg)",
         color: "var(--color-anchor-text)",
       }}
     >
-      §{anchorId}
+      {human ? label : `§${anchorId}`}
     </span>
   );
 }
