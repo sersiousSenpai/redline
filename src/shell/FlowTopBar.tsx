@@ -110,6 +110,7 @@ export function FlowTopBar({
     <>
     <header
       className="rl-app-header rl-ftb pl-20"
+      data-flow-topbar=""
       onMouseDown={beginWindowDrag}
       onDoubleClick={toggleWindowMaximize}
     >
@@ -145,6 +146,7 @@ export function FlowTopBar({
       {mode && ModeIcon && colors && (
         <span
           className="rl-ftb-mode"
+          data-flow-mode-chip=""
           data-mode={mode.kind}
           style={{ color: colors.fg, background: colors.bg }}
         >
@@ -156,6 +158,7 @@ export function FlowTopBar({
         <button
           type="button"
           className="rl-ftb-show-plan"
+          data-flow-show-plan=""
           title="Show the plan beside the conversation (⌘⌥B)"
           onClick={() => {
             onShowStage();
@@ -171,6 +174,7 @@ export function FlowTopBar({
         <button
           type="button"
           className="rl-ftb-needs"
+          data-flow-needs-you=""
           onClick={onJumpToNeedsYou}
           title="Go to the first thing waiting on you"
         >
@@ -203,6 +207,7 @@ export function FlowTopBar({
         ref={toolsRef}
         type="button"
         className="rl-ftb-tools"
+        data-flow-tools=""
         aria-haspopup="menu"
         aria-expanded={toolsOpen}
         onPointerEnter={toolsChunk.warm}

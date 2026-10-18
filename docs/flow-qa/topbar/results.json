@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:19:29.950Z",
+  "startedAt": "2026-10-18T09:26:32.722Z",
   "fixture": "fixtures/flow-topbar-qa",
   "boards": "/Users/yusufalbazian/redline-wt/flow-design",
   "screenshots": [
@@ -2980,8 +2980,8 @@
   },
   "errors": [],
   "sourceSha256": {
-    "src/shell/FlowTopBar.tsx": "1a05e8fde4465db33cf2cd44ff144b58de9e10bc12293aab4f3c44126b4d77ee",
-    "src/shell/ToolsMenu.tsx": "94dc696bc06e2d3cac9e461682e0a03040a30b66789f29782fd17f911e279b7d",
+    "src/shell/FlowTopBar.tsx": "7d636411b84278de6e789b94dd1aa5a0e5cde04ea607d7eb98da898d8cac326b",
+    "src/shell/ToolsMenu.tsx": "e4cdc2ad74a50c8d0eed4cfa6215d014bab29c471e064e5d1067f0a5d714d50a",
     "src/shell/topbar.css": "dbba2016142e0023502954333a1068976388947234209f43e64cb14d1a394ab3",
     "src/shell/stageDim.ts": "e28073373df36a99f7888602a7add0c1a66f6f54271ac04f8aadae3f56cc7b17",
     "src/lib/sessionMode.ts": "287a19868bf03f180e4f4f87fab45e48236b45df9e5cc9595ca53a4132ef4f46",
@@ -2993,13 +2993,13 @@
     "Headless Chrome component fixture; not WKWebView, native window drag or the live app.",
     "The bar alone in each board's state, with a stand-in stage under it. Synthetic memory status; no live sessions."
   ],
-  "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-topbar-qa/",
+  "fixtureUrl": "http://127.0.0.1:5174/fixtures/flow-topbar-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
   "contrast": {
     "themes": 15,
     "samples": 765,
     "short": []
   },
-  "finishedAt": "2026-10-18T09:19:57.272Z",
+  "finishedAt": "2026-10-18T09:27:00.027Z",
   "passed": true
 }

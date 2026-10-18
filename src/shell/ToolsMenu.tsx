@@ -134,7 +134,7 @@ export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, on
         ) : (
           Icon && <Icon size={14} className="rl-tools-menu-icon" aria-hidden />
         )}
-        {tool.label}
+        <span>{tool.label}</span>
         <span className="rl-tools-menu-fill" />
         {tool.key && <span className="rl-tools-menu-key">⌘{tool.key}</span>}
         {tool.id === "runs" && liveRuns > 0 && <span className="rl-tools-menu-live">{liveRuns} live</span>}
@@ -154,6 +154,7 @@ export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, on
       ref={panel}
       role="menu"
       aria-label="Tools"
+      data-flow-tools-menu=""
       className="rl-tools-menu rl-glass rl-glass-menu"
       style={{ top: place.top, right: place.right }}
       onKeyDown={onKeyDown}
