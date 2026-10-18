@@ -112,13 +112,13 @@ export default function FlowSidebar(props: SessionSidebarProps) {
     />
   );
   return (
-    <nav className="rl-fs" aria-label="Sessions">
-      <div className="rl-fs-head">
+    <nav className="rl-sb" aria-label="Sessions">
+      <div className="rl-sb-head">
         {/* The start screen's way in. Filled while the start screen is up,
             outlined otherwise (4a vs 4b). */}
         <button
           type="button"
-          className="rl-fs-new"
+          className="rl-sb-new"
           data-filled={startActive || undefined}
           aria-current={startActive ? "page" : undefined}
           aria-keyshortcuts="Meta+N"
@@ -129,7 +129,7 @@ export default function FlowSidebar(props: SessionSidebarProps) {
           <kbd aria-hidden>⌘N</kbd>
         </button>
       </div>
-      <div className="rl-fs-scroll rl-thin-scroll-y">
+      <div className="rl-sb-scroll rl-thin-scroll-y">
         {model.sections.map((section) => (
           <Section key={section.id} section={section} open={expanded.has(section.id)} onToggle={toggleSection}
             onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}>
@@ -137,12 +137,12 @@ export default function FlowSidebar(props: SessionSidebarProps) {
           </Section>
         ))}
         {model.archived.length > 0 && (
-          <section className="rl-fs-section">
-            <button type="button" className="rl-fs-fold" aria-expanded={archivedShown} onClick={() => setArchivedOpen((v) => !v)}>
+          <section className="rl-sb-section">
+            <button type="button" className="rl-sb-fold" aria-expanded={archivedShown} onClick={() => setArchivedOpen((v) => !v)}>
               Archived · {model.archived.length}
               <ChevronDown size={12} aria-hidden data-open={archivedShown || undefined} />
             </button>
-            {archivedShown && <ul className="rl-fs-rows">{model.archived.map(row)}</ul>}
+            {archivedShown && <ul className="rl-sb-rows">{model.archived.map(row)}</ul>}
           </section>
         )}
       </div>
@@ -160,21 +160,21 @@ function Section({ section, open, onToggle, onAdd, children }: {
   const labelId = useId();
   const folder = section.projectPath;
   return (
-    <section className="rl-fs-section" aria-labelledby={labelId}>
-      <div className="rl-fs-label">
+    <section className="rl-sb-section" aria-labelledby={labelId}>
+      <div className="rl-sb-label">
         <span id={labelId}>{section.label}</span>
         {/* A project's own "+": the start screen, pointed at this folder.
             Always there, as faint as the label it sits on. */}
         {onAdd && folder && (
-          <button type="button" className="rl-fs-add" aria-label={`New session in ${section.label}`} title={`New session in ${folder}`}
+          <button type="button" className="rl-sb-add" aria-label={`New session in ${section.label}`} title={`New session in ${folder}`}
             onClick={() => onAdd(folder)}>
             <Plus size={12} aria-hidden />
           </button>
         )}
       </div>
-      <ul className="rl-fs-rows">{children}</ul>
+      <ul className="rl-sb-rows">{children}</ul>
       {(section.hidden > 0 || (open && section.foldable)) && (
-        <button type="button" className="rl-fs-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
+        <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
           {open ? "Show less" : `Show ${section.hidden} more`}
         </button>
       )}
@@ -184,9 +184,9 @@ function Section({ section, open, onToggle, onAdd, children }: {
 
 function RowIcon({ item, active }: { item: SidebarItem; active: boolean }) {
   // Needs you trades the icon for an amber dot (5a).
-  if (item.need) return <i className="rl-fs-dot" aria-hidden />;
+  if (item.need) return <i className="rl-sb-dot" aria-hidden />;
   const color = active ? MODE_FG[item.mode] : undefined;
-  if (item.working || item.mode === "build") return <Loader size={13} aria-hidden className="rl-fs-spin" style={{ color }} />;
+  if (item.working || item.mode === "build") return <Loader size={13} aria-hidden className="rl-sb-spin" style={{ color }} />;
   if (item.kind === "chat") return <MessageSquare size={13} aria-hidden style={{ color }} />;
   if (item.mode === "redline") return <FilePenLine size={13} aria-hidden style={{ color }} />;
   return <FileText size={13} aria-hidden style={{ color }} />;
@@ -241,10 +241,10 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
     setRenaming(false);
     setConfirming(false);
   };
-  const icon = <span className="rl-fs-icon"><RowIcon item={item} active={active} /></span>;
+  const icon = <span className="rl-sb-icon"><RowIcon item={item} active={active} /></span>;
   return (
     <li
-      className="rl-fs-item"
+      className="rl-sb-item"
       data-active={active || undefined}
       data-nest={versions ? "" : undefined}
       data-menu={menuOpen || undefined}
@@ -253,7 +253,7 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
       // the delete ask keep their own).
       onKeyDown={(e) => {
         const from = e.target as HTMLElement;
-        if (from !== rowButton.current && !from.classList.contains("rl-fs-dots")) return;
+        if (from !== rowButton.current && !from.classList.contains("rl-sb-dots")) return;
         if ((e.key === "Backspace" || e.key === "Delete") && deletable) {
           e.preventDefault();
           setConfirming(true);
@@ -270,17 +270,17 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
       }}
     >
       {renaming ? (
-        <div className="rl-fs-row" data-editing="">
+        <div className="rl-sb-row" data-editing="">
           {icon}
-          <RowRename className="rl-fs-rename" label={item.kind === "chat" ? "Chat title" : "Session title"} value={item.title} onDone={(title, how) => {
+          <RowRename className="rl-sb-rename" label={item.kind === "chat" ? "Chat title" : "Session title"} value={item.title} onDone={(title, how) => {
             back(how !== "blur");
             if (title !== null) handlers.rename(item, title);
           }} />
         </div>
       ) : confirming ? (
-        <div className="rl-fs-row" data-confirming="">
+        <div className="rl-sb-row" data-confirming="">
           {icon}
-          <span className="rl-fs-title">{item.title}</span>
+          <span className="rl-sb-title">{item.title}</span>
           <ConfirmDelete
             what={item.kind === "chat" ? "chat" : "plan"}
             held={held}
@@ -293,14 +293,14 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
           <button
             ref={rowButton}
             type="button"
-            className="rl-fs-row"
+            className="rl-sb-row"
             aria-current={active ? "page" : undefined}
             title={item.title}
             onClick={() => handlers.pick(item)}
           >
             {icon}
-            <span className="rl-fs-title">{item.title}</span>
-            {item.need && <span className="rl-fs-tag">{item.need}</span>}
+            <span className="rl-sb-title">{item.title}</span>
+            {item.need && <span className="rl-sb-tag">{item.need}</span>}
           </button>
           <RowMenu
             open={menuOpen}
@@ -308,17 +308,17 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
             at={menuAt}
             label={item.title}
             actions={actions}
-            triggerClassName="rl-fs-dots"
+            triggerClassName="rl-sb-dots"
           />
         </>
       )}
       {versions && (
-        <ul className="rl-fs-versions" aria-label="Versions">
+        <ul className="rl-sb-versions" aria-label="Versions">
           {versions.map((v) => (
             <li key={v.versionNumber}>
               <button
                 type="button"
-                className="rl-fs-version"
+                className="rl-sb-version"
                 data-latest={v.latest || undefined}
                 aria-current={v.viewed ? "true" : undefined}
                 onClick={() => handlers.selectRevision(item.id, v.latest ? null : v.versionNumber)}
@@ -362,7 +362,7 @@ function ConfirmDelete({ what, held, onConfirm, onCancel }: {
 }) {
   return (
     <div
-      className="rl-fs-confirm"
+      className="rl-sb-confirm"
       role="group"
       aria-label={`Delete this ${what}?`}
       onKeyDown={(e) => {
@@ -374,14 +374,14 @@ function ConfirmDelete({ what, held, onConfirm, onCancel }: {
     >
       <button
         type="button"
-        className="rl-fs-confirm-yes"
+        className="rl-sb-confirm-yes"
         autoFocus
         title={held ? "Delete this session and release Claude Code's blocked terminal (cannot be undone)" : "Delete (cannot be undone)"}
         onClick={onConfirm}
       >
         {held ? "Release & delete" : "Delete"}
       </button>
-      <button type="button" className="rl-fs-confirm-no" onClick={onCancel}>Cancel</button>
+      <button type="button" className="rl-sb-confirm-no" onClick={onCancel}>Cancel</button>
     </div>
   );
 }

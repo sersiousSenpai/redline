@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:23:29.660Z",
+  "startedAt": "2026-10-18T09:29:31.718Z",
   "fixture": "fixtures/flow-sidebar-qa",
   "screenshots": [
     "4a-sidebar-aurora.png",
@@ -2615,11 +2615,11 @@
   ],
   "errors": [],
   "sourceSha256": {
-    "src/components/SessionSidebar.tsx": "afba6fae7cea5baafbc65916e6a51231be67066599855212dab52ac65a88ef7d",
-    "src/shell/FlowSidebar.tsx": "472b71f5a77c66737020ceece299aa8420b3f6128d5ad0bab1e54449467455b1",
-    "src/shell/FlowSidebar.css": "36f300df313e9f60019cfb76e71700652c44ee1864c930d65006fd7c39d0966a",
+    "src/components/SessionSidebar.tsx": "0ca3745cde01c32c0536e43ad3634c5b22e18c4adf7be25ec01530077ba92552",
+    "src/shell/FlowSidebar.tsx": "4037301382264bbc9ff90bf7e78d28fee924ba25754e6c795141255f448b2a05",
+    "src/shell/FlowSidebar.css": "01afd5a86023a63247db7bc7b113375342ca79b6249dc262809489a620c73f90",
     "src/components/RowMenu.tsx": "8a8b73e07f4463708ed59133fd2d87d2c0d2b0252cc91261e7a8914445b20728",
-    "src/lib/sessionGroups.ts": "2a020d52abf5c95c6d928d4186705d369c406f56c4761d9050525784e2b8d2c4",
+    "src/lib/sessionGroups.ts": "ace552595fce3cf99a7905909157a2ad130eb269b669109604e591d687e10a84",
     "src/lib/sessionMode.ts": "09a0b22327219ae1c5f2b0be0652b19637659b52651ca7bf649a9e6ca0e6ae5f"
   },
   "limitations": [
@@ -2627,8 +2627,8 @@
     "Sessions, chats and launches are synthetic; the sidebar, row menu, grouping and themes are the production modules.",
     "Expected geometry is what the design HTML (flow.html) renders, measured in the same Chrome; board crops are the rendered PNGs."
   ],
-  "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-sidebar-qa/",
+  "fixtureUrl": "http://127.0.0.1:5174/fixtures/flow-sidebar-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:23:44.825Z",
+  "finishedAt": "2026-10-18T09:29:46.417Z",
   "passed": true
 }

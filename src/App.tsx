@@ -302,7 +302,6 @@ function prefetchSurfaceChunk(surface: string): void {
 }
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
-import { isFlowShell } from "./lib/shellFlag";
 import { setSidebar as setFlowSidebar, useFlow } from "./shell/flowState";
 import type { FlowLaunch } from "./lib/sessionGroups";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
@@ -8453,9 +8452,12 @@ function App() {
   // and the launch in flight until its plan arrives. The classic sidebar
   // ignores all of these.
   const flowSidebarHandlers = useStableHandlers({
+    // A click is a pointer summons: the start screen arrives quiet, the
+    // caret left where it was.
+    onNewSession: () => openStartScreen("pointer"),
     onNewSessionIn: (path: string) => {
       setFrontDoorProject({ path });
-      openFrontDoor();
+      openStartScreen("pointer");
     },
     onSelectChat: openChat,
     onRenameChat: (id: string, title: string) => {
@@ -8486,8 +8488,7 @@ function App() {
   const flowSidebarData = isFlowShell()
     ? {
         layout: "flow" as const,
-        onNewSession: openFrontDoor,
-        startActive: frontDoorOpen && !roomChat,
+        startActive: flowStartOnStage && !roomChat,
         chats,
         activeChatId: roomChat ? chatId : null,
         launches: flowLaunches,

@@ -101,8 +101,8 @@ export interface SessionSidebarProps {
   activeLaunchId?: string | null;
   onSelectLaunch?: (terminalId: string) => void;
   /** Flow: why a row needs you, by row key (`plan:<id>`, `chat:<id>`,
-   *  `launch:<terminalId>`), from the engine's open asks. A held plan's
-   *  Review is read off the session without it. */
+   *  `launch:<terminalId>`), from the engine's open asks. A run waiting on
+   *  its code review (Review) or stalled is read off the session without it. */
   needs?: Readonly<Record<string, NeedReason>>;
   /** Flow: row keys whose Claude is mid-turn (a spinner). */
   working?: ReadonlySet<string>;

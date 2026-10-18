@@ -75,7 +75,7 @@ async function shot(name, clip) {
 async function viewport(width, height) { await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }); }
 async function scene(name, theme = "aurora") {
   await cdp.evaluate(`window.__qa.setScene(${JSON.stringify(name)}); window.__qa.setTheme(${JSON.stringify(theme)})`);
-  for (let i = 0; i < 100 && !(await cdp.evaluate(`document.documentElement.dataset.qaScene === ${JSON.stringify(name)} && !!document.querySelector('.rl-fs-row')`)); i++) await delay(50);
+  for (let i = 0; i < 100 && !(await cdp.evaluate(`document.documentElement.dataset.qaScene === ${JSON.stringify(name)} && !!document.querySelector('.rl-sb-row')`)); i++) await delay(50);
   await mouse("mouseMoved", { x: 900, y: 700 });
   await settle();
 }
@@ -115,29 +115,29 @@ const rectNear = (got, want) => !!got && want.every((v, i) => near(got[i], v));
 // Rects relative to the sidebar, plus the computed styles a fidelity cell
 // names; and every token resolved, so a colour can be held to its token.
 const MEASURE = `(() => {
-  const side = document.querySelector('.rl-fs').getBoundingClientRect();
+  const side = document.querySelector('.rl-sb').getBoundingClientRect();
   const rel = (e) => { if (!e) return null; const r = e.getBoundingClientRect(); return [r.x - side.x, r.y - side.y, r.width, r.height].map((n) => Math.round(n * 10) / 10); };
   const style = (e, ...props) => { if (!e) return null; const s = getComputedStyle(e); return Object.fromEntries(props.map((p) => [p, s.getPropertyValue(p)])); };
   const probe = document.createElement('i'); document.body.append(probe);
   const token = (name) => { probe.style.color = 'var(--' + name + ')'; return getComputedStyle(probe).color; };
   const tokens = Object.fromEntries(['color-canvas','color-rule','color-fill-1','color-fill-2','color-fill-3','color-focus-rim','color-ink','color-ink-3','color-ink-4','color-ink-5','color-glass-2','color-mode-plan-fg','color-mode-redline-fg','color-mode-build-fg','color-mode-danger-fg','color-mode-danger-bg'].map((n) => [n, token(n)]));
   probe.remove();
-  const neu = document.querySelector('.rl-fs-new');
-  const rows = [...document.querySelectorAll('.rl-fs-item')].map((li) => {
-    const row = li.querySelector('.rl-fs-row'), icon = li.querySelector('.rl-fs-icon > *'), dots = li.querySelector('.rl-fs-dots svg');
-    return { title: li.querySelector('.rl-fs-title')?.textContent, li: rel(li), row: rel(row), icon: rel(icon), titleRect: rel(li.querySelector('.rl-fs-title')), dots: rel(dots), tag: rel(li.querySelector('.rl-fs-tag')),
+  const neu = document.querySelector('.rl-sb-new');
+  const rows = [...document.querySelectorAll('.rl-sb-item')].map((li) => {
+    const row = li.querySelector('.rl-sb-row'), icon = li.querySelector('.rl-sb-icon > *'), dots = li.querySelector('.rl-sb-dots svg');
+    return { title: li.querySelector('.rl-sb-title')?.textContent, li: rel(li), row: rel(row), icon: rel(icon), titleRect: rel(li.querySelector('.rl-sb-title')), dots: rel(dots), tag: rel(li.querySelector('.rl-sb-tag')),
       active: li.hasAttribute('data-active'), nest: li.hasAttribute('data-nest'), menu: li.hasAttribute('data-menu'),
       rowStyle: style(row, 'background-color', 'color', 'border-radius', 'font-size', 'box-shadow'), liStyle: style(li, 'background-color', 'border-radius'),
-      iconColor: icon && getComputedStyle(icon).color, iconBg: icon && getComputedStyle(icon).backgroundColor, dotsColor: dots && getComputedStyle(dots).color, dotsOpacity: dots && getComputedStyle(li.querySelector('.rl-fs-dots')).opacity, spinning: !!li.querySelector('.rl-fs-row .rl-fs-spin') };
+      iconColor: icon && getComputedStyle(icon).color, iconBg: icon && getComputedStyle(icon).backgroundColor, dotsColor: dots && getComputedStyle(dots).color, dotsOpacity: dots && getComputedStyle(li.querySelector('.rl-sb-dots')).opacity, spinning: !!li.querySelector('.rl-sb-row .rl-sb-spin') };
   });
-  const labels = [...document.querySelectorAll('.rl-fs-label')].map((e) => ({ text: e.innerText.trim(), rect: rel(e), style: style(e, 'font-size', 'letter-spacing', 'color', 'text-transform'), add: rel(e.querySelector('.rl-fs-add')) }));
-  const versions = [...document.querySelectorAll('.rl-fs-version')].map((e) => ({ text: e.firstChild.textContent, date: e.querySelector('span').textContent, rect: rel(e), style: style(e, 'background-color', 'color', 'font-size', 'border-radius'), current: e.getAttribute('aria-current') }));
-  const folds = [...document.querySelectorAll('.rl-fs-fold')].map((e) => ({ text: e.textContent.trim(), rect: rel(e), style: style(e, 'font-size', 'color') }));
+  const labels = [...document.querySelectorAll('.rl-sb-label')].map((e) => ({ text: e.innerText.trim(), rect: rel(e), style: style(e, 'font-size', 'letter-spacing', 'color', 'text-transform'), add: rel(e.querySelector('.rl-sb-add')) }));
+  const versions = [...document.querySelectorAll('.rl-sb-version')].map((e) => ({ text: e.firstChild.textContent, date: e.querySelector('span').textContent, rect: rel(e), style: style(e, 'background-color', 'color', 'font-size', 'border-radius'), current: e.getAttribute('aria-current') }));
+  const folds = [...document.querySelectorAll('.rl-sb-fold')].map((e) => ({ text: e.textContent.trim(), rect: rel(e), style: style(e, 'font-size', 'color') }));
   const layer = document.querySelector('.rl-row-menu-layer');
   const menu = layer && { rect: rel(layer), surface: style(layer.firstElementChild, 'border-radius', 'padding-top', 'background-color'), glass: layer.firstElementChild.className,
     items: [...layer.querySelectorAll('.rl-row-menu-item')].map((e) => ({ text: e.querySelector('.rl-row-menu-label').textContent, rect: rel(e), style: style(e, 'background-color', 'color', 'border-radius', 'font-size'), icon: rel(e.querySelector('svg')), focused: document.activeElement === e })),
     rule: rel(layer.querySelector('.rl-row-menu-rule')), key: rel(layer.querySelector('.rl-row-menu-key')), keyText: layer.querySelector('.rl-row-menu-key')?.textContent };
-  return { side: [side.width, side.height], sideStyle: style(document.querySelector('.rl-fs'), 'border-right-color', 'border-right-width'),
+  return { side: [side.width, side.height], sideStyle: style(document.querySelector('.rl-sb'), 'border-right-color', 'border-right-width'),
     newSession: { rect: rel(neu), plus: rel(neu.querySelector('svg')), kbd: rel(neu.querySelector('kbd')), style: style(neu, 'background-color', 'color', 'border-top-color', 'border-top-width', 'border-radius', 'font-size'), current: neu.getAttribute('aria-current') },
     labels, rows, versions, folds, menu, tokens };
 })()`;
@@ -164,7 +164,7 @@ const CONTRAST = `window.__qaContrast = (rootSelector, base) => {
     if (el.tagName === 'INPUT' && el.value) out.push({ text: 'input: ' + el.value.slice(0, 24), ratio: ratio(over(rgba(s.color), bg), bg) });
   }
   const icons = [];
-  for (const control of document.querySelectorAll(rootSelector + ' :is(.rl-fs-dots, .rl-fs-add)')) {
+  for (const control of document.querySelectorAll(rootSelector + ' :is(.rl-sb-dots, .rl-sb-add)')) {
     let o = 1; for (let n = control; n; n = n.parentElement) o *= Number(getComputedStyle(n).opacity); if (o < 0.99) continue;
     const bg = background(control);
     icons.push({ text: control.getAttribute('aria-label').slice(0, 32), ratio: ratio(over(rgba(getComputedStyle(control).color), bg), bg) });
@@ -229,7 +229,7 @@ try {
   await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   await viewport(1280, 800);
   await cdp.call("Page.navigate", { url: report.fixtureUrl });
-  for (let i = 0; i < 200 && !(await cdp.evaluate("!!window.__qa && !!document.querySelector('.rl-fs-row')")); i++) await delay(100);
+  for (let i = 0; i < 200 && !(await cdp.evaluate("!!window.__qa && !!document.querySelector('.rl-sb-row')")); i++) await delay(100);
   await cdp.evaluate(CONTRAST);
   const builds = {};
 
@@ -238,11 +238,11 @@ try {
   let m = await cdp.evaluate(MEASURE);
   geometry("4a", m);
   check("4a: New session is filled (--color-fill-2, ink, no rule) and current", m.newSession.style["background-color"] === m.tokens["color-fill-2"] && m.newSession.style.color === m.tokens["color-ink"] && m.newSession.style["border-top-width"] === "0px" && m.newSession.current === "page", m.newSession);
-  check("4a: plans wear the doc icon, the chat the chat icon, and no row is open", await cdp.evaluate("(() => { const icons = [...document.querySelectorAll('.rl-fs-icon svg')].map(s => [...s.classList].find(c => c.startsWith('lucide-') && c !== 'lucide')); return JSON.stringify(icons) === JSON.stringify(['lucide-file-text','lucide-file-text','lucide-message-square']) && !document.querySelector('[data-active]'); })()"));
+  check("4a: plans wear the doc icon, the chat the chat icon, and no row is open", await cdp.evaluate("(() => { const icons = [...document.querySelectorAll('.rl-sb-icon svg')].map(s => [...s.classList].find(c => c.startsWith('lucide-') && c !== 'lucide')); return JSON.stringify(icons) === JSON.stringify(['lucide-file-text','lucide-file-text','lucide-message-square']) && !document.querySelector('[data-active]'); })()"));
   builds["4a"] = await shot("4a-sidebar-aurora", { x: 0, y: 47, width: 253, height: 753 });
   await shot("4a-aurora");
-  await contrast("4a aurora", ".rl-fs");
-  await smallTargets("4a", ".rl-fs");
+  await contrast("4a aurora", ".rl-sb");
+  await smallTargets("4a", ".rl-sb");
 
   // ── 4b: the active launch, working ─────────────────────────────────────
   await scene("4b");
@@ -254,11 +254,11 @@ try {
     active?.title === "Din roadmap: next steps" && active.rowStyle["background-color"] === m.tokens["color-fill-2"] && active.rowStyle.color === m.tokens["color-ink"] && active.spinning && active.iconColor === m.tokens["color-mode-plan-fg"] && rectNear(active.dots, DESIGN["4b"].activeDots) && active.dotsColor === m.tokens["color-ink-4"], active);
   builds["4b"] = await shot("4b-sidebar-aurora", { x: 0, y: 47, width: 253, height: 753 });
   await shot("4b-aurora");
-  await contrast("4b aurora", ".rl-fs");
+  await contrast("4b aurora", ".rl-sb");
 
   // ── 4d: the row menu on "Din backend: Hono + Fly", the open row amber ──
   await scene("4d");
-  await click('.rl-fs-item:nth-child(2) .rl-fs-dots');
+  await click('.rl-sb-item:nth-child(2) .rl-sb-dots');
   // The menu opens over its own ⋯, so the pointer that opened it rests on
   // Open plan; the board is drawn with it elsewhere.
   await mouse("mouseMoved", { x: 900, y: 700 });
@@ -280,7 +280,7 @@ try {
   builds["4d"] = await shot("4d-sidebar-aurora", { x: 0, y: 47, width: 420, height: 753 });
   await shot("4d-aurora");
   await contrast("4d menu aurora", ".rl-row-menu-layer");
-  await contrast("4d sidebar aurora", ".rl-fs");
+  await contrast("4d sidebar aurora", ".rl-sb");
   // Keyboard: arrows move, Escape closes and hands focus back to the ⋯.
   await key("ArrowDown", "ArrowDown", 40);
   check("4d: ↓ moves to Rename", await cdp.evaluate("document.activeElement?.textContent === 'Rename'"));
@@ -289,51 +289,51 @@ try {
   await key("ArrowDown", "ArrowDown", 40);
   check("4d: ↓ wraps to Open plan", await cdp.evaluate("document.activeElement?.textContent === 'Open plan'"));
   await key("Escape", "Escape", 27);
-  check("4d: Escape closes and focus returns to the row's ⋯", await cdp.evaluate("!document.querySelector('.rl-row-menu-layer') && document.activeElement?.classList.contains('rl-fs-dots') && !document.querySelector('[data-menu]')"));
+  check("4d: Escape closes and focus returns to the row's ⋯", await cdp.evaluate("!document.querySelector('.rl-row-menu-layer') && document.activeElement?.classList.contains('rl-sb-dots') && !document.querySelector('[data-menu]')"));
 
   // Right-click opens it at the pointer; Rename edits in place.
-  const point = await centre('.rl-fs-item:nth-child(3) .rl-fs-title');
+  const point = await centre('.rl-sb-item:nth-child(3) .rl-sb-title');
   await mouse("mouseMoved", point); await mouse("mousePressed", point, { button: "right", clickCount: 1 }); await mouse("mouseReleased", point, { button: "right", clickCount: 1 });
   await settle();
-  const ctx = await cdp.evaluate("(() => { const l = document.querySelector('.rl-row-menu-layer'); if (!l) return null; const r = l.getBoundingClientRect(); return { x: r.x, y: r.y, row: document.querySelector('[data-menu] .rl-fs-title')?.textContent }; })()");
+  const ctx = await cdp.evaluate("(() => { const l = document.querySelector('.rl-row-menu-layer'); if (!l) return null; const r = l.getBoundingClientRect(); return { x: r.x, y: r.y, row: document.querySelector('[data-menu] .rl-sb-title')?.textContent }; })()");
   check("Right-click opens the row menu at the pointer, on that row", ctx && near(ctx.x, point.x) && near(ctx.y, point.y) && ctx.row === "Din retrieval plan", { ctx, point });
   await click('.rl-row-menu-item:nth-child(2)');
-  const editing = await cdp.evaluate("(() => { const i = document.querySelector('.rl-fs-rename'); if (!i) return null; const row = i.closest('.rl-fs-row').getBoundingClientRect(); return { focused: document.activeElement === i, selected: i.selectionStart === 0 && i.selectionEnd === i.value.length, value: i.value, rowH: row.height, inputX: i.getBoundingClientRect().x + 6 - document.querySelector('.rl-fs').getBoundingClientRect().x }; })()");
+  const editing = await cdp.evaluate("(() => { const i = document.querySelector('.rl-sb-rename'); if (!i) return null; const row = i.closest('.rl-sb-row').getBoundingClientRect(); return { focused: document.activeElement === i, selected: i.selectionStart === 0 && i.selectionEnd === i.value.length, value: i.value, rowH: row.height, inputX: i.getBoundingClientRect().x + 6 - document.querySelector('.rl-sb').getBoundingClientRect().x }; })()");
   check("Rename edits in place: the row keeps its height, the title selected where it stood", editing?.focused && editing.selected && editing.value === "Din retrieval plan" && near(editing.rowH, 32) && near(editing.inputX, 42), editing);
   await shot("rename-inline-aurora", { x: 0, y: 47, width: 253, height: 260 });
   await cdp.evaluate("window.__qa.calls.length = 0");
   await type("Din retrieval v2");
   await key("Enter", "Enter", 13);
-  check("Enter saves the new title and hands focus back to the row", await cdp.evaluate("JSON.stringify(window.__qa.calls) === JSON.stringify([['rename','retrieval','Din retrieval v2']]) && document.activeElement?.classList.contains('rl-fs-row') && !document.querySelector('.rl-fs-rename')"), await cdp.evaluate("window.__qa.calls"));
+  check("Enter saves the new title and hands focus back to the row", await cdp.evaluate("JSON.stringify(window.__qa.calls) === JSON.stringify([['rename','retrieval','Din retrieval v2']]) && document.activeElement?.classList.contains('rl-sb-row') && !document.querySelector('.rl-sb-rename')"), await cdp.evaluate("window.__qa.calls"));
   await key("ContextMenu", "ContextMenu", 93);
   await click('.rl-row-menu-item:nth-child(2)');
   await type(" and more");
   await key("Escape", "Escape", 27);
-  check("Escape cancels the rename and writes nothing", await cdp.evaluate("window.__qa.calls.length === 1 && !document.querySelector('.rl-fs-rename')"));
-  await cdp.evaluate("document.querySelector('.rl-fs-item:nth-child(3) .rl-fs-row').focus()");
+  check("Escape cancels the rename and writes nothing", await cdp.evaluate("window.__qa.calls.length === 1 && !document.querySelector('.rl-sb-rename')"));
+  await cdp.evaluate("document.querySelector('.rl-sb-item:nth-child(3) .rl-sb-row').focus()");
   await key("ContextMenu", "ContextMenu", 93);
   await click('.rl-row-menu-item:nth-child(2)');
-  await cdp.evaluate("(() => { const i = document.querySelector('.rl-fs-rename'); i.select(); })()");
+  await cdp.evaluate("(() => { const i = document.querySelector('.rl-sb-rename'); i.select(); })()");
   await type("Retrieval, blurred");
   await click(".qa-stage");
   check("Leaving the field saves", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['rename','retrieval','Retrieval, blurred'])"), await cdp.evaluate("window.__qa.calls"));
   // ⌫ on a focused row asks, inline; Escape backs out, Delete deletes.
-  await cdp.evaluate("document.querySelector('.rl-fs-item:nth-child(2) .rl-fs-row').focus()");
+  await cdp.evaluate("document.querySelector('.rl-sb-item:nth-child(2) .rl-sb-row').focus()");
   await key("Backspace", "Backspace", 8);
-  const ask = await cdp.evaluate("(() => { const g = document.querySelector('.rl-fs-confirm'); return g && { label: g.getAttribute('aria-label'), focused: document.activeElement?.textContent, title: g.closest('.rl-fs-item').querySelector('.rl-fs-title').textContent }; })()");
+  const ask = await cdp.evaluate("(() => { const g = document.querySelector('.rl-sb-confirm'); return g && { label: g.getAttribute('aria-label'), focused: document.activeElement?.textContent, title: g.closest('.rl-sb-item').querySelector('.rl-sb-title').textContent }; })()");
   check("⌫ on a focused row asks to delete it, in the row, Delete focused", ask?.label === "Delete this plan?" && ask.focused === "Delete" && ask.title === "Din backend: Hono + Fly" && await cdp.evaluate("!window.__qa.calls.some(c => c[0] === 'delete')"), ask);
   await shot("delete-confirm-aurora", { x: 0, y: 47, width: 253, height: 260 });
-  await contrast("delete confirm aurora", ".rl-fs");
+  await contrast("delete confirm aurora", ".rl-sb");
   await key("Escape", "Escape", 27);
-  check("Escape backs out and focus returns to the row", await cdp.evaluate("!document.querySelector('.rl-fs-confirm') && document.activeElement?.closest('.rl-fs-item')?.querySelector('.rl-fs-title')?.textContent === 'Din backend: Hono + Fly'"));
-  await click('.rl-fs-item:nth-child(2) .rl-fs-dots');
+  check("Escape backs out and focus returns to the row", await cdp.evaluate("!document.querySelector('.rl-sb-confirm') && document.activeElement?.closest('.rl-sb-item')?.querySelector('.rl-sb-title')?.textContent === 'Din backend: Hono + Fly'"));
+  await click('.rl-sb-item:nth-child(2) .rl-sb-dots');
   await click('.rl-row-menu-item[data-danger]');
-  await click('.rl-fs-confirm-yes');
+  await click('.rl-sb-confirm-yes');
   check("Delete plan in the menu → Delete deletes that plan", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['delete','backend'])"), await cdp.evaluate("window.__qa.calls.at(-1)"));
-  await click('.rl-fs-new');
-  await click('.rl-fs-add');
+  await click('.rl-sb-new');
+  await click('.rl-sb-add');
   check("+ New session and a project's + start a session, the + in that folder", await cdp.evaluate("JSON.stringify(window.__qa.calls.slice(-2)) === JSON.stringify([['new-session'],['new-session-in','/Users/me/projects/din']])"), await cdp.evaluate("window.__qa.calls.slice(-2)"));
-  await click('.rl-fs-item:nth-child(4) .rl-fs-row');
+  await click('.rl-sb-item:nth-child(4) .rl-sb-row');
   check("A chat row opens the chat", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['select-chat','status'])"));
 
   // ── 5a: sorted by need, versions nested under the open session ────────
@@ -357,25 +357,25 @@ try {
   check("5a: In review rows wear the pen; then Show 9 more (12.5px, --color-ink-4) at the board's rect", m.rows.filter((r) => r.title && m.rows.indexOf(r) >= 3).every((r) => !r.spinning) && m.folds[0]?.text === d5.more[0] && rectNear(m.folds[0].rect, d5.more.slice(1)) && m.folds[0].style["font-size"] === "12.5px" && m.folds[0].style.color === m.tokens["color-ink-4"], m.folds);
   builds["5a"] = await shot("5a-sidebar-aurora", { x: 0, y: 47, width: 281, height: 913 });
   await shot("5a-aurora");
-  await contrast("5a aurora", ".rl-fs");
-  await smallTargets("5a", ".rl-fs");
+  await contrast("5a aurora", ".rl-sb");
+  await smallTargets("5a", ".rl-sb");
   // Hovering the Needs you row trades its tag for the ⋯.
-  await mouse("mouseMoved", await centre('.rl-fs-item[data-need] .rl-fs-title'));
+  await mouse("mouseMoved", await centre('.rl-sb-item[data-need] .rl-sb-title'));
   await settle();
-  check("5a: under the pointer, the Needs you row shows its ⋯ in place of the tag", await cdp.evaluate("(() => { const li = document.querySelector('.rl-fs-item[data-need]'); return getComputedStyle(li.querySelector('.rl-fs-dots')).opacity === '1' && getComputedStyle(li.querySelector('.rl-fs-tag')).visibility === 'hidden'; })()"));
-  await click('.rl-fs-version:not([aria-current])');
+  check("5a: under the pointer, the Needs you row shows its ⋯ in place of the tag", await cdp.evaluate("(() => { const li = document.querySelector('.rl-sb-item[data-need]'); return getComputedStyle(li.querySelector('.rl-sb-dots')).opacity === '1' && getComputedStyle(li.querySelector('.rl-sb-tag')).visibility === 'hidden'; })()"));
+  await click('.rl-sb-version:not([aria-current])');
   check("5a: a version row shows that revision", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['revision','dial',2])"), await cdp.evaluate("window.__qa.calls.at(-1)"));
-  await click('.rl-fs-fold');
-  check("5a: Show 9 more opens all fourteen, then offers Show less", await cdp.evaluate("document.querySelectorAll('.rl-fs-section:nth-child(3) .rl-fs-item').length === 14 && document.querySelector('.rl-fs-section:nth-child(3) .rl-fs-fold').textContent === 'Show less'"));
+  await click('.rl-sb-fold');
+  check("5a: Show 9 more opens all fourteen, then offers Show less", await cdp.evaluate("document.querySelectorAll('.rl-sb-section:nth-child(3) .rl-sb-item').length === 14 && document.querySelector('.rl-sb-section:nth-child(3) .rl-sb-fold').textContent === 'Show less'"));
   await shot("5a-expanded-aurora", { x: 0, y: 47, width: 281, height: 913 });
 
   // ── Archived fold, chats without a folder ──────────────────────────────
   await viewport(1280, 800);
   await scene("archive");
-  check("Archived · N closes the list, folded; the folderless chat closes the groups as Chats", await cdp.evaluate("(() => { const f = [...document.querySelectorAll('.rl-fs-fold')].at(-1); return f.textContent.trim() === 'Archived · 2' && f.getAttribute('aria-expanded') === 'false' && [...document.querySelectorAll('.rl-fs-label')].map(l => l.innerText.trim()).join() === 'DIN,CHATS' && !document.body.textContent.includes('Old brainstorm'); })()"));
-  await click('.rl-fs-section:last-child .rl-fs-fold');
-  check("Opening the fold shows the archived plan and chat, newest archive first, their menus offering Unarchive", await cdp.evaluate("[...document.querySelectorAll('.rl-fs-section:last-child .rl-fs-title')].map(t => t.textContent).join() === 'Old brainstorm,Din search spike'"));
-  await click('.rl-fs-section:last-child .rl-fs-item:first-child .rl-fs-dots');
+  check("Archived · N closes the list, folded; the folderless chat closes the groups as Chats", await cdp.evaluate("(() => { const f = [...document.querySelectorAll('.rl-sb-fold')].at(-1); return f.textContent.trim() === 'Archived · 2' && f.getAttribute('aria-expanded') === 'false' && [...document.querySelectorAll('.rl-sb-label')].map(l => l.innerText.trim()).join() === 'DIN,CHATS' && !document.body.textContent.includes('Old brainstorm'); })()"));
+  await click('.rl-sb-section:last-child .rl-sb-fold');
+  check("Opening the fold shows the archived plan and chat, newest archive first, their menus offering Unarchive", await cdp.evaluate("[...document.querySelectorAll('.rl-sb-section:last-child .rl-sb-title')].map(t => t.textContent).join() === 'Old brainstorm,Din search spike'"));
+  await click('.rl-sb-section:last-child .rl-sb-item:first-child .rl-sb-dots');
   check("An archived chat's menu: Open chat · Rename · Unarchive · Delete chat", await cdp.evaluate("[...document.querySelectorAll('.rl-row-menu-item .rl-row-menu-label')].map(t => t.textContent).join() === 'Open chat,Rename,Unarchive,Delete chat'"));
   await click('.rl-row-menu-item:nth-child(3)');
   check("Unarchive goes through the chat archive with archived=false", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['archive-chat','gone',false])"), await cdp.evaluate("window.__qa.calls.at(-1)"));
@@ -385,7 +385,7 @@ try {
   await scene("classic");
   for (let i = 0; i < 100 && !(await cdp.evaluate("!!document.querySelector('.rl-session-row')")); i++) await delay(50);
   await settle();
-  check("Classic: no row nests an interactive element inside its own button", await cdp.evaluate("document.querySelectorAll('.rl-session-row button :is(button, a[href], input), .rl-fs-row :is(button, a[href], input, [role=button])').length === 0"),
+  check("Classic: no row nests an interactive element inside its own button", await cdp.evaluate("document.querySelectorAll('.rl-session-row button :is(button, a[href], input), .rl-sb-row :is(button, a[href], input, [role=button])').length === 0"),
     await cdp.evaluate("[...document.querySelectorAll('.rl-session-row button button')].map(b => b.getAttribute('aria-label') || b.textContent)"));
   await shot("classic-aurora", { x: 0, y: 47, width: 300, height: 400 });
   await cdp.evaluate("window.__qa.calls.length = 0; document.querySelector('.rl-session-row [aria-label=\"Move to repo…\"]').focus()");
@@ -404,11 +404,11 @@ try {
       const board = DESIGN[name];
       await viewport(name === "5a" ? 1600 : 1280, name === "5a" ? 960 : 800);
       await scene(name, theme);
-      if (name === "4d") { await click('.rl-fs-item:nth-child(2) .rl-fs-dots'); await mouse("mouseMoved", { x: 900, y: 700 }); await settle(); }
+      if (name === "4d") { await click('.rl-sb-item:nth-child(2) .rl-sb-dots'); await mouse("mouseMoved", { x: 900, y: 700 }); await settle(); }
       const t = await cdp.evaluate(MEASURE);
       check(`${name} ${theme}: same geometry as Aurora (rows, labels, New session)`, rectNear(t.newSession.rect, board.newSession) && board.rows.every(([title, ...rect], i) => t.rows.filter((r) => r.title !== undefined)[i]?.title === title && rectNear(t.rows.filter((r) => r.title !== undefined)[i].row, rect)), { rows: t.rows.map((r) => r.row) });
       await shot(`${name}-${theme}`, { x: 0, y: 0, width: name === "4d" ? 520 : board.width + 40, height: name === "5a" ? 960 : 800 });
-      await contrast(`${name} ${theme}`, ".rl-fs");
+      await contrast(`${name} ${theme}`, ".rl-sb");
       if (name === "4d") await contrast(`${name} menu ${theme}`, ".rl-row-menu-layer");
     }
   }

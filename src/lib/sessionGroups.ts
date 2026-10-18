@@ -12,7 +12,7 @@
 //! Sections are ordered by what each row needs from you:
 //!
 //! 1. **Needs you**: Claude is blocked on you (a question, a permission, a
-//!    held plan, a run waiting on its code review, a stalled run).
+//!    run waiting on its code review, a stalled run).
 //! 2. **Building**: an approved plan an agent is building.
 //! 3. **In review**: a plan that is yours to redline, with nothing blocked.
 //! 4. **By project**: everything else, one group per folder.
@@ -100,8 +100,8 @@ export interface SidebarInput {
   chats?: readonly FlowChat[];
   launches?: readonly FlowLaunch[];
   /** Live needs by item key, from the conversation engine's open asks
-   *  (Question, Permission). A held plan's Review and a run's Review or
-   *  Stalled are read off the session here; an entry in this map wins. */
+   *  (Question, Permission). A run's Review or Stalled is read off the
+   *  session here; an entry in this map wins. */
   needs?: Readonly<Record<string, NeedReason>>;
   /** Item keys whose Claude is mid-turn. A launch's own `working` counts too. */
   working?: ReadonlySet<string>;
@@ -138,10 +138,14 @@ export function planRowTitle(s: SessionSummary): string {
   return s.titleOverride || s.planTitle || s.projectName || s.projectPath || s.sessionId;
 }
 
-/** A plan's own need, before any engine ask: Claude held on a review, or a
- *  run waiting on you. */
+/** A plan's own need, before any engine ask: a run waiting on your code
+ *  review, or one that stalled.
+ *
+ *  A plan held for its review is not one. That is what redlining IS (4d: the
+ *  plan being marked is held, and sits in its project), and it is the row
+ *  you are on: if opening it moved it out of Needs you, the row would jump
+ *  out from under the click that opened it. */
 function planNeed(s: SessionSummary): NeedReason | null {
-  if (s.held && s.awaitingReview) return "Review";
   if (s.runState === "in_code_review" || s.runState === "awaiting_review") return "Review";
   if (s.runState === "stalled") return "Stalled";
   return null;

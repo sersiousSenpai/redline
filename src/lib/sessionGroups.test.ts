@@ -60,7 +60,7 @@ describe("which section a row sorts into", () => {
   // One live row turns the sections on; the table is what each row becomes.
   const live = plan("live", { status: "approved", runState: "building", projectPath: "/code/other", projectName: "other", updatedAt: 1 });
   it.each([
-    ["a held plan awaiting review", plan("x", { status: "in_review", held: true, awaitingReview: true }), "Needs you", "Review"],
+    ["a held plan awaiting review (redlining)", plan("x", { status: "in_review", held: true, awaitingReview: true }), "In review", null],
     ["a run waiting on its code review", plan("x", { runState: "in_code_review" }), "Needs you", "Review"],
     ["an overnight run parked for review", plan("x", { runState: "awaiting_review" }), "Needs you", "Review"],
     ["a stalled run", plan("x", { runState: "stalled" }), "Needs you", "Stalled"],
@@ -92,9 +92,13 @@ describe("which section a row sorts into", () => {
     ]);
   });
 
-  it("an engine ask outranks a plan's own review", () => {
-    const [item] = sidebarItems({ sessions: [plan("p", { held: true, awaitingReview: true })], needs: { "plan:p": "Permission" } });
+  it("an engine ask outranks a run's own review", () => {
+    const [item] = sidebarItems({ sessions: [plan("p", { runState: "in_code_review" })], needs: { "plan:p": "Permission" } });
     expect(item.need).toBe("Permission");
+  });
+
+  it("a held plan being redlined stays in its project while nothing is live (4d)", () => {
+    expect(shape({ sessions: [plan("roadmap", { status: "in_review", held: true, awaitingReview: true })] })).toEqual([["din", ["plan:roadmap"], 0]]);
   });
 });
 
@@ -118,7 +122,7 @@ describe("the live sections appear only while something needs you or is building
 
   it("live: Needs you → Building → In review → by project (5a)", () => {
     const sessions = [
-      plan("vehicle", { held: true, awaitingReview: true, status: "in_review", projectPath: "/code/dial", updatedAt: 90 }),
+      plan("vehicle", { runState: "in_code_review", projectPath: "/code/dial", updatedAt: 90 }),
       plan("dial", { runState: "building", projectPath: "/code/dial", updatedAt: 80 }),
       plan("sprint", { runState: "orchestrating", projectPath: "/code/mos", projectName: "machineos", updatedAt: 85 }),
       ...Array.from({ length: 14 }, (_, i) => plan(`r${i}`, { status: "in_review", updatedAt: 70 - i })),
