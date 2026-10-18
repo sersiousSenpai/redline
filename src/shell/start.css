@@ -95,7 +95,9 @@
 .rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip[aria-expanded="true"] { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip > svg { width: 13px; height: 13px; color: var(--color-ink-4); }
 .rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip > svg:last-child { width: 11px; height: 11px; }
-.rl-fs-lastused { flex: none; color: var(--color-ink-4); }
+/* In the model's own line, 7 after it (the row's gap), so a squeezed chip
+   cuts "last used" before the model's name. */
+.rl-fs-lastused { margin-left: 7px; color: var(--color-ink-4); }
 .rl-fs-spacer { flex: 1 1 0; min-width: 0; }
 
 /* 📎 and the mic: bare 30px glyphs in the muted ink (an icon's 3:1 is the

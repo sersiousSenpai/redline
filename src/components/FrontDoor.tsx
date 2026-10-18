@@ -1595,8 +1595,9 @@ export function BackendMenu({
         >
           {flowLabel ? (
             <>
-              <Sparkles size={13} aria-hidden="true"/><span>{flowLabel.text}</span>
-              {flowLabel.lastUsed && <span className="rl-fs-lastused">· last used</span>}
+              {/* One line, one ellipsis: squeezed, "last used" goes first. */}
+              <Sparkles size={13} aria-hidden="true"/>
+              <span>{flowLabel.text}{flowLabel.lastUsed && <span className="rl-fs-lastused">· last used</span>}</span>
               <ChevronDown size={11} aria-hidden="true"/>
             </>
           ) : (
