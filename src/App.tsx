@@ -10892,10 +10892,11 @@ function App() {
       )}
       <MonochatIsland
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${flowStartOnStage}:${bootAnimating}`}
-        // In the flow shell the door rests on the start screen whatever the
-        // sidebar holds — a folder there is where it would launch (A5), not a
-        // file viewer covering the plate — and its pill keeps to Tools pages.
-        landing={plateAtRest && shellReady && !joinedActive && (flowStartOnStage || sidebarTab.kind !== "folder")}
+        // In the flow shell the door rests exactly where the start screen is
+        // the stage — whatever the sidebar holds: a folder there is where it
+        // would launch (A5), not a file viewer covering the plate — and its
+        // pill keeps to Tools pages.
+        landing={plateAtRest && shellReady && !joinedActive && (isFlowShell() ? flowStartOnStage : sidebarTab.kind !== "folder")}
         pill={!isFlowShell() || flowPillShown(mainSurface)}
         surfaceKey={doorNavKey}
         onVisibilityChange={setDoorVisible}
