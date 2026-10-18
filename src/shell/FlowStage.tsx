@@ -30,10 +30,12 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { TerminalSquare } from "lucide-react";
 
 import type { StageTarget } from "../lib/flowSessions";
+import { useStageDock } from "../lib/stageDock";
 import {
   effectivePose,
   NARROW_STAGE_PX,
@@ -98,6 +100,8 @@ export interface FlowStageProps {
   composer: ReactNode;
   /** ⌘J: the stage shows the session's terminal. */
   terminalView: boolean;
+  /** App's terminal dock, laid over this stage while it shows the PTY. */
+  terminalDock: RefObject<HTMLElement | null>;
 }
 
 export default function FlowStage(p: FlowStageProps) {
@@ -116,6 +120,8 @@ export default function FlowStage(p: FlowStageProps) {
     return () => ro.disconnect();
   }, []);
   const pose = effectivePose({ stored, hasPlan: p.hasPlan, narrow });
+  // ⌘J: the dock over this stage's box, showing the session's PTY alone.
+  useStageDock(p.terminalDock, rootRef, p.terminalView && !!p.target.terminalId);
   const layout: ConversationLayout = pose === "full" ? "panel" : pose === "split" ? "column" : "stage";
 
   const onPose = p.onPose;

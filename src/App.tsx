@@ -24,7 +24,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { makeToast, RedlineToast, type ActiveToast, type ToastSpec } from "./components/RedlineToast";
 import type { BrowserDownloadEvent } from "./lib/browserOutput";
-import { CommentComposer } from "./components/CommentComposer";
 import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
@@ -392,8 +391,11 @@ import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
 import type { ConversationLayout } from "./shell/FlowStage";
 import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
 import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
-import { convoPrebind } from "./lib/convo/api";
-import { useStageDock } from "./lib/stageDock";
+// The comment composer opens on a gesture — a selection's menu — so it rides
+// its own chunk (about 9.5 kB off the boot path, which pays for the flow
+// stage's wiring), warmed the moment a selection shows that menu.
+const loadCommentComposer = () => import("./components/CommentComposer");
+const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
 const loadFlowStage = () => import("./shell/FlowStage");
 const loadSessionConversation = () => import("./shell/SessionConversation");
 const FlowStage = lazy(loadFlowStage);
@@ -3384,9 +3386,6 @@ function App() {
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
   const termDockRef = useRef<HTMLDivElement | null>(null);
-  // Flow's terminal view: the dock lies over the stage while it shows the
-  // session's PTY (lib/stageDock).
-  useStageDock(termDockRef, docColumnRef, flowTermStage);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
   // inside the document column — but it follows the same rule: its width is
   // written straight to the element, never rendered from JSX.
@@ -4017,6 +4016,9 @@ function App() {
     documentRef,
     composing === null,
   );
+  useEffect(() => {
+    if (selection) void loadCommentComposer().catch(() => {});
+  }, [selection]);
   // Imperative bridge to the lazily-mounted PlanEditor so the SelectionMenu's
   // Strike action can run an editor command without owning the editor.
   const planActionsRef = useRef<PlanEditorActions | null>(null);
@@ -6381,7 +6383,7 @@ function App() {
     // before the resumed CLI's SessionStart, so it binds the moment it does.
     if (flowShell) {
       bindSessionTerminals([{ sessionId, terminalId: id }]);
-      void convoPrebind(id, sessionId).catch(() => {});
+      void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
     }
     onRestore({
       type: "dispatched",
@@ -8804,6 +8806,7 @@ function App() {
   // The comment composer, while a mark is being written: the discussion
   // pane's on classic, the plan panel's (or its Feedback tab's) in flow.
   const commentComposer = composing ? (
+    <Suspense fallback={null}>
     <CommentComposer
       type={composing.type}
       sessionId={activeId ?? ""}
@@ -8816,6 +8819,7 @@ function App() {
       onCancel={() => setComposing(null)}
       onSubmit={submitComment}
     />
+    </Suspense>
   ) : null;
 
   // ── The flow stage's props ───────────────────────────────────────────────
@@ -8952,6 +8956,7 @@ function App() {
             }
             composer={commentComposer}
             terminalView={flowView === "terminal"}
+            terminalDock={termDockRef}
           />
         </ErrorBoundary>
       </Suspense>

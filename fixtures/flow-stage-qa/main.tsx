@@ -90,6 +90,7 @@ function Fixture() {
   const [zoom, setZoom] = useState(1);
   const view = useFlow((s) => s.stage);
   const articleRef = useRef<HTMLElement | null>(null);
+  const dockRef = useRef<HTMLElement | null>(null);
   const focused = board === "5a" ? "c-001" : null;
 
   useEffect(() => {
@@ -182,6 +183,7 @@ function Fixture() {
               feedback={board === "5a" ? { session: DIAL_SESSION, viewingVersion: 1, onJumpToAnchor: () => {}, focusedCommentId: focused, composer: { onSubmit: () => {} } } : null}
               composer={composer}
               terminalView={view === "terminal"}
+              terminalDock={dockRef}
             />
             <div className="rl-doc-zoom absolute flex items-center gap-1 rounded-full" style={{ right: 16, bottom: 16, padding: 3, background: "var(--color-bg-elevated)", border: "1px solid var(--color-rule)", boxShadow: "0 4px 14px rgba(0,0,0,0.18)", opacity: 0.92 }}>
               <ZoomButton label="−" title="Zoom out" onClick={() => setZoom((z) => z - 0.1)} />
