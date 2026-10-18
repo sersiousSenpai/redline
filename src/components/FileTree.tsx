@@ -13,12 +13,13 @@ interface FileTreeProps {
   /** Absolute path of the file currently open in the viewer, for highlight. */
   activeFile: string | null;
   onOpenFile: (path: string) => void;
+  onPlanHere?: (path: string) => void;
 }
 
 // A VSCode-style file explorer rooted at one project folder. Each directory
 // lazy-loads its children the first time it's expanded (one `list_dir` per
 // level), so opening a huge repo never walks the whole tree up front.
-function FileTreeBase({ root, activeFile, onOpenFile }: FileTreeProps) {
+function FileTreeBase({ root, activeFile, onOpenFile, onPlanHere }: FileTreeProps) {
   // Warm the code-viewer chunk the moment the explorer is shown, so the first
   // file click never waits on the JS chunk (which would stack a Suspense flash
   // on top of CodeView's own loader — the "double flash").
@@ -26,6 +27,7 @@ function FileTreeBase({ root, activeFile, onOpenFile }: FileTreeProps) {
 
   return (
     <div className="py-1" style={{ fontSize: "13px" }}>
+      {onPlanHere && <button type="button" className="rl-menu-item w-full text-left px-3 py-2" onClick={() => onPlanHere(root)}>＋ Plan here</button>}
       <DirChildren
         path={root}
         depth={0}

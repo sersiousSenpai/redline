@@ -9,6 +9,7 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { acquireGraphics } from "../lib/graphicsAllocation";
 import type { WebglAddon } from "@xterm/addon-webgl";
 import { loadXterm, xtermMods, type XtermMods } from "../lib/xtermLoader";
+import { readTerminalPrefs, terminalFamily, TERMINAL_PREFS_EVENT, type TerminalPrefs } from "../lib/terminalPrefs";
 import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
@@ -385,17 +386,19 @@ export const TerminalView = memo(function TerminalView({
     // these bytes into the new xterm, so retaining them would replay twice.
     pendingRef.current = { chunks: [], size: 0 };
 
+    const prefs = readTerminalPrefs();
     const term = new Terminal({
-      fontFamily:
-        getComputedStyle(document.documentElement)
-          .getPropertyValue("--font-mono")
-          .trim() || "ui-monospace, Menlo, monospace",
-      fontSize: 13,
+      fontFamily: terminalFamily(prefs),
+      fontSize: prefs.size,
+      lineHeight: prefs.lineHeight,
+      allowProposedApi: true,
       cursorBlink: true,
       theme: readXtermTheme(theme),
       scrollback: 5000,
     });
     const fit = new FitAddon();
+    term.loadAddon(new xt.Unicode11Addon());
+    term.unicode.activeVersion = "11";
     term.loadAddon(fit);
     term.open(host);
     fit.fit();
@@ -657,6 +660,21 @@ export const TerminalView = memo(function TerminalView({
     }
     return drop;
   }, [visible, xt]);
+
+  // Settings → Terminal applies live: a new size re-fits the grid.
+  useEffect(() => {
+    const apply = (event: Event) => {
+      const prefs = (event as CustomEvent<TerminalPrefs>).detail ?? readTerminalPrefs();
+      const term = termRef.current;
+      if (!term) return;
+      term.options.fontFamily = terminalFamily(prefs);
+      term.options.fontSize = prefs.size;
+      term.options.lineHeight = prefs.lineHeight;
+      if (visibleRef.current) fitRef.current?.fit();
+    };
+    window.addEventListener(TERMINAL_PREFS_EVENT, apply);
+    return () => window.removeEventListener(TERMINAL_PREFS_EVENT, apply);
+  }, []);
 
   // Re-theme in place when the app theme changes.
   useEffect(() => {

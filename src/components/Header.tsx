@@ -37,6 +37,8 @@ const ExtensionsPanel = lazy(() =>
 const ModeToggle = settingsRow("ModeToggle");
 const ThemePicker = settingsRow("ThemePicker");
 const FontPicker = settingsRow("FontPicker");
+const TerminalSettings = settingsRow("TerminalSettings");
+const TransparencySettings = settingsRow("TransparencySettings");
 const LintPicker = settingsRow("LintPicker");
 const AlertSettings = settingsRow("AlertSettings");
 
@@ -412,6 +414,8 @@ export function Header({
           />
         )}
         <SettingsMenu
+          terminal={<TerminalSettings />}
+          transparency={<TransparencySettings />}
           onOpenIntegrationHooks={onOpenIntegrationHooks}
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
           theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}

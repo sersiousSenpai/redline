@@ -253,6 +253,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
     "NSImage", "NSImageRep", "NSBitmapImageRep", "objc2-quartz-core",
     "NSPrintInfo", "NSPrintOperation", "NSDragging", "NSFilePromiseReceiver",
+    "NSWorkspace", "NSAccessibility",
     "block2",
 ] }
 

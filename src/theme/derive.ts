@@ -10,12 +10,17 @@ export interface ThemeBase {
   blue: string;
   yellow: string;
   green: string;
+  red?: string;
   // A vibrant, high-visibility hue for text selection / comment highlights,
   // hand-picked per theme to contrast strongly with that theme's background.
   selection: string;
 }
 
-export interface ThemeTokens {
+type FlowToken = `color-fill-${1 | 2 | 3}` | "color-rule-strong" | "color-focus-rim"
+  | `color-ink-${2 | 3 | 4 | 5}` | `color-mode-${"plan" | "redline" | "build" | "danger"}-${"fg" | "bg"}`
+  | `color-glass-${1 | 2 | 3}` | "color-glass-rim-hi" | "color-glass-rim-lo" | "color-glass-shadow"
+  | "color-ambient-a" | "color-ambient-b";
+export interface ThemeTokens extends Record<FlowToken, string> {
   "color-paper": string;
   "color-ink": string;
   "color-ink-muted": string;
@@ -253,7 +258,32 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
         deletion: "#9a1015",
       };
 
+  const fills = [0.04, 0.06, 0.09].map(alpha => mix(bg, fg, hoverAlpha(fg, [bg], alpha, 4.5)));
+  const surfaces = [bg, canvas, elevated, ...fills];
+  const mode = (accent: string) => {
+    const fill = mix(bg, accent, isDark ? 0.12 : 0.08);
+    return { bg: fill, fg: onFill(fill, [accent, fg]) };
+  };
+  const plan = mode(base.blue), redline = mode(base.yellow), build = mode(base.green), danger = mode(base.red ?? hl.deletion);
   return {
+    "color-fill-1": fills[0], "color-fill-2": fills[1], "color-fill-3": fills[2],
+    "color-rule-strong": mix(bg, fg, 0.23), "color-focus-rim": mix(mix(bg, fg, 0.18), base.blue, 0.28),
+    "color-ink-2": mutedInk(fg, bg, 0.08, 4.5, surfaces, false),
+    "color-ink-3": mutedInk(fg, bg, 0.25, 4.5, surfaces, false),
+    "color-ink-4": mutedInk(fg, bg, 0.45, 4.5, surfaces, false),
+    "color-ink-5": mutedInk(fg, bg, 0.6, 4.5, surfaces, false),
+    "color-mode-plan-fg": plan.fg, "color-mode-plan-bg": plan.bg,
+    "color-mode-redline-fg": redline.fg, "color-mode-redline-bg": redline.bg,
+    "color-mode-build-fg": build.fg, "color-mode-build-bg": build.bg,
+    "color-mode-danger-fg": danger.fg, "color-mode-danger-bg": danger.bg,
+    "color-glass-1": rgba(elevated, isDark ? 0.70 : 0.78),
+    "color-glass-2": rgba(elevated, isDark ? 0.62 : 0.72),
+    "color-glass-3": rgba(elevated, isDark ? 0.56 : 0.66),
+    "color-glass-rim-hi": rgba(fg, isDark ? 0.22 : 0.16),
+    "color-glass-rim-lo": rgba(fg, isDark ? 0.07 : 0.06),
+    "color-glass-shadow": rgba("#000000", isDark ? 0.35 : 0.12),
+    "color-ambient-a": rgba(base.blue, isDark ? 0.08 : 0.04),
+    "color-ambient-b": rgba(base.selection, isDark ? 0.06 : 0.03),
     "color-paper": bg,
     "color-ink": fg,
     // Secondary text must stay readable on every theme — not a flat 45% fade

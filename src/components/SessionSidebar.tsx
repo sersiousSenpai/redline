@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { memo, useCallback, useEffect, useState } from "react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
+import { RowMenu } from "./RowMenu";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
@@ -32,6 +33,8 @@ interface SessionSidebarProps {
    *  drains the orphaned hook response so Claude Code's terminal unblocks
    *  before the row disappears. */
   onDelete: (id: string) => void;
+  onRename?: (id: string, title: string) => void;
+  onArchive?: (id: string, archived: boolean) => void;
   onSetPlanState?: (id: string, state: ManualPlanState) => void;
   onMoveProject?: (id: string) => void;
   /** Download a specific revision as a clean .md file. Kept as a separate
@@ -114,6 +117,7 @@ function SessionSidebarBase({
   onLeaveJoined,
   onSelect,
   onDelete,
+  onRename, onArchive,
   onSetPlanState, onMoveProject,
   onExport,
   onSelectRevision,
@@ -129,6 +133,7 @@ function SessionSidebarBase({
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(activeId ? [activeId] : []),
   );
+  const [showArchived, setShowArchived] = useState(false);
   useEffect(() => {
     if (!activeId) return;
     setExpanded((prev) => {
@@ -286,7 +291,7 @@ function SessionSidebarBase({
         </div>
       ) : (
         <ul>
-          {sessions.map((s) => (
+          {sessions.filter(s => !s.archivedAt || showArchived).map((s) => (
             <SessionRow
               key={s.sessionId}
               session={s}
@@ -303,6 +308,8 @@ function SessionSidebarBase({
               onClick={clickRow}
               onToggleExpand={toggleExpand}
               onDelete={onDelete}
+              onRename={onRename}
+              onArchive={onArchive}
               onSetPlanState={onSetPlanState}
               onMoveProject={onMoveProject}
               onExport={onExport}
@@ -312,6 +319,7 @@ function SessionSidebarBase({
           ))}
         </ul>
       )}
+      {sessions.some(s => s.archivedAt) && <button type="button" className="rl-menu-item px-3 py-2 text-left" aria-expanded={showArchived} onClick={() => setShowArchived(v => !v)}>{showArchived ? "▾" : "▸"} Archived · {sessions.filter(s => s.archivedAt).length}</button>}
       {combining && (
         <div className="rl-cmb-bar">
           {/* States the operation, not the mechanic: "3 plans → 1 plan" is
@@ -467,6 +475,7 @@ function SessionRowBase({
   onClick,
   onToggleExpand,
   onDelete,
+  onRename, onArchive,
   onSetPlanState, onMoveProject,
   onExport,
   onSelectRevision,
@@ -492,6 +501,8 @@ function SessionRowBase({
   onClick: (sessionId: string) => void;
   onToggleExpand: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onRename?: (id: string, title: string) => void;
+  onArchive?: (id: string, archived: boolean) => void;
   onSetPlanState?: (id: string, state: ManualPlanState) => void;
   onMoveProject?: (id: string) => void;
   onExport: (sessionId: string, versionNumber: number) => void;
@@ -499,6 +510,9 @@ function SessionRowBase({
   onOpenRunReport?: (sessionId: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
   const display = computeRevisionDisplay(session.revisions);
   const badgeVersion = latestDisplayVersion(
     session.revisions,
@@ -509,10 +523,16 @@ function SessionRowBase({
   const expandable = session.revisions.length > 1;
   const picked = pickedAt >= 0;
   const rowName =
-    session.planTitle || session.projectName || session.projectPath || session.sessionId;
+    session.titleOverride || session.planTitle || session.projectName || session.projectPath || session.sessionId;
 
   return (
-    <li className="rl-session-row relative group">
+    <li className="rl-session-row relative group" onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuOpen(true); } }} onKeyDown={e => {
+      if (!combining && (e.key === "Backspace" || e.key === "Delete") && (e.target as HTMLElement).tagName !== "INPUT") { e.preventDefault(); setConfirming(true); }
+    }}>
+      {renaming && <form className="rl-row-rename" onSubmit={e => { e.preventDefault(); onRename?.(session.sessionId, newTitle); setRenaming(false); }}>
+        <input autoFocus aria-label="Session title" maxLength={200} value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setRenaming(false); }} />
+        <button type="submit">Save</button><button type="button" onClick={() => setRenaming(false)}>Cancel</button>
+      </form>}
       {/* One-shot arrival glow — an overlay, like the tile hail, so it paints
           above the row's own background. Keyed on the nonce: a new arrival is
           a new element, so the animation genuinely restarts. */}
@@ -609,29 +629,12 @@ function SessionRowBase({
           </button>
         </div>
       ) : combining ? null : (
-        <button
-          type="button"
-          aria-label="Delete session"
-          title={
-            session.held
-              ? "Delete this session (will release Claude Code's blocked terminal)"
-              : "Delete this session"
-          }
-          onClick={(e) => {
-            e.stopPropagation();
-            setConfirming(true);
-          }}
-          className="absolute right-3 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
-          style={{
-            color: "var(--color-ink-muted)",
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-rule)",
-            fontSize: "12px",
-            lineHeight: 1.4,
-          }}
-        >
-          ✕
-        </button>
+        <RowMenu open={menuOpen} onOpenChange={setMenuOpen} label={rowName} actions={[
+          { label: "Open plan", onSelect: () => onClick(session.sessionId) },
+          ...(onRename ? [{ label: "Rename", onSelect: () => { setNewTitle(rowName); setRenaming(true); } }] : []),
+          ...(onArchive ? [{ label: session.archivedAt ? "Unarchive" : "Archive", disabled: session.held, onSelect: () => onArchive(session.sessionId, !session.archivedAt) }] : []),
+          { label: "Delete plan ⌫", danger: true, onSelect: () => setConfirming(true) },
+        ]} />
       )}
       <button
         type="button"
@@ -644,7 +647,7 @@ function SessionRowBase({
               : `${rowName}, not in the combination`
             : undefined
         }
-        className={`hover-elevated w-full text-left pl-7 pr-3 py-2 border-b${
+        className={`hover-elevated w-full text-left pl-7 pr-10 py-2 border-b${
           combining ? " rl-cmb-row" : ""
         }${combining && picked ? " is-on" : ""}`}
         style={{
@@ -666,7 +669,7 @@ function SessionRowBase({
             }}
             title={session.projectPath}
           >
-            {session.planTitle ||
+            {session.titleOverride || session.planTitle ||
               session.projectName ||
               session.projectPath ||
               session.sessionId}

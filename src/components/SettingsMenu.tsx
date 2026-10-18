@@ -36,6 +36,8 @@ interface SettingsMenuProps {
   mode: ReactNode;
   theme: ReactNode;
   font: ReactNode;
+  terminal?: ReactNode;
+  transparency?: ReactNode;
   lint: ReactNode;
   /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
   agents: ReactNode;
@@ -74,6 +76,8 @@ export function SettingsMenu({
   mode,
   theme,
   font,
+  terminal,
+  transparency,
   lint,
   agents,
   surfaces,
@@ -170,6 +174,8 @@ export function SettingsMenu({
             <Row label="Mode">{mode}</Row>
             <Row label="Theme">{theme}</Row>
             <Row label="Font">{font}</Row>
+            {terminal && <Row label="Terminal">{terminal}</Row>}
+            {transparency && <Row label="Transparency">{transparency}</Row>}
             <Row label="Linting">{lint}</Row>
             <Row label="Agent Seats">{agents}</Row>
             <Row label="Surfaces">{surfaces}</Row>

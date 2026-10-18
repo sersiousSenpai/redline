@@ -21,6 +21,7 @@ import {
 } from "./lib/boot";
 import { mark } from "./lib/bootMarks";
 import { perfProbeOn, syncPerfProbe } from "./lib/perfProbeSwitch";
+import { shellFlag } from "./lib/shellFlag";
 
 // The zero point for every frontend boot milestone (docs/perf-budget.md "Boot
 // budget"). First statement in the entry module, so the measurements start
@@ -36,6 +37,13 @@ if (perfProbeOn()) void syncPerfProbe(true);
 applyTheme(readStoredTheme());
 applyFont(readStoredFont());
 applyLint(readStoredLint());
+// The shell (classic | flow) is read once per load; stamping it before React
+// mounts lets CSS branch on it from the first frame (lib/shellFlag.ts).
+document.documentElement.dataset.rlShell = shellFlag();
+// Glass turns solid under Reduce Transparency / Increase Contrast, or when the
+// user chose Always solid; the native read and its observer load off the
+// entry chunk.
+void import("./lib/transparency").then((m) => m.startTransparencyObserver());
 
 // Doors-open boot (A2): stamp the closed frame before React mounts, so the
 // first frame the hidden window ever paints is the gathered plates —

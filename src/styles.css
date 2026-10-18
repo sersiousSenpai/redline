@@ -2,6 +2,53 @@
 /* Copyright 2026 Yusuf Al-Bazian */
 @import "tailwindcss";
 
+:root {
+  --rl-blur-1: 16px; --rl-blur-2: 24px; --rl-blur-3: 32px; --rl-sat: 170%;
+  --rl-shadow-1: 0 2px 8px var(--color-glass-shadow);
+  --rl-shadow-2: 0 18px 50px var(--color-glass-shadow);
+  --rl-shadow-3: 0 20px 60px var(--color-glass-shadow);
+  --rl-ease-spring: cubic-bezier(.16, 1, .3, 1); --rl-ease-out: cubic-bezier(.2, .7, .25, 1);
+  --rl-dur-1: 120ms; --rl-dur-2: 180ms; --rl-dur-3: 240ms;
+  --rl-text-label: 11px; --rl-text-chip: 11.5px; --rl-text-chrome: 12.5px;
+  --rl-text-row: 13px; --rl-text-conversation: 15px; --rl-text-plan: 16.5px;
+  --rl-text-heading: 19px; --rl-text-title: 30px; --rl-text-welcome: 36px;
+  --rl-radius-chip: 6px; --rl-radius-row: 7px; --rl-radius-menu-row: 8px;
+  --rl-radius-button: 9px; --rl-radius-card: 12px; --rl-radius-composer: 14px; --rl-radius-start: 16px;
+}
+/* The in-app glass material, three tiers: chip (needs-you, mode, version),
+   menu (Tools, ⋯, model menu, palette, toasts) and sheet (composers, the
+   Plan-ready card, the plan header's edge). A translucent theme fill over a
+   blurred, saturated backdrop; the rim is two inset shadows — a hairline
+   ring and a brighter top-left edge — so the fill stays a plain colour a
+   contrast check can read, and an element's own border is left alone.
+   Never animate the blur, fill or shadow (the springing suspension below
+   drops the blur while a surface moves). */
+.rl-glass {
+  --rl-glass-fill: var(--color-glass-1); --rl-glass-blur: var(--rl-blur-1); --rl-glass-shadow: var(--rl-shadow-1);
+  --rl-glass-ring: var(--color-glass-rim-lo); --rl-glass-hi: var(--color-glass-rim-hi);
+  background: var(--rl-glass-fill);
+  box-shadow: inset 1px 1px 0 var(--rl-glass-hi), inset 0 0 0 1px var(--rl-glass-ring), var(--rl-glass-shadow);
+  backdrop-filter: blur(var(--rl-glass-blur)) saturate(var(--rl-sat));
+  -webkit-backdrop-filter: blur(var(--rl-glass-blur)) saturate(var(--rl-sat));
+}
+.rl-glass-menu { --rl-glass-fill: var(--color-glass-2); --rl-glass-blur: var(--rl-blur-2); --rl-glass-shadow: var(--rl-shadow-2); }
+.rl-glass-sheet { --rl-glass-fill: var(--color-glass-3); --rl-glass-blur: var(--rl-blur-3); --rl-glass-shadow: var(--rl-shadow-3); }
+/* Reduce Transparency, Increase Contrast or Settings → Always solid. */
+html[data-rl-transparency="reduced"] .rl-glass {
+  --rl-glass-ring: var(--color-rule-strong); --rl-glass-hi: transparent;
+  background: var(--color-bg-elevated) !important;
+  backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+}
+.rl-ambient { background: radial-gradient(ellipse at 15% 0%, var(--color-ambient-a), transparent 55%), radial-gradient(ellipse at 90% 100%, var(--color-ambient-b), transparent 55%), var(--color-canvas); }
+
+.rl-row-menu-trigger { position: absolute; right: 10px; top: 7px; z-index: 10; width: 26px; height: 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink-muted); cursor: pointer; }
+.rl-row-menu { padding: 6px; }
+.rl-row-menu button { display: block; width: 100%; height: 32px; padding: 0 10px; border-radius: 8px; text-align: left; font-size: 12px; cursor: pointer; }
+.rl-row-menu button:disabled { opacity: .5; cursor: default; }
+.rl-row-menu .rl-row-danger { color: var(--color-mode-danger-fg, var(--color-warning-text)); border-top: 1px solid var(--color-rule); }
+.rl-row-rename { position: relative; z-index: 12; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: var(--color-paper); font-size: 12px; }
+.rl-row-rename input { width: 100%; border: 1px solid var(--color-info); padding: 6px; border-radius: 6px; }
+
 .rl-integration-dialog { margin: auto; width: min(510px, calc(100vw - 32px)); max-height: 88vh; overflow: auto; padding: 28px; color: var(--color-ink); background: var(--color-bg-elevated); border: 1px solid var(--color-rule); border-radius: 20px; box-shadow: 0 24px 100px #0006; }
 .rl-integration-dialog::backdrop { background: var(--color-overlay); backdrop-filter: blur(5px); }
 .rl-integration-eyebrow { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--color-info); }
@@ -3552,20 +3599,12 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   position: relative;
   border-radius: 18px;
   padding: 14px 14px 12px;
-  /* Glass: a translucent wash over the paper, blurred and saturated so
-     whatever sits behind it reads as depth rather than noise. */
-  background: color-mix(in srgb, var(--color-bg-elevated) 62%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(160%);
-  backdrop-filter: blur(24px) saturate(160%);
-  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
-  box-shadow:
-    0 1px 0 0 color-mix(in srgb, var(--color-ink) 6%, transparent) inset,
-    0 8px 28px -12px rgba(0, 0, 0, 0.45);
-  transition:
-    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 320ms cubic-bezier(0.16, 1, 0.3, 1),
-    border-color 260ms ease,
-    background-color 260ms ease;
+  /* The glass sheet (.rl-glass-sheet), spelled out so the contrast check can
+     read what the sentence sits on. The border is the old box's 1px, kept
+     transparent so nothing moves; the rim is the glass's. */
+  background: var(--color-glass-3);
+  border: 1px solid transparent;
+  transition: transform var(--rl-dur-3) var(--rl-ease-out);
 }
 /* Lifted = focused, or carrying a sentence, or planning. The slab rises and
    picks up an accent ring — the shape IS the state. */
@@ -3576,12 +3615,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-fd-island.is-lifted,
 .rl-dl-bar.is-lifted {
   transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--color-info) 42%, transparent);
-  background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
-  box-shadow:
-    0 1px 0 0 color-mix(in srgb, var(--color-ink) 8%, transparent) inset,
-    0 0 0 3px color-mix(in srgb, var(--color-info) 12%, transparent),
-    0 18px 44px -18px rgba(0, 0, 0, 0.6);
+  --rl-glass-ring: var(--color-focus-rim);
 }
 /* The Drafter's bar still morphs into a launch card in place — its document
    never leaves the screen, so the card has something to sit beside. The front
@@ -4628,6 +4662,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    re-blur the backdrop every frame, at a changing scale — comfortably the most
    expensive thing that could be happening during this animation, and it buys
    nothing while the surface is in motion. Restored the moment it lands. */
+.rl-swap-in[data-springing="1"] .rl-glass,
 .rl-swap-in[data-springing="1"] .rl-page,
 .rl-swap-in[data-springing="1"] .rl-dl-bar {
   -webkit-backdrop-filter: none;

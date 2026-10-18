@@ -2,7 +2,7 @@
 .rl-composer-chip > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rl-composer-chip > svg { flex-shrink: 0; }
 .rl-composer-chip:hover, .rl-composer-chip[aria-expanded=true] { border-color: color-mix(in srgb, var(--color-info) 45%, transparent); background: color-mix(in srgb, var(--color-info) 12%, transparent); }
-.rl-composer-menu { border-radius: 18px !important; border-color: color-mix(in srgb, var(--color-ink) 16%, transparent) !important; background: color-mix(in srgb, var(--color-bg-elevated) 94%, transparent) !important; -webkit-backdrop-filter: blur(32px) saturate(150%); backdrop-filter: blur(32px) saturate(150%); box-shadow: inset 0 1px 0 #ffffff0c, 0 18px 50px #0005 !important; max-width: calc(100vw - 16px); }
+.rl-composer-menu { border-radius: 12px !important; max-width: calc(100vw - 16px); }
 .rl-composer-menu-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 7px; overscroll-behavior: contain; }
 .rl-composer-menu-heading { padding: 10px 10px 7px; color: var(--color-ink-muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
 .rl-composer-option { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px; color: var(--color-ink); background: transparent; border: 1px solid transparent; border-radius: 11px; text-align: left; font-size: 12px; cursor: pointer; }
@@ -14,7 +14,7 @@
 .rl-composer-check { color: var(--color-info); flex-shrink: 0; }
 .rl-composer-chip:focus-visible { outline: 2px solid var(--color-info); outline-offset: 3px; }
 .rl-model-menu > .rl-thin-scroll-y { border-radius: inherit; overscroll-behavior: contain; }
-.rl-effort-strip { position: absolute; z-index: 2; width: 184px; padding: 12px; border: 1px solid var(--color-rule); border-radius: 14px; background: var(--color-bg-elevated); box-shadow: 0 8px 28px #0004; animation: rl-effort-enter 130ms ease-out; }
+.rl-effort-strip { position: absolute; z-index: 2; width: 184px; padding: 12px; border: 1px solid transparent; border-radius: 12px; animation: rl-effort-enter 130ms ease-out; }
 .rl-effort-readout { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; color: var(--color-ink-muted); font-size: 10px; margin-bottom: 5px; }
 .rl-effort-value { color: var(--color-ink); font-size: 11px; font-weight: 500; }
 .rl-effort-notches { display: flex; gap: 4px; align-items: end; }

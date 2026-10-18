@@ -10,3 +10,5 @@ export { LintPicker } from "./LintPicker";
 export { ModeToggle } from "./ModeToggle";
 export { SurfacesPanel } from "./SurfacesPanel";
 export { ThemePicker } from "./ThemePicker";
+export { TerminalSettings } from "./TerminalSettings";
+export { TransparencySettings } from "./TransparencySettings";

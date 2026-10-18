@@ -33,6 +33,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onFocusCha
 vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({ onDragDropEvent: async (fn: (event: { payload: unknown }) => void) => { mocks.drops.add(fn); return () => mocks.drops.delete(fn); } }) }));
 vi.mock("../lib/xtermLoader", () => {
   class Terminal {
+    unicode = { activeVersion: "6" };
     cols = 80;
     rows = 24;
     options = {};
@@ -62,7 +63,8 @@ vi.mock("../lib/xtermLoader", () => {
   }
   class FitAddon { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } }
   class WebglAddon { onContextLoss() {} dispose() {} }
-  const mods = { Terminal, FitAddon, WebglAddon };
+  class Unicode11Addon {}
+  const mods = { Terminal, FitAddon, WebglAddon, Unicode11Addon };
   return { xtermMods: () => mods, loadXterm: async () => mods };
 });
 

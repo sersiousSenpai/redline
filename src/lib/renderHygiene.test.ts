@@ -170,7 +170,7 @@ describe("content-visibility", () => {
     for (const row of ROWS) {
       expect(styles).toMatch(new RegExp(`\\${row}[^{]*\\{\\s*contain-intrinsic-height:\\s*auto \\d+px;`));
     }
-    expect(read("src/components/SessionSidebar.tsx")).toContain('<li className="rl-session-row relative group">');
+    expect(read("src/components/SessionSidebar.tsx")).toContain('<li className="rl-session-row relative group"');
     expect(read("src/components/SessionSidebar.tsx")).toContain('<li className="rl-revision-row">');
     expect(read("src/components/FileTree.tsx")).toContain("rl-file-row");
   });

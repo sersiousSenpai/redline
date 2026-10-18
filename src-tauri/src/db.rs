@@ -749,7 +749,7 @@ impl Database {
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
     /// step that has shipped. Higher stamps are verified without migrations
     /// or restamping; only an unusable forward schema is refused.
-    const SCHEMA_VERSION: i64 = 9;
+    const SCHEMA_VERSION: i64 = 10;
 
     /// The schema version this build writes, for callers outside `db`.
     ///
@@ -773,6 +773,7 @@ impl Database {
             (7, Self::migrate_v7),
             (8, Self::migrate_v8),
             (9, Self::migrate_v9),
+            (10, Self::migrate_v10),
         ];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
@@ -798,6 +799,7 @@ impl Database {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if current == Self::SCHEMA_VERSION {
+            Self::migrate_v10(conn)?;
             // Another migration lineage has used this same integer before.
             // Never let a matching stamp hide missing history-read columns.
             Self::verify_schema(conn)?;
@@ -832,6 +834,7 @@ impl Database {
             Self::migrate_v6(conn)?;
             Self::migrate_v8(conn)?;
             Self::migrate_v9(conn)?;
+            Self::migrate_v10(conn)?;
             Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -948,7 +951,7 @@ impl Database {
             ),
         ];
         // Columns later steps add, keyed by the version that adds them.
-        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"]), (8, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (8, "browse_messages", &["backend"]), (9, "browse_messages", &["target_browse_id"])];
+        const REQUIRED_SINCE: &[(i64, &str, &[&str])] = &[(5, "comments", &["research"]), (6, "companion_sessions", &["project_path"]), (6, "companion_messages", &["meta"]), (6, "change_narrations", &["repo", "fingerprint", "story", "created_at"]), (6, "commit_narrations", &["repo", "sha", "story", "created_at"]), (6, "git_workspaces", &["id", "repo", "path", "branch", "title", "base_sha", "created_at", "state"]), (7, "thread_messages", &["mode"]), (8, "browse_threads", &["backend", "model", "effort", "codex_thread_id", "codex_usage"]), (8, "browse_messages", &["backend"]), (9, "browse_messages", &["target_browse_id"]), (10, "sessions", &["archived_at", "title_override"]), (10, "companion_sessions", &["archived_at"])];
         let later = REQUIRED_SINCE
             .iter()
             .filter(|(since, ..)| *since <= version)
@@ -1172,6 +1175,48 @@ impl Database {
             [],
         )?;
         Ok(())
+    }
+
+    /// Session organization is additive; schema shape wins over a colliding
+    /// version stamp. Safe after a partially completed migration as well.
+    fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
+        for (table, additions) in [
+            ("sessions", vec![("archived_at", "INTEGER"), ("title_override", "TEXT")]),
+            ("companion_sessions", vec![("archived_at", "INTEGER")]),
+        ] {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let columns = stmt.query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if columns.is_empty() { continue; }
+            for (name, kind) in additions {
+                if !columns.iter().any(|c| c == name) {
+                    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {kind}"), [])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn session_organization(&self) -> rusqlite::Result<std::collections::HashMap<String, (Option<i64>, Option<String>)>> {
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare("SELECT session_id, archived_at, title_override FROM sessions")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?;
+        rows.collect()
+    }
+
+    pub fn archive_session(&self, id: &str, archived: bool) -> rusqlite::Result<bool> {
+        Ok(self.lock_conn().execute(
+            "UPDATE sessions SET archived_at=?2 WHERE session_id=?1 AND (?2 IS NULL OR attach_state != 'held')",
+            params![id, archived.then(crate::state::now_millis)],
+        )? > 0)
+    }
+
+    pub fn rename_session(&self, id: &str, title: Option<&str>) -> rusqlite::Result<bool> {
+        Ok(self.lock_conn().execute("UPDATE sessions SET title_override=?2 WHERE session_id=?1", params![id, title])? > 0)
+    }
+
+    pub fn archive_companion(&self, id: &str, archived: bool) -> rusqlite::Result<bool> {
+        Ok(self.lock_conn().execute("UPDATE companion_sessions SET archived_at=?2 WHERE companion_id=?1", params![id, archived.then(crate::state::now_millis)])? > 0)
     }
 
     /// v2 → v3: repair the stamp collision with the older cockpit lineage.
@@ -2567,6 +2612,7 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE sessions SET archived_at=NULL WHERE session_id=?1", [session_id])?;
         tx.execute(
             "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -9756,6 +9802,43 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    #[test]
+    fn flow_organization_migration_repairs_partial_and_foreign_stamps() {
+        for stamp in [9, 10, 99] {
+            let db = Database::open_in_memory().unwrap();
+            let conn = db.lock_conn();
+            conn.execute("ALTER TABLE sessions DROP COLUMN title_override", []).unwrap();
+            conn.execute("ALTER TABLE companion_sessions DROP COLUMN archived_at", []).unwrap();
+            conn.pragma_update(None, "user_version", stamp).unwrap();
+            Database::migrate(&conn).unwrap();
+            Database::migrate(&conn).unwrap();
+            Database::verify_schema(&conn).unwrap();
+            let actual: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(actual, stamp.max(10));
+        }
+    }
+
+    #[test]
+    fn flow_organization_preserves_title_and_unarchives_on_new_plan() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        store.upsert_plan("flow", "/repo", "# Original".into(), vec![], true, false);
+        store.set_attach_state("flow", AttachState::Idle);
+        assert!(db.rename_session("flow", Some("My title")).unwrap());
+        assert!(db.archive_session("flow", true).unwrap());
+        let summary = store.list().remove(0);
+        assert!(summary.archived_at.is_some());
+        assert_eq!(summary.title_override.as_deref(), Some("My title"));
+        store.upsert_plan("flow", "/repo", "# Revised".into(), vec![], true, false);
+        let summary = store.list().remove(0);
+        assert!(summary.archived_at.is_none());
+        assert_eq!(summary.title_override.as_deref(), Some("My title"));
+        store.set_attach_state("flow", AttachState::Held);
+        assert!(!db.archive_session("flow", true).unwrap());
+        assert!(db.archive_session("flow", false).unwrap());
+        assert!(!db.archive_session("missing", true).unwrap());
     }
 
     // --- Backend provenance (which harness authored the plan) --------------

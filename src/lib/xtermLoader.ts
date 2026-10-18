@@ -11,11 +11,13 @@
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import type { WebglAddon } from "@xterm/addon-webgl";
+import type { Unicode11Addon } from "@xterm/addon-unicode11";
 
 export interface XtermMods {
   Terminal: typeof Terminal;
   FitAddon: typeof FitAddon;
   WebglAddon: typeof WebglAddon;
+  Unicode11Addon: typeof Unicode11Addon;
 }
 
 let cached: XtermMods | null = null;
@@ -33,14 +35,16 @@ export function loadXterm(): Promise<XtermMods> {
       import("@xterm/xterm"),
       import("@xterm/addon-fit"),
       import("@xterm/addon-webgl"),
+      import("@xterm/addon-unicode11"),
       // Vite turns this into a CSS chunk it injects on load.
       import("@xterm/xterm/css/xterm.css"),
     ]).then(
-      ([xterm, fit, webgl]) =>
+      ([xterm, fit, webgl, unicode]) =>
         (cached = {
           Terminal: xterm.Terminal,
           FitAddon: fit.FitAddon,
           WebglAddon: webgl.WebglAddon,
+          Unicode11Addon: unicode.Unicode11Addon,
         }),
       (err) => {
         inflight = null;

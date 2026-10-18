@@ -97,7 +97,7 @@ import {
   type RestoreEvent,
 } from "./lib/restoreAttempt";
 import { isLiveRunState } from "./lib/orchestration";
-import { Footer } from "./components/Footer";
+const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 import { Header } from "./components/Header";
 import { Button } from "./components/ui/Button";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
@@ -2927,12 +2927,13 @@ function App() {
   // folders. No-op on the terminal side if no terminal lives in that folder.
   const selectFolderTab = useCallback(
     (path: string) => {
+      setFrontDoorProject({ path });
       activateFolder(path);
       if (!linkNavRef.current) return;
       const termId = folderTermRef.current.get(path);
       if (termId) terminalsRef.current?.selectTab(termId);
     },
-    [activateFolder],
+    [activateFolder, setFrontDoorProject],
   );
 
   // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane,
@@ -3837,6 +3838,18 @@ function App() {
     setToast(`Moved to ${path.split("/").filter(Boolean).pop() ?? path}`);
   };
 
+
+  async function renameSession(id: string, title: string) {
+    try { await invoke("rename_session", { sessionId: id, title }); await refreshSummaries(); }
+    catch (error) { setToast(String(error), 6000); }
+  }
+  async function archiveSession(id: string, archived: boolean) {
+    try {
+      await invoke("archive_session", { sessionId: id, archived });
+      await refreshSummaries();
+      if (archived && id === activeId) { setActiveId(null); setSession(null); }
+    } catch (error) { setToast(String(error), 6000); }
+  }
 
   async function deleteSession(id: string): Promise<void> {
     // Always force=true: the UI confirm step is the user's intent gate, and
@@ -8375,6 +8388,8 @@ function App() {
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
     onCombine: (ids: string[]) => void beginCombine(ids),
     onDelete: deleteSession,
+    onRename: renameSession,
+    onArchive: archiveSession,
     onSetPlanState: (id: string, state: ManualPlanState) => void setPlanState(id, state),
     onMoveProject: (id: string) => void openMovePlan(id),
     onExport: exportRevision,
@@ -8666,6 +8681,7 @@ function App() {
             <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
               <FileTree
                 root={sidebarTab.id}
+                onPlanHere={(path) => { setFrontDoorProject({ path }); openFrontDoor(); }}
                 activeFile={activeFile}
                 onOpenFile={handleOpenFile}
               />
@@ -10525,7 +10541,7 @@ function App() {
       >
       {/* Same swap at the bottom — no native constraint here, so the footer
           hides outright behind a SHELL_EDGE strip of hull. */}
-      <ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
+      <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
       <Footer
         planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
         onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
@@ -10561,7 +10577,7 @@ function App() {
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
-      </ChromeSlot>
+      </ChromeSlot></Suspense>
       </ErrorBoundary>
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}

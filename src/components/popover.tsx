@@ -66,7 +66,8 @@ export interface PanelProps {
  *    and clipped to it, i.e. invisible. Portalling out of the contained
  *    subtree restores viewport coordinates.
  *
- *  Styling follows the header dropdowns (LiveSessionMenu). */
+ *  Styling follows the header dropdowns (LiveSessionMenu), in the glass menu
+ *  tier. */
 export function Panel({
   className = "",
   label,
@@ -86,7 +87,7 @@ export function Panel({
       ref={element => { ownRef.current = element; panelRef(element); }}
       role="menu"
       aria-label={label}
-      className={`rounded-md overflow-hidden font-sans ${className}`}
+      className={`rl-glass rl-glass-menu rounded-md overflow-hidden font-sans ${className}`}
       onKeyDown={event => {
         if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || (event.target as HTMLElement).matches("input, textarea, select")) return;
         const items = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), [role="menuitem"]:not([aria-disabled="true"])')];
@@ -108,9 +109,9 @@ export function Panel({
         // `overflow: hidden` stays — it is what rounds the corners.
         display: "flex",
         flexDirection: "column",
-        border: "1px solid var(--color-rule)",
-        background: "var(--color-bg-elevated)",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+        // The glass menu tier draws the fill, rim and shadow; the border
+        // stays 1px so the panel keeps its size.
+        border: "1px solid transparent",
         ...style,
       }}
     >

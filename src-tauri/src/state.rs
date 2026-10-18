@@ -206,6 +206,8 @@ pub struct SessionSummary {
     /// First `# heading` of the latest revision's plan — the session's display
     /// name. Derived on `list()`, never persisted. `None` = heading-less plan.
     pub plan_title: Option<String>,
+    pub archived_at: Option<i64>,
+    pub title_override: Option<String>,
     pub latest_version: u32,
     /// Every revision of this session, oldest-first — drives the sidebar tree.
     pub revisions: Vec<RevisionSummary>,
@@ -1570,6 +1572,10 @@ impl SessionStore {
         // One small keyed read per refresh — the run chip needs a mode string
         // and nothing else from the runs table.
         let run_modes = self.db.run_modes();
+        let organization = self.db.session_organization().unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to read session organization");
+            Default::default()
+        });
         let map = self.inner.lock().unwrap();
         let mut sessions: Vec<SessionSummary> = map
             .values()
@@ -1591,6 +1597,8 @@ impl SessionStore {
                     project_name: s.project_name.clone(),
                     project_path: s.project_path.clone(),
                     plan_title,
+                    archived_at: organization.get(&s.session_id).and_then(|o| o.0),
+                    title_override: organization.get(&s.session_id).and_then(|o| o.1.clone()),
                     latest_version,
                     revisions: s
                         .revisions

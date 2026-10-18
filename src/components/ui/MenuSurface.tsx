@@ -3,8 +3,8 @@
 import type { CSSProperties, ReactNode } from "react";
 
 // The popover-card idiom, deduped from the Settings dropdown, the Options
-// (download) menu and the header's surface context menu: one elevated rounded
-// card floating above the shell. Positioning (absolute/fixed, top/width,
+// (download) menu and the header's surface context menu: one rounded card in
+// the glass menu tier, floating above the shell. Positioning (absolute/fixed, top/width,
 // z-index) stays at the call site via className/style; open/close state and
 // the useMenuOverlay webview-hide contract stay with the caller too — this is
 // only the surface.
@@ -34,12 +34,12 @@ export function MenuSurface({
       role={role}
       aria-modal={modal || undefined}
       aria-label={ariaLabel}
-      className={className}
+      className={`rl-glass rl-glass-menu ${className ?? ""}`}
       style={{
         borderRadius: "var(--rl-radius-control)",
-        border: "1px solid var(--color-rule)",
-        background: "var(--color-bg-elevated)",
-        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.28)",
+        // The glass menu tier draws the fill, rim and shadow; the border
+        // stays 1px so the surface keeps its size.
+        border: "1px solid transparent",
         ...style,
       }}
       onMouseDown={onMouseDown}

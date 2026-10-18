@@ -268,6 +268,8 @@ export interface SessionSummary {
   /** First `# heading` of the latest revision's plan — the session's display
    *  name. Null/absent when the plan has no heading. */
   planTitle?: string | null;
+  archivedAt?: number | null;
+  titleOverride?: string | null;
   latestVersion: number;
   /** Every revision of this session, oldest-first — drives the sidebar tree. */
   revisions: RevisionSummary[];

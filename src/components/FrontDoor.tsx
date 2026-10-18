@@ -822,7 +822,7 @@ export function FrontDoor(props: FrontDoorProps) {
   // neither — it left, and the door is back at rest.
   const lifted = focused || hasText;
   const islandClass = [
-    "rl-fd-island",
+    "rl-fd-island rl-glass rl-glass-sheet",
     lifted ? "is-lifted" : "",
     refusedNonce === 0 ? "" : refusedNonce % 2 ? "is-refused" : "is-refused-alt",
   ]
@@ -1494,7 +1494,7 @@ export function BackendMenu({
             </span>
             <button type="button" role="menuitem" disabled={modelStatus?.refreshing} onClick={onRefresh}>Refresh models</button>
           </div>}
-          {showEffort && <div ref={effortRef} className="rl-effort-strip" style={effortPosition} onKeyDown={event => {
+          {showEffort && <div ref={effortRef} className="rl-effort-strip rl-glass rl-glass-menu" style={effortPosition} onKeyDown={event => {
             if (event.key !== "ArrowLeft" || (event.target as HTMLElement).closest(".rl-effort-notches")) return;
             event.preventDefault(); event.stopPropagation();
             modelsRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus();

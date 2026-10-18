@@ -142,6 +142,7 @@ mod skill;
 mod state;
 mod term_attention;
 mod thumbs;
+mod transparency;
 mod tts;
 mod tts_studio;
 mod turn;
@@ -7027,6 +7028,39 @@ fn list_sessions(
     sessions
 }
 
+#[tauri::command]
+fn archive_session(app: AppHandle, store: tauri::State<'_, SessionStore>, pending: tauri::State<'_, PendingResponses>, session_id: String, archived: bool) -> Result<(), String> {
+    if archived && pending.has(&session_id) {
+        return Err("This session is waiting for review. Continue or approve it before archiving.".into());
+    }
+    if !store.database().archive_session(&session_id, archived).map_err(|e| e.to_string())? {
+        return Err("Session is missing or still held for review.".into());
+    }
+    let _ = app.emit("session-status-changed", SessionEvent { session_id });
+    Ok(())
+}
+
+#[tauri::command]
+fn rename_session(app: AppHandle, store: tauri::State<'_, SessionStore>, session_id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.chars().count() > 200 || title.chars().any(char::is_control) {
+        return Err("Use a title of at most 200 characters, without control characters.".into());
+    }
+    if !store.database().rename_session(&session_id, (!title.is_empty()).then_some(title)).map_err(|e| e.to_string())? {
+        return Err("Session not found.".into());
+    }
+    let _ = app.emit("session-status-changed", SessionEvent { session_id });
+    Ok(())
+}
+
+#[tauri::command]
+fn archive_companion(store: tauri::State<'_, SessionStore>, companion_id: String, archived: bool) -> Result<(), String> {
+    if !store.database().archive_companion(&companion_id, archived).map_err(|e| e.to_string())? {
+        return Err("Conversation not found.".into());
+    }
+    Ok(())
+}
+
 /// Which session boot should land on instead of the front door.
 ///
 /// A HELD session is Claude literally paused mid-run waiting on a verdict;
@@ -12845,12 +12879,16 @@ pub fn run() {
             local_install_confirm,
             marketplace_index,
             marketplace_install,
+            transparency::reduced_transparency,
             list_sessions,
             get_session,
             export_revision_markdown,
             export_revision_docx,
             save_revision_to_obsidian,
             delete_session,
+            archive_session,
+            rename_session,
+            archive_companion,
             add_comment,
             update_comment,
             delete_comment,
@@ -13311,6 +13349,7 @@ pub fn run() {
         ]))
         .setup(|app| {
             boot_trace::mark(boot_trace::SETUP_ENTER);
+            transparency::observe(app.handle().clone());
             // Register the `redline://` scheme with the OS at runtime. In a
             // bundled release the Info.plist declaration is authoritative; this
             // best-effort call makes the deep link work in dev too. Harmless if

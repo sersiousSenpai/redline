@@ -1624,7 +1624,7 @@ function PromptDrafterBase({
       <div className="rl-dl-bar-wrap" data-no-drag="true">
         <div
           className={[
-            "rl-dl-bar",
+            "rl-dl-bar rl-glass rl-glass-sheet",
             view?.isFocused || pending ? "is-lifted" : "",
             pending ? "is-planning" : "",
           ]
