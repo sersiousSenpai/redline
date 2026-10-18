@@ -26,6 +26,7 @@ export function VersionPill({ viewing, latest, receivedAt, onGoToLatest }: Versi
   return (
     <span
       className="rl-version-pill"
+      data-version-pill
       role="group"
       aria-labelledby={labelId}
       title={when ? `v${viewing} · received ${when}` : undefined}

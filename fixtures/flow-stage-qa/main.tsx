@@ -139,6 +139,10 @@ function Fixture() {
         )}
         <div className="qa-column">
           <div className="rl-surface-pane flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col relative" data-main-surface="document" style={{ "--rl-doc-zoom": zoom } as CSSProperties}>
+            {/* App's floating "☰ Contents" and Discuss pill, as App renders
+                them (inline display), which the stage must keep out of sight. */}
+            {!contents && <button type="button" className="rl-toc-btn font-sans" style={{ position: "absolute", top: 10, left: 10, zIndex: 20, display: "flex" }}>☰ Contents</button>}
+            <button type="button" className="rl-discuss-pill absolute flex items-center" style={{ right: 16, top: 60, display: "flex" }}>Discuss</button>
             {contents && (
               <div className="rl-toc-rail" style={{ position: "absolute", top: 0, left: 0, bottom: 0, width: 230, zIndex: 20, background: "var(--color-bg-elevated)", borderRight: "1px solid var(--color-rule)" }} />
             )}

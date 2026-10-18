@@ -95,7 +95,7 @@ export interface PlanPanelFooterProps {
 
 export function PlanPanelFooter(p: PlanPanelFooterProps) {
   return (
-    <footer className="rl-plan-foot" data-pose={p.pose}>
+    <footer className="rl-plan-foot" data-pose={p.pose} data-plan-panel-footer>
       <span className="rl-plan-foot-status">
         <Status {...p} />
       </span>

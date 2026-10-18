@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:29:29.825Z",
+  "startedAt": "2026-10-18T09:53:34.130Z",
   "fixture": "fixtures/flow-stage-qa",
   "screenshots": [
     "4c-aurora.png",
@@ -16,6 +16,14 @@
     "5a-studio.png"
   ],
   "checks": [
+    {
+      "name": "4c: App's floating Contents button and Discuss pill stay out of the stage",
+      "passed": true,
+      "details": [
+        "none",
+        "none"
+      ]
+    },
     {
       "name": "4c: the stage paints the window colour",
       "passed": true,
@@ -955,7 +963,7 @@
       "passed": true,
       "details": {
         "title": "rgb(0, 0, 0)",
-        "mark": "rgb(166, 138, 0)"
+        "mark": "rgb(0, 0, 0)"
       }
     },
     {
@@ -1362,14 +1370,14 @@
       }
     },
     {
-      "name": "5a body: a 720px column, centred, 40px from the header",
+      "name": "5a body: a 720px text column, centred, 40px from the header",
       "passed": true,
       "details": {
-        "x": 370,
+        "x": 346,
         "y": 94,
-        "w": 720,
+        "w": 768,
         "h": 640,
-        "right": 1090,
+        "right": 1114,
         "bottom": 734,
         "fontSize": 13,
         "lineHeight": 19.5,
@@ -1379,12 +1387,12 @@
         "bg": "rgba(0, 0, 0, 0)",
         "radius": 0,
         "pt": 40,
-        "pr": 0,
+        "pr": 24,
         "pb": 48,
-        "pl": 0,
-        "ml": 110,
+        "pl": 24,
+        "ml": 86,
         "gap": 0,
-        "maxWidth": "720px",
+        "maxWidth": "768px",
         "bt": 0,
         "bb": 0,
         "bl": 0,
@@ -1952,6 +1960,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-stage-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:29:44.275Z",
+  "finishedAt": "2026-10-18T09:53:47.967Z",
   "passed": true
 }

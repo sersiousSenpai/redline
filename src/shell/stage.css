@@ -487,19 +487,21 @@
   color: var(--color-ink);
 }
 
-/* A mark is amber: a tinted run with a 2px rule under it (4c). The one the
-   reader is following turns plan-blue (5a). */
+/* A mark is redlining amber: a tinted run with a 2px rule under it (4c).
+   The one the reader is following turns plan-blue (5a). */
 .rl-flow-plan .rl-comment-highlight {
-  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  background: color-mix(in srgb, var(--color-mode-redline-fg) 18%, transparent);
   box-shadow: none;
-  border-bottom: 2px solid var(--color-warning);
+  border-bottom: 2px solid var(--color-mode-redline-fg);
   border-radius: 0;
   transition: none;
 }
-.rl-flow-plan .rl-comment-highlight--focused,
-.rl-flow-plan .rl-comment-highlight--muted.rl-comment-highlight--focused {
-  background: color-mix(in srgb, var(--color-info) 16%, transparent);
-  border-bottom-color: var(--color-info);
+/* Blue only where the followed mark's thread is open beside it: the full
+   pose's Feedback tab. In the split pose a clicked mark stays amber. */
+.rl-flow-plan[data-pose="full"] .rl-comment-highlight--focused,
+.rl-flow-plan[data-pose="full"] .rl-comment-highlight--muted.rl-comment-highlight--focused {
+  background: color-mix(in srgb, var(--color-mode-plan-fg) 16%, transparent);
+  border-bottom-color: var(--color-mode-plan-fg);
   box-shadow: none;
 }
 .rl-flow-plan .rl-comment-highlight--muted {

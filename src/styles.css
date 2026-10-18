@@ -5364,7 +5364,7 @@ html[data-rl-shell="flow"] .rl-term-dock--stage {
    and while the plan is closed it waits, mounted and hidden. */
 .rl-surface-pane:has(> .rl-flow-stage) > .rl-toc-btn,
 .rl-surface-pane:has(> .rl-flow-stage) > .rl-discuss-pill {
-  display: none;
+  display: none !important;
 }
 .rl-surface-pane:has(> .rl-flow-stage[data-pose="split"]) > .rl-toc-rail {
   left: 440px !important;
@@ -5384,7 +5384,7 @@ html[data-rl-shell="flow"] .rl-term-dock--stage {
 }
 .rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-toc-rail,
 .rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-doc-zoom {
-  display: none;
+  display: none !important;
 }
 /* The start screen as the stage: an empty plate the resting door lands in. */
 html[data-rl-shell="flow"] .rl-flow-start-plate {

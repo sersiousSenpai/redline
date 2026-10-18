@@ -394,8 +394,10 @@ import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sid
 import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
 import { convoPrebind } from "./lib/convo/api";
 import { useStageDock } from "./lib/stageDock";
-const FlowStage = lazy(() => import("./shell/FlowStage"));
-const SessionConversation = lazy(() => import("./shell/SessionConversation"));
+const loadFlowStage = () => import("./shell/FlowStage");
+const loadSessionConversation = () => import("./shell/SessionConversation");
+const FlowStage = lazy(loadFlowStage);
+const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
@@ -944,7 +946,9 @@ function App() {
   // Table-of-contents rail (Phase 2): a collapsible outline of the current
   // plan's headings, docked to the left of the document column. Persisted so a
   // reader's preference sticks across sessions.
-  const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
+  // Flow keeps its own, closed until asked for: the plan panel opens as the
+  // boards draw it, and "☰ Contents" in its header is one click away.
+  const [tocOpen, setTocOpen] = usePersistedState(isFlowShell() ? "redline.flow.tocOpen" : "redline.tocOpen", !isFlowShell());
   // Rail width: two snap points (230 / 340). `tocWide` is the persisted snap;
   // the transient width during a drag is written straight onto the rail and the
   // scroller, and release snaps to whichever point is nearer (see snapTocWide).
@@ -2453,6 +2457,21 @@ function App() {
   // engine (`convo-bound`), held plans and arrivals. On the classic shell the
   // hook stays inert, the list empty and the target is never read.
   const flowShell = isFlowShell();
+  // The stage's two chunks are what a session opens onto: warmed once the
+  // shell is up, so the first plan or launch doesn't wait on a fetch.
+  useEffect(() => {
+    if (!flowShell) return;
+    const warm = () => {
+      void loadFlowStage().catch(() => {});
+      void loadSessionConversation().catch(() => {});
+    };
+    const idle = window.requestIdleCallback?.(warm, { timeout: 2000 });
+    if (idle === undefined) {
+      const t = setTimeout(warm, 500);
+      return () => clearTimeout(t);
+    }
+    return () => window.cancelIdleCallback?.(idle);
+  }, [flowShell]);
   const [flowLaunches, setFlowLaunches] = useState<readonly FlowLaunch[]>([]);
   const flowLaunchesRef = useRef(flowLaunches);
   flowLaunchesRef.current = flowLaunches;

@@ -172,7 +172,7 @@ export default function FlowStage(p: FlowStageProps) {
         </section>
       )}
       {full && (
-        <aside className="rl-flow-panel" aria-label="Chat and feedback">
+        <aside className="rl-flow-panel" aria-label="Chat and feedback" data-flow-right-panel>
           <FeedbackTabs
             tab={tab}
             onTab={setPanelTab}

@@ -139,6 +139,8 @@ async function board4c() {
   const [w, h] = VIEW["4c"];
   await load("4c", w, h);
   await screenshot("4c-aurora");
+  const floating = await cdp.evaluate("[...document.querySelectorAll('.rl-surface-pane > .rl-toc-btn, .rl-surface-pane > .rl-discuss-pill')].map(e => getComputedStyle(e).display)");
+  check("4c: App's floating Contents button and Discuss pill stay out of the stage", floating.length === 2 && floating.every((d) => d === "none"), floating);
   const stage = await m(".rl-flow-stage");
   check("4c: the stage paints the window colour", stage.bg === (await tok("color-canvas", "backgroundColor")), stage.bg);
   const column = await m('.rl-flow-convo[data-layout="column"]');
@@ -168,7 +170,7 @@ async function board4c() {
   check("4c body: body 16/1.75 in the prose ink", near(body.fontSize, 16) && near(body.lineHeight, 28) && body.color === (await tok("color-ink-2")), body);
   check("4c body: blocks 16px apart, h2 6px more", near(lede.y - title.bottom, 16) && near(h2.y - lede.bottom, 22), { titleToLede: lede.y - title.bottom, ledeToH2: h2.y - lede.bottom });
   const mark = await m(".rl-flow-plan .rl-comment-highlight");
-  check("4c mark: amber — a tinted run with a 2px amber rule under it", mark?.text === "0018_vault_revisions.sql before the next build" && mark.bb === 2 && mark.bbColor === (await tok("color-warning")) && mark.bg !== "rgba(0, 0, 0, 0)", mark);
+  check("4c mark: amber — a tinted run with a 2px amber rule under it", mark?.text === "0018_vault_revisions.sql before the next build" && mark.bb === 2 && mark.bbColor === (await tok("color-mode-redline-fg")) && mark.bg !== "rgba(0, 0, 0, 0)", mark);
   const note = await m(".rl-flow-plan .rl-margin-note");
   const who = await m(".rl-flow-plan .rl-margin-note-avatar");
   check("4c margin note: r10, 13px sans, indented 24px, under its block", note && near(note.radius, 10) && near(note.fontSize, 13) && /system|apple|sans/i.test(note.fontFamily) && near(note.x - (article.x + article.pl), 24) && note.text.endsWith("Run this against staging first, not prod."), note);
@@ -231,7 +233,7 @@ async function board4c() {
     await load("4c", w, h, theme);
     await screenshot(`4c-${theme}`);
     const t = await m(".rl-flow-plan .rl-prose h1"), mk = await m(".rl-flow-plan .rl-comment-highlight");
-    check(`4c ${theme}: the plan reads in its tokens`, t.color === (await tok("color-ink")) && mk.bbColor === (await tok("color-warning")) && (await m(".rl-flow-plan")).bg === (await tok("color-paper", "backgroundColor")), { title: t.color, mark: mk.bbColor });
+    check(`4c ${theme}: the plan reads in its tokens`, t.color === (await tok("color-ink")) && mk.bbColor === (await tok("color-mode-redline-fg")) && (await m(".rl-flow-plan")).bg === (await tok("color-paper", "backgroundColor")), { title: t.color, mark: mk.bbColor });
     await sweep("4c", theme);
   }
 }
@@ -284,7 +286,7 @@ async function board5a() {
   const body = await m(".rl-flow-plan .rl-prose > p");
   check("5a body: 16.5/1.75 prose", near(body.fontSize, 16.5) && near(body.lineHeight, 28.875) && body.color === (await tok("color-ink-2")), body);
   const mark = await m(".rl-flow-plan .rl-comment-highlight");
-  check("5a: the followed mark is plan-blue", mark && mark.bbColor === (await tok("color-info")) && mark.bb === 2 && mark.text.startsWith("The test throughout"), mark);
+  check("5a: the followed mark is plan-blue", mark && mark.bbColor === (await tok("color-mode-plan-fg")) && mark.bb === 2 && mark.text.startsWith("The test throughout"), mark);
   const label = await m(".rl-flow-plan .rl-prose tr > :first-child"), cell = await m(".rl-flow-plan .rl-prose tr > :first-child + *");
   const table = await m(".rl-flow-plan .rl-prose table");
   check("5a decisions table: a 130px label column, hairline rows, 15/1.6", near(label.w, 130) && near(label.pt, 12) && label.bb === 1 && label.bbColor === (await tok("color-rule")) && table.bt === 1 && near(cell.fontSize, 15) && near(cell.lineHeight, 24) && label.color === (await tok("color-ink-3")), { label, cell, table: { bt: table.bt } });

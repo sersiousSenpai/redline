@@ -50,7 +50,7 @@ export function PlanPanelHeader({
   ].filter(Boolean).join(" · ");
   const fullLabel = full ? "Leave full screen: the plan goes back beside the conversation" : "Full screen: the conversation moves into the panel's Chat tab";
   return (
-    <header className="rl-plan-head" data-pose={pose}>
+    <header className="rl-plan-head" data-pose={pose} data-plan-panel-header>
       {full ? (
         <button
           type="button"
