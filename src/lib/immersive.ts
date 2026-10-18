@@ -90,6 +90,26 @@ export function effectiveShape(pref: ShapeFlags, immersive: boolean): ShapeFlags
   return immersive ? { ...HIDDEN } : pref;
 }
 
+/** The flow shell's session stage, as one more overlay of the same law:
+ *  - `dockHidden`: the stage never docks a terminal under the conversation —
+ *    the session's PTY is the stage's own terminal view (⌘J) and the wall is
+ *    the dock's fullscreen — so on the stage the dock folds away;
+ *  - `sidebarHidden`: the split pose takes the sidebar's width for the plan
+ *    (board 4c).
+ *  Only hides, never writes, and returns `shape` itself when neither applies
+ *  — which is always, on the classic shell. */
+export function flowStageShape(
+  shape: ShapeFlags,
+  i: { dockHidden: boolean; sidebarHidden: boolean },
+): ShapeFlags {
+  if (!i.dockHidden && !i.sidebarHidden) return shape;
+  return {
+    ...shape,
+    termCollapsed: shape.termCollapsed || i.dockHidden,
+    sidebarCollapsed: shape.sidebarCollapsed || i.sidebarHidden,
+  };
+}
+
 // ---- The narrow mask: the two side panels, and nothing else -----------------
 //
 // `isImmersiveSurface` takes the whole periphery — the chrome and the terminal
@@ -138,10 +158,6 @@ export interface PanelMaskInput {
    *  something on screen after all. Read from the EFFECTIVE shape, before
    *  masking — `maskPanels` never touches `docPinned`, so there is no cycle. */
   docPinned: boolean;
-  /** A conversation has taken the plate (`conversationPose` → "expanded").
-   *  Not a surface — the surface underneath is still "document" — which is
-   *  exactly why it needs saying here. */
-  conversationExpanded?: boolean;
 }
 
 export const BOTH: PanelMask = { sidebar: true, pane: true };
@@ -150,8 +166,38 @@ export const BOTH: PanelMask = { sidebar: true, pane: true };
  *  Mirrors `isImmersive`, one tier narrower. */
 export function panelMask(i: PanelMaskInput): PanelMask {
   if (!i.enabled) return NO_MASK;
-  const mask = i.conversationExpanded ? BOTH : i.docPinned ? NO_MASK : panelMaskFor(i.surface);
+  const mask = i.docPinned ? NO_MASK : panelMaskFor(i.surface);
   return { sidebar: mask.sidebar && !i.broken.sidebar, pane: mask.pane && !i.broken.pane };
+}
+
+// ---- The plate's own pane mask --------------------------------------------
+//
+// One tier narrower again, and on the document surface only: the discussion
+// pane is a plan's margin, so beside a plate with no plan on it (the Front
+// Door, a folder's file) it has nothing to be the margin of. Unlike the
+// surface mask above it neither defers an arriving plan to a notice nor
+// shows the "panels hidden" hint — the surface is the plan's own — which is
+// why it is a separate overlay, OR'd in at `maskPanels`.
+
+export interface PlatePaneInput {
+  surface: MainSurface;
+  /** Which face the document plate is wearing. */
+  plateMode: "door" | "plan" | "file";
+  /** The user reopened the pane on this visit (`PanelMask` breaks). */
+  brokenPane: boolean;
+  /** The flow shell only — undefined on classic. Whether the session stage
+   *  leaves the discussion pane open beside it. The stage's plan panel is
+   *  the plan's margin there (its Feedback tab holds the threads), so App
+   *  passes false and the pane never opens beside the plate in flow: no
+   *  break reopens it, because the plan panel is where those threads are. */
+  flowPaneOpen?: boolean;
+}
+
+/** Whether the plate hides the discussion pane. Derived, never stored. */
+export function platePaneMask(i: PlatePaneInput): boolean {
+  if (i.surface !== "document") return false;
+  if (i.flowPaneOpen !== undefined) return !i.flowPaneOpen;
+  return i.plateMode !== "plan" && !i.brokenPane;
 }
 
 /** True when this mask hides anything — what the "where did the panels go"

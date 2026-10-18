@@ -22,6 +22,7 @@ const launch = (terminalId: string, over: Partial<FlowLaunch> = {}): FlowLaunch 
   startedAt: 100,
   projectPath: "/p/din",
   mode: "plan",
+  harness: "claude",
   confirmed: false,
   ...over,
 });

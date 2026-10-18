@@ -53,6 +53,8 @@ export interface FlowLaunch {
   startedAt: number;
   projectPath: string | null;
   mode: "plan" | "run";
+  /** Which CLI it runs: the conversation mirror reads the two differently. */
+  harness: "claude" | "codex";
   /** The dock has reported this terminal live at least once. Until then an
    *  absent id is ignorance rather than news (the `launchLiveness` rule). */
   confirmed: boolean;

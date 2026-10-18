@@ -5,7 +5,6 @@ import {
   dockScope, withDockOpen, toggleDockIn, onScopeChange,
   activeConversation,
   conversationContexts,
-  conversationPose,
   kindPill,
   migrateChatSurfaceOnce,
   pillKind,
@@ -131,10 +130,3 @@ describe("pill ↔ kind", () => {
   });
 });
 
-describe("conversationPose", () => {
-  it("expands an open Home chat and docks a document conversation", () => {
-    expect(conversationPose({ open: false, plateAtRest: true })).toBe("hidden");
-    expect(conversationPose({ open: true, plateAtRest: true })).toBe("expanded");
-    expect(conversationPose({ open: true, plateAtRest: false })).toBe("docked");
-  });
-});

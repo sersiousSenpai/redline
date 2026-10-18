@@ -151,16 +151,21 @@ export function planColumnVars(
   const full = pose === "full";
   return {
     "--rl-plan-max": wide ? "none" : `${(full ? 720 : 680) + extra}px`,
-    "--rl-plan-pad": full ? (wide ? "40px 64px 48px" : "40px 0 48px") : "34px 56px 48px",
-    "--rl-plan-mx": full ? "auto" : "0",
+    "--rl-plan-pt": full ? "40px" : "34px",
+    "--rl-plan-px": full ? (wide ? "64px" : "0px") : "56px",
+    "--rl-plan-mx": full ? "auto" : "0px",
   } as CSSProperties;
 }
 
 /** The plan article's inline box in the flow shell — the counterpart of
- *  classic's `docArticleWidth`, reading what `planColumnVars` set. */
+ *  classic's `docArticleWidth`, reading what `planColumnVars` set. Longhands
+ *  only, so it never meets a classic `paddingLeft` as a shorthand. */
 export const FLOW_ARTICLE: CSSProperties = {
   maxWidth: "var(--rl-plan-max, 720px)",
-  padding: "var(--rl-plan-pad, 40px 0 48px)",
+  paddingTop: "var(--rl-plan-pt, 40px)",
+  paddingBottom: "48px",
+  paddingLeft: "var(--rl-plan-px, 0px)",
+  paddingRight: "var(--rl-plan-px, 0px)",
   marginLeft: "var(--rl-plan-mx, auto)",
   marginRight: "var(--rl-plan-mx, auto)",
 };

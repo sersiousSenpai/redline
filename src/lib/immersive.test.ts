@@ -9,6 +9,8 @@ import {
   maskPanels,
   panelMask,
   panelMaskFor,
+  platePaneMask,
+  flowStageShape,
   panelsMasked,
   type ShapeFlags,
 } from "./immersive";
@@ -285,38 +287,50 @@ describe("maskPanels", () => {
   });
 });
 
-describe("panelMask: a conversation that has taken the plate", () => {
-  const base = { surface: "document" as const, broken: { sidebar: false, pane: false }, enabled: true, docPinned: false };
+describe("platePaneMask: the plate's own pane rule", () => {
+  type Row = [string, Parameters<typeof platePaneMask>[0], boolean];
+  const table: Row[] = [
+    // Classic: the pane is a plan's margin, so it hides beside a plate with
+    // no plan on it — until the user reopens it on this visit.
+    ["classic: a plan keeps its margin", { surface: "document", plateMode: "plan", brokenPane: false }, false],
+    ["classic: the door has no plan to be the margin of", { surface: "document", plateMode: "door", brokenPane: false }, true],
+    ["classic: nor does a folder's file", { surface: "document", plateMode: "file", brokenPane: false }, true],
+    ["classic: reopened on this visit, it stays", { surface: "document", plateMode: "door", brokenPane: true }, false],
+    ["classic: another surface is the surface mask's business", { surface: "browser", plateMode: "door", brokenPane: false }, false],
+    // Flow: the plan panel is the margin, so nothing reopens the pane there.
+    ["flow: a plan's threads are in the plan panel", { surface: "document", plateMode: "plan", brokenPane: false, flowPaneOpen: false }, true],
+    ["flow: not even reopened", { surface: "document", plateMode: "plan", brokenPane: true, flowPaneOpen: false }, true],
+    ["flow: the door", { surface: "document", plateMode: "door", brokenPane: false, flowPaneOpen: false }, true],
+    ["flow: open when the stage leaves it open", { surface: "document", plateMode: "plan", brokenPane: false, flowPaneOpen: true }, false],
+    ["flow: Code Review keeps its diff's threads", { surface: "review", plateMode: "plan", brokenPane: false, flowPaneOpen: false }, false],
+  ];
+  it.each(table)("%s", (_name, input, masked) => {
+    expect(platePaneMask(input)).toBe(masked);
+  });
+});
 
-  it("hides both panels, though the surface is still the document", () => {
-    // The document surface normally keeps both — they are ABOUT the document.
-    // In the room there is no document, so they are furniture from elsewhere.
-    expect(panelMask({ ...base })).toEqual({ sidebar: false, pane: false });
-    expect(panelMask({ ...base, conversationExpanded: true })).toEqual({
-      sidebar: true,
-      pane: true,
-    });
+describe("flowStageShape: the session stage's overlay", () => {
+  const shape = {
+    sidebarCollapsed: false,
+    paneCollapsed: false,
+    paneFullscreen: false,
+    termCollapsed: false,
+    termFullscreen: false,
+    docPinned: false,
+  };
+
+  it("is the shape itself when nothing applies — always, on the classic shell", () => {
+    expect(flowStageShape(shape, { dockHidden: false, sidebarHidden: false })).toBe(shape);
   });
 
-  it("outranks docPinned, which cannot pin a document that isn't there", () => {
-    expect(
-      panelMask({ ...base, docPinned: true, conversationExpanded: true }),
-    ).toEqual({ sidebar: true, pane: true });
+  it("folds the dock away on the stage, and the sidebar in the split pose", () => {
+    expect(flowStageShape(shape, { dockHidden: true, sidebarHidden: false })).toEqual({ ...shape, termCollapsed: true });
+    expect(flowStageShape(shape, { dockHidden: false, sidebarHidden: true })).toEqual({ ...shape, sidebarCollapsed: true });
   });
 
-  it("still yields to the user reopening something, and to the manifest", () => {
-    expect(
-      panelMask({ ...base, broken: { sidebar: true, pane: true }, conversationExpanded: true }),
-    ).toEqual({ sidebar: false, pane: false });
-    expect(
-      panelMask({ ...base, enabled: false, conversationExpanded: true }),
-    ).toEqual({ sidebar: false, pane: false });
-  });
-
-  it("collapsing the room lifts the mask — nothing was ever stored", () => {
-    const masked = panelMask({ ...base, conversationExpanded: true });
-    const lifted = panelMask({ ...base, conversationExpanded: false });
-    expect(panelsMasked(masked)).toBe(true);
-    expect(panelsMasked(lifted)).toBe(false);
+  it("only hides: a collapsed flag stays collapsed, and fullscreen is untouched", () => {
+    const wall = { ...shape, termCollapsed: true, termFullscreen: true, sidebarCollapsed: true };
+    expect(flowStageShape(wall, { dockHidden: false, sidebarHidden: false })).toBe(wall);
+    expect(flowStageShape(wall, { dockHidden: true, sidebarHidden: true })).toEqual(wall);
   });
 });

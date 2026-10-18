@@ -116,8 +116,9 @@ describe("planColumnVars", () => {
   const vars = (...a: Parameters<typeof planColumnVars>) => planColumnVars(...a) as Record<string, string>;
 
   it("is the board's column at the default measure", () => {
-    expect(vars("split", false, 820)).toEqual({ "--rl-plan-max": "680px", "--rl-plan-pad": "34px 56px 48px", "--rl-plan-mx": "0" });
-    expect(vars("full", false, 820)).toEqual({ "--rl-plan-max": "720px", "--rl-plan-pad": "40px 0 48px", "--rl-plan-mx": "auto" });
+    expect(vars("split", false, 820)).toEqual({ "--rl-plan-max": "680px", "--rl-plan-pt": "34px", "--rl-plan-px": "56px", "--rl-plan-mx": "0px" });
+    expect(vars("full", false, 820)).toEqual({ "--rl-plan-max": "720px", "--rl-plan-pt": "40px", "--rl-plan-px": "0px", "--rl-plan-mx": "auto" });
+    expect(vars("full", true, 820)["--rl-plan-px"]).toBe("64px");
   });
 
   it("widens by the dragged measure, and wide fills the panel", () => {
