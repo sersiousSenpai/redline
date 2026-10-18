@@ -138,8 +138,12 @@ export default function FeedbackPanel({
   // being shown — so a thread keeps the words it was written against.
   const display = useMemo(() => createAnchorDisplay(revision?.sections ?? []), [revision]);
   const { open, settled } = useMemo(() => orderFeedback(revision?.comments ?? []), [revision]);
+  // The stage's handlers where it gives them; an absent one keeps the command.
   const act = useMemo<FeedbackActions>(
-    () => ({ ...commandActions(session.sessionId), ...actions }),
+    () => ({
+      ...commandActions(session.sessionId),
+      ...Object.fromEntries(Object.entries(actions ?? {}).filter(([, handler]) => !!handler)),
+    }),
     [session.sessionId, actions],
   );
   const [showAll, setShowAll] = useState(false);

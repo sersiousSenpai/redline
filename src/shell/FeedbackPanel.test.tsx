@@ -205,6 +205,12 @@ describe("the actions are the existing comment commands", () => {
     expect(calls("accept_resolution")).toEqual([]);
   });
 
+  it("a handler the stage leaves undefined keeps the command", async () => {
+    await render(panel({ actions: { accept: undefined } }));
+    await act(async () => button("Accept", card("c-001")).click());
+    expect(calls("accept_resolution")).toEqual([{ sessionId: "qa-dialcrown", commentId: "c-001" }]);
+  });
+
   it("💬 Discuss starts the comment's discussion fork on the comment itself", async () => {
     await render(panel());
     await act(async () => button("Discuss", card("c-001")).click());
