@@ -327,6 +327,8 @@ struct PtySession {
     /// emit `pty-exit` — that event means "your shell died", and printing
     /// "[process exited]" into a successor terminal is pure noise.
     expected_exit: Arc<AtomicBool>,
+    /// What the conversation composer needs to know before it types here.
+    input: Arc<InputTrack>,
 }
 
 /// Monotonic spawn-generation counter (see `PtySession::generation`).
@@ -498,6 +500,7 @@ pub fn pty_spawn(
 
     let alive = Arc::new(AtomicBool::new(true));
     let pump = Pump::new(alive.clone());
+    let input = Arc::new(InputTrack::default());
     if let Err(error) = pump.attach(on_output, attachment_id) {
         // The initial (possibly empty) replay frame can fail if the mounting
         // webview disappeared during spawn. No registry/reaper owns this child
@@ -522,6 +525,7 @@ pub fn pty_spawn(
             pid,
             generation,
             expected_exit: expected_exit.clone(),
+            input: input.clone(),
         })),
     );
     drop(guard);
@@ -530,7 +534,9 @@ pub fn pty_spawn(
     // firehose can't outrun the renderer (the child blocks on a full PTY buffer
     // instead of flooding the UI thread or growing memory unbounded).
     let pump_for_reader = pump.clone();
-    std::thread::spawn(move || read_output(reader, pump_for_reader));
+    let (app_for_reader, id_for_reader) = (app.clone(), id.clone());
+    let on_mode = move || crate::convo::input_changed(&app_for_reader, &id_for_reader);
+    std::thread::spawn(move || read_output(reader, pump_for_reader, input, on_mode));
 
     // Flusher pump: drains the coalescer once per `COALESCE_WINDOW` and pushes
     // one raw-byte message per drain to this tab's Channel. One subscriber per
@@ -599,13 +605,21 @@ pub fn pty_spawn(
     Ok(())
 }
 
-fn read_output(mut reader: Box<dyn Read + Send>, output: Arc<Pump>) {
+/// The reader pump. `on_mode` hears every bracketed-paste switch, which is
+/// the conversation composer's "the prompt can take a paste now".
+fn read_output(mut reader: Box<dyn Read + Send>, output: Arc<Pump>, input: Arc<InputTrack>, on_mode: impl Fn()) {
     let mut buf = [0u8; 8192];
+    let mut modes = ModeScan::default();
     while output.wait_until_drained() {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 LAST_PTY_OUTPUT_MS.store(crate::ledger::now_millis(), Ordering::Relaxed);
+                if let Some(on) = modes.feed(&buf[..n]) {
+                    if input.paste_mode.swap(on, Ordering::AcqRel) != on {
+                        on_mode();
+                    }
+                }
                 output.push(&buf[..n]);
             }
             Err(_) => break,
@@ -622,11 +636,23 @@ fn session_of(state: &PtyState, id: &str) -> Option<Arc<Mutex<PtySession>>> {
 
 #[tauri::command]
 pub fn pty_write(
+    app: AppHandle,
     state: tauri::State<'_, PtyState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    pty_write_bytes(&state, &id, data.as_bytes())
+    let Some(session) = session_of(&state, &id) else {
+        return Ok(());
+    };
+    write_chunk(&session, data.as_bytes())?;
+    // These are the user's keystrokes (xterm's onData): what they leave
+    // half-typed in the TUI is what a composer send would append to.
+    let input = lock_ok(&session).input.clone();
+    let flipped = lock_ok(&input.keys).feed(data.as_bytes(), Instant::now());
+    if flipped {
+        crate::convo::input_changed(&app, &id);
+    }
+    Ok(())
 }
 
 /// Internal write helper — same as the `pty_write` Tauri command but callable
@@ -739,6 +765,307 @@ pub fn pty_write_bytes_checked(state: &PtyState, id: &str, bytes: &[u8]) -> Resu
         return Err(format!("terminal {id} is not running"));
     };
     write_chunk(&session, bytes)
+}
+
+// --- the conversation composer --------------------------------------------------
+//
+// The session stage's composer types into the same PTY the CLI reads
+// (`convo`). What it may send, and when, was measured in experiment (m):
+// - S6: a bracketed paste reaches the CLI whole (a 20 KB one byte-equal once
+//   the CLI's own `<pasted_content>` wrapper and tab expansion are undone),
+//   a short one verbatim, and a pasted slash command runs. Pasting
+//   everything keeps the TUI's single-key shortcuts (`?`, `!`) out of the
+//   composer's text, so every send is a paste, then Return.
+// - The TUI turns bracketed paste on (`ESC[?2004h`) once its prompt is up,
+//   and off when it exits; that is the "ready to take a paste" signal.
+// - S9: Esc interrupts; a second within ~1 s opens the rewind menu.
+
+/// What the conversation composer needs to know about a terminal's input.
+#[derive(Default)]
+pub struct InputTrack {
+    /// Bracketed paste as the program in the terminal last set it.
+    paste_mode: AtomicBool,
+    /// The user's own typing in the raw TUI, and their last Esc.
+    keys: Mutex<KeyScan>,
+    /// One send at a time per terminal, so two sends never interleave.
+    submit: Mutex<()>,
+}
+
+/// A terminal's input side, as readiness reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputState {
+    pub paste_mode: bool,
+    /// The user left text half-typed in the TUI's prompt.
+    pub dirty: bool,
+    /// Something other than the shell owns the terminal (the CLI, while it
+    /// runs). The shell back in front is a CLI that exited without saying.
+    pub cli_foreground: bool,
+}
+
+pub fn input_state(state: &PtyState, id: &str) -> Option<InputState> {
+    let session = session_of(state, id)?;
+    let (input, foreground, shell) = {
+        let s = lock_ok(&session);
+        if !s.alive.load(Ordering::Acquire) {
+            return None;
+        }
+        #[cfg(unix)]
+        let foreground = s.master.process_group_leader().and_then(|pgid| u32::try_from(pgid).ok());
+        #[cfg(not(unix))]
+        let foreground = None;
+        (s.input.clone(), foreground, s.pid)
+    };
+    let dirty = lock_ok(&input.keys).count > 0;
+    Some(InputState {
+        paste_mode: input.paste_mode.load(Ordering::Acquire),
+        dirty,
+        cli_foreground: match (foreground, shell) {
+            (Some(front), Some(shell)) => front != shell,
+            _ => true,
+        },
+    })
+}
+
+/// The CLI took a prompt: whatever was typed is gone from its box.
+pub fn clear_typed(app: &AppHandle, id: &str) {
+    let Some(session) = app.try_state::<PtyState>().and_then(|state| session_of(&state, id)) else { return };
+    let input = lock_ok(&session).input.clone();
+    lock_ok(&input.keys).count = 0;
+}
+
+/// Follows `ESC[?2004h` / `ESC[?2004l` through the output stream, across
+/// reads that split the sequence anywhere.
+#[derive(Default)]
+struct ModeScan {
+    matched: usize,
+}
+
+impl ModeScan {
+    const PREFIX: &'static [u8] = b"\x1b[?2004";
+
+    /// The last switch in `bytes`, if any.
+    fn feed(&mut self, bytes: &[u8]) -> Option<bool> {
+        let mut last = None;
+        for &b in bytes {
+            if self.matched == Self::PREFIX.len() {
+                match b {
+                    b'h' => last = Some(true),
+                    b'l' => last = Some(false),
+                    _ => {}
+                }
+                self.matched = usize::from(b == 0x1b);
+            } else if b == Self::PREFIX[self.matched] {
+                self.matched += 1;
+            } else {
+                self.matched = usize::from(b == 0x1b);
+            }
+        }
+        last
+    }
+}
+
+/// Typed-but-unsent text, counted from the keystrokes xterm forwards:
+/// characters add, Backspace removes, Return / Ctrl+C / Ctrl+U clear, and a
+/// second Esc within the CLI's window clears ("Esc again to clear", S9).
+/// Escape sequences (arrows, focus reports, terminal query replies) are not
+/// typing; a paste inside `ESC[200~ … ESC[201~` is.
+#[derive(Default)]
+struct KeyScan {
+    count: u32,
+    state: KeyState,
+    csi: Vec<u8>,
+    paste_end: usize,
+    /// The last Esc this terminal got, typed or sent by `pty_interrupt`.
+    esc_at: Option<Instant>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum KeyState {
+    #[default]
+    Text,
+    Esc,
+    Csi,
+    Ss3,
+    Osc,
+    OscEsc,
+    Paste,
+}
+
+impl KeyScan {
+    const PASTE_START: &'static [u8] = b"200~";
+    const PASTE_END: &'static [u8] = b"\x1b[201~";
+
+    /// Feed one write; returns whether "something is half-typed" flipped.
+    fn feed(&mut self, bytes: &[u8], now: Instant) -> bool {
+        let before = self.count > 0;
+        if bytes == b"\x1b" {
+            // A lone Esc keypress (xterm sends it as its own write).
+            if self.esc_at.is_some_and(|at| now.duration_since(at) < DOUBLE_ESC_GUARD) {
+                self.count = 0;
+            }
+            self.esc_at = Some(now);
+        } else {
+            bytes.iter().for_each(|&b| self.byte(b));
+        }
+        before != (self.count > 0)
+    }
+
+    fn byte(&mut self, b: u8) {
+        self.state = match self.state {
+            KeyState::Text => match b {
+                0x1b => KeyState::Esc,
+                b'\r' | 0x03 | 0x15 => {
+                    self.count = 0;
+                    KeyState::Text
+                }
+                0x7f | 0x08 | 0x17 => {
+                    self.count = self.count.saturating_sub(1);
+                    KeyState::Text
+                }
+                // Other controls and UTF-8 continuation bytes add nothing.
+                0x00..=0x1f | 0x80..=0xbf => KeyState::Text,
+                _ => {
+                    self.count += 1;
+                    KeyState::Text
+                }
+            },
+            KeyState::Esc => match b {
+                b'[' => {
+                    self.csi.clear();
+                    KeyState::Csi
+                }
+                b']' => KeyState::Osc,
+                b'O' => KeyState::Ss3,
+                0x1b => KeyState::Esc,
+                // Alt+key.
+                _ => KeyState::Text,
+            },
+            KeyState::Csi if (0x40..=0x7e).contains(&b) => {
+                self.csi.push(b);
+                if self.csi == Self::PASTE_START {
+                    self.paste_end = 0;
+                    KeyState::Paste
+                } else {
+                    KeyState::Text
+                }
+            }
+            KeyState::Csi => {
+                if self.csi.len() < 16 {
+                    self.csi.push(b);
+                }
+                KeyState::Csi
+            }
+            KeyState::Ss3 => KeyState::Text,
+            KeyState::Osc => match b {
+                0x07 => KeyState::Text,
+                0x1b => KeyState::OscEsc,
+                _ => KeyState::Osc,
+            },
+            KeyState::OscEsc if b == b'\\' => KeyState::Text,
+            KeyState::OscEsc => KeyState::Osc,
+            KeyState::Paste if b == Self::PASTE_END[self.paste_end] => {
+                self.paste_end += 1;
+                if self.paste_end == Self::PASTE_END.len() {
+                    KeyState::Text
+                } else {
+                    KeyState::Paste
+                }
+            }
+            KeyState::Paste => {
+                self.paste_end = usize::from(b == 0x1b);
+                if !(0x80..=0xbf).contains(&b) && b != 0x1b {
+                    self.count += 1;
+                }
+                KeyState::Paste
+            }
+        };
+    }
+}
+
+/// Two Esc presses this close together open the CLI's rewind menu: S9 saw
+/// it at 150, 400 and 700 ms apart, and not at 1000.
+const DOUBLE_ESC_GUARD: Duration = Duration::from_millis(1200);
+/// Return follows the paste after this beat: the paste has been written in
+/// order by then, and S6 saw paste + Return in one write submit too.
+const SUBMIT_SETTLE: Duration = Duration::from_millis(30);
+
+/// What the composer may type: no control characters but newline and tab,
+/// and so no escape sequence of any kind (a stray `ESC[201~` would end the
+/// paste early), with CRLF and bare CR made newlines.
+pub(crate) fn sanitize(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+fn bracketed(text: &str) -> Vec<u8> {
+    [b"\x1b[200~".as_slice(), text.as_bytes(), b"\x1b[201~"].concat()
+}
+
+/// Paste `text` into the terminal and press Return, paced like every
+/// programmatic write (`PTY_CHUNK`). Callers check readiness; this only
+/// serialises sends per terminal. Blocks for the length of the write, so it
+/// runs off the main thread.
+pub fn submit_text(state: &PtyState, id: &str, text: &str) -> Result<(), String> {
+    let session = session_of(state, id).ok_or_else(|| format!("terminal {id} is not running"))?;
+    let input = lock_ok(&session).input.clone();
+    let _turn = lock_ok(&input.submit);
+    let text = sanitize(text);
+    if text.trim().is_empty() {
+        return Err("nothing to send".into());
+    }
+    tauri::async_runtime::block_on(paced(&bracketed(&text), |chunk| write_chunk(&session, chunk)))?;
+    std::thread::sleep(SUBMIT_SETTLE);
+    write_chunk(&session, b"\r")?;
+    lock_ok(&input.keys).count = 0;
+    Ok(())
+}
+
+/// Return on its own: confirms the dialog `/effort` opens.
+pub fn press_return(state: &PtyState, id: &str) -> Result<(), String> {
+    let session = session_of(state, id).ok_or_else(|| format!("terminal {id} is not running"))?;
+    write_chunk(&session, b"\r")
+}
+
+/// The composer's send: refused with the blocker while the CLI can't take it
+/// (`convo` readiness), else pasted and submitted. On the blocking pool
+/// (`OFF_MAIN_COMMANDS`): a long send is paced.
+#[tauri::command]
+pub fn pty_submit(
+    app: AppHandle,
+    state: tauri::State<'_, PtyState>,
+    terminal_id: String,
+    text: String,
+) -> Result<crate::convo::SubmitResult, String> {
+    if let Some(blocker) = crate::convo::composer_blocker(&app, &terminal_id) {
+        return Ok(crate::convo::SubmitResult::Blocked { blocker });
+    }
+    submit_text(&state, &terminal_id, &text)?;
+    crate::convo::input_changed(&app, &terminal_id);
+    Ok(crate::convo::SubmitResult::Sent)
+}
+
+/// Stop: one Esc, dropped if another reached this terminal within
+/// [`DOUBLE_ESC_GUARD`] (typed or sent), so Stop never opens the rewind menu.
+#[tauri::command]
+pub fn pty_interrupt(state: tauri::State<'_, PtyState>, terminal_id: String) -> Result<(), String> {
+    interrupt(&state, &terminal_id).map(|_| ())
+}
+
+/// Whether the Esc was sent (`false`: one already went within the guard).
+fn interrupt(state: &PtyState, id: &str) -> Result<bool, String> {
+    let session = session_of(state, id).ok_or_else(|| format!("terminal {id} is not running"))?;
+    let input = lock_ok(&session).input.clone();
+    {
+        let mut keys = lock_ok(&input.keys);
+        if keys.esc_at.is_some_and(|at| at.elapsed() < DOUBLE_ESC_GUARD) {
+            return Ok(false);
+        }
+        keys.esc_at = Some(Instant::now());
+    }
+    write_chunk(&session, b"\x1b").map(|_| true)
 }
 
 /// A backend-owned terminal, including its original launch directory. A dead
@@ -1408,6 +1735,7 @@ mod tests {
             let reader = pair.master.try_clone_reader().unwrap();
             let writer = pair.master.take_writer().unwrap();
             let output = new_output();
+            let input = Arc::new(InputTrack::default());
             let state = PtyState::new();
             lock_ok(&state.0).insert(
                 "real-pty".into(),
@@ -1421,10 +1749,11 @@ mod tests {
                     alive: output.alive.clone(),
                     output: output.clone(),
                     expected_exit: Arc::new(AtomicBool::new(false)),
+                    input: input.clone(),
                 })),
             );
             let reader_output = output.clone();
-            std::thread::spawn(move || read_output(reader, reader_output));
+            std::thread::spawn(move || read_output(reader, reader_output, input, || {}));
             let flusher_output = output.clone();
             std::thread::spawn(move || {
                 while flusher_output.wait_for_output() {
@@ -1499,6 +1828,114 @@ mod tests {
             "none".into()
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_composer_send_keeps_no_control_but_newline_and_tab() {
+        assert_eq!(sanitize("a\r\nb\rc"), "a\nb\nc");
+        assert_eq!(sanitize("x\x1b[201~y\x07\x00z\tq"), "x[201~yz\tq", "no ESC, so nothing can end the paste early");
+        assert_eq!(sanitize("caf\u{e9} \u{9b}31m ok\u{7f}"), "caf\u{e9} 31m ok", "C1 controls and DEL too");
+        assert_eq!(bracketed("hi\nthere"), b"\x1b[200~hi\nthere\x1b[201~".to_vec());
+    }
+
+    #[test]
+    fn paste_mode_is_followed_across_reads_split_anywhere() {
+        let stream: &[u8] = b"\x1b[?25l\x1b[?2004hprompt\x1b[2J\x1b[?2004l bye \x1b\x1b[?2004h";
+        for first in 0..=stream.len() {
+            for second in first..=stream.len() {
+                let mut scan = ModeScan::default();
+                let parts = [&stream[..first], &stream[first..second], &stream[second..]];
+                let seen: Vec<bool> = parts.iter().filter_map(|part| scan.feed(part)).collect();
+                assert_eq!(seen.last(), Some(&true), "split at {first}/{second}");
+            }
+        }
+        let mut scan = ModeScan::default();
+        let each: Vec<bool> = stream.iter().filter_map(|b| scan.feed(std::slice::from_ref(b))).collect();
+        assert_eq!(each, [true, false, true], "every switch, one byte per read");
+        assert_eq!(ModeScan::default().feed(b"\x1b[?2004;1h \x1b[?200h"), None, "only the exact switch");
+    }
+
+    #[test]
+    fn half_typed_text_is_counted_from_keystrokes_not_escape_sequences() {
+        let t = Instant::now();
+        let mut keys = KeyScan::default();
+        let replies = b"\x1b[A\x1b[I\x1b[O\x1b[?1;2c\x1b[12;1R\x1b]11;rgb:0000/0000/0000\x1b\\\x1bOP\x1b]10;x\x07";
+        assert!(!keys.feed(replies, t), "arrows, focus, F1, terminal replies: not typing");
+        assert_eq!(keys.count, 0);
+        assert!(keys.feed(b"h", t), "the first character flips it");
+        keys.feed("\u{e9}\u{65e5}".as_bytes(), t);
+        assert_eq!(keys.count, 3, "characters, not bytes");
+        assert!(keys.feed(b"\x7f\x7f\x7f\x7f", t));
+        assert_eq!(keys.count, 0, "Backspace never goes below empty");
+        keys.feed(b"abc", t);
+        keys.feed(b"\x15", t);
+        assert_eq!(keys.count, 0, "Ctrl+U");
+        keys.feed(b"abc\r", t);
+        assert_eq!(keys.count, 0, "submitted");
+        keys.feed(b"\x1b[200~pasted\ntext\x1b[201~", t);
+        assert_eq!(keys.count, 11, "a paste into the TUI is typing");
+        keys.feed(b"\x03", t);
+        assert_eq!(keys.count, 0, "Ctrl+C");
+        // A sequence split across writes is still a sequence. (A write that
+        // is exactly ESC is the Esc key: xterm sends each key in one write.)
+        for split in (0..=replies.len()).filter(|&i| i != 1) {
+            let mut keys = KeyScan::default();
+            keys.feed(&replies[..split], t);
+            keys.feed(&replies[split..], t);
+            assert_eq!(keys.count, 0, "split at {split}");
+        }
+        // Esc, then Esc again inside the CLI's window, clears (S9).
+        let mut keys = KeyScan::default();
+        keys.feed(b"draft", t);
+        keys.feed(b"\x1b", t);
+        assert_eq!(keys.count, 5);
+        assert!(keys.feed(b"\x1b", t + Duration::from_millis(400)));
+        assert_eq!(keys.count, 0);
+        let mut keys = KeyScan::default();
+        keys.feed(b"draft", t);
+        keys.feed(b"\x1b", t);
+        keys.feed(b"\x1b", t + Duration::from_secs(2));
+        assert_eq!(keys.count, 5, "two Escs far apart are two single ones");
+    }
+
+    fn wait_for(recorded: &Arc<Mutex<Vec<u8>>>, done: impl Fn(&[u8]) -> bool) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !done(&lock_ok(recorded)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        lock_ok(recorded).clone()
+    }
+
+    /// Against a real PTY (`cat` echoing raw input): a send is one bracketed
+    /// paste then Return; the reader sees the program switch paste mode; and
+    /// a second Stop inside the guard sends nothing.
+    #[test]
+    fn a_send_reaches_the_program_as_one_paste_then_return() {
+        let terminal = TestPty::new();
+        let (channel, recorded) = recording_channel();
+        attach_session(&terminal.state, "real-pty", channel, "a".into()).unwrap();
+        wait_for(&recorded, |b| b.starts_with(b"ready"));
+        let long = "x".repeat(1500);
+        submit_text(&terminal.state, "real-pty", &format!("line one\r\n{long}\x1b[201~")).unwrap();
+        let got = wait_for(&recorded, |b| b.ends_with(b"\r"));
+        let want = [b"ready\x1b[200~line one\n".as_slice(), long.as_bytes(), b"[201~\x1b[201~\r"].concat();
+        assert_eq!(got, want, "paced, whole, and ended by its own marker");
+        assert!(submit_text(&terminal.state, "real-pty", " \x07\n").is_err(), "nothing to send");
+
+        assert!(!input_state(&terminal.state, "real-pty").unwrap().paste_mode);
+        pty_write_bytes_checked(&terminal.state, "real-pty", b"\x1b[?2004h").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !input_state(&terminal.state, "real-pty").unwrap().paste_mode && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(input_state(&terminal.state, "real-pty").unwrap().paste_mode, "the program's switch, read off its output");
+
+        let before = wait_for(&recorded, |b| b.ends_with(b"\x1b[?2004h")).len();
+        assert!(interrupt(&terminal.state, "real-pty").unwrap());
+        assert!(!interrupt(&terminal.state, "real-pty").unwrap(), "a second Esc this soon would open the rewind menu");
+        let got = wait_for(&recorded, |b| b.len() > before);
+        assert_eq!(&got[before..], b"\x1b");
+        assert!(interrupt(&PtyState::new(), "missing").is_err());
     }
 
     #[test]

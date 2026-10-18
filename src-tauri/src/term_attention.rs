@@ -14,6 +14,10 @@
 //! - Codex: the existing Stop hook (`/v1/codex/stop`) and prompt capture
 //!   (`/v1/prompts/ingest`) carry the same header.
 //!
+//! The same fires bind the terminal's conversation mirror (`convo::bind`):
+//! SessionStart joins the three above, plus SessionEnd, and every fire also
+//! carries `X-Redline-Entrypoint` so a nested `claude -p` can be told apart.
+//!
 //! A session in an external terminal carries no id and is ignored, and so is
 //! an id that names no live dock terminal. The daemon keeps the latest
 //! attention per terminal and emits [`EVENT`]; "seen", the shelf and OS
@@ -48,6 +52,10 @@ use crate::pty::PtyState;
 
 /// The header every attention fire names its terminal in.
 pub const HEADER: &str = "X-Redline-Terminal";
+/// The header carrying the CLI's `CLAUDE_CODE_ENTRYPOINT`: `cli` for the
+/// TUI, `sdk-cli` for a `claude -p` (experiment (m), S2), which the
+/// conversation mirror never binds a terminal to.
+pub const ENTRYPOINT_HEADER: &str = "X-Redline-Entrypoint";
 /// The variable `pty_spawn` sets on every dock shell, which the hooks forward.
 pub const ENV_TERMINAL_ID: &str = "REDLINE_TERMINAL_ID";
 /// Emitted with a [`TermAttention`] on every change.
@@ -280,6 +288,21 @@ fn transcript_under(path: &str, projects: &Path) -> Option<PathBuf> {
     .then_some(canonical)
 }
 
+/// `transcript_under` for a path the CLI may not have written yet:
+/// SessionStart names its transcript before the first prompt creates it
+/// (experiment (m), S1). The file, once it exists, must still be a `.jsonl`
+/// file inside the projects directory.
+pub(crate) fn transcript_target(path: &str, projects: &Path) -> Option<PathBuf> {
+    let path = Path::new(path);
+    if path.exists() {
+        return transcript_under(path.to_str()?, projects);
+    }
+    let parent = path.parent()?.canonicalize().ok()?;
+    let name = path.file_name()?;
+    (parent.starts_with(projects.canonicalize().ok()?) && path.extension().is_some_and(|ext| ext == "jsonl"))
+        .then(|| parent.join(name))
+}
+
 fn read_tail(path: &Path) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -373,6 +396,7 @@ pub fn observe_prompt(app: &AppHandle, terminal_id: &str, session_id: Option<&st
 
 /// POST `/v1/term/event` — the Claude Code attention hooks' sink. Always `{}`:
 /// the hooks are async and fail-open, so nothing here can hold up a turn.
+/// The same fires bind the terminal's conversation mirror (`convo`).
 pub(crate) async fn handle_event(
     State(app_state): State<crate::AppState>,
     headers: HeaderMap,
@@ -380,6 +404,8 @@ pub(crate) async fn handle_event(
 ) -> Json<Value> {
     if let Some(terminal_id) = terminal_header(&headers) {
         observe_claude(&app_state.app_handle, &terminal_id, &payload);
+        let entrypoint = headers.get(ENTRYPOINT_HEADER).and_then(|v| v.to_str().ok()).map(str::trim).filter(|v| !v.is_empty());
+        crate::convo::observe_hook(&app_state.app_handle, &terminal_id, entrypoint, &payload);
     }
     Json(json!({}))
 }
@@ -536,6 +562,22 @@ mod tests {
         let escape = projects.join("-p/../../s.jsonl");
         assert!(transcript_under(escape.to_str().unwrap(), &projects).is_none(), "dot-dot resolves outside");
         assert!(transcript_under(projects.join("-p/missing.jsonl").to_str().unwrap(), &projects).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_transcript_not_yet_written_is_accepted_under_the_projects_dir_only() {
+        let root = scratch("target");
+        let projects = root.join("projects");
+        std::fs::create_dir_all(projects.join("-p")).unwrap();
+        let fresh = projects.join("-p/new.jsonl");
+        assert!(transcript_target(fresh.to_str().unwrap(), &projects).is_some_and(|p| p.ends_with("-p/new.jsonl")));
+        assert!(transcript_target(projects.join("-p/new.txt").to_str().unwrap(), &projects).is_none());
+        assert!(transcript_target(root.join("new.jsonl").to_str().unwrap(), &projects).is_none());
+        assert!(transcript_target(projects.join("-p/../../x.jsonl").to_str().unwrap(), &projects).is_none(), "dot-dot resolves outside");
+        assert!(transcript_target(projects.join("-missing/x.jsonl").to_str().unwrap(), &projects).is_none(), "its folder must exist");
+        std::fs::write(&fresh, "").unwrap();
+        assert!(transcript_target(fresh.to_str().unwrap(), &projects).is_some(), "and once written, as before");
         std::fs::remove_dir_all(root).unwrap();
     }
 

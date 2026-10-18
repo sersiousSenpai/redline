@@ -5,6 +5,7 @@ mod agent;
 mod ai_commit;
 mod ai_review;
 mod antigravity_hook;
+mod asks;
 mod auth;
 mod binprobe;
 mod bookshelf;
@@ -40,6 +41,7 @@ mod companion_build;
 mod companion_warm;
 mod compose;
 mod context;
+mod convo;
 mod cursor_hook;
 mod db;
 mod dedup;
@@ -3388,6 +3390,9 @@ async fn run_server(state: AppState) {
         // Terminal attention (terminal-wall Phase 1): the async Notification /
         // Stop / UserPromptSubmit hooks of an agent in a dock terminal.
         .route("/v1/term/event", post(term_attention::handle_event))
+        // Permission / question cards (Flow): the blocking PermissionRequest
+        // and AskUserQuestion hooks of an agent in a dock terminal.
+        .route("/v1/term/ask", post(asks::handle_ask))
         .route("/v1/codex/stop", post(handle_codex_stop))
         .route("/v1/cursor/prompt", post(handle_cursor_prompt))
         .route("/v1/cursor/response", post(handle_cursor_response))
@@ -12636,6 +12641,16 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "pty_procs",
     "pty_resize",
     "pty_spawn",
+    // The conversation mirror: the first read of a transcript (subscribe),
+    // a page of it, a transcript lookup (prebind), and the paced typing of
+    // a composer send or a mid-session switch. `pty_interrupt` and the
+    // answers stay on the main thread: one byte, one oneshot.
+    "convo_page",
+    "convo_prebind",
+    "convo_set_mode",
+    "convo_set_model",
+    "convo_subscribe",
+    "pty_submit",
     // The agent harnesses: the agents table in SQLite, and an installed
     // harness's link on disk.
     "harness_agent_create",
@@ -12804,6 +12819,9 @@ pub fn run() {
         .on_page_load(|webview, payload| {
             if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
                 browser_events::hide_browser_tabs(webview.app_handle());
+                // A reloaded stage starts over: its conversation subscriptions
+                // went with the old page and must stop arming cards.
+                convo::drop_subscriptions(webview.app_handle());
             }
         });
     // Must be the first plugin (Tauri v2 requirement). A second `redline`
@@ -13035,6 +13053,16 @@ pub fn run() {
             pty::pty_procs,
             term_attention::term_attention_snapshot,
             term_attention::set_attention_badge,
+            convo::convo_subscribe,
+            convo::convo_unsubscribe,
+            convo::convo_page,
+            convo::convo_expect,
+            convo::convo_prebind,
+            convo::convo_set_mode,
+            convo::convo_set_model,
+            asks::convo_answer_ask,
+            pty::pty_submit,
+            pty::pty_interrupt,
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
@@ -13508,6 +13536,7 @@ pub fn run() {
 
             app.manage(pty::PtyState::new());
             app.manage(term_attention::TermAttentionState::default());
+            app.manage(convo::ConvoState::default());
             app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());
             app.manage(self_develop::SelfDevelopState::new());

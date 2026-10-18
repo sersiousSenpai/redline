@@ -52,6 +52,47 @@ pub struct ConflictScan {
     pub conflicts: Vec<HookConflict>,
     pub errors: Vec<InspectionError>,
     pub inactive_plugins: Vec<String>,
+    /// The user's own Claude Code `PermissionRequest` hooks. They run beside
+    /// the hook behind the session stage's permission cards, so one that
+    /// decides on its own can answer an ask before (or instead of) a card.
+    /// Informational: nothing here is a plan conflict, and nothing offers
+    /// to remove them.
+    pub permission_hooks: Vec<PermissionHook>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionHook {
+    pub source_path: String,
+    pub matcher: Option<String>,
+    /// The handler's command, or its URL for an `http` handler.
+    pub command: String,
+}
+
+/// Every `PermissionRequest` handler in a Claude Code source that isn't
+/// Redline's own ask hook.
+fn permission_hooks(source: &Source, root: &Value) -> Vec<PermissionHook> {
+    let entries = root.pointer("/hooks/PermissionRequest").and_then(Value::as_array);
+    entries
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| {
+            let matcher = entry.get("matcher").and_then(Value::as_str).map(str::to_string);
+            entry["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|handler| !crate::hook::is_ask_handler(handler))
+                .filter_map(move |handler| {
+                    let command = handler.get("command").or_else(|| handler.get("url")).and_then(Value::as_str)?;
+                    Some(PermissionHook {
+                        source_path: source.path.to_string_lossy().into_owned(),
+                        matcher: matcher.clone(),
+                        command: command.to_string(),
+                    })
+                })
+        })
+        .collect()
 }
 #[derive(Clone, Debug)]
 struct Source {
@@ -378,6 +419,7 @@ fn scan_sources(sources: &[Source]) -> ConflictScan {
             }
         };
         if source.backend == "claude-code" {
+            scan.permission_hooks.extend(permission_hooks(source, &root));
             if let Some(enabled) = root
                 .get("enabledPlugins")
                 .and_then(|p| p.get(PLUGIN))
@@ -768,6 +810,23 @@ mod tests {
         ] {
             assert_eq!(recognize(command), Recognition::None, "{command}");
         }
+    }
+
+    #[test]
+    fn a_users_own_permission_hooks_are_listed_but_never_a_conflict() {
+        let fixture = Fixture::new();
+        let ours = direct("[ -n \"${REDLINE_TERMINAL_ID:-}\" ] || exit 0; curl -sf --max-time 3600 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" --data-binary @- http://127.0.0.1:7676/v1/term/ask || true");
+        let source = fixture.source("settings.json", "claude-code", json!({"hooks": {"PermissionRequest": [
+            {"matcher": "Bash", "hooks": [direct("my-guard")]},
+            {"matcher": "*", "hooks": [ours]},
+            {"hooks": [{"type": "http", "url": "http://localhost:9/decide"}]}
+        ]}}));
+        let scan = scan_sources(&[source]);
+        assert!(scan.conflicts.is_empty() && scan.errors.is_empty());
+        let listed: Vec<_> = scan.permission_hooks.iter().map(|h| (h.matcher.as_deref(), h.command.as_str())).collect();
+        assert_eq!(listed, [(Some("Bash"), "my-guard"), (None, "http://localhost:9/decide")], "Redline's own ask hook is not listed");
+        let codex = fixture.source("hooks.json", "codex", json!({"hooks": {"PermissionRequest": [{"hooks": [direct("x")]}]}}));
+        assert!(scan_sources(&[codex]).permission_hooks.is_empty(), "Claude Code sources only");
     }
 
     #[test]

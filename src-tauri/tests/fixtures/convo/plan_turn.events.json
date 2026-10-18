@@ -1,0 +1,104 @@
+[
+  {
+    "epoch": 0,
+    "id": "@0:83",
+    "kind": "mode_change",
+    "mode": "plan",
+    "offset": 83,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "8c221fb0-4d69-4a55-8660-f4bcd0a21d69",
+    "kind": "user_text",
+    "offset": 504,
+    "promptId": "6fd5b97b-6f1d-4831-aa16-92709cc104d1",
+    "text": "Plan adding a file NOTES.md containing the single line hello. Keep the plan to two short steps, then present it with ExitPlanMode. Once it is approved, carry it out.",
+    "ts": 1792313377157
+  },
+  {
+    "effort": null,
+    "epoch": 0,
+    "id": "bfc7f7d1-818d-4b06-9212-69a4f99f0cf1",
+    "kind": "model_seen",
+    "model": "claude-sonnet-5-5",
+    "offset": 1667,
+    "ts": 1792313377156
+  },
+  {
+    "epoch": 0,
+    "id": "@0:6938",
+    "kind": "mode_change",
+    "mode": "plan",
+    "offset": 6938,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "8bcd3dc0-a766-4d2a-ba82-832ecac2af90",
+    "kind": "tool_use",
+    "name": "Write",
+    "offset": 10928,
+    "summary": "/Users/u/.claude/plans/plan-adding-a-file-functional-anchor.md",
+    "toolUseId": "toolu_01Ls5W6bba7uxz4UVR77Yx9b",
+    "ts": 1792313380322
+  },
+  {
+    "epoch": 0,
+    "id": "d2afb40b-5f74-4771-a46b-fd7497cb427a",
+    "kind": "tool_use",
+    "name": "ToolSearch",
+    "offset": 13347,
+    "summary": "select:ExitPlanMode",
+    "toolUseId": "toolu_018babLJrTm5A6wG4zKmq9ed",
+    "ts": 1792313380327
+  },
+  {
+    "epoch": 0,
+    "id": "2299fc2d-0e46-462c-a600-942a7fe2c0cf",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 15229,
+    "preview": "File created successfully at: /Users/u/.claude/plans/plan-adding-a-file-functional-anchor.md (file state is current in your context — no need to Read it back)",
+    "toolUseId": "toolu_01Ls5W6bba7uxz4UVR77Yx9b",
+    "ts": 1792313380350
+  },
+  {
+    "epoch": 0,
+    "id": "c4c86872-aaf7-4a65-a348-afa00cb1884b",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 16539,
+    "preview": "",
+    "toolUseId": "toolu_018babLJrTm5A6wG4zKmq9ed",
+    "ts": 1792313380355
+  },
+  {
+    "epoch": 0,
+    "id": "@0:18365",
+    "kind": "mode_change",
+    "mode": "plan",
+    "offset": 18365,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "8e3a7075-46d9-425f-a16a-bfac0d8c3013:0",
+    "kind": "tool_use",
+    "name": "ExitPlanMode",
+    "offset": 20524,
+    "summary": "Plan: add NOTES.md",
+    "toolUseId": "toolu_014YVYkQZvLvGBnxSYLGqqUE",
+    "ts": 1792313381912
+  },
+  {
+    "epoch": 0,
+    "id": "8e3a7075-46d9-425f-a16a-bfac0d8c3013:1",
+    "kind": "plan_proposed",
+    "offset": 20524,
+    "sessionId": "870509b9-ff25-4376-8f93-f9526dbd739c",
+    "title": "Plan: add NOTES.md",
+    "toolUseId": "toolu_014YVYkQZvLvGBnxSYLGqqUE",
+    "ts": 1792313381912
+  }
+]

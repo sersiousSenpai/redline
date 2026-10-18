@@ -785,23 +785,38 @@ fn edit_capture_at(path: &std::path::Path, install: bool) -> Result<bool, String
 }
 
 // ===========================================================================
-// Terminal attention hooks (terminal-wall Phase 1)
+// Terminal hooks: attention (terminal-wall Phase 1), the conversation mirror's
+// binding, and its permission / question cards (Flow program, Wave B)
 // ===========================================================================
 //
-// Three async command hooks, `Notification`, `Stop` and `UserPromptSubmit`,
-// that tell the daemon what a dock terminal's agent needs (`term_attention`).
-// Installed with the plan hook, refreshed at boot when stale, removed with it.
+// Async command hooks on `Notification`, `Stop`, `UserPromptSubmit`,
+// `SessionStart` and `SessionEnd` tell the daemon what a dock terminal's agent
+// is doing (`term_attention`) and which transcript is its conversation
+// (`convo::bind`). Two blocking command hooks, `PermissionRequest` and
+// `PreToolUse` for `AskUserQuestion`, let the session stage answer asks
+// (`asks`). All of them are installed with the plan hook, refreshed at boot
+// when stale (`postboot`: byte-compared, so a changed command rewrites every
+// older install), and removed with it.
 //
 // Measured on claude 2.1.295 (docs/protocol-verification.md, experiment (l)):
 // a hook command inherits the agent's environment, so the dock PTY's
 // `REDLINE_TERMINAL_ID` reaches curl; `async: true` never holds the turn; and
 // every payload carries what the daemon needs (Stop has
-// `last_assistant_message`), so each hook is one POST of its stdin.
+// `last_assistant_message`), so each hook is one POST of its stdin. And on
+// 2.1.302 (experiment (m)): SessionStart fires for every source and names its
+// transcript; `CLAUDE_CODE_ENTRYPOINT` tells a nested `claude -p` (`sdk-cli`)
+// from the TUI (`cli`); a held PermissionRequest never blocks the TUI's own
+// dialog, while a held AskUserQuestion shows no card until released.
 
 const TERM_EVENT_URL: &str = "http://127.0.0.1:7676/v1/term/event";
+const TERM_ASK_URL: &str = "http://127.0.0.1:7676/v1/term/ask";
 
 /// The Claude Code events the attention hooks listen on.
-pub const ATTENTION_EVENTS: [&str; 3] = ["Notification", "Stop", "UserPromptSubmit"];
+pub const ATTENTION_EVENTS: [&str; 5] = ["Notification", "Stop", "UserPromptSubmit", "SessionStart", "SessionEnd"];
+
+/// The ask hooks' events and matchers: every tool's permission, and the
+/// question tool before it runs.
+const ASK_HOOKS: [(&str, &str); 2] = [("PermissionRequest", "*"), ("PreToolUse", "^AskUserQuestion$")];
 
 /// Redirects the response away and keeps any failure silent.
 const ATTENTION_TAIL: &str = " >/dev/null 2>&1 || true";
@@ -812,19 +827,21 @@ fn attention_guard() -> String {
     format!("[ -n \"${{{}:-}}\" ] && ", crate::term_attention::ENV_TERMINAL_ID)
 }
 
-/// The command each attention hook runs. The header comes from the
+/// The command each attention hook runs. The headers come from the
 /// environment the way the capture hook's do (`capture_spec`): double-quoted,
-/// so the shell expands the id at fire time. Unlike the capture command,
+/// so the shell expands them at fire time. Unlike the capture command,
 /// nothing is echoed: an async hook's JSON output reaches the model on its
 /// next turn, and attention has nothing to tell the model. `--max-time 1` and
 /// `|| true` keep a closed or slow daemon silent.
 fn attention_command() -> String {
     format!(
         "{guard}curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
-         -H \"{header}: ${{{env}}}\" --data-binary @- {TERM_EVENT_URL}{ATTENTION_TAIL}",
+         -H \"{header}: ${{{env}}}\" -H \"{entry}: ${{CLAUDE_CODE_ENTRYPOINT:-}}\" \
+         --data-binary @- {TERM_EVENT_URL}{ATTENTION_TAIL}",
         guard = attention_guard(),
         header = crate::term_attention::HEADER,
         env = crate::term_attention::ENV_TERMINAL_ID,
+        entry = crate::term_attention::ENTRYPOINT_HEADER,
     )
 }
 
@@ -832,6 +849,41 @@ fn attention_command() -> String {
 /// `async` is the contract, not a tuning: the hook must never hold a turn.
 fn attention_handler() -> Value {
     json!({ "type": "command", "command": attention_command(), "async": true, "timeout": 5 })
+}
+
+/// The command an ask hook runs. Unlike attention it blocks and prints: the
+/// daemon's reply IS the hook's decision, so curl's stdout is the hook's.
+/// Fail-open three ways: outside the dock it exits before curl; `-f` prints
+/// nothing for an HTTP error; `|| true` turns a closed daemon into an empty
+/// reply. An empty reply is no decision, and the TUI asks on its own.
+fn ask_command(max_secs: u64) -> String {
+    format!(
+        "[ -n \"${{{env}:-}}\" ] || exit 0; curl -sf --max-time {max_secs} -X POST \
+         -H 'Content-Type: application/json' -H \"{header}: ${{{env}}}\" \
+         --data-binary @- {TERM_ASK_URL} || true",
+        env = crate::term_attention::ENV_TERMINAL_ID,
+        header = crate::term_attention::HEADER,
+    )
+}
+
+/// One ask handler. Its `timeout` (and curl's) is how long the stage may
+/// hold the ask: an hour for a permission, whose dialog the TUI shows
+/// regardless; minutes for a question, which shows no card in the TUI
+/// until released.
+fn ask_handler(event: &str) -> Value {
+    let secs = if event == "PermissionRequest" {
+        crate::asks::PERMISSION_TIMEOUT_SECS
+    } else {
+        crate::asks::QUESTION_TIMEOUT_SECS
+    };
+    json!({ "type": "command", "command": ask_command(secs), "timeout": secs })
+}
+
+/// Every terminal hook this build writes: `(event, matcher, handler)`.
+fn terminal_hooks() -> Vec<(&'static str, Option<&'static str>, Value)> {
+    let attention = ATTENTION_EVENTS.iter().map(|event| (*event, None, attention_handler()));
+    let asks = ASK_HOOKS.iter().map(|(event, matcher)| (*event, Some(*matcher), ask_handler(event)));
+    attention.chain(asks).collect()
 }
 
 /// Is this handler ours, of any vintage? Ownership is the curl invocation
@@ -847,30 +899,42 @@ fn is_attention_handler(handler: &Value) -> bool {
         })
 }
 
-/// Are all three attention hooks installed exactly as this build writes
-/// them? Compared byte for byte like `capture_current`: an older install (a
-/// different command, or one that is not async) is rewritten, not trusted.
+/// An ask handler of ours, of any vintage: its curl names the ask route.
+pub(crate) fn is_ask_handler(handler: &Value) -> bool {
+    handler.get("type").and_then(Value::as_str) == Some("command")
+        && handler.get("command").and_then(Value::as_str).is_some_and(|command| {
+            let invocation = command.split_once("; ").map_or(command, |(_, rest)| rest);
+            let invocation = invocation.strip_suffix(" || true").unwrap_or(invocation);
+            crate::hook_conflicts::targets_url(invocation, TERM_ASK_URL)
+        })
+}
+
+/// Are all the terminal hooks installed exactly as this build writes them?
+/// Compared byte for byte like `capture_current`: an older install (a
+/// different command, a missing event, one that is not async) is rewritten,
+/// not trusted. `HookStatus::attention_installed` and the boot refresh read
+/// this, so adding an event here is what upgrades existing installs.
 pub fn attention_current() -> bool {
     attention_current_at(&settings_path())
 }
 
 pub fn attention_current_at(path: &std::path::Path) -> bool {
     let Some(root) = read_json(path) else { return false };
-    let want = attention_handler();
-    ATTENTION_EVENTS.iter().all(|event| {
+    terminal_hooks().iter().all(|(event, matcher, want)| {
         root.pointer(&format!("/hooks/{event}"))
             .and_then(Value::as_array)
             .is_some_and(|entries| {
                 entries
                     .iter()
+                    .filter(|entry| entry.get("matcher").and_then(Value::as_str) == *matcher)
                     .filter_map(|entry| entry.get("hooks").and_then(Value::as_array))
                     .flatten()
-                    .any(|handler| handler == &want)
+                    .any(|handler| handler == want)
             })
     })
 }
 
-/// Install (or refresh) the attention hooks. Idempotent: ours are rewritten in
+/// Install (or refresh) the terminal hooks. Idempotent: ours are rewritten in
 /// place, duplicates dropped, and every other hook under those events is kept.
 pub fn install_attention() -> Result<bool, String> {
     install_attention_at(&settings_path())
@@ -881,7 +945,7 @@ pub fn install_attention_at(path: &std::path::Path) -> Result<bool, String> {
     Ok(attention_current_at(path))
 }
 
-/// Remove only Redline's attention handlers, dropping containers they leave
+/// Remove only Redline's terminal handlers, dropping containers they leave
 /// empty. Returns whether the hooks are still (currently) installed.
 pub fn uninstall_attention() -> Result<bool, String> {
     uninstall_attention_at(&settings_path())
@@ -905,23 +969,33 @@ fn edit_attention_at(path: &std::path::Path, install: bool) -> Result<(), String
     let object = root.as_object_mut().ok_or("settings root is not a JSON object")?;
     if !install && !object.contains_key("hooks") { return Ok(()); }
     let hooks = object.entry("hooks").or_insert_with(|| json!({})).as_object_mut().ok_or("hooks is not an object")?;
-    for event in ATTENTION_EVENTS {
+    for (event, matcher, want) in terminal_hooks() {
         if !install && !hooks.contains_key(event) { continue; }
         let entries = hooks.entry(event).or_insert_with(|| json!([])).as_array_mut()
             .ok_or_else(|| format!("hooks.{event} is not an array"))?;
+        // The kind of handler this row owns, so the two PreToolUse /
+        // PermissionRequest rows never claim each other's or the plan hook's.
+        let ours = if matcher.is_some() { is_ask_handler } else { is_attention_handler };
         let mut found = false;
         for entry in entries.iter_mut() {
+            let right_matcher = entry.get("matcher").and_then(Value::as_str) == matcher;
             // A malformed foreign entry is not ours to fix or to fail on.
             let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) else { continue };
             handlers.retain_mut(|handler| {
-                if !is_attention_handler(handler) { return true; }
-                if !install || found { return false; }
-                *handler = attention_handler();
+                if !ours(handler) { return true; }
+                // An older vintage under another matcher is dropped and
+                // written fresh under ours.
+                if !install || found || !right_matcher { return false; }
+                *handler = want.clone();
                 found = true;
                 true
             });
         }
-        if install && !found { entries.push(json!({ "hooks": [attention_handler()] })); }
+        if install && !found {
+            let mut entry = json!({ "hooks": [want] });
+            if let Some(matcher) = matcher { entry["matcher"] = json!(matcher); }
+            entries.push(entry);
+        }
         entries.retain(|entry| !entry["hooks"].as_array().is_some_and(Vec::is_empty)
             || entry.as_object().is_some_and(|o| o.keys().any(|k| k != "matcher" && k != "hooks")));
         if entries.is_empty() { hooks.remove(event); }
@@ -1244,12 +1318,85 @@ mod tests {
             attention_command(),
             "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] && curl -s --max-time 1 -X POST \
              -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
+             -H \"X-Redline-Entrypoint: ${CLAUDE_CODE_ENTRYPOINT:-}\" \
              --data-binary @- http://127.0.0.1:7676/v1/term/event >/dev/null 2>&1 || true"
         );
         let handler = attention_handler();
         assert_eq!(handler["async"], true, "an attention hook must never hold a turn");
         assert_eq!(handler["type"], "command");
         assert!(is_attention_handler(&handler));
+        assert!(!is_ask_handler(&handler));
+    }
+
+    /// The ask commands, byte for byte, for the same reason: a changed byte
+    /// rewrites every install at boot.
+    #[test]
+    fn ask_commands_are_pinned() {
+        assert_eq!(
+            ask_command(3600),
+            "[ -n \"${REDLINE_TERMINAL_ID:-}\" ] || exit 0; curl -sf --max-time 3600 -X POST \
+             -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${REDLINE_TERMINAL_ID}\" \
+             --data-binary @- http://127.0.0.1:7676/v1/term/ask || true"
+        );
+        let permission = ask_handler("PermissionRequest");
+        assert_eq!(permission, json!({ "type": "command", "command": ask_command(3600), "timeout": 3600 }));
+        assert!(permission.get("async").is_none(), "an ask hook holds: its reply is the decision");
+        assert_eq!(ask_handler("PreToolUse"), json!({ "type": "command", "command": ask_command(300), "timeout": 300 }));
+        assert!(is_ask_handler(&permission));
+        assert!(!is_attention_handler(&permission));
+        assert!(!is_ask_handler(&json!({ "type": "command", "command": format!("echo {TERM_ASK_URL}") })));
+        assert!(!is_ask_handler(&json!({ "type": "http", "url": HOOK_URL })), "the plan hook is not an ask hook");
+    }
+
+    /// Ask rows sit beside the plan hook under PreToolUse and beside a user's
+    /// own PermissionRequest hooks; each installer leaves the others alone.
+    #[test]
+    fn ask_hooks_install_beside_the_plan_hook_and_user_hooks() {
+        let path = tmppath();
+        std::fs::write(&path, serde_json::to_string_pretty(&json!({
+            "hooks": {
+                "PermissionRequest": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "my-guard" }] }],
+                "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": format!("curl -sf --data-binary @- {TERM_ASK_URL}") }] }]
+            }
+        })).unwrap()).unwrap();
+        install_at(&path).unwrap();
+        assert!(install_attention_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pre = json["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2, "the stale ask under `*` is replaced by ours under its matcher: {pre:?}");
+        assert!(pre.iter().any(|e| e["matcher"] == "ExitPlanMode" && e["hooks"][0]["url"] == HOOK_URL));
+        assert!(pre.iter().any(|e| e["matcher"] == "^AskUserQuestion$" && e["hooks"] == json!([ask_handler("PreToolUse")])));
+        let perm = json["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(perm[0]["hooks"], json!([{ "type": "command", "command": "my-guard" }]), "the user's own hook is kept");
+        assert_eq!(perm[1], json!({ "matcher": "*", "hooks": [ask_handler("PermissionRequest")] }));
+        assert!(get_status_at(&path).installed, "the plan hook is untouched");
+
+        assert!(!uninstall_attention_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"]["PermissionRequest"], json!([{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "my-guard" }] }]));
+        assert_eq!(json["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+        assert!(get_status_at(&path).installed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The upgrade path: an install from before SessionStart, SessionEnd and
+    /// the ask hooks is stale, and one refresh brings every event current.
+    #[test]
+    fn an_install_without_the_new_events_is_stale_until_refreshed() {
+        let path = tmppath();
+        let old = json!({ "type": "command", "command": format!("[ -n \"${{REDLINE_TERMINAL_ID:-}}\" ] && curl -s --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Terminal: ${{REDLINE_TERMINAL_ID}}\" --data-binary @- {TERM_EVENT_URL} >/dev/null 2>&1 || true"), "async": true, "timeout": 5 });
+        let mut hooks = serde_json::Map::new();
+        for event in ["Notification", "Stop", "UserPromptSubmit"] {
+            hooks.insert(event.into(), json!([{ "hooks": [old.clone()] }]));
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap()).unwrap();
+        assert!(!attention_current_at(&path));
+        assert!(install_attention_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for event in ATTENTION_EVENTS {
+            assert_eq!(json["hooks"][event], json!([{ "hooks": [attention_handler()] }]), "{event}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Ownership is the curl invocation, never a mention of the URL.

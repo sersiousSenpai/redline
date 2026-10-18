@@ -1,0 +1,46 @@
+[
+  {
+    "epoch": 0,
+    "id": "dfd1a744-f45d-4e81-8a84-72c81eea4912",
+    "kind": "user_text",
+    "offset": 507,
+    "promptId": "b8790313-ff6e-47be-a5f2-74bdd9a4e7fd",
+    "text": "Use the Bash tool to run exactly this command and nothing else: touch a-esc.txt",
+    "ts": 1792313044789
+  },
+  {
+    "epoch": 0,
+    "id": "61722aaa-06f6-4be6-ac42-498ba6ce7679",
+    "kind": "tool_use",
+    "name": "Bash",
+    "offset": 1541,
+    "summary": "touch a-esc.txt",
+    "toolUseId": "toolu_01Ke2FBoS9bK3i5MHPD1467w",
+    "ts": 1792313045734
+  },
+  {
+    "epoch": 0,
+    "id": "b3f7b3e6-c3f3-4e70-8ace-e9fe86003baf",
+    "isError": true,
+    "kind": "tool_result",
+    "offset": 3342,
+    "preview": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+    "toolUseId": "toolu_01Ke2FBoS9bK3i5MHPD1467w",
+    "ts": 1792313047488
+  },
+  {
+    "epoch": 0,
+    "id": "168939a6-a817-4141-9af3-6e731bc510b3",
+    "kind": "interrupted",
+    "offset": 4267,
+    "ts": 1792313047489
+  },
+  {
+    "durationMs": 970,
+    "epoch": 0,
+    "id": "2d98e934-9fb2-4b8c-8f69-5119ac9f834b",
+    "kind": "turn_end",
+    "offset": 4797,
+    "ts": 1792313047490
+  }
+]

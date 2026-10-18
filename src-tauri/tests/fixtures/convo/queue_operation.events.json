@@ -1,0 +1,74 @@
+[
+  {
+    "epoch": 0,
+    "id": "b6c6926b-ed51-4fa2-beac-f916e1f27690",
+    "kind": "user_text",
+    "offset": 236,
+    "promptId": "55631272-cb3f-432e-b801-4a0287c1ea8c",
+    "text": "Write a 300-word essay about the history of coffee.",
+    "ts": 1792313218198
+  },
+  {
+    "epoch": 0,
+    "id": "@0:1570",
+    "kind": "queued",
+    "offset": 1570,
+    "op": "enqueue",
+    "reason": null,
+    "text": "Then reply with the single word queued.",
+    "ts": 1792313220488
+  },
+  {
+    "epoch": 0,
+    "id": "@0:1761",
+    "kind": "queued",
+    "offset": 1761,
+    "op": "dequeue",
+    "reason": null,
+    "text": null,
+    "ts": 1792313221959
+  },
+  {
+    "epoch": 0,
+    "id": "80bcb629-9731-492f-b54c-8ad825c7c15f",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 1900,
+    "text": "Coffee's history begins in the highlands of Ethiopia, where legend credits a goat herder named Kaldi with discovering its stimulating effects. He noticed his goats becoming unusually lively after eating the red berries of a certain shrub. Whether or not the story is accurate, the plant itself almost certainly grew wild in the region, and people there likely chewed its fruit and brewed its leaves long before coffee became a drink.\n\nCoffee cultivation and brewing spread across the Red Sea to Yemen by at least the fifteenth century. Sufi monks there used coffee to stay awake during long nights of prayer, and it soon became central to social life. Coffeehouses, known as *qahveh khaneh*, appeared in Mecca, Cairo, and Istanbul, where people gathered to talk, play games, and exchange news. Authorities sometimes viewed these establishments with suspicion, and rulers in several cities tried to ban coffee at various points, but the drink proved too popular to suppress.\n\nCoffee reached Europe in the late sixteenth and early seventeenth centuries through Venetian and Dutch merchants. By the 1650s, coffeehouses had opened in London, Oxford, and Paris, becoming hubs for merchants, writers, and political debate. London's coffeehouses were so influential that they were nicknamed \"penny universities,\" since admission was cheap and conversation ranged widely.\n\nFrom there, coffee became a global commodity. European powers established plantations in their colonies in Asia, the Caribbean, and Latin America, often relying on enslaved and coerced labor. Today coffee is one of the most traded agricultural products in the world, and its history reflects both its cultural richness and the economic inequalities that shaped its spread.",
+    "ts": 1792313221915
+  },
+  {
+    "durationMs": 3754,
+    "epoch": 0,
+    "id": "d3d2b834-2ba6-4d90-b0e5-c0a4bc6854fa",
+    "kind": "turn_end",
+    "offset": 6087,
+    "ts": 1792313221949
+  },
+  {
+    "epoch": 0,
+    "id": "4ffaacb7-c779-4cfe-a9e8-0ac14336f6d0",
+    "kind": "user_text",
+    "offset": 6956,
+    "promptId": "52ba1b10-0f1b-45df-b14c-5709805b6b47",
+    "text": "Then reply with the single word queued.",
+    "ts": 1792313221971
+  },
+  {
+    "epoch": 0,
+    "id": "aad49e6f-c79c-4dcd-9d09-05e0fd6993da",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 7955,
+    "text": "queued",
+    "ts": 1792313222715
+  },
+  {
+    "durationMs": 783,
+    "epoch": 0,
+    "id": "40a62158-45d4-449d-83d9-3269dc8268c3",
+    "kind": "turn_end",
+    "offset": 10399,
+    "ts": 1792313222743
+  }
+]

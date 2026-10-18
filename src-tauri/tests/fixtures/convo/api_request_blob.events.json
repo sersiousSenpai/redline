@@ -1,0 +1,44 @@
+[
+  {
+    "epoch": 0,
+    "id": "@0:349",
+    "kind": "mode_change",
+    "mode": "default",
+    "offset": 349,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "d2917d14-6577-40f9-9d00-c7c9b67732e5",
+    "kind": "user_text",
+    "offset": 116173,
+    "promptId": "ca118b9d-ad40-4521-b48d-a978415a9d76",
+    "text": "Reply with the single word ping.",
+    "ts": 1792313012475
+  },
+  {
+    "epoch": 0,
+    "id": "@0:117507",
+    "kind": "mode_change",
+    "mode": "default",
+    "offset": 117507,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "d5a4bae1-8a04-430c-83fd-5cc94070f544",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 117695,
+    "text": "ping",
+    "ts": 1792313013100
+  },
+  {
+    "durationMs": 655,
+    "epoch": 0,
+    "id": "917df250-01fb-4c2b-9cd7-19f88abb87b3",
+    "kind": "turn_end",
+    "offset": 120181,
+    "ts": 1792313013119
+  }
+]

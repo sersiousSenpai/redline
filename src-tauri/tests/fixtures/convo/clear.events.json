@@ -1,0 +1,46 @@
+[
+  {
+    "epoch": 0,
+    "id": "fd27783b-9174-4e48-8d15-8268dd3e0cff",
+    "kind": "user_text",
+    "offset": 877,
+    "promptId": null,
+    "text": "/clear",
+    "ts": 1792313357771
+  },
+  {
+    "epoch": 0,
+    "id": "c760ce12-dbaa-4790-a2d1-45773f27d15e",
+    "kind": "user_text",
+    "offset": 2087,
+    "promptId": "19a13c3f-eb77-4d9b-bb0a-3650536bdf9d",
+    "text": "Reply with the single word fresh.",
+    "ts": 1792313360597
+  },
+  {
+    "effort": null,
+    "epoch": 0,
+    "id": "b088e84a-6f91-4873-b7be-29a4ff0b496d",
+    "kind": "model_seen",
+    "model": "claude-haiku-5-5",
+    "offset": 3060,
+    "ts": 1792313360597
+  },
+  {
+    "epoch": 0,
+    "id": "ec2b3817-a63c-48fd-b00e-ce5773519c78",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 9381,
+    "text": "fresh",
+    "ts": 1792313361811
+  },
+  {
+    "durationMs": 1241,
+    "epoch": 0,
+    "id": "ea3e70b1-a8ca-4b0f-99d7-0753647af228",
+    "kind": "turn_end",
+    "offset": 12307,
+    "ts": 1792313361820
+  }
+]

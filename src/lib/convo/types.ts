@@ -125,8 +125,11 @@ export type ConvoEvent = Base &
     /** The turn finished (the Stop hook, or the transcript's turn
      *  duration line). */
     | { kind: "turn_end"; durationMs?: number | null }
-    /** The CLI's own type-ahead queue (`queue-operation` lines). */
-    | { kind: "queued"; op: "enqueue" | "dequeue" | "remove" | "popAll"; text?: string | null }
+    /** The CLI's own type-ahead queue (`queue-operation` lines). A prompt
+     *  sent while a turn runs is `enqueue`d, then either `dequeue`d after the
+     *  turn (its prompt line follows) or `remove`d with `reason`
+     *  `absorbed_mid_turn` (folded into the running turn; no prompt line). */
+    | { kind: "queued"; op: "enqueue" | "dequeue" | "remove" | "popAll"; text?: string | null; reason?: string | null }
     /** ExitPlanMode was called: a plan exists for review. `sessionId` is the
      *  same id the plan-received event carries. */
     | { kind: "plan_proposed"; toolUseId: string; sessionId: string; title?: string | null }
@@ -175,3 +178,27 @@ export type SubmitResult =
  *  from here right now (a turn is running, or no slash command exists);
  *  the chip says "Switch in terminal". */
 export type SwitchResult = { status: "sent" } | { status: "terminal"; reason: string };
+
+/** App-wide Tauri event names the engine emits beside the per-terminal
+ *  channel, for surfaces that aren't subscribed to a conversation. */
+export const CONVO_BOUND_EVENT = "convo-bound";
+export const CONVO_TITLE_EVENT = "convo-title";
+
+/** `convo-bound`: a terminal was bound to a session (on every bind, the same
+ *  moment its `bound` event goes to subscribers). The stage keeps a
+ *  sessionId → terminalId map from it. */
+export interface ConvoBoundNotice {
+  terminalId: string;
+  sessionId: string;
+  harness: ConvoHarness;
+  transcriptPath: string | null;
+}
+
+/** `convo-title`: the CLI named the session (its transcript's `ai-title`,
+ *  the same text its window title carries after the status glyph). Only
+ *  terminals whose conversation is being tailed report it. */
+export interface ConvoTitleNotice {
+  terminalId: string;
+  sessionId: string;
+  title: string;
+}
