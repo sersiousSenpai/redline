@@ -41,13 +41,25 @@ html[data-rl-transparency="reduced"] .rl-glass {
 }
 .rl-ambient { background: radial-gradient(ellipse at 15% 0%, var(--color-ambient-a), transparent 55%), radial-gradient(ellipse at 90% 100%, var(--color-ambient-b), transparent 55%), var(--color-canvas); }
 
-.rl-row-menu-trigger { position: absolute; right: 10px; top: 7px; z-index: 10; width: 26px; height: 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink-muted); cursor: pointer; }
-.rl-row-menu { padding: 6px; }
-.rl-row-menu button { display: block; width: 100%; height: 32px; padding: 0 10px; border-radius: 8px; text-align: left; font-size: 12px; cursor: pointer; }
-.rl-row-menu button:disabled { opacity: .5; cursor: default; }
-.rl-row-menu .rl-row-danger { color: var(--color-mode-danger-fg, var(--color-warning-text)); border-top: 1px solid var(--color-rule); }
-.rl-row-rename { position: relative; z-index: 12; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; background: var(--color-paper); font-size: 12px; }
-.rl-row-rename input { width: 100%; border: 1px solid var(--color-info); padding: 6px; border-radius: 6px; }
+/* A session row's ⋯ menu (RowMenu, board 4d): 190px of rows inside 6px of
+   padding and the glass tier's 1px rim, 32px rows with a 14px glyph, Delete
+   tinted below a rule. The classic row keeps its boxed ⋯ chip; the flow row
+   draws its own bare glyph (FlowSidebar.css). */
+.rl-row-menu-trigger { position: absolute; right: 10px; top: 7px; z-index: 10; display: grid; place-items: center; width: 26px; height: 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink-muted); cursor: pointer; }
+.rl-row-menu-layer { position: fixed; z-index: 1000; width: 204px; }
+.rl-row-menu { display: flex; flex-direction: column; padding: 6px; }
+.rl-row-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 10px; border-radius: var(--rl-radius-menu-row); color: var(--color-ink); font-size: var(--rl-text-row); line-height: normal; text-align: left; cursor: pointer; }
+.rl-row-menu-item > svg { flex: none; color: var(--color-ink-4); }
+.rl-row-menu-item:hover { background: var(--color-fill-2); }
+.rl-row-menu-item:focus-visible { outline: none; background: var(--color-fill-2); box-shadow: inset 0 0 0 1px var(--color-focus-rim); }
+.rl-row-menu-item:disabled { opacity: .5; cursor: default; background: none; }
+.rl-row-menu-item[data-danger] { background: var(--color-mode-danger-bg); color: var(--color-mode-danger-fg); }
+.rl-row-menu-item[data-danger] > svg { color: inherit; }
+.rl-row-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-row-menu-key { font: inherit; font-size: var(--rl-text-label); opacity: .7; }
+.rl-row-menu-rule { flex: none; height: 1px; margin: 5px 4px; background: var(--color-rule); }
+/* The classic row's rename, laid over its own title line. */
+.rl-row-rename { position: absolute; z-index: 12; left: 24px; right: 44px; top: 5px; height: 26px; padding: 0 6px; border: 1px solid var(--color-focus-rim); border-radius: 6px; background: var(--color-paper); color: var(--color-ink); font-size: 13px; font-weight: 600; outline: none; }
 
 .rl-integration-dialog { margin: auto; width: min(510px, calc(100vw - 32px)); max-height: 88vh; overflow: auto; padding: 28px; color: var(--color-ink); background: var(--color-bg-elevated); border: 1px solid var(--color-rule); border-radius: 20px; box-shadow: 0 24px 100px #0006; }
 .rl-integration-dialog::backdrop { background: var(--color-overlay); backdrop-filter: blur(5px); }

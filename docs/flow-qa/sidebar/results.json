@@ -1,0 +1,2614 @@
+{
+  "startedAt": "2026-10-18T09:06:45.265Z",
+  "fixture": "fixtures/flow-sidebar-qa",
+  "screenshots": [
+    "4a-sidebar-aurora.png",
+    "4a-aurora.png",
+    "4b-sidebar-aurora.png",
+    "4b-aurora.png",
+    "4d-sidebar-aurora.png",
+    "4d-aurora.png",
+    "rename-inline-aurora.png",
+    "delete-confirm-aurora.png",
+    "5a-sidebar-aurora.png",
+    "5a-aurora.png",
+    "5a-expanded-aurora.png",
+    "archive-aurora.png",
+    "4a-basic.png",
+    "4b-basic.png",
+    "4d-basic.png",
+    "5a-basic.png",
+    "4a-studio.png",
+    "4b-studio.png",
+    "4d-studio.png",
+    "5a-studio.png",
+    "compare-4a.png",
+    "compare-4b.png",
+    "compare-4d.png",
+    "compare-5a.png"
+  ],
+  "checks": [
+    {
+      "name": "4a: sidebar is 253px wide with a 1px rule in --color-rule",
+      "passed": true,
+      "details": {
+        "side": [
+          253,
+          753
+        ],
+        "style": {
+          "border-right-color": "rgb(50, 55, 66)",
+          "border-right-width": "1px"
+        }
+      }
+    },
+    {
+      "name": "4a: \"+ New session ⌘N\" at the board's rect, r8, 13px",
+      "passed": true,
+      "details": {
+        "got": {
+          "rect": [
+            10,
+            12,
+            232,
+            34
+          ],
+          "plus": [
+            20,
+            22,
+            14,
+            14
+          ],
+          "kbd": [
+            213.6,
+            22.5,
+            18.4,
+            13
+          ],
+          "style": {
+            "background-color": "rgb(24, 29, 40)",
+            "color": "rgb(228, 233, 243)",
+            "border-top-color": "rgb(228, 233, 243)",
+            "border-top-width": "0px",
+            "border-radius": "8px",
+            "font-size": "13px"
+          },
+          "current": "page"
+        },
+        "want": {
+          "rect": [
+            10,
+            12,
+            232,
+            34
+          ],
+          "plus": [
+            20,
+            22,
+            14,
+            14
+          ],
+          "kbd": [
+            213.6,
+            22.5,
+            18.4,
+            13
+          ]
+        }
+      }
+    },
+    {
+      "name": "4a: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "DIN",
+            [
+              10,
+              60,
+              232,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ]
+        ],
+        "want": [
+          [
+            "DIN",
+            10,
+            60,
+            232,
+            19
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4a: rows: copy, order, rects (r7, 13px)",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "Din backend: Hono + Fly",
+            [
+              10,
+              81,
+              232,
+              32
+            ]
+          ],
+          [
+            "Din retrieval plan",
+            [
+              10,
+              115,
+              232,
+              32
+            ]
+          ],
+          [
+            "Review status check",
+            [
+              10,
+              149,
+              232,
+              32
+            ]
+          ]
+        ],
+        "want": [
+          [
+            "Din backend: Hono + Fly",
+            10,
+            81,
+            232,
+            32
+          ],
+          [
+            "Din retrieval plan",
+            10,
+            115,
+            232,
+            32
+          ],
+          [
+            "Review status check",
+            10,
+            149,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4a: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "passed": true,
+      "details": [
+        [
+          "Din backend: Hono + Fly",
+          [
+            20,
+            90.5,
+            13,
+            13
+          ],
+          [
+            42,
+            89,
+            167,
+            16
+          ]
+        ],
+        [
+          "Din retrieval plan",
+          [
+            20,
+            124.5,
+            13,
+            13
+          ],
+          [
+            42,
+            123,
+            167,
+            16
+          ]
+        ],
+        [
+          "Review status check",
+          [
+            20,
+            158.5,
+            13,
+            13
+          ],
+          [
+            42,
+            157,
+            167,
+            16
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "4a: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "passed": true,
+      "details": [
+        [
+          "Din backend: Hono + Fly",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Din retrieval plan",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Review status check",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ]
+      ]
+    },
+    {
+      "name": "4a: New session is filled (--color-fill-2, ink, no rule) and current",
+      "passed": true,
+      "details": {
+        "rect": [
+          10,
+          12,
+          232,
+          34
+        ],
+        "plus": [
+          20,
+          22,
+          14,
+          14
+        ],
+        "kbd": [
+          213.6,
+          22.5,
+          18.4,
+          13
+        ],
+        "style": {
+          "background-color": "rgb(24, 29, 40)",
+          "color": "rgb(228, 233, 243)",
+          "border-top-color": "rgb(228, 233, 243)",
+          "border-top-width": "0px",
+          "border-radius": "8px",
+          "font-size": "13px"
+        },
+        "current": "page"
+      }
+    },
+    {
+      "name": "4a: plans wear the doc icon, the chat the chat icon, and no row is open",
+      "passed": true
+    },
+    {
+      "name": "4a aurora: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (4)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.93"
+      }
+    },
+    {
+      "name": "4a: no control under 24 × 24",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "4b: sidebar is 253px wide with a 1px rule in --color-rule",
+      "passed": true,
+      "details": {
+        "side": [
+          253,
+          753
+        ],
+        "style": {
+          "border-right-color": "rgb(50, 55, 66)",
+          "border-right-width": "1px"
+        }
+      }
+    },
+    {
+      "name": "4b: \"+ New session ⌘N\" at the board's rect, r8, 13px",
+      "passed": true,
+      "details": {
+        "got": {
+          "rect": [
+            10,
+            12,
+            232,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            212.6,
+            23.5,
+            18.4,
+            13
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(174, 179, 189)",
+            "border-top-color": "rgb(50, 55, 66)",
+            "border-top-width": "1px",
+            "border-radius": "8px",
+            "font-size": "13px"
+          },
+          "current": null
+        },
+        "want": {
+          "rect": [
+            10,
+            12,
+            232,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            212.6,
+            23.5,
+            18.4,
+            13
+          ]
+        }
+      }
+    },
+    {
+      "name": "4b: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "DIN",
+            [
+              10,
+              62,
+              232,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ]
+        ],
+        "want": [
+          [
+            "DIN",
+            10,
+            62,
+            232,
+            19
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4b: rows: copy, order, rects (r7, 13px)",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "Din roadmap: next steps",
+            [
+              10,
+              83,
+              232,
+              32
+            ]
+          ],
+          [
+            "Din backend: Hono + Fly",
+            [
+              10,
+              117,
+              232,
+              32
+            ]
+          ],
+          [
+            "Din retrieval plan",
+            [
+              10,
+              151,
+              232,
+              32
+            ]
+          ],
+          [
+            "Review status check",
+            [
+              10,
+              185,
+              232,
+              32
+            ]
+          ]
+        ],
+        "want": [
+          [
+            "Din roadmap: next steps",
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            "Din backend: Hono + Fly",
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            "Din retrieval plan",
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            "Review status check",
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4b: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "passed": true,
+      "details": [
+        [
+          "Din roadmap: next steps",
+          [
+            20,
+            92.5,
+            13,
+            13
+          ],
+          [
+            42,
+            91,
+            167,
+            16
+          ]
+        ],
+        [
+          "Din backend: Hono + Fly",
+          [
+            20,
+            126.5,
+            13,
+            13
+          ],
+          [
+            42,
+            125,
+            167,
+            16
+          ]
+        ],
+        [
+          "Din retrieval plan",
+          [
+            20,
+            160.5,
+            13,
+            13
+          ],
+          [
+            42,
+            159,
+            167,
+            16
+          ]
+        ],
+        [
+          "Review status check",
+          [
+            20,
+            194.5,
+            13,
+            13
+          ],
+          [
+            42,
+            193,
+            167,
+            16
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "4b: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "passed": true,
+      "details": [
+        [
+          "Din roadmap: next steps",
+          "rgb(228, 233, 243)",
+          "rgb(138, 186, 247)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Din backend: Hono + Fly",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Din retrieval plan",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Review status check",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ]
+      ]
+    },
+    {
+      "name": "4b: New session is outlined (1px --color-rule, --color-ink-3) and not current",
+      "passed": true,
+      "details": {
+        "rect": [
+          10,
+          12,
+          232,
+          36
+        ],
+        "plus": [
+          21,
+          23,
+          14,
+          14
+        ],
+        "kbd": [
+          212.6,
+          23.5,
+          18.4,
+          13
+        ],
+        "style": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(174, 179, 189)",
+          "border-top-color": "rgb(50, 55, 66)",
+          "border-top-width": "1px",
+          "border-radius": "8px",
+          "font-size": "13px"
+        },
+        "current": null
+      }
+    },
+    {
+      "name": "4b: the active row: --color-fill-2, ink, a spinner in the plan blue, its ⋯ visible at the board's spot in --color-ink-4",
+      "passed": true,
+      "details": {
+        "title": "Din roadmap: next steps",
+        "li": [
+          10,
+          83,
+          232,
+          32
+        ],
+        "row": [
+          10,
+          83,
+          232,
+          32
+        ],
+        "icon": [
+          20,
+          92.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          91,
+          167,
+          16
+        ],
+        "dots": [
+          218,
+          92,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": true,
+        "nest": false,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgb(24, 29, 40)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "border-radius": "7px"
+        },
+        "iconColor": "rgb(138, 186, 247)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "1",
+        "spinning": true
+      }
+    },
+    {
+      "name": "4b aurora: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.79"
+      }
+    },
+    {
+      "name": "4d: sidebar is 253px wide with a 1px rule in --color-rule",
+      "passed": true,
+      "details": {
+        "side": [
+          253,
+          753
+        ],
+        "style": {
+          "border-right-color": "rgb(50, 55, 66)",
+          "border-right-width": "1px"
+        }
+      }
+    },
+    {
+      "name": "4d: \"+ New session ⌘N\" at the board's rect, r8, 13px",
+      "passed": true,
+      "details": {
+        "got": {
+          "rect": [
+            10,
+            12,
+            232,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            212.6,
+            23.5,
+            18.4,
+            13
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(174, 179, 189)",
+            "border-top-color": "rgb(50, 55, 66)",
+            "border-top-width": "1px",
+            "border-radius": "8px",
+            "font-size": "13px"
+          },
+          "current": null
+        },
+        "want": {
+          "rect": [
+            10,
+            12,
+            232,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            212.6,
+            23.5,
+            18.4,
+            13
+          ]
+        }
+      }
+    },
+    {
+      "name": "4d: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "DIN",
+            [
+              10,
+              62,
+              232,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ]
+        ],
+        "want": [
+          [
+            "DIN",
+            10,
+            62,
+            232,
+            19
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4d: rows: copy, order, rects (r7, 13px)",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "Din roadmap: next steps",
+            [
+              10,
+              83,
+              232,
+              32
+            ]
+          ],
+          [
+            "Din backend: Hono + Fly",
+            [
+              10,
+              117,
+              232,
+              32
+            ]
+          ],
+          [
+            "Din retrieval plan",
+            [
+              10,
+              151,
+              232,
+              32
+            ]
+          ],
+          [
+            "Review status check",
+            [
+              10,
+              185,
+              232,
+              32
+            ]
+          ]
+        ],
+        "want": [
+          [
+            "Din roadmap: next steps",
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            "Din backend: Hono + Fly",
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            "Din retrieval plan",
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            "Review status check",
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4d: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "passed": true,
+      "details": [
+        [
+          "Din roadmap: next steps",
+          [
+            20,
+            92.5,
+            13,
+            13
+          ],
+          [
+            42,
+            91,
+            167,
+            16
+          ]
+        ],
+        [
+          "Din backend: Hono + Fly",
+          [
+            20,
+            126.5,
+            13,
+            13
+          ],
+          [
+            42,
+            125,
+            167,
+            16
+          ]
+        ],
+        [
+          "Din retrieval plan",
+          [
+            20,
+            160.5,
+            13,
+            13
+          ],
+          [
+            42,
+            159,
+            167,
+            16
+          ]
+        ],
+        [
+          "Review status check",
+          [
+            20,
+            194.5,
+            13,
+            13
+          ],
+          [
+            42,
+            193,
+            167,
+            16
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "4d: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "passed": true,
+      "details": [
+        [
+          "Din roadmap: next steps",
+          "rgb(228, 233, 243)",
+          "rgb(227, 191, 133)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Din backend: Hono + Fly",
+          "rgb(228, 233, 243)",
+          "rgb(134, 139, 149)",
+          "rgb(228, 233, 243)"
+        ],
+        [
+          "Din retrieval plan",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Review status check",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ]
+      ]
+    },
+    {
+      "name": "4d: the open row's icon is the amber pen (Redlining)",
+      "passed": true,
+      "details": {
+        "title": "Din roadmap: next steps",
+        "li": [
+          10,
+          83,
+          232,
+          32
+        ],
+        "row": [
+          10,
+          83,
+          232,
+          32
+        ],
+        "icon": [
+          20,
+          92.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          91,
+          167,
+          16
+        ],
+        "dots": [
+          218,
+          92,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": true,
+        "nest": false,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgb(24, 29, 40)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "border-radius": "7px"
+        },
+        "iconColor": "rgb(227, 191, 133)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "1",
+        "spinning": false
+      }
+    },
+    {
+      "name": "4d: the row under the menu: menu fill, an inset --color-focus-rim ring, ink, its ⋯ lit",
+      "passed": true,
+      "details": {
+        "title": "Din backend: Hono + Fly",
+        "li": [
+          10,
+          117,
+          232,
+          32
+        ],
+        "row": [
+          10,
+          117,
+          232,
+          32
+        ],
+        "icon": [
+          20,
+          126.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          125,
+          167,
+          16
+        ],
+        "dots": [
+          218,
+          126,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": false,
+        "nest": false,
+        "menu": true,
+        "rowStyle": {
+          "background-color": "rgba(26, 31, 42, 0.62)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "rgb(75, 92, 117) 0px 0px 0px 1px inset"
+        },
+        "liStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "border-radius": "7px"
+        },
+        "iconColor": "rgb(134, 139, 149)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(228, 233, 243)",
+        "dotsOpacity": "1",
+        "spinning": false
+      }
+    },
+    {
+      "name": "4d: the menu: 204 × 153 at the board's spot, glass menu tier, r12, 6px padding",
+      "passed": true,
+      "details": {
+        "got": [
+          206,
+          104,
+          204,
+          153
+        ],
+        "want": [
+          206,
+          104,
+          204,
+          153
+        ],
+        "surface": {
+          "border-radius": "12px",
+          "padding-top": "6px",
+          "background-color": "rgba(26, 31, 42, 0.62)"
+        }
+      }
+    },
+    {
+      "name": "4d: menu rows: Open plan · Rename · Archive · rule · Delete plan, 190 × 32, r8, 13px, 14px icons at x+10",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "Open plan",
+            [
+              213,
+              111,
+              190,
+              32
+            ],
+            [
+              223,
+              120,
+              14,
+              14
+            ]
+          ],
+          [
+            "Rename",
+            [
+              213,
+              143,
+              190,
+              32
+            ],
+            [
+              223,
+              152,
+              14,
+              14
+            ]
+          ],
+          [
+            "Archive",
+            [
+              213,
+              175,
+              190,
+              32
+            ],
+            [
+              223,
+              184,
+              14,
+              14
+            ]
+          ],
+          [
+            "Delete plan",
+            [
+              213,
+              218,
+              190,
+              32
+            ],
+            [
+              223,
+              227,
+              14,
+              14
+            ]
+          ]
+        ],
+        "rule": [
+          217,
+          212,
+          182,
+          1
+        ]
+      }
+    },
+    {
+      "name": "4d: Delete plan is tinted (--color-mode-danger-fg on -bg) with ⌫ at the right",
+      "passed": true,
+      "details": {
+        "del": {
+          "text": "Delete plan",
+          "rect": [
+            213,
+            218,
+            190,
+            32
+          ],
+          "style": {
+            "background-color": "rgb(37, 31, 40)",
+            "color": "rgb(224, 139, 134)",
+            "border-radius": "8px",
+            "font-size": "13px"
+          },
+          "icon": [
+            223,
+            227,
+            14,
+            14
+          ],
+          "focused": false
+        },
+        "key": [
+          381.8,
+          227.5,
+          11.3,
+          13
+        ],
+        "want": [
+          381.8,
+          227.5,
+          11.3,
+          13
+        ]
+      }
+    },
+    {
+      "name": "4d: a mouse-opened menu shows no focus ring, but its first item holds focus for the keyboard",
+      "passed": true,
+      "details": {
+        "text": "Open plan",
+        "rect": [
+          213,
+          111,
+          190,
+          32
+        ],
+        "style": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "8px",
+          "font-size": "13px"
+        },
+        "icon": [
+          223,
+          120,
+          14,
+          14
+        ],
+        "focused": true
+      }
+    },
+    {
+      "name": "4d menu aurora: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "6.29"
+      }
+    },
+    {
+      "name": "4d sidebar aurora: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.79"
+      }
+    },
+    {
+      "name": "4d: ↓ moves to Rename",
+      "passed": true
+    },
+    {
+      "name": "4d: End goes to Delete plan",
+      "passed": true
+    },
+    {
+      "name": "4d: ↓ wraps to Open plan",
+      "passed": true
+    },
+    {
+      "name": "4d: Escape closes and focus returns to the row's ⋯",
+      "passed": true
+    },
+    {
+      "name": "Right-click opens the row menu at the pointer, on that row",
+      "passed": true,
+      "details": {
+        "ctx": {
+          "x": 125,
+          "y": 214,
+          "row": "Din retrieval plan"
+        },
+        "point": {
+          "x": 125.5,
+          "y": 214
+        }
+      }
+    },
+    {
+      "name": "Rename edits in place: the row keeps its height, the title selected where it stood",
+      "passed": true,
+      "details": {
+        "focused": true,
+        "selected": true,
+        "value": "Din retrieval plan",
+        "rowH": 32,
+        "inputX": 42
+      }
+    },
+    {
+      "name": "Enter saves the new title and hands focus back to the row",
+      "passed": true,
+      "details": [
+        [
+          "rename",
+          "retrieval",
+          "Din retrieval v2"
+        ]
+      ]
+    },
+    {
+      "name": "Escape cancels the rename and writes nothing",
+      "passed": true
+    },
+    {
+      "name": "Leaving the field saves",
+      "passed": true,
+      "details": [
+        [
+          "rename",
+          "retrieval",
+          "Din retrieval v2"
+        ],
+        [
+          "rename",
+          "retrieval",
+          "Retrieval, blurred"
+        ]
+      ]
+    },
+    {
+      "name": "⌫ on a focused row asks to delete it, in the row, Delete focused",
+      "passed": true,
+      "details": {
+        "label": "Delete this plan?",
+        "focused": "Delete",
+        "title": "Din backend: Hono + Fly"
+      }
+    },
+    {
+      "name": "delete confirm aurora: every text ≥ 4.5:1 (9 runs), every icon-only control ≥ 3:1 (4)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.79"
+      }
+    },
+    {
+      "name": "Escape backs out and focus returns to the row",
+      "passed": true
+    },
+    {
+      "name": "Delete plan in the menu → Delete deletes that plan",
+      "passed": true,
+      "details": [
+        "delete",
+        "backend"
+      ]
+    },
+    {
+      "name": "+ New session and a project's + start a session, the + in that folder",
+      "passed": true,
+      "details": [
+        [
+          "new-session"
+        ],
+        [
+          "new-session-in",
+          "/Users/me/projects/din"
+        ]
+      ]
+    },
+    {
+      "name": "A chat row opens the chat",
+      "passed": true
+    },
+    {
+      "name": "5a: sidebar is 281px wide with a 1px rule in --color-rule",
+      "passed": true,
+      "details": {
+        "side": [
+          281,
+          913
+        ],
+        "style": {
+          "border-right-color": "rgb(50, 55, 66)",
+          "border-right-width": "1px"
+        }
+      }
+    },
+    {
+      "name": "5a: \"+ New session ⌘N\" at the board's rect, r8, 13px",
+      "passed": true,
+      "details": {
+        "got": {
+          "rect": [
+            10,
+            12,
+            260,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            240.6,
+            23.5,
+            18.4,
+            13
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(174, 179, 189)",
+            "border-top-color": "rgb(50, 55, 66)",
+            "border-top-width": "1px",
+            "border-radius": "8px",
+            "font-size": "13px"
+          },
+          "current": null
+        },
+        "want": {
+          "rect": [
+            10,
+            12,
+            260,
+            36
+          ],
+          "plus": [
+            21,
+            23,
+            14,
+            14
+          ],
+          "kbd": [
+            240.6,
+            23.5,
+            18.4,
+            13
+          ]
+        }
+      }
+    },
+    {
+      "name": "5a: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "NEEDS YOU",
+            [
+              10,
+              64,
+              260,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ],
+          [
+            "BUILDING",
+            [
+              10,
+              135,
+              260,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ],
+          [
+            "IN REVIEW",
+            [
+              10,
+              344,
+              260,
+              19
+            ],
+            {
+              "font-size": "11px",
+              "letter-spacing": "0.44px",
+              "color": "rgb(134, 139, 149)",
+              "text-transform": "uppercase"
+            }
+          ]
+        ],
+        "want": [
+          [
+            "NEEDS YOU",
+            10,
+            64,
+            260,
+            19
+          ],
+          [
+            "BUILDING",
+            10,
+            135,
+            260,
+            19
+          ],
+          [
+            "IN REVIEW",
+            10,
+            344,
+            260,
+            19
+          ]
+        ]
+      }
+    },
+    {
+      "name": "5a: rows: copy, order, rects (r7, 13px)",
+      "passed": true,
+      "details": {
+        "got": [
+          [
+            "Every vehicle gets a 3D model",
+            [
+              10,
+              85,
+              260,
+              34
+            ]
+          ],
+          [
+            "Dialcrown: fastest credible launch",
+            [
+              10,
+              156,
+              260,
+              34
+            ]
+          ],
+          [
+            "MachineOS \"Full Bore\" sprint",
+            [
+              10,
+              294,
+              260,
+              34
+            ]
+          ],
+          [
+            "Component meshes from a splat",
+            [
+              10,
+              365,
+              260,
+              34
+            ]
+          ],
+          [
+            "Foundation docs for gpu-harness",
+            [
+              10,
+              401,
+              260,
+              34
+            ]
+          ],
+          [
+            "Skip the \"trust this folder\" prompt",
+            [
+              10,
+              437,
+              260,
+              34
+            ]
+          ],
+          [
+            "Memory surface: kill the jank",
+            [
+              10,
+              473,
+              260,
+              34
+            ]
+          ],
+          [
+            "Theme cull + light theme",
+            [
+              10,
+              509,
+              260,
+              34
+            ]
+          ]
+        ],
+        "want": [
+          [
+            "Every vehicle gets a 3D model",
+            10,
+            85,
+            260,
+            34
+          ],
+          [
+            "Dialcrown: fastest credible launch",
+            10,
+            156,
+            260,
+            34
+          ],
+          [
+            "MachineOS \"Full Bore\" sprint",
+            10,
+            294,
+            260,
+            34
+          ],
+          [
+            "Component meshes from a splat",
+            10,
+            365,
+            260,
+            34
+          ],
+          [
+            "Foundation docs for gpu-harness",
+            10,
+            401,
+            260,
+            34
+          ],
+          [
+            "Skip the \"trust this folder\" prompt",
+            10,
+            437,
+            260,
+            34
+          ],
+          [
+            "Memory surface: kill the jank",
+            10,
+            473,
+            260,
+            34
+          ],
+          [
+            "Theme cull + light theme",
+            10,
+            509,
+            260,
+            34
+          ]
+        ]
+      }
+    },
+    {
+      "name": "5a: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "passed": true,
+      "details": [
+        [
+          "Every vehicle gets a 3D model",
+          [
+            20,
+            98.5,
+            7,
+            7
+          ],
+          [
+            36,
+            94,
+            168,
+            16
+          ]
+        ],
+        [
+          "Dialcrown: fastest credible launch",
+          [
+            20,
+            166.5,
+            13,
+            13
+          ],
+          [
+            42,
+            165,
+            195,
+            16
+          ]
+        ],
+        [
+          "MachineOS \"Full Bore\" sprint",
+          [
+            20,
+            304.5,
+            13,
+            13
+          ],
+          [
+            42,
+            303,
+            195,
+            16
+          ]
+        ],
+        [
+          "Component meshes from a splat",
+          [
+            20,
+            375.5,
+            13,
+            13
+          ],
+          [
+            42,
+            374,
+            195,
+            16
+          ]
+        ],
+        [
+          "Foundation docs for gpu-harness",
+          [
+            20,
+            411.5,
+            13,
+            13
+          ],
+          [
+            42,
+            410,
+            195,
+            16
+          ]
+        ],
+        [
+          "Skip the \"trust this folder\" prompt",
+          [
+            20,
+            447.5,
+            13,
+            13
+          ],
+          [
+            42,
+            446,
+            195,
+            16
+          ]
+        ],
+        [
+          "Memory surface: kill the jank",
+          [
+            20,
+            483.5,
+            13,
+            13
+          ],
+          [
+            42,
+            482,
+            195,
+            16
+          ]
+        ],
+        [
+          "Theme cull + light theme",
+          [
+            20,
+            519.5,
+            13,
+            13
+          ],
+          [
+            42,
+            518,
+            195,
+            16
+          ]
+        ]
+      ]
+    },
+    {
+      "name": "5a: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "passed": true,
+      "details": [
+        [
+          "Every vehicle gets a 3D model",
+          "rgb(228, 233, 243)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Dialcrown: fastest credible launch",
+          "rgb(228, 233, 243)",
+          "rgb(124, 227, 195)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "MachineOS \"Full Bore\" sprint",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Component meshes from a splat",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Foundation docs for gpu-harness",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Skip the \"trust this folder\" prompt",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Memory surface: kill the jank",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ],
+        [
+          "Theme cull + light theme",
+          "rgb(174, 179, 189)",
+          "rgb(134, 139, 149)",
+          "rgb(134, 139, 149)"
+        ]
+      ]
+    },
+    {
+      "name": "5a: the open session is one grouped container (menu fill, r8) at the board's rect",
+      "passed": true,
+      "details": {
+        "title": "Dialcrown: fastest credible launch",
+        "li": [
+          10,
+          156,
+          260,
+          136
+        ],
+        "row": [
+          10,
+          156,
+          260,
+          34
+        ],
+        "icon": [
+          20,
+          166.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          165,
+          195,
+          16
+        ],
+        "dots": [
+          246,
+          166,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": true,
+        "nest": true,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(26, 31, 42, 0.62)",
+          "border-radius": "8px"
+        },
+        "iconColor": "rgb(124, 227, 195)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "1",
+        "spinning": true
+      }
+    },
+    {
+      "name": "5a: its spinner is the building green; its ⋯ at the board's spot",
+      "passed": true,
+      "details": {
+        "title": "Dialcrown: fastest credible launch",
+        "li": [
+          10,
+          156,
+          260,
+          136
+        ],
+        "row": [
+          10,
+          156,
+          260,
+          34
+        ],
+        "icon": [
+          20,
+          166.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          165,
+          195,
+          16
+        ],
+        "dots": [
+          246,
+          166,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": true,
+        "nest": true,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(26, 31, 42, 0.62)",
+          "border-radius": "8px"
+        },
+        "iconColor": "rgb(124, 227, 195)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "1",
+        "spinning": true
+      }
+    },
+    {
+      "name": "5a: versions: v1 … v4 · latest, 24px rows at 12px, r5, dates at the right; v1 is on screen (--color-fill-3, ink), latest --color-ink-3",
+      "passed": true,
+      "details": [
+        {
+          "text": "v1",
+          "date": "Oct 14",
+          "rect": [
+            40,
+            190,
+            224,
+            24
+          ],
+          "style": {
+            "background-color": "rgb(31, 36, 46)",
+            "color": "rgb(228, 233, 243)",
+            "font-size": "12px",
+            "border-radius": "5px"
+          },
+          "current": "true"
+        },
+        {
+          "text": "v2",
+          "date": "Oct 14",
+          "rect": [
+            40,
+            214,
+            224,
+            24
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(134, 139, 149)",
+            "font-size": "12px",
+            "border-radius": "5px"
+          },
+          "current": null
+        },
+        {
+          "text": "v3",
+          "date": "Oct 15",
+          "rect": [
+            40,
+            238,
+            224,
+            24
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(134, 139, 149)",
+            "font-size": "12px",
+            "border-radius": "5px"
+          },
+          "current": null
+        },
+        {
+          "text": "v4 · latest",
+          "date": "Oct 15",
+          "rect": [
+            40,
+            262,
+            224,
+            24
+          ],
+          "style": {
+            "background-color": "rgba(0, 0, 0, 0)",
+            "color": "rgb(174, 179, 189)",
+            "font-size": "12px",
+            "border-radius": "5px"
+          },
+          "current": null
+        }
+      ]
+    },
+    {
+      "name": "5a: Needs you: an amber dot, ink title, the reason tag at the right (11px, --color-ink-4), its ⋯ held back until hover",
+      "passed": true,
+      "details": {
+        "title": "Every vehicle gets a 3D model",
+        "li": [
+          10,
+          85,
+          260,
+          34
+        ],
+        "row": [
+          10,
+          85,
+          260,
+          34
+        ],
+        "icon": [
+          20,
+          98.5,
+          7,
+          7
+        ],
+        "titleRect": [
+          36,
+          94,
+          168,
+          16
+        ],
+        "dots": [
+          246,
+          95,
+          14,
+          14
+        ],
+        "tag": [
+          213,
+          95.5,
+          47,
+          13
+        ],
+        "active": false,
+        "nest": false,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(228, 233, 243)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "border-radius": "7px"
+        },
+        "iconColor": "rgb(134, 139, 149)",
+        "iconBg": "rgb(227, 191, 133)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "0",
+        "spinning": false
+      }
+    },
+    {
+      "name": "5a: a building row that is not open: a --color-ink-4 spinner, --color-ink-3 title",
+      "passed": true,
+      "details": {
+        "title": "MachineOS \"Full Bore\" sprint",
+        "li": [
+          10,
+          294,
+          260,
+          34
+        ],
+        "row": [
+          10,
+          294,
+          260,
+          34
+        ],
+        "icon": [
+          20,
+          304.5,
+          13,
+          13
+        ],
+        "titleRect": [
+          42,
+          303,
+          195,
+          16
+        ],
+        "dots": [
+          246,
+          304,
+          14,
+          14
+        ],
+        "tag": null,
+        "active": false,
+        "nest": false,
+        "menu": false,
+        "rowStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "color": "rgb(174, 179, 189)",
+          "border-radius": "7px",
+          "font-size": "13px",
+          "box-shadow": "none"
+        },
+        "liStyle": {
+          "background-color": "rgba(0, 0, 0, 0)",
+          "border-radius": "7px"
+        },
+        "iconColor": "rgb(134, 139, 149)",
+        "iconBg": "rgba(0, 0, 0, 0)",
+        "dotsColor": "rgb(134, 139, 149)",
+        "dotsOpacity": "1",
+        "spinning": true
+      }
+    },
+    {
+      "name": "5a: In review rows wear the pen; then Show 9 more (12.5px, --color-ink-4) at the board's rect",
+      "passed": true,
+      "details": [
+        {
+          "text": "Show 9 more",
+          "rect": [
+            10,
+            545,
+            260,
+            34
+          ],
+          "style": {
+            "font-size": "12.5px",
+            "color": "rgb(134, 139, 149)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5a aurora: every text ≥ 4.5:1 (23 runs), every icon-only control ≥ 3:1 (7)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.24"
+      }
+    },
+    {
+      "name": "5a: no control under 24 × 24",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "5a: under the pointer, the Needs you row shows its ⋯ in place of the tag",
+      "passed": true
+    },
+    {
+      "name": "5a: a version row shows that revision",
+      "passed": true,
+      "details": [
+        "revision",
+        "dial",
+        2
+      ]
+    },
+    {
+      "name": "5a: Show 9 more opens all fourteen, then offers Show less",
+      "passed": true
+    },
+    {
+      "name": "Archived · N closes the list, folded; the folderless chat closes the groups as Chats",
+      "passed": true
+    },
+    {
+      "name": "Opening the fold shows the archived plan and chat, newest archive first, their menus offering Unarchive",
+      "passed": true
+    },
+    {
+      "name": "An archived chat's menu: Open chat · Rename · Unarchive · Delete chat",
+      "passed": true
+    },
+    {
+      "name": "Unarchive goes through the chat archive with archived=false",
+      "passed": true,
+      "details": [
+        "archive-chat",
+        "gone",
+        false
+      ]
+    },
+    {
+      "name": "4a basic: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            81,
+            232,
+            32
+          ],
+          [
+            10,
+            115,
+            232,
+            32
+          ],
+          [
+            10,
+            149,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4a basic: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (4)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.89"
+      }
+    },
+    {
+      "name": "4b basic: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4b basic: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.98"
+      }
+    },
+    {
+      "name": "4d basic: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4d basic: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.98"
+      }
+    },
+    {
+      "name": "4d menu basic: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "7.39"
+      }
+    },
+    {
+      "name": "5a basic: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            85,
+            260,
+            34
+          ],
+          [
+            10,
+            156,
+            260,
+            34
+          ],
+          [
+            10,
+            294,
+            260,
+            34
+          ],
+          [
+            10,
+            365,
+            260,
+            34
+          ],
+          [
+            10,
+            401,
+            260,
+            34
+          ],
+          [
+            10,
+            437,
+            260,
+            34
+          ],
+          [
+            10,
+            473,
+            260,
+            34
+          ],
+          [
+            10,
+            509,
+            260,
+            34
+          ]
+        ]
+      }
+    },
+    {
+      "name": "5a basic: every text ≥ 4.5:1 (23 runs), every icon-only control ≥ 3:1 (7)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.82"
+      }
+    },
+    {
+      "name": "4a studio: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            81,
+            232,
+            32
+          ],
+          [
+            10,
+            115,
+            232,
+            32
+          ],
+          [
+            10,
+            149,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4a studio: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (4)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "4.97"
+      }
+    },
+    {
+      "name": "4b studio: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4b studio: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "6.30"
+      }
+    },
+    {
+      "name": "4d studio: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            83,
+            232,
+            32
+          ],
+          [
+            10,
+            117,
+            232,
+            32
+          ],
+          [
+            10,
+            151,
+            232,
+            32
+          ],
+          [
+            10,
+            185,
+            232,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "name": "4d studio: every text ≥ 4.5:1 (7 runs), every icon-only control ≥ 3:1 (5)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "6.30"
+      }
+    },
+    {
+      "name": "4d menu studio: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.57"
+      }
+    },
+    {
+      "name": "5a studio: same geometry as Aurora (rows, labels, New session)",
+      "passed": true,
+      "details": {
+        "rows": [
+          [
+            10,
+            85,
+            260,
+            34
+          ],
+          [
+            10,
+            156,
+            260,
+            34
+          ],
+          [
+            10,
+            294,
+            260,
+            34
+          ],
+          [
+            10,
+            365,
+            260,
+            34
+          ],
+          [
+            10,
+            401,
+            260,
+            34
+          ],
+          [
+            10,
+            437,
+            260,
+            34
+          ],
+          [
+            10,
+            473,
+            260,
+            34
+          ],
+          [
+            10,
+            509,
+            260,
+            34
+          ]
+        ]
+      }
+    },
+    {
+      "name": "5a studio: every text ≥ 4.5:1 (23 runs), every icon-only control ≥ 3:1 (7)",
+      "passed": true,
+      "details": {
+        "lowText": [],
+        "lowIcons": [],
+        "min": "5.40"
+      }
+    }
+  ],
+  "errors": [],
+  "sourceSha256": {
+    "src/components/SessionSidebar.tsx": "ae53e4e086cb3aa29ce9d58f2ddff2c12c0eddde9d89e3ab13ccf2187c586708",
+    "src/shell/FlowSidebar.tsx": "e8aa2ec3facd34c512ee875b722625575020580144f8dae9be18037a13ce0ad8",
+    "src/shell/FlowSidebar.css": "36f300df313e9f60019cfb76e71700652c44ee1864c930d65006fd7c39d0966a",
+    "src/components/RowMenu.tsx": "8a8b73e07f4463708ed59133fd2d87d2c0d2b0252cc91261e7a8914445b20728",
+    "src/lib/sessionGroups.ts": "6fc86a8470092075c726b61dfc600df2db9191badfe25c85bb2489fae8519135",
+    "src/lib/sessionMode.ts": "09a0b22327219ae1c5f2b0be0652b19637659b52651ca7bf649a9e6ca0e6ae5f"
+  },
+  "limitations": [
+    "Headless Chrome component fixture: not WKWebView or the live app.",
+    "Sessions, chats and launches are synthetic; the sidebar, row menu, grouping and themes are the production modules.",
+    "Expected geometry is what the design HTML (flow.html) renders, measured in the same Chrome; board crops are the rendered PNGs."
+  ],
+  "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-sidebar-qa/",
+  "browserVersion": "Chrome/155.0.8059.80",
+  "finishedAt": "2026-10-18T09:06:56.648Z",
+  "passed": true
+}

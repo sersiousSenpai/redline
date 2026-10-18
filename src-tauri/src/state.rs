@@ -981,6 +981,15 @@ pub struct Companion {
     /// The user renamed this chat, so the auto-titling pass must leave it be.
     #[serde(default)]
     pub title_is_user_set: bool,
+    /// When the chat was archived (`archive_companion`); the flow sidebar
+    /// folds it away under "Archived". Never set on a row being written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// The folder the chat was started in, which groups it with that
+    /// project's plans in the flow sidebar. Read-only here: the first
+    /// message's project fills the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 /// One persisted turn in a Companion discussion. Each turn is surface-tagged

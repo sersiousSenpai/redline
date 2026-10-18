@@ -302,6 +302,9 @@ function prefetchSurfaceChunk(surface: string): void {
 }
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
+import { isFlowShell } from "./lib/shellFlag";
+import { setSidebar as setFlowSidebar, useFlow } from "./shell/flowState";
+import type { FlowLaunch } from "./lib/sessionGroups";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
 import { useTextClearance } from "./hooks/useTextClearance";
 import { useDevServers } from "./hooks/useDevServers";
@@ -958,7 +961,7 @@ function App() {
   // The four size keys below (plus BrowserPane's chat ratio) are written by
   // drag paths. Without a debounce every commit ran a synchronous
   // JSON.stringify + localStorage.setItem on the main thread mid-drag.
-  const [sidebarWidth, setSidebarWidth] = usePersistedState(
+  const [sidebarWidthPref, setSidebarWidth] = usePersistedState(
     "redline.sidebar.width",
     240,
     { debounceMs: 250 },
@@ -2439,9 +2442,12 @@ function App() {
     broken: immersiveBroken,
     enabled: workspaceImmersive(workspace),
   });
+  // Flow keeps its own sidebar switch (⌘B, shell/flowState), so the layout
+  // reads that instead of the classic shell's persisted collapse.
+  const flowSidebarOpen = useFlow((s) => s.sidebar);
   const baseShape = effectiveShape(
     {
-      sidebarCollapsed: sidebarCollapsedPref,
+      sidebarCollapsed: isFlowShell() ? !flowSidebarOpen : sidebarCollapsedPref,
       paneCollapsed: paneCollapsedPref,
       paneFullscreen: paneFullscreenPref,
       termCollapsed: termCollapsedPref,
@@ -2495,7 +2501,8 @@ function App() {
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    setSidebarCollapsed(false);
+    if (isFlowShell()) setFlowSidebar(true);
+    else setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
   const revealPane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -2513,7 +2520,8 @@ function App() {
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    setSidebarCollapsed(!sidebarCollapsed);
+    if (isFlowShell()) setFlowSidebar(sidebarCollapsed);
+    else setSidebarCollapsed(!sidebarCollapsed);
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -3116,6 +3124,12 @@ function App() {
   const [winWidth, setWinWidth] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
+  // The flow sidebar is the boards' fixed column, not a dragged width: 232px
+  // of content plus 10px padding each side and its 1px rule at 1280, growing
+  // to 260px of content at 1600 (FlowSidebar.css). Classic keeps the drag.
+  const sidebarWidth = isFlowShell()
+    ? Math.min(281, Math.max(253, Math.round(winWidth * 0.1625) + 21))
+    : sidebarWidthPref;
 
   // The row's space model: the doc column floors at DOC_MIN and any pane
   // width past that becomes curtain overlay instead of flow. Stateless — it
@@ -6459,7 +6473,7 @@ function App() {
     }).then(() => null).catch((err: unknown) => String(err));
     if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}`, retryable: true };
 
-    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, draftId: req.draftId, restore: req.restore };
+    const pending: PendingLaunch = { launchId, chatId: req.chatId ?? undefined, origin: req.origin, prompt: trimmed, startedAt, terminalId, projectPath: req.projectPath, draftId: req.draftId, restore: req.restore };
     // Register before typing: an immediate intercept must be able to match the
     // launch. A run sends no plan, so it registers nothing for an intercept to
     // match and claims no decision window.
@@ -8380,6 +8394,39 @@ function App() {
     );
   };
 
+  // The flow sidebar's own rows: chats beside the plans, a project's "+",
+  // and the launch in flight until its plan arrives. The classic sidebar
+  // ignores all of these.
+  const flowSidebarHandlers = useStableHandlers({
+    onNewSessionIn: (path: string) => {
+      setFrontDoorProject({ path });
+      openFrontDoor();
+    },
+    onSelectChat: openChat,
+    onRenameChat: (id: string, title: string) => {
+      invoke("companion_rename", { companionId: id, title, byUser: true })
+        .then(refreshChats, (e) => setToast(String(e), 6000));
+    },
+    onArchiveChat: (id: string, archived: boolean) => {
+      invoke("archive_companion", { companionId: id, archived }).then(() => {
+        if (archived && id === chatId) { setChatId(null); setChatSeed(null); }
+        refreshChats();
+      }, (e) => setToast(String(e), 6000));
+    },
+    onDeleteChat: (id: string) => {
+      invoke("companion_delete", { companionId: id }).then(() => {
+        if (id === chatId) { setChatId(null); setChatSeed(null); }
+        refreshChats();
+      }, (e) => setToast(String(e), 6000));
+    },
+  });
+  const flowLaunches = useMemo<FlowLaunch[]>(
+    () => pendingLaunch
+      ? [{ terminalId: pendingLaunch.terminalId, title: pendingLaunch.prompt, startedAt: pendingLaunch.startedAt, projectPath: pendingLaunch.projectPath ?? null, working: true }]
+      : [],
+    [pendingLaunch],
+  );
+
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
   // every shell render.
@@ -8635,7 +8682,9 @@ function App() {
         // aside spill right OVER the doc, painted above it.
         <div
           ref={sidebarClipRef}
-          className="shrink-0 rl-sidebar-clip rl-plate"
+          // Flow's sidebar sits flush on the window with its own rule; the
+          // plate is classic's.
+          className={`shrink-0 rl-sidebar-clip${isFlowShell() ? "" : " rl-plate"}`}
           data-rl-pane
           // No `width` here on purpose: `applyLiveLayout` owns it, so a drag
           // frame never has to go through React and React never clobbers a
@@ -8651,7 +8700,8 @@ function App() {
           data-tour="sessions"
           className="flex flex-col shrink-0 rl-sidebar-aside"
         >
-          {openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
+          {/* Flow's sidebar is sessions only; folders open from the composer. */}
+          {!isFlowShell() && openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
             openFolders={openFolders}
             sidebarTab={sidebarTab}
             linkNav={linkNav}
@@ -8660,12 +8710,19 @@ function App() {
             onCloseFolder={closeFolder}
             onToggleLink={() => setLinkNav((v) => !v)}
           /></Suspense>}
-          {sidebarTab.kind === "sessions" ? (
+          {isFlowShell() || sidebarTab.kind === "sessions" ? (
             // Chunk warmed by the boot effect; null while it lands — the house
             // rule is a quietly blank plate, never a spinner.
             <Suspense fallback={null}>
             <SessionSidebar
               {...sidebarHandlers}
+              {...flowSidebarHandlers}
+              layout={isFlowShell() ? "flow" : "classic"}
+              onNewSession={openFrontDoor}
+              startActive={frontDoorOpen && !roomChat}
+              chats={chats}
+              activeChatId={roomChat ? chatId : null}
+              launches={flowLaunches}
               sessions={summaries}
               activeId={activeId}
               pendingCounts={pendingPerSession}
@@ -8690,7 +8747,7 @@ function App() {
         </aside>
         {/* In curtain state the flow boundary sits under the spilled aside, so
             the divider rides the curtain's visible right edge instead. */}
-        {liveFlags.curtainL && (
+        {liveFlags.curtainL && !isFlowShell() && (
           <div
             ref={sidebarCurtainDivRef}
             style={{
@@ -8717,8 +8774,10 @@ function App() {
         )}
         {/* Always in flow (its 6px is part of the space model); when the
             sidebar curtains it is painted over, and the absolute copy above
-            carries the affordance at the curtain's visible edge. */}
-        <PaneDivider
+            carries the affordance at the curtain's visible edge. The flow
+            shell has none: its sidebar is a fixed column with its own rule,
+            shown and hidden with ⌘B, and "+ New session" is its way in. */}
+        {!isFlowShell() && <PaneDivider
           orientation="vertical"
           side="leading"
           label="sidebar"
@@ -8737,7 +8796,7 @@ function App() {
             label: "Plan a build (⌘⇧N)",
             onClick: openFrontDoor,
           }}
-        />
+        />}
         <div
           ref={docColumnRef}
           className={`min-h-0 min-w-0 flex-1 overflow-hidden flex relative rl-doc-column${browserOpen ? "" : " rl-plate"}`}

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useEffect, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
-import { RowMenu } from "./RowMenu";
+import { planRowActions, RowMenu, RowRename } from "./RowMenu";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
+import type { FlowChat, FlowLaunch, NeedReason } from "../lib/sessionGroups";
+import { isFlowShell } from "../lib/shellFlag";
 import { MIN_COMBINE } from "../lib/launch";
 import {
   computeRevisionDisplay,
@@ -18,7 +20,19 @@ import {
 } from "../lib/orchestration";
 import { detachedPillTitle } from "../lib/restoreHarness";
 
-interface SessionSidebarProps {
+// The flow shell's sidebar is its own lazy chunk: the classic shell never
+// loads it. Under the flow shell it is fetched as this module evaluates, so
+// it lands alongside this chunk rather than one round trip behind it.
+const loadFlowSidebar = () => import("../shell/FlowSidebar");
+const FlowSidebar = lazy(loadFlowSidebar);
+if (isFlowShell()) void loadFlowSidebar().catch(() => {});
+
+export interface SessionSidebarProps {
+  /** `classic` (the default) is the sessions list below; `flow` is the flow
+   *  shell's sidebar (shell/FlowSidebar.tsx), which reads the props marked
+   *  "Flow" and ignores the classic-only ones (Combine, joined session, the
+   *  run chips, export). */
+  layout?: "classic" | "flow";
   sessions: SessionSummary[];
   activeId: string | null;
   pendingCounts: Record<string, number>;
@@ -66,6 +80,31 @@ interface SessionSidebarProps {
    *  and nothing else ever clears the selection, so without this row the
    *  front door is unreachable for anyone who has ever reviewed a plan. */
   onNewPlan?: () => void;
+  /** Flow: "+ New session ⌘N", the start screen. */
+  onNewSession?: () => void;
+  /** Flow: a project group's "+", a new session in that folder. */
+  onNewSessionIn?: (projectPath: string) => void;
+  /** Flow: the start screen is on the stage, so "+ New session" reads as
+   *  selected and no row does. Defaults to nothing being open. */
+  startActive?: boolean;
+  /** Flow: chats (companion conversations), rows among the plans. */
+  chats?: readonly FlowChat[];
+  activeChatId?: string | null;
+  onSelectChat?: (companionId: string) => void;
+  onRenameChat?: (companionId: string, title: string) => void;
+  onArchiveChat?: (companionId: string, archived: boolean) => void;
+  onDeleteChat?: (companionId: string) => void;
+  /** Flow: sessions launched into a terminal whose plan has not arrived
+   *  (the BRIEF's "Session identity in flow"). */
+  launches?: readonly FlowLaunch[];
+  activeLaunchId?: string | null;
+  onSelectLaunch?: (terminalId: string) => void;
+  /** Flow: why a row needs you, by row key (`plan:<id>`, `chat:<id>`,
+   *  `launch:<terminalId>`), from the engine's open asks. A held plan's
+   *  Review is read off the session without it. */
+  needs?: Readonly<Record<string, NeedReason>>;
+  /** Flow: row keys whose Claude is mid-turn (a spinner). */
+  working?: ReadonlySet<string>;
 }
 
 /** Chip palette for the orchestrated-run lifecycle. `stalled` warns; `landed`
@@ -511,8 +550,9 @@ function SessionRowBase({
 }) {
   const [confirming, setConfirming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
+  const rowButton = useRef<HTMLButtonElement>(null);
   const display = computeRevisionDisplay(session.revisions);
   const badgeVersion = latestDisplayVersion(
     session.revisions,
@@ -526,13 +566,14 @@ function SessionRowBase({
     session.titleOverride || session.planTitle || session.projectName || session.projectPath || session.sessionId;
 
   return (
-    <li className="rl-session-row relative group" onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuOpen(true); } }} onKeyDown={e => {
+    <li className="rl-session-row relative group" onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
       if (!combining && (e.key === "Backspace" || e.key === "Delete") && (e.target as HTMLElement).tagName !== "INPUT") { e.preventDefault(); setConfirming(true); }
     }}>
-      {renaming && <form className="rl-row-rename" onSubmit={e => { e.preventDefault(); onRename?.(session.sessionId, newTitle); setRenaming(false); }}>
-        <input autoFocus aria-label="Session title" maxLength={200} value={newTitle} onChange={e => setNewTitle(e.target.value)} onKeyDown={e => { if (e.key === "Escape") setRenaming(false); }} />
-        <button type="submit">Save</button><button type="button" onClick={() => setRenaming(false)}>Cancel</button>
-      </form>}
+      {renaming && <RowRename className="rl-row-rename" label="Session title" value={rowName} onDone={(title, how) => {
+        setRenaming(false);
+        if (title !== null) onRename?.(session.sessionId, title);
+        if (how !== "blur") rowButton.current?.focus();
+      }} />}
       {/* One-shot arrival glow — an overlay, like the tile hail, so it paints
           above the row's own background. Keyed on the nonce: a new arrival is
           a new element, so the animation genuinely restarts. */}
@@ -629,14 +670,16 @@ function SessionRowBase({
           </button>
         </div>
       ) : combining ? null : (
-        <RowMenu open={menuOpen} onOpenChange={setMenuOpen} label={rowName} actions={[
-          { label: "Open plan", onSelect: () => onClick(session.sessionId) },
-          ...(onRename ? [{ label: "Rename", onSelect: () => { setNewTitle(rowName); setRenaming(true); } }] : []),
-          ...(onArchive ? [{ label: session.archivedAt ? "Unarchive" : "Archive", disabled: session.held, onSelect: () => onArchive(session.sessionId, !session.archivedAt) }] : []),
-          { label: "Delete plan ⌫", danger: true, onSelect: () => setConfirming(true) },
-        ]} />
+        <RowMenu open={menuOpen} onOpenChange={open => { setMenuOpen(open); if (!open) setMenuAt(null); }} at={menuAt} label={rowName}
+          actions={planRowActions(session, {
+            open: () => onClick(session.sessionId),
+            rename: onRename ? () => setRenaming(true) : undefined,
+            archive: onArchive ? () => onArchive(session.sessionId, !session.archivedAt) : undefined,
+            remove: () => setConfirming(true),
+          })} />
       )}
       <button
+        ref={rowButton}
         type="button"
         onClick={() => onClick(session.sessionId)}
         aria-pressed={combining ? picked : undefined}
@@ -1026,6 +1069,18 @@ function RevisionRow({
   );
 }
 
+/** One shell for the life of the page (`isFlowShell` is read once), so a
+ *  mounted sidebar never switches layout under its own state. */
+function SessionSidebarLayout(props: SessionSidebarProps) {
+  if (props.layout !== "flow") return <SessionSidebarBase {...props} />;
+  // Null while the chunk lands: the house rule is a quietly blank plate.
+  return (
+    <Suspense fallback={null}>
+      <FlowSidebar {...props} />
+    </Suspense>
+  );
+}
+
 /** Memoized: the sidebar reconciles the whole session list, and a sidebar
  *  drag changes only its width. */
-export const SessionSidebar = memo(SessionSidebarBase);
+export const SessionSidebar = memo(SessionSidebarLayout);

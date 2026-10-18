@@ -1016,6 +1016,10 @@ export interface Companion {
   effort?: string;
   /** The user renamed this chat, so the auto-titling pass leaves it alone. */
   titleIsUserSet?: boolean;
+  /** Archived (`archive_companion`); absent while it is not. */
+  archivedAt?: number;
+  /** The folder the chat was started in; absent when it has none. */
+  projectPath?: string;
 }
 
 /** One persisted Companion turn, surface-tagged with where the user was. */
