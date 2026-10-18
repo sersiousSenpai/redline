@@ -47,6 +47,8 @@ interface Scene {
   needs?: Record<string, NeedReason>;
   viewedVersionNumber?: number | null;
   startActive?: boolean;
+  /** The classic shell's list, for the row markup both shells share. */
+  classic?: boolean;
 }
 
 const inReview = [
@@ -89,6 +91,17 @@ const SCENES: Record<string, Scene> = {
     ],
     chats: [], launches: [], activeId: "dial", needs: { "plan:vehicle": "Question" }, viewedVersionNumber: 1,
   },
+  // The classic list: a plan-state menu, a project line and a run chip in
+  // each row, which must not nest a button inside the row's own.
+  classic: {
+    width: 1280, height: 800, classic: true, chats: [], launches: [], activeId: "roadmap",
+    sessions: [
+      roadmapPlan,
+      plan("built", "Din billing", { runState: "running", updatedAt: day(15) }),
+      plan("parked", "Din search", { attachState: "detached", status: "in_review", updatedAt: day(14) }),
+      backend,
+    ],
+  },
   // Archived rows and a chat without a folder, for the fold.
   archive: {
     width: 1280, height: 800,
@@ -125,6 +138,9 @@ const handlers = {
   onArchiveChat: log("archive-chat"),
   onDeleteChat: log("delete-chat"),
   onSelectLaunch: log("select-launch"),
+  onSetPlanState: log("plan-state"),
+  onMoveProject: log("move-project"),
+  onOpenRunReport: log("run-report"),
 };
 
 function Fixture() {
@@ -136,7 +152,7 @@ function Fixture() {
     document.documentElement.dataset.qaScene = name;
   }, [name]);
   // The sidebar column, sized as App sizes it under the flow shell.
-  const sidebarWidth = Math.min(281, Math.max(253, Math.round(scene.width * 0.1625) + 21));
+  const sidebarWidth = scene.classic ? 300 : Math.min(281, Math.max(253, Math.round(scene.width * 0.1625) + 21));
   return (
     <div className="qa-board" style={{ width: scene.width, height: scene.height, display: "flex", flexDirection: "column", background: "var(--color-canvas)", color: "var(--color-ink)" }}>
       <div className="qa-top" style={{ height: 47, flex: "none", borderBottom: "1px solid var(--color-rule)" }} />
@@ -145,7 +161,7 @@ function Fixture() {
           <SessionSidebar
             key={name}
             {...handlers}
-            layout="flow"
+            layout={scene.classic ? "classic" : "flow"}
             sessions={scene.sessions}
             chats={scene.chats}
             launches={scene.launches}

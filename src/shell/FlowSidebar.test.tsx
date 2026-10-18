@@ -128,6 +128,12 @@ describe("the flow sidebar", () => {
     expect(handlers.onDelete).toHaveBeenCalledWith("b");
   });
 
+  it("⌫ on the row's ⋯ asks too", async () => {
+    await render({ sessions: [summary("a", 1)] });
+    await press(row("Plan a").querySelector(".rl-fs-dots")!, "Backspace");
+    expect(row("Plan a").querySelector(".rl-fs-confirm")).not.toBeNull();
+  });
+
   it("a held plan's delete says it releases Claude", async () => {
     await render({ sessions: [summary("h", 1, { held: true, status: "in_review" })] });
     await press(row("Plan h").querySelector(".rl-fs-row")!, "Backspace");

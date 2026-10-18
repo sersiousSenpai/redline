@@ -381,6 +381,23 @@ try {
   check("Unarchive goes through the chat archive with archived=false", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['archive-chat','gone',false])"), await cdp.evaluate("window.__qa.calls.at(-1)"));
   await shot("archive-aurora", { x: 0, y: 47, width: 253, height: 400 });
 
+  // ── The classic list: its row shares RowMenu and must not nest buttons ─
+  await scene("classic");
+  for (let i = 0; i < 100 && !(await cdp.evaluate("!!document.querySelector('.rl-session-row')")); i++) await delay(50);
+  await settle();
+  check("Classic: no row nests an interactive element inside its own button", await cdp.evaluate("document.querySelectorAll('.rl-session-row button :is(button, a[href], input), .rl-fs-row :is(button, a[href], input, [role=button])').length === 0"),
+    await cdp.evaluate("[...document.querySelectorAll('.rl-session-row button button')].map(b => b.getAttribute('aria-label') || b.textContent)"));
+  await shot("classic-aurora", { x: 0, y: 47, width: 300, height: 400 });
+  await cdp.evaluate("window.__qa.calls.length = 0; document.querySelector('.rl-session-row [aria-label=\"Move to repo…\"]').focus()");
+  await key("Enter", "Enter", 13);
+  await cdp.evaluate("document.querySelectorAll('.rl-session-row')[1].querySelector('[title^=\"Orchestrated run\"]').focus()");
+  await key(" ", "Space", 32);
+  await click('.rl-session-row [aria-label="Change plan state"]');
+  check("Classic: the project line, run chip and plan-state label still answer Enter, Space and clicks, and never select the row",
+    await cdp.evaluate("JSON.stringify(window.__qa.calls) === JSON.stringify([['move-project','roadmap'],['run-report','built']]) && !!document.querySelector('[role=menu][aria-label=\"Plan state\"]')"),
+    await cdp.evaluate("window.__qa.calls"));
+  await key("Escape", "Escape", 27);
+
   // ── basic (light) and studio (another dark) ────────────────────────────
   for (const theme of ["basic", "studio"]) {
     for (const name of ["4a", "4b", "4d", "5a"]) {

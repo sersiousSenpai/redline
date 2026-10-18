@@ -3,6 +3,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { planRowActions, RowMenu, RowRename } from "./RowMenu";
+import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
@@ -747,11 +748,14 @@ function SessionRowBase({
             two sessions in one project stay tellable apart by title, and one
             title across two projects by this line. */}
         {session.planTitle && session.projectName && (
-          <button type="button" className="truncate mb-1" title={session.projectPath} aria-label="Move to repo…"
-            onClick={event => { event.stopPropagation(); onMoveProject?.(session.sessionId); }}
-            style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}>
+          <span className="truncate mb-1" title={session.projectPath} aria-label="Move to repo…"
+            {...nestedControl(() => onMoveProject?.(session.sessionId))}
+            // `clip`, not the class's `hidden`: an inline-block that scrolls
+            // sits on its bottom edge, where the button this was sat on its
+            // text. Clipping still ellipsizes.
+            style={{ ...NESTED_CONTROL_STYLE, overflow: "clip", fontSize: "10px", color: "var(--color-ink-muted)" }}>
             {session.projectName}
-          </button>
+          </span>
         )}
         <div
           className="flex items-center gap-2"
@@ -782,7 +786,7 @@ function SessionRowBase({
             {/* Approved with nothing building is its own state — it waits on
                 you (Build or Reopen), so it says so rather than reading as
                 done. NULL run_state is exactly that state. */}
-            {onSetPlanState ? <PlanStateMenu session={session} onState={state => onSetPlanState(session.sessionId, state)}
+            {onSetPlanState ? <PlanStateMenu nested session={session} onState={state => onSetPlanState(session.sessionId, state)}
               onMove={onMoveProject ? () => onMoveProject(session.sessionId) : undefined}>
               {session.status === "approved" && !session.runState ? "approved · not built" : STATUS_LABELS[session.status]}
             </PlanStateMenu> : STATUS_LABELS[session.status]}
@@ -858,16 +862,13 @@ function SessionRowBase({
             </span>
           )}
           {session.runState && session.runState !== "building" && !combining && (
-            <button
-              type="button"
+            <span
               title={`Orchestrated run: ${session.runState.replace(/_/g, " ")} — click to ${
                 isLiveRunState(session.runState) ? "watch it live" : "open the run report"
               }`}
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenRunReport?.(session.sessionId);
-              }}
+              {...nestedControl(() => onOpenRunReport?.(session.sessionId))}
               style={{
+                ...NESTED_CONTROL_STYLE,
                 color: RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)",
                 border: `1px solid ${RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)"}`,
                 borderRadius: "9999px",
@@ -880,7 +881,7 @@ function SessionRowBase({
               }}
             >
               {session.runState.replace(/_/g, " ")}
-            </button>
+            </span>
           )}
           {/* The run degraded to the sequential fallback. Deliberately its
               own chip rather than a tint on the state chip: the state is

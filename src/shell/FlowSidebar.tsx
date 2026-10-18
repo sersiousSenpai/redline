@@ -249,6 +249,19 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
       data-nest={versions ? "" : undefined}
       data-menu={menuOpen || undefined}
       data-need={item.need ? "" : undefined}
+      // The row's keys, from the row or its ⋯ (the menu, the rename field and
+      // the delete ask keep their own).
+      onKeyDown={(e) => {
+        const from = e.target as HTMLElement;
+        if (from !== rowButton.current && !from.classList.contains("rl-fs-dots")) return;
+        if ((e.key === "Backspace" || e.key === "Delete") && deletable) {
+          e.preventDefault();
+          setConfirming(true);
+        } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+          e.preventDefault();
+          openMenu(null);
+        }
+      }}
       onContextMenu={(e) => {
         // The rename field keeps the system's own menu (paste).
         if (renaming || confirming) return;
@@ -284,15 +297,6 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
             aria-current={active ? "page" : undefined}
             title={item.title}
             onClick={() => handlers.pick(item)}
-            onKeyDown={(e) => {
-              if ((e.key === "Backspace" || e.key === "Delete") && deletable) {
-                e.preventDefault();
-                setConfirming(true);
-              } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
-                e.preventDefault();
-                openMenu(null);
-              }
-            }}
           >
             {icon}
             <span className="rl-fs-title">{item.title}</span>

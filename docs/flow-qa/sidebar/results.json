@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:14:51.268Z",
+  "startedAt": "2026-10-18T09:23:29.660Z",
   "fixture": "fixtures/flow-sidebar-qa",
   "screenshots": [
     "4a-sidebar-aurora.png",
@@ -14,6 +14,7 @@
     "5a-aurora.png",
     "5a-expanded-aurora.png",
     "archive-aurora.png",
+    "classic-aurora.png",
     "4a-basic.png",
     "4b-basic.png",
     "4d-basic.png",
@@ -2211,6 +2212,25 @@
       ]
     },
     {
+      "name": "Classic: no row nests an interactive element inside its own button",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "Classic: the project line, run chip and plan-state label still answer Enter, Space and clicks, and never select the row",
+      "passed": true,
+      "details": [
+        [
+          "move-project",
+          "roadmap"
+        ],
+        [
+          "run-report",
+          "built"
+        ]
+      ]
+    },
+    {
       "name": "4a basic: same geometry as Aurora (rows, labels, New session)",
       "passed": true,
       "details": {
@@ -2595,8 +2615,8 @@
   ],
   "errors": [],
   "sourceSha256": {
-    "src/components/SessionSidebar.tsx": "ae53e4e086cb3aa29ce9d58f2ddff2c12c0eddde9d89e3ab13ccf2187c586708",
-    "src/shell/FlowSidebar.tsx": "771da1c142a1dc0ef4cd3940bed98e518411c10359eb9c2a9e7dc4e8eb56d894",
+    "src/components/SessionSidebar.tsx": "afba6fae7cea5baafbc65916e6a51231be67066599855212dab52ac65a88ef7d",
+    "src/shell/FlowSidebar.tsx": "472b71f5a77c66737020ceece299aa8420b3f6128d5ad0bab1e54449467455b1",
     "src/shell/FlowSidebar.css": "36f300df313e9f60019cfb76e71700652c44ee1864c930d65006fd7c39d0966a",
     "src/components/RowMenu.tsx": "8a8b73e07f4463708ed59133fd2d87d2c0d2b0252cc91261e7a8914445b20728",
     "src/lib/sessionGroups.ts": "2a020d52abf5c95c6d928d4186705d369c406f56c4761d9050525784e2b8d2c4",
@@ -2609,6 +2629,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-sidebar-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:15:01.685Z",
+  "finishedAt": "2026-10-18T09:23:44.825Z",
   "passed": true
 }
