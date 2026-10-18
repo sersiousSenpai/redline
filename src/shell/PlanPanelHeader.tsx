@@ -14,9 +14,19 @@
 //! header carries it as an icon beside Full screen, since 4c's header has no
 //! room on its left for a second label.
 
-import { FileText, List, Maximize2, Minimize2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Ellipsis, FileText, List, Maximize2, Minimize2, X } from "lucide-react";
 
+import { MenuSurface } from "../components/ui/MenuSurface";
 import { VersionPill, type VersionPillProps } from "./VersionPill";
+
+/** One row of the plan's ⋯ menu. */
+export interface PlanMenuItem {
+  id: string;
+  label: string;
+  detail?: string;
+  onPick: () => void;
+}
 
 export interface PlanPanelHeaderProps {
   pose: "split" | "full";
@@ -31,6 +41,10 @@ export interface PlanPanelHeaderProps {
   contentsOpen: boolean;
   onToggleFull: () => void;
   onClose: () => void;
+  /** The plan's own actions — export, share, invite, move — in a ⋯ menu,
+   *  where classic kept them in the header's Download and Live Session
+   *  menus. Empty draws no ⋯. */
+  menu: readonly PlanMenuItem[];
 }
 
 export function PlanPanelHeader({
@@ -42,6 +56,7 @@ export function PlanPanelHeader({
   contentsOpen,
   onToggleFull,
   onClose,
+  menu,
 }: PlanPanelHeaderProps) {
   const full = pose === "full";
   const meta = [
@@ -70,6 +85,9 @@ export function PlanPanelHeader({
           {meta && <span className="rl-plan-head-meta">{meta}</span>}
         </span>
       )}
+      {/* The ⋯ on the right is matched on the left in the full pose, so the
+          version pill stays centred between Contents and Full screen (5a). */}
+      {full && menu.length > 0 && <span className="rl-plan-head-balance" aria-hidden />}
       <span className="rl-plan-head-spacer" />
       {viewing && (
         <>
@@ -77,6 +95,7 @@ export function PlanPanelHeader({
           <span className="rl-plan-head-spacer" />
         </>
       )}
+      {menu.length > 0 && <PlanMenu items={menu} />}
       {!full && onToggleContents && (
         <button
           type="button"
@@ -115,6 +134,64 @@ export function PlanPanelHeader({
         </button>
       )}
     </header>
+  );
+}
+
+/** The ⋯ and its menu, hung under the button's right edge. */
+function PlanMenu({ items }: { items: readonly PlanMenuItem[] }) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    wrap.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+    const away = (e: Event) => {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setOpen(false);
+      wrap.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    };
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  return (
+    <span ref={wrap} className="rl-plan-menu">
+      <button
+        type="button"
+        className="rl-plan-head-btn rl-plan-head-icon-btn"
+        aria-label="More plan actions"
+        title="Export, share, invite, move"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <Ellipsis aria-hidden size={14} strokeWidth={2} />
+      </button>
+      {open && (
+        <MenuSurface ariaLabel="Plan actions" className="rl-plan-menu-panel">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitem"
+              className="rl-plan-menu-item"
+              onClick={() => {
+                setOpen(false);
+                item.onPick();
+              }}
+            >
+              {item.label}
+              {item.detail && <span className="rl-plan-menu-detail">{item.detail}</span>}
+            </button>
+          ))}
+        </MenuSurface>
+      )}
+    </span>
   );
 }
 

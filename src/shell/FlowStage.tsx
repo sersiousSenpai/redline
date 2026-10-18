@@ -29,6 +29,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
   type RefObject,
 } from "react";
@@ -44,11 +45,13 @@ import {
   toggleFull,
   noteRevision,
 } from "../lib/flowPose";
-import { setPanelTab, useFlow, type PlanPose } from "./flowState";
+import { setPanelTab, setStage, useFlow, type PlanPose } from "./flowState";
 import { feedbackSummary } from "../lib/feedbackThreads";
 import type { Comment, ReviewSession } from "../types";
-import { PlanPanelHeader } from "./PlanPanelHeader";
-import { PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
+import { PlanPanelHeader, type PlanMenuItem } from "./PlanPanelHeader";
+import { footerTally, PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
+import { PlanNotices, type PlanNoticesProps } from "./PlanNotices";
+import { DiscussionZoomContext } from "../components/DiscussionViewContext";
 import { useOrchestration } from "../hooks/useOrchestration";
 import { buildProgress } from "../lib/flowPose";
 import type { VersionPillProps } from "./VersionPill";
@@ -77,14 +80,27 @@ export interface FlowStageProps {
   planBody: ReactNode;
   /** The latest version, for the header and the revision rule. */
   latestVersion: number | null;
-  /** Unsent marks on the latest version. */
-  marks: number;
-  /** Marks waiting on an answer, for "entering full opens Feedback". */
-  unresolved: number;
+  /** The plan thread's comments (App's `threadComments`): the marks the
+   *  next Send carries are read off them. */
+  comments: readonly Comment[];
   viewing: VersionPillProps | null;
   contents: { open: boolean; onToggle: (() => void) | null };
   width: { wide: boolean; measure: number };
-  footer: Omit<PlanPanelFooterProps, "pose">;
+  footer: Omit<PlanPanelFooterProps, "pose" | "comments" | "detached">;
+  /** Classic's plan-pane notices; the stage works out the clean-slate
+   *  pointer and the terminal itself. */
+  notices: Omit<PlanNoticesProps, "prior" | "onShowTerminal">;
+  /** The plan's own actions, for the header's ⋯ (classic's Download and
+   *  Live Session menus): each runs on this session and the version shown. */
+  planMenu: {
+    onExport: (sessionId: string, version: number) => void;
+    onExportDocx: (sessionId: string, version: number) => void;
+    onSaveObsidian: (sessionId: string, version: number) => void;
+    onShare: () => void;
+    /** Null when the workspace has live collaboration off. */
+    onInvite: (() => void) | null;
+    onMove: (sessionId: string) => void;
+  };
   /** The Feedback tab's data (FeedbackPanel's props, App's sources); null
    *  before the session has loaded. */
   feedback: {
@@ -100,6 +116,9 @@ export interface FlowStageProps {
   } | null;
   /** The comment composer while a mark is being written, else null. */
   composer: ReactNode;
+  /** Classic's discussion text size (its threads' A−/A+), for the
+   *  Feedback tab's discussions. */
+  discussionZoom: { value: number; adjust: (delta: number) => void };
   /** ⌘J: the stage shows the session's terminal. */
   terminalView: boolean;
   /** App's terminal dock, laid over this stage while it shows the PTY. */
@@ -126,6 +145,29 @@ export default function FlowStage(p: FlowStageProps) {
     return () => ro.disconnect();
   }, []);
   const pose = effectivePose({ stored, hasPlan: p.hasPlan, narrow });
+  // What the marks are, read off the comments (classic's footer and pane
+  // read the same): the latest's unsent ones for the header, the version on
+  // screen's open ones for "entering full opens Feedback".
+  const marks = footerTally(p.comments, p.footer.waiting).marks;
+  const session = p.feedback?.session ?? null;
+  const shownVersion = p.viewing ? p.viewing.viewing : p.latestVersion;
+  const shown = session?.revisions.find((r) => r.versionNumber === shownVersion)?.comments ?? [];
+  const unresolved = shown.filter((c) => c.status === "draft" || c.status === "submitted" || c.status === "reopened").length;
+  const prior = session && !p.viewing && shown.length === 0 ? priorWithComments(session, p.latestVersion) : null;
+  const showTerminal = p.target.terminalId ? () => setStage("terminal") : null;
+  const notices = <PlanNotices {...p.notices} prior={prior} onShowTerminal={showTerminal} />;
+  const menu: PlanMenuItem[] =
+    // A live room you joined has no session of its own to export or move.
+    sessionId && session && shownVersion !== null
+      ? [
+          { id: "md", label: "Download as Markdown", detail: `v${shownVersion} as a .md file`, onPick: () => p.planMenu.onExport(sessionId, shownVersion) },
+          { id: "docx", label: "Download as Word", detail: `v${shownVersion} as a .docx file`, onPick: () => p.planMenu.onExportDocx(sessionId, shownVersion) },
+          { id: "obsidian", label: "Save to Obsidian", detail: "A note in your vault", onPick: () => p.planMenu.onSaveObsidian(sessionId, shownVersion) },
+          { id: "share", label: "Share a snapshot…", detail: "Someone reviews it and sends comments back", onPick: p.planMenu.onShare },
+          ...(p.planMenu.onInvite ? [{ id: "invite", label: "Invite to a live session…", detail: "Review it together, live", onPick: p.planMenu.onInvite }] : []),
+          { id: "move", label: "Move to repo…", detail: "The project it belongs to", onPick: () => p.planMenu.onMove(sessionId) },
+        ]
+      : [];
   // ⌘J: the dock over this stage's box, showing the session's PTY alone.
   useStageDock(p.terminalDock, rootRef, p.terminalView && !!p.target.terminalId);
   const layout: ConversationLayout = pose === "full" ? "panel" : pose === "split" ? "column" : "stage";
@@ -163,24 +205,38 @@ export default function FlowStage(p: FlowStageProps) {
       data-terminal-view={p.terminalView ? "" : undefined}
       style={planColumnVars(pose, p.width.wide, p.width.measure)}
     >
-      {!full && <div ref={setSlot} className="rl-flow-convo" data-layout={layout} />}
+      {!full && (
+        <div className="rl-flow-convo-col" data-layout={layout}>
+          {/* With the plan closed its notices head the conversation. */}
+          {pose === "closed" && p.hasPlan && notices}
+          <div ref={setSlot} className="rl-flow-convo" data-layout={layout} />
+        </div>
+      )}
       {p.hasPlan && (
         <section className="rl-flow-plan" data-pose={pose} hidden={pose === "closed"} aria-label="Plan">
           <PlanPanelHeader
             pose={headerPose}
             version={p.latestVersion}
-            marks={p.marks}
+            marks={marks}
             viewing={p.viewing}
             onToggleContents={toggleContents}
             contentsOpen={p.contents.open}
-            onToggleFull={() => sessionId && toggleFull(sessionId, p.unresolved)}
+            onToggleFull={() => sessionId && toggleFull(sessionId, unresolved)}
+            menu={menu}
             onClose={() => sessionId && closePlan(sessionId)}
           />
           <div className="rl-flow-plan-body">
+            {pose !== "closed" && notices}
             {p.planBody}
             {!full && composing && <div className="rl-flow-compose-sheet rl-glass rl-glass-sheet">{p.composer}</div>}
           </div>
-          <PlanPanelFooter pose={headerPose} {...p.footer} progress={p.footer.progress ?? runProgress} />
+          <PlanPanelFooter
+            pose={headerPose}
+            {...p.footer}
+            comments={p.comments}
+            detached={p.notices.detached ? (p.notices.detached.restoring ? "restoring" : "ended") : null}
+            progress={p.footer.progress ?? runProgress}
+          />
         </section>
       )}
       {full && (
@@ -191,7 +247,12 @@ export default function FlowStage(p: FlowStageProps) {
             count={summary?.count ?? 0}
             allResolved={summary?.allResolved ?? false}
           />
-          <div className="rl-flow-panel-body" role="tabpanel">
+          <div
+            className="rl-flow-panel-body"
+            role="tabpanel"
+            style={{ "--rl-discussion-zoom": p.discussionZoom.value } as CSSProperties}
+          >
+            <DiscussionZoomContext.Provider value={p.discussionZoom.adjust}>
             {tab === "chat" ? (
               <div ref={setSlot} className="rl-flow-convo" data-layout="panel" />
             ) : p.feedback ? (
@@ -206,6 +267,7 @@ export default function FlowStage(p: FlowStageProps) {
                 composer={p.composer || <FeedbackComposer session={p.feedback.session} {...p.feedback.composer} />}
               />
             ) : null}
+            </DiscussionZoomContext.Provider>
           </div>
         </aside>
       )}
@@ -247,4 +309,19 @@ function useConversationPlacement(host: HTMLElement, slot: HTMLElement | null) {
       host.remove();
     };
   }, [host, slot]);
+}
+
+/** The clean slate: the latest version arrives with no comments, and the
+ *  last round's live on an earlier version of the same thread. */
+function priorWithComments(session: ReviewSession, latest: number | null): number | null {
+  const revisions = session.revisions;
+  let start = 0;
+  revisions.forEach((r, i) => {
+    if (r.threadStart) start = i;
+  });
+  for (let i = revisions.length - 1; i >= start; i--) {
+    const r = revisions[i];
+    if (r.versionNumber !== latest && r.comments.length > 0) return r.versionNumber;
+  }
+  return null;
 }

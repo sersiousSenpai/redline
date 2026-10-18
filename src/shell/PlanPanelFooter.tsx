@@ -6,11 +6,15 @@
 //! you" in the top bar.
 //!
 //! On the left, one status line, first match wins:
-//! 1. the plan's CLI session ended (detached) — Restore, or its progress;
-//! 2. the author is answering a Send;
+//! 1. the plan's CLI session ended (detached) — the notice above the plan
+//!    carries the restore; this says why the verbs are off, or its progress;
+//! 2. the author is answering a Send — a press shows its terminal;
 //! 3. the plan is approved — "Building v4: step 3 of 11 · 1 terminal" while a
 //!    run is live, else its state (and PlanStateMenu, as classic wore it);
-//! 4. "Select text to mark it." — the hint, and the manual state menu.
+//! 4. every resolution handled — "approve, or add another round";
+//! 5. "Select text to mark it." — the hint, and the manual state menu.
+//!
+//! Send's tooltip carries classic's tally (2 pending · 1 edit · 1 question).
 //!
 //! On the right, the review's two verbs — "Send marks to Claude" and
 //! "🔨 Approve & build" (its ▾ keeps "build later" and the team builds one
@@ -24,6 +28,8 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ChevronDown, Hammer, Loader } from "lucide-react";
 
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
+import { ridesSubmit } from "../lib/planSearch";
+import type { Comment } from "../types";
 import type { ManualPlanState, PlanStateTarget } from "../components/PlanStateMenu";
 import { MenuSurface } from "../components/ui/MenuSurface";
 import { ContextHint } from "./ContextHint";
@@ -50,26 +56,13 @@ export interface PlanFooterBuildTarget {
   detail?: string;
 }
 
-/** The plan's CLI session ended under it (classic's detached banner). */
-export interface PlanFooterDetached {
-  restoring: boolean;
-  /** The restore's own progress line, while it runs. */
-  status: string | null;
-  /** Why the last restore failed, when it did. */
-  failure: string | null;
-  /** What would stop a restore bringing the plan back, if anything. */
-  blocked: string | null;
-  onRestore: () => void;
-}
-
 export interface PlanPanelFooterProps {
   pose: "split" | "full";
   /** Who wrote the plan and answers a Send ("Claude", "Codex"). */
   author: string;
-  /** Marks the next Send carries. */
-  marks: number;
-  /** Every one of them a question: the Send asks rather than revises. */
-  askOnly: boolean;
+  /** The plan thread's comments: what the next Send carries is read off
+   *  them, as classic's footer read them. */
+  comments: readonly Comment[];
   canSubmit: boolean;
   canApprove: boolean;
   waiting: boolean;
@@ -90,7 +83,32 @@ export interface PlanPanelFooterProps {
   /** Terminals working on this plan — the faint "· 1 terminal". */
   terminals: number;
   onShowTerminal?: () => void;
-  detached?: PlanFooterDetached | null;
+  /** The plan's CLI session ended (the notice above carries the restore),
+   *  or a restore is bringing it back. */
+  detached?: "ended" | "restoring" | null;
+}
+
+/** What the next Send carries, classic's tally, and whether every
+ *  resolution has been dealt with. */
+export function footerTally(comments: readonly Comment[], waiting: boolean) {
+  const pending = comments.filter(ridesSubmit);
+  const count = (type: Comment["type"]) => pending.filter((c) => c.type === type).length;
+  const tally = [
+    `${pending.length} pending`,
+    count("edit") ? `${count("edit")} edit` : null,
+    count("feedback") ? `${count("feedback")} feedback` : null,
+    count("question") ? `${count("question")} question${count("question") === 1 ? "" : "s"}` : null,
+  ].filter(Boolean).join(" · ");
+  return {
+    marks: pending.length,
+    askOnly: pending.length > 0 && pending.every((c) => c.type === "question" && !c.actionable),
+    tally,
+    allHandled:
+      pending.length === 0 &&
+      !waiting &&
+      !comments.some((c) => c.status === "resolved") &&
+      comments.some((c) => c.status === "accepted" || c.status === "withdrawn"),
+  };
 }
 
 export function PlanPanelFooter(p: PlanPanelFooterProps) {
@@ -112,38 +130,34 @@ function Spinner({ tone }: { tone: "plan" | "build" }) {
 }
 
 function Status(p: PlanPanelFooterProps) {
-  const d = p.detached;
-  if (d) {
-    if (d.restoring)
-      return (
-        <span className="rl-plan-foot-line" role="status">
-          <Spinner tone="plan" />
-          Reopening this plan…
-          {d.status && <span className="rl-plan-foot-faint">{d.status}</span>}
-        </span>
-      );
-    return (
-      <span className="rl-plan-foot-line" role="status">
-        {d.failure ? `Couldn't reopen this plan: ${d.failure}` : `${p.author}'s session for this plan ended.`}
-        <button
-          type="button"
-          className="rl-plan-foot-link"
-          onClick={d.onRestore}
-          disabled={!!d.blocked}
-          title={d.blocked ? `${d.blocked}: restore can't bring the plan back until that's fixed.` : "Reopens the same conversation and re-presents the plan, in the background."}
-        >
-          {d.failure ? "Retry" : "Restore"}
-        </button>
-      </span>
-    );
-  }
-  if (p.waiting)
+  if (p.detached === "restoring")
     return (
       <span className="rl-plan-foot-line" role="status">
         <Spinner tone="plan" />
-        {p.waitingAsk ? `${p.author} is answering your questions…` : `${p.author} is revising the plan…`}
+        Reopening this plan…
       </span>
     );
+  if (p.detached === "ended")
+    return (
+      <span className="rl-plan-foot-line" role="status">
+        {p.author}'s session for this plan ended. Restore it to send or approve.
+      </span>
+    );
+  if (p.waiting) {
+    const text = p.waitingAsk ? `${p.author} is answering your questions…` : `${p.author} is revising the plan…`;
+    return (
+      <span className="rl-plan-foot-line" role="status">
+        <Spinner tone="plan" />
+        {p.onShowTerminal ? (
+          <button type="button" className="rl-plan-foot-terminals" onClick={p.onShowTerminal} title="Watch it in the terminal">
+            {text}
+          </button>
+        ) : (
+          text
+        )}
+      </span>
+    );
+  }
   if (p.approval) {
     const a = p.approval;
     const text = a.building
@@ -174,9 +188,10 @@ function Status(p: PlanPanelFooterProps) {
       </span>
     );
   }
+  const { allHandled } = footerTally(p.comments, p.waiting);
   return (
     <span className="rl-plan-foot-line">
-      <ContextHint>Select text to mark it.</ContextHint>
+      <ContextHint>{allHandled ? "All resolutions handled — approve, or add another round of marks." : "Select text to mark it."}</ContextHint>
       {p.planState && !p.planState.held && p.onSetPlanState && (
         <Suspense fallback={null}>
           <span className="rl-plan-foot-state">
@@ -189,7 +204,8 @@ function Status(p: PlanPanelFooterProps) {
 }
 
 function ReviewActions(p: PlanPanelFooterProps) {
-  const caption = p.marks === 0 ? "Mark something in the plan first" : p.askOnly ? "Asks questions only" : "Requests a revision";
+  const { marks, askOnly, tally } = footerTally(p.comments, p.waiting);
+  const caption = marks === 0 ? "Mark something in the plan first" : `${tally} — ${askOnly ? "asks questions only" : "requests a revision"}`;
   return (
     <>
       <button

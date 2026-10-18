@@ -72,6 +72,11 @@ const DIAL_SESSION: ReviewSession = {
   revisions: [revision(1, DIAL, DIAL_COMMENTS), revision(2, DIAL, []), revision(3, DIAL, []), revision(4, DIAL, [])],
 };
 
+const DIN_SESSION: ReviewSession = {
+  sessionId: "S-din", projectPath: "/p/din", projectName: "din", createdAt: 1, status: "in_review", attachState: "held", backend: "claude-code",
+  revisions: [revision(1, DIN, DIN_COMMENTS)],
+};
+
 const SPEC = {
   "4c": { sessionId: "S-din", title: "Din roadmap: next steps", markdown: DIN, comments: DIN_COMMENTS, sidebar: 0, pose: "split" as const },
   "4d": { sessionId: "S-din", title: "Din roadmap: next steps", markdown: DIN, comments: DIN_COMMENTS, sidebar: 232, pose: "closed" as const },
@@ -85,6 +90,7 @@ function Fixture() {
   const [painted, setPainted] = useState<{ pose: string; layout: "stage" | "column" | "panel" }>({ pose: "closed", layout: "stage" });
   const [composing, setComposing] = useState(false);
   const [contents, setContents] = useState(false);
+  const [notices, setNotices] = useState(false);
   const [wide, setWide] = useState(false);
   const [measure, setMeasure] = useState(820);
   const [zoom, setZoom] = useState(1);
@@ -105,6 +111,7 @@ function Fixture() {
       setStage,
       setComposing,
       setContents,
+      setNotices,
       openPlan: () => openPlan(SPEC.sessionId, 0, false),
     };
     document.documentElement.dataset.qaReady = "true";
@@ -155,15 +162,12 @@ function Fixture() {
               hasPlan
               planBody={planBody}
               latestVersion={board === "5a" ? 4 : 1}
-              marks={pending}
-              unresolved={board === "5a" ? 0 : pending}
+              comments={board === "5a" ? [] : SPEC.comments}
               viewing={board === "5a" ? { viewing: 1, latest: 4, receivedAt: 1_792_000_000_001, onGoToLatest: () => {} } : null}
               contents={{ open: contents, onToggle: () => setContents((o) => !o) }}
               width={{ wide, measure }}
               footer={{
                 author: "Claude",
-                marks: pending,
-                askOnly: false,
                 canSubmit: pending > 0,
                 canApprove: board !== "5a",
                 waiting: false,
@@ -180,8 +184,32 @@ function Fixture() {
                 onShowTerminal: () => setStage("terminal"),
                 detached: null,
               }}
-              feedback={board === "5a" ? { session: DIAL_SESSION, viewingVersion: 1, onJumpToAnchor: () => {}, focusedCommentId: focused, composer: { onSubmit: () => {} } } : null}
+              feedback={{ session: board === "5a" ? DIAL_SESSION : DIN_SESSION, viewingVersion: board === "5a" ? 1 : 1, onJumpToAnchor: () => {}, focusedCommentId: focused, composer: { onSubmit: () => {} } }}
+              notices={{
+                askModeViolation: notices,
+                onDismissAskMode: () => setNotices(false),
+                warning: notices ? { parseError: null, unmatchedIds: ["c-009"], unresolvedSubmittedIds: [] } : null,
+                onDismissWarning: () => setNotices(false),
+                detached: notices
+                  ? {
+                      restoring: false,
+                      status: null,
+                      failure: null,
+                      copy: { lede: "Claude Code's session for this plan ended.", body: "The plan is safe here, with your comments." },
+                      decision: { harness: "claude-code", legacy: true, chosen: false, label: "Claude Code" },
+                      onHarness: () => {},
+                      blockers: [],
+                      onFix: async () => true,
+                      onRestore: () => {},
+                      onCopyResume: () => {},
+                      onDismiss: () => setNotices(false),
+                    }
+                  : null,
+                onViewPrior: () => {},
+              }}
+              planMenu={{ onExport: () => {}, onExportDocx: () => {}, onSaveObsidian: () => {}, onShare: () => {}, onInvite: () => {}, onMove: () => {} }}
               composer={composer}
+              discussionZoom={{ value: 1, adjust: () => {} }}
               terminalView={view === "terminal"}
               terminalDock={dockRef}
             />

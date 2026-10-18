@@ -6,6 +6,11 @@
 //! the multi-tile terminal wall. Which rows exist is the workspace manifest's
 //! call (`toolSurfaces`); this only draws them.
 //!
+//! Below a divider, the shell's own utilities that classic kept in its
+//! header (`extras`): the command palette (the one way to ⌘K over a browser
+//! page, whose keystrokes never reach the app), joining a live session, the
+//! memory inspector, tiling the plan beside a tool, and leaving a harness.
+//!
 //! Lazy: mounted only while open. It hides the native browser webview while
 //! up (useMenuOverlay — the webview paints above all DOM) and steps the stage
 //! back to 55% (stageDim). It springs out of its trigger, transform and
@@ -29,6 +34,15 @@ const ICONS: Partial<Record<ToolId, typeof Globe>> = {
   terminals: SquareTerminal,
 };
 
+/** A utility row under the tools: what classic's header carried. */
+export interface ToolExtra {
+  id: string;
+  label: string;
+  /** Its shortcut or state, quiet at the row's end. */
+  hint?: string;
+  onPick: () => void;
+}
+
 export interface ToolsMenuProps {
   /** The Tools button: the menu hangs off its bottom-right corner. */
   anchor: RefObject<HTMLElement | null>;
@@ -37,6 +51,7 @@ export interface ToolsMenuProps {
   current: ToolId | null;
   liveRuns: number;
   onPick: (id: ToolId) => void;
+  extras?: readonly ToolExtra[];
   onClose: () => void;
 }
 
@@ -48,7 +63,7 @@ function placeUnder(anchor: HTMLElement | null): { top: number; right: number } 
   return { top: r.bottom + 7, right: Math.max(8, window.innerWidth - r.right - 1) };
 }
 
-export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, onClose }: ToolsMenuProps) {
+export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, extras = [], onClose }: ToolsMenuProps) {
   const panel = useRef<HTMLDivElement | null>(null);
   const [place, setPlace] = useState(() => placeUnder(anchor.current));
   const [memory, setMemory] = useState<MemoryStatus | null>(null);
@@ -162,6 +177,22 @@ export default function ToolsMenu({ anchor, tools, current, liveRuns, onPick, on
       {surfaces.map(row)}
       {surfaces.length > 0 && more.length > 0 && <div className="rl-tools-menu-divider" role="separator" />}
       {more.map(row)}
+      {extras.length > 0 && <div className="rl-tools-menu-divider" role="separator" />}
+      {extras.map((x) => (
+        <button
+          key={x.id}
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onClose();
+            x.onPick();
+          }}
+        >
+          <span>{x.label}</span>
+          <span className="rl-tools-menu-fill" />
+          {x.hint && <span className="rl-tools-menu-key">{x.hint}</span>}
+        </button>
+      ))}
     </div>,
     document.body,
   );

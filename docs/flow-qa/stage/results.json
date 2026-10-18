@@ -1,13 +1,18 @@
 {
-  "startedAt": "2026-10-18T10:05:03.197Z",
+  "startedAt": "2026-10-18T10:44:11.246Z",
   "fixture": "fixtures/flow-stage-qa",
   "screenshots": [
     "4c-aurora.png",
+    "4c-plan-menu-aurora.png",
+    "4c-notices-aurora.png",
+    "4d-notices-aurora.png",
     "4c-contents-aurora.png",
     "4c-to-full-aurora.png",
     "4c-narrow-aurora.png",
     "4c-basic.png",
+    "4c-notices-basic.png",
     "4c-studio.png",
+    "4c-notices-studio.png",
     "4d-aurora.png",
     "4d-basic.png",
     "4d-studio.png",
@@ -62,7 +67,7 @@
         "blColor": "rgb(228, 233, 243)",
         "brColor": "rgb(50, 55, 66)",
         "shadow": "none",
-        "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan readyOpen in panel →2 sections · 3 steps. Mark anything you'd change, then approve.Why is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanopus · HighTalk",
+        "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan readyOpen in panel →2 sections · 3 steps. Mark anything you'd change, then approve.Why is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighTalk",
         "display": "flex",
         "visible": true
       }
@@ -790,9 +795,182 @@
       }
     },
     {
-      "name": "4c aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (31 swept)",
+      "name": "4c aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
       "passed": true,
       "details": []
+    },
+    {
+      "name": "4c footer: Send carries classic's tally in its tooltip",
+      "passed": true,
+      "details": "2 pending · 2 feedback — requests a revision"
+    },
+    {
+      "name": "4c ⋯: export, Obsidian, share, invite and move, from the plan's header",
+      "passed": true,
+      "details": [
+        "Download as Markdown",
+        "Download as Word",
+        "Save to Obsidian",
+        "Share a snapshot…",
+        "Invite to a live session…",
+        "Move to repo…"
+      ]
+    },
+    {
+      "name": "4c ⋯: Escape closes it",
+      "passed": true
+    },
+    {
+      "name": "notices (split): the session ended, Plan modified during Ask and the resolution issue sit between the header and the plan",
+      "passed": true,
+      "details": {
+        "notices": {
+          "x": 440,
+          "y": 94,
+          "w": 840,
+          "h": 238.75,
+          "right": 1280,
+          "bottom": 332.75,
+          "fontSize": 13,
+          "lineHeight": 19.5,
+          "fontWeight": "400",
+          "fontFamily": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "color": "rgb(228, 233, 243)",
+          "bg": "rgba(0, 0, 0, 0)",
+          "radius": 0,
+          "pt": 0,
+          "pr": 0,
+          "pb": 0,
+          "pl": 0,
+          "ml": 0,
+          "gap": 0,
+          "maxWidth": "none",
+          "bt": 0,
+          "bb": 1,
+          "bl": 0,
+          "br": 0,
+          "bbColor": "rgb(50, 55, 66)",
+          "btColor": "rgb(228, 233, 243)",
+          "blColor": "rgb(228, 233, 243)",
+          "brColor": "rgb(228, 233, 243)",
+          "shadow": "none",
+          "text": "Claude Code's session for this plan ended.The plan is safe here, with your comments.Restore plan session reopens the same conversation and re-presents the plan for review, in the background — nothing is retyped and nothing is lost.Written in:Claude CodeCodexCursorAntigravityRestore plan sessionCopy resume commandPlan modified during AskYou asked only questions, but it returned a revised plan anyway. This was processed as a normal revision — review the diff.Resolution block issueResolutions for unknown comments: c-009",
+          "display": "flex",
+          "visible": true
+        },
+        "rows": [
+          "Claude Code's session for this plan ended.",
+          "Plan modified during Ask",
+          "Resolution block issue"
+        ]
+      }
+    },
+    {
+      "name": "notices: the restore keeps classic's Written in, Restore, Copy resume command and Dismiss",
+      "passed": true,
+      "details": {
+        "radios": [
+          "Claude Code",
+          "Codex",
+          "Cursor",
+          "Antigravity"
+        ],
+        "buttons": [
+          "Restore plan session",
+          "Copy resume command"
+        ],
+        "dismiss": true
+      }
+    },
+    {
+      "name": "notices: the footer says why its verbs are off",
+      "passed": true,
+      "details": "Claude's session for this plan ended. Restore it to send or approve."
+    },
+    {
+      "name": "4c notices aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "notices (closed): they head the conversation",
+      "passed": true,
+      "details": {
+        "x": 0,
+        "y": 46,
+        "w": 1280,
+        "h": 202.5,
+        "right": 1280,
+        "bottom": 248.5,
+        "fontSize": 13,
+        "lineHeight": 19.5,
+        "fontWeight": "400",
+        "fontFamily": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "radius": 0,
+        "pt": 0,
+        "pr": 0,
+        "pb": 0,
+        "pl": 0,
+        "ml": 0,
+        "gap": 0,
+        "maxWidth": "none",
+        "bt": 0,
+        "bb": 1,
+        "bl": 0,
+        "br": 0,
+        "bbColor": "rgb(50, 55, 66)",
+        "btColor": "rgb(228, 233, 243)",
+        "blColor": "rgb(228, 233, 243)",
+        "brColor": "rgb(228, 233, 243)",
+        "shadow": "none",
+        "text": "Claude Code's session for this plan ended.The plan is safe here, with your comments.Restore plan session reopens the same conversation and re-presents the plan for review, in the background — nothing is retyped and nothing is lost.Written in:Claude CodeCodexCursorAntigravityRestore plan sessionCopy resume commandPlan modified during AskYou asked only questions, but it returned a revised plan anyway. This was processed as a normal revision — review the diff.Resolution block issueResolutions for unknown comments: c-009",
+        "display": "flex",
+        "visible": true
+      }
+    },
+    {
+      "name": "notices (full): above the plan in the centre",
+      "passed": true,
+      "details": {
+        "x": 0,
+        "y": 94,
+        "w": 880,
+        "h": 238.75,
+        "right": 880,
+        "bottom": 332.75,
+        "fontSize": 13,
+        "lineHeight": 19.5,
+        "fontWeight": "400",
+        "fontFamily": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "radius": 0,
+        "pt": 0,
+        "pr": 0,
+        "pb": 0,
+        "pl": 0,
+        "ml": 0,
+        "gap": 0,
+        "maxWidth": "none",
+        "bt": 0,
+        "bb": 1,
+        "bl": 0,
+        "br": 0,
+        "bbColor": "rgb(50, 55, 66)",
+        "btColor": "rgb(228, 233, 243)",
+        "blColor": "rgb(228, 233, 243)",
+        "brColor": "rgb(228, 233, 243)",
+        "shadow": "none",
+        "text": "Claude Code's session for this plan ended.The plan is safe here, with your comments.Restore plan session reopens the same conversation and re-presents the plan for review, in the background — nothing is retyped and nothing is lost.Written in:Claude CodeCodexCursorAntigravityRestore plan sessionCopy resume commandPlan modified during AskYou asked only questions, but it returned a revised plan anyway. This was processed as a normal revision — review the diff.Resolution block issueResolutions for unknown comments: c-009",
+        "display": "flex",
+        "visible": true
+      }
+    },
+    {
+      "name": "notices: none drawn when there is nothing to say",
+      "passed": true
     },
     {
       "name": "4c contents: the rail docks on the plan, under its header",
@@ -920,7 +1098,7 @@
       "passed": true,
       "details": {
         "pose": "full",
-        "tab": "Feedback",
+        "tab": "Feedback2",
         "connected": false
       }
     },
@@ -963,11 +1141,16 @@
       "passed": true,
       "details": {
         "title": "rgb(0, 0, 0)",
-        "mark": "rgb(0, 0, 0)"
+        "mark": "rgb(166, 138, 0)"
       }
     },
     {
-      "name": "4c basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (31 swept)",
+      "name": "4c basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "4c notices basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
       "passed": true,
       "details": []
     },
@@ -980,7 +1163,12 @@
       }
     },
     {
-      "name": "4c studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (31 swept)",
+      "name": "4c studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
+      "passed": true,
+      "details": []
+    },
+    {
+      "name": "4c notices studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
       "passed": true,
       "details": []
     },
@@ -1026,7 +1214,7 @@
           "blColor": "rgb(228, 233, 243)",
           "brColor": "rgb(228, 233, 243)",
           "shadow": "none",
-          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanopus · HighdinTalk",
+          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighdinTalk",
           "display": "flex",
           "visible": true
         },
@@ -1060,7 +1248,7 @@
           "blColor": "rgb(228, 233, 243)",
           "brColor": "rgb(228, 233, 243)",
           "shadow": "none",
-          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanopus · HighdinTalkPlanv1 · 2 marksFull screenClose planDin roadmap: next stepsPicks up from note 28 and the 2026-10-17 updates in the build log.1. Finish Track BCompile the build in Xcode on the Mac.Apply 0018_vault_revisions.sql before the next build runs.Deploy the Worker; D3 crash reports need both.2. Next by priorityC1, D1, D3, D4, C6 are built. Start with D6: the pattern and experiment loop.Select text to mark it.Send marks to ClaudeApprove & build",
+          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighdinTalkPlanv1 · 2 marksFull screenClose planDin roadmap: next stepsPicks up from note 28 and the 2026-10-17 updates in the build log.1. Finish Track BCompile the build in Xcode on the Mac.Apply 0018_vault_revisions.sql before the next build runs.Deploy the Worker; D3 crash reports need both.2. Next by priorityC1, D1, D3, D4, C6 are built. Start with D6: the pattern and experiment loop.Select text to mark it.Send marks to ClaudeApprove & build",
           "display": "flex",
           "visible": true
         }
@@ -1937,17 +2125,17 @@
       }
     },
     {
-      "name": "5a aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (142 swept)",
+      "name": "5a aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "5a basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (142 swept)",
+      "name": "5a basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "5a studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (142 swept)",
+      "name": "5a studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
       "passed": true,
       "details": []
     }
@@ -1960,6 +2148,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-stage-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T10:05:16.927Z",
+  "finishedAt": "2026-10-18T10:44:26.511Z",
   "passed": true
 }
