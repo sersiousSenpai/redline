@@ -153,7 +153,6 @@ function Fixture() {
               latestVersion={board === "5a" ? 4 : 1}
               marks={pending}
               unresolved={board === "5a" ? 0 : pending}
-              threads={SPEC.comments.length}
               viewing={board === "5a" ? { viewing: 1, latest: 4, receivedAt: 1_792_000_000_001, onGoToLatest: () => {} } : null}
               contents={{ open: contents, onToggle: () => setContents((o) => !o) }}
               width={{ wide, measure }}
@@ -177,7 +176,7 @@ function Fixture() {
                 onShowTerminal: () => setStage("terminal"),
                 detached: null,
               }}
-              feedback={board === "5a" ? { session: DIAL_SESSION, viewingVersion: 1, onJumpToAnchor: () => {} } : null}
+              feedback={board === "5a" ? { session: DIAL_SESSION, viewingVersion: 1, onJumpToAnchor: () => {}, focusedCommentId: focused, composer: { onSubmit: () => {} } } : null}
               composer={composer}
               terminalView={view === "terminal"}
             />

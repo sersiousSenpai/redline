@@ -4,7 +4,7 @@ import { Editor } from "@tiptap/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { planMarkdownToDoc } from "../markdown";
-import { initialsOf, MarginNotes, type MarginNote } from "./MarginNotes";
+import { MarginNotes, type MarginNote } from "./MarginNotes";
 import { planExtensions } from "./planExtensions";
 
 const MD = [
@@ -82,17 +82,5 @@ describe("MarginNotes", () => {
     editor.commands.bindMarginNoteClick(onClick);
     editor.view.dom.querySelector<HTMLElement>(".rl-margin-note")!.click();
     expect(onClick).toHaveBeenCalledWith("c-1");
-  });
-});
-
-describe("initialsOf", () => {
-  it.each([
-    ["Imani Moss", "IM"],
-    ["  imani   de la moss ", "IM"],
-    ["yusuf", "YU"],
-    ["", ""],
-    [null, ""],
-  ])("%s → %s", (name, initials) => {
-    expect(initialsOf(name)).toBe(initials);
   });
 });

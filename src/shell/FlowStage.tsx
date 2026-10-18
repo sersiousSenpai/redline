@@ -26,8 +26,6 @@
 //! here.
 
 import {
-  lazy,
-  Suspense,
   useLayoutEffect,
   useRef,
   useState,
@@ -45,14 +43,20 @@ import {
   noteRevision,
 } from "../lib/flowPose";
 import { setPanelTab, useFlow, type PlanPose } from "./flowState";
-import type { ReviewSession } from "../types";
+import { feedbackSummary } from "../lib/feedbackThreads";
+import type { Comment, ReviewSession } from "../types";
 import { PlanPanelHeader } from "./PlanPanelHeader";
 import { PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
 import type { VersionPillProps } from "./VersionPill";
-import { SessionComposer } from "./SessionComposer";
+// The Feedback tab, its header row and its composer are the feedback lane's;
+// they ride this chunk (as does feedback.css, the margin note's look).
+import FeedbackPanel, {
+  FeedbackComposer,
+  FeedbackTabs,
+  type FeedbackActions,
+  type FeedbackComposerProps,
+} from "./FeedbackPanel";
 import "./stage.css";
-
-const FeedbackPanel = lazy(() => import("./FeedbackPanel"));
 
 export type ConversationLayout = "stage" | "column" | "panel";
 
@@ -73,17 +77,22 @@ export interface FlowStageProps {
   marks: number;
   /** Marks waiting on an answer, for "entering full opens Feedback". */
   unresolved: number;
-  /** Feedback threads on the version on screen, for the tab's count. */
-  threads: number;
   viewing: VersionPillProps | null;
   contents: { open: boolean; onToggle: (() => void) | null };
   width: { wide: boolean; measure: number };
   footer: Omit<PlanPanelFooterProps, "pose">;
-  /** The Feedback tab's data; null before the session has loaded. */
+  /** The Feedback tab's data (FeedbackPanel's props, App's sources); null
+   *  before the session has loaded. */
   feedback: {
     session: ReviewSession;
     viewingVersion: number;
-    onJumpToAnchor: (anchorId: string) => void;
+    onJumpToAnchor: (anchorId: string, commentId?: string) => void;
+    focusedCommentId?: string | null;
+    submitInFlight?: boolean;
+    actions?: Partial<FeedbackActions>;
+    onViewResearch?: (comment: Comment) => void;
+    /** The tab's resting composer: a note on a selection, or on the plan. */
+    composer: Omit<FeedbackComposerProps, "session">;
   } | null;
   /** The comment composer while a mark is being written, else null. */
   composer: ReactNode;
@@ -131,6 +140,7 @@ export default function FlowStage(p: FlowStageProps) {
 
   const full = pose === "full";
   const headerPose = full ? "full" : "split";
+  const summary = p.feedback ? feedbackSummary(p.feedback.session, p.feedback.viewingVersion) : null;
   const toggleContents = p.contents.onToggle;
   return (
     <div
@@ -163,50 +173,26 @@ export default function FlowStage(p: FlowStageProps) {
       )}
       {full && (
         <aside className="rl-flow-panel" aria-label="Chat and feedback">
-          <div className="rl-flow-panel-head" role="tablist" aria-label="Right panel">
-            <button
-              type="button"
-              role="tab"
-              className="rl-flow-tab"
-              aria-selected={tab === "chat"}
-              onClick={() => setPanelTab("chat")}
-            >
-              Chat
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className="rl-flow-tab"
-              aria-selected={tab === "feedback"}
-              onClick={() => setPanelTab("feedback")}
-            >
-              Feedback
-              {p.threads > 0 && <span className="rl-flow-tab-count">{p.threads}</span>}
-            </button>
-            <span className="rl-flow-panel-spacer" />
-            {p.threads > 0 && p.unresolved === 0 && <span className="rl-flow-panel-note">All resolved</span>}
-          </div>
+          <FeedbackTabs
+            tab={tab}
+            onTab={setPanelTab}
+            count={summary?.count ?? 0}
+            allResolved={summary?.allResolved ?? false}
+          />
           <div className="rl-flow-panel-body" role="tabpanel">
             {tab === "chat" ? (
               <div ref={setSlot} className="rl-flow-convo" data-layout="panel" />
             ) : p.feedback ? (
-              <Suspense fallback={null}>
-                <FeedbackPanel
-                  session={p.feedback.session}
-                  viewingVersion={p.feedback.viewingVersion}
-                  onJumpToAnchor={p.feedback.onJumpToAnchor}
-                  composer={
-                    p.composer || (
-                      <SessionComposer
-                        terminalId={p.target.terminalId}
-                        sessionId={sessionId}
-                        harness={p.harness}
-                        placeholder="Select text in the plan, or type feedback…"
-                      />
-                    )
-                  }
-                />
-              </Suspense>
+              <FeedbackPanel
+                session={p.feedback.session}
+                viewingVersion={p.feedback.viewingVersion}
+                onJumpToAnchor={p.feedback.onJumpToAnchor}
+                focusedCommentId={p.feedback.focusedCommentId}
+                submitInFlight={p.feedback.submitInFlight}
+                actions={p.feedback.actions}
+                onViewResearch={p.feedback.onViewResearch}
+                composer={p.composer || <FeedbackComposer session={p.feedback.session} {...p.feedback.composer} />}
+              />
             ) : null}
           </div>
         </aside>

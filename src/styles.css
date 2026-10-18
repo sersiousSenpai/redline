@@ -1539,6 +1539,14 @@ p.rl-block-modified {
   max-height: 240px;
   overflow-y: auto;
 }
+/* Flow: a collapsed (accepted) comment keeps two lines of its note, where
+ * the classic card truncates to one. */
+.rl-comment-preview-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .rl-thread-scroll {
   max-height: 320px;
   overflow-y: auto;
@@ -5365,4 +5373,10 @@ html[data-rl-shell="flow"] .rl-term-dock--stage {
 .rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-toc-rail,
 .rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-doc-zoom {
   display: none;
+}
+/* The start screen as the stage: an empty plate the resting door lands in. */
+html[data-rl-shell="flow"] .rl-flow-start-plate {
+  flex: 1;
+  min-height: 0;
+  background: var(--color-canvas);
 }

@@ -11,7 +11,7 @@ export interface MarginNote {
   commentId: string;
   /** The top-level block the comment's mark sits in. */
   blockId: string;
-  /** Its author's initials, for the disc. */
+  /** Its author's initials, for the disc (lib/feedbackThreads' `noteInitials`). */
   initials: string;
   body: string;
 }
@@ -108,15 +108,17 @@ export const MarginNotes = Extension.create<unknown, MarginNotesStorage>({
   },
 });
 
+/** The note's DOM: the same classes as shell/MarginNote's `marginNoteElement`
+ *  (the feedback lane's), so one stylesheet says how a note looks. Built here
+ *  rather than imported, so the plan editor's chunk carries no flow CSS. */
 function noteDom(note: MarginNote, storage: MarginNotesStorage): HTMLElement {
   const card = document.createElement("div");
   card.className = "rl-margin-note";
   card.setAttribute("contenteditable", "false");
+  card.setAttribute("role", "note");
   card.dataset.commentId = note.commentId;
-  card.setAttribute("role", "button");
-  card.tabIndex = -1;
   const who = document.createElement("span");
-  who.className = "rl-margin-note-who";
+  who.className = "rl-margin-note-avatar";
   who.textContent = note.initials;
   who.setAttribute("aria-hidden", "true");
   const body = document.createElement("span");
@@ -126,12 +128,4 @@ function noteDom(note: MarginNote, storage: MarginNotesStorage): HTMLElement {
   card.addEventListener("mousedown", (e) => e.preventDefault());
   card.addEventListener("click", () => storage.onClick?.(note.commentId));
   return card;
-}
-
-/** "Imani Moss" → "IM"; one word → its first two letters; nothing → "". */
-export function initialsOf(name: string | null | undefined): string {
-  const words = (name ?? "").trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return "";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[words.length - 1][0]).toUpperCase();
 }

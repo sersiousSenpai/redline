@@ -207,7 +207,7 @@ async function board4c() {
   const host = '[data-portal-host="session-conversation"]';
   await cdp.evaluate(`window.__qaHost = document.querySelector('${host}')`);
   await click(".rl-plan-head-btn[aria-pressed=false]:not(.rl-plan-head-icon-btn)");
-  const toFull = await cdp.evaluate(`({ pose: document.querySelector('.rl-flow-stage').dataset.pose, tab: document.querySelector('.rl-flow-tab[aria-selected=true]')?.textContent, connected: window.__qaHost.isConnected })`);
+  const toFull = await cdp.evaluate(`({ pose: document.querySelector('.rl-flow-stage').dataset.pose, tab: document.querySelector('.rl-fb-tab[aria-selected=true]')?.textContent, connected: window.__qaHost.isConnected })`);
   check("4c → Full screen: full, and with marks waiting the panel opens on Feedback, the conversation waiting detached", toFull.pose === "full" && toFull.tab === "Feedback2" && !toFull.connected, toFull);
   await screenshot("4c-to-full-aurora");
   await cdp.evaluate("window.__qa.setTab('chat')"); await settle();
@@ -300,12 +300,14 @@ async function board5a() {
   check('5a footer: a green spinner, "Building v4: step 3 of 11" and a faint "· 1 terminal"', status.text.startsWith("Building v4: step 3 of 11") && status.color === (await tok("color-ink-3")) && faint.text === "· 1 terminal" && faint.color === (await tok("color-ink-5")) && spin.color === (await tok("color-mode-build-fg")) && near(spin.w, 13), { status: status.text, faint, spin: spin.color });
   const reopen = await mText(".rl-plan-foot", "Reopen plan");
   check('5a footer: "Reopen plan" — 34px, r9, outlined, at the right inset', near(reopen.h, 34) && near(reopen.radius, 9) && reopen.bt === 1 && near(foot.right - reopen.right, 16), reopen);
-  const ph = await m(".rl-flow-panel-head");
-  check("5a right panel header: 48px, 0 12, gap 4, 12.5px", near(ph.h, 48) && near(ph.pl, 12) && near(ph.pr, 12) && near(ph.gap, 4) && near(ph.fontSize, 12.5) && ph.bb === 1, ph);
-  const chat = await mText(".rl-flow-panel-head", "Chat"), fb = await m('.rl-flow-tab[aria-selected="true"]'), count = await m(".rl-flow-tab-count");
-  check('5a tabs: "Chat" quiet; "Feedback 16" selected — 28px, r7, the selected-row fill', near(chat.h, 28) && near(chat.pl, 10) && chat.color === (await tok("color-ink-4")) && fb.text === "Feedback16" && near(fb.h, 28) && near(fb.radius, 7) && near(fb.gap, 7) && fb.bg === (await tok("color-fill-2", "backgroundColor")) && fb.color === (await tok("color-ink")) && count.color === (await tok("color-ink-4")), { chat, fb, count });
-  const all = await m(".rl-flow-panel-note");
-  check('5a: "All resolved" at 11.5px, muted, on the right', all.text === "All resolved" && near(all.fontSize, 11.5) && all.color === (await tok("color-ink-4")) && near(panel.right - all.right, 12), all);
+  // The right panel's header and Feedback tab are the feedback lane's; the
+  // stage seats them. Measured here because the panel is the stage's cell.
+  const ph = await m(".rl-fb-tabs");
+  check("5a right panel header: 48px, 0 12, gap 4, 12.5px, hairline under", near(ph.h, 48) && near(ph.pl, 12) && near(ph.pr, 12) && near(ph.gap, 4) && near(ph.fontSize, 12.5) && ph.bb === 1, ph);
+  const chat = await mText(".rl-fb-tabs", "Chat"), fb = await m('.rl-fb-tab[aria-selected="true"]'), count = await m(".rl-fb-tab-count");
+  check('5a tabs: "Chat" quiet; "Feedback 16" selected — 28px, r7, the selected-row fill', near(chat.h, 28) && near(chat.pl, 10) && chat.color === (await tok("color-ink-4")) && fb.text === "Feedback16" && near(fb.h, 28) && near(fb.radius, 7) && fb.bg === (await tok("color-fill-2", "backgroundColor")) && fb.color === (await tok("color-ink")) && count.color === (await tok("color-ink-4")), { chat, fb, count });
+  const all = await m(".rl-fb-tabs-status");
+  check('5a: "All resolved" at 11.5px, muted, on the right', all?.text === "All resolved" && near(all.fontSize, 11.5) && all.color === (await tok("color-ink-4")) && near(panel.right - all.right, 12), all);
   await sweep("5a", "aurora");
   for (const theme of ["basic", "studio"]) {
     await load("5a", w, h, theme);

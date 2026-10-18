@@ -23,7 +23,8 @@ import type {
 import { planExtensions } from "../editor/extensions/planExtensions";
 import { RedlineDecorations } from "../editor/extensions/RedlineDecorations";
 import { CommentMarkers } from "../editor/extensions/CommentMarkers";
-import { initialsOf, MarginNotes, type MarginNote } from "../editor/extensions/MarginNotes";
+import { MarginNotes, type MarginNote } from "../editor/extensions/MarginNotes";
+import { noteInitials, noteText } from "../lib/feedbackThreads";
 import {
   CommentHighlights,
   type CommentHighlightRange,
@@ -582,10 +583,10 @@ function PlanEditorBase({
         ? []
         : (comments ?? []).flatMap<MarginNote>((c) => {
             const blockId = c.blockId ?? blockByAnchor.get(c.anchorId);
-            const body = c.body.trim();
+            const body = noteText(c);
             const open = c.status === "draft" || c.status === "submitted" || c.status === "reopened";
             if (!blockId || !body || !open) return [];
-            return [{ commentId: c.id, blockId, body, initials: initialsOf(c.reviewer ?? marginNotesBy) || "✎" }];
+            return [{ commentId: c.id, blockId, body, initials: noteInitials(c, marginNotesBy) }];
           });
     editor.commands.setMarginNotes(notes);
   }, [editor, comments, blockByAnchor, marginNotesBy]);

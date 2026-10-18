@@ -101,7 +101,13 @@ export const hasChildOverlay = () => Array.from(document.querySelectorAll(OVERLA
 /** The door's own composer box, and the context chips that ride with what it
  *  sends: where the caret is "in the box". A chat's composer is not it. */
 const BOX = ".has-welcome .rl-fd-island, .has-welcome .rl-context-chips";
-const inBox = (target: EventTarget | null) => !!(target as Element | null)?.closest?.(BOX);
+/** A send control in the box (`data-rl-door-go`, the start screen's Start)
+ *  is not the caret going into it: pressed at rest it launches where it is,
+ *  instead of zooming the door for the moment the launch takes. */
+const inBox = (target: EventTarget | null) => {
+  const element = target as Element | null;
+  return !!element?.closest?.(BOX) && !element.closest("[data-rl-door-go]");
+};
 /** A key that types into a field: what engages the resting door, and what
  *  moves the caret from the quiet room into its box. */
 const typing = (event: ReactKeyboardEvent) => !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing
@@ -130,7 +136,7 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, pill = true, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -144,6 +150,10 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   compact?: ReactNode;
   /** The empty plate: the door rests there, unengaged, instead of the pill. */
   landing?: boolean;
+  /** Whether the pill shows at all. The flow shell keeps it to the Tools
+   *  pages: its session stage and start screen have a composer of their own.
+   *  Hidden, the door is still a key (⇧⏎, ⌘⇧N) away. */
+  pill?: boolean;
   onVisibilityChange?: (visible: boolean) => void;
   context: string;
   busy: boolean;
@@ -213,7 +223,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   // The middle of the plate's free area, where the resting door is centred.
   const restCentre = useRef<{ x: number; y: number } | null>(null);
   const live = useRef({ open, compactOpen }); live.current = { open, compactOpen };
-  useNativeOverlayRegion(launcher, !visible);
+  useNativeOverlayRegion(launcher, !visible && pill);
   // The door on its way back toward the pill: still painted, already inert.
   const [closing, setClosing] = useState(false);
   // The ⌄ fading out after the door shuts — a stand-in that never takes the
@@ -335,7 +345,11 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     // The plate's column. Its horizontal edges bound the resting door the way
     // the header and dock bound it vertically — without them the layer spans
     // the whole window and the composer lands across the sessions sidebar.
-    const plate = document.querySelector<HTMLElement>(".rl-doc-column");
+    // The flow shell's stage names its own rect (`data-rl-door-plate`), and
+    // that rect is the whole of the free area: its stage already sits between
+    // the top bar, the sidebar and whatever is below.
+    const stage = document.querySelector<HTMLElement>("[data-rl-door-plate]");
+    const plate = stage ?? document.querySelector<HTMLElement>(".rl-doc-column");
     const position = () => {
       const rect = footer?.getBoundingClientRect();
       // Center within the existing footer row. This fixed overlay contributes
@@ -358,8 +372,9 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
       // keeps at rest on the empty plate, and as where its paper spreads from
       // and its box glides from when it is engaged there.
       const dockRect = termDock?.getBoundingClientRect();
-      const areaTop = header?.getBoundingClientRect().bottom ?? 0;
-      const areaBottom = dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
+      const stageRect = stage?.getBoundingClientRect();
+      const areaTop = stageRect ? stageRect.top : header?.getBoundingClientRect().bottom ?? 0;
+      const areaBottom = stageRect ? stageRect.bottom : dockRect && dockRect.height > 0 ? dockRect.top : rect && rect.height > 0 ? rect.top : window.innerHeight;
       layer.current?.style.setProperty("--fd-rest-top", `${Math.max(0, areaTop)}px`);
       layer.current?.style.setProperty("--fd-rest-bottom", `${Math.max(0, window.innerHeight - areaBottom)}px`);
       const plateRect = plate?.getBoundingClientRect();
@@ -590,7 +605,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
         const remembered = returnFocus.current;
         if (navigated.current || handoff || remembered && !remembered.isConnected) focusMain();
         else if (remembered) remembered.focus({ preventScroll: true });
-        else if (!visible) launcher.current?.focus({ preventScroll: true });
+        else if (!visible && pill) launcher.current?.focus({ preventScroll: true });
         else (active as HTMLElement | null)?.blur();
       }
       returnFocus.current = null;
@@ -761,8 +776,8 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
   // the brand as the mark rather than the word. Its name starts with what it
   // shows (WCAG 2.5.3).
   const label = busy ? "Working" : draft ? "Continue draft" : "Plan a build";
-  const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible} data-busy={busy} data-reduced={reduced}
-    tabIndex={visible ? -1 : 0} aria-hidden={visible}
+  const entrance = <button ref={launcher} type="button" className="rl-monochat-notch" data-hidden={visible || !pill} data-busy={busy} data-reduced={reduced}
+    tabIndex={visible || !pill ? -1 : 0} aria-hidden={visible || !pill}
     aria-label={busy ? `${label}, plan a build` : label}
     title="Plan a build (Shift+Enter)" aria-keyshortcuts="Shift+Enter"
     aria-expanded={open} aria-controls="rl-monochat-content"

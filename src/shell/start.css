@@ -1,0 +1,169 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* ── The start screen: the Front Door in the flow shell (board 4a) ─────────
+   Every rule here is under `.is-flow`, which FrontDoor sets only when App
+   hands it the flow props, and App does that only in the flow shell: the
+   classic door never matches one of them.
+
+   The resting door is the same island as ever — it lands in the stage's
+   rect (MonochatIsland, `[data-rl-door-plate]`), zooms when the caret goes
+   into its box, and springs the box to the window's centre — so only its
+   furniture changes here. The numbers are the board's. Colours are the flow
+   role tokens: the composer is the glass sheet with the focus rim, chips the
+   chip fill, the secondary and muted inks for chip text and hints. */
+
+/* The headline, the composer and the strip's slot stand as ONE centred group,
+   26 apart and 40 above the middle — the board centres the group, where the
+   classic door centres the box and hangs its welcome off it. Showing or
+   receding the welcome is still opacity and visibility only, so the box
+   never moves under the caret. */
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-flow { gap: 26px; padding: 0 0 40px; }
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-flow > .rl-fd-welcome { position: relative; left: auto; right: auto; bottom: auto; }
+.rl-monochat .rl-frontdoor.is-flow > .rl-fd-welcome-hero { margin: 0; }
+/* 36px serif. The line box is pinned to the board's (49px, Source Serif 4 at
+   its normal leading) so the group — and the box in it — lands where the
+   board has it whichever serif the system resolves. */
+.rl-fs-title { margin: 0; font-size: var(--rl-text-welcome); line-height: 49px; font-weight: 600; letter-spacing: -0.01em; color: var(--color-ink); text-align: center; }
+
+/* The composer: 660 wide (the board's content box — 662 with the hairline),
+   radius 16, the focus rim whether or not it holds the caret (it is the one
+   thing on the stage to use), the sheet's 0 20px 60px shadow. It never lifts:
+   the box stays exactly where the board puts it. Only its transform may
+   move — never the shadow, which the zoom deepens instantly. */
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-flow .rl-fd-island {
+  box-sizing: content-box; width: 660px; max-width: calc(100% - 2px); align-self: center;
+  padding: 0; border-radius: var(--rl-radius-start);
+  --rl-glass-ring: var(--color-focus-rim);
+  transition: transform var(--rl-dur-3) var(--rl-ease-out);
+}
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-island.is-lifted { transform: none; }
+.rl-frontdoor-focus[data-zoom] .rl-monochat .rl-floating-composer.rl-frontdoor.is-flow .rl-fd-island {
+  box-shadow: inset 1px 1px 0 var(--rl-glass-hi), inset 0 0 0 1px var(--rl-glass-ring), var(--rl-glass-shadow);
+}
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-morph { gap: 0; }
+/* Content the box only sometimes holds (attachments, plans being combined,
+   a refusal, a blocker) keeps the box's own side padding. */
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-attach,
+.rl-monochat .rl-frontdoor.is-flow .rl-cmb-pills,
+.rl-monochat .rl-frontdoor.is-flow .rl-cmb-fuse { margin: 12px 18px 0; }
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-island > .rl-fd-refused,
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-island > .rl-fd-block { margin: 0 14px 12px; }
+
+/* Row one: Chat | Plan, and what the mode does. The track is the window's
+   colour in a 3px-padded r9 hairline; a segment is 26 tall, r6. Plan, chosen,
+   is the plan blue's tint with a blue icon; Chat, chosen, the track fill. */
+.rl-fs-moderow { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 12px 14px 0; }
+.rl-fs-modes {
+  display: flex; flex: none; padding: 3px; border: 1px solid var(--color-rule); border-radius: var(--rl-radius-button);
+  background: var(--color-canvas); font-size: var(--rl-text-chrome);
+}
+.rl-fs-modes button {
+  display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border: 0; border-radius: var(--rl-radius-chip);
+  background: transparent; color: var(--color-ink-3); font: inherit; cursor: pointer;
+}
+.rl-fs-modes button:hover { color: var(--color-ink); }
+.rl-fs-modes button[aria-checked="true"] { background: var(--color-fill-3); color: var(--color-ink); }
+.rl-fs-modes button[data-mode="plan"][aria-checked="true"] { background: var(--color-mode-plan-bg); }
+.rl-fs-modes button[data-mode="plan"][aria-checked="true"] svg { color: var(--color-mode-plan-fg); }
+.rl-fs-modes button:focus-visible { outline: 2px solid var(--color-info); outline-offset: 1px; }
+.rl-fs-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-ink-4); }
+
+/* A piece of the row still on its way (the furniture's chunk): its place is
+   held, so the box is the board's size from its first frame. */
+.rl-fs-slot { display: block; flex: 1; height: 32px; }
+.rl-fs-slot.is-modes { flex: none; height: 34px; }
+
+/* The prompt: 16/1.5, 18 18 22 — one line is 64 tall. */
+.rl-monochat .rl-floating-composer.rl-frontdoor.is-flow .rl-fd-input {
+  min-height: 64px; padding: 18px 18px 22px; font-size: 16px; line-height: 1.5; color: var(--color-ink);
+}
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-input::placeholder { color: var(--color-ink-4); }
+
+/* The chips row: folder first, then model · effort, a spacer, 📎, the voice
+   pair and Start. 30px chips at r8 on the chip fill, the secondary ink, their
+   icons muted. A long model name gives way before anything else does. */
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools {
+  flex-wrap: nowrap; gap: 6px; min-width: 0; padding: 0 12px 12px;
+  font-size: var(--rl-text-chrome); color: var(--color-ink-3);
+}
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools > div[data-no-drag] { flex: 0 1 auto; min-width: 0; max-width: none; }
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip {
+  gap: 7px; height: 30px; min-height: 30px; padding: 0 10px; border: 0; border-radius: var(--rl-radius-menu-row);
+  background: var(--color-fill-1); color: var(--color-ink-3); font-size: var(--rl-text-chrome);
+}
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip:hover,
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip[aria-expanded="true"] { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip > svg { width: 13px; height: 13px; color: var(--color-ink-4); }
+.rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip > svg:last-child { width: 11px; height: 11px; }
+/* In the model's own line, 7 after it (the row's gap), so a squeezed chip
+   cuts "last used" before the model's name. */
+.rl-fs-lastused { margin-left: 7px; color: var(--color-ink-4); }
+.rl-fs-spacer { flex: 1 1 0; min-width: 0; }
+
+/* 📎 and the mic: bare 30px glyphs in the muted ink (an icon's 3:1 is the
+   floor they are held to). The mic and Talk sit together as the voice pair. */
+.rl-fs-icon {
+  display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; padding: 0; border: 0;
+  border-radius: var(--rl-radius-menu-row); background: transparent; color: var(--color-ink-4); cursor: pointer;
+}
+.rl-fs-icon:hover, .rl-fs-icon.is-hot { background: var(--color-fill-1); color: var(--color-ink); }
+.rl-fs-voice { display: inline-flex; align-items: center; flex: none; }
+.rl-fs-talk {
+  height: 30px; padding: 0 9px; border: 0; border-radius: var(--rl-radius-menu-row);
+  background: transparent; color: var(--color-ink-3); font: inherit; font-size: var(--rl-text-chrome); cursor: pointer;
+}
+.rl-fs-talk:hover { background: var(--color-fill-1); color: var(--color-ink); }
+.rl-fs-talk[aria-pressed="true"] { background: var(--color-mode-plan-bg); color: var(--color-mode-plan-fg); }
+.rl-fs-icon:focus-visible, .rl-fs-talk:focus-visible { outline: 2px solid var(--color-info); outline-offset: 1px; }
+
+/* "Start plan ↵": 32px, r9, filled with the ink, weight 600. */
+.rl-fs-go {
+  display: inline-flex; align-items: center; gap: 8px; flex: none; height: 32px; padding: 0 12px 0 14px; border: 0;
+  border-radius: var(--rl-radius-button); background: var(--color-ink); color: var(--color-paper);
+  font: inherit; font-size: var(--rl-text-chrome); font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+.rl-fs-go:disabled { opacity: 0.45; cursor: default; }
+.rl-fs-go:focus-visible { outline: 2px solid var(--color-info); outline-offset: 2px; }
+.rl-fs-key { font-size: 11px; opacity: 0.6; }
+
+/* The strip's slot: 18px in the group, whether or not the strip shows, so the
+   box keeps its place when the strip retires or arrives late. */
+.rl-monochat .rl-frontdoor.is-flow > .rl-fs-foot { height: 18px; }
+
+/* Under the slot and out of flow: the first-run checklist, then the
+   Continue links. Interactive at rest, where the door's welcome takes no
+   pointer. The checklist is the composer's width and each fault one line
+   of detail (its whole text is the row's tooltip), so three of them and the
+   links still fit under a 1280 × 800 window's stage. */
+.rl-fs-orbit { position: absolute; top: calc(100% + 16px); left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.rl-monochat .rl-fs-orbit :is(button, a) { pointer-events: auto; }
+.rl-fs-checklist {
+  box-sizing: border-box; width: min(662px, 100%); padding: 10px 14px 4px; border: 1px solid var(--color-rule); border-radius: var(--rl-radius-card);
+  background: var(--color-fill-1); text-align: left;
+}
+.rl-fs-checklist-head { margin: 0 0 4px; font-size: var(--rl-text-label); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-ink-4); }
+.rl-fs-checklist ul { margin: 0; padding: 0; list-style: none; }
+.rl-fs-check { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.rl-fs-check + .rl-fs-check { border-top: 1px solid var(--color-rule); }
+.rl-fs-check > .rl-fd-dot { flex: none; }
+.rl-fs-check-text { flex: 1; min-width: 0; }
+.rl-fs-check-label { display: block; font-size: var(--rl-text-row); line-height: 1.4; color: var(--color-ink-2); }
+.rl-fs-check-detail { display: block; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.45; color: var(--color-ink-4); }
+.rl-fs-check > :last-child:not(.rl-fs-check-text) { flex: none; }
+.rl-fs-continue { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 18px; max-width: 100%; }
+.rl-fs-continue button {
+  max-width: 100%; min-height: 24px; padding: 2px 4px; border: 0; border-radius: var(--rl-radius-chip); background: none;
+  color: var(--color-ink-4); font: inherit; font-size: var(--rl-text-chrome); cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rl-fs-continue-title { color: var(--color-ink-2); text-decoration: underline 1px var(--color-rule-strong); text-underline-offset: 4px; }
+.rl-fs-continue button:hover .rl-fs-continue-title, .rl-fs-continue button:focus-visible .rl-fs-continue-title { color: var(--color-ink); }
+.rl-fs-continue button:focus-visible { outline: 2px solid var(--color-info); outline-offset: 1px; }
+
+/* The zoom: the strip and what hangs below it drop away as the headline
+   rises, as the classic door's recents do. On a short stage the group sheds
+   its welcome outright — in flow it is in the group, so hiding it alone
+   would leave its room behind (MonochatIsland's `landingFit`). */
+.rl-frontdoor-focus[data-zoom] .rl-monochat .rl-frontdoor.is-flow > .rl-fs-foot { transform: translateY(6px); }
+.rl-frontdoor-focus[data-rest="pills"] .rl-frontdoor.is-flow > .rl-fd-welcome-hero,
+.rl-frontdoor-focus[data-rest="bare"] .rl-frontdoor.is-flow > .rl-fd-welcome { display: none; }
