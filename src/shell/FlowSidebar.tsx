@@ -7,31 +7,57 @@
 //! The open session's versions nest under it; archived rows wait in a fold
 //! at the end.
 //!
+//! Every row says where it is in its life on a second line, in its colour,
+//! with how long ago (lib/sessionGroups `rowStatus`): Planning, In review,
+//! Approved · not built, Built… and on the first line its unsent marks or
+//! its version. A spinner means something is running right now.
+//!
 //! `SessionSidebar` renders this for `layout="flow"`, lazily, so the classic
 //! shell never loads it. Every row has a ⋯ (also right-click, and ⌫ to
-//! delete), always visible: faint at rest, full under the pointer.
+//! delete), shown under the pointer in place of the version.
 
 import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown, FilePenLine, FileText, Loader, MessageSquare, Plus } from "lucide-react";
+import {
+  ChevronDown, CircleCheck, CircleCheckBig, Download, Eye, FilePenLine, FileText, FolderInput, Hammer, LoaderCircle,
+  MessageSquare, Play, Plus, TriangleAlert, X,
+} from "lucide-react";
 import type { SessionSidebarProps } from "../components/SessionSidebar";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "../components/RowMenu";
+import type { ManualPlanState } from "../components/PlanStateMenu";
+import type { JoinedSessionInfo } from "../collab/useJoinedSession";
 import {
   buildSidebar,
   itemKey,
+  rowAge,
+  rowStatus,
   versionRows,
   type SidebarItem,
   type SidebarSection,
+  type StatusIcon,
+  type StatusTone,
 } from "../lib/sessionGroups";
-import { isBuildingRunState, type ModeKind } from "../lib/sessionMode";
+import { isLiveRunState } from "../lib/orchestration";
+import { latestDisplayVersion } from "../lib/revisionVersions";
 import "./FlowSidebar.css";
 
-/** The open row's icon wears its mode (4b's blue spinner, 4d's amber pen,
- *  5a's green loader). A chat has no mode colour. */
-const MODE_FG: Record<ModeKind, string> = {
+/** A status's colour: the top bar's mode inks, contrast-safe in every theme. */
+const TONE: Record<StatusTone, string> = {
   plan: "var(--color-mode-plan-fg)",
   redline: "var(--color-mode-redline-fg)",
   build: "var(--color-mode-build-fg)",
-  chat: "var(--color-ink)",
+  quiet: "var(--color-ink-4)",
+};
+
+const ICON: Record<Exclude<StatusIcon, "dot">, typeof FileText> = {
+  spin: LoaderCircle,
+  alert: TriangleAlert,
+  pen: FilePenLine,
+  hammer: Hammer,
+  check: CircleCheck,
+  built: CircleCheckBig,
+  run: Play,
+  chat: MessageSquare,
+  file: FileText,
 };
 
 /** What the row does, by kind; id-based so a memoized row keeps them. */
@@ -41,6 +67,20 @@ interface RowHandlers {
   archive: (item: SidebarItem) => void;
   remove: (item: SidebarItem) => void;
   selectRevision: (sessionId: string, versionNumber: number | null) => void;
+  exportVersion: (sessionId: string, versionNumber: number) => void;
+  setState?: (sessionId: string, state: ManualPlanState) => void;
+  move?: (sessionId: string) => void;
+  openRun?: (sessionId: string) => void;
+}
+
+/** What only the host knows about a row: unsent marks, an arrival it hasn't
+ *  been looked at since, and whether its project needs naming (a Needs you
+ *  row sits outside its project's group). */
+interface RowExtra {
+  pending: number;
+  unseen: boolean;
+  glow: number | null;
+  showProject: boolean;
 }
 
 export default function FlowSidebar(props: SessionSidebarProps) {
@@ -48,7 +88,8 @@ export default function FlowSidebar(props: SessionSidebarProps) {
     sessions, activeId, chats, activeChatId, launches, activeLaunchId, needs, working,
     viewedVersionNumber, onNewSession, onNewSessionIn,
     onSelect, onSelectChat, onSelectLaunch, onRename, onRenameChat, onArchive, onArchiveChat,
-    onDelete, onDeleteChat, onSelectRevision,
+    onDelete, onDeleteChat, onSelectRevision, onExport, onSetPlanState, onMoveProject, onOpenRunReport,
+    pendingCounts, unseenIds, arrivalGlow, joined, onSelectJoined, onLeaveJoined,
   } = props;
   // The start screen owns the stage when nothing is open; while it shows, no
   // row reads as open even if a plan is still selected underneath.
@@ -95,13 +136,17 @@ export default function FlowSidebar(props: SessionSidebarProps) {
       else if (item.kind === "chat") onDeleteChat?.(item.id);
     },
     selectRevision: onSelectRevision,
-  }), [onSelect, onSelectChat, onSelectLaunch, onRename, onRenameChat, onArchive, onArchiveChat, onDelete, onDeleteChat, onSelectRevision]);
+    exportVersion: onExport,
+    setState: onSetPlanState,
+    move: onMoveProject,
+    openRun: onOpenRunReport,
+  }), [onSelect, onSelectChat, onSelectLaunch, onRename, onRenameChat, onArchive, onArchiveChat, onDelete, onDeleteChat, onSelectRevision, onExport, onSetPlanState, onMoveProject, onOpenRunReport]);
   const can = useMemo(() => ({
     renamePlan: !!onRename, renameChat: !!onRenameChat, archivePlan: !!onArchive, archiveChat: !!onArchiveChat, deleteChat: !!onDeleteChat,
   }), [onRename, onRenameChat, onArchive, onArchiveChat, onDeleteChat]);
   const archivedShown = archivedOpen || model.archived.some((item) => item.key === activeKey);
 
-  const row = (item: SidebarItem) => (
+  const row = (item: SidebarItem, inNeeds = false) => (
     <FlowRow
       key={item.key}
       item={item}
@@ -109,8 +154,13 @@ export default function FlowSidebar(props: SessionSidebarProps) {
       viewedVersionNumber={item.key === activeKey ? viewedVersionNumber : null}
       handlers={handlers}
       can={can}
+      pending={item.kind === "plan" ? pendingCounts[item.id] ?? 0 : 0}
+      unseen={item.kind === "plan" && !!unseenIds?.has(item.id)}
+      glow={item.kind === "plan" && arrivalGlow?.sessionId === item.id ? arrivalGlow.nonce : null}
+      showProject={inNeeds}
     />
   );
+  const empty = model.sections.length === 0 && model.archived.length === 0 && !joined;
   return (
     <nav className="rl-sb" aria-label="Sessions">
       <div className="rl-sb-head">
@@ -130,19 +180,32 @@ export default function FlowSidebar(props: SessionSidebarProps) {
         </button>
       </div>
       <div className="rl-sb-scroll rl-thin-scroll-y">
+        {joined && (
+          <section className="rl-sb-section" aria-label="Live session">
+            <div className="rl-sb-label"><span>Live session</span></div>
+            <ul className="rl-sb-rows">
+              <JoinedRow joined={joined} active={activeId === joined.key} onSelect={onSelectJoined} onLeave={onLeaveJoined} />
+            </ul>
+          </section>
+        )}
         {model.sections.map((section) => (
           <Section key={section.id} section={section} open={expanded.has(section.id)} onToggle={toggleSection}
             onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}>
-            {section.rows.map(row)}
+            {section.rows.map((item) => row(item, section.kind === "needs"))}
           </Section>
         ))}
+        {empty && (
+          <p className="rl-sb-empty">
+            No sessions yet. Start one with <b>New session</b> above, or ⌘N.
+          </p>
+        )}
         {model.archived.length > 0 && (
           <section className="rl-sb-section">
             <button type="button" className="rl-sb-fold" aria-expanded={archivedShown} onClick={() => setArchivedOpen((v) => !v)}>
               Archived · {model.archived.length}
               <ChevronDown size={12} aria-hidden data-open={archivedShown || undefined} />
             </button>
-            {archivedShown && <ul className="rl-sb-rows">{model.archived.map(row)}</ul>}
+            {archivedShown && <ul className="rl-sb-rows" data-archived="">{model.archived.map((item) => row(item))}</ul>}
           </section>
         )}
       </div>
@@ -182,17 +245,44 @@ function Section({ section, open, onToggle, onAdd, children }: {
   );
 }
 
-function RowIcon({ item, active }: { item: SidebarItem; active: boolean }) {
-  // Needs you trades the icon for an amber dot (5a).
-  if (item.need) return <i className="rl-sb-dot" aria-hidden />;
-  const color = active ? MODE_FG[item.mode] : undefined;
-  if (item.working || isBuildingRunState(item.session?.runState)) return <Loader size={13} aria-hidden className="rl-sb-spin" style={{ color }} />;
-  if (item.kind === "chat") return <MessageSquare size={13} aria-hidden style={{ color }} />;
-  if (item.mode === "redline") return <FilePenLine size={13} aria-hidden style={{ color }} />;
-  return <FileText size={13} aria-hidden style={{ color }} />;
+function StatusGlyph({ icon, tone }: { icon: StatusIcon; tone: StatusTone }) {
+  // Needs you trades the icon for a dot in its colour (5a).
+  if (icon === "dot") return <i className="rl-sb-dot" aria-hidden style={{ background: TONE[tone] }} />;
+  const Icon = ICON[icon];
+  return <Icon size={14} aria-hidden className={icon === "spin" ? "rl-sb-spin" : undefined} style={{ color: TONE[tone] }} />;
 }
 
-function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
+/** A live room this window is a guest in: its own green dot, who shares it,
+ *  and a way to leave. */
+function JoinedRow({ joined, active, onSelect, onLeave }: {
+  joined: JoinedSessionInfo;
+  active: boolean;
+  onSelect?: () => void;
+  onLeave?: () => void;
+}) {
+  return (
+    <li className="rl-sb-item" data-active={active || undefined}>
+      <button type="button" className="rl-sb-row" aria-current={active ? "page" : undefined} title={`Live session shared by ${joined.ownerName ?? "its owner"}`} onClick={onSelect}>
+        <span className="rl-sb-icon"><i className="rl-sb-live" aria-hidden /></span>
+        <span className="rl-sb-text">
+          <span className="rl-sb-line"><span className="rl-sb-title">{joined.title}</span></span>
+          <span className="rl-sb-meta">
+            <span className="rl-sb-status" style={{ color: TONE.build }}>Live</span>
+            {joined.ownerName && <span>· shared by {joined.ownerName}</span>}
+          </span>
+        </span>
+        <span className="rl-sb-end"><span className="rl-sb-ver">v{joined.version}</span></span>
+      </button>
+      {onLeave && (
+        <button type="button" className="rl-sb-dots" aria-label="Leave this live session" title="Leave this live session" onClick={onLeave}>
+          <X size={13} aria-hidden />
+        </button>
+      )}
+    </li>
+  );
+}
+
+function FlowRowBase({ item, active, viewedVersionNumber, handlers, can, pending, unseen, glow, showProject }: RowExtra & {
   item: SidebarItem;
   active: boolean;
   viewedVersionNumber: number | null;
@@ -215,7 +305,7 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
   // A launch has no plan or chat record yet, so nothing to rename, archive
   // or delete: its menu only opens it.
   const actions: RowAction[] = item.kind === "plan" && item.session
-    ? planRowActions(item.session, acts)
+    ? planActions(item.session, acts, handlers)
     : item.kind === "chat"
       ? chatRowActions(item, acts)
       : [{ label: "Open session", icon: <FileText size={14} aria-hidden />, onSelect: acts.open }];
@@ -241,7 +331,12 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
     setRenaming(false);
     setConfirming(false);
   };
-  const icon = <span className="rl-sb-icon"><RowIcon item={item} active={active} /></span>;
+  const status = rowStatus(item);
+  const icon = <span className="rl-sb-icon"><StatusGlyph icon={status.icon} tone={status.tone} /></span>;
+  const s = item.session;
+  const version = s && s.revisions.length > 0 ? latestDisplayVersion(s.revisions, s.revisions[s.revisions.length - 1].versionNumber) : null;
+  const project = showProject ? (s?.projectName || (item.projectPath ? item.projectPath.split("/").filter(Boolean).pop() : null)) : null;
+  const tooltip = [item.title, item.projectPath, status.detail].filter(Boolean).join("\n");
   return (
     <li
       className="rl-sb-item"
@@ -295,12 +390,32 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
             type="button"
             className="rl-sb-row"
             aria-current={active ? "page" : undefined}
-            title={item.title}
+            title={tooltip}
             onClick={() => handlers.pick(item)}
           >
+            {glow !== null && <span key={glow} className="rl-sb-arrival" aria-hidden />}
             {icon}
-            <span className="rl-sb-title">{item.title}</span>
-            {item.need && <span className="rl-sb-tag">{item.need}</span>}
+            <span className="rl-sb-text">
+              <span className="rl-sb-line">
+                <span className="rl-sb-title">{item.title}</span>
+                {unseen && <i className="rl-sb-unseen" title="A new plan arrived" aria-label="New" />}
+              </span>
+              <span className="rl-sb-meta">
+                {project && <span className="rl-sb-project">{project} ·</span>}
+                <span className="rl-sb-status" style={{ color: TONE[status.tone] }}>{status.word}</span>
+                {s?.attachState === "detached" && status.tone !== "quiet" && <span className="rl-sb-flag" title="Its CLI session ended; restore it from the plan">ended</span>}
+                {s?.backend === "codex" && <span className="rl-sb-flag" title={`Planned by Codex${s.model ? ` · ${s.model}` : ""}`}>Codex</span>}
+                {/* A Needs you row names its project instead: it is now. */}
+                {!project && <span className="rl-sb-age">· {rowAge(item.at)}</span>}
+              </span>
+            </span>
+            <span className="rl-sb-end">
+              {pending > 0 ? (
+                <span className="rl-sb-count" title={`${pending} unsent mark${pending === 1 ? "" : "s"}`}>{pending}</span>
+              ) : version !== null ? (
+                <span className="rl-sb-ver">v{version}</span>
+              ) : null}
+            </span>
           </button>
           <RowMenu
             open={menuOpen}
@@ -316,6 +431,7 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
         <ul className="rl-sb-versions" aria-label="Versions">
           {versions.map((v) => (
             <li key={v.versionNumber}>
+              {v.threadStart && <span className="rl-sb-thread">New plan in this terminal</span>}
               <button
                 type="button"
                 className="rl-sb-version"
@@ -325,6 +441,15 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
               >
                 {v.label}
                 <span>{v.date}</span>
+              </button>
+              <button
+                type="button"
+                className="rl-sb-version-dl"
+                aria-label={`Download ${v.label.split(" ")[0]} as Markdown`}
+                title={`Download ${v.label.split(" ")[0]} as Markdown`}
+                onClick={() => handlers.exportVersion(item.id, v.versionNumber)}
+              >
+                <Download size={12} aria-hidden />
               </button>
             </li>
           ))}
@@ -339,6 +464,11 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
  *  identity (App's `refreshSummaries`), so comparing the fields is enough. */
 const FlowRow = memo(FlowRowBase, (a, b) =>
   a.active === b.active &&
+  a.pending === b.pending &&
+  a.unseen === b.unseen &&
+  a.glow === b.glow &&
+  a.showProject === b.showProject &&
+  a.item.at === b.item.at &&
   a.viewedVersionNumber === b.viewedVersionNumber &&
   a.handlers === b.handlers &&
   a.can === b.can &&
@@ -350,6 +480,31 @@ const FlowRow = memo(FlowRowBase, (a, b) =>
   a.item.archivedAt === b.item.archivedAt &&
   a.item.session === b.item.session,
 );
+
+/** A plan's menu: classic's row menu, plus what classic kept on the row's
+ *  chips (its run, Move to repo, the manual state) and a download. */
+function planActions(
+  s: NonNullable<SidebarItem["session"]>,
+  acts: { open: () => void; rename?: () => void; archive?: () => void; remove?: () => void },
+  h: RowHandlers,
+): RowAction[] {
+  const base = planRowActions(s, acts);
+  const removeAt = base.findIndex((a) => a.danger);
+  const head = removeAt >= 0 ? base.slice(0, removeAt) : base;
+  const tail = removeAt >= 0 ? base.slice(removeAt) : [];
+  const live = isLiveRunState(s.runState);
+  // Classic's PlanStateMenu rule: nothing to set while Claude waits on the
+  // review or a run is live.
+  const locked = s.held || live;
+  const extra: RowAction[] = [];
+  if (s.runState && h.openRun) extra.push({ label: live ? "Watch the run" : "Open the run report", icon: <Eye size={14} aria-hidden />, onSelect: () => h.openRun!(s.sessionId), divided: true });
+  if (h.setState && s.status === "approved" && s.runState !== "landed") extra.push({ label: "Mark as built", icon: <CircleCheckBig size={14} aria-hidden />, disabled: locked, onSelect: () => h.setState!(s.sessionId, "completed"), divided: extra.length === 0 });
+  if (h.setState && s.status !== "in_review") extra.push({ label: "Back to in review", icon: <FilePenLine size={14} aria-hidden />, disabled: locked, onSelect: () => h.setState!(s.sessionId, "in_review"), divided: extra.length === 0 });
+  if (h.move) extra.push({ label: "Move to repo…", icon: <FolderInput size={14} aria-hidden />, onSelect: () => h.move!(s.sessionId), divided: extra.length === 0 });
+  const last = s.revisions[s.revisions.length - 1];
+  if (last) extra.push({ label: "Download as Markdown", icon: <Download size={14} aria-hidden />, onSelect: () => h.exportVersion(s.sessionId, last.versionNumber) });
+  return [...head, ...extra, ...tail];
+}
 
 /** The existing two-step delete, inline in the row: ⌫ or the menu asks,
  *  Delete confirms, Escape or Cancel backs out. A held plan's delete also

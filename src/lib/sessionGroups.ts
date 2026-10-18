@@ -9,21 +9,19 @@
 //! spinner before any plan row exists in the database, and the plan's row
 //! replaces it once the plan arrives from the same terminal.
 //!
-//! Sections are ordered by what each row needs from you:
+//! Sections: **Needs you** first (Claude is blocked on you: a question, a
+//! permission, a run waiting on its code review, a stalled run), only while
+//! something does; then one group per project, the most recent first.
 //!
-//! 1. **Needs you**: Claude is blocked on you (a question, a permission, a
-//!    run waiting on its code review, a stalled run).
-//! 2. **Building**: an approved plan an agent is building.
-//! 3. **In review**: a plan that is yours to redline, with nothing blocked.
-//! 4. **By project**: everything else, one group per folder.
-//!
-//! The first three appear only while something needs you or is building
-//! (board 5a). Otherwise the list is just the project groups (4a–4d), and a
-//! plan in review sits in its project like any other row.
+//! Where a row is in its life (planning, in review, approved, building,
+//! built) is the row's own status line (`rowStatus`), in its colour, on every
+//! row; not a section. A section per stage put a stale "building" (nothing
+//! ever moves a plan out of it when the agent finishes) at the top of the
+//! list for good, spinning.
 
 import type { SessionSummary } from "../types";
 import { computeRevisionDisplay } from "./revisionVersions";
-import { isBuildingRunState, sessionMode, type ModeKind } from "./sessionMode";
+import { sessionMode, type ModeKind } from "./sessionMode";
 
 /** Why a row is in Needs you; the tag at the row's right end. */
 export type NeedReason = "Question" | "Permission" | "Review" | "Stalled";
@@ -67,11 +65,11 @@ export interface SidebarItem {
   session?: SessionSummary;
 }
 
-export type SectionKind = "needs" | "building" | "review" | "project";
+export type SectionKind = "needs" | "project";
 
 export interface SidebarSection {
-  /** `needs` · `building` · `review` · `project:<path>` (`project:` alone for
-   *  rows with no folder). Stable across renders: it keys "Show N more". */
+  /** `needs` · `project:<path>` (`project:` alone for rows with no folder).
+   *  Stable across renders: it keys "Show N more". */
   id: string;
   kind: SectionKind;
   /** As written; the sidebar sets it in small caps. */
@@ -88,7 +86,7 @@ export interface SidebarSection {
 }
 
 export interface SidebarModel {
-  /** Something needs you or is building, so the live sections lead. */
+  /** Something needs you, so that section leads. */
   live: boolean;
   sections: SidebarSection[];
   /** Archived plans and chats, newest archive first, for the closing fold. */
@@ -110,14 +108,11 @@ export interface SidebarInput {
   expanded?: ReadonlySet<string>;
 }
 
-/** Rows a section shows before "Show N more". Needs you and Building never
- *  fold: each row there is something to act on. In review folds at five
- *  (board 5a: five rows, then "Show 9 more"), and so does a project. */
+/** Rows a section shows before "Show N more". Needs you never folds: each
+ *  row there is something to act on. A project folds at six. */
 export const SECTION_LIMIT: Record<SectionKind, number> = {
   needs: Infinity,
-  building: Infinity,
-  review: 5,
-  project: 5,
+  project: 6,
 };
 
 export const itemKey = (kind: ItemKind, id: string): string => `${kind}:${id}`;
@@ -277,19 +272,76 @@ export function buildSidebar(input: SidebarInput): SidebarModel {
   const archived = all.filter((item) => item.archivedAt !== null).sort((a, b) => b.archivedAt! - a.archivedAt! || byRecency(a, b));
   const current = all.filter((item) => item.archivedAt === null);
   const needs = current.filter((item) => item.need !== null);
-  const building = current.filter((item) => item.need === null && isBuildingRunState(item.session?.runState));
-  const live = needs.length > 0 || building.length > 0;
-  if (!live) return { live, sections: projectSections(current, input), archived };
-  const review = current.filter(
-    (item) => item.need === null && !isBuildingRunState(item.session?.runState) && item.session?.status === "in_review",
-  );
-  const sorted = new Set([...needs, ...building, ...review]);
+  const live = needs.length > 0;
   const sections: SidebarSection[] = [];
-  if (needs.length) sections.push(fold("needs", "needs", "Needs you", null, needs.sort(byRecency), input));
-  if (building.length) sections.push(fold("building", "building", "Building", null, building.sort(byRecency), input));
-  if (review.length) sections.push(fold("review", "review", "In review", null, review.sort(byRecency), input));
-  sections.push(...projectSections(current.filter((item) => !sorted.has(item)), input));
+  if (live) sections.push(fold("needs", "needs", "Needs you", null, needs.sort(byRecency), input));
+  sections.push(...projectSections(current.filter((item) => item.need === null), input));
   return { live, sections, archived };
+}
+
+// ── A row's status line ─────────────────────────────────────────────────────
+
+/** The colour a status wears: the top bar's mode inks (plan blue, redlining
+ *  amber, building green) plus a quiet grey. */
+export type StatusTone = "plan" | "redline" | "build" | "quiet";
+
+export type StatusIcon = "spin" | "dot" | "alert" | "pen" | "hammer" | "check" | "built" | "run" | "chat" | "file";
+
+export interface RowStatus {
+  /** The status line's first word(s): "In review", "Approved · not built". */
+  word: string;
+  tone: StatusTone;
+  icon: StatusIcon;
+  /** The longer story, for the tooltip. */
+  detail?: string;
+}
+
+const NEED_STATUS: Record<NeedReason, RowStatus> = {
+  Question: { word: "Question for you", tone: "redline", icon: "dot", detail: "Claude asked you something and is waiting" },
+  Permission: { word: "Needs permission", tone: "redline", icon: "dot", detail: "Claude is waiting for you to allow a tool" },
+  Review: { word: "Ready for review", tone: "redline", icon: "dot", detail: "The run finished and waits on your review" },
+  Stalled: { word: "Stalled", tone: "redline", icon: "alert", detail: "The run stopped making progress" },
+};
+
+/** Where a row is in its life, in one line. A spinner means something is
+ *  running right now: a terminal mid-turn, or an orchestrated run the run
+ *  watcher keeps honest. A build handed to an agent in its terminal is
+ *  "Approved" with a hammer, never a spinner: nothing tells Redline when that
+ *  agent finishes, so a spinner there would spin forever. */
+export function rowStatus(item: Pick<SidebarItem, "kind" | "need" | "working" | "session">): RowStatus {
+  if (item.need) return NEED_STATUS[item.need];
+  if (item.kind === "chat") return item.working ? { word: "Replying", tone: "plan", icon: "spin" } : { word: "Chat", tone: "quiet", icon: "chat" };
+  if (item.kind === "launch") return item.working ? { word: "Planning", tone: "plan", icon: "spin" } : { word: "Waiting", tone: "quiet", icon: "file", detail: "Claude is idle in its terminal, with no plan yet" };
+  const s = item.session;
+  if (!s) return { word: "Plan", tone: "quiet", icon: "file" };
+  if (item.working) {
+    return s.status === "approved"
+      ? { word: "Building", tone: "build", icon: "spin", detail: "An agent is building this plan in its terminal" }
+      : { word: s.held ? "Planning" : "Revising", tone: "plan", icon: "spin", detail: "Claude is working in this plan's terminal" };
+  }
+  if (s.runState === "orchestrating") return { word: "Starting the run", tone: "build", icon: "spin" };
+  if (s.runState === "running") return { word: "Running", tone: "build", icon: "spin", detail: "An orchestrated run is building this plan" };
+  if (s.status === "in_review") return { word: "In review", tone: "redline", icon: "pen", detail: s.held ? "Claude is waiting on your review" : undefined };
+  if (s.status === "aborted") return { word: "Aborted", tone: "quiet", icon: "file" };
+  switch (s.runState) {
+    case "landed": return { word: "Built", tone: "build", icon: "built" };
+    case "building": return { word: "Approved", tone: "build", icon: "hammer", detail: "Handed to an agent to build in its terminal" };
+    case "ready": return { word: "Run ready", tone: "build", icon: "run", detail: "A run is drafted and waits on you to start it" };
+    case "abandoned": return { word: "Stood down", tone: "quiet", icon: "file" };
+    default: return { word: "Approved · not built", tone: "build", icon: "check" };
+  }
+}
+
+/** "now", "5m", "3h", "2d", then the date. */
+export function rowAge(at: number, now: number = Date.now()): string {
+  const minutes = Math.floor((now - at) / 60_000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 export interface VersionRow {
@@ -301,6 +353,8 @@ export interface VersionRow {
   latest: boolean;
   /** The revision on screen. */
   viewed: boolean;
+  /** A new plan began here in the same terminal: a thread boundary. */
+  threadStart: boolean;
 }
 
 /** The open session's versions, oldest first (board 5a). `viewedVersionNumber`
@@ -312,7 +366,7 @@ export function versionRows(
 ): VersionRow[] {
   const display = computeRevisionDisplay(session.revisions);
   const today = new Date(now).toDateString();
-  return session.revisions.map((r) => {
+  return session.revisions.map((r, index) => {
     const info = display.get(r.versionNumber);
     const latest = info?.isLatest ?? false;
     const when = new Date(r.receivedAt);
@@ -326,6 +380,7 @@ export function versionRows(
           : when.toLocaleDateString([], { month: "short", day: "numeric" }),
       latest,
       viewed: viewedVersionNumber === null ? latest : r.versionNumber === viewedVersionNumber,
+      threadStart: index > 0 && !!r.threadStart && !r.restored,
     };
   });
 }

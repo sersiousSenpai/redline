@@ -5,12 +5,15 @@ import {
   buildSidebar,
   itemKey,
   planRowMode,
+  rowAge,
+  rowStatus,
   SECTION_LIMIT,
   sidebarItems,
   versionRows,
   type FlowChat,
   type FlowLaunch,
   type SidebarInput,
+  type SidebarItem,
 } from "./sessionGroups";
 import { isBuildingRunState } from "./sessionMode";
 
@@ -56,22 +59,21 @@ describe("a plan row's mode, in the top bar's words", () => {
 });
 
 describe("which section a row sorts into", () => {
-  // One live row turns the sections on; the table is what each row becomes.
-  const live = plan("live", { status: "approved", runState: "building", projectPath: "/code/other", projectName: "other", updatedAt: 1 });
   it.each([
-    ["a held plan awaiting review (redlining)", plan("x", { status: "in_review", held: true, awaitingReview: true }), "In review", null],
+    ["a held plan awaiting review (redlining)", plan("x", { status: "in_review", held: true, awaitingReview: true }), "din", null],
     ["a run waiting on its code review", plan("x", { runState: "in_code_review" }), "Needs you", "Review"],
     ["an overnight run parked for review", plan("x", { runState: "awaiting_review" }), "Needs you", "Review"],
     ["a stalled run", plan("x", { runState: "stalled" }), "Needs you", "Stalled"],
-    ["a building plan", plan("x", { runState: "building" }), "Building", null],
-    ["an orchestrated run", plan("x", { runState: "running" }), "Building", null],
-    ["a plan in review, nothing held", plan("x", { status: "in_review" }), "In review", null],
-    ["a detached plan in review", plan("x", { status: "in_review", attachState: "detached" }), "In review", null],
+    // Where a plan is in its life is its status line, not a section: a stale
+    // "building" (nothing moves a plan out of it) must not pin it to the top.
+    ["a plan handed to an agent to build", plan("x", { runState: "building" }), "din", null],
+    ["an orchestrated run", plan("x", { runState: "running" }), "din", null],
+    ["a plan in review, nothing held", plan("x", { status: "in_review" }), "din", null],
     ["an approved plan", plan("x"), "din", null],
     ["a landed run", plan("x", { runState: "landed" }), "din", null],
     ["an aborted plan", plan("x", { status: "aborted" }), "din", null],
   ] as const)("%s → %s", (_, session, label, need) => {
-    const model = buildSidebar({ sessions: [session, live] });
+    const model = buildSidebar({ sessions: [session] });
     const section = model.sections.find((s) => s.rows.some((r) => r.key === "plan:x"))!;
     expect(section.label).toBe(label);
     expect(section.rows.find((r) => r.key === "plan:x")!.need).toBe(need);
@@ -95,75 +97,104 @@ describe("which section a row sorts into", () => {
     const [item] = sidebarItems({ sessions: [plan("p", { runState: "in_code_review" })], needs: { "plan:p": "Permission" } });
     expect(item.need).toBe("Permission");
   });
-
-  it("a held plan being redlined stays in its project while nothing is live (4d)", () => {
-    expect(shape({ sessions: [plan("roadmap", { status: "in_review", held: true, awaitingReview: true })] })).toEqual([["din", ["plan:roadmap"], 0]]);
-  });
 });
 
-describe("the live sections appear only while something needs you or is building", () => {
-  it("nothing live: project groups only, a plan in review stays in its project (4a–4d)", () => {
-    expect(
-      shape({
-        sessions: [plan("roadmap", { status: "in_review", updatedAt: 40 }), plan("backend", { updatedAt: 30 }), plan("retrieval", { updatedAt: 20 })],
-        chats: [chat("status", { updatedAt: 10 })],
-      }),
-    ).toEqual([["din", ["plan:roadmap", "plan:backend", "plan:retrieval", "chat:status"], 0]]);
+describe("sections: Needs you while anything does, then projects", () => {
+  it("nothing needs you: project groups only (4a–4d)", () => {
+    const model = buildSidebar({
+      sessions: [plan("roadmap", { status: "in_review", updatedAt: 40 }), plan("backend", { updatedAt: 30 }), plan("retrieval", { runState: "building", updatedAt: 20 })],
+      chats: [chat("status", { updatedAt: 10 })],
+    });
+    expect(model.live).toBe(false);
+    expect(shape({
+      sessions: [plan("roadmap", { status: "in_review", updatedAt: 40 }), plan("backend", { updatedAt: 30 }), plan("retrieval", { runState: "building", updatedAt: 20 })],
+      chats: [chat("status", { updatedAt: 10 })],
+    })).toEqual([["din", ["plan:roadmap", "plan:backend", "plan:retrieval", "chat:status"], 0]]);
   });
 
-  it("a working launch is not live: it leads its project with a spinner (4b)", () => {
+  it("a working launch leads its project with a spinner (4b)", () => {
     const model = buildSidebar({ sessions: [plan("backend", { updatedAt: 30 })], launches: [launch("t", { startedAt: 50 })] });
-    expect(model.live).toBe(false);
-    expect(model.sections.map((s) => s.rows.map((r) => [r.key, r.working, r.mode]))).toEqual([
-      // An approved plan nothing is building is the chip's "Approved v1":
-      // the build family, but not the Building section and no spinner.
-      [["launch:t", true, "plan"], ["plan:backend", false, "build"]],
+    expect(model.sections.map((s) => s.rows.map((r) => [r.key, r.working, rowStatus(r).icon]))).toEqual([
+      [["launch:t", true, "spin"], ["plan:backend", false, "check"]],
     ]);
   });
 
-  it("live: Needs you → Building → In review → by project (5a)", () => {
+  it("Needs you leads; everything else keeps its project (5a)", () => {
     const sessions = [
       plan("vehicle", { runState: "in_code_review", projectPath: "/code/dial", updatedAt: 90 }),
       plan("dial", { runState: "building", projectPath: "/code/dial", updatedAt: 80 }),
       plan("sprint", { runState: "orchestrating", projectPath: "/code/mos", projectName: "machineos", updatedAt: 85 }),
-      ...Array.from({ length: 14 }, (_, i) => plan(`r${i}`, { status: "in_review", updatedAt: 70 - i })),
       plan("old", { updatedAt: 5, projectPath: "/code/mos", projectName: "machineos" }),
     ];
     expect(shape({ sessions })).toEqual([
       ["Needs you", ["plan:vehicle"], 0],
-      ["Building", ["plan:sprint", "plan:dial"], 0],
-      ["In review", ["plan:r0", "plan:r1", "plan:r2", "plan:r3", "plan:r4"], 9],
-      ["machineos", ["plan:old"], 0],
+      ["machineos", ["plan:sprint", "plan:old"], 0],
+      // Named by the plan's recorded project name (the helper's "din").
+      ["din", ["plan:dial"], 0],
     ]);
   });
 });
 
+describe("a row's status line", () => {
+  const item = (over: Partial<SessionSummary>, extra: Partial<SidebarItem> = {}): SidebarItem =>
+    ({ ...sidebarItems({ sessions: [plan("x", over)] })[0], ...extra });
+  it.each([
+    ["held for review", item({ status: "in_review", held: true }), "In review", "redline", "pen"],
+    ["in review, detached", item({ status: "in_review", attachState: "detached" }), "In review", "redline", "pen"],
+    ["Claude revising after feedback", item({ status: "in_review" }, { working: true }), "Revising", "plan", "spin"],
+    ["approved, nothing built", item({}), "Approved · not built", "build", "check"],
+    // A build handed to an agent never spins on its own: nothing says when it ends.
+    ["handed to an agent", item({ runState: "building" }), "Approved", "build", "hammer"],
+    ["that agent mid-turn", item({ runState: "building" }, { working: true }), "Building", "build", "spin"],
+    ["a run starting", item({ runState: "orchestrating" }), "Starting the run", "build", "spin"],
+    ["a run running", item({ runState: "running" }), "Running", "build", "spin"],
+    ["a run drafted", item({ runState: "ready" }), "Run ready", "build", "run"],
+    ["built", item({ runState: "landed" }), "Built", "build", "built"],
+    ["stood down", item({ runState: "abandoned" }), "Stood down", "quiet", "file"],
+    ["aborted", item({ status: "aborted" }), "Aborted", "quiet", "file"],
+    ["a run waiting on review", item({ runState: "in_code_review" }), "Ready for review", "redline", "dot"],
+    ["a stalled run", item({ runState: "stalled" }), "Stalled", "redline", "alert"],
+  ] as const)("%s → %s", (_, row, word, tone, icon) => {
+    expect(rowStatus(row)).toMatchObject({ word, tone, icon });
+  });
+
+  it("chats and launches", () => {
+    const [c, l] = sidebarItems({ sessions: [], chats: [chat("c")], launches: [launch("t", { working: false })] });
+    expect(rowStatus(c)).toMatchObject({ word: "Chat", icon: "chat" });
+    expect(rowStatus({ ...c, working: true })).toMatchObject({ word: "Replying", icon: "spin" });
+    expect(rowStatus(l)).toMatchObject({ word: "Waiting", icon: "file" });
+    expect(rowStatus({ ...l, working: true })).toMatchObject({ word: "Planning", icon: "spin" });
+  });
+
+  it("how long ago, briefly", () => {
+    const now = Date.UTC(2026, 9, 18, 12);
+    expect([30_000, 5 * 60_000, 3 * 3_600_000, 2 * 86_400_000].map((ago) => rowAge(now - ago, now))).toEqual(["now", "5m", "3h", "2d"]);
+  });
+});
+
 describe("Show N more", () => {
-  const sessions = Array.from({ length: 8 }, (_, i) => plan(`p${i}`, { updatedAt: 100 - i }));
+  const sessions = Array.from({ length: 9 }, (_, i) => plan(`p${i}`, { updatedAt: 100 - i }));
+  const first = Array.from({ length: SECTION_LIMIT.project }, (_, i) => `plan:p${i}`);
   it("folds a project at its limit and counts the rest", () => {
-    expect(SECTION_LIMIT.project).toBe(5);
-    expect(shape({ sessions })).toEqual([["din", ["plan:p0", "plan:p1", "plan:p2", "plan:p3", "plan:p4"], 3]]);
+    expect(SECTION_LIMIT.project).toBe(6);
+    expect(shape({ sessions })).toEqual([["din", first, 3]]);
   });
 
   it("keeps the open row visible wherever it sits, in its own place", () => {
-    expect(shape({ sessions, activeKey: "plan:p6" })).toEqual([["din", ["plan:p0", "plan:p1", "plan:p2", "plan:p3", "plan:p4", "plan:p6"], 2]]);
+    expect(shape({ sessions, activeKey: "plan:p7" })).toEqual([["din", [...first, "plan:p7"], 2]]);
   });
 
   it("an expanded section shows everything, and can fold back only while it has more than its limit", () => {
     const [open] = buildSidebar({ sessions, expanded: new Set(["project:/code/din"]) }).sections;
-    expect([open.rows.length, open.hidden, open.foldable]).toEqual([8, 0, true]);
-    const [few] = buildSidebar({ sessions: sessions.slice(0, 5), expanded: new Set(["project:/code/din"]) }).sections;
+    expect([open.rows.length, open.hidden, open.foldable]).toEqual([9, 0, true]);
+    const [few] = buildSidebar({ sessions: sessions.slice(0, 6), expanded: new Set(["project:/code/din"]) }).sections;
     expect(few.foldable).toBe(false);
   });
 
-  it("never folds Needs you or Building", () => {
-    const many = Array.from({ length: 9 }, (_, i) => plan(`b${i}`, { runState: "building", updatedAt: 50 - i }));
+  it("never folds Needs you", () => {
     const asks = Array.from({ length: 9 }, (_, i) => plan(`n${i}`, { runState: "stalled", updatedAt: 90 - i }));
-    const model = buildSidebar({ sessions: [...many, ...asks] });
-    expect(model.sections.map((s) => [s.label, s.rows.length, s.hidden])).toEqual([
-      ["Needs you", 9, 0],
-      ["Building", 9, 0],
-    ]);
+    const model = buildSidebar({ sessions: asks });
+    expect(model.sections.map((s) => [s.label, s.rows.length, s.hidden])).toEqual([["Needs you", 9, 0]]);
   });
 });
 

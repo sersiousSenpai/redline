@@ -80,31 +80,92 @@
 
 .rl-sb-rows { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .rl-sb-item { position: relative; border-radius: var(--rl-radius-row); }
+/* A row is two lines: the title (with its unsent marks or version at the
+   right), then its status in colour, how long ago, and any flags. */
 .rl-sb-row {
+  position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 9px;
   width: 100%;
-  height: var(--rl-sb-row);
-  /* Room on the right for the ⋯ (14px glyph, 9px gap). */
-  padding: 0 33px 0 10px;
+  min-height: 44px;
+  padding: 6px 8px 6px 10px;
   border-radius: var(--rl-radius-row);
-  color: var(--color-ink-3);
+  color: var(--color-ink-2);
   text-align: left;
   cursor: pointer;
 }
 .rl-sb-row:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
-.rl-sb-icon { flex: none; display: flex; color: var(--color-ink-4); }
-.rl-sb-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rl-sb-tag { flex: none; font-size: var(--rl-text-label); color: var(--color-ink-4); }
-.rl-sb-dot { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--color-mode-redline-fg); }
+.rl-sb-icon { flex: none; display: flex; align-items: center; justify-content: center; width: 14px; height: 18px; color: var(--color-ink-4); }
+.rl-sb-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.rl-sb-line { display: flex; align-items: center; gap: 6px; min-width: 0; height: 18px; }
+.rl-sb-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-sb-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--color-ink-4);
+}
+.rl-sb-status { flex: none; font-weight: 500; }
+.rl-sb-project, .rl-sb-age { flex: none; }
+.rl-sb-project { min-width: 0; max-width: 45%; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.rl-sb-flag {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--color-ink-4);
+}
+.rl-sb-end { flex: none; display: flex; align-items: center; justify-content: flex-end; min-width: 22px; height: 18px; }
+.rl-sb-ver { font-family: var(--font-mono); font-size: 10.5px; color: var(--color-ink-5); }
+/* Unsent marks: the redlining amber, as a count. */
+.rl-sb-count {
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--color-mode-redline-bg);
+  color: var(--color-mode-redline-fg);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+.rl-sb-dot { display: block; width: 7px; height: 7px; border-radius: 50%; }
+/* A plan that arrived while you were elsewhere: a breathing blue dot until
+   you open it, and one glow across the row as it lands. */
+.rl-sb-unseen { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-mode-plan-fg); }
+.rl-sb-arrival {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--color-mode-plan-fg);
+  pointer-events: none;
+  opacity: 0;
+}
+/* A live room you joined: a green dot with a halo. */
+.rl-sb-live { display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--color-mode-build-fg); box-shadow: 0 0 0 3px var(--color-mode-build-bg); }
 @media (prefers-reduced-motion: no-preference) {
   .rl-sb-spin { animation: rl-term-spin 1.1s linear infinite; }
+  .rl-sb-unseen { animation: rl-sb-breathe 1.6s ease-in-out infinite; }
+  .rl-sb-arrival { animation: rl-sb-arrive 1.6s ease-out; }
 }
+@keyframes rl-sb-arrive { 0% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes rl-sb-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 .rl-sb-item:not([data-nest]):hover > .rl-sb-row { background: var(--color-fill-1); }
 .rl-sb-item[data-active]:not([data-nest]) > .rl-sb-row { background: var(--color-fill-2); color: var(--color-ink); }
-.rl-sb-item[data-need] > .rl-sb-row { padding-right: 10px; color: var(--color-ink); }
+.rl-sb-item[data-need] > .rl-sb-row { color: var(--color-ink); }
+.rl-sb-rows[data-archived] .rl-sb-row { opacity: 0.72; }
+.rl-sb-empty { margin: 4px 10px; font-size: 12.5px; line-height: 1.5; color: var(--color-ink-4); }
+.rl-sb-empty b { font-weight: 600; color: var(--color-ink-3); }
 /* The open session with versions: one grouped container in the menu fill,
    the row bare inside it (5a). */
 .rl-sb-item[data-nest] { background: var(--color-glass-2); border-radius: var(--rl-radius-menu-row); }
@@ -113,28 +174,25 @@
    (4d). */
 .rl-sb-item[data-menu] > .rl-sb-row { background: var(--color-glass-2); color: var(--color-ink); box-shadow: inset 0 0 0 1px var(--color-focus-rim); }
 
-/* The ⋯, always there: faint at rest, a step up on the open row, full ink
-   under the pointer or while its menu is open. On a Needs you row the
-   reason tag holds its place until then (5a). */
+/* The ⋯: under the pointer, on focus and while its menu is open, in the
+   place of the row's version or count, which step aside for it. */
 .rl-sb-dots {
   position: absolute;
-  top: calc((var(--rl-sb-row) - 24px) / 2);
-  right: 5px;
+  top: 3px;
+  right: 4px;
   display: grid;
   place-items: center;
   width: 24px;
   height: 24px;
   border-radius: var(--rl-radius-chip);
-  color: var(--color-ink-5);
+  color: var(--color-ink-3);
   cursor: pointer;
+  opacity: 0;
 }
-.rl-sb-item[data-active] .rl-sb-dots { color: var(--color-ink-4); }
-.rl-sb-item:hover .rl-sb-dots,
-.rl-sb-item[data-menu] .rl-sb-dots,
-.rl-sb-dots:focus-visible { color: var(--color-ink); }
+.rl-sb-dots:hover { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-dots { opacity: 1; }
+.rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-row .rl-sb-end { visibility: hidden; }
 .rl-sb-dots:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
-.rl-sb-item[data-need]:not(:hover, :focus-within, [data-menu]) .rl-sb-dots { opacity: 0; }
-.rl-sb-item[data-need]:is(:hover, :focus-within, [data-menu]) .rl-sb-tag { visibility: hidden; }
 
 /* Rename in place: the field starts where the title did. */
 .rl-sb-row[data-editing],
@@ -159,8 +217,35 @@
 .rl-sb-confirm-no { color: var(--color-ink-3); }
 .rl-sb-confirm-no:hover { background: var(--color-fill-2); color: var(--color-ink); }
 
-/* The open session's versions (5a): 24px rows at 12px, dates at the right. */
+/* The open session's versions (5a): 24px rows at 12px, dates at the right;
+   under the pointer a version's date gives way to its download. */
 .rl-sb-versions { margin: 0; padding: 0 6px 6px 30px; list-style: none; font-size: 12px; color: var(--color-ink-4); }
+.rl-sb-versions li { position: relative; }
+.rl-sb-version-dl {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  color: var(--color-ink-3);
+  cursor: pointer;
+  opacity: 0;
+}
+.rl-sb-versions li:is(:hover, :focus-within) .rl-sb-version-dl { opacity: 1; }
+.rl-sb-versions li:is(:hover, :focus-within) .rl-sb-version span { visibility: hidden; }
+.rl-sb-version-dl:hover { background: var(--color-fill-3); color: var(--color-ink); }
+.rl-sb-thread {
+  display: block;
+  margin: 4px 0 2px;
+  padding: 0 8px;
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--color-ink-5);
+}
 .rl-sb-version {
   display: flex;
   align-items: center;

@@ -260,9 +260,16 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
 
   const fills = [0.04, 0.06, 0.09].map(alpha => mix(bg, fg, hoverAlpha(fg, [bg], alpha, 4.5)));
   const surfaces = [bg, canvas, elevated, ...fills];
+  // A mode's ink is its accent wherever that reads at 4.5:1, on its own tint
+  // and on the surfaces a status word sits on (the sidebar, the bar, the
+  // plate); else the accent taken toward black or white only as far as that
+  // needs. Never the plain ink: Basic's amber stays amber, a shade darker.
   const mode = (accent: string) => {
     const fill = mix(bg, accent, isDark ? 0.12 : 0.08);
-    return { bg: fill, fg: onFill(fill, [accent, fg]) };
+    const onto = [fill, ...surfaces];
+    const extreme = wcagContrast("#000000", fill) > wcagContrast("#ffffff", fill) ? "#000000" : "#ffffff";
+    const ink = onto.every((s) => wcagContrast(accent, s) >= 4.5) ? accent : mutedInk(extreme, accent, 1, 4.5, onto, false);
+    return { bg: fill, fg: ink };
   };
   const plan = mode(base.blue), redline = mode(base.yellow), build = mode(base.green), danger = mode(base.red ?? hl.deletion);
   return {
