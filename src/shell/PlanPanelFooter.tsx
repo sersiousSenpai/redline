@@ -34,10 +34,14 @@ const PlanStateMenu = lazy(() =>
 
 export interface PlanFooterApproval {
   version: number;
-  /** NULL is "approved · not built". */
+  /** NULL is "approved · not built" — or being built by the agent that
+   *  wrote it, which `building` says. */
   runState: string | null;
   /** A live orchestrated run can't be reopened under itself. */
   runLive: boolean;
+  /** Something is building it right now: a live run, or the plan's own
+   *  agent at work in its terminal after Approve & build. */
+  building: boolean;
 }
 
 export interface PlanFooterBuildTarget {
@@ -142,12 +146,12 @@ function Status(p: PlanPanelFooterProps) {
     );
   if (p.approval) {
     const a = p.approval;
-    const text = a.runLive
+    const text = a.building
       ? `Building v${a.version}${p.progress ? `: step ${p.progress.step} of ${p.progress.of}` : ""}`
       : `Approved v${a.version} · ${a.runState === null ? "not built" : a.runState.replace(/_/g, " ")}`;
     const line = (
       <>
-        {a.runLive && <Spinner tone="build" />}
+        {a.building && <Spinner tone="build" />}
         {text}
       </>
     );
@@ -162,7 +166,7 @@ function Status(p: PlanPanelFooterProps) {
         ) : (
           line
         )}
-        {p.terminals > 0 && (
+        {a.building && p.terminals > 0 && (
           <button type="button" className="rl-plan-foot-faint rl-plan-foot-terminals" onClick={p.onShowTerminal} disabled={!p.onShowTerminal} title="Show the terminal">
             · {p.terminals} terminal{p.terminals === 1 ? "" : "s"}
           </button>

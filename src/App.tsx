@@ -8681,6 +8681,11 @@ function App() {
                       version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
                       runState: activeRunState,
                       runLive: isLiveRunState(activeRunState),
+                      // A live run, or the plan's own agent at work in its
+                      // terminal after Approve & build.
+                      building:
+                        isLiveRunState(activeRunState) ||
+                        (activeRunState === null && !!stageTerminalId && terminalKinds.get(stageTerminalId) === "working"),
                     }
                   : null,
               buildTargets,

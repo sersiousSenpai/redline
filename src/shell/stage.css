@@ -130,7 +130,6 @@
 /* 5a's "☰ Contents" sits flush at the header's 24px inset. */
 .rl-plan-head-contents {
   padding: 0;
-  margin-right: 4px;
 }
 .rl-plan-head-contents:hover:not(:disabled) {
   background: transparent;
@@ -397,11 +396,15 @@
 .rl-flow-plan[data-pose="full"] .rl-prose {
   font-size: calc(16.5px * var(--rl-doc-zoom, 1));
 }
-/* The boards set blocks 16px apart. */
+/* The boards set blocks 16px apart; a list's items are lines of one block. */
 .rl-flow-plan .rl-prose p,
 .rl-flow-plan .rl-prose ul,
 .rl-flow-plan .rl-prose ol {
   margin: 16px 0;
+}
+.rl-flow-plan .rl-prose li,
+.rl-flow-plan .rl-prose li > p {
+  margin: 0;
 }
 .rl-flow-plan .rl-prose h1,
 .rl-flow-plan .rl-prose h2,
@@ -659,7 +662,8 @@
   gap: 10px;
   padding: 12px 14px;
   font-size: 13.5px;
-  line-height: 1.4;
+  /* The conversation's own leading (4b's 1.65), as the board inherits it. */
+  line-height: 1.65;
 }
 .rl-plan-card[data-variant="inline"] .rl-plan-card-title {
   min-width: 0;
