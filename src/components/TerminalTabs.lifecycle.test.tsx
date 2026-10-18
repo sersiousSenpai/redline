@@ -844,3 +844,64 @@ describe("reach and notify", () => {
     expect(mocks.notify).toHaveBeenLastCalledWith({ title: "repo 1 · your turn", body: "Which API key should I use?" });
   });
 });
+
+describe("solo: the flow shell's terminal view", () => {
+  const view = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)!;
+  const shown = () => [...host.querySelectorAll<HTMLElement>('[data-visible="true"]')].map((node) => node.dataset.terminalId!);
+  async function render(solo: string | null, onActiveTabChange?: (id: string) => void) {
+    await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={false} solo={solo} onActiveTabChange={onActiveTabChange} /></StrictMode>));
+  }
+
+  it("shows one terminal alone and gives the wall back untouched — no shell spawned, killed or remounted", async () => {
+    await render(null);
+    const a = await open();
+    const b = await open();
+    const before = { ids: ids(), tiles: saved().tiles, nodes: [view(a), view(b)] };
+    expect(before.tiles).toEqual([a, b]);
+    const kills = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_kill").length;
+    const killed = kills();
+
+    await render(a);
+    expect(shown()).toEqual([a]);
+    // No tile header and no gutters: the stage's own top bar is the chrome.
+    expect(tiled()).toEqual([]);
+    expect(ids()).toEqual(before.ids);
+    expect(saved().tiles).toEqual(before.tiles);
+
+    await render(null);
+    expect(shown().sort()).toEqual([a, b].sort());
+    expect(tiled()).toEqual([a, b]);
+    // The same DOM nodes: React kept both views mounted through the switch.
+    expect([view(a), view(b)]).toEqual(before.nodes);
+    expect(view(a)).toBe(before.nodes[0]);
+    expect(kills()).toBe(killed);
+  });
+
+  it("shows a terminal that has no tile, without putting it on the wall", async () => {
+    await render(null);
+    const first = await open();
+    await click(`[data-type="${first}"]`);
+    const background = await open(true);
+    expect(tiled()).toEqual([first]);
+    await render(background);
+    expect(shown()).toEqual([background]);
+    await render(null);
+    expect(tiled()).toEqual([first]);
+    expect(shown()).toEqual([first]);
+  });
+
+  it("ignores an id that isn't open, and reports the solo terminal as the one watched", async () => {
+    const active = vi.fn();
+    await render(null, active);
+    const a = await open();
+    await click(`[data-type="${a}"]`);
+    const b = await open(true);
+    await render("gone", active);
+    expect(shown()).toEqual([a]);
+    expect(tiled()).toEqual([a]);
+    await render(b, active);
+    expect(active).toHaveBeenLastCalledWith(b);
+    await render(null, active);
+    expect(active).toHaveBeenLastCalledWith(a);
+  });
+});

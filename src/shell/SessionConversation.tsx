@@ -33,7 +33,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, use
 import { ArrowRight, Check, ChevronDown, FilePenLine, Loader, X } from "lucide-react";
 import { MarkdownView } from "../components/MarkdownView";
 import { QueueTray } from "../components/QueueTray";
-import { convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
+import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
+import { questionsToRelease } from "../lib/askRelease";
 import type { ConvoAsk, ConvoAskOutcome } from "../lib/convo/types";
 import {
   MAX_ROWS,
@@ -107,6 +108,10 @@ export interface SessionConversationProps {
   /** Open or close the voice panel; without it, Talk raises
    *  `redline:flow-talk`. */
   onTalk?: () => void;
+  /** Out of sight (the terminal view, the Feedback tab, another surface):
+   *  its open questions go to the terminal, since a held AskUserQuestion
+   *  shows nowhere else (lib/askRelease). It stays subscribed. */
+  hidden?: boolean;
 }
 
 /** How close to the top, in px, scrolling asks for the page before. */
@@ -145,6 +150,23 @@ export default function SessionConversation(props: SessionConversationProps) {
       if (subscription) void convoUnsubscribe(terminalId, subscription).catch(() => {});
     };
   }, [terminalId]);
+
+  // ── A question never waits out of sight (lib/askRelease) ──
+  // Hidden, every open question is released to the terminal as it arrives;
+  // unmounting (another session on the stage) releases what is still open.
+  const released = useRef(new Set<string>());
+  const openAsks = useRef(view.openAsks);
+  openAsks.current = view.openAsks;
+  const release = useCallback(() => {
+    for (const askId of questionsToRelease(openAsks.current, released.current)) {
+      released.current.add(askId);
+      void answerAsk(askId, { kind: "terminal" }).catch(() => released.current.delete(askId));
+    }
+  }, []);
+  useEffect(() => {
+    if (props.hidden) release();
+  }, [props.hidden, view.openAsks, release]);
+  useEffect(() => release, [release]);
 
   // ── Scrolling: follow the live end, page at the top ──
   const scroller = useRef<HTMLDivElement>(null);

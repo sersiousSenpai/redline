@@ -98,6 +98,8 @@ const DRIVES = {
     { do: "waitFor", expr: "window.__qa.terminals().some(t => t.launched && t.subscribed)", timeout: 6000, optional: true, why: "the stage subscribes to the launch's conversation" },
   ],
   "4c": [
+    // Flow opens the plan beside the chat by itself once it has loaded.
+    { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
     { do: "click", text: "Open in panel →", optional: true, why: "open the plan beside the chat (split pose)" },
     { do: "key", key: "b", modifiers: 4, optional: true, shell: "flow", why: "⌘B collapses the sidebar" },
     { do: "click", css: ["[data-comment-id=c-001]", "mark"], optional: true, why: "focus the mark so its margin note shows" },
@@ -110,8 +112,12 @@ const DRIVES = {
   ],
   "5a": [
     { do: "click", text: "Dialcrown: fastest credible launch", why: "open the building session" },
-    { do: "click", text: "v1", up: "button, [role=button], [role=treeitem], a, li", optional: true, why: "view v1 (read-only)" },
+    // Flow: the session loads, and its plan opens beside the conversation
+    // (split, which folds the sidebar); Full screen brings the sidebar and
+    // its versions back.
+    { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
     { do: "click", text: "Full screen", up: "button", optional: true, shell: "flow", why: "⤢ Full screen: the full pose" },
+    { do: "click", text: "v1", up: "button, [role=button], [role=treeitem], a, li", optional: true, why: "view v1 (read-only)" },
     { do: "click", textStarts: "Feedback", up: "button, [role=tab]", optional: true, shell: "flow", why: "the right panel's Feedback tab" },
   ],
 };

@@ -51,12 +51,6 @@ export type ConversationKind =
  *  what the browser already had. It is never voice-capable and never leads. */
 export const NON_CONVERSATION_KINDS: readonly ConversationKind[] = ["browselist"];
 
-/** Home chat fills the resting plate; document conversations use a column. */
-export type ConversationPose = "hidden" | "docked" | "expanded";
-export function conversationPose(i: { open: boolean; plateAtRest: boolean }): ConversationPose {
-  return !i.open ? "hidden" : i.plateAtRest ? "expanded" : "docked";
-}
-
 /** The kinds the browser pane owns and renders itself (into the dock's slot). */
 export const BROWSER_DOCK_KINDS: readonly ConversationKind[] = [
   "browse",

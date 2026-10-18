@@ -160,6 +160,9 @@ describe("the setup dialog opens by itself only on a true first run", () => {
 describe("boot takes no caret", () => {
   it("the door rests on the empty plate alone; every other restored surface shows only the pill", () => {
     expect(app).toContain('const plateAtRest = mainSurface === "document" && plateMode === "door";');
+    // In flow the door rests only on the start screen: a launch waiting on
+    // its plan leaves the plate empty, but the stage is its conversation.
+    expect(app).toContain('const flowStartOnStage = isFlowShell() && plateAtRest && stageTarget.kind === "start";');
     expect(app).toMatch(/landing=\{plateAtRest && shellReady/);
     // Nothing at boot opens it, so its composer's autofocus never fires.
     expect(between("const [frontDoorOpen, setFrontDoorOpen] = useState(", "const [doorCompact")).toContain("return false;");

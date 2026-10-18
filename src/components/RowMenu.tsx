@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import { Archive, ArchiveRestore, Ellipsis, FileText, MessageSquare, Pencil, Trash2 } from "lucide-react";
 import { useMenuOverlay } from "./menuOverlay";
+import { useStageDim } from "../shell/stageDim";
 import { MenuSurface } from "./ui/MenuSurface";
 
 export interface RowAction {
@@ -87,6 +88,8 @@ export function RowMenu({
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   useMenuOverlay(open);
+  // The stage steps back behind it (4d), as behind the Tools menu.
+  useStageDim(open);
   // Placed against its own measured size before the first paint, so it never
   // shows at a stale spot or past the window edge for a frame.
   useLayoutEffect(() => {

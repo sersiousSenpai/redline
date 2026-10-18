@@ -187,3 +187,56 @@ describe("SessionConversation", () => {
     expect((heard.mock.calls[0][0] as CustomEvent).detail).toEqual({ terminalId: "term-1", sessionId: "s1" });
   });
 });
+
+describe("a question never waits out of sight", () => {
+  const QUESTION = ev("a1", 40, { kind: "ask_opened", ask: { askId: "q1", kind: "question", toolName: "AskUserQuestion", summary: "Which key?", questions: [{ question: "Which key?", options: [{ label: "A" }] }], openedAt: 1 } });
+  const PERMISSION = ev("a2", 41, { kind: "ask_opened", ask: { askId: "p1", kind: "permission", toolName: "Bash", summary: "npm test", openedAt: 1 } });
+  const released = async () => {
+    const { answerAsk } = await import("../lib/convo/api");
+    return (answerAsk as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+  };
+  beforeEach(async () => {
+    const { answerAsk } = await import("../lib/convo/api");
+    (answerAsk as unknown as { mockClear: () => void }).mockClear();
+  });
+
+  it("on screen, the question waits as its card", async () => {
+    api.snapshot = [BOUND, PROMPT, QUESTION, PERMISSION];
+    await render(props());
+    expect(await released()).toEqual([]);
+    expect(all(".rl-ask-card")).toHaveLength(2);
+  });
+
+  it("hidden, open questions go to the terminal — once, and never a permission ask — and it stays subscribed", async () => {
+    api.snapshot = [BOUND, PROMPT, QUESTION, PERMISSION];
+    await render(props({ hidden: true }));
+    expect(await released()).toEqual([["q1", { kind: "terminal" }]]);
+    await render(props({ hidden: true }));
+    expect(await released()).toHaveLength(1);
+    expect(log).toEqual(["subscribe term-1"]);
+  });
+
+  it("a question that arrives while hidden goes straight to the terminal", async () => {
+    await render(props({ hidden: true }));
+    expect(await released()).toEqual([]);
+    await act(async () => api.batches.get("term-1")!({ events: [QUESTION] }));
+    await flush();
+    expect(await released()).toEqual([["q1", { kind: "terminal" }]]);
+  });
+
+  it("hiding releases what is open; leaving the stage does too", async () => {
+    api.snapshot = [BOUND, PROMPT, QUESTION];
+    await render(props());
+    expect(await released()).toEqual([]);
+    await render(props({ hidden: true }));
+    expect(await released()).toEqual([["q1", { kind: "terminal" }]]);
+    const other = ev("a3", 42, { kind: "ask_opened", ask: { askId: "q2", kind: "question", toolName: "AskUserQuestion", summary: "Which lock?", openedAt: 2 } });
+    await render(props());
+    await act(async () => api.batches.get("term-1")!({ events: [other] }));
+    await flush();
+    expect(await released()).toHaveLength(1);
+    await act(async () => root.unmount());
+    expect(await released()).toEqual([["q1", { kind: "terminal" }], ["q2", { kind: "terminal" }]]);
+    root = createRoot(host);
+  });
+});

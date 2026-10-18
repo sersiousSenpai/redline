@@ -23,6 +23,8 @@ import type {
 import { planExtensions } from "../editor/extensions/planExtensions";
 import { RedlineDecorations } from "../editor/extensions/RedlineDecorations";
 import { CommentMarkers } from "../editor/extensions/CommentMarkers";
+import { MarginNotes, type MarginNote } from "../editor/extensions/MarginNotes";
+import { noteInitials, noteText } from "../lib/feedbackThreads";
 import {
   CommentHighlights,
   type CommentHighlightRange,
@@ -126,6 +128,10 @@ interface PlanEditorProps {
   onLockedEdit?: (blockId: string) => void;
   /** Live collaboration room to attach this revision's Y.Doc to. */
   collab?: PlanEditorCollab;
+  /** Flow's split pose: draw each open mark's comment as a note under its
+   *  block, signed with the reviewer's name (or this, the owner's). Absent —
+   *  always, on the classic shell — draws none. */
+  marginNotesBy?: string | null;
 }
 
 /** Editor actions the App can invoke imperatively (it renders the
@@ -160,6 +166,7 @@ function PlanEditorBase({
   actionsRef,
   onLockedEdit,
   collab,
+  marginNotesBy,
 }: PlanEditorProps) {
   const isCollaborator = collab?.role === "collaborator";
   // A collaborator has no Tauri comment backend (Phase 1b adds a Yjs-backed
@@ -314,6 +321,7 @@ function PlanEditorBase({
       RedlineDecorations,
       CommentHighlights,
       CommentMarkers,
+      MarginNotes,
       SearchHighlight,
       // IDE-style token coloring; a no-op (empty decorations) unless the user
       // has picked a lint theme. Reads <html data-lint> directly, so no prop.
@@ -565,6 +573,27 @@ function PlanEditorBase({
       });
     editor.commands.setCommentHighlights(ranges);
   }, [editor, comments, blockByAnchor]);
+
+  // Margin notes (flow's split pose): the open marks' words under their
+  // blocks. Clicking one focuses its comment like clicking its highlight.
+  useEffect(() => {
+    if (!editor) return;
+    const notes: MarginNote[] =
+      marginNotesBy == null
+        ? []
+        : (comments ?? []).flatMap<MarginNote>((c) => {
+            const blockId = c.blockId ?? blockByAnchor.get(c.anchorId);
+            const body = noteText(c);
+            const open = c.status === "draft" || c.status === "submitted" || c.status === "reopened";
+            if (!blockId || !body || !open) return [];
+            return [{ commentId: c.id, blockId, body, initials: noteInitials(c, marginNotesBy) }];
+          });
+    editor.commands.setMarginNotes(notes);
+  }, [editor, comments, blockByAnchor, marginNotesBy]);
+  useEffect(() => {
+    if (!editor) return;
+    editor.commands.bindMarginNoteClick(onHighlightClick ?? null);
+  }, [editor, onHighlightClick]);
 
   // Mirror the external focused-comment state into the extension storage so
   // the matching decoration gets the `--focused` modifier (and scroll the

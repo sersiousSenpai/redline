@@ -24,7 +24,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { makeToast, RedlineToast, type ActiveToast, type ToastSpec } from "./components/RedlineToast";
 import type { BrowserDownloadEvent } from "./lib/browserOutput";
-import { CommentComposer } from "./components/CommentComposer";
 import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
@@ -310,7 +309,6 @@ function prefetchSurfaceChunk(surface: string): void {
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
 import { setSidebar as setFlowSidebar, useFlow } from "./shell/flowState";
-import type { FlowLaunch } from "./lib/sessionGroups";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
 import { useTextClearance } from "./hooks/useTextClearance";
 import { useDevServers } from "./hooks/useDevServers";
@@ -386,6 +384,22 @@ const TerminalTabs = lazy(() =>
   })),
 );
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
+// The flow shell's session stage: what it shows (lib/flowSessions), the plan
+// panel's pose rules (lib/flowPose) and its body, a lazy chunk the classic
+// shell never fetches.
+import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
+import type { ConversationLayout } from "./shell/FlowStage";
+import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
+import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
+// The comment composer opens on a gesture — a selection's menu — so it rides
+// its own chunk (about 9.5 kB off the boot path, which pays for the flow
+// stage's wiring), warmed the moment a selection shows that menu.
+const loadCommentComposer = () => import("./components/CommentComposer");
+const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
+const loadFlowStage = () => import("./shell/FlowStage");
+const loadSessionConversation = () => import("./shell/SessionConversation");
+const FlowStage = lazy(loadFlowStage);
+const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
 import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
@@ -442,6 +456,8 @@ import {
   isImmersive,
   maskPanels,
   panelMask,
+  platePaneMask,
+  flowStageShape,
   panelsMasked,
 } from "./lib/immersive";
 import { boxOf, type SwapRect } from "./lib/springSwap";
@@ -932,7 +948,9 @@ function App() {
   // Table-of-contents rail (Phase 2): a collapsible outline of the current
   // plan's headings, docked to the left of the document column. Persisted so a
   // reader's preference sticks across sessions.
-  const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
+  // Flow keeps its own, closed until asked for: the plan panel opens as the
+  // boards draw it, and "☰ Contents" in its header is one click away.
+  const [tocOpen, setTocOpen] = usePersistedState(isFlowShell() ? "redline.flow.tocOpen" : "redline.tocOpen", !isFlowShell());
   // Rail width: two snap points (230 / 340). `tocWide` is the persisted snap;
   // the transient width during a drag is written straight onto the rail and the
   // scroller, and release snaps to whichever point is nearer (see snapTocWide).
@@ -2431,16 +2449,169 @@ function App() {
       alive = false;
     };
   }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
+  // ── The flow shell's session stage ────────────────────────────────────────
+  //
+  // In flow a session exists from the moment it launches (BRIEF, "Session
+  // identity in flow"): the stage shows a launch until its plan arrives and
+  // then that plan, keyed by the terminal its CLI runs in, so the handoff
+  // never changes which conversation is on screen. `launchPlan` records the
+  // launches; the terminal map is fed by the hooks (`term-attention`), the
+  // engine (`convo-bound`), held plans and arrivals. On the classic shell the
+  // hook stays inert, the list empty and the target is never read.
+  const flowShell = isFlowShell();
+  // The stage's two chunks are what a session opens onto: warmed once the
+  // shell is up, so the first plan or launch doesn't wait on a fetch.
+  useEffect(() => {
+    if (!flowShell) return;
+    const warm = () => {
+      void loadFlowStage().catch(() => {});
+      void loadSessionConversation().catch(() => {});
+    };
+    const idle = window.requestIdleCallback?.(warm, { timeout: 2000 });
+    if (idle === undefined) {
+      const t = setTimeout(warm, 500);
+      return () => clearTimeout(t);
+    }
+    return () => window.cancelIdleCallback?.(idle);
+  }, [flowShell]);
+  const [flowLaunches, setFlowLaunches] = useState<readonly FlowLaunch[]>([]);
+  const flowLaunchesRef = useRef(flowLaunches);
+  flowLaunchesRef.current = flowLaunches;
+  const noteFlowLaunch = useCallback(
+    (event: LaunchEvent) => setFlowLaunches((prev) => reduceLaunches(prev, event)),
+    [],
+  );
+  // The launch the stage is showing, by terminal. A launch puts the stage on
+  // it (and takes the selection off whatever plan was open); selecting any
+  // session takes the stage off it.
+  const [focusedLaunch, setFocusedLaunch] = useState<string | null>(null);
+  const focusedLaunchRef = useRef(focusedLaunch);
+  focusedLaunchRef.current = focusedLaunch;
+  useEffect(() => {
+    if (activeId) setFocusedLaunch(null);
+  }, [activeId]);
+  const {
+    terminals: sessionTerminals,
+    attention: terminalAttention,
+    titles: terminalTitles,
+    bind: bindSessionTerminals,
+  } = useSessionTerminals(flowShell);
+  const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
+  // A held plan names the terminal its CLI is waiting in.
+  useEffect(() => {
+    if (!flowShell) return;
+    bindSessionTerminals(
+      summaries.flatMap((s) =>
+        s.heldTerminalId ? [{ sessionId: s.sessionId, terminalId: s.heldTerminalId }] : [],
+      ),
+    );
+  }, [flowShell, summaries, bindSessionTerminals]);
+  // The handoff: a launch's plan arriving binds its session to the launch's
+  // terminal and, when the stage is on that launch, flips it to the plan —
+  // the same conversation, now with a plan. The general arrival rule (the
+  // `plan-received` listener below) still decides everything else.
+  useEffect(() => {
+    if (!flowShell) return;
+    const unlisten = listen<PlanReceivedEvent>("plan-received", (e) => {
+      const { launchId, sessionId } = e.payload;
+      const launch = launchId
+        ? flowLaunchesRef.current.find((l) => l.launchId === launchId)
+        : undefined;
+      if (!launch) return;
+      bindSessionTerminals([{ sessionId, terminalId: launch.terminalId }]);
+      noteFlowLaunch({ type: "arrived", launchId: launch.launchId });
+      if (focusedLaunchRef.current !== launch.terminalId) return;
+      selectSessions();
+      setActiveId(sessionId);
+      setViewedVersionNumber(null);
+      void loadSession(sessionId);
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flowShell, bindSessionTerminals, noteFlowLaunch, selectSessions]);
+  const stageTarget = deriveStageTarget({
+    activeId,
+    focusedLaunch,
+    launches: flowLaunches,
+    pendingLaunch,
+    runFlight,
+    terminals: sessionTerminals,
+  });
+  // The sidebar's launch rows (its flow layout): `launches`, with
+  // `activeLaunchId` and `selectFlowLaunch`.
+  const flowSidebarLaunches = useMemo(
+    () => (flowShell ? sidebarLaunches(flowLaunches, terminalKinds, terminalTitles) : []),
+    [flowShell, flowLaunches, terminalKinds, terminalTitles],
+  );
+  // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
+  const { working: flowWorking, needs: flowNeeds } = useMemo(
+    () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
+    [sessionTerminals, terminalAttention, flowLaunches],
+  );
+  const activeLaunchId = stageTarget.kind === "launch" ? stageTarget.terminalId : null;
+  const selectFlowLaunch = useCallback((terminalId: string) => {
+    setFocusedLaunch(terminalId);
+    setActiveId(null);
+  }, []);
+  // The stage owns the plate: a launch or a plan on the session surface —
+  // not the New-session screen and not the folder's file viewer.
+  const flowStageOwns =
+    flowShell && mainSurface === "document" && stageTarget.kind !== "start" && plateMode !== "file";
+  // ⌘J's Conversation | Terminal, and the pose the stage last painted (its
+  // narrow rule needs its own width, so it reports the result up).
+  const flowView = useFlow((s) => s.stage);
+  const [flowPainted, setFlowPainted] = useState<{ pose: PlanPose; layout: ConversationLayout }>(
+    { pose: "closed", layout: "stage" },
+  );
+  const onFlowPose = useCallback(
+    (pose: PlanPose, layout: ConversationLayout) =>
+      setFlowPainted((prev) => (prev.pose === pose && prev.layout === layout ? prev : { pose, layout })),
+    [],
+  );
+  // 4c: the split pose takes the sidebar's width for the plan, and gives it
+  // back on the way out — unless ⌘B moved it in between, which is the
+  // user's say. Through flow's own sidebar switch, so ⌘B works in the pose.
+  const splitFoldedSidebar = useRef(false);
+  const flowSplit = flowStageOwns && flowPainted.pose === "split";
+  useEffect(() => {
+    if (!flowShell) return;
+    if (flowSplit) {
+      if (getFlowState().sidebar) {
+        splitFoldedSidebar.current = true;
+        setFlowSidebar(false);
+      }
+    } else if (splitFoldedSidebar.current) {
+      splitFoldedSidebar.current = false;
+      if (!getFlowState().sidebar) setFlowSidebar(true);
+    }
+  }, [flowShell, flowSplit]);
+  // The conversation is ONE mounted component in three places — the stage,
+  // the split column, the full pose's Chat tab — like the chat room's host
+  // below: the stage moves this node between them and the conversation in it
+  // never remounts, so its subscription and its place survive every pose.
+  const [flowConvoHost] = useState(() => (flowShell ? createBoundedPortalHost("session-conversation") : null));
+  // The session's terminal at full stage (deviation 6): the dock, positioned
+  // over the stage and showing that one PTY. Off the stage the dock is the
+  // wall when fullscreen and hidden otherwise — flow never docks a terminal
+  // under the conversation.
+  const stageTerminalId = stageTarget.kind === "start" ? null : stageTarget.terminalId;
+  const flowTermStage = flowStageOwns && flowView === "terminal" && stageTerminalId !== null;
+  // Whether the conversation can be seen: on the stage, not under ⌘J's
+  // terminal, and not behind the full pose's Feedback tab.
+  const flowPanelTab = useFlow((s) => s.panelTab);
+  const flowConvoOnScreen =
+    flowStageOwns && flowView === "conversation" && !(flowPainted.pose === "full" && flowPanelTab === "feedback");
+  const flowDockHidden = flowShell && mainSurface === "document" && !termFullscreenPref && !flowTermStage;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
   // In the flow shell that same empty plate is the start screen — the
-  // New-session screen, the door at rest on the stage. The stage lane's
-  // target is the authority once it lands: `stageTarget.kind === "start"`
-  // is this, minus a launch that has not become a plan yet.
-  const flowStartOnStage = isFlowShell() && plateAtRest;
-  // The front door owns its full-screen layer; surface docks remain columns.
-  const conversationExpanded = false;
+  // New-session screen, the door at rest on the stage — but only while the
+  // stage's target is: a launch whose plan hasn't arrived leaves the plate
+  // empty too, and the stage is showing its conversation.
+  const flowStartOnStage = isFlowShell() && plateAtRest && stageTarget.kind === "start";
 
 
   // ---- Immersive surfaces ---------------------------------------------------
@@ -2461,16 +2632,19 @@ function App() {
   // Flow keeps its own sidebar switch (⌘B, shell/flowState), so the layout
   // reads that instead of the classic shell's persisted collapse.
   const flowSidebarOpen = useFlow((s) => s.sidebar);
-  const baseShape = effectiveShape(
-    {
-      sidebarCollapsed: isFlowShell() ? !flowSidebarOpen : sidebarCollapsedPref,
-      paneCollapsed: paneCollapsedPref,
-      paneFullscreen: paneFullscreenPref,
-      termCollapsed: termCollapsedPref,
-      termFullscreen: termFullscreenPref,
-      docPinned: docPinnedPref,
-    },
-    immersive,
+  const baseShape = flowStageShape(
+    effectiveShape(
+      {
+        sidebarCollapsed: isFlowShell() ? !flowSidebarOpen : sidebarCollapsedPref,
+        paneCollapsed: paneCollapsedPref,
+        paneFullscreen: paneFullscreenPref,
+        termCollapsed: termCollapsedPref,
+        termFullscreen: termFullscreenPref,
+        docPinned: docPinnedPref,
+      },
+      immersive,
+    ),
+    flowDockHidden,
   );
   // The second, NARROWER overlay: just the two side panels, leaving the header,
   // the footer and the terminal dock exactly where they are. The sessions list
@@ -2480,13 +2654,19 @@ function App() {
   // `docPinned` is read from the UNMASKED shape (this never touches it), so
   // there is no cycle.
   const pMask = panelMask({
-    conversationExpanded,
     surface: mainSurface,
     broken: panelBreaks,
     enabled: workspaceImmersive(workspace),
     docPinned: baseShape.docPinned,
   });
-  const noPlanPane = mainSurface === "document" && plateMode !== "plan" && !conversationExpanded && !panelBreaks.pane;
+  // A plate with no plan on it hides the pane too — and in flow, the plate
+  // never has one beside it: the stage's plan panel is the plan's margin.
+  const noPlanPane = platePaneMask({
+    surface: mainSurface,
+    plateMode,
+    brokenPane: panelBreaks.pane,
+    flowPaneOpen: flowShell ? false : undefined,
+  });
   const combinedPaneMask = pMask.pane || noPlanPane;
   const previousPaneMask = useRef(false);
   useLayoutEffect(() => {
@@ -3836,6 +4016,9 @@ function App() {
     documentRef,
     composing === null,
   );
+  useEffect(() => {
+    if (selection) void loadCommentComposer().catch(() => {});
+  }, [selection]);
   // Imperative bridge to the lazily-mounted PlanEditor so the SelectionMenu's
   // Strike action can run an editor command without owning the editor.
   const planActionsRef = useRef<PlanEditorActions | null>(null);
@@ -4979,7 +5162,7 @@ function App() {
   // One source of truth for the JSX and for the surrounding layout, so the
   // dock, the divider and the pill can never disagree about whether the
   // column is up.
-  const voiceDocked = !conversationExpanded && dockOpen && dockContext != null;
+  const voiceDocked = dockOpen && dockContext != null;
   const planVoiceOpen = voiceDocked && dockContext?.kind === "voice";
   planVoiceOpenRef.current = planVoiceOpen;
   // The conversation a dictation with nowhere to type becomes a turn in: the
@@ -6196,6 +6379,12 @@ function App() {
       fail("Couldn't open a terminal to resume in.");
       return;
     }
+    // Flow: the plan's conversation is this terminal's from now on — bound
+    // before the resumed CLI's SessionStart, so it binds the moment it does.
+    if (flowShell) {
+      bindSessionTerminals([{ sessionId, terminalId: id }]);
+      void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
+    }
     onRestore({
       type: "dispatched",
       sessionId,
@@ -6453,7 +6642,9 @@ function App() {
         ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
         : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
     }\r`;
-    if (!req.background) {
+    // In flow the launch lands on the stage, as its conversation; the dock
+    // stays out of sight (⌘J shows the PTY).
+    if (!req.background && !flowShell) {
       suppressTerminalRevealFocus();
       setTermFullscreen(false);
       revealTerm();
@@ -6505,11 +6696,20 @@ function App() {
       launchedPlansRef.current.delete(launchId);
       return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
     }
+    // Flow: the session exists from here, before any plan row does. A launch
+    // the user asked to see puts the stage on it.
+    if (flowShell) {
+      noteFlowLaunch({
+        type: "launched",
+        launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
+      });
+      if (!req.background) selectFlowLaunch(terminalId);
+    }
     if (run) {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
       setLastLaunchProject(req.projectPath!);
-      setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
+      if (req.background || !flowShell) setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
       return { ok: true, terminalId, launchId };
     }
 
@@ -6521,7 +6721,7 @@ function App() {
     setReadinessNow(startedAt);
     if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
-    setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
+    if (req.background || !flowShell) setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
     return { ok: true, terminalId, launchId };
   };
 
@@ -7270,6 +7470,11 @@ function App() {
     for (const p of dead) repayPending(p, "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveTermIds, pendingLaunch, runFlight]);
+  // Flow's launches obey the same law: one whose terminal closed is gone
+  // from the stage and the sidebar, since no plan can come from a dead PTY.
+  useEffect(() => {
+    if (flowShell) noteFlowLaunch({ type: "terminals", live: liveTermIds });
+  }, [flowShell, liveTermIds, noteFlowLaunch]);
 
   // The run's pill retires itself once the run is under way: no plan arrives
   // to clear it, and a run's tile is its own status from then on. Keyed on
@@ -8307,6 +8512,8 @@ function App() {
     setDoorCompact(false);
     selectSessions();
     setActiveId(null);
+    // Off any launch the stage was showing: New session is the start screen.
+    setFocusedLaunch(null);
     selectSurface("document");
     // Once the resting door has landed on the stage it engages like any
     // keyboard summons.
@@ -8510,23 +8717,27 @@ function App() {
       }, (e) => setToast(String(e), 6000));
     },
   });
-  const flowLaunches = useMemo<FlowLaunch[]>(
-    () => pendingLaunch
-      ? [{ terminalId: pendingLaunch.terminalId, title: pendingLaunch.prompt, startedAt: pendingLaunch.startedAt, projectPath: pendingLaunch.projectPath ?? null, working: true }]
-      : [],
-    [pendingLaunch],
-  );
   // What only the flow sidebar reads. The classic sidebar gets none of it,
   // so a chats refresh or the door opening never re-renders it.
-  const flowSidebarData = isFlowShell()
-    ? {
-        layout: "flow" as const,
-        startActive: flowStartOnStage && !roomChat,
-        chats,
-        activeChatId: roomChat ? chatId : null,
-        launches: flowLaunches,
-      }
-    : null;
+  // Launches are the stage's registry (lib/flowSessions): every launch until
+  // its plan arrives or its terminal closes, the one on the stage active.
+  const flowSidebarData = useMemo(
+    () =>
+      isFlowShell()
+        ? {
+            layout: "flow" as const,
+            startActive: flowStartOnStage && !roomChat,
+            chats,
+            activeChatId: roomChat ? chatId : null,
+            launches: flowSidebarLaunches,
+            activeLaunchId,
+            onSelectLaunch: selectFlowLaunch,
+            working: flowWorking,
+            needs: flowNeeds,
+          }
+        : null,
+    [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, selectFlowLaunch, flowWorking, flowNeeds],
+  );
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -8592,21 +8803,182 @@ function App() {
     onCloseDock: () => setDockOpenBy((state) => withDockOpen(state, "browser", false)),
   });
 
+  // The comment composer, while a mark is being written: the discussion
+  // pane's on classic, the plan panel's (or its Feedback tab's) in flow.
+  const commentComposer = composing ? (
+    <Suspense fallback={null}>
+    <CommentComposer
+      type={composing.type}
+      sessionId={activeId ?? ""}
+      anchorId={composing.anchorId}
+      selectedText={composing.selectedText}
+      charStart={composing.charStart}
+      charEnd={composing.charEnd}
+      subBlockId={composing.subBlockId}
+      presetRevised={composing.presetRevised}
+      onCancel={() => setComposing(null)}
+      onSubmit={submitComment}
+    />
+    </Suspense>
+  ) : null;
+
+  // ── The flow stage's props ───────────────────────────────────────────────
+  const stageHarness: "claude" | "codex" =
+    stageTarget.kind === "launch"
+      ? (flowLaunches.find((l) => l.terminalId === stageTarget.terminalId)?.harness ?? "claude")
+      : session?.backend === "codex"
+        ? "codex"
+        : "claude";
+  const stageHasPlan = stageTarget.kind === "plan" && sessionReady && !!latest && !joinedActive;
+  // Marks still waiting on an answer: unsent, sent, or reopened. Resolved
+  // ones are answered — the board's "All resolved" counts them done.
+  const stageUnresolved = paneComments.filter(
+    (c) => c.status === "draft" || c.status === "submitted" || c.status === "reopened",
+  ).length;
+  // The Feedback tab's verbs: the comment cards' own handlers.
+  const feedbackActions = useMemo(
+    () => ({
+      accept: commentCallbacks.onAccept,
+      reopen: commentCallbacks.onReopen,
+      promote: commentCallbacks.onPromote,
+      remove: commentCallbacks.onDelete,
+      update: commentCallbacks.onUpdate,
+      acceptSuggestion: commentCallbacks.onAcceptSuggestion,
+    }),
+    [commentCallbacks],
+  );
+  const stagePlanTitle = stageHasPlan
+    ? (summaries.find((s) => s.sessionId === activeId)?.planTitle ?? null)
+    : null;
+  // The conversation's Talk: the dock's conversation beside the stage — the
+  // plan's voice panel once there is a plan. A launch with no plan yet has no
+  // voice of its own, so Talk says when it will.
+  const flowTalk = () => {
+    if (voiceDocked) closeDock();
+    else if (dockReachable) openDiscussion();
+    else setToast({ message: "Talk opens on the plan as soon as it arrives.", tone: "info" });
+  };
+  const renderFlowStage = (planBody: ReactNode) => {
+    if (stageTarget.kind === "start" || !flowConvoHost) return planBody;
+    const author = agentLabelFor(session?.backend ?? null);
+    return (
+      <Suspense fallback={null}>
+        <ErrorBoundary region="session stage" fallback={surfaceFallback("session stage")}>
+          <FlowStage
+            target={stageTarget}
+            harness={stageHarness}
+            conversationHost={flowConvoHost}
+            onPose={onFlowPose}
+            hasPlan={stageHasPlan}
+            planBody={planBody}
+            latestVersion={latest?.versionNumber ?? null}
+            marks={pendingComments.length}
+            unresolved={stageUnresolved}
+            viewing={
+              isViewingHistorical && viewedRevision && latest
+                ? {
+                    viewing: viewedRevision.versionNumber,
+                    latest: latest.versionNumber,
+                    receivedAt: viewedRevision.receivedAt,
+                    onGoToLatest: () => setViewedVersionNumber(null),
+                  }
+                : null
+            }
+            contents={{ open: tocOpen, onToggle: tocEligible ? () => setTocOpen(!tocOpen) : null }}
+            width={{ wide: docWide, measure: docMeasure }}
+            footer={{
+              author,
+              marks: pendingComments.length,
+              askOnly: pendingComments.length > 0 && pendingComments.every((c) => c.type === "question" && !c.actionable),
+              canSubmit,
+              canApprove,
+              waiting,
+              waitingAsk,
+              onSubmit: submitReview,
+              onApprove: approvePlan,
+              onApproveLater: () => void approvePlanLater(),
+              onBuildTeam: (scale) => void startTeamBuild(scale),
+              approval:
+                session?.status === "approved"
+                  ? {
+                      version: session.revisions[session.revisions.length - 1]?.versionNumber ?? 1,
+                      runState: activeRunState,
+                      runLive: isLiveRunState(activeRunState),
+                      // A live run, or the plan's own agent at work in its
+                      // terminal after Approve & build.
+                      building:
+                        isLiveRunState(activeRunState) ||
+                        (activeRunState === null && !!stageTerminalId && terminalKinds.get(stageTerminalId) === "working"),
+                    }
+                  : null,
+              buildTargets,
+              onBuild: (id) => void buildApproved(id),
+              onReopen: () => void reopenApproved(),
+              planState: session ? { status: session.status, runState: activeRunState, held: activeHeld } : undefined,
+              onSetPlanState: session ? (state) => { void setPlanState(session.sessionId, state); } : undefined,
+              onMoveProject: session ? () => { void openMovePlan(session.sessionId); } : undefined,
+              progress: null,
+              terminals: stageTerminalId ? 1 : 0,
+              onShowTerminal: stageTerminalId ? () => setStage("terminal") : undefined,
+              detached: detached
+                ? {
+                    restoring,
+                    status: restoreStatus,
+                    failure: restoreFailure?.error ?? null,
+                    blocked: restoreBlockers[0]?.label ?? null,
+                    onRestore: restorePlanSession,
+                  }
+                : null,
+            }}
+            feedback={
+              session
+                ? {
+                    session,
+                    viewingVersion: isViewingHistorical && viewedRevision ? viewedRevision.versionNumber : (latest?.versionNumber ?? 1),
+                    // A thread's anchor takes you to its comment (scrolled to,
+                    // flashed, the block when it has no highlight).
+                    onJumpToAnchor: (anchorId, commentId) => {
+                      if (commentId) focusComment(commentId);
+                      else documentRef.current?.querySelector(`[data-anchor-id="${cssEscape(anchorId)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+                    },
+                    focusedCommentId,
+                    submitInFlight: busy,
+                    actions: feedbackActions,
+                    onViewResearch: viewResearch,
+                    composer: {
+                      // A historical view's anchors point into another revision.
+                      selection: isViewingHistorical ? null : selection,
+                      onClearSelection: clearSelection,
+                      onSubmit: (req) => submitComment(req),
+                    },
+                  }
+                : null
+            }
+            composer={commentComposer}
+            terminalView={flowView === "terminal"}
+            terminalDock={termDockRef}
+          />
+        </ErrorBoundary>
+      </Suspense>
+    );
+  };
+
   // ── The flow shell's top bar and keys (C1) ──────────────────────────────
-  // What the bar names: the session on the stage, its mode, its plan and its
-  // terminal. Until the stage's StageTarget (lib/flowSessions) lands, this
-  // reads the same thing from the door, the chat in it, the pending launch
-  // and the active plan.
-  const flowSummary = activeId ? summaries.find((s) => s.sessionId === activeId) ?? null : null;
+  // What the bar names: the session on the stage (its StageTarget), its mode,
+  // its plan and its terminal — or the chat the door is holding, or the
+  // start screen while the door is open.
+  const flowSummary = stageTarget.kind === "plan" ? summaries.find((s) => s.sessionId === stageTarget.sessionId) ?? null : null;
   const flowChat = frontDoorOpen && chatInRoom && chatId ? chats.find((c) => c.companionId === chatId) ?? null : null;
-  const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : flowSummary ? "plan" : pendingLaunch ? "launch" : "start";
-  const flowPlanId = flowTarget === "plan" ? flowSummary?.sessionId ?? null : null;
-  const flowTerminalId =
-    flowTarget === "launch" ? pendingLaunch?.terminalId ?? null : flowTarget === "plan" ? flowSummary?.heldTerminalId ?? null : null;
+  const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : stageTarget.kind;
+  const flowPlanId = flowTarget === "plan" && stageTarget.kind === "plan" ? stageTarget.sessionId : null;
+  const flowTerminalId = flowTarget === "launch" || flowTarget === "plan" ? stageTerminalId : null;
+  // The CLI's own name for the session (`convo-title`) stands in until the
+  // plan brings a title of its own.
+  const flowCliTitle = stageTerminalId ? terminalTitles.get(stageTerminalId) ?? null : null;
   const flowTitle =
     flowTarget === "chat" ? flowChat?.title || "Chat"
-      : flowTarget === "plan" && flowSummary ? sessionTitle(flowSummary)
-        : flowTarget === "launch" && pendingLaunch ? launchTitle(pendingLaunch.prompt)
+      : flowTarget === "plan" && flowSummary ? (flowSummary.titleOverride || flowSummary.planTitle ? sessionTitle(flowSummary) : flowCliTitle ?? sessionTitle(flowSummary))
+        : flowTarget === "launch" && stageTarget.kind === "launch" ? flowCliTitle ?? launchTitle(stageTarget.prompt)
           : null;
   const flowMode = sessionMode({
     target: flowTarget,
@@ -8735,7 +9107,7 @@ function App() {
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
-    <div className="h-full min-h-0 min-w-0 flex flex-col overflow-hidden">
+    <div className={`h-full min-h-0 min-w-0 flex flex-col overflow-hidden${flowShell ? " rl-ambient" : ""}`}>
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
           a render throw stays inside it. The terminal dock is deliberately a
@@ -8954,7 +9326,7 @@ function App() {
           against this element, so they cover the ring — plates only. */}
       <main
         className="relative min-h-0 min-w-0 flex-1 overflow-hidden flex flex-col"
-        style={{ padding: `${SHELL_EDGE}px` }}
+        style={{ padding: `${flowShell ? 0 : SHELL_EDGE}px` }}
       >
         <ErrorBoundary
           region="content area"
@@ -9668,8 +10040,8 @@ function App() {
                 // there (a loading or revoked notice) centres on its own, and a
                 // wide-view setting left over from a plan must not slide it
                 // sideways. Symmetric, slim gutters instead of the reading ones.
-                ...(docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
-                paddingLeft: docSurfaceActive ? undefined : "24px",
+                ...(flowStageOwns ? FLOW_ARTICLE : docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
+                ...(flowStageOwns ? null : { paddingLeft: docSurfaceActive ? undefined : "24px" }),
                 // `--rl-doc-zoom` moved UP one level, to the ancestor every
                 // surface body shares — it was inert in the Drafter from here.
               } as React.CSSProperties
@@ -9744,6 +10116,8 @@ function App() {
                   focusNonce={focusNonce}
                   onHighlightClick={handleHighlightClick}
                   onBackToLatest={() => setViewedVersionNumber(null)}
+                  // Flow says it once, in the plan header's version pill.
+                  banner={!flowStageOwns}
                 />
               ) : (
                 <Suspense fallback={null}>
@@ -9768,6 +10142,9 @@ function App() {
                       actionsRef={planActionsRef}
                       onLockedEdit={lockedEditToast}
                       collab={ownerCollab}
+                      // Flow's split pose has no comment pane: a mark's words
+                      // go under its block (board 4c).
+                      marginNotesBy={flowStageOwns && flowPainted.pose === "split" ? relayDefaults.displayName : undefined}
                     />
                   </ErrorBoundary>
                 </Suspense>
@@ -9826,21 +10203,6 @@ function App() {
               // key) and resolves here to no body — the document — which is
               // exactly what the lenient record is for.
             };
-            // The room. A conversation that has taken the plate springs out
-            // of the box the gesture started in — the Front Door's island —
-            // with the door still mounted behind it and fading, exactly as
-            // the Drafter does. One spring, one surface becoming another:
-            // the door is a way THROUGH, not a place you leave.
-            if (conversationExpanded && dockBody)
-              return (
-                <SpringSwap
-                  from={swapFrom}
-                  onArrived={() => setSwapFrom(null)}
-                  leaving={swapFrom ? documentBody : null}
-                >
-                  <div className="flex h-full min-h-0 flex-col">{dockBody}</div>
-                </SpringSwap>
-              );
             const secondaryBody =
               mainSurface === "document"
                 ? null
@@ -9857,6 +10219,11 @@ function App() {
                 />
               );
             if (secondaryBody) return secondaryBody;
+            // Flow: the session stage, holding the plan document in its panel
+            // — or, with no session on it, the start screen's plate: empty,
+            // the window's colour, and where the resting door lands.
+            if (flowStageOwns) return renderFlowStage(documentBody);
+            if (flowStartOnStage) return <div data-rl-door-plate className="rl-flow-start-plate" />;
             // No secondary pane open → the document is the default full view.
             return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{documentBody}</SpringSwap> : documentBody;
           })()}
@@ -9906,7 +10273,7 @@ function App() {
             plateMode !== "file" && (
             <div
               ref={zoomCtrlRef}
-              className={`absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
+              className={`rl-doc-zoom absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
               style={{
                 right: "16px",
                 bottom: "16px",
@@ -10004,11 +10371,12 @@ function App() {
           )}
         </div>
 
-        {!paneFullscreen && (
+        {!paneFullscreen && !(flowShell && mainSurface === "document") && (
           // Always in flow (its 6px is part of the space model); when the
           // discussion pane curtains it is painted over, and the absolute
           // copy inside the pane wrapper carries the affordance at the
-          // curtain's visible edge.
+          // curtain's visible edge. Not beside the flow stage, whose plan
+          // panel is the plan's margin (`platePaneMask`).
           <PaneDivider
             collapsed={paneCollapsed}
             dragging={isDragging}
@@ -10573,20 +10941,7 @@ function App() {
                 )}
               </div>
             )}
-            {composing && (
-              <CommentComposer
-                type={composing.type}
-                sessionId={activeId ?? ""}
-                anchorId={composing.anchorId}
-                selectedText={composing.selectedText}
-                charStart={composing.charStart}
-                charEnd={composing.charEnd}
-                subBlockId={composing.subBlockId}
-                presetRevised={composing.presetRevised}
-                onCancel={() => setComposing(null)}
-                onSubmit={submitComment}
-              />
-            )}
+            {commentComposer}
             {waiting && (
               <div
                 className="rounded-md border p-3"
@@ -10773,7 +11128,7 @@ function App() {
         </div>
         </ErrorBoundary>
 
-        {!termFullscreen && (
+        {!termFullscreen && !flowDockHidden && !flowTermStage && (
           <PaneDivider
             orientation="horizontal"
             label="terminal"
@@ -10799,14 +11154,18 @@ function App() {
         <div
           ref={termDockRef}
           className={
-            termFullscreen
+            // Flow's terminal view first: the dock over the stage, showing
+            // the session's PTY alone (`solo` below).
+            flowTermStage
+              ? "rl-term-dock--stage"
+              : termFullscreen
               ? "absolute inset-0 z-30"
               : // Collapsed, the dock folds to height 0 — the plate class must
                 // go with it, or its top/bottom hairlines survive the fold as
                 // a 2px rounded sliver across the hull.
                 `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
           }
-          data-rl-pane={termFullscreen ? undefined : ""}
+          data-rl-pane={termFullscreen || flowTermStage ? undefined : ""}
           // Height is owned by `applyLiveLayout` (it folds in the collapsed
           // state), so the dock tracks the divider without a render — and
           // without touching style for anything else on the page.
@@ -10815,7 +11174,7 @@ function App() {
           {/* In fullscreen, an overlay divider at the top of the terminal
               gives the user the same top-edge caret they use to collapse
               the docked terminal — except here it exits fullscreen. */}
-          {termFullscreen && (
+          {termFullscreen && !flowTermStage && (
             <div
               style={{
                 position: "absolute",
@@ -10854,7 +11213,8 @@ function App() {
             onTileCountChange={handleTileCountChange}
             onNeedsYouChange={setTermNeedYou}
             onNeedsYouIdsChange={isFlowShell() ? setFlowNeedsYouTerms : undefined}
-            collapsed={termFullscreen ? false : termCollapsed}
+            collapsed={termFullscreen || flowTermStage ? false : termCollapsed}
+            solo={flowTermStage ? stageTerminalId : null}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}
@@ -10889,7 +11249,9 @@ function App() {
       >
       {/* Same swap at the bottom — no native constraint here, so the footer
           hides outright behind a SHELL_EDGE strip of hull. */}
-      <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
+      {/* Not in flow: build status moved to the plan panel's footer, and
+          "needs you" to the top bar (PLAN, "Footer removed"). */}
+      {!flowShell && <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
       <Footer
         planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
         onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
@@ -10925,7 +11287,7 @@ function App() {
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
-      </ChromeSlot></Suspense>
+      </ChromeSlot></Suspense>}
       </ErrorBoundary>
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}
@@ -11266,6 +11628,37 @@ function App() {
               onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
+      {/* The flow stage's conversation, rendered here — at one place in the
+          tree for as long as the session is on the stage — and shown wherever
+          the stage puts its host. Keyed by the terminal, so a launch becoming
+          its plan keeps the conversation, and another session gets its own. */}
+      {flowConvoHost && stageTarget.kind !== "start" && createPortal(
+        <Suspense fallback={null}>
+          <ErrorBoundary region="session conversation" fallback={surfaceFallback("session conversation")}>
+            <SessionConversation
+              key={stageTerminalId ?? (stageTarget.kind === "plan" ? stageTarget.sessionId : "")}
+              terminalId={stageTerminalId}
+              sessionId={stageTarget.kind === "plan" ? stageTarget.sessionId : null}
+              harness={stageHarness}
+              layout={flowStageOwns ? flowPainted.layout : "stage"}
+              planTitle={stagePlanTitle}
+              planMarks={pendingComments.length}
+              planOpen={flowStageOwns && flowPainted.pose !== "closed"}
+              onOpenPlan={() => { if (stageTarget.kind === "plan") openPlan(stageTarget.sessionId, stageUnresolved, false); }}
+              onShowTerminal={() => setStage("terminal")}
+              projectPath={stageTarget.kind === "launch" ? stageTarget.projectPath : (session?.projectPath ?? null)}
+              planMarkdown={stageHasPlan ? (latest?.rawPlanMarkdown ?? null) : null}
+              // Talk is the voice panel, one click away (it IS the
+              // discussion surface): open beside the stage, or closed again.
+              talking={voiceDocked}
+              onTalk={flowTalk}
+              // Out of sight, its questions go to the terminal (lib/askRelease).
+              hidden={!flowConvoOnScreen}
+            />
+          </ErrorBoundary>
+        </Suspense>,
+        flowConvoHost,
+      )}
       {browserMounted && createPortal(
 <Suspense fallback={null}>
               <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
@@ -11418,6 +11811,7 @@ function HistoricalRevisionView({
   focusNonce,
   onHighlightClick,
   onBackToLatest,
+  banner = true,
 }: {
   sessionId: string;
   revision: Revision;
@@ -11427,11 +11821,14 @@ function HistoricalRevisionView({
   focusNonce?: number;
   onHighlightClick: (commentId: string) => void;
   onBackToLatest: () => void;
+  /** The "Viewing vN · read-only" bar above the text. The flow shell's
+   *  plan header carries it as the version pill instead. */
+  banner?: boolean;
 }) {
   const when = new Date(revision.receivedAt).toLocaleString();
   return (
     <div>
-      <div
+      {banner && <div
         className="mb-4 flex items-center justify-between gap-3 rounded border px-3 py-2"
         style={{
           borderColor: "var(--color-rule)",
@@ -11464,7 +11861,7 @@ function HistoricalRevisionView({
         >
           Back to latest
         </button>
-      </div>
+      </div>}
       <Suspense fallback={null}>
         {/* `sessionId` deliberately omitted: the historical doc is in-memory
             only — no IndexedDB persistence for a read-only view. The `hist`
