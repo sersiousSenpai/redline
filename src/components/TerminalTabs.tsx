@@ -155,6 +155,13 @@ interface TerminalTabsProps {
   /** Recent repo directories for the tile menu's NEW TERMINAL IN section. The
    *  same list the drafter's launch picker uses. */
   projectOptions?: readonly ProjectOption[];
+  /** The flow shell's terminal view (⌘J): this one terminal alone, filling
+   *  the dock, with no shelf, tile header or gutters — the session's own PTY
+   *  at full stage. A view, like a zoom: no shell is spawned or killed, the
+   *  wall's tiles are left exactly as they were, and every other terminal
+   *  stays mounted underneath (display:none). An id that isn't open is
+   *  ignored. */
+  solo?: string | null;
 }
 
 /** UI policy: how many tiles the grid will show at once. Deliberately absent
@@ -334,6 +341,7 @@ export const TerminalTabs = memo(
       heldTerminalIds,
       heldPlanTitles,
       projectOptions,
+      solo = null,
     }: TerminalTabsProps,
     ref,
   ) {
@@ -456,6 +464,9 @@ export const TerminalTabs = memo(
   const focusIdx = Math.min(focusedTile, tiles.length - 1);
   const focusedId = tiles[focusIdx];
   const zoomed = zoomedId !== null && tiles.includes(zoomedId) ? zoomedId : null;
+  // Derived against `tabs`, like the zoom: a closed terminal can never leave
+  // the dock showing nothing.
+  const soloId = solo !== null && tabs.some((t) => t.id === solo) ? solo : null;
   const zoomedRef = useRef(zoomed);
   zoomedRef.current = zoomed;
   const collapsedRef = useRef(collapsed);
@@ -792,9 +803,11 @@ export const TerminalTabs = memo(
 
   // Notify the host whenever the focused terminal changes so post-submit PTY
   // injects and cwd-follow polling target the terminal being watched.
+  // The solo terminal is the one being watched while it is shown alone.
+  const watchedId = soloId ?? focusedId;
   useEffect(() => {
-    onActiveTabChange?.(focusedId);
-  }, [focusedId, onActiveTabChange]);
+    onActiveTabChange?.(watchedId);
+  }, [watchedId, onActiveTabChange]);
 
   // ── Live cwds ─────────────────────────────────────────────────────────────
 
@@ -1001,12 +1014,14 @@ export const TerminalTabs = memo(
   // focused window, for SEEN_AFTER_MS. Keyed on the transition's `at`, so the
   // excerpt filling in (same `at`) doesn't restart the clock and a new turn
   // (new `at`) does.
-  const focusedAt = focusedId ? attention.get(focusedId)?.at : undefined;
-  const focusedState = focusedId ? termStates.get(focusedId) : undefined;
-  const focusedOnScreen = !collapsed && (zoomed === null || zoomed === focusedId);
+  // Shown alone, the solo terminal is the one on screen and in focus.
+  const seenId = soloId ?? focusedId;
+  const focusedAt = seenId ? attention.get(seenId)?.at : undefined;
+  const focusedState = seenId ? termStates.get(seenId) : undefined;
+  const focusedOnScreen = !collapsed && (soloId !== null || zoomed === null || zoomed === focusedId);
   useEffect(() => {
     if (
-      !focusedId ||
+      !seenId ||
       focusedAt === undefined ||
       focusedState !== "your-turn" ||
       !focusedOnScreen ||
@@ -1015,10 +1030,10 @@ export const TerminalTabs = memo(
       return;
     }
     const timer = window.setTimeout(() => {
-      setAcks((prev) => putAck(prev, focusedId, { at: focusedAt, as: "seen" }));
+      setAcks((prev) => putAck(prev, seenId, { at: focusedAt, as: "seen" }));
     }, SEEN_AFTER_MS);
     return () => window.clearTimeout(timer);
-  }, [focusedId, focusedAt, focusedState, focusedOnScreen, windowFocused, setAcks]);
+  }, [seenId, focusedAt, focusedState, focusedOnScreen, windowFocused, setAcks]);
 
   // ── Parking (park-only automation) ───────────────────────────────────────
   //
@@ -1867,20 +1882,25 @@ export const TerminalTabs = memo(
           </button>
         </div>
       )}
-      <TerminalShelf
-        chips={shelfChips}
-        onPlace={placeShelfChip}
-        onDragStart={dragShelfChip}
-      />
+      {soloId === null && (
+        <TerminalShelf
+          chips={shelfChips}
+          onPlace={placeShelfChip}
+          onDragStart={dragShelfChip}
+        />
+      )}
       <TerminalMenuDataContext.Provider value={menuData}>
       <div ref={paneContainerRef} className="flex-1 relative">
         {tabs.map((t) => {
           const tileIndex = tiles.indexOf(t.id);
           const tiled = tileIndex !== -1;
           const rect = tiled ? rects[tileIndex] : null;
-          const isZoomed = zoomed === t.id;
-          const hiddenByZoom = zoomed !== null && !isZoomed;
-          const visible = tiled && !collapsed && !hiddenByZoom;
+          // Solo outranks the wall's own layout and zoom, without touching
+          // either: the tile keeps its rect for when the view comes back.
+          const isSolo = soloId === t.id;
+          const isZoomed = soloId === null ? zoomed === t.id : isSolo;
+          const hiddenByZoom = soloId === null ? zoomed !== null && !isZoomed : !isSolo;
+          const visible = (tiled || isSolo) && !collapsed && !hiddenByZoom;
           const ident = identity.byId.get(t.id);
           // What this terminal is doing and on, beside its name. Same
           // derivation the tile menu uses (`workLine`) — just no longer
@@ -1909,7 +1929,7 @@ export const TerminalTabs = memo(
               data-term-state={tiled ? line.state : undefined}
               style={wrapperStyle(rect, isZoomed, hiddenByZoom)}
             >
-              {tiled && ident && (
+              {tiled && soloId === null && ident && (
                 // The boundary wraps the HEADER ELEMENT ONLY — around the
                 // whole wrapper it would unmount the TerminalView on a header
                 // crash, which would discard its local rendered history. A
@@ -1932,7 +1952,7 @@ export const TerminalTabs = memo(
               <div
                 style={{
                   position: "absolute",
-                  top: TILE_HEADER_H,
+                  top: soloId === null ? TILE_HEADER_H : 0,
                   left: 0,
                   right: 0,
                   bottom: 0,
@@ -1955,7 +1975,7 @@ export const TerminalTabs = memo(
             </div>
           );
         })}
-        {!collapsed && zoomed === null && (
+        {!collapsed && zoomed === null && soloId === null && (
           // Null fallback: a crashed gutter layer just disappears (resize the
           // dock to get it back); the tiles keep their shells. ONE boundary
           // around the whole layer, not one per gutter.

@@ -15,7 +15,7 @@ import {
   movePose,
   noteRevision,
   openPlan,
-  planColumnStyle,
+  planColumnVars,
   poseOnRevision,
   resetFlowPoseForTests,
   tabOnPose,
@@ -112,16 +112,19 @@ describe("the writers go through flowState", () => {
   });
 });
 
-describe("planColumnStyle", () => {
+describe("planColumnVars", () => {
+  const vars = (...a: Parameters<typeof planColumnVars>) => planColumnVars(...a) as Record<string, string>;
+
   it("is the board's column at the default measure", () => {
-    expect(planColumnStyle("split", false, 820)).toMatchObject({ maxWidth: "680px", padding: "34px 56px 48px", marginLeft: 0 });
-    expect(planColumnStyle("full", false, 820)).toMatchObject({ maxWidth: "720px", marginLeft: "auto", marginRight: "auto" });
+    expect(vars("split", false, 820)).toEqual({ "--rl-plan-max": "680px", "--rl-plan-pad": "34px 56px 48px", "--rl-plan-mx": "0" });
+    expect(vars("full", false, 820)).toEqual({ "--rl-plan-max": "720px", "--rl-plan-pad": "40px 0 48px", "--rl-plan-mx": "auto" });
   });
 
   it("widens by the dragged measure, and wide fills the panel", () => {
-    expect(planColumnStyle("full", false, 900).maxWidth).toBe("800px");
-    expect(planColumnStyle("split", false, 900).maxWidth).toBe("760px");
-    expect(planColumnStyle("full", true, 820).maxWidth).toBe("none");
-    expect(planColumnStyle("split", true, 820).maxWidth).toBe("none");
+    expect(vars("full", false, 900)["--rl-plan-max"]).toBe("800px");
+    expect(vars("split", false, 900)["--rl-plan-max"]).toBe("760px");
+    expect(vars("full", true, 820)["--rl-plan-max"]).toBe("none");
+    expect(vars("split", true, 820)["--rl-plan-max"]).toBe("none");
+    expect(vars("split", false, Number.NaN)["--rl-plan-max"]).toBe("680px");
   });
 });

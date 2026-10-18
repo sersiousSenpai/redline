@@ -1,0 +1,681 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* The session stage and the plan panel (PLAN C3; boards 4b, 4c, 4d, 5a).
+   Sizes are the boards' at 1280×800 / 1600×960; every colour is a token
+   (role map in PLAN, "Design palette → Redline tokens"). The conversation,
+   the plan and the terminal are solid; only floating layers are glass. */
+
+.rl-flow-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  transition: opacity var(--rl-dur-2) var(--rl-ease-out);
+}
+
+/* The conversation's place. The host inside is absolutely inset (it takes
+   no intrinsic space), so this box alone decides the size. */
+.rl-flow-convo {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rl-flow-convo[data-layout="column"] {
+  flex: none;
+  width: 440px;
+  border-right: 1px solid var(--color-rule);
+}
+
+/* ── The plan panel ──────────────────────────────────────────────────── */
+
+.rl-flow-plan {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-paper);
+}
+.rl-flow-plan[hidden] {
+  display: none;
+}
+.rl-flow-plan-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Header — 48px; 4c: 0 14 0 22, 5a: 0 16 0 24; 12.5px. */
+.rl-plan-head {
+  height: 48px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 22px;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: var(--rl-text-chrome);
+  line-height: 1;
+  white-space: nowrap;
+}
+.rl-plan-head[data-pose="full"] {
+  padding: 0 16px 0 24px;
+}
+.rl-plan-head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.rl-plan-head-icon {
+  flex: none;
+  color: var(--color-ink-4);
+}
+.rl-plan-head-name {
+  color: var(--color-ink);
+}
+.rl-plan-head-meta {
+  color: var(--color-ink-5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rl-plan-head-spacer {
+  flex: 1;
+  min-width: 0;
+}
+.rl-plan-head-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--rl-radius-row);
+  border: 0;
+  background: transparent;
+  color: var(--color-ink-3);
+  font: inherit;
+  cursor: pointer;
+}
+.rl-plan-head-btn:hover:not(:disabled) {
+  background: var(--color-fill-1);
+  color: var(--color-ink);
+}
+.rl-plan-head-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.rl-plan-head-close {
+  background: var(--color-fill-1);
+}
+.rl-plan-head-close:hover {
+  background: var(--color-fill-2);
+}
+.rl-plan-head-icon-btn {
+  width: 28px;
+  padding: 0;
+  justify-content: center;
+}
+.rl-plan-head-icon-btn[aria-pressed="true"] {
+  color: var(--color-ink);
+}
+/* 5a's "☰ Contents" sits flush at the header's 24px inset. */
+.rl-plan-head-contents {
+  padding: 0;
+  margin-right: 4px;
+}
+.rl-plan-head-contents:hover:not(:disabled) {
+  background: transparent;
+}
+.rl-plan-head-btn:focus-visible,
+.rl-plan-btn:focus-visible,
+.rl-flow-tab:focus-visible,
+.rl-version-pill-go:focus-visible,
+.rl-plan-card button:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: 2px;
+}
+
+/* The version pill — 30px, r8, amber; the inner Go is 22px and filled. */
+.rl-version-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 6px 0 12px;
+  border-radius: var(--rl-radius-menu-row);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 20%, var(--color-paper));
+  background: color-mix(in srgb, var(--color-mode-redline-bg) 70%, var(--color-paper));
+  color: var(--color-mode-redline-fg);
+  font-size: var(--rl-text-chrome);
+  white-space: nowrap;
+  flex: none;
+}
+.rl-version-pill-go {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--rl-radius-chip);
+  background: var(--color-warning);
+  color: var(--color-on-warning);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Footer — 4c: 64px, 0 16 0 22; 5a: 60px, 0 16 0 24; 13px. */
+.rl-plan-foot {
+  height: 64px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 0 22px;
+  border-top: 1px solid var(--color-rule);
+  font-size: var(--rl-text-row);
+  white-space: nowrap;
+}
+.rl-plan-foot[data-pose="full"] {
+  height: 60px;
+  padding: 0 16px 0 24px;
+}
+.rl-plan-foot-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-ink-3);
+}
+.rl-plan-foot-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+/* The hint is the board's 13px muted line here, whatever its own default. */
+.rl-plan-foot .rl-context-hint {
+  margin: 0;
+  font-size: var(--rl-text-row);
+  color: var(--color-ink-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rl-plan-foot-faint {
+  color: var(--color-ink-5);
+}
+.rl-plan-foot-terminals,
+.rl-plan-foot-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.rl-plan-foot-terminals:disabled {
+  cursor: default;
+}
+.rl-plan-foot-link {
+  color: var(--color-info-text);
+  text-decoration: underline;
+}
+.rl-plan-foot-link:disabled {
+  color: var(--color-ink-4);
+  cursor: default;
+}
+/* PlanStateMenu's bare trigger, quiet beside the hint. */
+.rl-plan-foot-state button,
+.rl-plan-foot-line > span > button[aria-haspopup="menu"] {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.rl-plan-foot-state button {
+  color: var(--color-ink-4);
+}
+.rl-plan-foot-spacer {
+  flex: 1;
+}
+.rl-plan-foot-actions,
+.rl-plan-foot-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* The footer's buttons — 34px, r9: outlined, and the ink-filled primary. */
+.rl-plan-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: var(--rl-radius-button);
+  border: 1px solid var(--color-rule-strong);
+  background: transparent;
+  color: var(--color-ink-3);
+  font: inherit;
+  cursor: pointer;
+}
+.rl-plan-btn:hover:not(:disabled) {
+  background: var(--color-fill-1);
+  color: var(--color-ink);
+}
+.rl-plan-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.rl-plan-btn--quiet {
+  border-color: transparent;
+}
+.rl-plan-btn--primary {
+  padding: 0 16px;
+  border-color: transparent;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-weight: 600;
+}
+.rl-plan-btn--primary:hover:not(:disabled) {
+  background: var(--color-ink-2);
+  color: var(--color-paper);
+}
+.rl-plan-split {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.rl-plan-split > .rl-plan-btn--primary:first-child:not(:last-of-type) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.rl-plan-split-more {
+  width: 26px;
+  padding: 0;
+  justify-content: center;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid color-mix(in srgb, var(--color-paper) 30%, transparent);
+}
+.rl-plan-split-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 50;
+  min-width: 240px;
+  padding: 6px;
+  white-space: normal;
+}
+.rl-plan-split-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--rl-radius-menu-row);
+  background: none;
+  color: var(--color-ink);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.rl-plan-split-item:hover {
+  background: var(--color-fill-2);
+}
+.rl-plan-split-detail {
+  display: block;
+  color: var(--color-ink-4);
+  font-size: var(--rl-text-label);
+}
+
+/* A spinner turns; nothing else about it animates. */
+.rl-stage-spin {
+  flex: none;
+  animation: rl-stage-spin 1.2s linear infinite;
+}
+.rl-stage-spin[data-tone="build"] {
+  color: var(--color-mode-build-fg);
+}
+.rl-stage-spin[data-tone="plan"] {
+  color: var(--color-mode-plan-fg);
+}
+@keyframes rl-stage-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-stage-spin {
+    animation: none;
+  }
+}
+
+/* The comment composer, while a mark is being written beside the chat: a
+   glass sheet over the plan's foot, the plan scrolling beneath it. */
+.rl-flow-compose-sheet {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: 14px;
+  z-index: 25;
+  max-width: 560px;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  animation: rl-stage-rise var(--rl-dur-2) var(--rl-ease-spring);
+}
+@keyframes rl-stage-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-flow-compose-sheet {
+    animation: none;
+  }
+}
+
+/* ── The plan, in the board's type ───────────────────────────────────── */
+
+/* Serif reading type: 4c 16/1.75, 5a 16.5/1.75; prose in the second ink.
+   The document zoom still scales it. */
+.rl-flow-plan .rl-prose {
+  font-family: var(--font-serif);
+  font-size: calc(16px * var(--rl-doc-zoom, 1));
+  line-height: 1.75;
+  color: var(--color-ink-2);
+}
+.rl-flow-plan[data-pose="full"] .rl-prose {
+  font-size: calc(16.5px * var(--rl-doc-zoom, 1));
+}
+/* The boards set blocks 16px apart. */
+.rl-flow-plan .rl-prose p,
+.rl-flow-plan .rl-prose ul,
+.rl-flow-plan .rl-prose ol {
+  margin: 16px 0;
+}
+.rl-flow-plan .rl-prose h1,
+.rl-flow-plan .rl-prose h2,
+.rl-flow-plan .rl-prose h3,
+.rl-flow-plan .rl-prose h4 {
+  font-family: var(--font-serif);
+  color: var(--color-ink);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+/* Title: 4c 28px, 5a 30px, at 1.25. */
+.rl-flow-plan .rl-prose h1 {
+  font-size: calc(28px * var(--rl-doc-zoom, 1));
+  line-height: 1.25;
+  margin: 0 0 16px;
+}
+.rl-flow-plan[data-pose="full"] .rl-prose h1 {
+  font-size: calc(30px * var(--rl-doc-zoom, 1));
+}
+/* The lede: the paragraph under the title, 16/1.65 in the muted ink. */
+.rl-flow-plan .rl-prose h1 + p {
+  font-size: calc(16px * var(--rl-doc-zoom, 1));
+  line-height: 1.65;
+  color: var(--color-ink-3);
+}
+/* Sections: 19px, no rule under them, 6–8px of air above. */
+.rl-flow-plan .rl-prose h2 {
+  font-size: calc(19px * var(--rl-doc-zoom, 1));
+  line-height: 1.3;
+  margin: 22px 0 16px;
+  padding: 0;
+  border-bottom: 0;
+}
+.rl-flow-plan[data-pose="full"] .rl-prose h2 {
+  margin-top: 24px;
+}
+.rl-flow-plan .rl-prose h3 {
+  font-size: calc(17px * var(--rl-doc-zoom, 1));
+  margin: 20px 0 12px;
+}
+/* A decisions table (5a): a 130px label column and hairline rows, no grid,
+   no zebra, the reading face at 15/1.6. */
+.rl-flow-plan .rl-prose table {
+  width: 100%;
+  margin: 16px 0;
+  border-top: 1px solid var(--color-rule);
+  font-size: calc(15px * var(--rl-doc-zoom, 1));
+  line-height: 1.6;
+}
+.rl-flow-plan .rl-prose th,
+.rl-flow-plan .rl-prose td {
+  border: 0;
+  border-bottom: 1px solid var(--color-rule);
+  padding: 12px 0;
+  background: none;
+  font-weight: 400;
+  vertical-align: top;
+}
+.rl-flow-plan .rl-prose tbody tr:nth-child(even) td {
+  background: none;
+}
+.rl-flow-plan .rl-prose tr > :first-child {
+  width: 130px;
+  color: var(--color-ink-3);
+}
+.rl-flow-plan .rl-prose tr > :first-child + * {
+  padding-left: 0;
+}
+.rl-flow-plan .rl-prose td strong,
+.rl-flow-plan .rl-prose th strong {
+  color: var(--color-ink);
+}
+
+/* A mark is amber: a tinted run with a 2px rule under it (4c). The one the
+   reader is following turns plan-blue (5a). */
+.rl-flow-plan .rl-comment-highlight {
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  box-shadow: none;
+  border-bottom: 2px solid var(--color-warning);
+  border-radius: 0;
+  transition: none;
+}
+.rl-flow-plan .rl-comment-highlight--focused,
+.rl-flow-plan .rl-comment-highlight--muted.rl-comment-highlight--focused {
+  background: color-mix(in srgb, var(--color-info) 16%, transparent);
+  border-bottom-color: var(--color-info);
+  box-shadow: none;
+}
+.rl-flow-plan .rl-comment-highlight--muted {
+  background: color-mix(in srgb, var(--color-ink-muted) 10%, transparent);
+  border-bottom-color: var(--color-rule-strong);
+}
+/* The classic gutter dot is the margin note's job here. */
+.rl-flow-plan .rl-has-comments::before {
+  display: none;
+}
+
+/* A margin note (4c): the mark's comment, under its paragraph — 13px sans,
+   r10, indented 24px, its author's initials in an amber disc. */
+.rl-flow-plan .rl-margin-note {
+  display: flex;
+  gap: 10px;
+  width: fit-content;
+  max-width: 420px;
+  margin: 0 0 16px 24px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 14%, var(--color-rule));
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--rl-text-row);
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+}
+.rl-flow-plan .rl-margin-note-who {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--color-warning);
+  color: var(--color-on-warning);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rl-flow-plan .rl-margin-note-body {
+  overflow-wrap: anywhere;
+}
+/* ── The full pose's right panel ─────────────────────────────────────── */
+
+.rl-flow-panel {
+  width: 400px;
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--color-rule);
+}
+.rl-flow-panel-head {
+  height: 48px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: var(--rl-text-chrome);
+}
+.rl-flow-tab {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--rl-radius-row);
+  background: transparent;
+  color: var(--color-ink-4);
+  font: inherit;
+  cursor: pointer;
+}
+.rl-flow-tab[aria-selected="true"] {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+.rl-flow-tab-count {
+  color: var(--color-ink-4);
+}
+.rl-flow-panel-spacer {
+  flex: 1;
+}
+.rl-flow-panel-note {
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+}
+.rl-flow-panel-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ⌘J with no terminal to show. */
+.rl-flow-noterm {
+  position: absolute;
+  inset: 0;
+  z-index: 31;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--color-canvas);
+  color: var(--color-ink-3);
+  font-size: var(--rl-text-row);
+}
+
+/* ── Plan cards in the conversation (PlanReadyCard) ──────────────────── */
+
+.rl-plan-card {
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  color: var(--color-ink);
+}
+/* 4c: r12, the focus rim, padding 14 — it is the thread's one call to act. */
+.rl-plan-card[data-variant="ready"] {
+  --rl-glass-ring: var(--color-focus-rim);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+.rl-plan-card-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.rl-plan-card[data-variant="ready"] .rl-plan-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.rl-plan-card-icon {
+  flex: none;
+  color: var(--color-mode-plan-fg);
+}
+.rl-plan-card-spacer {
+  flex: 1;
+}
+.rl-plan-card-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-plan-card-link:hover {
+  color: var(--color-ink);
+}
+.rl-plan-card-summary {
+  font-size: var(--rl-text-row);
+  line-height: 1.55;
+  color: var(--color-ink-3);
+}
+/* 4d: one 13.5px line, the rule-strong rim, padding 12/14. */
+.rl-plan-card[data-variant="inline"] {
+  --rl-glass-ring: var(--color-rule-strong);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+.rl-plan-card[data-variant="inline"] .rl-plan-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-plan-card-meta {
+  flex: none;
+  color: var(--color-ink-4);
+}
+.rl-plan-card-open {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-mode-plan-fg);
+  cursor: pointer;
+}

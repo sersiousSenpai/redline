@@ -137,28 +137,30 @@ export function resetFlowPoseForTests(): void {
 // ── The plan column ─────────────────────────────────────────────────────────
 
 /** The plan article's box in each pose (4c: a 680px column, 34/56 padding,
- *  set against the panel's left edge; 5a: a 720px text column, centred).
- *  The width control still wins: wide fills the panel, and a measure dragged
- *  past its minimum widens the board's column by as much. Inline, as
- *  `docArticleWidth` is classic's. */
-export function planColumnStyle(
+ *  set against the panel's left edge; 5a: a 720px text column, centred), as
+ *  custom properties the stage sets on its root and the article reads
+ *  (`FLOW_ARTICLE`): the article is App's, rendered before the stage knows
+ *  its pose. The width control still wins: wide fills the panel, and a
+ *  measure dragged past its minimum widens the board's column by as much. */
+export function planColumnVars(
   pose: PlanPose,
   wide: boolean,
   measure: number,
 ): CSSProperties {
   const extra = Number.isFinite(measure) ? Math.max(0, measure - DOC_MEASURE_MIN) : 0;
-  if (pose === "full") {
-    return {
-      maxWidth: wide ? "none" : `${720 + extra}px`,
-      padding: wide ? "40px 64px 48px" : "40px 0 48px",
-      marginLeft: "auto",
-      marginRight: "auto",
-    };
-  }
+  const full = pose === "full";
   return {
-    maxWidth: wide ? "none" : `${680 + extra}px`,
-    padding: "34px 56px 48px",
-    marginLeft: 0,
-    marginRight: 0,
-  };
+    "--rl-plan-max": wide ? "none" : `${(full ? 720 : 680) + extra}px`,
+    "--rl-plan-pad": full ? (wide ? "40px 64px 48px" : "40px 0 48px") : "34px 56px 48px",
+    "--rl-plan-mx": full ? "auto" : "0",
+  } as CSSProperties;
 }
+
+/** The plan article's inline box in the flow shell — the counterpart of
+ *  classic's `docArticleWidth`, reading what `planColumnVars` set. */
+export const FLOW_ARTICLE: CSSProperties = {
+  maxWidth: "var(--rl-plan-max, 720px)",
+  padding: "var(--rl-plan-pad, 40px 0 48px)",
+  marginLeft: "var(--rl-plan-mx, auto)",
+  marginRight: "var(--rl-plan-mx, auto)",
+};
