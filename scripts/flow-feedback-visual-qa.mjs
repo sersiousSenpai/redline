@@ -34,7 +34,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const report = {
   startedAt: new Date().toISOString(),
   fixture: "fixtures/flow-feedback-qa",
-  boards,
+  boards: path.relative(root, boards),
   screenshots: [],
   checks: [],
   errors: [],
@@ -120,7 +120,7 @@ const contrastSweep = `window.__qaContrast = (rootSelector, base, alsoHidden = '
 async function sideBySide(name, boardFile, crop, oursBase64, label) {
   let board;
   try { await access(boardFile); board = (await readFile(boardFile)).toString("base64"); }
-  catch { report.limitations.push(`${path.basename(boardFile)} not found under ${boards}: ${name} skipped.`); return; }
+  catch { report.limitations.push(`${path.basename(boardFile)} not found under ${path.relative(root, boards)}: ${name} skipped.`); return; }
   const png = await cdp.evaluate(`(async () => {
     const load = (src) => new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = src; });
     const board = await load('data:image/png;base64,${board}'), ours = await load('data:image/png;base64,${oursBase64}');

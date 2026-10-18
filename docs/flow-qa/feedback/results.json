@@ -1,7 +1,7 @@
 {
-  "startedAt": "2026-10-18T09:09:35.496Z",
+  "startedAt": "2026-10-18T09:14:32.789Z",
   "fixture": "fixtures/flow-feedback-qa",
-  "boards": "/Users/yusufalbazian/redline-wt/flow-design",
+  "boards": "../flow-design",
   "screenshots": [
     "5a-panel-aurora.png",
     "5a-panel-side-by-side.png",
@@ -1229,6 +1229,6 @@
     "states": 46,
     "margin": 4
   },
-  "finishedAt": "2026-10-18T09:09:49.326Z",
+  "finishedAt": "2026-10-18T09:14:46.756Z",
   "passed": true
 }
