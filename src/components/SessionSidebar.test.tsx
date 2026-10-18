@@ -104,3 +104,51 @@ describe("the sessions list renders only the rows that changed", () => {
     expect(handlers.onSelect).toHaveBeenLastCalledWith("b");
   });
 });
+
+describe("the classic row's ⋯ menu", () => {
+  const withRename = { onRename: vi.fn(), onArchive: vi.fn() };
+  const renderWith = (sessions: SessionSummary[]) =>
+    act(async () =>
+      root.render(
+        <SessionSidebar
+          {...handlers}
+          {...withRename}
+          sessions={sessions}
+          activeId={null}
+          pendingCounts={{}}
+          viewedVersionNumber={null}
+        />,
+      ),
+    );
+
+  it("lists Open plan · Rename · Archive, then Delete plan below a rule with its ⌫", async () => {
+    await renderWith([summary("a", 1)]);
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-row-menu-trigger")!.click());
+    const items = [...document.querySelectorAll<HTMLButtonElement>(".rl-row-menu-item")];
+    expect(items.map((b) => b.querySelector(".rl-row-menu-label")!.textContent)).toEqual(["Open plan", "Rename", "Archive", "Delete plan"]);
+    expect(items.every((b) => b.querySelector("svg"))).toBe(true);
+    expect(items[3].dataset.danger).toBe("true");
+    expect(items[3].previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(items[3].querySelector("kbd")!.textContent).toBe("⌫");
+    expect(document.activeElement).toBe(items[0]);
+    await act(async () => items[0].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.querySelector(".rl-row-menu-item")).toBeNull();
+    expect(document.activeElement).toBe(host.querySelector(".rl-row-menu-trigger"));
+  });
+
+  it("renames over the row's own title: Enter saves and focus returns to the row", async () => {
+    await renderWith([summary("a", 1)]);
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-row-menu-trigger")!.click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>(".rl-row-menu-item")][1].click());
+    const input = host.querySelector<HTMLInputElement>("li.rl-session-row > input.rl-row-rename")!;
+    expect(document.activeElement).toBe(input);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Mine");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(withRename.onRename).toHaveBeenCalledWith("a", "Mine");
+    expect(host.querySelector(".rl-row-rename")).toBeNull();
+    expect(document.activeElement).toBe(host.querySelector("li.rl-session-row > button.hover-elevated"));
+  });
+});

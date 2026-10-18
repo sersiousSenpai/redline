@@ -179,3 +179,12 @@ export function needsYou(input: NeedsYouInput): NeedsYou {
     review: input.reviewHold,
   };
 }
+
+/** Whether an approved plan is being built right now: one agent in its
+ *  terminal (`building`) or an orchestrated run that has not landed
+ *  (`orchestrating`, `running`). Narrower than the chip's Building — a run
+ *  in code review is waiting on YOU and a stalled one has stopped — so it is
+ *  what the sidebar's Building section and its spinners key on. */
+export function isBuildingRunState(runState: string | null | undefined): boolean {
+  return runState === "building" || runState === "orchestrating" || runState === "running";
+}

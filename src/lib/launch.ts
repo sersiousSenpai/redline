@@ -223,6 +223,9 @@ export interface PendingLaunch {
    *  a launch that never happened", and this type makes that unrepresentable.
    *  A surface that couldn't open a terminal must report that, not set this. */
   terminalId: string;
+  /** The folder it was launched in, which files its flow sidebar row under
+   *  that project until the plan arrives. Absent on launches that predate it. */
+  projectPath?: string | null;
   /** The document this launch came from, when it came from one. The Drafter
    *  shows its card only when this matches the document on screen. */
   draftId: string | null;

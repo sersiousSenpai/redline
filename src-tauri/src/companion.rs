@@ -919,6 +919,8 @@ pub fn companion_create(
         // of a half-formed thought, not a name. The auto-titling pass replaces
         // it once the first reply lands; a user rename latches this.
         title_is_user_set: false,
+        archived_at: None,
+        project_path: None,
     };
     companion
         .db
@@ -2839,6 +2841,8 @@ mod tests {
             model: None,
             effort: None,
             title_is_user_set: false,
+            archived_at: None,
+            project_path: None,
         }
     }
 
