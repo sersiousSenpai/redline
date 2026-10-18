@@ -1,0 +1,53 @@
+[
+  {
+    "epoch": 0,
+    "id": "c7bbd6c9-1e76-4398-809e-963007c57df8",
+    "kind": "user_text",
+    "offset": 236,
+    "promptId": "c387cc22-9af9-4d44-9c60-4f7a552b26f5",
+    "text": "/compact",
+    "ts": 1792313339919
+  },
+  {
+    "epoch": 0,
+    "id": "@0:1026",
+    "kind": "mode_change",
+    "mode": "auto",
+    "offset": 1026,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "ffeb74c9-6fea-429e-b7aa-620602e44484",
+    "kind": "compact",
+    "offset": 1211,
+    "trigger": "manual",
+    "ts": 1792313354067
+  },
+  {
+    "epoch": 0,
+    "id": "a9d5df74-8578-4a25-8867-04c4d68fc113",
+    "kind": "user_text",
+    "offset": 10631,
+    "promptId": "c387cc22-9af9-4d44-9c60-4f7a552b26f5",
+    "text": "/compact",
+    "ts": 1792313339923
+  },
+  {
+    "effort": null,
+    "epoch": 0,
+    "id": "61e6024b-da80-461e-83f3-e8787bd9c38a",
+    "kind": "model_seen",
+    "model": "claude-haiku-5-5",
+    "offset": 13859,
+    "ts": 1792313354061
+  },
+  {
+    "epoch": 0,
+    "id": "@0:14900",
+    "kind": "mode_change",
+    "mode": "auto",
+    "offset": 14900,
+    "ts": 0
+  }
+]

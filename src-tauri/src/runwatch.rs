@@ -267,7 +267,7 @@ pub(crate) fn parse_workflow_launch(text: &str) -> Option<WorkflowLaunch> {
 }
 
 /// Collapse whitespace runs and truncate on a char boundary.
-fn preview(s: &str, cap: usize) -> String {
+pub(crate) fn preview(s: &str, cap: usize) -> String {
     let mut out = String::with_capacity(cap.min(s.len()) + 1);
     let mut last_ws = false;
     for c in s.chars() {
@@ -1131,8 +1131,18 @@ pub(crate) fn local_day(ms: i64) -> String {
 #[derive(Default)]
 pub(crate) struct Cursor {
     offset: u64,
-    partial: String,
+    /// The unterminated last line, kept as bytes: a read can end inside a
+    /// multibyte character, and decoding that half on its own would turn it
+    /// into replacement characters.
+    partial: Vec<u8>,
     primed: bool,
+}
+
+impl Cursor {
+    /// Where the next unread line starts: past every complete line read.
+    pub(crate) fn line_start(&self) -> u64 {
+        self.offset - self.partial.len() as u64
+    }
 }
 
 /// Complete new lines since the cursor. Over-cap growth seeks to the tail,
@@ -1140,6 +1150,13 @@ pub(crate) struct Cursor {
 /// skip. Partial trailing lines are held across calls — never parse a torn
 /// line.
 pub(crate) fn read_new_lines(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<String>, u64) {
+    let (records, skipped) = read_new_records(path, cur, cap);
+    (records.into_iter().map(|(_, line)| line).collect(), skipped)
+}
+
+/// `read_new_lines` with the byte offset each line starts at, which is what
+/// the conversation mirror orders by and pages from.
+pub(crate) fn read_new_records(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<(u64, String)>, u64) {
     let Ok(mut f) = std::fs::File::open(path) else {
         return (Vec::new(), 0);
     };
@@ -1169,17 +1186,12 @@ pub(crate) fn read_new_lines(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<St
     if handle.read_to_end(&mut buf).is_err() {
         return (Vec::new(), 0);
     }
+    let start = cur.line_start();
     cur.offset += buf.len() as u64;
-    let chunk = String::from_utf8_lossy(&buf);
-    let mut text = std::mem::take(&mut cur.partial);
-    text.push_str(&chunk);
-    let mut lines: Vec<String> = Vec::new();
-    let mut rest = text.as_str();
-    while let Some(i) = rest.find('\n') {
-        lines.push(rest[..i].trim_end_matches('\r').to_string());
-        rest = &rest[i + 1..];
-    }
-    cur.partial = rest.to_string();
+    let mut bytes = std::mem::take(&mut cur.partial);
+    bytes.extend_from_slice(&buf);
+    let (mut lines, rest) = split_lines(&bytes, start);
+    cur.partial = bytes[rest..].to_vec();
     if skipped > 0 {
         // The first line after a tail-seek is torn mid-line.
         if lines.is_empty() {
@@ -1189,6 +1201,21 @@ pub(crate) fn read_new_lines(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<St
         }
     }
     (lines, skipped)
+}
+
+/// The complete lines in `bytes` (which starts at file offset `base`), each
+/// with its offset, plus where the unterminated remainder begins. Decoding
+/// happens per whole line, so no character is ever split.
+pub(crate) fn split_lines(bytes: &[u8], base: u64) -> (Vec<(u64, String)>, usize) {
+    let mut lines = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = bytes[pos..].iter().position(|&b| b == b'\n') {
+        let line = &bytes[pos..pos + i];
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        lines.push((base + pos as u64, String::from_utf8_lossy(line).into_owned()));
+        pos += i + 1;
+    }
+    (lines, pos)
 }
 
 // --- watcher ----------------------------------------------------------------
@@ -1845,7 +1872,7 @@ pub struct AgentTailResult {
 }
 
 /// Summarize a tool call's input down to the one telling field.
-fn summarize_tool_input(input: &serde_json::Value) -> String {
+pub(crate) fn summarize_tool_input(input: &serde_json::Value) -> String {
     for key in ["file_path", "command", "pattern", "prompt", "url", "path", "query", "description"] {
         if let Some(s) = input.get(key).and_then(serde_json::Value::as_str) {
             if !s.trim().is_empty() {

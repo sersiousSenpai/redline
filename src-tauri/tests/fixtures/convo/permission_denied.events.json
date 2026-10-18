@@ -1,0 +1,55 @@
+[
+  {
+    "epoch": 0,
+    "id": "c9f32e6a-5116-4d08-ad88-686b5409c7bf",
+    "kind": "user_text",
+    "offset": 508,
+    "promptId": "4baf5ffe-2948-4a36-b54b-ab0a6e930bc6",
+    "text": "Use the Bash tool to run exactly this command and nothing else: touch a-deny.txt",
+    "ts": 1792313025860
+  },
+  {
+    "epoch": 0,
+    "id": "0ffd4c48-9a21-4f73-a0ef-67dfbcb9cf56",
+    "kind": "tool_use",
+    "name": "Bash",
+    "offset": 2257,
+    "summary": "touch a-deny.txt",
+    "toolUseId": "toolu_015iy6ajTumTH6sAv8PnqiP1",
+    "ts": 1792313026656
+  },
+  {
+    "epoch": 0,
+    "id": "32d37a12-c4d4-4580-b6b4-477ecca77fdd",
+    "isError": true,
+    "kind": "tool_result",
+    "offset": 4491,
+    "preview": "Not now. Reply with the single word understood.",
+    "toolUseId": "toolu_015iy6ajTumTH6sAv8PnqiP1",
+    "ts": 1792313026680
+  },
+  {
+    "epoch": 0,
+    "id": "1aa260ac-0c1b-45b9-88bc-b6a88b330d5f",
+    "kind": "thinking",
+    "offset": 5801,
+    "ts": 1792313028642
+  },
+  {
+    "epoch": 0,
+    "id": "8e7f37fd-f7b5-44e4-b74a-002ee90eccbe",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 7430,
+    "text": "The `touch a-deny.txt` command was refused. The Bash tool returned \"Not now. Reply with the single word understood.\" instead of running it, so I don't know whether the file was created. I haven't retried. If you want it created, tell me to try again or create it another way.",
+    "ts": 1792313029064
+  },
+  {
+    "durationMs": 3212,
+    "epoch": 0,
+    "id": "6a4e5a72-ee90-48a4-af77-371ed9d66a15",
+    "kind": "turn_end",
+    "offset": 10151,
+    "ts": 1792313029085
+  }
+]

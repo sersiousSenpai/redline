@@ -58,6 +58,13 @@ export function answerAsk(askId: string, answer: AskAnswer): Promise<void> {
   return invoke("convo_answer_ask", { askId, answer });
 }
 
+/** Bind a terminal to a known session before its CLI starts: Restore calls
+ *  it with the restore terminal so the stage shows the conversation's
+ *  history while `claude --resume` boots. `false` = no transcript found. */
+export function convoPrebind(terminalId: string, sessionId: string): Promise<boolean> {
+  return invoke<boolean>("convo_prebind", { terminalId, sessionId });
+}
+
 /** Mid-session `/plan`-style mode switch while the CLI is idle. */
 export function convoSetMode(terminalId: string, mode: ConvoMode): Promise<SwitchResult> {
   return invoke<SwitchResult>("convo_set_mode", { terminalId, mode });
