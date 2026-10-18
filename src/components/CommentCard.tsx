@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { Comment, CommentStatus, UpdateCommentRequest } from "../types";
 import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
 import { compactEditPreview } from "../editor/wordDiff";
+import { isFlowShell } from "../lib/shellFlag";
 import { AnchorPill } from "./AnchorPill";
 import { AttachmentChips } from "./AttachmentChips";
 import { CommentThread } from "./CommentThread";
@@ -62,6 +63,9 @@ interface CommentCardProps {
    *  including the entire "Claude is revising" wait, resolution is always
    *  available. */
   submitInFlight?: boolean;
+  /** The anchor's human label (lib/anchorDisplay), shown in place of the
+   *  positional id in the flow shell. Absent: the id, as before. */
+  anchorLabel?: string;
 }
 
 const TYPE_COLORS: Record<Comment["type"], string> = {
@@ -123,7 +127,12 @@ export const CommentCard = memo(function CommentCard({
   onReopen,
   onPromote,
   submitInFlight = false,
+  anchorLabel,
 }: CommentCardProps) {
+  // The flow shell's thread look (5a): no c-0xx id chip, and a collapsed
+  // card keeps two lines of its note rather than one. Read once per page
+  // load, so a card never changes shape under the reviewer.
+  const flow = isFlowShell();
   // M4: an agent-authored suggestion. While draft + undecided it shows
   // Accept/Reject; once accepted in place it carries the settled chip (the
   // comment stays draft and rides the next submit as a normal edit).
@@ -258,6 +267,13 @@ export const CommentCard = memo(function CommentCard({
     }
     return "";
   })();
+  // Two clamped lines hold more than the 90 characters one line does; the
+  // clamp, not a slice, decides where they end.
+  const collapsedText = (() => {
+    const text = (body ?? "").replace(/\s+/g, " ").trim();
+    if (text && text !== "(edit)") return text.slice(0, 400);
+    return edit ? `"${edit.original}" → "${edit.revised}"`.slice(0, 400) : "";
+  })();
 
   // A reopened follow-up rides back to Claude on Submit, which flips the comment
   // reopened→submitted — but the note is preserved. Keep showing it (pulsing)
@@ -332,7 +348,7 @@ export const CommentCard = memo(function CommentCard({
               </span>
             )}
           </span>
-          <AnchorPill anchorId={comment.anchorId} />
+          <AnchorPill anchorId={comment.anchorId} label={anchorLabel} />
           <StatusChip status={comment.status} />
           {comment.author && (
             <span
@@ -383,12 +399,16 @@ export const CommentCard = memo(function CommentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <span
-            className="font-mono"
-            style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
-          >
-            {comment.id}
-          </span>
+          {/* The id is a resolution key, not something to read: the flow
+              shell names the comment by its anchor instead. */}
+          {!flow && (
+            <span
+              className="font-mono"
+              style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+            >
+              {comment.id}
+            </span>
+          )}
           {canEditDraft && !editOpen && (
             <button
               type="button"
@@ -425,10 +445,10 @@ export const CommentCard = memo(function CommentCard({
 
       {collapsed && bodyPreview && (
         <div
-          className="truncate"
+          className={flow ? "rl-comment-preview-2" : "truncate"}
           style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}
         >
-          {bodyPreview}
+          {flow ? collapsedText : bodyPreview}
         </div>
       )}
 
