@@ -2614,10 +2614,10 @@ function App() {
   const stageTerminalId = stageTarget.kind === "start" ? null : stageTarget.terminalId;
   const flowTermStage = flowStageOwns && flowView === "terminal" && stageTerminalId !== null;
   // Whether the conversation can be seen: on the stage, not under ⌘J's
-  // terminal, and not behind the full pose's Feedback tab.
+  // terminal, and not behind the companion column's Feedback tab.
   const flowPanelTab = useFlow((s) => s.panelTab);
   const flowConvoOnScreen =
-    flowStageOwns && flowView === "conversation" && !(flowPainted.pose === "full" && flowPanelTab === "feedback");
+    flowStageOwns && flowView === "conversation" && !(flowPainted.pose !== "closed" && flowPanelTab === "feedback");
   // On every surface, Tools included: flow never docks a terminal under
   // anything. The wall (⌘J's big sibling, Tools ▸ Terminals) is the one way
   // the dock shows off the stage.
@@ -8865,6 +8865,7 @@ function App() {
       charEnd={composing.charEnd}
       subBlockId={composing.subBlockId}
       presetRevised={composing.presetRevised}
+      sections={latest?.sections}
       onCancel={() => setComposing(null)}
       onSubmit={submitComment}
     />
@@ -9016,6 +9017,11 @@ function App() {
                       onClearSelection: clearSelection,
                       onSubmit: (req) => submitComment(req),
                     },
+                    onOpenVersion: (version) => setViewedVersionNumber(version === latest?.versionNumber ? null : version),
+                    autoDiscussId: autoDiscussCommentId,
+                    onAutoDiscussConsumed: clearAutoDiscuss,
+                    autoOpenId: autoOpenCommentId,
+                    onAutoOpenConsumed: clearAutoOpen,
                   }
                 : null
             }

@@ -15,6 +15,8 @@ import {
   revisionAt,
   statusNote,
   summarize,
+  markType,
+  reviewGroups,
 } from "./feedbackThreads";
 
 const comment = (over: Partial<Comment>): Comment => ({
@@ -76,7 +78,7 @@ describe("the tab's count and All resolved", () => {
       comment({ id: "c-2", status: "accepted", resolution: resolution(2) }),
       comment({ id: "c-3", status: "withdrawn" }),
     ];
-    expect(summarize(all)).toEqual({ count: 3, open: 1, allResolved: true });
+    expect(summarize(all)).toEqual({ count: 3, open: 1, waiting: 1, marks: 0, allResolved: true });
   });
 
   it.each(["draft", "submitted", "reopened"] as const)("a %s thread keeps it from all resolved", (status) => {
@@ -84,13 +86,58 @@ describe("the tab's count and All resolved", () => {
   });
 
   it("an empty revision is not all resolved", () => {
-    expect(summarize([])).toEqual({ count: 0, open: 0, allResolved: false });
+    expect(summarize([])).toEqual({ count: 0, open: 0, waiting: 0, marks: 0, allResolved: false });
   });
 
-  it("reads the revision the panel shows", () => {
-    const s = session([revision(1, [comment({ status: "accepted" }), comment({ id: "c-2", status: "accepted" })]), revision(2, [])]);
-    expect(feedbackSummary(s, 1).count).toBe(2);
-    expect(feedbackSummary(s, 2).count).toBe(0);
+  it("reads the whole current thread on the latest, and only the version shown on an older one", () => {
+    const s = session([
+      revision(1, [comment({ status: "accepted" }), comment({ id: "c-2", status: "resolved", resolution: resolution(2) })]),
+      revision(2, [comment({ id: "c-3", status: "draft" })]),
+    ]);
+    // On v2, last round's answer still waits on you, beside the new mark.
+    expect(feedbackSummary(s, 2)).toMatchObject({ count: 3, waiting: 1, marks: 1 });
+    expect(feedbackSummary(s, 1)).toMatchObject({ count: 2, waiting: 1, marks: 0 });
+  });
+
+  it("a new thread in the same terminal starts the scope over", () => {
+    const s = session([revision(1, [comment({ status: "resolved", resolution: resolution(1) })]), { ...revision(2, []), threadStart: true }]);
+    expect(feedbackSummary(s, 2)).toMatchObject({ count: 0, waiting: 0 });
+  });
+});
+
+describe("the review's piles", () => {
+  it("waiting on you, your marks, with the agent, resolved; each in the order written, each with its version", () => {
+    const s = session([
+      revision(1, [
+        comment({ id: "answered", status: "resolved", resolution: resolution(2), createdAt: 1 }),
+        comment({ id: "kept", status: "accepted", resolution: resolution(2), createdAt: 2 }),
+      ]),
+      revision(2, [
+        comment({ id: "suggested", type: "edit", author: "agent-x", status: "draft", edit: { original: "a", revised: "b" }, createdAt: 3 }),
+        comment({ id: "mine", status: "draft", createdAt: 4 }),
+        comment({ id: "again", status: "reopened", createdAt: 5 }),
+        comment({ id: "sent", status: "submitted", createdAt: 6 }),
+      ]),
+    ]);
+    const g = reviewGroups(s, 2);
+    const ids = (rows: { comment: { id: string }; version: number }[]) => rows.map((p) => `${p.comment.id}@v${p.version}`);
+    expect([ids(g.waiting), ids(g.marks), ids(g.withAgent), ids(g.settled)]).toEqual([
+      ["answered@v1", "suggested@v2"],
+      ["mine@v2", "again@v2"],
+      ["sent@v2"],
+      ["kept@v1"],
+    ]);
+  });
+
+  it.each([
+    [{ type: "edit" as const }, "Edit", "plan"],
+    [{ type: "feedback" as const }, "Feedback", "redline"],
+    [{ type: "feedback" as const, scope: "structural" as const }, "Feedback · structural", "redline"],
+    [{ type: "question" as const }, "Question", "build"],
+    [{ type: "question" as const, actionable: true }, "Change request", "redline"],
+    [{ type: "block-move" as const }, "Block moved", "plan"],
+  ])("%j reads as %s", (over, text, tone) => {
+    expect(markType(comment(over))).toEqual({ text, tone });
   });
 });
 

@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   CommentScope,
   CommentType,
   NewCommentRequest,
+  Section,
 } from "../types";
+import { createAnchorDisplay } from "../lib/anchorDisplay";
+import { isFlowShell } from "../lib/shellFlag";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 import { useDictationComposer } from "../lib/dictationComposer";
@@ -32,6 +35,9 @@ interface CommentComposerProps {
    *  cross-out (delete the span); the composer opens ready to save it.
    *  Undefined defaults the field to the selected text (a normal edit). */
   presetRevised?: string;
+  /** The revision's sections. In the flow shell the anchor then reads as the
+   *  plan names it ("§1 · step 3"), not by its position ("§A.1.p1"). */
+  sections?: readonly Section[];
   onCancel: () => void;
   /** `discuss`: the comment was SENT — save it and start its discussion in
    *  the same press. False for the quiet "Save" (⌥⌘⏎) and for every edit. */
@@ -77,9 +83,17 @@ export function CommentComposer({
   charEnd,
   subBlockId,
   presetRevised,
+  sections,
   onCancel,
   onSubmit,
 }: CommentComposerProps) {
+  const anchorLabel = useMemo(
+    () =>
+      sections && isFlowShell()
+        ? createAnchorDisplay(sections).label({ anchorId, selection: { quotedText: selectedText, subBlockId } })
+        : null,
+    [sections, anchorId, selectedText, subBlockId],
+  );
   const [body, setBody] = useState("");
   const [scope, setScope] = useState<CommentScope>("local");
   const [revised, setRevised] = useState(presetRevised ?? selectedText);
@@ -197,7 +211,7 @@ export function CommentComposer({
           >
             {TYPE_LABELS[type]}
           </span>
-          <AnchorPill anchorId={anchorId} />
+          {anchorLabel ? <span className="rl-composer-anchor">{anchorLabel}</span> : <AnchorPill anchorId={anchorId} />}
         </div>
         <button
           type="button"

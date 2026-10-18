@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! The full pose's right-panel **Feedback** tab (board 5a): the plan's
-//! comments read as threads — your note, Claude's reply behind a rule, then
-//! ✓ Accept · Reopen … 💬 Discuss — with human anchors ("§4 · step 4") in
-//! place of the positional ids, and resolved threads collapsed to two lines.
+//! The plan's **Feedback** tab (board 5a), beside the plan in split and in
+//! full: the plan's comments read as threads — your note, Claude's reply
+//! behind a rule, then ✓ Accept · Reopen … 💬 Discuss — with human anchors
+//! ("§4 · step 4") in place of the positional ids, in four piles
+//! (lib/feedbackThreads `reviewGroups`):
+//!
+//! - **Waiting on you**: Claude's answers to accept or reopen, across the
+//!   current thread's versions (classic's Action Items, as the cards
+//!   themselves), and agents' suggestions;
+//! - **Your marks**, which ride the next Send;
+//! - **With Claude**;
+//! - **Resolved**, collapsed to two lines after the first three.
 //!
 //! Three pieces, because the stage owns where they sit:
 //!
@@ -25,7 +33,7 @@
 import "./feedback.css";
 
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowUp, Check, MessageCircle, Mic } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, MessageCircle, Mic, RotateCcw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -52,11 +60,12 @@ import {
   isSettled,
   isUndecidedSuggestion,
   isVoiceNote,
+  markType,
   noteText,
-  orderFeedback,
   RESOLVED_PREVIEW,
-  revisionAt,
+  reviewGroups,
   statusNote,
+  type Placed,
 } from "../lib/feedbackThreads";
 import { shortModel } from "../lib/modelInfo";
 import { researchStatus } from "../lib/planSearch";
@@ -99,6 +108,15 @@ export interface FeedbackPanelProps {
   actions?: Partial<FeedbackActions>;
   /** A research comment's "View result →" (App's `viewResearch`). */
   onViewResearch?: (comment: Comment) => void;
+  /** Put another version on screen: a thread from an earlier round, jumped
+   *  to, is read where it was written. */
+  onOpenVersion?: (version: number) => void;
+  /** A mark the composer just sent (saved + discuss): its thread starts once.
+   *  And a voice note just made: its thread opens once. */
+  autoDiscussId?: string | null;
+  onAutoDiscussConsumed?: () => void;
+  autoOpenId?: string | null;
+  onAutoOpenConsumed?: () => void;
 }
 
 /** The default actions: the same commands, with the same arguments, App's
@@ -132,12 +150,21 @@ export default function FeedbackPanel({
   submitInFlight = false,
   actions,
   onViewResearch,
+  onOpenVersion,
+  autoDiscussId = null,
+  onAutoDiscussConsumed,
+  autoOpenId = null,
+  onAutoOpenConsumed,
 }: FeedbackPanelProps) {
-  const revision = revisionAt(session, viewingVersion);
-  // Labels are read against the revision the comments were made on — the one
-  // being shown — so a thread keeps the words it was written against.
-  const display = useMemo(() => createAnchorDisplay(revision?.sections ?? []), [revision]);
-  const { open, settled } = useMemo(() => orderFeedback(revision?.comments ?? []), [revision]);
+  // Labels are read against the revision each comment was made on, so a
+  // thread keeps the words it was written against.
+  const displays = useMemo(
+    () => new Map(session.revisions.map((r) => [r.versionNumber, createAnchorDisplay(r.sections ?? [])])),
+    [session.revisions],
+  );
+  const groups = useMemo(() => reviewGroups(session, viewingVersion), [session, viewingVersion]);
+  const settled = groups.settled;
+  const open = [...groups.waiting, ...groups.marks, ...groups.withAgent];
   // The stage's handlers where it gives them; an absent one keeps the command.
   const act = useMemo<FeedbackActions>(
     () => ({
@@ -151,7 +178,7 @@ export default function FeedbackPanel({
   // resolved" brings the rest out, so the thread it names is on screen.
   useEffect(() => {
     if (!focusedCommentId) return;
-    const at = settled.findIndex((c) => c.id === focusedCommentId);
+    const at = settled.findIndex((p) => p.comment.id === focusedCommentId);
     if (at >= RESOLVED_PREVIEW) setShowAll(true);
   }, [focusedCommentId, settled]);
   const listRef = useRef<HTMLDivElement>(null);
@@ -164,56 +191,79 @@ export default function FeedbackPanel({
   // The thread you're on: the one focused from the plan, else the first that
   // still needs something — the board's one card with the focus rim.
   const current =
-    focusedCommentId && open.some((c) => c.id === focusedCommentId) ? focusedCommentId : open[0]?.id ?? null;
+    focusedCommentId && open.some((p) => p.comment.id === focusedCommentId) ? focusedCommentId : open[0]?.comment.id ?? null;
   const shown = showAll ? settled : settled.slice(0, RESOLVED_PREVIEW);
   const more = settled.length - shown.length;
-  const jump = useCallback((c: Comment) => onJumpToAnchor(c.anchorId, c.id), [onJumpToAnchor]);
+  // A thread from an earlier round is read where it was written: that
+  // version comes on screen first, then its comment is found there.
+  const jump = useCallback(
+    (c: Comment, version: number) => {
+      if (version !== viewingVersion) onOpenVersion?.(version);
+      onJumpToAnchor(c.anchorId, c.id);
+    },
+    [onJumpToAnchor, onOpenVersion, viewingVersion],
+  );
+  const agent = agentLabelFor(session.backend);
+  const card = (p: Placed, isCurrent: boolean) => (
+    <FeedbackCard
+      key={p.comment.id}
+      comment={p.comment}
+      version={p.version}
+      elsewhere={p.version !== viewingVersion}
+      label={(displays.get(p.version) ?? displays.get(viewingVersion))?.label(commentTarget(p.comment)) ?? p.comment.anchorId}
+      current={isCurrent}
+      focused={p.comment.id === focusedCommentId}
+      sessionId={session.sessionId}
+      backend={session.backend ?? null}
+      act={act}
+      busy={submitInFlight}
+      onJump={jump}
+      onViewResearch={onViewResearch}
+      autoDiscuss={p.comment.id === autoDiscussId}
+      onAutoDiscussConsumed={onAutoDiscussConsumed}
+      autoOpen={p.comment.id === autoOpenId}
+      onAutoOpenConsumed={onAutoOpenConsumed}
+    />
+  );
+  const pile = (label: string, hint: string | null, rows: Placed[]) =>
+    rows.length > 0 && (
+      <section className="rl-fb-pile" aria-label={label}>
+        <h3 className="rl-fb-pile-label">
+          {label} <span>{rows.length}</span>
+          {hint && <em>{hint}</em>}
+        </h3>
+        {rows.map((p) => card(p, p.comment.id === current))}
+      </section>
+    );
 
   return (
     <div className="rl-fb-panel" data-flow-feedback>
       <div ref={listRef} className="rl-fb-list rl-thin-scroll-y">
         {open.length === 0 && settled.length === 0 && (
-          <p className="rl-fb-empty">Select text in the plan to mark it, or type feedback below.</p>
+          <p className="rl-fb-empty">
+            Nothing marked yet. Select text in the plan to mark it (an edit, feedback, or a question), or type feedback below.
+          </p>
         )}
-        {open.map((c) => (
-          <FeedbackCard
-            key={c.id}
-            comment={c}
-            label={display.label(commentTarget(c))}
-            current={c.id === current}
-            focused={c.id === focusedCommentId}
-            sessionId={session.sessionId}
-            backend={session.backend ?? null}
-            act={act}
-            busy={submitInFlight}
-            onJump={jump}
-            onViewResearch={onViewResearch}
-          />
-        ))}
-        {shown.map((c) => (
-          <FeedbackCard
-            key={c.id}
-            comment={c}
-            label={display.label(commentTarget(c))}
-            current={false}
-            focused={c.id === focusedCommentId}
-            sessionId={session.sessionId}
-            backend={session.backend ?? null}
-            act={act}
-            busy={submitInFlight}
-            onJump={jump}
-            onViewResearch={onViewResearch}
-          />
-        ))}
-        {more > 0 && (
-          <button type="button" className="rl-fb-more" onClick={() => setShowAll(true)}>
-            {more} more resolved
-          </button>
-        )}
-        {showAll && settled.length > RESOLVED_PREVIEW && (
-          <button type="button" className="rl-fb-more" onClick={() => setShowAll(false)}>
-            Show fewer
-          </button>
+        {pile("Waiting on you", `Accept ${agent}'s answer, or reopen it`, groups.waiting)}
+        {pile("Your marks", "Ride your next Send", groups.marks)}
+        {pile(`With ${agent}`, null, groups.withAgent)}
+        {settled.length > 0 && (
+          <section className="rl-fb-pile" aria-label="Resolved">
+            <h3 className="rl-fb-pile-label">
+              Resolved <span>{settled.length}</span>
+            </h3>
+            {shown.map((p) => card(p, false))}
+            {more > 0 && (
+              <button type="button" className="rl-fb-more" onClick={() => setShowAll(true)}>
+                {more} more resolved
+              </button>
+            )}
+            {showAll && settled.length > RESOLVED_PREVIEW && (
+              <button type="button" className="rl-fb-more" onClick={() => setShowAll(false)}>
+                Show fewer
+              </button>
+            )}
+          </section>
         )}
       </div>
       {composer === undefined ? (
@@ -229,6 +279,9 @@ export default function FeedbackPanel({
 
 interface FeedbackCardProps {
   comment: Comment;
+  /** The version it lives on, and whether that is not the one on screen. */
+  version: number;
+  elsewhere: boolean;
   label: string;
   /** The board's focus rim: the thread you're on. */
   current: boolean;
@@ -238,8 +291,12 @@ interface FeedbackCardProps {
   backend: string | null;
   act: FeedbackActions;
   busy: boolean;
-  onJump: (c: Comment) => void;
+  onJump: (c: Comment, version: number) => void;
   onViewResearch?: (c: Comment) => void;
+  autoDiscuss: boolean;
+  onAutoDiscussConsumed?: () => void;
+  autoOpen: boolean;
+  onAutoOpenConsumed?: () => void;
 }
 
 type Form = "reopen" | "promote" | "edit" | null;
@@ -249,6 +306,8 @@ const OWN_CLICK = "button, a, textarea, input, select, label, [data-no-jump]";
 
 function FeedbackCard({
   comment: c,
+  version,
+  elsewhere,
   label,
   current,
   focused,
@@ -258,12 +317,19 @@ function FeedbackCard({
   busy,
   onJump,
   onViewResearch,
+  autoDiscuss,
+  onAutoDiscussConsumed,
+  autoOpen,
+  onAutoOpenConsumed,
 }: FeedbackCardProps) {
   const settled = isSettled(c);
   const [expanded, setExpanded] = useState(false);
+  const [roundsOpen, setRoundsOpen] = useState(false);
   useEffect(() => {
-    if (focused && settled) setExpanded(true);
-  }, [focused, settled]);
+    if ((focused || autoOpen || autoDiscuss) && settled) setExpanded(true);
+  }, [focused, autoOpen, autoDiscuss, settled]);
+  const type = markType(c);
+  const rounds = c.reopenHistory ?? [];
   const collapsed = settled && !expanded;
   const status = statusNote(c, backend);
   const agent = agentLabelFor(backend);
@@ -309,7 +375,7 @@ function FeedbackCard({
   const onCardClick = (e: MouseEvent) => {
     if ((e.target as Element).closest(OWN_CLICK)) return;
     if (settled) setExpanded((x) => !x);
-    onJump(c);
+    onJump(c, version);
   };
 
   const className = [
@@ -323,16 +389,19 @@ function FeedbackCard({
   return (
     <article data-comment-id={c.id} className={className} onClick={onCardClick}>
       <div className="rl-fb-meta">
+        <span className="rl-fb-type" data-tone={type.tone}>{type.text}</span>
+        <span aria-hidden>·</span>
         <button
           type="button"
           className="rl-fb-anchor"
-          title="Show in the plan"
+          title={elsewhere ? `Show it on v${version}, where it was made` : "Show in the plan"}
           onClick={() => {
             if (settled) setExpanded(true);
-            onJump(c);
+            onJump(c, version);
           }}
         >
           {label}
+          {elsewhere && <span className="rl-fb-elsewhere">v{version}</span>}
         </button>
         {isVoiceNote(c) && (
           <>
@@ -370,6 +439,27 @@ function FeedbackCard({
               )}
             </div>
           )}
+          {rounds.length > 0 && (
+            <div className="rl-fb-rounds" data-no-jump>
+              <button type="button" className="rl-fb-rounds-toggle" aria-expanded={roundsOpen} onClick={() => setRoundsOpen((v) => !v)}>
+                <RotateCcw size={11} aria-hidden />
+                {rounds.length} earlier round{rounds.length === 1 ? "" : "s"}
+                <ChevronRight size={11} aria-hidden data-open={roundsOpen || undefined} />
+              </button>
+              {roundsOpen && rounds.map((r, i) => (
+                <div key={i} className="rl-fb-round">
+                  <span className="rl-fb-followup-label">v{r.version} · {agent}'s answer</span>
+                  <MarkdownView body={r.resolutionBody} />
+                  {r.reopenNote && (
+                    <>
+                      <span className="rl-fb-followup-label">Your note</span>
+                      <MarkdownView body={r.reopenNote} />
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {c.resolution && (
             <div className={reopenedView ? "rl-fb-reply is-superseded" : "rl-fb-reply"}>
               <span className="rl-fb-reply-rule" aria-hidden />
@@ -377,6 +467,12 @@ function FeedbackCard({
                 <MarkdownView body={c.resolution.body} />
               </div>
             </div>
+          )}
+          {c.type === "question" && !c.actionable && c.status === "resolved" && form === null && (
+            <p className="rl-fb-hint">Asking only: this won't change the plan unless you make it a change.</p>
+          )}
+          {c.status === "reopened" && !c.reopenNote && form === null && (
+            <p className="rl-fb-hint">Rides your next Send back to {agent}.</p>
           )}
           {reopenedView && c.reopenNote && form === null && (
             <div className="rl-fb-followup">
@@ -511,6 +607,10 @@ function FeedbackCard({
               hideEntry
               discussNonce={discussNonce}
               onHasDiscussion={setHasDiscussion}
+              autoDiscuss={autoDiscuss}
+              onAutoDiscussConsumed={onAutoDiscussConsumed}
+              autoOpen={autoOpen}
+              onAutoOpenConsumed={onAutoOpenConsumed}
             />
           </div>
         </>
@@ -547,15 +647,18 @@ function Note({ comment: c }: { comment: Comment }) {
 export interface FeedbackTabsProps {
   tab: PanelTab;
   onTab: (tab: PanelTab) => void;
-  /** Threads on the shown revision (`feedbackSummary(...).count`). */
+  /** Threads the review reads (`feedbackSummary(...).count`). */
   count: number;
   /** Every thread has its answer (`feedbackSummary(...).allResolved`). */
   allResolved: boolean;
+  /** Decisions waiting on you (`feedbackSummary(...).waiting`): the header's
+   *  amber "N to review" in place of "All resolved". */
+  waiting?: number;
 }
 
 /** The right panel's 48px header: "Chat" / "Feedback 16" … "All resolved".
  *  The stage renders it once above both tabs. */
-export function FeedbackTabs({ tab, onTab, count, allResolved }: FeedbackTabsProps) {
+export function FeedbackTabs({ tab, onTab, count, allResolved, waiting = 0 }: FeedbackTabsProps) {
   return (
     <div className="rl-fb-tabs" role="tablist" aria-label="Plan panel">
       <button
@@ -577,7 +680,13 @@ export function FeedbackTabs({ tab, onTab, count, allResolved }: FeedbackTabsPro
         Feedback
         {count > 0 && <span className="rl-fb-tab-count">{count}</span>}
       </button>
-      {allResolved && <span className="rl-fb-tabs-status">All resolved</span>}
+      {waiting > 0 ? (
+        <button type="button" className="rl-fb-tabs-status is-waiting" onClick={() => onTab("feedback")}>
+          {waiting} to review
+        </button>
+      ) : (
+        allResolved && <span className="rl-fb-tabs-status">All resolved</span>
+      )}
     </div>
   );
 }

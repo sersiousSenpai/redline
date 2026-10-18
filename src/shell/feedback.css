@@ -447,3 +447,103 @@ button.rl-margin-note {
 .rl-margin-note-body {
   min-width: 0;
 }
+
+/* ── The review's piles ───────────────────────────────────────────────────
+   Waiting on you, Your marks, With Claude, Resolved: a small-caps label with
+   its count, and a quiet hint of what to do there. */
+.rl-fb-pile {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.rl-fb-pile + .rl-fb-pile {
+  margin-top: 8px;
+}
+.rl-fb-pile-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--rl-text-label);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+}
+.rl-fb-pile-label span {
+  color: var(--color-ink-5);
+  font-weight: 500;
+}
+.rl-fb-pile-label em {
+  margin-left: auto;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--color-ink-5);
+}
+.rl-fb-pile[aria-label="Waiting on you"] .rl-fb-pile-label {
+  color: var(--color-mode-redline-fg);
+}
+
+/* What kind of mark: classic's colours. */
+.rl-fb-type {
+  flex: none;
+  font-weight: 600;
+  color: var(--color-ink-3);
+}
+.rl-fb-type[data-tone="plan"] { color: var(--color-mode-plan-fg); }
+.rl-fb-type[data-tone="redline"] { color: var(--color-mode-redline-fg); }
+.rl-fb-type[data-tone="build"] { color: var(--color-mode-build-fg); }
+/* A thread from an earlier round names its version. */
+.rl-fb-elsewhere {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ink-4);
+}
+.rl-fb-hint {
+  margin: 0;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+}
+/* Earlier rounds of a thread: each answer and the note that reopened it. */
+.rl-fb-rounds { display: flex; flex-direction: column; gap: 6px; }
+.rl-fb-rounds-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  font-size: var(--rl-text-chip);
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-fb-rounds-toggle:hover { color: var(--color-ink); }
+.rl-fb-rounds-toggle svg[data-open] { transform: rotate(90deg); }
+.rl-fb-round {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--color-rule);
+  color: var(--color-ink-3);
+}
+/* The header's "N to review": amber, and the way to them. */
+.rl-fb-tabs-status.is-waiting {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: var(--rl-radius-chip);
+  background: var(--color-mode-redline-bg);
+  color: var(--color-mode-redline-fg);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* The comment composer's anchor in flow: as the plan names it. */
+.rl-composer-anchor {
+  font-size: 11px;
+  color: var(--color-mode-plan-fg);
+}

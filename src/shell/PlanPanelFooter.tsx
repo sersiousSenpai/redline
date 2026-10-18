@@ -14,7 +14,8 @@
 //! 4. every resolution handled — "approve, or add another round";
 //! 5. "Select text to mark it." — the hint, and the manual state menu.
 //!
-//! Send's tooltip carries classic's tally (2 pending · 1 edit · 1 question).
+//! With marks to send, the hint's place carries classic's tally ("2 marks to
+//! send · 1 edit · 1 question — requests a revision"), as Send's tooltip does.
 //!
 //! On the right, the review's two verbs — "Send marks to Claude" and
 //! "🔨 Approve & build" (its ▾ keeps "build later" and the team builds one
@@ -94,7 +95,7 @@ export function footerTally(comments: readonly Comment[], waiting: boolean) {
   const pending = comments.filter(ridesSubmit);
   const count = (type: Comment["type"]) => pending.filter((c) => c.type === type).length;
   const tally = [
-    `${pending.length} pending`,
+    `${pending.length} mark${pending.length === 1 ? "" : "s"} to send`,
     count("edit") ? `${count("edit")} edit` : null,
     count("feedback") ? `${count("feedback")} feedback` : null,
     count("question") ? `${count("question")} question${count("question") === 1 ? "" : "s"}` : null,
@@ -188,10 +189,16 @@ function Status(p: PlanPanelFooterProps) {
       </span>
     );
   }
-  const { allHandled } = footerTally(p.comments, p.waiting);
+  const { allHandled, marks, askOnly, tally } = footerTally(p.comments, p.waiting);
   return (
     <span className="rl-plan-foot-line">
-      <ContextHint>{allHandled ? "All resolutions handled — approve, or add another round of marks." : "Select text to mark it."}</ContextHint>
+      <ContextHint>
+        {marks > 0
+          ? `${tally} — ${askOnly ? "asks questions only" : "requests a revision"}`
+          : allHandled
+            ? "All resolutions handled — approve, or add another round of marks."
+            : "Select text to mark it."}
+      </ContextHint>
       {p.planState && !p.planState.held && p.onSetPlanState && (
         <Suspense fallback={null}>
           <span className="rl-plan-foot-state">

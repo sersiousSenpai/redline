@@ -4,10 +4,16 @@
 //! exists, its plan, in the pose the rules in lib/flowPose.ts pick.
 //!
 //! - **closed** (4b, 4d): the conversation has the whole stage.
-//! - **split** (4c): the conversation as a 440px column, the plan panel on
-//!   the paper beside it — header, the plan, footer.
-//! - **full** (5a): the plan in the centre, and a 400px right panel whose
-//!   Chat tab is the conversation and whose Feedback tab is the threads.
+//! - **split** (4c): the companion column on the left (Chat | Feedback), the
+//!   plan panel on the paper beside it — header, the plan, footer.
+//! - **full** (5a): the plan in the centre, and the same companion column on
+//!   the right.
+//!
+//! The companion column is one thing in both poses: its Chat tab is the
+//! conversation and its Feedback tab is the review (shell/FeedbackPanel),
+//! which comes forward by itself when there is something to decide: a mark
+//! being written, a highlight or margin note clicked, a new version arriving
+//! with answers waiting on you.
 //!
 //! Two things here must never remount, and neither is rendered by this file:
 //!
@@ -47,6 +53,7 @@ import {
 } from "../lib/flowPose";
 import { setPanelTab, setStage, useFlow, type PlanPose } from "./flowState";
 import { feedbackSummary } from "../lib/feedbackThreads";
+import { latestDisplayVersion } from "../lib/revisionVersions";
 import type { Comment, ReviewSession } from "../types";
 import { PlanPanelHeader, type PlanMenuItem } from "./PlanPanelHeader";
 import { footerTally, PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
@@ -113,6 +120,14 @@ export interface FlowStageProps {
     onViewResearch?: (comment: Comment) => void;
     /** The tab's resting composer: a note on a selection, or on the plan. */
     composer: Omit<FeedbackComposerProps, "session">;
+    /** Put another version on screen (App's viewed version). */
+    onOpenVersion?: (version: number) => void;
+    /** The composer's Send: that mark's discussion starts once. A voice
+     *  note: its thread opens once. */
+    autoDiscussId?: string | null;
+    onAutoDiscussConsumed?: () => void;
+    autoOpenId?: string | null;
+    onAutoOpenConsumed?: () => void;
   } | null;
   /** The comment composer while a mark is being written, else null. */
   composer: ReactNode;
@@ -152,8 +167,14 @@ export default function FlowStage(p: FlowStageProps) {
   const session = p.feedback?.session ?? null;
   const shownVersion = p.viewing ? p.viewing.viewing : p.latestVersion;
   const shown = session?.revisions.find((r) => r.versionNumber === shownVersion)?.comments ?? [];
-  const unresolved = shown.filter((c) => c.status === "draft" || c.status === "submitted" || c.status === "reopened").length;
-  const prior = session && !p.viewing && shown.length === 0 ? priorWithComments(session, p.latestVersion) : null;
+  const summary = p.feedback ? feedbackSummary(p.feedback.session, p.feedback.viewingVersion) : null;
+  // Rule 4's "anything to read in Feedback": decisions waiting on you and
+  // your own marks, across the thread (a new version's slate is clean).
+  const unresolved = (summary?.waiting ?? 0) + (summary?.marks ?? 0);
+  // Classic's notice points at last round's version; the Feedback tab now
+  // reads that round's answers itself, so the pointer is only for the rest.
+  const prior = session && !p.viewing && shown.length === 0 && !summary?.waiting ? priorWithComments(session, p.latestVersion) : null;
+  const displayVersion = session && p.latestVersion !== null ? latestDisplayVersion(session.revisions, p.latestVersion) : p.latestVersion;
   const showTerminal = p.target.terminalId ? () => setStage("terminal") : null;
   const notices = <PlanNotices {...p.notices} prior={prior} onShowTerminal={showTerminal} />;
   const menu: PlanMenuItem[] =
@@ -182,11 +203,25 @@ export default function FlowStage(p: FlowStageProps) {
     if (sessionId && p.hasPlan && p.latestVersion !== null) noteRevision(sessionId, p.latestVersion);
   }, [sessionId, p.hasPlan, p.latestVersion]);
 
-  // A mark being written in the full pose is written in Feedback.
+  // The Feedback tab comes forward by itself when there is something to
+  // decide: a mark being written (it is written there), a highlight or
+  // margin note clicked in the plan, a new version with answers waiting.
   const composing = p.composer != null && p.composer !== false;
   useLayoutEffect(() => {
-    if (composing && pose === "full") setPanelTab("feedback");
+    if (composing && pose !== "closed") setPanelTab("feedback");
   }, [composing, pose]);
+  const focused = p.feedback?.focusedCommentId ?? null;
+  useLayoutEffect(() => {
+    if (focused && pose !== "closed") setPanelTab("feedback");
+  }, [focused, pose]);
+  const waiting = summary?.waiting ?? 0;
+  const announced = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const key = `${sessionId}:${p.latestVersion}`;
+    if (!sessionId || p.latestVersion === null || pose === "closed" || announced.current === key) return;
+    announced.current = key;
+    if (waiting > 0) setPanelTab("feedback");
+  }, [sessionId, p.latestVersion, pose, waiting]);
 
   // Where the conversation goes: the stage or the column, else the Chat tab.
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
@@ -194,8 +229,47 @@ export default function FlowStage(p: FlowStageProps) {
 
   const full = pose === "full";
   const headerPose = full ? "full" : "split";
-  const summary = p.feedback ? feedbackSummary(p.feedback.session, p.feedback.viewingVersion) : null;
   const toggleContents = p.contents.onToggle;
+  // The companion column: Chat | Feedback, left of the plan in split and
+  // right of it in full; one component, so the two poses read the same.
+  const companion = (
+    <aside className="rl-flow-panel" data-side={full ? "right" : "left"} aria-label="Chat and feedback" data-flow-right-panel={full ? "" : undefined}>
+      <FeedbackTabs
+        tab={tab}
+        onTab={setPanelTab}
+        count={summary?.count ?? 0}
+        allResolved={summary?.allResolved ?? false}
+        waiting={waiting}
+      />
+      <div
+        className="rl-flow-panel-body"
+        role="tabpanel"
+        style={{ "--rl-discussion-zoom": p.discussionZoom.value } as CSSProperties}
+      >
+        <DiscussionZoomContext.Provider value={p.discussionZoom.adjust}>
+        {tab === "chat" ? (
+          <div ref={setSlot} className="rl-flow-convo" data-layout={layout} />
+        ) : p.feedback ? (
+          <FeedbackPanel
+            session={p.feedback.session}
+            viewingVersion={p.feedback.viewingVersion}
+            onJumpToAnchor={p.feedback.onJumpToAnchor}
+            focusedCommentId={p.feedback.focusedCommentId}
+            submitInFlight={p.feedback.submitInFlight}
+            actions={p.feedback.actions}
+            onViewResearch={p.feedback.onViewResearch}
+            onOpenVersion={p.feedback.onOpenVersion}
+            autoDiscussId={p.feedback.autoDiscussId}
+            onAutoDiscussConsumed={p.feedback.onAutoDiscussConsumed}
+            autoOpenId={p.feedback.autoOpenId}
+            onAutoOpenConsumed={p.feedback.onAutoOpenConsumed}
+            composer={p.composer || <FeedbackComposer session={p.feedback.session} {...p.feedback.composer} />}
+          />
+        ) : null}
+        </DiscussionZoomContext.Provider>
+      </div>
+    </aside>
+  );
   return (
     <div
       ref={rootRef}
@@ -205,19 +279,22 @@ export default function FlowStage(p: FlowStageProps) {
       data-terminal-view={p.terminalView ? "" : undefined}
       style={planColumnVars(pose, p.width.wide, p.width.measure)}
     >
-      {!full && (
+      {pose === "closed" && (
         <div className="rl-flow-convo-col" data-layout={layout}>
           {/* With the plan closed its notices head the conversation. */}
-          {pose === "closed" && p.hasPlan && notices}
+          {p.hasPlan && notices}
           <div ref={setSlot} className="rl-flow-convo" data-layout={layout} />
         </div>
       )}
+      {pose === "split" && companion}
       {p.hasPlan && (
         <section className="rl-flow-plan" data-pose={pose} hidden={pose === "closed"} aria-label="Plan">
           <PlanPanelHeader
             pose={headerPose}
-            version={p.latestVersion}
+            version={displayVersion}
             marks={marks}
+            toReview={waiting}
+            onReview={() => setPanelTab("feedback")}
             viewing={p.viewing}
             onToggleContents={toggleContents}
             contentsOpen={p.contents.open}
@@ -228,7 +305,6 @@ export default function FlowStage(p: FlowStageProps) {
           <div className="rl-flow-plan-body">
             {pose !== "closed" && notices}
             {p.planBody}
-            {!full && composing && <div className="rl-flow-compose-sheet rl-glass rl-glass-sheet">{p.composer}</div>}
           </div>
           <PlanPanelFooter
             pose={headerPose}
@@ -239,38 +315,7 @@ export default function FlowStage(p: FlowStageProps) {
           />
         </section>
       )}
-      {full && (
-        <aside className="rl-flow-panel" aria-label="Chat and feedback" data-flow-right-panel>
-          <FeedbackTabs
-            tab={tab}
-            onTab={setPanelTab}
-            count={summary?.count ?? 0}
-            allResolved={summary?.allResolved ?? false}
-          />
-          <div
-            className="rl-flow-panel-body"
-            role="tabpanel"
-            style={{ "--rl-discussion-zoom": p.discussionZoom.value } as CSSProperties}
-          >
-            <DiscussionZoomContext.Provider value={p.discussionZoom.adjust}>
-            {tab === "chat" ? (
-              <div ref={setSlot} className="rl-flow-convo" data-layout="panel" />
-            ) : p.feedback ? (
-              <FeedbackPanel
-                session={p.feedback.session}
-                viewingVersion={p.feedback.viewingVersion}
-                onJumpToAnchor={p.feedback.onJumpToAnchor}
-                focusedCommentId={p.feedback.focusedCommentId}
-                submitInFlight={p.feedback.submitInFlight}
-                actions={p.feedback.actions}
-                onViewResearch={p.feedback.onViewResearch}
-                composer={p.composer || <FeedbackComposer session={p.feedback.session} {...p.feedback.composer} />}
-              />
-            ) : null}
-            </DiscussionZoomContext.Provider>
-          </div>
-        </aside>
-      )}
+      {full && companion}
       {p.terminalView && !p.target.terminalId && (
         <div className="rl-flow-noterm" role="status">
           <TerminalSquare aria-hidden size={18} strokeWidth={1.75} />

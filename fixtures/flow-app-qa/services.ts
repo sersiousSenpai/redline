@@ -849,7 +849,50 @@ const handlers: Record<string, Handler> = {
   activation_status: () => ({ verifying: false, gated: false, gatedMessage: "", runningRelease: null, lastReport: null }),
   set_attention_badge: () => null,
   browser_workspace_write: (a) => ({ ...(a?.value as object), revision: Number(a?.expectedRevision ?? 0) + 1 }),
+  // The review loop, enough of it to use by hand: each command changes the
+  // session and announces it, as the backend does, so App reloads it.
+  accept_resolution: (a) => editComment(a, (c) => ({ ...c, status: "accepted", resolution: { ...(c.resolution as object), acceptedAt: Date.now() } })),
+  reopen_resolution: (a) =>
+    editComment(a, (c) => ({ ...c, status: "reopened", reopenNote: (a?.note as string | null) ?? null, ...(a?.asChange ? { actionable: true } : {}) })),
+  update_comment: (a) => editComment(a, (c) => ({ ...c, ...(a?.update as object) })),
+  delete_comment: (a) => editComment(a, () => null),
+  add_comment: (a) => addComment(a),
 };
+
+type FixtureComment = Record<string, unknown> & { id: string };
+
+/** Replace one comment (null removes it) wherever it lives in the session,
+ *  without mutating what App already holds, and announce the change. */
+function editComment(a: Args, next: (c: FixtureComment) => FixtureComment | null): null {
+  const sessionId = String(a?.sessionId);
+  const s = state.sessions.get(sessionId);
+  if (!s) return null;
+  const id = String(a?.commentId);
+  s.full = {
+    ...s.full,
+    revisions: s.full.revisions.map((r) => ({
+      ...r,
+      comments: (r.comments as FixtureComment[]).flatMap((c) => (c.id === id ? [next(c)].filter((x): x is FixtureComment => !!x) : [c])),
+    })),
+  };
+  queueMicrotask(() => dispatch("comments-changed", { sessionId }));
+  return null;
+}
+
+let fixtureCommentSeq = 100;
+function addComment(a: Args): FixtureComment | null {
+  const sessionId = String(a?.sessionId);
+  const s = state.sessions.get(sessionId);
+  if (!s) return null;
+  const comment: FixtureComment = { ...(a?.request as object), id: `c-${++fixtureCommentSeq}`, status: "draft", createdAt: Date.now() };
+  const last = s.full.revisions.length - 1;
+  s.full = {
+    ...s.full,
+    revisions: s.full.revisions.map((r, i) => (i === last ? { ...r, comments: [...(r.comments as FixtureComment[]), comment] } : r)),
+  };
+  queueMicrotask(() => dispatch("comments-changed", { sessionId }));
+  return comment;
+}
 
 /** Commands whose default answer (`null` / `[]`) IS the right answer for a
  *  fresh profile: handled, so the unmocked report lists only real gaps. */

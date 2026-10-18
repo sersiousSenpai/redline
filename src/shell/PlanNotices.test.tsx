@@ -113,10 +113,10 @@ describe("footerTally: what classic's footer read off the comments", () => {
   const c = (id: string, over: Partial<Comment>): Comment => ({ id, type: "feedback", anchorId: "A", body: "x", createdAt: 1, status: "draft", ...over });
   it("counts what the next Send carries, by kind", () => {
     const t = footerTally([c("1", {}), c("2", { type: "question" }), c("3", { type: "edit" }), c("4", { status: "accepted" })], false);
-    expect(t).toMatchObject({ marks: 3, askOnly: false, tally: "3 pending · 1 edit · 1 feedback · 1 question", allHandled: false });
+    expect(t).toMatchObject({ marks: 3, askOnly: false, tally: "3 marks to send · 1 edit · 1 feedback · 1 question", allHandled: false });
   });
   it("a batch of plain questions only asks", () => {
-    expect(footerTally([c("1", { type: "question" }), c("2", { type: "question" })], false)).toMatchObject({ askOnly: true, tally: "2 pending · 2 questions" });
+    expect(footerTally([c("1", { type: "question" }), c("2", { type: "question" })], false)).toMatchObject({ askOnly: true, tally: "2 marks to send · 2 questions" });
     expect(footerTally([c("1", { type: "question", actionable: true })], false).askOnly).toBe(false);
   });
   it("every resolution handled: nothing pending or awaiting a verdict, something settled, nothing in flight", () => {

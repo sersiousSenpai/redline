@@ -96,7 +96,8 @@ describe("board 5a's threads", () => {
   it("the open thread reads as the board's: anchor, voice note, status, note, reply, actions", async () => {
     await render(panel());
     const open = card("c-001");
-    expect(open.querySelector(".rl-fb-meta")!.textContent).toBe("Context · ¶3·voice noteResolved in v2");
+    // Classic's kind of mark leads, in its colour; then the board's line.
+    expect(open.querySelector(".rl-fb-meta")!.textContent).toBe("Feedback·Context · ¶3·voice noteResolved in v2");
     expect(open.className).toContain("is-current");
     expect(open.className).toContain("rl-glass-sheet");
     expect(open.querySelector(".rl-fb-note")!.textContent).toContain("The pilot firm is my own firm.");
@@ -131,9 +132,16 @@ describe("board 5a's threads", () => {
     expect(cards()).toHaveLength(4);
   });
 
-  it("an empty revision says how to begin", async () => {
+  it("on the latest version, last round's answer still waits on you, named by its version", async () => {
     await render(panel({ viewingVersion: 4 }));
-    expect(text()).toContain("Select text in the plan to mark it, or type feedback below.");
+    const waiting = host.querySelector('[aria-label="Waiting on you"]')!;
+    expect(waiting.querySelector('[data-comment-id="c-001"]')).not.toBeNull();
+    expect(card("c-001").querySelector(".rl-fb-elsewhere")!.textContent).toBe("v1");
+  });
+
+  it("with nothing marked anywhere, it says how to begin", async () => {
+    await render(panel({ session: withComments([]), viewingVersion: 1 }));
+    expect(text()).toContain("Nothing marked yet. Select text in the plan to mark it");
   });
 });
 
