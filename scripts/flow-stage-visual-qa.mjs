@@ -143,7 +143,7 @@ async function board4c() {
   check("4c: App's floating Contents button and Discuss pill stay out of the stage", floating.length === 2 && floating.every((d) => d === "none"), floating);
   const stage = await m(".rl-flow-stage");
   check("4c: the stage paints the window colour", stage.bg === (await tok("color-canvas", "backgroundColor")), stage.bg);
-  const column = await m('.rl-flow-convo[data-layout="column"]');
+  const column = await m('.rl-flow-convo-col[data-layout="column"]');
   check("4c: the conversation is a 440px column with a hairline on its right", near(column?.w, 440) && column.br === 1 && column.brColor === (await tok("color-rule")), column);
   const plan = await m(".rl-flow-plan");
   check("4c: the plan panel sits beside it on the paper", near(plan.x, 440) && plan.bg === (await tok("color-paper", "backgroundColor")), { x: plan.x, bg: plan.bg });
@@ -189,6 +189,38 @@ async function board4c() {
   const card = await m(".rl-convo-plan");
   check('4c: the conversation shows its "Plan ready" card in the column', card?.visible && card.x >= 0 && card.right <= 441 && card.text.includes("Plan ready"), card && { x: card.x, right: card.right, text: card.text.slice(0, 60) });
   await sweep("4c", "aurora");
+  const sendTitle = await cdp.evaluate("[...document.querySelectorAll('.rl-plan-foot .rl-plan-btn')].find(b => b.textContent.startsWith('Send marks'))?.title");
+  check("4c footer: Send carries classic's tally in its tooltip", /^2 pending · 2 feedback — requests a revision$/.test(sendTitle ?? ""), sendTitle);
+
+  // The plan's ⋯: classic's Download and Live Session menus.
+  await click('.rl-plan-head [aria-label="More plan actions"]');
+  const menuItems = await cdp.evaluate("[...document.querySelectorAll('.rl-plan-menu-panel [role=menuitem]')].map(b => b.firstChild.textContent)");
+  check("4c ⋯: export, Obsidian, share, invite and move, from the plan's header", JSON.stringify(menuItems) === JSON.stringify(["Download as Markdown", "Download as Word", "Save to Obsidian", "Share a snapshot…", "Invite to a live session…", "Move to repo…"]), menuItems);
+  await screenshot("4c-plan-menu-aurora");
+  await cdp.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))"); await settle();
+  check("4c ⋯: Escape closes it", !(await cdp.evaluate("!!document.querySelector('.rl-plan-menu-panel')")));
+
+  // Classic's plan-pane notices, above the plan, in every pose.
+  await cdp.evaluate("window.__qa.setNotices(true)"); await settle();
+  const notices = await m(".rl-flow-plan .rl-plan-notices");
+  const planScroll = await m(".rl-flow-plan .rl-thin-scroll-y");
+  const rows = await cdp.evaluate("[...document.querySelectorAll('.rl-flow-plan .rl-plan-notice-title')].map(e => e.textContent)");
+  check("notices (split): the session ended, Plan modified during Ask and the resolution issue sit between the header and the plan", notices?.visible && near(notices.y, (await m(".rl-plan-head")).bottom) && planScroll.y >= notices.bottom - 1 && JSON.stringify(rows) === JSON.stringify(["Claude Code's session for this plan ended.", "Plan modified during Ask", "Resolution block issue"]), { notices, rows });
+  const detachedRow = await cdp.evaluate("(() => { const n = document.querySelector('.rl-flow-plan .rl-plan-notice'); return { radios: [...n.querySelectorAll('[role=radio]')].map(b => b.textContent), buttons: [...n.querySelectorAll('.rl-plan-notice-btn:not([role=radio])')].map(b => b.textContent), dismiss: !!n.querySelector('.rl-plan-notice-x') }; })()");
+  check("notices: the restore keeps classic's Written in, Restore, Copy resume command and Dismiss", JSON.stringify(detachedRow.radios) === JSON.stringify(["Claude Code", "Codex", "Cursor", "Antigravity"]) && JSON.stringify(detachedRow.buttons) === JSON.stringify(["Restore plan session", "Copy resume command"]) && detachedRow.dismiss, detachedRow);
+  const endedLine = await m(".rl-plan-foot-status .rl-plan-foot-line");
+  check("notices: the footer says why its verbs are off", /session for this plan ended/.test(endedLine.text), endedLine.text);
+  await screenshot("4c-notices-aurora");
+  await sweep("4c notices", "aurora");
+  await cdp.evaluate("window.__qa.setPose('closed')"); await settle();
+  const closedNotices = await m(".rl-flow-convo-col .rl-plan-notices");
+  check("notices (closed): they head the conversation", closedNotices?.visible && near(closedNotices.y, (await m(".rl-flow-stage")).y), closedNotices);
+  await screenshot("4d-notices-aurora");
+  await cdp.evaluate("window.__qa.setPose('full')"); await settle();
+  const fullNotices = await m(".rl-flow-plan .rl-plan-notices");
+  check("notices (full): above the plan in the centre", fullNotices?.visible && near(fullNotices.y, (await m(".rl-plan-head")).bottom), fullNotices);
+  await cdp.evaluate("window.__qa.setPose('split')"); await cdp.evaluate("window.__qa.setNotices(false)"); await settle();
+  check("notices: none drawn when there is nothing to say", !(await cdp.evaluate("!!document.querySelector('.rl-plan-notices')")));
 
   // Contents in the split pose: the rail docks under the header, on the plan.
   await cdp.evaluate("window.__qa.setContents(true)"); await settle();
@@ -235,6 +267,9 @@ async function board4c() {
     const t = await m(".rl-flow-plan .rl-prose h1"), mk = await m(".rl-flow-plan .rl-comment-highlight");
     check(`4c ${theme}: the plan reads in its tokens`, t.color === (await tok("color-ink")) && mk.bbColor === (await tok("color-warning")) && (await m(".rl-flow-plan")).bg === (await tok("color-paper", "backgroundColor")), { title: t.color, mark: mk.bbColor });
     await sweep("4c", theme);
+    await cdp.evaluate("window.__qa.setNotices(true)"); await settle();
+    await screenshot(`4c-notices-${theme}`);
+    await sweep("4c notices", theme);
   }
 }
 
@@ -335,9 +370,11 @@ try {
   await cdp.call("Page.enable"); await cdp.call("Runtime.enable"); await cdp.call("Log.enable");
   report.browserVersion = (await cdp.call("Browser.getVersion")).product;
   await cdp.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
-  await board4c();
-  await board4d();
-  await board5a();
+  // QA_ONLY=4d,5a runs a subset (a debugging aid; the gate runs all three).
+  const only = (process.env.QA_ONLY ?? "4c,4d,5a").split(",");
+  if (only.includes("4c")) await board4c();
+  if (only.includes("4d")) await board4d();
+  if (only.includes("5a")) await board5a();
 } catch (error) { report.errors.push(String(error?.stack ?? error)); }
 finally {
   report.finishedAt = new Date().toISOString();

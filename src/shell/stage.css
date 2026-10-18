@@ -18,7 +18,9 @@
 }
 
 /* The conversation's place. The host inside is absolutely inset (it takes
-   no intrinsic space), so this box alone decides the size. */
+   no intrinsic space), so this box alone decides the size. Its column holds
+   the plan's notices above it while the plan is closed. */
+.rl-flow-convo-col,
 .rl-flow-convo {
   position: relative;
   flex: 1;
@@ -27,7 +29,7 @@
   display: flex;
   flex-direction: column;
 }
-.rl-flow-convo[data-layout="column"] {
+.rl-flow-convo-col[data-layout="column"] {
   flex: none;
   width: 440px;
   border-right: 1px solid var(--color-rule);
@@ -118,6 +120,10 @@
 }
 .rl-plan-head-close:hover {
   background: var(--color-fill-2);
+}
+.rl-plan-head-balance {
+  flex: none;
+  width: 28px;
 }
 .rl-plan-head-icon-btn {
   width: 28px;
@@ -558,4 +564,145 @@
   background: var(--color-canvas);
   color: var(--color-ink-3);
   font-size: var(--rl-text-row);
+}
+
+/* ── The plan's notices (PlanNotices) ────────────────────────────────── */
+
+/* Slim rows above the plan body — or above the conversation while the plan
+   is closed — on the redlining amber, which the mode tokens hold to
+   contrast in every theme. */
+.rl-plan-notices {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--color-rule);
+}
+.rl-plan-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 14px 9px 22px;
+  background: var(--color-mode-redline-bg);
+  color: var(--color-ink);
+  font-size: var(--rl-text-chrome);
+  line-height: 1.5;
+}
+.rl-plan-notice + .rl-plan-notice {
+  border-top: 1px solid var(--color-rule);
+}
+.rl-plan-notice[data-tone="quiet"] {
+  background: var(--color-fill-1);
+  color: var(--color-ink-3);
+}
+.rl-plan-notice-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+.rl-plan-notice-title {
+  color: var(--color-mode-redline-fg);
+  font-weight: 600;
+}
+.rl-plan-notice-line {
+  min-width: 0;
+}
+.rl-plan-notice-faint {
+  color: var(--color-ink-3);
+}
+.rl-plan-notice-actions {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.rl-plan-notice-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--rl-radius-chip);
+  background: transparent;
+  color: var(--color-ink-2);
+  font: inherit;
+  font-size: var(--rl-text-chip);
+  cursor: pointer;
+}
+.rl-plan-notice-btn[data-primary] {
+  border-color: transparent;
+  background: var(--color-ink);
+  color: var(--color-paper);
+  font-weight: 600;
+}
+.rl-plan-notice-btn[aria-checked="true"] {
+  border-color: var(--color-mode-redline-fg);
+  color: var(--color-ink);
+}
+.rl-plan-notice-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.rl-plan-notice-x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--rl-radius-chip);
+  background: transparent;
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+.rl-plan-notice-x:hover,
+.rl-plan-notice-btn:hover:not(:disabled):not([data-primary]) {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+.rl-plan-notice-btn:focus-visible,
+.rl-plan-notice-x:focus-visible,
+.rl-plan-menu-item:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: 2px;
+}
+
+/* ── The plan's ⋯ menu (PlanPanelHeader) ─────────────────────────────── */
+
+.rl-plan-menu {
+  position: relative;
+  display: inline-flex;
+}
+.rl-plan-menu-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  min-width: 240px;
+  padding: 6px;
+  white-space: normal;
+}
+.rl-plan-menu-item {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--rl-radius-menu-row);
+  background: none;
+  color: var(--color-ink);
+  font-size: var(--rl-text-chrome);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-plan-menu-item:hover {
+  background: var(--color-fill-2);
+}
+.rl-plan-menu-detail {
+  display: block;
+  color: var(--color-ink-4);
+  font-size: var(--rl-text-label);
 }

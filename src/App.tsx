@@ -390,7 +390,7 @@ import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
 import type { ConversationLayout } from "./shell/FlowStage";
 import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
-import { FLOW_ARTICLE, openPlan } from "./lib/flowPose";
+import { FLOW_ARTICLE } from "./lib/flowPose";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path, which pays for the flow
 // stage's wiring), warmed the moment a selection shows that menu.
@@ -8829,12 +8829,8 @@ function App() {
       : session?.backend === "codex"
         ? "codex"
         : "claude";
-  const stageHasPlan = stageTarget.kind === "plan" && sessionReady && !!latest && !joinedActive;
-  // Marks still waiting on an answer: unsent, sent, or reopened. Resolved
-  // ones are answered — the board's "All resolved" counts them done.
-  const stageUnresolved = paneComments.filter(
-    (c) => c.status === "draft" || c.status === "submitted" || c.status === "reopened",
-  ).length;
+  // A live room's plan is on the plate too: its document is the mesh's.
+  const stageHasPlan = stageTarget.kind === "plan" && (joinedActive || (sessionReady && !!latest));
   // The Feedback tab's verbs: the comment cards' own handlers.
   const feedbackActions = useMemo(
     () => ({
@@ -8872,8 +8868,7 @@ function App() {
             hasPlan={stageHasPlan}
             planBody={planBody}
             latestVersion={latest?.versionNumber ?? null}
-            marks={pendingComments.length}
-            unresolved={stageUnresolved}
+            comments={threadComments}
             viewing={
               isViewingHistorical && viewedRevision && latest
                 ? {
@@ -8888,8 +8883,6 @@ function App() {
             width={{ wide: docWide, measure: docMeasure }}
             footer={{
               author,
-              marks: pendingComments.length,
-              askOnly: pendingComments.length > 0 && pendingComments.every((c) => c.type === "question" && !c.actionable),
               canSubmit,
               canApprove,
               waiting,
@@ -8920,15 +8913,38 @@ function App() {
               progress: null,
               terminals: stageTerminalId ? 1 : 0,
               onShowTerminal: stageTerminalId ? () => setStage("terminal") : undefined,
+            }}
+            // Classic's plan-pane notices, every one (shell/PlanNotices).
+            notices={{
+              askModeViolation,
+              onDismissAskMode: () => setAskModeViolation(false),
+              warning,
+              onDismissWarning: () => setWarning(null),
               detached: detached
                 ? {
                     restoring,
                     status: restoreStatus,
                     failure: restoreFailure?.error ?? null,
-                    blocked: restoreBlockers[0]?.label ?? null,
+                    copy: detachedCopy,
+                    decision: restoreDecision,
+                    onHarness: (h) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),
+                    blockers: restoreBlockers,
+                    onFix: applyReadinessFix,
                     onRestore: restorePlanSession,
+                    onCopyResume: copyRestoreCommand,
+                    onDismiss: () => setDetachDismissed(true),
                   }
                 : null,
+              onViewPrior: setViewedVersionNumber,
+            }}
+            // Classic's Download and Live Session menus, as the plan's ⋯.
+            planMenu={{
+              onExport: exportRevision,
+              onExportDocx: exportRevisionDocx,
+              onSaveObsidian: saveRevisionToObsidian,
+              onShare: () => setShareOpen(true),
+              onInvite: surfaceEnabled(effectiveWorkspace, "collab") ? () => setInviteOpen(true) : null,
+              onMove: openMovePlan,
             }}
             feedback={
               session
@@ -8955,6 +8971,7 @@ function App() {
                 : null
             }
             composer={commentComposer}
+            discussionZoom={{ value: discussionZoom, adjust: adjustDiscussionZoom }}
             terminalView={flowView === "terminal"}
             terminalDock={termDockRef}
           />
@@ -8995,7 +9012,8 @@ function App() {
   const flowWaiting = needsYou({
     summaries,
     needsYouTerminals: flowNeedsYouTerms,
-    reviewHold: codeReview.holdActive,
+    // A review an agent asked for, or a run's report: classic's footer chip.
+    reviewHold: codeReview.holdActive || !!reviewNews,
     activeSessionId: flowPlanId,
     activeTerminalId: flowTerminalId,
   });
@@ -9168,6 +9186,19 @@ function App() {
           tools={flowTools}
           liveRuns={summaries.filter((s) => isLiveRunState(s.runState)).length}
           onOpenTool={openFlowTool}
+          // What classic's header carried and no other flow control does.
+          toolExtras={[
+            { id: "palette", label: "Command palette", hint: "⌘K", onPick: () => setPaletteOpen(true) },
+            ...(surfaceEnabled(effectiveWorkspace, "collab") ? [{ id: "join", label: "Join a live session…", onPick: () => setJoinOpen(true) }] : []),
+            ...(surfaceEnabled(effectiveWorkspace, "memory") ? [{ id: "inspector", label: "Memory inspector", onPick: () => setMemoryInspectorOpen(true) }] : []),
+            ...(mainSurface !== "document"
+              ? [
+                  { id: "tile", label: docPinned ? "Untile the plan" : "Tile the plan alongside", onPick: () => { setSplitRatio(0.5); setImmersiveBroken(true); setDocPinned(!docPinned); } },
+                  ...(docPinned ? [{ id: "split", label: splitVertical ? "Split side by side" : "Split stacked", onPick: () => { setSplitRatio(0.5); setSplitVertical((v) => !v); } }] : []),
+                ]
+              : []),
+            ...(activeHarness && activeHarness.entry !== "boot" ? [{ id: "harness", label: `Exit ${activeHarness.manifest.name}`, onPick: exitHarness }] : []),
+          ]}
           settings={{
             onOpenIntegrationHooks: hookConflicts.openDialog,
             theme,
@@ -11644,7 +11675,7 @@ function App() {
               planTitle={stagePlanTitle}
               planMarks={pendingComments.length}
               planOpen={flowStageOwns && flowPainted.pose !== "closed"}
-              onOpenPlan={() => { if (stageTarget.kind === "plan") openPlan(stageTarget.sessionId, stageUnresolved, false); }}
+              onOpenPlan={() => { if (stageTarget.kind === "plan") setPlanPose(stageTarget.sessionId, "split"); }}
               onShowTerminal={() => setStage("terminal")}
               projectPath={stageTarget.kind === "launch" ? stageTarget.projectPath : (session?.projectPath ?? null)}
               planMarkdown={stageHasPlan ? (latest?.rawPlanMarkdown ?? null) : null}

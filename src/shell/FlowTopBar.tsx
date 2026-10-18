@@ -21,6 +21,7 @@ import { lazy, Suspense, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, FilePenLine, FileText, Hammer, MessageSquare, PanelLeft, PenLine, Settings, Terminal } from "lucide-react";
 import { SettingsGear, type SettingsGearProps } from "../components/SettingsGear";
 import type { ToolDescriptor, ToolId } from "../config/workspace";
+import type { ToolExtra } from "./ToolsMenu";
 import { modeColors, type ModeKind, type SessionMode } from "../lib/sessionMode";
 import { warmableChunk } from "../lib/warmableChunk";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
@@ -60,6 +61,8 @@ export interface FlowTopBarProps {
   /** Orchestrated runs in flight: the Runs row's "N live". */
   liveRuns: number;
   onOpenTool: (id: ToolId) => void;
+  /** The utilities classic kept in its header, under the tools. */
+  toolExtras?: readonly ToolExtra[];
   /** The gear: the same SettingsMenu, rows and all, the classic header
    *  mounts. */
   settings: SettingsGearProps;
@@ -84,6 +87,7 @@ export function FlowTopBar({
   tools,
   liveRuns,
   onOpenTool,
+  toolExtras,
   settings,
 }: FlowTopBarProps) {
   const sidebar = useFlow((s) => s.sidebar);
@@ -232,6 +236,7 @@ export function FlowTopBar({
               setToolsOpen(false);
               onOpenTool(id);
             }}
+            extras={toolExtras}
             onClose={() => setToolsOpen(false)}
           />
         </Suspense>
