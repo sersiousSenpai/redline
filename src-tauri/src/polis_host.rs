@@ -320,6 +320,7 @@ impl IngestObserver for RedlineIngest {
             .filter(|id| crate::claude_proc::is_plain_session_id(id))
         {
             crate::term_attention::observe_prompt(&self.app, terminal_id, cx.session_id);
+            crate::convo::observe_codex(&self.app, terminal_id, None, cx.payload);
         }
         // Capture runs before the first plan creates a ReviewSession. Bind its
         // unique launch token now; handle_plan_core consumes the chosen fields

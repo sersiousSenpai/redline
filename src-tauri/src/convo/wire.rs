@@ -25,7 +25,17 @@ pub struct ConvoEvent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum Body {
-    Bound { harness: String, session_id: String, transcript_path: Option<String>, source: String },
+    Bound {
+        harness: String,
+        session_id: String,
+        transcript_path: Option<String>,
+        source: String,
+        /// `false`: a Codex session no second client can read (one Redline's
+        /// launcher didn't start), shown in its terminal only. Absent
+        /// otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mirrored: Option<bool>,
+    },
     Epoch { reason: String },
     UserText { text: String, prompt_id: Option<String> },
     AssistantText { text: String, model: Option<String> },
@@ -199,10 +209,13 @@ mod tests {
             "no_paste_mode"
         );
         assert_eq!(event(Body::Readiness { ready: true, blocker: None })["blocker"], Value::Null);
-        let bound = event(Body::Bound { harness: "claude".into(), session_id: "s".into(), transcript_path: None, source: "startup".into() });
+        let bound = event(Body::Bound { harness: "claude".into(), session_id: "s".into(), transcript_path: None, source: "startup".into(), mirrored: None });
         assert_eq!(bound["kind"], "bound");
         assert_eq!(bound["sessionId"], "s");
         assert_eq!(bound["transcriptPath"], Value::Null);
+        assert!(bound.get("mirrored").is_none(), "absent unless a Codex session can't be read");
+        let terminal_only = event(Body::Bound { harness: "codex".into(), session_id: "t".into(), transcript_path: None, source: "prompt".into(), mirrored: Some(false) });
+        assert_eq!(terminal_only["mirrored"], false);
         let ask = ConvoAsk {
             ask_id: "a".into(), kind: "question".into(), tool_name: "AskUserQuestion".into(), summary: "s".into(),
             input: None, suggestions: None, rule: None, opened_at: 1,

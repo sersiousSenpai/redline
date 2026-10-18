@@ -1,0 +1,145 @@
+[
+  {
+    "epoch": 0,
+    "id": "01a14ec2-2cb5-78d2-83e5-468d06f020ff",
+    "kind": "user_text",
+    "offset": 1835338455632896,
+    "promptId": null,
+    "text": "Plan a greeting file for my review.",
+    "ts": 1792322710709
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_0:0",
+    "kind": "tool_use",
+    "name": "Read",
+    "offset": 1835338455632898,
+    "summary": "/tmp/probe/workspace/README.md",
+    "toolUseId": "call_27_0",
+    "ts": 1792322710944
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338455632898,
+    "preview": "# probe",
+    "toolUseId": "call_27_0",
+    "ts": 1792322710945
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_2:0",
+    "kind": "tool_use",
+    "name": "LS",
+    "offset": 1835338455632900,
+    "summary": ".",
+    "toolUseId": "call_27_2",
+    "ts": 1792322710945
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_2:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338455632900,
+    "preview": "total 16 drwxr-xr-x 7 user staff 224 Oct 18 04:24 . drwx------ 14 user staff 448 Oct 18 04:25 .. -rw-r--r-- 1 user staff 8 Oct 18 04:24 README.md -rw-r--r-- 1 user staff 0 Oct 18 04:24 from-client.txt -rw-r--r-- 1 user staff 0 Oct 18 04:24 from-rust.txt -rw-r--r-- 1 user staff 0 Oct 18 04:24 from-tu…",
+    "toolUseId": "call_27_2",
+    "ts": 1792322710946
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_1:0",
+    "kind": "tool_use",
+    "name": "Grep",
+    "offset": 1835338455632902,
+    "summary": "probe",
+    "toolUseId": "call_27_1",
+    "ts": 1792322710951
+  },
+  {
+    "epoch": 0,
+    "id": "call_27_1:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338455632902,
+    "preview": "./README.md:# probe",
+    "toolUseId": "call_27_1",
+    "ts": 1792322710951
+  },
+  {
+    "epoch": 0,
+    "id": "mes_28_0",
+    "kind": "plan_proposed",
+    "offset": 1835338455632904,
+    "sessionId": "01a14ec2-2bff-7d22-b278-b7f7acf9871c",
+    "title": "Greeting v1",
+    "toolUseId": "mes_28_0",
+    "ts": 1792322710990
+  },
+  {
+    "epoch": 0,
+    "feedback": "Add a step that verifies the file.",
+    "id": "msg_01a14ec2-2df3-7ae3-9c9d-fba2ff01c663",
+    "kind": "plan_outcome",
+    "offset": 1835338455632906,
+    "outcome": "feedback",
+    "toolUseId": "mes_28_0",
+    "ts": 1792322711028
+  },
+  {
+    "epoch": 0,
+    "id": "mes_29_0:0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338455632908,
+    "text": "Revised as asked.",
+    "ts": 1792322711031
+  },
+  {
+    "epoch": 0,
+    "id": "mes_29_0:1",
+    "kind": "plan_proposed",
+    "offset": 1835338455632908,
+    "sessionId": "01a14ec2-2bff-7d22-b278-b7f7acf9871c",
+    "title": "Greeting v2",
+    "toolUseId": "mes_29_0",
+    "ts": 1792322711031
+  },
+  {
+    "durationMs": 589,
+    "epoch": 0,
+    "id": "01a14ec2-2c33-7c70-a124-e27df1052348:end",
+    "kind": "turn_end",
+    "offset": 1835338455632909,
+    "ts": 1792322711173
+  },
+  {
+    "epoch": 0,
+    "feedback": null,
+    "id": "01a14ec2-2eae-7fb3-b84e-1bf16a9312d7",
+    "kind": "plan_outcome",
+    "offset": 1835338456241152,
+    "outcome": "approved",
+    "toolUseId": "mes_29_0",
+    "ts": 1792322711215
+  },
+  {
+    "epoch": 0,
+    "id": "mes_32_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338456241154,
+    "text": "Implemented in blue.",
+    "ts": 1792322711275
+  },
+  {
+    "durationMs": 139,
+    "epoch": 0,
+    "id": "01a14ec2-2e85-7ec0-8198-73b320d0202c:end",
+    "kind": "turn_end",
+    "offset": 1835338456241155,
+    "ts": 1792322711314
+  }
+]

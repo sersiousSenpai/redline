@@ -1,0 +1,88 @@
+[
+  {
+    "epoch": 0,
+    "id": "01a14ec1-b50e-7cb1-a7bc-23e36821aefd",
+    "kind": "user_text",
+    "offset": 1835338424336384,
+    "promptId": null,
+    "text": "Build the approved plan.",
+    "ts": 1792322680079
+  },
+  {
+    "epoch": 0,
+    "id": "call_13_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338424336386,
+    "summary": "touch from-client.txt",
+    "toolUseId": "call_13_0",
+    "ts": 1792322680150
+  },
+  {
+    "epoch": 0,
+    "id": "call_13_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336386,
+    "preview": "",
+    "toolUseId": "call_13_0",
+    "ts": 1792322682226
+  },
+  {
+    "epoch": 0,
+    "id": "call_15_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338424336388,
+    "summary": "touch from-tui.txt",
+    "toolUseId": "call_15_0",
+    "ts": 1792322682339
+  },
+  {
+    "epoch": 0,
+    "id": "call_15_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336388,
+    "preview": "",
+    "toolUseId": "call_15_0",
+    "ts": 1792322683404
+  },
+  {
+    "epoch": 0,
+    "id": "call_16_0:0",
+    "kind": "tool_use",
+    "name": "Write",
+    "offset": 1835338424336390,
+    "summary": "/tmp/probe/workspace/hello.txt",
+    "toolUseId": "call_16_0",
+    "ts": 1792322683492
+  },
+  {
+    "epoch": 0,
+    "id": "call_16_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336390,
+    "preview": "",
+    "toolUseId": "call_16_0",
+    "ts": 1792322683525
+  },
+  {
+    "epoch": 0,
+    "id": "mes_17_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338424336392,
+    "text": "Built it.",
+    "ts": 1792322683563
+  },
+  {
+    "durationMs": 3575,
+    "epoch": 0,
+    "id": "01a14ec1-b4d0-7833-9cb5-1f269dd82f45:end",
+    "kind": "turn_end",
+    "offset": 1835338424336393,
+    "ts": 1792322683601
+  }
+]

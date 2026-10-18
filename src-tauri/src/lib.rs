@@ -1890,6 +1890,12 @@ async fn handle_codex_stop(
     headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
+    // Every Stop names the launcher's socket: the conversation mirror's
+    // binding for a dock terminal (`convo::codex`), plan or not.
+    if let Some(terminal_id) = term_attention::terminal_header(&headers) {
+        let socket = headers.get("X-Redline-Codex-Socket").and_then(|v| v.to_str().ok());
+        convo::observe_codex(&app_state.app_handle, &terminal_id, socket, &payload);
+    }
     // Gate on the BLOCK, not on the mode. A Redline-launched Codex session
     // runs in `default` mode with the plan contract injected as
     // `developer_instructions` (no CLI flag starts the TUI in native Plan

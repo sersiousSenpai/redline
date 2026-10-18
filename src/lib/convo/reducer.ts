@@ -89,6 +89,8 @@ export interface BoundFact {
   harness: ConvoHarness;
   sessionId: string;
   transcriptPath: string | null;
+  /** False for a Codex session only its terminal shows (`bound.mirrored`). */
+  mirrored: boolean;
 }
 
 export interface ReadinessFact {
@@ -280,7 +282,12 @@ function applyFacts(
             ...next,
             bound: {
               key,
-              value: { harness: event.harness, sessionId: event.sessionId, transcriptPath: event.transcriptPath },
+              value: {
+                harness: event.harness,
+                sessionId: event.sessionId,
+                transcriptPath: event.transcriptPath,
+                mirrored: event.mirrored !== false,
+              },
             },
           };
         break;

@@ -108,6 +108,10 @@ export type ConvoEvent = Base &
         sessionId: string;
         transcriptPath: string | null;
         source: "startup" | "resume" | "clear" | "compact" | "fork" | "prompt" | "stop" | "restore";
+        /** `false`: a Codex session no second client can read — one Redline's
+         *  launcher didn't start (a direct run, a build, a `codex` typed by
+         *  hand) — so its terminal is the only view. Absent otherwise. */
+        mirrored?: boolean;
       }
     /** A divider: what follows is a new transcript (or a cleared one). */
     | { kind: "epoch"; reason: "clear" | "resume" | "fork" }

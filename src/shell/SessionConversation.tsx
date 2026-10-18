@@ -20,6 +20,10 @@
 //! - **Sends** are optimistic: the bubble shows at once and the transcript's
 //!   own prompt replaces it. A send the PTY can't take now waits in the
 //!   local queue (`QueueTray`) and goes, in order, when it can.
+//! - **A Codex session no second client can read** (`bound.mirrored` false:
+//!   one Redline's launcher didn't start) says so, opens on its terminal
+//!   once, and offers no composer: nothing sent from here could be seen
+//!   arriving.
 //!
 //! Why not the chat surfaces' `ReplyBlock`: its anatomy is a byline, a steps
 //! LINE over the text and a tail row of actions, with Stop deliberately in
@@ -114,6 +118,10 @@ export interface SessionConversationProps {
   hidden?: boolean;
 }
 
+/** Terminal-and-session pairs already switched to their terminal: once per
+ *  session, across remounts, so the reader's own toggle wins after that. */
+const terminalShown = new Set<string>();
+
 /** How close to the top, in px, scrolling asks for the page before. */
 const PAGE_AT = 160;
 /** How close to the bottom still counts as following the live end. */
@@ -167,6 +175,17 @@ export default function SessionConversation(props: SessionConversationProps) {
     if (props.hidden) release();
   }, [props.hidden, view.openAsks, release]);
   useEffect(() => release, [release]);
+
+  // ── A Codex session only its terminal shows ──
+  const terminalOnly = view.bound?.mirrored === false;
+  const boundSession = view.bound?.sessionId ?? null;
+  useEffect(() => {
+    if (!terminalOnly || !terminalId || !boundSession) return;
+    const key = `${terminalId}:${boundSession}`;
+    if (terminalShown.has(key)) return;
+    terminalShown.add(key);
+    onShowTerminal();
+  }, [terminalOnly, terminalId, boundSession, onShowTerminal]);
 
   // ── Scrolling: follow the live end, page at the top ──
   const scroller = useRef<HTMLDivElement>(null);
@@ -366,6 +385,14 @@ export default function SessionConversation(props: SessionConversationProps) {
               </button>
             </p>
           )}
+          {terminalOnly && (
+            <p className="rl-convo-note">
+              This Codex session is shown in its terminal.{" "}
+              <button type="button" onClick={onShowTerminal}>
+                Open Terminal
+              </button>
+            </p>
+          )}
           {blocks.map((block) => (
             <BlockView
               key={block.kind === "turn" ? block.turn.id : block.id}
@@ -398,47 +425,49 @@ export default function SessionConversation(props: SessionConversationProps) {
           {!activeId && tail}
         </div>
       </div>
-      <div className="rl-convo-dock">
-        <QueueTray
-          rows={queue.map((item) => ({ id: item.id, text: item.text }))}
-          onRemove={(id) => {
-            const { queue: rest, text } = unqueueSend(queue, id);
-            setQueue(rest);
-            if (text) setRestore({ text, nonce: Date.now() });
-          }}
-          onPromote={(id) => setQueue((q) => promoteSend(q, id))}
-        />
-        {readiness.message && (
-          <p className="rl-convo-readiness" role="status">
-            {readiness.message}
-            {readiness.terminalFix && (
-              <>
-                {" "}
-                <button type="button" onClick={onShowTerminal}>
-                  Open Terminal
-                </button>
-              </>
-            )}
-          </p>
-        )}
-        <SessionComposer
-          terminalId={terminalId}
-          sessionId={props.sessionId}
-          harness={props.harness}
-          layout={layout}
-          mode={view.mode}
-          model={view.model}
-          projectPath={props.projectPath}
-          working={working}
-          placeholder={placeholder}
-          onSend={onSend}
-          onStop={stop}
-          onShowTerminal={onShowTerminal}
-          talking={props.talking}
-          onTalk={props.onTalk}
-          restore={restore}
-        />
-      </div>
+      {!terminalOnly && (
+        <div className="rl-convo-dock">
+          <QueueTray
+            rows={queue.map((item) => ({ id: item.id, text: item.text }))}
+            onRemove={(id) => {
+              const { queue: rest, text } = unqueueSend(queue, id);
+              setQueue(rest);
+              if (text) setRestore({ text, nonce: Date.now() });
+            }}
+            onPromote={(id) => setQueue((q) => promoteSend(q, id))}
+          />
+          {readiness.message && (
+            <p className="rl-convo-readiness" role="status">
+              {readiness.message}
+              {readiness.terminalFix && (
+                <>
+                  {" "}
+                  <button type="button" onClick={onShowTerminal}>
+                    Open Terminal
+                  </button>
+                </>
+              )}
+            </p>
+          )}
+          <SessionComposer
+            terminalId={terminalId}
+            sessionId={props.sessionId}
+            harness={props.harness}
+            layout={layout}
+            mode={view.mode}
+            model={view.model}
+            projectPath={props.projectPath}
+            working={working}
+            placeholder={placeholder}
+            onSend={onSend}
+            onStop={stop}
+            onShowTerminal={onShowTerminal}
+            talking={props.talking}
+            onTalk={props.onTalk}
+            restore={restore}
+          />
+        </div>
+      )}
     </div>
   );
 }

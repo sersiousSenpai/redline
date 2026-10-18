@@ -25,12 +25,17 @@
 //! otherwise, and at once when a hook POST kicks it. Deliveries to a
 //! subscription are coalesced to at most one batch per 50 ms.
 //!
-//! The harness is a field rather than an assumption: a Codex source (its
-//! app-server thread instead of a transcript file) plugs in beside
-//! [`tail::ClaudeSource`] behind the same events.
+//! The harness is a field rather than an assumption: a Codex terminal's
+//! conversation is read from its app-server thread instead of a transcript
+//! file ([`codex`], experiment (m) S10/S11), behind the same events. Its hooks
+//! (`observe_codex`) name a thread; the tail thread finds the socket that
+//! serves it before binding, so a nested `codex exec` never takes a terminal
+//! over, and a Codex no second client can reach binds as shown in its
+//! terminal only.
 
 pub mod bind;
 pub mod claude;
+pub mod codex;
 pub mod tail;
 pub mod wire;
 
@@ -67,7 +72,6 @@ const ASK_MATCH_WINDOW: usize = 40;
 pub const BOUND_EVENT: &str = "convo-bound";
 /// App-wide: the CLI named its session (`TitleNotice`).
 pub const TITLE_EVENT: &str = "convo-title";
-const HARNESS_CLAUDE: &str = "claude";
 
 static NEXT_HOST: AtomicU64 = AtomicU64::new(1);
 
@@ -95,7 +99,7 @@ struct Shared {
     started: AtomicBool,
 }
 
-/// One open ask, held by its hook until answered.
+/// One open ask, held by its hook (or its Codex request) until answered.
 pub(crate) struct PendingAsk {
     pub ask: ConvoAsk,
     /// The tool call it is about. A question's PreToolUse payload names it;
@@ -104,7 +108,16 @@ pub(crate) struct PendingAsk {
     /// The tool input as the hook received it: a question's answers go back
     /// as this plus `answers`.
     pub input: Value,
-    pub tx: oneshot::Sender<Value>,
+    pub reply: Replier,
+}
+
+/// Where an ask's answer goes.
+pub(crate) enum Replier {
+    /// A Claude Code hook, holding its request open (`asks.rs`).
+    Hook(oneshot::Sender<Value>),
+    /// A request the Codex app-server made of the mirror's own connection.
+    /// Nothing waits on it: the TUI's prompt is up the whole time (S10).
+    Codex(codex::AskReply),
 }
 
 struct Sub {
@@ -126,7 +139,41 @@ struct Expect {
 /// What a bind did, for the app to persist and announce.
 struct Bound {
     session_id: String,
-    path: String,
+    /// Claude's transcript; none for Codex (its rollout is never read).
+    path: Option<String>,
+    harness: bind::Harness,
+}
+
+/// Where a terminal's conversation is read from.
+enum Source {
+    Claude(tail::ClaudeSource),
+    Codex(codex::CodexSource),
+}
+
+impl Source {
+    fn for_binding(binding: &bind::Binding, client: Option<crate::codex_app_server::SocketClient>) -> Self {
+        match binding.harness {
+            bind::Harness::Claude => Source::Claude(tail::ClaudeSource::new(binding.transcript.clone(), binding.epoch)),
+            bind::Harness::Codex => {
+                let socket = Some(binding.transcript.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+                Source::Codex(codex::CodexSource::new(&binding.session_id, socket, client, binding.epoch))
+            }
+        }
+    }
+
+    fn epoch(&self) -> u32 {
+        match self {
+            Source::Claude(s) => s.epoch,
+            Source::Codex(s) => s.epoch,
+        }
+    }
+
+    fn offset(&self) -> u64 {
+        match self {
+            Source::Claude(s) => s.offset(),
+            Source::Codex(s) => s.offset(),
+        }
+    }
 }
 
 /// One terminal's conversation.
@@ -140,7 +187,9 @@ struct Term {
     /// `bound` and `epoch` events, kept out of the ring so a snapshot always
     /// names the session however long the conversation is.
     marks: Vec<ConvoEvent>,
-    source: Option<tail::ClaudeSource>,
+    source: Option<Source>,
+    /// A Codex thread a hook named, waiting for its socket to be found.
+    candidate: Option<codex::Candidate>,
     ring: tail::Ring,
     subs: Vec<Sub>,
     unwatched_since: Option<Instant>,
@@ -165,11 +214,27 @@ impl Term {
 
     /// Where the tail is: a host event's offset.
     fn offset(&self) -> u64 {
-        self.source.as_ref().filter(|s| s.epoch == self.epoch()).map_or(0, |s| s.offset())
+        self.source.as_ref().filter(|s| s.epoch() == self.epoch()).map_or(0, Source::offset)
+    }
+
+    fn harness(&self) -> Option<bind::Harness> {
+        self.binding.as_ref().map(|b| b.harness)
+    }
+
+    fn codex(&mut self) -> Option<&mut codex::CodexSource> {
+        match self.source.as_mut() {
+            Some(Source::Codex(s)) => Some(s),
+            _ => None,
+        }
     }
 
     fn tailing(&self) -> bool {
-        self.source.is_some() && (!self.subs.is_empty() || !self.expects.is_empty() || !self.asks.is_empty())
+        let watched = !self.subs.is_empty() || !self.expects.is_empty() || !self.asks.is_empty();
+        // A joined Codex connection is read whatever the stage does: the
+        // server streams every joined client the thread's deltas, and one
+        // left unread would back up into the TUI's own server.
+        let joined = matches!(&self.source, Some(Source::Codex(s)) if s.joined());
+        self.source.is_some() && (watched || joined)
     }
 
     fn fast(&self) -> bool {
@@ -238,6 +303,12 @@ impl Term {
     // --- binding ----------------------------------------------------------------
 
     fn apply_fire(&mut self, fire: bind::Fire) -> Option<Bound> {
+        self.apply_fire_with(fire, None)
+    }
+
+    /// [`Term::apply_fire`], handing a Codex source the connection its
+    /// socket was found with.
+    fn apply_fire_with(&mut self, fire: bind::Fire, client: Option<crate::codex_app_server::SocketClient>) -> Option<Bound> {
         let step = bind::step(self.binding.as_ref(), &fire);
         self.live = true;
         let binding = bind::apply(&fire, &step)?;
@@ -260,13 +331,19 @@ impl Term {
             }
             _ => {}
         }
-        if self.binding.as_ref().is_none_or(|b| b.epoch != binding.epoch || b.transcript != binding.transcript) {
+        let moved = self.binding.as_ref().is_none_or(|b| b.epoch != binding.epoch || b.transcript != binding.transcript || b.harness != binding.harness);
+        if moved {
             self.epochs.retain(|(e, _)| *e != binding.epoch);
-            self.epochs.push((binding.epoch, binding.transcript.clone()));
-            self.source = Some(tail::ClaudeSource::new(binding.transcript.clone(), binding.epoch));
+            // Pages read transcripts; a Codex epoch pages through its source.
+            if binding.harness == bind::Harness::Claude {
+                self.epochs.push((binding.epoch, binding.transcript.clone()));
+            }
+            self.source = Some(Source::for_binding(&binding, client));
             self.next_read = None;
         }
-        let path = binding.transcript.to_string_lossy().into_owned();
+        let harness = binding.harness;
+        let path = (harness == bind::Harness::Claude).then(|| binding.transcript.to_string_lossy().into_owned());
+        let mirrored = (harness == bind::Harness::Codex && binding.transcript.as_os_str().is_empty()).then_some(false);
         let session_id = binding.session_id.clone();
         let offset = if fresh_epoch { 0 } else { self.offset() };
         self.binding = Some(binding);
@@ -276,13 +353,14 @@ impl Term {
             offset,
             ts: now_ms(),
             body: Body::Bound {
-                harness: HARNESS_CLAUDE.to_string(),
+                harness: harness.as_str().to_string(),
                 session_id: session_id.clone(),
-                transcript_path: Some(path.clone()),
+                transcript_path: path.clone(),
                 source: fire.source,
+                mirrored,
             },
         });
-        Some(Bound { session_id, path })
+        Some(Bound { session_id, path, harness })
     }
 
     /// The turn-level side of a hook fire (binding is [`Term::apply_fire`]).
@@ -336,10 +414,16 @@ impl Term {
     /// Returns a new session title, if a line carried one.
     fn read(&mut self) -> Option<String> {
         let first = self.ring.len() == 0;
-        let earliest = self.epochs.first().map(|(e, _)| *e);
+        let earliest = self.marks.iter().map(|m| m.epoch).min();
         let source = self.source.as_mut()?;
-        let epoch = source.epoch;
-        let polled = source.poll(now_ms());
+        let epoch = source.epoch();
+        let (polled, codex) = match source {
+            Source::Claude(s) => (s.poll(now_ms()), None),
+            Source::Codex(s) => {
+                let mut read = s.poll(now_ms());
+                (std::mem::take(&mut read.polled), Some(read))
+            }
+        };
         if first {
             self.ring.complete = !polled.skipped && earliest == Some(epoch);
         }
@@ -404,16 +488,95 @@ impl Term {
         }
         self.emit(polled.events);
         self.emit(extra);
+        if let Some(read) = codex {
+            self.codex_read(read);
+        }
         let title = polled.title.filter(|t| self.title.as_ref() != Some(t))?;
         self.title = Some(title.clone());
         Some(title)
     }
 
-    /// One pass of the tail thread: read if due, expire composer sends,
-    /// deliver batches. Returns when this terminal next needs a pass, and a
-    /// new title if the read found one.
-    fn tick(&mut self, now: Instant) -> (Instant, Option<String>) {
+    /// What a Codex read says beyond its events: a turn under way, the
+    /// TUI waiting on an answer, approvals asked of this client, requests
+    /// answered by somebody.
+    fn codex_read(&mut self, read: codex::CodexPolled) {
+        if let Some(working) = read.working {
+            self.working = working;
+        }
+        // The thread's own word on whether it waits: an approval or a
+        // question is up in the TUI, and owns its keyboard.
+        if let Some(waiting) = read.waiting {
+            self.dialog = waiting;
+        }
+        let mut opened = Vec::new();
+        for (ask, reply) in read.asks {
+            if self.asks.iter().any(|a| a.ask.ask_id == ask.ask_id) {
+                continue;
+            }
+            self.dialog = true;
+            opened.push(self.host(format!("ask:{}", ask.ask_id), Body::AskOpened { ask: ask.clone() }));
+            // The item it is about: its result closes the card too.
+            let tool_use_id = ask.ask_id.split(':').next().map(str::to_string);
+            self.asks.push(PendingAsk { ask, tool_use_id, input: Value::Null, reply: Replier::Codex(reply) });
+        }
+        self.emit(opened);
+        for key in read.resolved {
+            self.close_asks("terminal", |a| matches!(&a.reply, Replier::Codex(r) if codex::request_key(&r.request_id) == key));
+        }
+    }
+
+    /// Find the socket serving a Codex hook's thread, then bind to it.
+    fn resolve(&mut self, mut candidate: codex::Candidate, now: Instant) -> Option<Bound> {
+        let current = self.binding.clone().filter(|b| b.harness == bind::Harness::Codex);
+        let current_socket = current.as_ref().map(|b| b.transcript.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+        let started_here = self.codex().is_some_and(|s| s.started_here(&candidate.thread_id));
+        let hint = candidate.socket.clone().or_else(|| current_socket.clone());
+        let fire = |source: &str, socket: &str| bind::Fire {
+            source: source.to_string(),
+            session_id: candidate.thread_id.clone(),
+            transcript: PathBuf::from(socket),
+            starts: false,
+            harness: bind::Harness::Codex,
+        };
+        match codex::find(&candidate.thread_id, hint.as_deref()) {
+            Some((socket, client)) => {
+                // Another thread on the bound one's own server: the TUI's `/new`.
+                let other = current.as_ref().is_some_and(|b| b.session_id != candidate.thread_id);
+                let same_server = started_here || current_socket.as_deref() == Some(socket.as_str());
+                let source = if other && same_server { "clear" } else { candidate.source.as_str() };
+                self.apply_fire_with(fire(source, &socket), Some(client))
+            }
+            None if candidate.tries + 1 < codex::CANDIDATE_TRIES => {
+                candidate.tries += 1;
+                candidate.due = now + codex::CANDIDATE_RETRY;
+                self.candidate = Some(candidate);
+                None
+            }
+            // Nothing serves it. A terminal mirroring a Codex thread keeps it:
+            // this is a nested `codex exec` its agent ran. Otherwise it is a
+            // Codex the launcher didn't start, shown in its terminal only.
+            None if current_socket.is_some() && self.live => None,
+            None => self.apply_fire(fire(&candidate.source, "")),
+        }
+    }
+
+    /// One pass of the tail thread: bind a Codex hook's thread once its
+    /// socket is found, read if due, expire composer sends, deliver batches.
+    /// Returns when this terminal next needs a pass, a new title if the read
+    /// found one, and a bind to announce.
+    fn tick(&mut self, now: Instant) -> (Instant, Option<String>, Option<Bound>) {
         let mut next = now + IDLE_TICK;
+        let mut bound = None;
+        if let Some(candidate) = self.candidate.take() {
+            if now >= candidate.due {
+                bound = self.resolve(candidate, now);
+            } else {
+                self.candidate = Some(candidate);
+            }
+            if let Some(waiting) = &self.candidate {
+                next = next.min(waiting.due);
+            }
+        }
         if self.subs.is_empty() {
             let since = *self.unwatched_since.get_or_insert(now);
             if now.duration_since(since) > UNWATCHED_GRACE && self.expects.is_empty() && self.asks.is_empty() {
@@ -437,7 +600,7 @@ impl Term {
             next = next.min(due);
         }
         next = next.min(self.flush(now));
-        (next, title)
+        (next, title, bound)
     }
 
     /// Deliver what each subscription is owed, at most one batch per
@@ -505,7 +668,7 @@ impl Term {
         });
         let (tx, rx) = oneshot::channel();
         let opened = self.host(format!("ask:{}", ask.ask_id), Body::AskOpened { ask: ask.clone() });
-        self.asks.push(PendingAsk { ask, tool_use_id, input, tx });
+        self.asks.push(PendingAsk { ask, tool_use_id, input, reply: Replier::Hook(tx) });
         self.emit(vec![opened]);
         self.next_read = None;
         Some(rx)
@@ -523,12 +686,25 @@ impl Term {
             Err(e) => return Some(Err(e)),
         };
         let pending = self.asks.remove(i);
-        // `{}` hands the ask to the TUI, which shows its own dialog.
-        self.dialog |= reply.as_object().is_some_and(|o| o.is_empty());
-        // A failed send is a hook that gave up first (Esc, its timeout).
-        let (outcome, result) = match pending.tx.send(reply) {
-            Ok(()) => (outcome, Ok(())),
-            Err(_) => ("expired", Err("the ask already ended".to_string())),
+        let (outcome, result) = match pending.reply {
+            Replier::Hook(tx) => {
+                // `{}` hands the ask to the TUI, which shows its own dialog.
+                self.dialog |= reply.as_object().is_some_and(|o| o.is_empty());
+                // A failed send is a hook that gave up first (Esc, its timeout).
+                match tx.send(reply) {
+                    Ok(()) => (outcome, Ok(())),
+                    Err(_) => ("expired", Err("the ask already ended".to_string())),
+                }
+            }
+            // The TUI's own prompt is up, and takes the answer there.
+            Replier::Codex(_) if outcome == "terminal" => (outcome, Ok(())),
+            Replier::Codex(r) => {
+                let sent = self.codex().ok_or_else(|| "the Codex session isn't connected".to_string()).and_then(|s| s.respond(&r.request_id, reply));
+                match sent {
+                    Ok(()) => (outcome, Ok(())),
+                    Err(e) => ("expired", Err(e)),
+                }
+            }
         };
         let closed = self.host(format!("ask:{ask_id}:closed"), Body::AskClosed { ask_id: ask_id.to_string(), outcome: outcome.into() });
         self.emit(vec![closed]);
@@ -552,8 +728,11 @@ impl Term {
         let events = closed
             .into_iter()
             .map(|pending| {
-                // Moot by now: the TUI took its answer, or the turn is over.
-                let _ = pending.tx.send(Value::Object(Default::default()));
+                // Moot by now: the TUI took its answer, or the turn is over. A
+                // Codex request needs nothing: whoever answered it, did.
+                if let Replier::Hook(tx) = pending.reply {
+                    let _ = tx.send(Value::Object(Default::default()));
+                }
                 let id = format!("ask:{}:closed", pending.ask.ask_id);
                 self.host(id, Body::AskClosed { ask_id: pending.ask.ask_id, outcome: outcome.to_string() })
             })
@@ -588,7 +767,7 @@ impl Term {
     fn subscribe(&mut self, channel: Channel<ConvoBatch>, input: Option<InputState>) -> ConvoSnapshot {
         if self.source.is_none() {
             if let Some(b) = self.binding.clone() {
-                self.source = Some(tail::ClaudeSource::new(b.transcript, b.epoch));
+                self.source = Some(Source::for_binding(&b, None));
             }
         }
         if self.ring.len() == 0 {
@@ -602,14 +781,21 @@ impl Term {
     }
 
     /// One page of older events (see [`convo_page`]).
-    fn page(&self, epoch: u32, before_offset: u64) -> std::io::Result<ConvoPage> {
+    fn page(&mut self, epoch: u32, before_offset: u64) -> Result<ConvoPage, String> {
+        if before_offset > 0 && epoch == self.epoch() {
+            let older = self.marks.iter().any(|m| m.epoch < epoch);
+            if let Some(source) = self.codex() {
+                let (events, more) = source.page(now_ms())?;
+                return Ok(ConvoPage { events, has_older: more || older });
+            }
+        }
         let target = if before_offset == 0 {
             self.epochs.iter().filter(|(e, _)| *e < epoch).max_by_key(|(e, _)| *e).map(|(e, p)| (*e, p, u64::MAX))
         } else {
             self.epochs.iter().find(|(e, _)| *e == epoch).map(|(e, p)| (*e, p, before_offset))
         };
         let Some((epoch, path, before)) = target else { return Ok(ConvoPage { events: Vec::new(), has_older: false }) };
-        let (events, start) = tail::page(path, epoch, before, now_ms())?;
+        let (events, start) = tail::page(path, epoch, before, now_ms()).map_err(|e| e.to_string())?;
         let mut page: Vec<_> = self
             .marks
             .iter()
@@ -623,6 +809,11 @@ impl Term {
 
     /// Why a mid-session switch can't be typed now, if it can't.
     fn switch_blocker(&self, input: Option<InputState>) -> Option<String> {
+        // Codex picks its model in its own `/model` dialog, and Redline's
+        // Codex sessions plan by their instructions, not a mode to type.
+        if self.harness() == Some(bind::Harness::Codex) {
+            return Some("Switch it in the Codex terminal.".into());
+        }
         if self.working {
             return Some("Claude is working; switch when the turn ends, or in the terminal.".into());
         }
@@ -691,14 +882,18 @@ fn tail_loop(app: AppHandle, state: ConvoState) {
         let mut next = now + IDLE_TICK;
         for (id, term) in state.terms() {
             let mut t = lock(&term);
-            let (due, title) = t.tick(now);
+            let (due, title, bound) = t.tick(now);
             next = next.min(due);
-            if !t.subs.is_empty() {
+            if !t.subs.is_empty() || bound.is_some() {
                 // Nothing reports a CLI that crashed; the foreground check does.
                 t.refresh(input(&app, &id));
             }
             if let (Some(title), Some(b)) = (title, &t.binding) {
                 let _ = app.emit(TITLE_EVENT, TitleNotice { terminal_id: id.clone(), session_id: b.session_id.clone(), title });
+            }
+            drop(t);
+            if let Some(bound) = bound {
+                announce(&app, &id, bound);
             }
         }
         // A closed terminal nobody watches has nothing left to say.
@@ -777,17 +972,55 @@ pub fn observe_hook(app: &AppHandle, terminal_id: &str, entrypoint: Option<&str>
 
 /// Persist and broadcast a bind. The plan meter and Restore read the path
 /// from the session row; a launch has no row yet, and the plan's own hook
-/// stamps it when it arrives.
+/// stamps it when it arrives. A Codex thread has no transcript to persist.
 fn announce(app: &AppHandle, terminal_id: &str, bound: Bound) {
-    if let Some(store) = app.try_state::<crate::state::SessionStore>() {
-        let _ = store.database().set_session_transcript_path(&bound.session_id, &bound.path);
+    if let (Some(store), Some(path)) = (app.try_state::<crate::state::SessionStore>(), bound.path.as_deref()) {
+        let _ = store.database().set_session_transcript_path(&bound.session_id, path);
     }
     let _ = app.emit(BOUND_EVENT, BoundNotice {
         terminal_id: terminal_id.to_string(),
         session_id: bound.session_id,
-        harness: HARNESS_CLAUDE.to_string(),
-        transcript_path: Some(bound.path),
+        harness: bound.harness.as_str().to_string(),
+        transcript_path: bound.path,
     });
+}
+
+/// A Codex hook fired in a dock terminal: UserPromptSubmit through prompt
+/// capture (`polis_host`), Stop through `/v1/codex/stop`, which also names
+/// the launcher's socket. On the bound thread it follows the turn; any other
+/// thread waits for the tail thread to find the socket serving it
+/// ([`codex::Candidate`]).
+pub fn observe_codex(app: &AppHandle, terminal_id: &str, socket: Option<&str>, payload: &Value) {
+    let field = |key: &str| payload.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let source = match field("hook_event_name") {
+        Some("UserPromptSubmit") => "prompt",
+        Some("Stop") => "stop",
+        _ => return,
+    };
+    let Some(thread) = field("session_id").filter(|id| crate::claude_proc::is_plain_session_id(id)) else { return };
+    let socket = socket.map(str::trim).filter(|s| std::path::Path::new(s).is_absolute());
+    let Some(state) = app.try_state::<ConvoState>() else { return };
+    let term = state.term_or_new(terminal_id);
+    let mut t = lock(&term);
+    let bound = t.binding.as_ref().is_some_and(|b| {
+        b.harness == bind::Harness::Codex && b.session_id == thread && socket.is_none_or(|s| b.transcript.as_os_str() == s)
+    });
+    if bound {
+        if t.hook(payload) {
+            crate::pty::clear_typed(app, terminal_id);
+        }
+    } else if t.candidate.as_ref().is_none_or(|c| c.thread_id != thread || (c.socket.is_none() && socket.is_some())) {
+        t.candidate = Some(codex::Candidate {
+            thread_id: thread.to_string(),
+            socket: socket.map(str::to_string),
+            source: source.to_string(),
+            tries: 0,
+            due: Instant::now(),
+        });
+    }
+    t.refresh(input(app, terminal_id));
+    drop(t);
+    state.wake(app);
 }
 
 pub(crate) fn open_ask(
@@ -881,7 +1114,7 @@ pub fn convo_page(
 ) -> Result<ConvoPage, String> {
     let Some(term) = state.term(&terminal_id) else { return Ok(ConvoPage { events: Vec::new(), has_older: false }) };
     let page = lock(&term).page(epoch, before_offset);
-    page.map_err(|e| e.to_string())
+    page
 }
 
 /// Announce a composer send before it is typed: the stage shows the bubble
@@ -907,7 +1140,7 @@ pub fn convo_prebind(app: AppHandle, state: tauri::State<'_, ConvoState>, termin
     let transcript = transcript.canonicalize().unwrap_or(transcript);
     let term = state.term_or_new(&terminal_id);
     let mut t = lock(&term);
-    let bound = t.apply_fire(bind::Fire { source: "restore".into(), session_id, transcript, starts: true });
+    let bound = t.apply_fire(bind::Fire { source: "restore".into(), session_id, transcript, starts: true, harness: bind::Harness::Claude });
     // Not running yet: the composer waits for the CLI's own SessionStart.
     t.live = false;
     t.refresh(input(&app, &terminal_id));
@@ -995,3 +1228,5 @@ fn slash_arg(value: Option<String>, extra: &str) -> Result<Option<String>, Strin
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod codex_tests;

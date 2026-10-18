@@ -27,6 +27,8 @@ fn fixtures() -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        // Codex's are app-server messages, not transcripts (`codex_tests`).
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("codex_")))
         .collect();
     paths.sort();
     assert!(paths.len() >= 12, "the fixture set is missing: {paths:?}");
@@ -314,7 +316,7 @@ fn ready() -> Option<InputState> {
 }
 
 fn fire(source: &str, sid: &str, path: &Path) -> bind::Fire {
-    bind::Fire { source: source.into(), session_id: sid.into(), transcript: path.to_path_buf(), starts: true }
+    bind::Fire { source: source.into(), session_id: sid.into(), transcript: path.to_path_buf(), starts: true, harness: bind::Harness::Claude }
 }
 
 /// Every event kind delivered so far, batch by batch flattened.
@@ -511,7 +513,7 @@ fn a_composer_send_is_delivered_or_reported_undelivered() {
     assert!(term.expects[0].queued);
     // Nothing for 45 s.
     term.expects.push(expect("n3", "lost"));
-    let (due, _) = term.tick(now + Duration::from_secs(30));
+    let (due, _, _) = term.tick(now + Duration::from_secs(30));
     assert!(due <= now + EXPECT_WINDOW + Duration::from_millis(1));
     term.tick(now + Duration::from_secs(46));
     assert_eq!(term.expects.iter().map(|e| e.nonce.as_str()).collect::<Vec<_>>(), ["n2"], "the queued one waits");

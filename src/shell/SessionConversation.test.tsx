@@ -177,6 +177,25 @@ describe("SessionConversation", () => {
     expect(log).toContain("interrupt term-1");
   });
 
+  it("a Codex session no second client can read says so, opens its terminal once, and has no composer", async () => {
+    api.snapshot = [ev("b", 0, { kind: "bound", harness: "codex", sessionId: "t1", transcriptPath: null, source: "prompt", mirrored: false })];
+    const onShowTerminal = vi.fn();
+    await render(props({ harness: "codex", sessionId: "t1", terminalId: "term-cx", onShowTerminal }));
+    expect(q(".rl-convo-note")?.textContent).toBe("This Codex session is shown in its terminal. Open Terminal");
+    expect(q(".rl-convo-dock")).toBeNull();
+    expect(onShowTerminal).toHaveBeenCalledTimes(1);
+    // Back on the conversation (remounted), the reader's own toggle wins.
+    await act(async () => root.render(<div />));
+    await render(props({ harness: "codex", sessionId: "t1", terminalId: "term-cx", onShowTerminal }));
+    expect(onShowTerminal).toHaveBeenCalledTimes(1);
+    // A mirrored Codex session is drawn like any other.
+    api.snapshot = [ev("b", 0, { kind: "bound", harness: "codex", sessionId: "t2", transcriptPath: null, source: "prompt" }), PROMPT];
+    await render(props({ harness: "codex", sessionId: "t2", terminalId: "term-cx2", onShowTerminal }));
+    expect(q(".rl-convo-note")).toBeNull();
+    expect(q(".rl-convo-dock")).not.toBeNull();
+    expect(q(".rl-convo-bubble")?.textContent).toBe("Plan the roadmap");
+  });
+
   it("Talk without a handler asks the app for the voice panel", async () => {
     const heard = vi.fn();
     window.addEventListener(FLOW_TALK_EVENT, heard);
