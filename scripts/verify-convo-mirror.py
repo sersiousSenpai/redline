@@ -34,6 +34,12 @@ denied with feedback and then approved, compact, /clear, an interrupt, a
 tool rejection, the type-ahead queue, a background-task notification and a
 large tool result.
 
+Two further passes cover what the first left open. FOLLOW: a card answered
+while the TUI's dialog is up, a deny that interrupts, a question held by its
+hook, paste thresholds, a pasted slash command, `/effort`'s confirmation and
+SessionEnd. QUEUE: a prompt typed while tools run, which the CLI folds into
+the running turn.
+
 Isolation (the experiment (l) pattern): a throwaway project under the system
 temp dir; hooks supplied with `--settings <file>` and `--setting-sources
 project`, so the user's global hooks (Redline's own included) never load;
@@ -44,6 +50,7 @@ transcripts for the throwaway project are copied into the temp dir
 (`capture/`) and removed from ~/.claude unless --keep.
 
 Run: python3 scripts/verify-convo-mirror.py [--model haiku] [--only S4,S5] [--keep]
+     python3 scripts/verify-convo-mirror.py --only FOLLOW,QUEUE
 Prints a JSON summary; the temp dir keeps `log.jsonl`, the screens and the
 captured transcripts when --keep is given. Takes about ten minutes.
 """

@@ -209,7 +209,7 @@ impl Term {
         }
         let Some(input) = input else { return Some(Blocker::Unbound) };
         // The shell is in the foreground again: the CLI exited without a
-        // SessionEnd (S5 follow-up: a killed CLI sends none).
+        // SessionEnd (experiment (m): a killed CLI sends none).
         if !input.cli_foreground {
             return Some(Blocker::Unbound);
         }
@@ -902,6 +902,9 @@ pub fn convo_expect(app: AppHandle, state: tauri::State<'_, ConvoState>, termina
 #[tauri::command]
 pub fn convo_prebind(app: AppHandle, state: tauri::State<'_, ConvoState>, terminal_id: String, session_id: String) -> bool {
     let Some(transcript) = crate::claude_proc::find_transcript(&session_id) else { return false };
+    // The same spelling SessionStart's path gets (`transcript_target`), so
+    // the CLI's own fire confirms this binding instead of moving it.
+    let transcript = transcript.canonicalize().unwrap_or(transcript);
     let term = state.term_or_new(&terminal_id);
     let mut t = lock(&term);
     let bound = t.apply_fire(bind::Fire { source: "restore".into(), session_id, transcript, starts: true });
