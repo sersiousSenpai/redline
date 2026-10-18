@@ -8142,6 +8142,8 @@ function App() {
           // and ⌘⌥B the active plan's panel.
           ...(isFlowShell()
             ? {
+                // The palette is a keyboard: the start screen arrives zoomed.
+                draftNewPlan: () => openStartScreen("key"),
                 toggleDock: toggleStage,
                 toggleSidebar: toggleFlowSidebar,
                 togglePlanPanel: activeId ? () => togglePlanPanel(activeId) : undefined,
@@ -8587,8 +8589,12 @@ function App() {
     selectSurface("document");
   };
   // Mount-once listeners read the latest of these.
-  const flowKeysRef = useRef({ openTool: openFlowTool, newSession: openFrontDoor, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface });
-  flowKeysRef.current = { openTool: openFlowTool, newSession: openFrontDoor, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface };
+  // ⌘N, File ▸ New Session and the ⌘⇧N alias are all keyboard summons of
+  // the start screen (the start lane's openStartScreen): it arrives with the
+  // caret in the box.
+  const flowNewSession = () => openStartScreen("key");
+  const flowKeysRef = useRef({ openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface });
+  flowKeysRef.current = { openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface };
   useEffect(() => {
     if (!isFlowShell()) return;
     const keys = () => flowKeysRef.current;
@@ -8625,7 +8631,10 @@ function App() {
         if ((e.target as HTMLElement | null)?.isContentEditable || keys().surface === "review") return;
         claim();
         toggleFlowSidebar();
-      } else if (isNewSessionKey(e)) {
+      } else if (isNewSessionKey(e) || (e.metaKey && isNewPlanKey(e))) {
+        // ⌘⇧N too, the old chord, for one release — taken here, ahead of
+        // the classic listener, so it lands on the start screen rather than
+        // the door. (⌘ only: Ctrl+⇧N stays the terminal's.)
         claim();
         keys().newSession();
       } else {
