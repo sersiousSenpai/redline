@@ -18,14 +18,14 @@
 //! through props.
 
 import { lazy, Suspense, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, FilePenLine, FileText, Hammer, MessageSquare, PanelLeft, PenLine, Settings, Terminal } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronUp, FilePenLine, FileText, Hammer, MessageSquare, PanelLeft, PenLine, Settings, Terminal } from "lucide-react";
 import { SettingsGear, type SettingsGearProps } from "../components/SettingsGear";
 import type { ToolDescriptor, ToolId } from "../config/workspace";
 import type { ToolExtra } from "./ToolsMenu";
 import { modeColors, type ModeKind, type SessionMode } from "../lib/sessionMode";
 import { warmableChunk } from "../lib/warmableChunk";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
-import { planPoseOf, setPlanPose, setStage, toggleSidebar, useFlow, type StageView } from "./flowState";
+import { planPoseOf, setPlanPose, setStage, useFlow, type StageView } from "./flowState";
 import "./topbar.css";
 
 // The menu's rows only exist while it is open; the chunk is warmed as the
@@ -46,8 +46,13 @@ export interface FlowTopBarProps {
    *  only for a session that has one. */
   terminalId: string | null;
   /** The Tools surface on screen instead of the session stage, or null. Its
-   *  Tools row reads as current, and the title becomes the way back. */
+   *  Tools row reads as current, and the bar shows the way back: "‹ session
+   *  / Tool". */
   toolSurface: ToolId | null;
+  /** Whether the sidebar is on screen, and its switch (⌘B). App's, so the
+   *  button always says what it will do to what you can see. */
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
   /** Bring the session stage back from a Tools surface. Called before the
    *  bar's own stage gestures (Show plan, the toggle, the title), so each
    *  lands where it can be seen. */
@@ -81,6 +86,8 @@ export function FlowTopBar({
   planSessionId,
   terminalId,
   toolSurface,
+  sidebarOpen,
+  onToggleSidebar,
   onShowStage,
   needsYou,
   onJumpToNeedsYou,
@@ -90,7 +97,6 @@ export function FlowTopBar({
   toolExtras,
   settings,
 }: FlowTopBarProps) {
-  const sidebar = useFlow((s) => s.sidebar);
   const stage = useFlow((s) => s.stage);
   const pose = useFlow((s) => (planSessionId && s.planPose[planSessionId]) || "closed");
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -99,9 +105,11 @@ export function FlowTopBar({
   // The toggle swaps what fills the whole stage, so it shows while the
   // conversation has the stage to itself: not beside an open plan, and not
   // while the plan is back for your review — there Show plan is the next
-  // step (boards 4c, 4d). It never hides the way back from the terminal.
+  // step (boards 4c, 4d). It never hides the way back from the terminal,
+  // whatever the pose.
   const showToggle =
-    !!terminalId && pose === "closed" && (mode?.kind !== "redline" || stage === "terminal");
+    !!terminalId && !toolSurface && (stage === "terminal" || (pose === "closed" && mode?.kind !== "redline"));
+  const tool = toolSurface ? tools.find((t) => t.id === toolSurface) : null;
   const showPlan = !!planSessionId && pose === "closed";
   const ModeIcon = mode ? MODE_ICON[mode.kind] : null;
   const colors = mode ? modeColors(mode.kind) : null;
@@ -121,10 +129,10 @@ export function FlowTopBar({
       <button
         type="button"
         className="rl-ftb-icon"
-        onClick={toggleSidebar}
-        aria-pressed={sidebar}
-        aria-label={sidebar ? "Hide the sidebar" : "Show the sidebar"}
-        title={`${sidebar ? "Hide" : "Show"} the sidebar (⌘B)`}
+        onClick={onToggleSidebar}
+        aria-pressed={sidebarOpen}
+        aria-label={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}
+        title={`${sidebarOpen ? "Hide" : "Show"} the sidebar (⌘B)`}
       >
         <PanelLeft size={15} aria-hidden />
       </button>
@@ -133,21 +141,29 @@ export function FlowTopBar({
         Redline
       </span>
       <span className="rl-ftb-divider" aria-hidden>|</span>
-      {toolSurface && title ? (
-        <button
-          type="button"
-          className="rl-ftb-title"
-          onClick={onShowStage}
-          title={`Back to ${title}`}
-        >
-          {title}
-        </button>
+      {toolSurface ? (
+        // On a Tool: where you came from, as the way back to it (Esc, or the
+        // Tool's own key again, do the same), then where you are.
+        <>
+          <button
+            type="button"
+            className="rl-ftb-back"
+            data-flow-back=""
+            onClick={onShowStage}
+            title={`Back to ${title ?? "the new session"} (Esc)`}
+          >
+            <ChevronLeft size={14} aria-hidden />
+            <span className="rl-ftb-back-label">{title ?? "New session"}</span>
+          </button>
+          <span className="rl-ftb-divider" aria-hidden>/</span>
+          <span className="rl-ftb-here">{tool?.label ?? "Terminals"}</span>
+        </>
       ) : (
         <span className="rl-ftb-title" data-empty={title ? undefined : ""} title={title ?? undefined}>
           {title ?? "New session"}
         </span>
       )}
-      {mode && ModeIcon && colors && (
+      {!toolSurface && mode && ModeIcon && colors && (
         <span
           className="rl-ftb-mode"
           data-flow-mode-chip=""

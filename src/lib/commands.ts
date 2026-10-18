@@ -284,7 +284,8 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
   commands.push(
     {
       id: "snap-back",
-      title: "Snap the layout back",
+      // Flow's layout has nothing to snap; the same chord is the way back.
+      title: flow ? "Back to the session" : "Snap the layout back",
       group: "Layout",
       keys: keysFor("snap-back"),
       run: actions.snapBack,
@@ -305,27 +306,32 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
           run: actions.togglePlanPanel,
         }]
       : []),
-    {
-      id: "toggle-discussion",
-      title: "Show / hide the discussion pane",
-      group: "Layout",
-      keys: keysFor("pane-discussion"),
-      run: actions.toggleDiscussion,
-    },
-    {
-      id: "toggle-terminal",
-      title: "Show / hide the terminal",
-      group: "Layout",
-      keys: keysFor("pane-terminal"),
-      run: actions.toggleTerminal,
-    },
-    {
-      id: "toggle-immersive",
-      title: "Show / hide the panels on this surface",
-      group: "Layout",
-      keys: keysFor("immersive"),
-      run: actions.toggleImmersive,
-    },
+    // Classic's panes; flow has none of them.
+    ...(flow
+      ? []
+      : [
+          {
+            id: "toggle-discussion",
+            title: "Show / hide the discussion pane",
+            group: "Layout",
+            keys: keysFor("pane-discussion"),
+            run: actions.toggleDiscussion,
+          },
+          {
+            id: "toggle-terminal",
+            title: "Show / hide the terminal",
+            group: "Layout",
+            keys: keysFor("pane-terminal"),
+            run: actions.toggleTerminal,
+          },
+          {
+            id: "toggle-immersive",
+            title: "Show / hide the panels on this surface",
+            group: "Layout",
+            keys: keysFor("immersive"),
+            run: actions.toggleImmersive,
+          },
+        ]),
     {
       id: "zoom-reset",
       title: "Reset the zoom",

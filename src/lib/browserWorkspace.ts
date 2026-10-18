@@ -36,8 +36,8 @@ export function saveBrowserWorkspace(workspaceId: string, value: Omit<SavedBrows
       revisions.set(workspaceId, saved?.revision ?? 0);
     }
     if (generation !== (externalChanges.get(workspaceId) ?? 0)) throw new Error("The workspace changed before this save; newer state has been preserved.");
-    const result = await invoke<SavedBrowserWorkspace>("browser_workspace_write", { workspaceId, value, expectedRevision: revisions.get(workspaceId) });
-    revisions.set(workspaceId, Math.max(revisions.get(workspaceId) ?? 0, result.revision));
+    const result = await invoke<SavedBrowserWorkspace | null>("browser_workspace_write", { workspaceId, value, expectedRevision: revisions.get(workspaceId) });
+    revisions.set(workspaceId, Math.max(revisions.get(workspaceId) ?? 0, result?.revision ?? 0));
   });
   writes.set(workspaceId, next);
   return next;

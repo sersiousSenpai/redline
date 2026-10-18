@@ -7,7 +7,6 @@ import {
   effortLabel,
   flowMode,
   flowModelLabel,
-  flowPillShown,
   flowSubmitAction,
   tildePath,
 } from "./flowStart";
@@ -117,12 +116,5 @@ describe("the four-step strip", () => {
     expect(anyApproved([summary({ sessionId: "a" })])).toBe(false);
     expect(anyApproved([summary({ sessionId: "a", status: "approved" })])).toBe(true);
     expect(anyApproved([summary({ sessionId: "a", runState: "landed" })])).toBe(true);
-  });
-});
-
-describe("the floating pill", () => {
-  it("shows on the Tools pages only, never on the session stage or the start screen", () => {
-    for (const surface of ["browser", "drafter", "review", "servers", "runs", "memory"]) expect(flowPillShown(surface)).toBe(true);
-    expect(flowPillShown("document")).toBe(false);
   });
 });

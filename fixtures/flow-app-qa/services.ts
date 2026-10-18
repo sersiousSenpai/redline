@@ -848,6 +848,7 @@ const handlers: Record<string, Handler> = {
   unwatch_dir: () => null,
   activation_status: () => ({ verifying: false, gated: false, gatedMessage: "", runningRelease: null, lastReport: null }),
   set_attention_badge: () => null,
+  browser_workspace_write: (a) => ({ ...(a?.value as object), revision: Number(a?.expectedRevision ?? 0) + 1 }),
 };
 
 /** Commands whose default answer (`null` / `[]`) IS the right answer for a

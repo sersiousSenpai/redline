@@ -21,7 +21,7 @@ const noop = () => {};
 const v = (...ns: number[]) => ns.map((versionNumber) => ({ versionNumber, restored: false }));
 
 interface BoardState {
-  bar: Omit<FlowTopBarProps, "settings" | "tools" | "onShowStage" | "onJumpToNeedsYou" | "onOpenTool" | "liveRuns">;
+  bar: Omit<FlowTopBarProps, "settings" | "tools" | "onShowStage" | "onJumpToNeedsYou" | "onOpenTool" | "liveRuns" | "sidebarOpen" | "onToggleSidebar">;
   pose?: [string, PlanPose];
   sidebar: number;
 }
@@ -103,6 +103,8 @@ function Fixture() {
         tools={toolSurfaces(defaultWorkspace())}
         liveRuns={1}
         onShowStage={noop}
+        sidebarOpen={state.sidebar > 0}
+        onToggleSidebar={noop}
         onJumpToNeedsYou={() => ((window as unknown as Record<string, unknown>).__qaJumped = true)}
         onOpenTool={(id) => setPicked(id)}
         settings={SETTINGS}

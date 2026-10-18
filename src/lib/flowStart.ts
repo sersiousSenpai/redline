@@ -110,9 +110,3 @@ export function anyApproved(summaries: readonly SessionSummary[]): boolean {
   return summaries.some((s) => s.status === "approved" || !!s.runState);
 }
 
-/** Where the floating "Plan a build" pill shows in the flow shell: the Tools
- *  pages only. The session stage and the start screen have their own
- *  composer, and a second way in floating over it would be one too many. */
-export function flowPillShown(surface: string): boolean {
-  return surface !== "document" && surface !== "chat";
-}

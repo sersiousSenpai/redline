@@ -697,7 +697,9 @@ const ASK_OUTCOME: Record<ConvoAskOutcome, string> = {
   always: "Always allowed",
   deny: "Denied",
   answered: "Answered",
-  terminal: "Answered in the terminal",
+  // Chosen, or released while the conversation was out of sight: either
+  // way it waits in the terminal, unanswered as far as we know.
+  terminal: "Handed to the terminal",
   expired: "Expired",
 };
 

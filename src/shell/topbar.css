@@ -102,10 +102,38 @@
 .rl-ftb-title[data-empty] {
   color: var(--color-ink-4);
 }
-/* On a Tools surface the title is the way back to the session. */
-.rl-ftb button.rl-ftb-title:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
+/* On a Tools surface: "‹ session / Tool". The session is a ghost button, the
+   way back; the Tool is where you are. */
+.rl-ftb .rl-ftb-back {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  margin-left: -4px;
+  padding: 0 8px 0 4px;
+  border-radius: var(--rl-radius-chip);
+  color: var(--color-ink-3);
+}
+.rl-ftb .rl-ftb-back:hover,
+.rl-ftb .rl-ftb-back:focus-visible {
+  background: var(--color-fill-1);
+  color: var(--color-ink);
+}
+.rl-ftb-back svg {
+  flex: none;
+}
+.rl-ftb-back-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-ftb-here {
+  flex: none;
+  color: var(--color-ink);
+  font-weight: 600;
 }
 
 /* The mode chip: Plan mode, Redlining, Building vN, Chat. A solid tint, not
@@ -319,4 +347,30 @@ html[data-rl-shell="flow"][data-rl-stage-dim] .rl-flow-stage {
   html[data-rl-shell="flow"] .rl-flow-stage {
     transition: none;
   }
+}
+
+/* ---- Toasts in flow --------------------------------------------------------
+   Under the top bar, centred, in the menu glass: clear of the composer (and
+   its Send) at the stage's foot and of the plan footer's buttons, where
+   classic's bottom-right card sat. A top-placed toast lands in the same spot,
+   below the bar rather than over Tools and the gear. */
+html[data-rl-shell="flow"] .rl-toast,
+html[data-rl-shell="flow"] .rl-toast.is-top {
+  top: 54px;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: fit-content;
+  margin: 0 auto;
+  border-color: transparent;
+  background: var(--color-glass-3);
+  box-shadow: inset 1px 1px 0 var(--color-glass-rim-hi), inset 0 0 0 1px var(--color-glass-rim-lo), var(--rl-shadow-2);
+  backdrop-filter: blur(var(--rl-blur-2)) saturate(var(--rl-sat));
+  -webkit-backdrop-filter: blur(var(--rl-blur-2)) saturate(var(--rl-sat));
+}
+html[data-rl-shell="flow"][data-rl-transparency="reduced"] .rl-toast {
+  background: var(--color-bg-elevated);
+  box-shadow: inset 0 0 0 1px var(--color-rule-strong), var(--rl-shadow-2);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }

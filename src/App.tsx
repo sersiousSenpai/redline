@@ -101,7 +101,7 @@ import { Header } from "./components/Header";
 // The flow shell's top bar is the window-drag region, so unlike the other
 // flow pieces it loads with the app (see shell/FlowTopBar).
 import { FlowTopBar, togglePlanPanel } from "./shell/FlowTopBar";
-import { toggleStage, toggleSidebar as toggleFlowSidebar, setPlanPose } from "./shell/flowState";
+import { toggleStage, setPlanPose } from "./shell/flowState";
 import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
 import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
 import { TOOL_DESCRIPTORS, toolForKey, toolSurfaces, type ToolId } from "./config/workspace";
@@ -193,7 +193,8 @@ import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems"
 import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
 const SidebarTabStrip = lazy(() => import("./components/SidebarTabStrip").then((module) => ({ default: module.SidebarTabStrip })));
 import { PlanToc } from "./components/PlanToc";
-import { FileTree } from "./components/FileTree";
+// Classic's folder tab only, so its own chunk.
+const FileTree = lazy(() => import("./components/FileTree").then((m) => ({ default: m.FileTree })));
 // Lazy: the read-only viewer only mounts once a folder tab opens a file.
 const FileViewer = lazy(() =>
   import("./components/FileViewer").then((m) => ({ default: m.FileViewer })),
@@ -357,7 +358,7 @@ import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
 import { isFlowShell } from "./lib/shellFlag";
-import { anyApproved, continueLinks, flowPillShown, NEW_SESSION_EVENT } from "./lib/flowStart";
+import { anyApproved, continueLinks, NEW_SESSION_EVENT } from "./lib/flowStart";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -387,7 +388,8 @@ import type { TerminalTabsHandle } from "./components/TerminalTabs";
 // The flow shell's session stage: what it shows (lib/flowSessions), the plan
 // panel's pose rules (lib/flowPose) and its body, a lazy chunk the classic
 // shell never fetches.
-import { getFlowState, setStage, type PlanPose } from "./shell/flowState";
+import { getFlowState, setStage, type PlanPose, type StageView } from "./shell/flowState";
+import { useStageDock } from "./lib/stageDock";
 import type { ConversationLayout } from "./shell/FlowStage";
 import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
 import { FLOW_ARTICLE } from "./lib/flowPose";
@@ -401,7 +403,9 @@ const loadSessionConversation = () => import("./shell/SessionConversation");
 const FlowStage = lazy(loadFlowStage);
 const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
-import { CommandPalette } from "./components/CommandPalette";
+// ⌘K's palette paints nothing until it opens, so it rides its own chunk,
+// loaded on the first ⌘K (the flow shell's way back paid for its bytes).
+const CommandPalette = lazy(() => import("./components/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
@@ -666,7 +670,8 @@ const AgentShelf = lazy(() =>
   })),
 );
 import { DocumentsMenu } from "./components/DocumentsMenu";
-import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
+// A confirmation that opens on a gesture, so its own chunk.
+const SendToRedlineDialog = lazy(() => import("./components/SendToRedlineDialog").then((m) => ({ default: m.SendToRedlineDialog })));
 import type { ManualPlanState } from "./components/PlanStateMenu";
 const MoveToRepoDialog = lazy(() => import("./components/MoveToRepoDialog").then(m => ({ default: m.MoveToRepoDialog })));
 import type { JSONContent } from "@tiptap/react";
@@ -2402,6 +2407,11 @@ function App() {
     "redline.terminalPane.fullscreen",
     false,
   );
+  // Flow's wall (Tools ▸ Terminals) is a place you visit, never where the
+  // app opens.
+  useLayoutEffect(() => {
+    if (isFlowShell()) setTermFullscreen(false);
+  }, [setTermFullscreen]);
 
   // Project-folder explorer: open folders (sidebar tabs), the active tab, the
   // file shown in the center pane, and the linked-nav toggle.
@@ -2551,7 +2561,12 @@ function App() {
     [sessionTerminals, terminalAttention, flowLaunches],
   );
   const activeLaunchId = stageTarget.kind === "launch" ? stageTarget.terminalId : null;
+  // Set where the stage's way back is defined (`flowRowToStage`), below.
+  const flowRowToStageRef = useRef<() => void>(() => {});
+  const flowShowTerminalRef = useRef<(terminalId: string, view: StageView) => void>(() => {});
+  const flowJumpRef = useRef<() => void>(() => {});
   const selectFlowLaunch = useCallback((terminalId: string) => {
+    flowRowToStageRef.current();
     setFocusedLaunch(terminalId);
     setActiveId(null);
   }, []);
@@ -2603,7 +2618,10 @@ function App() {
   const flowPanelTab = useFlow((s) => s.panelTab);
   const flowConvoOnScreen =
     flowStageOwns && flowView === "conversation" && !(flowPainted.pose === "full" && flowPanelTab === "feedback");
-  const flowDockHidden = flowShell && mainSurface === "document" && !termFullscreenPref && !flowTermStage;
+  // On every surface, Tools included: flow never docks a terminal under
+  // anything. The wall (⌘J's big sibling, Tools ▸ Terminals) is the one way
+  // the dock shows off the stage.
+  const flowDockHidden = flowShell && !termFullscreenPref && !flowTermStage;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
@@ -2653,12 +2671,16 @@ function App() {
   // hides immediately; its rising edge also closes the discussion preference.
   // `docPinned` is read from the UNMASKED shape (this never touches it), so
   // there is no cycle.
-  const pMask = panelMask({
+  const surfaceMask = panelMask({
     surface: mainSurface,
     broken: panelBreaks,
     enabled: workspaceImmersive(workspace),
     docPinned: baseShape.docPinned,
   });
+  // Flow's sidebar is the app's navigation, not a document index: it stays
+  // on every surface, so a Tool is somewhere you visit with the way back in
+  // view.
+  const pMask = flowShell ? { ...surfaceMask, sidebar: false } : surfaceMask;
   // A plate with no plan on it hides the pane too — and in flow, the plate
   // never has one beside it: the stage's plan panel is the plan's margin.
   const noPlanPane = platePaneMask({
@@ -2874,7 +2896,8 @@ function App() {
     docPinnedPref,
     mainSurface,
   ]);
-  snapBackRef.current = snapBack;
+  // Flow's layout has nothing to snap: ⌘⇧0 is "back to the session".
+  snapBackRef.current = isFlowShell() ? () => flowRowToStageRef.current() : snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
   // The dock's GRID, distinct from the tab count — 9 tabs / 2 tiles is
   // normal. Drives dock growth and the browser-pane resync key.
@@ -3098,6 +3121,8 @@ function App() {
   // front door, like any "show me the terminal") and let it land on the next
   // terminal that needs you. Nothing happens when nothing does.
   const jumpToNeedsYou = useCallback(() => {
+    // Flow has no dock: the top bar's own jump, which goes to the session.
+    if (isFlowShell()) return flowJumpRef.current();
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
     setDoorCompact(false);
@@ -3153,6 +3178,8 @@ function App() {
   // Shift+Arrow text selection; the xterm helper textarea is exempted so the
   // hotkeys still fire there.
   useEffect(() => {
+    // Classic's panels; flow has none of them (⌘B is its sidebar).
+    if (isFlowShell()) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
       if (
@@ -3241,7 +3268,9 @@ function App() {
       // new report, so it always lands here) — with two terminals in one
       // folder, both tabs would converge on whichever file was opened last
       // anywhere in that folder.
-      if (linkNavRef.current) {
+      // Flow has no folder tabs and no file viewer on the stage: following
+      // the terminal there would swap the plan for "Browsing files".
+      if (linkNavRef.current && !isFlowShell()) {
         selectFolder(dir);
         setActiveFile(file ?? folderFileRef.current.get(dir) ?? null);
       }
@@ -3386,6 +3415,8 @@ function App() {
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
   const termDockRef = useRef<HTMLDivElement | null>(null);
+  // Flow's wall (Tools ▸ Terminals) covers the plate, not the sidebar.
+  useStageDock(termDockRef, docColumnRef, flowShell && termFullscreen);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
   // inside the document column — but it follows the same rule: its width is
   // written straight to the element, never rendered from JSX.
@@ -5922,11 +5953,17 @@ function App() {
         }, projectPath)}\r`;
         suppressTerminalRevealFocus();
         setTermFullscreen(false);
-        revealTerm();
-        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
+        // Flow has no dock: the build is this session's conversation from
+        // now on, bound before the resumed CLI starts (as a restore is).
+        if (!flowShell) revealTerm();
+        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath, flowShell ? { background: true } : undefined) ?? null;
         if (!id) {
           setToast("Couldn't open a terminal to build in", 6000);
           return;
+        }
+        if (flowShell) {
+          bindSessionTerminals([{ sessionId, terminalId: id }]);
+          void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
         }
         const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
         if (!delivery.ok) {
@@ -5934,7 +5971,7 @@ function App() {
           return;
         }
         await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
-        setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
+        setToast(flowShell ? `Building with ${agentLabelFor(planHarness)}. Follow it here, or in its terminal (⌘J).` : `Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
       } else {
         const path = await invoke<string>("write_plan_handoff", { sessionId });
         const r = await launchPlan({
@@ -6031,7 +6068,7 @@ function App() {
     const result = await orchestrateHandoff(deps, id, sessionId, launchCmd, prompt);
     if (result.ok) {
       setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
+      setToast(flowShell ? "Team build started. Redline shows you its workflow (Tools ▸ Runs) before any agent starts." : "Team build started below ↓ Redline shows you its workflow before any agent starts.");
     } else await fail(result.stage, result.reason);
   };
   // A pre-flight or a pause is waiting on the user: mount the cards (lazy).
@@ -6281,6 +6318,10 @@ function App() {
    *  attempt record carries its id. Focus is deliberately not suppressed here
    *  (unlike an automatic reveal): the reviewer asked to go there. */
   const showRawTerminal = async (terminalId: string | null) => {
+    if (isFlowShell()) {
+      if (terminalId) flowShowTerminalRef.current(terminalId, "terminal");
+      return;
+    }
     setTermFullscreen(false);
     revealTerm();
     if (!terminalId) return;
@@ -6740,7 +6781,7 @@ function App() {
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
-    setToast("Starting the dev server in the terminal below ↓");
+    setToast(flowShell ? "Starting the dev server (Tools ▸ Terminals)" : "Starting the dev server in the terminal below ↓");
   };
 
   // "Open" on a Localhost card: bring the browser surface forward with a tab on
@@ -8363,7 +8404,8 @@ function App() {
                 // The palette is a keyboard: the start screen arrives zoomed.
                 draftNewPlan: () => openStartScreen("key"),
                 toggleDock: toggleStage,
-                toggleSidebar: toggleFlowSidebar,
+                // The effective toggle: on a Tool too (flowKeysRef, below).
+                toggleSidebar: () => flowKeysRef.current.toggleSidebar(),
                 togglePlanPanel: activeId ? () => togglePlanPanel(activeId) : undefined,
               }
             : {}),
@@ -8699,7 +8741,10 @@ function App() {
       setFrontDoorProject({ path });
       openStartScreen("pointer");
     },
-    onSelectChat: openChat,
+    onSelectChat: (id: string) => {
+      flowRowToStage();
+      openChat(id);
+    },
     onRenameChat: (id: string, title: string) => {
       invoke("companion_rename", { companionId: id, title, byUser: true })
         .then(refreshChats, (e) => setToast(String(e), 6000));
@@ -8744,9 +8789,12 @@ function App() {
   // every shell render.
   const sidebarHandlers = useStableHandlers({
     // Flow: a row puts its session on the stage, so the start screen gives
-    // way (as a door recent does).
+    // way (as a door recent does) and a Tool steps back.
     onSelect: (id: string) => {
-      if (isFlowShell()) setFrontDoorOpen(false);
+      if (isFlowShell()) {
+        setFrontDoorOpen(false);
+        flowRowToStage();
+      }
       setActiveId(id);
     },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
@@ -8761,6 +8809,7 @@ function App() {
       // The sidebar fires this for the row click. The session it points at
       // might not be the active one yet — flip activeId first so the pane
       // mounts the right session before the viewed-version applies.
+      if (isFlowShell()) flowRowToStage();
       if (sessionId !== activeId) setActiveId(sessionId);
       setViewedVersionNumber(versionNumber);
     },
@@ -9006,7 +9055,9 @@ function App() {
     runState: flowSummary?.runState,
   });
   const flowTools = useMemo(() => toolSurfaces(effectiveWorkspace), [effectiveWorkspace]);
-  const flowToolSurface = flowTools.find((t) => t.id === mainSurface)?.id ?? null;
+  // The Tool on screen instead of the stage: the wall counts, so the top bar
+  // offers the way back from it like any other.
+  const flowToolSurface: ToolId | null = termFullscreen ? "terminals" : flowTools.find((t) => t.id === mainSurface)?.id ?? null;
   // "● N needs you" (lib/sessionMode `needsYou`): what waits on you anywhere
   // but the session on screen.
   const flowWaiting = needsYou({
@@ -9014,9 +9065,31 @@ function App() {
     needsYouTerminals: flowNeedsYouTerms,
     // A review an agent asked for, or a run's report: classic's footer chip.
     reviewHold: codeReview.holdActive || !!reviewNews,
-    activeSessionId: flowPlanId,
-    activeTerminalId: flowTerminalId,
+    // The session on screen is left out; on a Tool, nothing is on screen.
+    activeSessionId: flowStageOwns ? flowPlanId : null,
+    activeTerminalId: flowStageOwns ? flowTerminalId : null,
   });
+  // Flow has no dock, so a terminal is shown as its session's stage (or its
+  // launch's), in the view asked for; one no session owns, on the wall.
+  const flowShowTerminal = (terminalId: string, view: StageView) => {
+    const sessionId = [...sessionTerminals].find(([, t]) => t === terminalId)?.[0] ?? null;
+    const launch = flowLaunches.some((l) => l.terminalId === terminalId);
+    if (sessionId || launch) {
+      setFrontDoorOpen(false);
+      flowRowToStage();
+      if (sessionId) setActiveId(sessionId);
+      else selectFlowLaunch(terminalId);
+      setStage(view);
+      return;
+    }
+    enterTermFullscreen();
+    void ensureTerminalReady().then((dock) => {
+      dock?.selectTab(terminalId);
+      dock?.hailTerminal(terminalId);
+    });
+  };
+  flowShowTerminalRef.current = flowShowTerminal;
+  flowJumpRef.current = () => flowJumpToNeedsYou();
   // A gesture, so a trip like any other: the door steps aside for it.
   const flowJumpToNeedsYou = () => {
     const plan = flowWaiting.plans[0];
@@ -9027,39 +9100,58 @@ function App() {
       selectSurface("document");
       setPlanPose(plan, "split");
     } else if (flowWaiting.terminals.length > 0) {
-      jumpToNeedsYou();
+      // Its question or permission card is in the conversation.
+      flowShowTerminal(flowWaiting.terminals[0], "conversation");
     } else if (flowWaiting.review) {
       tripDoor();
       selectSurface("review");
     }
   };
+  // The Tool on screen, picked again (its row or its ⌘ key), is the way
+  // back, like a tab you click a second time.
   const openFlowTool = (id: ToolId) => {
+    if (id === flowToolSurface) return showFlowStage();
     tripDoor();
-    if (id === "terminals") enterTermFullscreen();
-    else selectSurface(id);
+    if (id === "terminals") return enterTermFullscreen();
+    setTermFullscreen(false);
+    selectSurface(id);
   };
   const showFlowStage = () => {
+    setTermFullscreen(false);
     if (mainSurface === "document") return;
     tripDoor();
     selectSurface("document");
   };
+  // A sidebar row is the way back from anywhere: its session takes the stage,
+  // and the sidebar is about sessions again (the terminal's folder follow
+  // can have left it on a folder, which flow never shows).
+  const flowRowToStage = () => {
+    showFlowStage();
+    selectSessions();
+  };
+  flowRowToStageRef.current = flowRowToStage;
   // Mount-once listeners read the latest of these.
   // ⌘N, File ▸ New Session and the ⌘⇧N alias are all keyboard summons of
   // the start screen (the start lane's openStartScreen): it arrives with the
   // caret in the box.
   const flowNewSession = () => openStartScreen("key");
-  const flowKeysRef = useRef({ openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface });
-  flowKeysRef.current = { openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface };
+  const flowKeys = { openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface, tool: flowToolSurface, toggleSidebar };
+  const flowKeysRef = useRef(flowKeys);
+  flowKeysRef.current = flowKeys;
   useEffect(() => {
     if (!isFlowShell()) return;
     const keys = () => flowKeysRef.current;
+    // From a Tool, ⌘J and ⌘⌥B first bring the session back; ⌘J then stops
+    // there rather than also flipping to the terminal.
     const stage = () => {
-      keys().showStage();
-      toggleStage();
+      if (keys().tool) keys().showStage();
+      else toggleStage();
     };
     const planPanel = () => {
       const id = keys().planId;
-      if (id) togglePlanPanel(id);
+      if (!id) return;
+      keys().showStage();
+      togglePlanPanel(id);
     };
     const tool = (n: number) => {
       const id = toolForKey(keys().workspace, n);
@@ -9085,7 +9177,7 @@ function App() {
         // ⌘B is bold in a text editor, and the file tree on Code review.
         if ((e.target as HTMLElement | null)?.isContentEditable || keys().surface === "review") return;
         claim();
-        toggleFlowSidebar();
+        keys().toggleSidebar();
       } else if (isNewSessionKey(e) || (e.metaKey && isNewPlanKey(e))) {
         // ⌘⇧N too, the old chord, for one release — taken here, ahead of
         // the classic listener, so it lands on the start screen rather than
@@ -9100,12 +9192,22 @@ function App() {
         }
       }
     };
+    // Esc leaves a Tool for the session, when nothing nearer claimed it: a
+    // field, the terminal, a menu, the browser's own tile restore.
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || !keys().tool) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable=true], .xterm, [role=menu], [role=dialog]")) return;
+      e.preventDefault();
+      keys().showStage();
+    };
     window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onEscape);
     // The same chords from inside a browser page (browser_signals.js →
     // BrowserPane), where none of our listeners can hear the keyboard.
     const fromPage: [string, () => void][] = [
       ["redline:toggle-monochat", stage],
-      ["redline:toggle-sidebar", toggleFlowSidebar],
+      ["redline:toggle-sidebar", () => keys().toggleSidebar()],
       ["redline:toggle-plan-panel", planPanel],
     ];
     for (const [name, run] of fromPage) window.addEventListener(name, run);
@@ -9116,6 +9218,7 @@ function App() {
     void invoke("set_flow_menu", { enabled: true }).catch(() => {});
     return () => {
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keydown", onEscape);
       for (const [name, run] of fromPage) window.removeEventListener(name, run);
       void onNew.then((un) => un());
       void onSurface.then((un) => un());
@@ -9180,6 +9283,8 @@ function App() {
           planSessionId={flowPlanId}
           terminalId={flowTerminalId}
           toolSurface={flowToolSurface}
+          sidebarOpen={!sidebarCollapsed}
+          onToggleSidebar={toggleSidebar}
           onShowStage={showFlowStage}
           needsYou={flowWaiting.count}
           onJumpToNeedsYou={flowJumpToNeedsYou}
@@ -9191,12 +9296,6 @@ function App() {
             { id: "palette", label: "Command palette", hint: "⌘K", onPick: () => setPaletteOpen(true) },
             ...(surfaceEnabled(effectiveWorkspace, "collab") ? [{ id: "join", label: "Join a live session…", onPick: () => setJoinOpen(true) }] : []),
             ...(surfaceEnabled(effectiveWorkspace, "memory") ? [{ id: "inspector", label: "Memory inspector", onPick: () => setMemoryInspectorOpen(true) }] : []),
-            ...(mainSurface !== "document"
-              ? [
-                  { id: "tile", label: docPinned ? "Untile the plan" : "Tile the plan alongside", onPick: () => { setSplitRatio(0.5); setImmersiveBroken(true); setDocPinned(!docPinned); } },
-                  ...(docPinned ? [{ id: "split", label: splitVertical ? "Split side by side" : "Split stacked", onPick: () => { setSplitRatio(0.5); setSplitVertical((v) => !v); } }] : []),
-                ]
-              : []),
             ...(activeHarness && activeHarness.entry !== "boot" ? [{ id: "harness", label: `Exit ${activeHarness.manifest.name}`, onPick: exitHarness }] : []),
           ]}
           settings={{
@@ -9427,12 +9526,14 @@ function App() {
             </Suspense>
           ) : (
             <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
+              <Suspense fallback={null}>
               <FileTree
                 root={sidebarTab.id}
                 onPlanHere={(path) => { setFrontDoorProject({ path }); openFrontDoor(); }}
                 activeFile={activeFile}
                 onOpenFile={handleOpenFile}
               />
+              </Suspense>
             </div>
           )}
         </aside>
@@ -10402,7 +10503,9 @@ function App() {
           )}
         </div>
 
-        {!paneFullscreen && !(flowShell && mainSurface === "document") && (
+        {/* Flow has no classic margin; Code review keeps it for its diff's
+            threads, which have no flow home yet. */}
+        {!paneFullscreen && !(flowShell && mainSurface !== "review") && (
           // Always in flow (its 6px is part of the space model); when the
           // discussion pane curtains it is painted over, and the absolute
           // copy inside the pane wrapper carries the affordance at the
@@ -11187,7 +11290,9 @@ function App() {
           className={
             // Flow's terminal view first: the dock over the stage, showing
             // the session's PTY alone (`solo` below).
-            flowTermStage
+            // Flow's wall too, over the plate beside the sidebar: the sidebar
+            // and the top bar's crumb are its way back.
+            flowTermStage || (flowShell && termFullscreen)
               ? "rl-term-dock--stage"
               : termFullscreen
               ? "absolute inset-0 z-30"
@@ -11205,7 +11310,7 @@ function App() {
           {/* In fullscreen, an overlay divider at the top of the terminal
               gives the user the same top-edge caret they use to collapse
               the docked terminal — except here it exits fullscreen. */}
-          {termFullscreen && !flowTermStage && (
+          {termFullscreen && !flowShell && (
             <div
               style={{
                 position: "absolute",
@@ -11365,6 +11470,7 @@ function App() {
         currentProject={movePlan.projectPath} options={projectOptions}
         onCancel={() => setMovePlan(null)} onConfirm={path => moveSessionProject(movePlan.sessionId, path)}/></Suspense>}
       {sendConfirm && (
+        <Suspense fallback={null}>
         <SendToRedlineDialog
           markdown={sendConfirm.markdown}
           options={projectOptions}
@@ -11384,6 +11490,7 @@ function App() {
           } : undefined}
           modelControls={<PlanningModelMenu choice={frontDoorBackend} onChange={setFrontDoorBackend} modelCatalogs={modelCatalogs} modelError={modelErrors[frontDoorBackend.backend]} modelStatus={modelStatus[frontDoorBackend.backend]} onRefresh={() => requestModels(frontDoorBackend.backend, selectedModelIdentity, true)} providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]} onLocate={() => { void applyReadinessFix({ id: "provider-missing", state: "blocked", label: "Locate planning CLI", detail: "Choose the executable used for planning.", fix: { label: "Change CLI…", kind: frontDoorBackend.backend === "codex" ? "locate-codex" : frontDoorBackend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: frontDoorBackend.backend } }); }} onOpen={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)} compact={false} />}
         />
+        </Suspense>
       )}
       {/* Persistent and unobtrusive: it announces a ready release once per
           candidate, and "Later" means indefinitely. It also owns the two short
@@ -11580,10 +11687,11 @@ function App() {
         clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${flowStartOnStage}:${bootAnimating}`}
         // In the flow shell the door rests exactly where the start screen is
         // the stage — whatever the sidebar holds: a folder there is where it
-        // would launch (A5), not a file viewer covering the plate — and its
-        // pill keeps to Tools pages.
+        // would launch (A5), not a file viewer covering the plate. Flow has
+        // no floating pill: its sidebar, and New session at its head, stay on
+        // every surface.
         landing={plateAtRest && shellReady && !joinedActive && (isFlowShell() ? flowStartOnStage : sidebarTab.kind !== "folder")}
-        pill={!isFlowShell() || flowPillShown(mainSurface)}
+        pill={!isFlowShell()}
         surfaceKey={doorNavKey}
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
@@ -11764,11 +11872,11 @@ function App() {
       {setupReviewInTerminal && <div className="rl-setup-return" role="status"><span>Sign in if Codex asks, then open <code>/hooks</code> to review Redline’s hooks. Your work stays here.</span><button type="button" onClick={() => { setSetupReviewInTerminal(false); void installIntegration(true, "codex"); }}>Verify and continue</button><button type="button" onClick={() => { setSetupReviewInTerminal(false); dismissSetup(); }}>Later</button></div>}
       {/* ⌘K palette. Registers with the menu-overlay contract while open, so
           the native browser webview hides beneath it. */}
-      <CommandPalette
-        open={paletteOpen}
-        commands={paletteCommands}
-        onClose={() => setPaletteOpen(false)}
-      />
+      {paletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette open commands={paletteCommands} onClose={() => setPaletteOpen(false)} />
+        </Suspense>
+      )}
       {/* Onboarding tour: replay from the menu always, or auto-run once on first
           launch — but only after the hook/skill setup modal is out of the way,
           so the two never overlap. Never in the flow shell, whose start
@@ -11794,7 +11902,7 @@ function App() {
           manifest, dismiss retires it; either way it never fires again.
           Suppressed inside a harness: the suggestion is about the STOCK
           landing, and accepting it there would edit the wrong manifest. */}
-      {nudgeSuggestion && !loading && !activeHarness && (
+      {nudgeSuggestion && !loading && !activeHarness && !flowShell && (
         <NudgeCard
           message={nudgeSuggestion.message}
           onAccept={() => {
