@@ -37,6 +37,9 @@ interface ProjectPickerProps {
    *  the drafter's bordered control. Inline styles would beat the class, so
    *  this is a swap rather than an override. */
   chromeless?: boolean;
+  /** How the chip names the chosen folder. The folder's name by default; the
+   *  flow shell's start screen shows where it is ("~/projects/din"). */
+  display?: (path: string | null) => string;
 }
 
 function basename(path: string): string {
@@ -71,6 +74,7 @@ export function ProjectPicker({
   onChange,
   onAfterPick,
   onNewProject,
+  display,
 }: ProjectPickerProps) {
 
   // Dedupe by normalized path; sessions win over folders on a tie.
@@ -87,7 +91,7 @@ export function ProjectPicker({
   // covers outside-mousedown AND Escape (which this never had).
 
   const label =
-    value === null ? "Home (~)" : basename(value);
+    display ? display(value) : value === null ? "Home (~)" : basename(value);
 
   const browse = async () => {
     try {

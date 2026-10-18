@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  lazy,
+  Suspense,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -11,7 +13,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Check, ChevronRight, CornerDownLeft, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, CornerDownLeft, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -47,12 +49,25 @@ import {
   backendLabel,
   choiceLabel,
   effortsFor,
+  isDefaultChoice,
   modelsFor,
   normalizeChoice,
   type BackendChoice,
   type ModelCatalogs,
 } from "../lib/backendChoice";
 import { runSupported } from "../lib/planLaunchCommand";
+import { flowMode, flowModelLabel, flowSubmitAction, tildePath, type ContinueLink, type FlowMode } from "../lib/flowStart";
+import "../shell/start.css";
+
+// The start screen's furniture — the mode switch, the chips' layout and
+// controls, the four-step strip, the first-run checklist, the Continue links —
+// in its own chunk: only the flow shell renders it, and the boot path carries
+// none of it. The composer it belongs to never waits for it: each piece holds
+// its place until the chunk lands (`.rl-fs-slot`).
+const loadFlowStart = () => import("../shell/FlowStart");
+const FlowStartOrbit = lazy(loadFlowStart);
+const FlowModeRow = lazy(() => loadFlowStart().then((m) => ({ default: m.FlowModeRow })));
+const FlowStartTools = lazy(() => loadFlowStart().then((m) => ({ default: m.FlowStartTools })));
 
 // The front door. The document plate's resting state and where Redline opens:
 // one line of type, one box, and ⏎ starts a real plan-mode session in a real
@@ -197,6 +212,26 @@ export interface FrontDoorProps {
    *  History menu, hidden when this is empty. */
   chats?: { id: string; title: string }[];
   onOpenChat?: (id: string) => void;
+  /** The flow shell's start screen (board 4a): this door, as the New-session
+   *  screen. Set only on the door's own composer and only in the flow shell —
+   *  the classic door, the compact card and a chat's composer never get it.
+   *  See `FlowDoor`. */
+  flow?: FlowDoor;
+}
+
+/** What the start screen needs beyond the door's own props. The door's
+ *  destination is its mode (Chat | Plan, `flowMode`); the Drafter and a direct
+ *  run left the door in flow, for Tools (⌘2) and ⌘↩. */
+export interface FlowDoor {
+  /** More than one harness is installed, so the model chip says which one
+   *  will do the work ("Codex · GPT-5.5 · Medium"). */
+  manyHarnesses: boolean;
+  /** The four-step strip, until the first approval retires it. */
+  strip: boolean;
+  /** The recents moved to the sidebar; the door keeps a couple of ways back
+   *  into the most recent sessions still in review. */
+  continues: ContinueLink[];
+  onContinue: (id: string) => void;
 }
 
 /** Page rows: the most the list ever shows, and the geometry `browseRoom`
@@ -278,6 +313,7 @@ export function FrontDoor(props: FrontDoorProps) {
     consumeSeed,
     chats = [],
     onOpenChat,
+    flow,
   } = props;
 
   // The sentence is the composer's own, so a keystroke re-renders this door
@@ -660,10 +696,39 @@ export function FrontDoor(props: FrontDoorProps) {
     taRef,
   );
 
+  // The start screen's mode, its model chip's "last used", and its Talk. A
+  // pick in the chip is this sentence's own; the next launch inherits it, so
+  // it reads "last used" again once a launch has left.
+  const mode: FlowMode = flowMode(liveDestination);
+  const [modelPicked, setModelPicked] = useState(false);
+  useEffect(() => setModelPicked(false), [launchedAt]);
+  const pickModel = useCallback((next: BackendChoice) => { setModelPicked(true); onBackendChange(next); }, [onBackendChange]);
+  // Talk is the spoken way in: the sentence becomes a chat, and the mic opens
+  // on it, where "send it" sends (the dictation's chat contract). A second
+  // press closes the mic.
+  const talking = mode === "chat" && dictation.listening;
+  const talk = () => {
+    if (talking) { dictation.toggle(); return; }
+    if (mode !== "chat") onDestinationChange("chat");
+    if (!dictation.listening) dictation.toggle();
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (workbench && !e.nativeEvent.isComposing) {
       if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); workbench.cycleMode(); return; }
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); workbench.onSubmit(e.altKey); return; }
+    }
+    // The start screen: ⏎ sends to the mode, ⌘⏎ runs it directly.
+    if (flow && combine.length === 0) {
+      const action = flowSubmitAction(
+        { key: e.key, shiftKey: e.shiftKey, metaKey: e.metaKey, ctrlKey: e.ctrlKey, isComposing: e.nativeEvent.isComposing },
+        mode,
+        runSupported(backend.backend),
+      );
+      if (action === "ignore" || action === "newline") return;
+      e.preventDefault();
+      send(action);
+      return;
     }
     const action = submitAction(
       {
@@ -721,7 +786,8 @@ export function FrontDoor(props: FrontDoorProps) {
   // Setup that needs finishing waits here, in the composer, as one chip —
   // never a dialog popping up mid-task. Its press opens the setup, and so
   // does a ⏎ the fault blocks. A chat's composer leaves it to the strip.
-  const setupItem = workbench ? null : readiness.find((item) => item.fix?.kind === "install-integration") ?? null;
+  // On the start screen the setup is a row of its first-run checklist instead.
+  const setupItem = workbench || flow ? null : readiness.find((item) => item.fix?.kind === "install-integration") ?? null;
 
   // `new-project` is the one fix App can't answer on its own — it needs a
   // name, and asking for one is this surface's job.
@@ -834,8 +900,11 @@ export function FrontDoor(props: FrontDoorProps) {
     floating && welcome ? "has-welcome" : "",
     // Engaged = there is a sentence in the box. The welcome fades on THIS —
     // not on the door opening, nor on the caret arriving: a summoned door
-    // arrives on its full welcome and lets go of it once you type.
-    floating && welcome && hasText ? "is-engaged" : "",
+    // arrives on its full welcome and lets go of it once you type. The start
+    // screen keeps its headline and strip over a sentence (board 4a); there
+    // only the zoom takes them.
+    floating && welcome && hasText && !flow ? "is-engaged" : "",
+    flow ? "is-flow" : "",
     entered ? "is-in" : "",
     compact ? "is-compact" : "",
     tight ? "is-tight" : "",
@@ -844,6 +913,56 @@ export function FrontDoor(props: FrontDoorProps) {
   ]
     .filter(Boolean)
     .join(" ");
+
+  // Locating the CLI, for either model chip.
+  const locateCli = () => { void onFix({ id: backend.backend === "codex" ? "codex-missing" : backend.backend === "claude-code" ? "claude-missing" : "provider-missing", state: "blocked", label: `Locate ${backendLabel(backend.backend)}`, detail: "Choose the executable used for planning and restore.", fix: { label: "Change CLI…", kind: backend.backend === "codex" ? "locate-codex" : backend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: backend.backend } }); };
+
+  // The start screen's chips, in the board's order: the folder FIRST — so
+  // pointing the session at a repo is the first thing on offer, not a
+  // navigation — then model · effort, and the rest (shell/FlowStart's
+  // `FlowStartTools`). The two pickers are the door's own; the chunk lays
+  // them out. Until it arrives the row holds its height, so the box is the
+  // board's size from its first frame.
+  const runEnabled = runSupported(backend.backend);
+  const flowTools = flow && (
+    <Suspense fallback={<span className="rl-fs-slot" />}>
+      <FlowStartTools
+        picker={<ProjectPicker
+          options={projectOptions}
+          value={choice ? choice.path : resolvedProject}
+          onChange={(path) => onChoiceChange({ path })}
+          onNewProject={() => setOffer({ name: projectNameFromPrompt(text), launchAfter: false, kind: "app" })}
+          onAfterPick={() => taRef.current?.focus()}
+          display={tildePath}
+          chromeless
+        />}
+        model={<BackendMenu
+          choice={backend}
+          onChange={pickModel}
+          modelCatalogs={modelCatalogs}
+          modelError={modelError}
+          modelStatus={modelStatus}
+          onRefresh={onRefreshModels}
+          providerInfo={providerInfo}
+          onLocate={locateCli}
+          onOpen={onNeedModels}
+          compact={false}
+          allowedBackends={mode === "chat" ? ["claude-code", "codex"] : undefined}
+          flowLabel={{ text: flowModelLabel(backend, modelCatalogs, flow.manyHarnesses), lastUsed: !modelPicked && !isDefaultChoice(backend) }}
+        />}
+        mode={mode}
+        combining={combine.length}
+        onAttach={attach}
+        listening={dictation.listening}
+        onDictate={dictation.toggle}
+        talk={chatEnabled ? { on: talking, onToggle: talk } : undefined}
+        startable={canSubmit && !(mode === "chat" && chatPending)}
+        opening={mode === "chat" && chatPending}
+        run={runEnabled ? backend.backend : null}
+        onStart={(run) => send(run && runEnabled ? "run" : mode)}
+      />
+    </Suspense>
+  );
 
   return (
     <div
@@ -861,15 +980,29 @@ export function FrontDoor(props: FrontDoorProps) {
           already asking one. "Redline" is the verb, which is the whole point
           of the product and the shortest way to say it. Hung above the box,
           out of flow, so showing or shedding it never moves the composer. */}
-      {floating && welcome && (
+      {floating && welcome && (flow ? (
+        // The start screen asks; the composer under it answers. In the
+        // centred group (start.css), so it is part of where the box sits.
+        <h1 className="rl-fd-welcome rl-fd-welcome-hero rl-fs-title font-serif">What are we working on?</h1>
+      ) : (
         <div className="rl-fd-welcome rl-fd-welcome-hero">
           <h1 className="rl-fd-title font-serif">Every build starts as a draft.</h1>
           <p className="rl-fd-sub">Describe it. Redline the plan. Then build.</p>
         </div>
-      )}
+      ))}
       {chips}
       <div ref={islandRef} className={`${islandClass}${dropHot ? " is-drop-target" : ""}`} style={workbench?.mode === "build" ? { borderColor: "var(--color-warning)", boxShadow: "0 0 0 1px var(--color-warning)" } : undefined}>
         <div className="rl-fd-morph">
+          {/* The start screen's first row: Chat | Plan, and one line saying
+              what the chosen one does. A radio group, so arrows move the
+              choice. Gone while plans are pilled: combining is a plan. */}
+          {flow && combine.length === 0 && (
+            <div className="rl-fs-moderow">
+              <Suspense fallback={<span className="rl-fs-slot is-modes" />}>
+                <FlowModeRow mode={mode} chatEnabled={chatEnabled} harness={backendLabel(backend.backend)} onMode={onDestinationChange} />
+              </Suspense>
+            </div>
+          )}
           {/* Plan pills. Deliberately NOT the attachment chip: an
               attachment is a file handed to a prompt, and these are whole
               documents being fused into one. Each wears the ordinal it was
@@ -954,6 +1087,7 @@ export function FrontDoor(props: FrontDoorProps) {
             placeholder={
               combine.length > 0
                 ? "Anything to add? (optional)"
+                : flow ? (mode === "chat" ? "Ask anything, or think out loud…" : "Describe what you want built…")
                 : floating ? "What are we working on?" : "What do you want to build?"
             }
             aria-label="Message Redline"
@@ -966,6 +1100,7 @@ export function FrontDoor(props: FrontDoorProps) {
             onKeyDown={onKeyDown}
           />
           <div className="rl-fd-tools">
+            {flow ? flowTools : <>
             {workbench ? workbench.picker : <BackendMenu
               choice={backend}
               onChange={onBackendChange}
@@ -974,7 +1109,7 @@ export function FrontDoor(props: FrontDoorProps) {
               modelStatus={modelStatus}
               onRefresh={onRefreshModels}
               providerInfo={providerInfo}
-              onLocate={() => { void onFix({ id: backend.backend === "codex" ? "codex-missing" : backend.backend === "claude-code" ? "claude-missing" : "provider-missing", state: "blocked", label: `Locate ${backendLabel(backend.backend)}`, detail: "Choose the executable used for planning and restore.", fix: { label: "Change CLI…", kind: backend.backend === "codex" ? "locate-codex" : backend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: backend.backend } }); }}
+              onLocate={locateCli}
               onOpen={onNeedModels}
               compact={tight}
               allowedBackends={liveDestination === "chat" ? ["claude-code", "codex"] : undefined}
@@ -1083,6 +1218,7 @@ export function FrontDoor(props: FrontDoorProps) {
               {stopping ? <Square size={11} fill="currentColor" /> : floating ? <ArrowUp size={17}/> : <CornerDownLeft size={15} />}
             </button>
             </div>
+            </>}
           </div>
         </div>
 
@@ -1173,7 +1309,7 @@ export function FrontDoor(props: FrontDoorProps) {
           scroll. They retire with the headline the moment there is a
           sentence. `mousedown` is swallowed so a press never moves focus into
           the composer on its way to opening somewhere else. */}
-      {floating && welcome && recents.length > 0 && onOpenRecent && (() => {
+      {floating && welcome && !flow && recents.length > 0 && onOpenRecent && (() => {
         const entry = (r: DoorRecent, className: string) => (
           <button
             key={r.id}
@@ -1237,8 +1373,25 @@ export function FrontDoor(props: FrontDoorProps) {
         );
       })()}
 
-      {/* The chip's one setup installs every piece it names: none is listed twice. */}
-      <ReadinessStrip items={setupItem ? readiness.filter((item) => item.fix?.kind !== "install-integration") : readiness} onFix={handleFix} />
+      {/* The start screen's foot: the strip's slot in the centred group, and
+          the checklist and Continue links hung below it (shell/FlowStart). */}
+      {flow ? (
+        <div className="rl-fd-welcome rl-fs-foot">
+          <Suspense fallback={null}>
+            <FlowStartOrbit
+              strip={flow.strip}
+              harness={backendLabel(backend.backend)}
+              readiness={readiness}
+              onFix={handleFix}
+              continues={flow.continues}
+              onContinue={flow.onContinue}
+            />
+          </Suspense>
+        </div>
+      ) : (
+        // The chip's one setup installs every piece it names: none is listed twice.
+        <ReadinessStrip items={setupItem ? readiness.filter((item) => item.fix?.kind !== "install-integration") : readiness} onFix={handleFix} />
+      )}
     </div>
   );
 }
@@ -1324,6 +1477,7 @@ export function BackendMenu({
   onOpen,
   compact,
   allowedBackends,
+  flowLabel,
 }: {
   choice: BackendChoice;
   onChange: (next: BackendChoice) => void;
@@ -1336,6 +1490,10 @@ export function BackendMenu({
   onOpen: () => void;
   compact: boolean;
   allowedBackends?: readonly BackendChoice["backend"][];
+  /** The start screen's reading of the chip: "Opus · High · last used ▾" —
+   *  the harness only when there is a choice of one (`flowModelLabel`), and
+   *  "last used" while the pick is inherited rather than made here. */
+  flowLabel?: { text: string; lastUsed: boolean };
 }) {
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const modelsRef = useRef<HTMLDivElement>(null);
@@ -1435,7 +1593,16 @@ export function BackendMenu({
           aria-expanded={open}
           className="rl-composer-chip"
         >
-          <Sparkles size={12}/><span>{label}</span> <span className="rl-fd-caret">▾</span>
+          {flowLabel ? (
+            <>
+              {/* One line, one ellipsis: squeezed, "last used" goes first. */}
+              <Sparkles size={13} aria-hidden="true"/>
+              <span>{flowLabel.text}{flowLabel.lastUsed && <span className="rl-fs-lastused">· last used</span>}</span>
+              <ChevronDown size={11} aria-hidden="true"/>
+            </>
+          ) : (
+            <><Sparkles size={12}/><span>{label}</span> <span className="rl-fd-caret">▾</span></>
+          )}
         </button>
       </div>
       {open && (

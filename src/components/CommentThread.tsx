@@ -24,6 +24,7 @@ import { useSidecarView, type SidecarView } from "../hooks/useSidecarView";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { askedMode, isChatRow, reportItems } from "../lib/sidecarRows";
 import { useSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
+import { isFlowShell } from "../lib/shellFlag";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -45,6 +46,14 @@ interface CommentThreadProps {
   /** Called once the seed is sent (or found already sent). */
   onAutoDiscussConsumed?: () => void;
   onHasDiscussion?: (value: boolean) => void;
+  /** The host owns the way in (the flow Feedback card's "💬 Discuss"): with
+   *  no discussion yet the thread renders nothing, instead of its own
+   *  Discuss / Chat row. */
+  hideEntry?: boolean;
+  /** Bumped by that host's Discuss: each bump opens the thread, starting the
+   *  discussion on the comment itself when it has none yet. Unlike
+   *  `autoDiscuss` it can start one again after a Discard. */
+  discussNonce?: number;
 }
 
 /** What "Write it up →" asks for once a chat has run past the last report. */
@@ -102,8 +111,13 @@ export const CommentThread = memo(function CommentThread({
   autoDiscuss = false,
   onAutoDiscussConsumed,
   onHasDiscussion,
+  hideEntry = false,
+  discussNonce = 0,
 }: CommentThreadProps) {
   const monochat = useMonochat();
+  // The flow shell drops the per-thread model chip (5a): the discussion runs
+  // on the plan's own harness, which the composer's chip already names.
+  const flow = isFlowShell();
   const commentId = comment.id;
   // Report (the structured answer) or Chat (quick turns with the same fork).
   // Persisted per comment; a remount or relaunch comes back to the same view.
@@ -243,6 +257,18 @@ export const CommentThread = memo(function CommentThread({
     onAutoDiscussConsumed?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoDiscuss, loaded]);
+
+  // The host's Discuss, once the thread has loaded: open it, and start it
+  // when it is empty. The press is remembered until then, never replayed.
+  const answeredNonce = useRef(discussNonce);
+  useEffect(() => {
+    if (!loaded || discussNonce === answeredNonce.current) return;
+    answeredNonce.current = discussNonce;
+    userCollapsedRef.current = false;
+    setExpanded(true);
+    if (messages.length === 0 && status === "idle") discuss();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discussNonce, loaded]);
 
   // Auto-expand as the reply streams in — unless the reviewer just folded
   // this thread away on purpose. (Previously done inside the delta listener;
@@ -458,6 +484,7 @@ export const CommentThread = memo(function CommentThread({
   // when the loaded thread replaces it), and the button never flashes on a
   // thread that turns out to exist.
   if (!loaded || (visible.length === 0 && status === "idle" && !(view === "chat" && expanded))) {
+    if (hideEntry) return null;
     return (
       <div
         className="rl-thread-entry mt-3 pt-3 border-t"
@@ -488,7 +515,7 @@ export const CommentThread = memo(function CommentThread({
         {/* While the row only holds its place, a stand-in of the chip's
             first-render size: the real one reads its pick and the seats,
             which a thread with history would throw away. */}
-        {loaded ? (
+        {flow ? null : loaded ? (
           <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
         ) : (
           <span className="rl-fd-model-chip-wrap" style={{ display: "inline-flex", marginLeft: 6 }}>
@@ -593,7 +620,9 @@ export const CommentThread = memo(function CommentThread({
             >
               {view === "chat" ? "← Report" : "Chat"}
             </button>
-            <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
+            {!flow && (
+              <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
+            )}
             <button
               type="button"
               onClick={(e) => {

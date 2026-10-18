@@ -429,6 +429,74 @@ describe("the resting door", () => {
   });
 });
 
+describe("the flow shell", () => {
+  /** The flow shell's stage: a start screen that names its own rect, and the
+   *  pill held off it. */
+  function Stage({ landing = true, pill = false }: { landing?: boolean; pill?: boolean }) {
+    const [open, setOpen] = useState(false);
+    const at = (rect: { left: number; top: number; right: number; bottom: number }) => (element: HTMLElement | null) => {
+      if (element) element.getBoundingClientRect = () => ({ ...rect, x: rect.left, y: rect.top, width: rect.right - rect.left, height: rect.bottom - rect.top, toJSON() {} }) as DOMRect;
+    };
+    return <>
+      <header className="rl-app-header" ref={at({ left: 0, top: 0, right: 1280, bottom: 47 })}/>
+      <main data-rl-door-plate ref={at({ left: 253, top: 47, right: 1280, bottom: 800 })}><button id="stage-focus">Stage</button></main>
+      <MonochatIsland landing={landing} pill={pill} surfaceKey="start" open={open} onOpenChange={setOpen} context="New session" busy={false}>
+        <div className="rl-frontdoor has-welcome"><div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue=""/></div></div>
+      </MonochatIsland>
+    </>;
+  }
+
+  it("rests in the rect its stage names, whatever the header and the dock say", async () => {
+    vi.stubGlobal("innerWidth", 1280); vi.stubGlobal("innerHeight", 800);
+    await render(<Stage/>);
+    const layer = layerOf();
+    expect(layer.hasAttribute("data-landed")).toBe(true);
+    expect(layer.style.getPropertyValue("--fd-rest-top")).toBe("47px");
+    expect(layer.style.getPropertyValue("--fd-rest-left")).toBe("253px");
+    expect(layer.style.getPropertyValue("--fd-rest-right")).toBe("0px");
+    expect(layer.style.getPropertyValue("--fd-rest-bottom")).toBe("0px");
+  });
+
+  it("holds the pill off its stage: hidden, out of the tab order, and the keys still summon the door zoomed", async () => {
+    await render(<Stage landing={false}/>);
+    expect(pill().dataset.hidden).toBe("true");
+    expect(pill().tabIndex).toBe(-1);
+    expect(pill().getAttribute("aria-hidden")).toBe("true");
+    const stage = host.querySelector<HTMLButtonElement>("#stage-focus")!; stage.focus();
+    await key(stage, { key: "Enter", shiftKey: true });
+    expect(pose()).toBe("conversation");
+    expect(zoomed()).toBe(true);
+    expect(document.activeElement).toBe(main());
+    await key(main(), { key: "Escape" });
+    // The caret goes back where it was — never to a pill no one can see.
+    expect(document.activeElement).toBe(stage);
+  });
+
+  it("a send control in the resting box launches where it is: it engages nothing", async () => {
+    const onOpen = vi.fn();
+    await render(<Harness landing onOpen={onOpen}>
+      <div className="rl-frontdoor has-welcome">
+        <div className="rl-fd-island"><textarea aria-label="Main reply" defaultValue="Plan it"/><button id="start" data-rl-door-go="">Start plan</button></div>
+      </div>
+    </Harness>);
+    const start = host.querySelector<HTMLButtonElement>("#start")!;
+    await pointer(start, "pointerdown", { button: 0 });
+    await act(async () => start.focus());
+    await key(start, { key: "Enter" });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(pose()).toBe("entry");
+    // The box around it still engages.
+    await pointer(main(), "pointerdown", { button: 0 });
+    expect(pose()).toBe("conversation");
+  });
+
+  it("shows the pill on a Tools page", async () => {
+    await render(<Stage landing={false} pill/>);
+    expect(pill().dataset.hidden).toBe("false");
+    expect(pill().tabIndex).toBe(0);
+  });
+});
+
 describe("keys", () => {
   it.each(["input", "textarea", "contenteditable"])("Shift+Enter in a %s is that field's newline, never a summons", async (kind) => {
     await render();

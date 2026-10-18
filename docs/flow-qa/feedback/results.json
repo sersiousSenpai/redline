@@ -1,0 +1,1234 @@
+{
+  "startedAt": "2026-10-18T09:14:32.789Z",
+  "fixture": "fixtures/flow-feedback-qa",
+  "boards": "../flow-design",
+  "screenshots": [
+    "5a-panel-aurora.png",
+    "5a-panel-side-by-side.png",
+    "5a-panel-resolved-opened-aurora.png",
+    "5a-panel-composing-aurora.png",
+    "4c-margin-aurora.png",
+    "4c-margin-side-by-side.png",
+    "5a-states-aurora.png",
+    "5a-panel-basic.png",
+    "5a-states-basic.png",
+    "4c-margin-basic.png",
+    "5a-panel-studio.png",
+    "5a-states-studio.png",
+    "4c-margin-studio.png"
+  ],
+  "checks": [
+    {
+      "name": "5a header: 48px row on the board's line (47 → 95), hairline in --color-rule, 12.5px",
+      "passed": true,
+      "details": {
+        "x": 0,
+        "y": 47,
+        "w": 400,
+        "h": 49,
+        "right": 400,
+        "bottom": 96,
+        "text": "ChatFeedback16All resolved",
+        "font": 12.5,
+        "lineHeight": 18.75,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "1px rgb(50, 55, 66)",
+        "pad": [
+          0,
+          12,
+          0,
+          12
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a tabs: copy \"Chat\" / \"Feedback 16\"",
+      "passed": true,
+      "details": [
+        "Chat",
+        "Feedback16"
+      ]
+    },
+    {
+      "name": "5a tab Chat: x 12, 28px tall at y 57, muted ink (--color-ink-4)",
+      "passed": true,
+      "details": {
+        "x": 12,
+        "y": 57,
+        "w": 47.609375,
+        "h": 28,
+        "right": 59.609375,
+        "bottom": 85,
+        "text": "Chat",
+        "font": 12.5,
+        "lineHeight": 18.75,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 7,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          10,
+          0,
+          10
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a tab Feedback: selected fill --color-fill-2, ink, r7, 28px at y 57; x 64, 97 wide as on the board (its fill spans 64 → 160)",
+      "passed": true,
+      "details": {
+        "x": 63.609375,
+        "y": 57,
+        "w": 97.875,
+        "h": 28,
+        "right": 161.484375,
+        "bottom": 85,
+        "text": "Feedback16",
+        "font": 12.5,
+        "lineHeight": 18.75,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 7,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgb(24, 29, 40)",
+        "shadow": "none",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          0,
+          10,
+          0,
+          10
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a tab count \"16\" in muted ink",
+      "passed": true,
+      "details": {
+        "x": 137.796875,
+        "y": 61.625,
+        "w": 13.6875,
+        "h": 18.75,
+        "right": 151.484375,
+        "bottom": 80.375,
+        "text": "16",
+        "font": 12.5,
+        "lineHeight": 18.75,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a \"All resolved\": 11.5px muted, right edge 12 from the panel's",
+      "passed": true,
+      "details": {
+        "x": 324.640625,
+        "y": 62.375,
+        "w": 63.359375,
+        "h": 17.25,
+        "right": 388,
+        "bottom": 79.625,
+        "text": "All resolved",
+        "font": 11.5,
+        "lineHeight": 17.25,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a list: from y 96, padding 14, 13px / 1.55",
+      "passed": true,
+      "details": {
+        "x": 0,
+        "y": 96,
+        "w": 400,
+        "h": 795,
+        "right": 400,
+        "bottom": 891,
+        "text": "Context · ¶3·voice noteResolved in v2The pilot firm is my own firm. Keep the vendor-terms and notice gates anyway, and get notice-text sign-off from someone other than me.\nDone. §3 and §4 now treat R1 as internal dogfooding. Both gates stay. Notice-text sign-off goes to outside counsel in step 6.\nAcceptReopenDiscuss§4 · step 4Resolved in v2Use one shared type-coercion helper for extraction output and human corrections, validated against the call's pinned config.§4 · releasesResolved in v2Reframe the releases: R1 is internal dogfooding. Public launch is gated on full in-app calling with a proven E911 path.§4Resolved in v2Add an iOS launch track with feature parity to web: softphone, VoIP push, texting inbox, call list.12 more resolved",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          14,
+          14,
+          14,
+          14
+        ],
+        "clamp": "none",
+        "overflow": "auto"
+      }
+    },
+    {
+      "name": "5a open card: x 14, y 110, 372 × 230.7 (board 110 → 339), r12",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 110,
+        "w": 372,
+        "h": 230.65625,
+        "right": 386,
+        "bottom": 340.65625,
+        "text": "Context · ¶3·voice noteResolved in v2The pilot firm is my own firm. Keep the vendor-terms and notice gates anyway, and get notice-text sign-off from someone other than me.\nDone. §3 and §4 now treat R1 as internal dogfooding. Both gates stay. Notice-text sign-off goes to outside counsel in step 6.\nAcceptReopenDiscuss",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 12,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(26, 31, 42, 0.56)",
+        "shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgb(75, 92, 117) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0) 0px 0px 0px 0px",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          15,
+          15,
+          15,
+          15
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a open card: glass sheet fill, focus rim from --color-focus-rim, no drop shadow",
+      "passed": true,
+      "details": {
+        "bg": "rgba(26, 31, 42, 0.56)",
+        "shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgb(75, 92, 117) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0) 0px 0px 0px 0px"
+      }
+    },
+    {
+      "name": "5a open card: content 15 in (board 14 + its 1px border)",
+      "passed": true,
+      "details": [
+        15,
+        15,
+        15,
+        15
+      ]
+    },
+    {
+      "name": "5a open meta copy: \"Context · ¶3 · voice note … Resolved in v2\"",
+      "passed": true,
+      "details": "Context · ¶3·voice noteResolved in v2"
+    },
+    {
+      "name": "5a open meta: 11.5px muted, first line at y 125 (board text 128–139)",
+      "passed": true,
+      "details": {
+        "x": 29,
+        "y": 125,
+        "w": 342,
+        "h": 17.8125,
+        "right": 371,
+        "bottom": 142.8125,
+        "text": "Context · ¶3·voice noteResolved in v2",
+        "font": 11.5,
+        "lineHeight": 17.825,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a open anchor in plan blue (--color-mode-plan-fg)",
+      "passed": true,
+      "details": "rgb(138, 186, 247)"
+    },
+    {
+      "name": "5a \"Resolved in v2\" in building green (--color-mode-build-fg), right edge at the content's",
+      "passed": true,
+      "details": {
+        "x": 292.046875,
+        "y": 125,
+        "w": 78.953125,
+        "h": 17.8125,
+        "right": 371,
+        "bottom": 142.8125,
+        "text": "Resolved in v2",
+        "font": 11.5,
+        "lineHeight": 17.825,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(124, 227, 195)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(124, 227, 195)",
+        "borderBottom": "0px rgb(124, 227, 195)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a voice-note mic icon 11px",
+      "passed": true,
+      "details": {
+        "x": 115.21875,
+        "y": 128.40625,
+        "w": 11,
+        "h": 11,
+        "right": 126.21875,
+        "bottom": 139.40625,
+        "text": "",
+        "font": 11.5,
+        "lineHeight": 17.825,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "hidden"
+      }
+    },
+    {
+      "name": "5a note: ink, three lines from y 153",
+      "passed": true,
+      "details": {
+        "x": 29,
+        "y": 152.8125,
+        "w": 342,
+        "h": 60.421875,
+        "right": 371,
+        "bottom": 213.234375,
+        "text": "The pilot firm is my own firm. Keep the vendor-terms and notice gates anyway, and get notice-text sign-off from someone other than me.\n",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a note copy verbatim",
+      "passed": true,
+      "details": "The pilot firm is my own firm. Keep the vendor-terms and notice gates anyway, and get notice-text sign-off from someone other than me.\n"
+    },
+    {
+      "name": "5a reply: secondary ink behind a 2px --color-rule-strong rule, gap 10, 2px above",
+      "passed": true,
+      "details": {
+        "reply": {
+          "x": 29,
+          "y": 223.234375,
+          "w": 342,
+          "h": 62.421875,
+          "right": 371,
+          "bottom": 285.65625,
+          "text": "Done. §3 and §4 now treat R1 as internal dogfooding. Both gates stay. Notice-text sign-off goes to outside counsel in step 6.\n",
+          "font": 13,
+          "lineHeight": 20.15,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 0,
+          "color": "rgb(174, 179, 189)",
+          "bg": "rgba(0, 0, 0, 0)",
+          "shadow": "none",
+          "border": "0px rgb(174, 179, 189)",
+          "borderBottom": "0px rgb(174, 179, 189)",
+          "pad": [
+            2,
+            0,
+            0,
+            0
+          ],
+          "clamp": "none",
+          "overflow": "visible"
+        },
+        "rule": {
+          "x": 29,
+          "y": 225.234375,
+          "w": 2,
+          "h": 60.421875,
+          "right": 31,
+          "bottom": 285.65625,
+          "text": "",
+          "font": 13,
+          "lineHeight": 20.15,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 1,
+          "color": "rgb(174, 179, 189)",
+          "bg": "rgb(61, 66, 77)",
+          "shadow": "none",
+          "border": "0px rgb(174, 179, 189)",
+          "borderBottom": "0px rgb(174, 179, 189)",
+          "pad": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "clamp": "none",
+          "overflow": "visible"
+        }
+      }
+    },
+    {
+      "name": "5a reply copy verbatim",
+      "passed": true,
+      "details": "Done. §3 and §4 now treat R1 as internal dogfooding. Both gates stay. Notice-text sign-off goes to outside counsel in step 6.\n"
+    },
+    {
+      "name": "5a actions copy: Accept · Reopen … Discuss",
+      "passed": true,
+      "details": [
+        "Accept",
+        "Reopen",
+        "Discuss"
+      ]
+    },
+    {
+      "name": "5a ✓ Accept: 28px, r7, green tint (--color-mode-build-bg/fg), 12px, at y 297",
+      "passed": true,
+      "details": {
+        "x": 29,
+        "y": 297.65625,
+        "w": 77.703125,
+        "h": 28,
+        "right": 106.703125,
+        "bottom": 325.65625,
+        "text": "Accept",
+        "font": 12,
+        "lineHeight": 18.6,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 7,
+        "color": "rgb(124, 227, 195)",
+        "bg": "rgb(25, 41, 47)",
+        "shadow": "none",
+        "border": "0px rgb(124, 227, 195)",
+        "borderBottom": "0px rgb(124, 227, 195)",
+        "pad": [
+          0,
+          10,
+          0,
+          10
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a Reopen: 28px, secondary ink, 8 after Accept",
+      "passed": true,
+      "details": {
+        "x": 114.703125,
+        "y": 297.65625,
+        "w": 62.796875,
+        "h": 28,
+        "right": 177.5,
+        "bottom": 325.65625,
+        "text": "Reopen",
+        "font": 12,
+        "lineHeight": 18.6,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 7,
+        "color": "rgb(174, 179, 189)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(174, 179, 189)",
+        "borderBottom": "0px rgb(174, 179, 189)",
+        "pad": [
+          0,
+          10,
+          0,
+          10
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a Discuss: muted ink, flush right",
+      "passed": true,
+      "details": {
+        "x": 308.859375,
+        "y": 297.65625,
+        "w": 62.140625,
+        "h": 28,
+        "right": 371,
+        "bottom": 325.65625,
+        "text": "Discuss",
+        "font": 12,
+        "lineHeight": 18.6,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 7,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a resolved 1: y 352, 372 × 92.1, r12, paper with a --color-rule hairline, padding 12/14",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 352.65625,
+        "w": 372,
+        "h": 92.09375,
+        "right": 386,
+        "bottom": 444.75,
+        "text": "§4 · step 4Resolved in v2Use one shared type-coercion helper for extraction output and human corrections, validated against the call's pinned config.",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 12,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgb(11, 16, 27)",
+        "shadow": "none",
+        "border": "1px rgb(50, 55, 66)",
+        "borderBottom": "1px rgb(50, 55, 66)",
+        "pad": [
+          12,
+          14,
+          12,
+          14
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a resolved 1: two clamped lines of secondary ink, anchor muted",
+      "passed": true,
+      "details": {
+        "cNote": {
+          "x": 29,
+          "y": 391.46875,
+          "w": 342,
+          "h": 40.28125,
+          "right": 371,
+          "bottom": 431.75,
+          "text": "Use one shared type-coercion helper for extraction output and human corrections, validated against the call's pinned config.",
+          "font": 13,
+          "lineHeight": 20.15,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 0,
+          "color": "rgb(174, 179, 189)",
+          "bg": "rgba(0, 0, 0, 0)",
+          "shadow": "none",
+          "border": "0px rgb(174, 179, 189)",
+          "borderBottom": "0px rgb(174, 179, 189)",
+          "pad": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "clamp": "2",
+          "overflow": "hidden"
+        },
+        "cLabel": "rgb(134, 139, 149)"
+      }
+    },
+    {
+      "name": "5a resolved 1: anchor copy",
+      "passed": true,
+      "details": "§4 · step 4"
+    },
+    {
+      "name": "5a resolved 2: y 457, 372 × 92.1, r12, paper with a --color-rule hairline, padding 12/14",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 456.75,
+        "w": 372,
+        "h": 92.09375,
+        "right": 386,
+        "bottom": 548.84375,
+        "text": "§4 · releasesResolved in v2Reframe the releases: R1 is internal dogfooding. Public launch is gated on full in-app calling with a proven E911 path.",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 12,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgb(11, 16, 27)",
+        "shadow": "none",
+        "border": "1px rgb(50, 55, 66)",
+        "borderBottom": "1px rgb(50, 55, 66)",
+        "pad": [
+          12,
+          14,
+          12,
+          14
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a resolved 2: two clamped lines of secondary ink, anchor muted",
+      "passed": true,
+      "details": {
+        "cNote": {
+          "x": 29,
+          "y": 495.5625,
+          "w": 342,
+          "h": 40.28125,
+          "right": 371,
+          "bottom": 535.84375,
+          "text": "Reframe the releases: R1 is internal dogfooding. Public launch is gated on full in-app calling with a proven E911 path.",
+          "font": 13,
+          "lineHeight": 20.15,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 0,
+          "color": "rgb(174, 179, 189)",
+          "bg": "rgba(0, 0, 0, 0)",
+          "shadow": "none",
+          "border": "0px rgb(174, 179, 189)",
+          "borderBottom": "0px rgb(174, 179, 189)",
+          "pad": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "clamp": "2",
+          "overflow": "hidden"
+        },
+        "cLabel": "rgb(134, 139, 149)"
+      }
+    },
+    {
+      "name": "5a resolved 2: anchor copy",
+      "passed": true,
+      "details": "§4 · releases"
+    },
+    {
+      "name": "5a resolved 3: y 561, 372 × 92.1, r12, paper with a --color-rule hairline, padding 12/14",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 560.84375,
+        "w": 372,
+        "h": 92.09375,
+        "right": 386,
+        "bottom": 652.9375,
+        "text": "§4Resolved in v2Add an iOS launch track with feature parity to web: softphone, VoIP push, texting inbox, call list.",
+        "font": 13,
+        "lineHeight": 20.15,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 12,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgb(11, 16, 27)",
+        "shadow": "none",
+        "border": "1px rgb(50, 55, 66)",
+        "borderBottom": "1px rgb(50, 55, 66)",
+        "pad": [
+          12,
+          14,
+          12,
+          14
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a resolved 3: two clamped lines of secondary ink, anchor muted",
+      "passed": true,
+      "details": {
+        "cNote": {
+          "x": 29,
+          "y": 599.65625,
+          "w": 342,
+          "h": 40.28125,
+          "right": 371,
+          "bottom": 639.9375,
+          "text": "Add an iOS launch track with feature parity to web: softphone, VoIP push, texting inbox, call list.",
+          "font": 13,
+          "lineHeight": 20.15,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 0,
+          "color": "rgb(174, 179, 189)",
+          "bg": "rgba(0, 0, 0, 0)",
+          "shadow": "none",
+          "border": "0px rgb(174, 179, 189)",
+          "borderBottom": "0px rgb(174, 179, 189)",
+          "pad": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "clamp": "2",
+          "overflow": "hidden"
+        },
+        "cLabel": "rgb(134, 139, 149)"
+      }
+    },
+    {
+      "name": "5a resolved 3: anchor copy",
+      "passed": true,
+      "details": "§4"
+    },
+    {
+      "name": "5a \"12 more resolved\": 12px muted, padding 2/4, at y 665 (glyphs 670–679 on the board)",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 664.9375,
+        "w": 104.5,
+        "h": 22.59375,
+        "right": 118.5,
+        "bottom": 687.53125,
+        "text": "12 more resolved",
+        "font": 12,
+        "lineHeight": 18.6,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          2,
+          4,
+          2,
+          4
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a composer row: hairline at y 891, padding 12/14/14",
+      "passed": true,
+      "details": {
+        "x": 0,
+        "y": 891,
+        "w": 400,
+        "h": 69,
+        "right": 400,
+        "bottom": 960,
+        "text": "Select text in the plan, or type feedback…Opus 4.5 · High",
+        "font": 13,
+        "lineHeight": 19.5,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "1px rgb(50, 55, 66)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          12,
+          14,
+          14,
+          14
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a composer: x 14, y 904, 372 × 42 (40 + its border), r11, glass sheet with a --color-rule-strong rim",
+      "passed": true,
+      "details": {
+        "x": 14,
+        "y": 904,
+        "w": 372,
+        "h": 42,
+        "right": 386,
+        "bottom": 946,
+        "text": "Select text in the plan, or type feedback…Opus 4.5 · High",
+        "font": 13,
+        "lineHeight": 19.5,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 11,
+        "color": "rgb(228, 233, 243)",
+        "bg": "rgba(26, 31, 42, 0.56)",
+        "shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgb(61, 66, 77) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0) 0px 0px 0px 0px",
+        "border": "0px rgb(228, 233, 243)",
+        "borderBottom": "0px rgb(228, 233, 243)",
+        "pad": [
+          0,
+          7,
+          0,
+          15
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a composer hint: verbatim, 13.5px muted, starting 15 in",
+      "passed": true,
+      "details": {
+        "x": 29,
+        "y": 908.8125,
+        "w": 217.4375,
+        "h": 32.375,
+        "right": 246.4375,
+        "bottom": 941.1875,
+        "text": "Select text in the plan, or type feedback…",
+        "font": 13.5,
+        "lineHeight": 16.2,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(134, 139, 149)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(134, 139, 149)",
+        "borderBottom": "0px rgb(134, 139, 149)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a composer model chip: \"Opus 4.5 · High\", 11.5px secondary ink",
+      "passed": true,
+      "details": {
+        "x": 256.4375,
+        "y": 916.375,
+        "w": 84.5625,
+        "h": 17.25,
+        "right": 341,
+        "bottom": 933.625,
+        "text": "Opus 4.5 · High",
+        "font": 11.5,
+        "lineHeight": 17.25,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(174, 179, 189)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(174, 179, 189)",
+        "borderBottom": "0px rgb(174, 179, 189)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "5a no c-0xx id anywhere",
+      "passed": true
+    },
+    {
+      "name": "5a nothing spills past the 400px panel",
+      "passed": true
+    },
+    {
+      "name": "5a nothing moves: no transitions or animations on the panel",
+      "passed": true
+    },
+    {
+      "name": "clicking a resolved thread jumps to its anchor and opens it",
+      "passed": true
+    },
+    {
+      "name": "\"12 more resolved\" brings all sixteen",
+      "passed": true
+    },
+    {
+      "name": "typing hides the hint, focuses the rim and arms send",
+      "passed": true
+    },
+    {
+      "name": "4c margin note: indented 24 (x 56 + 24), 42 tall, r10, 13px / 1.5 sans, padding 10/12",
+      "passed": true,
+      "details": {
+        "x": 80,
+        "y": 277.890625,
+        "w": 290.953125,
+        "h": 42,
+        "right": 370.953125,
+        "bottom": 319.890625,
+        "text": "IMRun this against staging first, not prod.",
+        "font": 13,
+        "lineHeight": 19.5,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 10,
+        "color": "rgb(211, 216, 226)",
+        "bg": "rgb(26, 31, 42)",
+        "shadow": "none",
+        "border": "1px color(srgb 0.172902 0.178039 0.196824)",
+        "borderBottom": "1px color(srgb 0.172902 0.178039 0.196824)",
+        "pad": [
+          10,
+          12,
+          10,
+          12
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "4c margin note: 291 wide like the board (±3, text-set), elevated card with a warm hairline",
+      "passed": true,
+      "details": {
+        "x": 80,
+        "y": 277.890625,
+        "w": 290.953125,
+        "h": 42,
+        "right": 370.953125,
+        "bottom": 319.890625,
+        "text": "IMRun this against staging first, not prod.",
+        "font": 13,
+        "lineHeight": 19.5,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 10,
+        "color": "rgb(211, 216, 226)",
+        "bg": "rgb(26, 31, 42)",
+        "shadow": "none",
+        "border": "1px color(srgb 0.172902 0.178039 0.196824)",
+        "borderBottom": "1px color(srgb 0.172902 0.178039 0.196824)",
+        "pad": [
+          10,
+          12,
+          10,
+          12
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "4c margin note: sits 16 under the list, at the board's y (body 34 + title/lede/h2/list)",
+      "passed": true,
+      "details": 277.890625
+    },
+    {
+      "name": "4c avatar \"IM\": 20px disc in --color-warning, --color-on-warning ink, 10.5px / 700",
+      "passed": true,
+      "details": {
+        "x": 93,
+        "y": 288.890625,
+        "w": 20,
+        "h": 20,
+        "right": 113,
+        "bottom": 308.890625,
+        "text": "IM",
+        "font": 10.5,
+        "lineHeight": 10.5,
+        "weight": "700",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 50,
+        "color": "rgb(11, 16, 27)",
+        "bg": "rgb(227, 191, 133)",
+        "shadow": "none",
+        "border": "0px rgb(11, 16, 27)",
+        "borderBottom": "0px rgb(11, 16, 27)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "4c note copy verbatim, prose ink",
+      "passed": true,
+      "details": {
+        "x": 123,
+        "y": 288.890625,
+        "w": 234.953125,
+        "h": 20,
+        "right": 357.953125,
+        "bottom": 308.890625,
+        "text": "Run this against staging first, not prod.",
+        "font": 13,
+        "lineHeight": 19.5,
+        "weight": "400",
+        "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "radius": 0,
+        "color": "rgb(211, 216, 226)",
+        "bg": "rgba(0, 0, 0, 0)",
+        "shadow": "none",
+        "border": "0px rgb(211, 216, 226)",
+        "borderBottom": "0px rgb(211, 216, 226)",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "clamp": "none",
+        "overflow": "visible"
+      }
+    },
+    {
+      "name": "4c the ProseMirror-widget note matches the React one",
+      "passed": true,
+      "details": {
+        "widget": {
+          "x": 80,
+          "y": 386.390625,
+          "w": 290.953125,
+          "h": 42,
+          "right": 370.953125,
+          "bottom": 428.390625,
+          "text": "IMRun this against staging first, not prod.",
+          "font": 13,
+          "lineHeight": 19.5,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 10,
+          "color": "rgb(211, 216, 226)",
+          "bg": "rgb(26, 31, 42)",
+          "shadow": "none",
+          "border": "1px color(srgb 0.172902 0.178039 0.196824)",
+          "borderBottom": "1px color(srgb 0.172902 0.178039 0.196824)",
+          "pad": [
+            10,
+            12,
+            10,
+            12
+          ],
+          "clamp": "none",
+          "overflow": "visible"
+        },
+        "mn": {
+          "x": 80,
+          "y": 277.890625,
+          "w": 290.953125,
+          "h": 42,
+          "right": 370.953125,
+          "bottom": 319.890625,
+          "text": "IMRun this against staging first, not prod.",
+          "font": 13,
+          "lineHeight": 19.5,
+          "weight": "400",
+          "family": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+          "radius": 10,
+          "color": "rgb(211, 216, 226)",
+          "bg": "rgb(26, 31, 42)",
+          "shadow": "none",
+          "border": "1px color(srgb 0.172902 0.178039 0.196824)",
+          "borderBottom": "1px color(srgb 0.172902 0.178039 0.196824)",
+          "pad": [
+            10,
+            12,
+            10,
+            12
+          ],
+          "clamp": "none",
+          "overflow": "visible"
+        }
+      }
+    },
+    {
+      "name": "states: each thread says where it stands",
+      "passed": true,
+      "details": [
+        "Not sent yet",
+        "With Claude",
+        "Reopened",
+        "Resolved in v2",
+        "Suggested by agent-1",
+        "Follow-up with Claude"
+      ]
+    },
+    {
+      "name": "states: anchors read as places — a step, a table row, a section",
+      "passed": true,
+      "details": [
+        "§4 · step 5",
+        "§5 · ¶1",
+        "§3",
+        "Decisions you made · first pilot",
+        "Context · ¶2",
+        "§4 · releases"
+      ]
+    },
+    {
+      "name": "states: a selection in the plan shows where the composer's note will land",
+      "passed": true
+    },
+    {
+      "name": "states: nothing pulses or fades — every state holds still",
+      "passed": true
+    },
+    {
+      "name": "basic: panel geometry holds (open card 230, composer 42 at y 904)",
+      "passed": true
+    },
+    {
+      "name": "studio: panel geometry holds (open card 230, composer 42 at y 904)",
+      "passed": true
+    },
+    {
+      "name": "contrast: every text ≥ 4.5:1 and icon-only control ≥ 3:1 — board panel, every thread state, margin note — all 15 themes",
+      "passed": true,
+      "details": {
+        "short": [],
+        "swept": {
+          "panel": 28,
+          "states": 46,
+          "margin": 4
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "limitations": [
+    "Headless Chrome component fixture, not WKWebView or the live app; the stage's own frame (top bar, plan centre) is a stand-in.",
+    "Board numbers are read from the design HTML and the rendered board PNGs; text widths depend on the system font, so tab and note widths are held to ±2px where the board's own text sets them."
+  ],
+  "fixtureUrl": "http://127.0.0.1:5174/fixtures/flow-feedback-qa/",
+  "browserVersion": "Chrome/155.0.8059.80",
+  "tokens": {
+    "color-ink": "rgb(228, 233, 243)",
+    "color-ink-2": "rgb(211, 216, 226)",
+    "color-ink-3": "rgb(174, 179, 189)",
+    "color-ink-4": "rgb(134, 139, 149)",
+    "color-fill-2": "rgb(24, 29, 40)",
+    "color-rule": "rgb(50, 55, 66)",
+    "color-rule-strong": "rgb(61, 66, 77)",
+    "color-paper": "rgb(11, 16, 27)",
+    "color-canvas": "rgb(7, 10, 18)",
+    "color-focus-rim": "rgb(75, 92, 117)",
+    "color-mode-plan-fg": "rgb(138, 186, 247)",
+    "color-mode-build-fg": "rgb(124, 227, 195)",
+    "color-mode-build-bg": "rgb(25, 41, 47)",
+    "color-glass-3": "rgba(26, 31, 42, 0.56)",
+    "color-bg-elevated": "rgb(26, 31, 42)",
+    "color-warning": "rgb(227, 191, 133)",
+    "color-on-warning": "rgb(11, 16, 27)"
+  },
+  "contrastSwept": {
+    "panel": 28,
+    "states": 46,
+    "margin": 4
+  },
+  "finishedAt": "2026-10-18T09:14:46.756Z",
+  "passed": true
+}
