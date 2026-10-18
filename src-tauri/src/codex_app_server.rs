@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -478,47 +479,186 @@ pub async fn queue_plan_implementation(socket: Option<&str>, thread_id: &str, pl
     }).await.map_err(|e| e.to_string())?
 }
 
-#[cfg(unix)]
 fn queue_implementation_at(socket: &str, thread_id: &str, plan: &str, approval_id: &str) -> Result<(), String> {
-    use std::os::unix::net::UnixStream;
-    use std::time::{Duration, Instant};
-    use tungstenite::Message;
     if !Path::new(socket).is_absolute() { return Err("Invalid Codex approval socket.".into()); }
     let deadline = Instant::now() + Duration::from_secs(8);
-    let stream = UnixStream::connect(socket).map_err(|e| format!("Could not reach the Codex terminal: {e}. Restore this plan in Redline and approve again."))?;
-    stream.set_read_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
-    stream.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
-    // app-server Unix sockets speak WebSocket, including the HTTP upgrade.
-    // The URL is the handshake Host header; all bytes stay on this UnixStream.
-    let (mut client, _) = tungstenite::client("ws://localhost/", stream).map_err(|e| e.to_string())?;
-    let mut id = 0u64;
+    let mut client = SocketClient::connect(socket, Duration::from_secs(8))
+        .map_err(|e| format!("Could not reach the Codex terminal: {e}. Restore this plan in Redline and approve again."))?;
     queue_implementation_with_rpc(thread_id, plan, approval_id, |method, params| {
-        let remaining = deadline.checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero()).ok_or("Codex approval timed out; the review is still held. Try again.")?;
-        client.get_ref().set_write_timeout(Some(remaining)).map_err(|e| e.to_string())?;
-        id += 1;
-        client.send(Message::Text(json!({"id":id,"method":method,"params":params}).to_string().into())).map_err(|e| e.to_string())?;
-        loop {
-            let remaining = deadline.checked_duration_since(Instant::now())
-                .filter(|d| !d.is_zero()).ok_or("Codex approval timed out; the review is still held. Try again.")?;
-            client.get_ref().set_read_timeout(Some(remaining)).map_err(|e| e.to_string())?;
-            let message = client.read().map_err(|e| format!("Codex did not acknowledge approval: {e}. The review is still held; try again."))?;
-            if let Message::Text(text) = message {
-                let value: Value = serde_json::from_str(text.as_str()).map_err(|e| e.to_string())?;
-                if let Some(result) = response_result(&value, id) {
-                    if method == "initialize" && result.is_ok() {
-                        client.send(Message::Text(json!({"method":"initialized","params":{}}).to_string().into())).map_err(|e| e.to_string())?;
-                    }
-                    return result;
-                }
-            }
-        }
+        client.call(method, params, deadline).map_err(|error| match error {
+            CallError::TimedOut => "Codex approval timed out; the review is still held. Try again.".to_string(),
+            CallError::Lost(e) => format!("Codex did not acknowledge approval: {e}. The review is still held; try again."),
+            CallError::Refused(e) => e,
+        })
     })
 }
 
-#[cfg(not(unix))]
-fn queue_implementation_at(_socket: &str, _thread_id: &str, _plan: &str, _approval_id: &str) -> Result<(), String> {
-    Err("Codex plan approval currently requires a Unix terminal.".into())
+/// Why a [`SocketClient::call`] got no result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CallError {
+    /// The deadline passed first.
+    TimedOut,
+    /// The connection failed or closed.
+    Lost(String),
+    /// The server answered with a JSON-RPC error.
+    Refused(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::TimedOut => f.write_str("timed out"),
+            CallError::Lost(e) | CallError::Refused(e) => f.write_str(e),
+        }
+    }
+}
+
+/// A JSON-RPC client on one app-server's private Unix socket: the one Redline's
+/// launcher (`codex_plan_launch.sh`) starts for each Codex plan terminal, with
+/// the TUI attached through `--remote`. The socket speaks WebSocket, upgrade
+/// included; the URL is only the handshake's Host header, and every byte stays
+/// on the stream.
+///
+/// Plan approval makes a few calls through one and drops it. The conversation
+/// mirror (`convo::codex`) keeps one open per terminal it shows, as a second
+/// client of the TUI's own thread: whatever arrives while a call waits for its
+/// answer is kept, in order, for [`SocketClient::drain`].
+pub(crate) struct SocketClient {
+    #[cfg(unix)]
+    ws: tungstenite::WebSocket<std::os::unix::net::UnixStream>,
+    next_id: u64,
+    inbox: std::collections::VecDeque<Value>,
+    closed: bool,
+}
+
+impl SocketClient {
+    #[cfg(unix)]
+    pub(crate) fn connect(socket: &str, timeout: Duration) -> Result<Self, String> {
+        if !Path::new(socket).is_absolute() {
+            return Err("not an absolute socket path".into());
+        }
+        let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+        stream.set_write_timeout(Some(timeout)).map_err(|e| e.to_string())?;
+        let (ws, _) = tungstenite::client("ws://localhost/", stream).map_err(|e| e.to_string())?;
+        Ok(Self { ws, next_id: 0, inbox: Default::default(), closed: false })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn connect(_socket: &str, _timeout: Duration) -> Result<Self, String> {
+        Err("Codex app-server sockets need a Unix terminal.".into())
+    }
+
+    /// The connection failed or closed; nothing more will arrive.
+    pub(crate) fn closed(&self) -> bool {
+        self.closed
+    }
+
+    /// One request, answered by `deadline`. A successful `initialize` is
+    /// followed by the `initialized` notification the protocol requires.
+    #[cfg(unix)]
+    pub(crate) fn call(&mut self, method: &str, params: Value, deadline: Instant) -> Result<Value, CallError> {
+        use tungstenite::Message;
+        let remaining = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(CallError::TimedOut);
+        self.next_id += 1;
+        let id = self.next_id;
+        let timeout = remaining()?;
+        self.ws.get_ref().set_write_timeout(Some(timeout)).map_err(|e| self.lost(e))?;
+        let request = json!({"id": id, "method": method, "params": params}).to_string();
+        self.ws.send(Message::Text(request.into())).map_err(|e| self.lost(e))?;
+        loop {
+            let timeout = remaining()?;
+            self.ws.get_ref().set_read_timeout(Some(timeout)).map_err(|e| self.lost(e))?;
+            let message = match self.ws.read() {
+                Ok(message) => message,
+                Err(tungstenite::Error::Io(e)) if is_timeout(&e) => return Err(CallError::TimedOut),
+                Err(e) => return Err(self.lost(e)),
+            };
+            let Message::Text(text) = message else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+            match response_result(&value, id) {
+                Some(Ok(result)) => {
+                    if method == "initialize" {
+                        let initialized = json!({"method": "initialized", "params": {}}).to_string();
+                        self.ws.send(Message::Text(initialized.into())).map_err(|e| self.lost(e))?;
+                    }
+                    return Ok(result);
+                }
+                Some(Err(error)) => return Err(CallError::Refused(error)),
+                None => self.inbox.push_back(value),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn call(&mut self, _method: &str, _params: Value, _deadline: Instant) -> Result<Value, CallError> {
+        Err(CallError::Lost("Codex app-server sockets need a Unix terminal.".into()))
+    }
+
+    /// Answer a request the server made of this client (an approval).
+    #[cfg(unix)]
+    pub(crate) fn respond(&mut self, id: &Value, result: Value) -> Result<(), String> {
+        use tungstenite::Message;
+        self.ws.get_ref().set_write_timeout(Some(Duration::from_secs(2))).map_err(|e| self.lost(e).to_string())?;
+        let reply = json!({"id": id, "result": result}).to_string();
+        self.ws.send(Message::Text(reply.into())).map_err(|e| self.lost(e).to_string())
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn respond(&mut self, _id: &Value, _result: Value) -> Result<(), String> {
+        Err("Codex app-server sockets need a Unix terminal.".into())
+    }
+
+    /// Everything that has arrived, oldest first, without waiting for more.
+    /// A connection that failed is [`closed`](Self::closed) afterwards; what
+    /// arrived before it failed is still returned.
+    #[cfg(unix)]
+    pub(crate) fn drain(&mut self) -> Vec<Value> {
+        use tungstenite::Message;
+        let mut out: Vec<Value> = self.inbox.drain(..).collect();
+        if self.closed {
+            return out;
+        }
+        if let Err(e) = self.ws.get_ref().set_read_timeout(Some(Duration::from_millis(1))) {
+            self.lost(e);
+            return out;
+        }
+        loop {
+            match self.ws.read() {
+                Ok(Message::Text(text)) => {
+                    if let Ok(value) = serde_json::from_str(text.as_str()) {
+                        out.push(value);
+                    }
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e)) if is_timeout(&e) => break,
+                Err(e) => {
+                    self.lost(e);
+                    break;
+                }
+            }
+        }
+        // A ping read above is answered on the next write: send it now.
+        let _ = self.ws.flush();
+        out
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn drain(&mut self) -> Vec<Value> {
+        self.inbox.drain(..).collect()
+    }
+
+    fn lost(&mut self, error: impl std::fmt::Display) -> CallError {
+        self.closed = true;
+        CallError::Lost(error.to_string())
+    }
+}
+
+/// A read that found nothing before its timeout (EAGAIN reads as WouldBlock
+/// on macOS).
+#[cfg(unix)]
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
 }
 
 fn queue_implementation_with_rpc(

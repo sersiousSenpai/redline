@@ -1,0 +1,65 @@
+[
+  {
+    "epoch": 0,
+    "id": "01a14ec1-a56c-7893-9bc6-6fbfb4810f0a",
+    "kind": "user_text",
+    "offset": 1835338420220928,
+    "promptId": null,
+    "text": "Plan a greeting file for this workspace.",
+    "ts": 1792322676077
+  },
+  {
+    "epoch": 0,
+    "id": "rea_2_0",
+    "kind": "thinking",
+    "offset": 1835338420220930,
+    "ts": 1792322676238
+  },
+  {
+    "epoch": 0,
+    "id": "call_2_1:0",
+    "kind": "tool_use",
+    "name": "LS",
+    "offset": 1835338420220932,
+    "summary": ".",
+    "toolUseId": "call_2_1",
+    "ts": 1792322676331
+  },
+  {
+    "epoch": 0,
+    "id": "call_2_1:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338420220932,
+    "preview": "README.md",
+    "toolUseId": "call_2_1",
+    "ts": 1792322676331
+  },
+  {
+    "epoch": 0,
+    "id": "mes_3_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338420220934,
+    "text": "I listed the workspace.",
+    "ts": 1792322676366
+  },
+  {
+    "epoch": 0,
+    "id": "mes_3_1",
+    "kind": "plan_proposed",
+    "offset": 1835338420220936,
+    "sessionId": "01a14ec1-a4b1-7cf0-8925-36df3d39442a",
+    "title": "Add a greeting file",
+    "toolUseId": "mes_3_1",
+    "ts": 1792322676367
+  },
+  {
+    "durationMs": 402,
+    "epoch": 0,
+    "id": "01a14ec1-a51d-72f0-bf7f-a201be824c2e:end",
+    "kind": "turn_end",
+    "offset": 1835338420220937,
+    "ts": 1792322676401
+  }
+]

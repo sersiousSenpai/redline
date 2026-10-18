@@ -35,12 +35,33 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+/// Which CLI a terminal's conversation belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Harness {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Harness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Codex => "codex",
+        }
+    }
+}
+
 /// What a terminal is bound to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub session_id: String,
+    /// Where the conversation is read from: Claude's transcript, or the
+    /// Codex launcher's app-server socket (empty when no server can be
+    /// reached, and the terminal is the only view; `convo::codex`).
     pub transcript: PathBuf,
     pub epoch: u32,
+    pub harness: Harness,
 }
 
 /// One hook fire, as binding reads it.
@@ -48,6 +69,8 @@ pub struct Binding {
 pub struct Fire {
     /// `startup` / `resume` / `clear` / `compact` / `fork` for SessionStart;
     /// `prompt` / `stop` for a confirming hook; `restore` for a pre-bind.
+    /// Codex has no SessionStart hook of Redline's: a new thread on the
+    /// bound one's own server (the TUI's `/new`) fires as `clear`.
     pub source: String,
     pub session_id: String,
     pub transcript: PathBuf,
@@ -55,6 +78,7 @@ pub struct Fire {
     /// a confirming hook that names a different one is still believed (an
     /// older install has no SessionStart), but as a new epoch.
     pub starts: bool,
+    pub harness: Harness,
 }
 
 /// What a fire does to the binding.
@@ -77,6 +101,11 @@ pub enum Step {
 pub fn step(current: Option<&Binding>, fire: &Fire) -> Step {
     let Some(current) = current else { return Step::Bind { epoch: 0 } };
     let next = current.epoch + 1;
+    // The other CLI started in this terminal (one exited, the other ran):
+    // nothing it says continues what the stage holds.
+    if current.harness != fire.harness {
+        return Step::Reset { epoch: next };
+    }
     if current.session_id == fire.session_id {
         return if fire.source == "compact" || current.transcript != fire.transcript {
             Step::Bind { epoch: current.epoch }
@@ -101,7 +130,7 @@ pub fn apply(fire: &Fire, step: &Step) -> Option<Binding> {
         Step::Same => return None,
         Step::Bind { epoch } | Step::NewEpoch { epoch, .. } | Step::Reset { epoch } => *epoch,
     };
-    Some(Binding { session_id: fire.session_id.clone(), transcript: fire.transcript.clone(), epoch })
+    Some(Binding { session_id: fire.session_id.clone(), transcript: fire.transcript.clone(), epoch, harness: fire.harness })
 }
 
 /// Read a hook payload as a binding fire, or `None` when it can't bind: a
@@ -121,7 +150,7 @@ pub fn fire_from_hook(payload: &Value, entrypoint: Option<&str>, projects: &Path
     };
     let session_id = field("session_id").filter(|id| crate::claude_proc::is_plain_session_id(id))?;
     let transcript = crate::term_attention::transcript_target(field("transcript_path")?, projects)?;
-    Some(Fire { source, session_id: session_id.to_string(), transcript, starts })
+    Some(Fire { source, session_id: session_id.to_string(), transcript, starts, harness: Harness::Claude })
 }
 
 #[cfg(test)]
@@ -129,11 +158,11 @@ mod tests {
     use super::*;
 
     fn fire(source: &str, sid: &str, path: &str) -> Fire {
-        Fire { source: source.into(), session_id: sid.into(), transcript: PathBuf::from(path), starts: true }
+        Fire { source: source.into(), session_id: sid.into(), transcript: PathBuf::from(path), starts: true, harness: Harness::Claude }
     }
 
     fn bound(sid: &str, path: &str, epoch: u32) -> Binding {
-        Binding { session_id: sid.into(), transcript: PathBuf::from(path), epoch }
+        Binding { session_id: sid.into(), transcript: PathBuf::from(path), epoch, harness: Harness::Claude }
     }
 
     /// Every row is a measured or plausible transition (module note).
@@ -160,6 +189,22 @@ mod tests {
         let f = fire("clear", "b", "/p/b.jsonl");
         assert_eq!(apply(&f, &Step::NewEpoch { epoch: 3, reason: "clear" }), Some(bound("b", "/p/b.jsonl", 3)));
         assert_eq!(apply(&f, &Step::Same), None);
+    }
+
+    /// Codex fires (`convo::codex`): a new thread on the same socket is the
+    /// TUI's `/new`; the same thread on a new socket is a restore in place;
+    /// and the other CLI taking the terminal over starts the stage again.
+    #[test]
+    fn codex_transitions() {
+        let codex = |source: &str, sid: &str, socket: &str| Fire { harness: Harness::Codex, starts: false, ..fire(source, sid, socket) };
+        let t = Binding { harness: Harness::Codex, ..bound("t", "/tmp/rlcx.a/server.sock", 1) };
+        assert_eq!(step(Some(&t), &codex("prompt", "t", "/tmp/rlcx.a/server.sock")), Step::Same);
+        assert_eq!(step(Some(&t), &codex("stop", "t", "/tmp/rlcx.b/server.sock")), Step::Bind { epoch: 1 }, "restored in this terminal");
+        assert_eq!(step(Some(&t), &codex("clear", "u", "/tmp/rlcx.a/server.sock")), Step::NewEpoch { epoch: 2, reason: "clear" }, "/new");
+        assert_eq!(step(Some(&t), &codex("prompt", "u", "/tmp/rlcx.b/server.sock")), Step::NewEpoch { epoch: 2, reason: "resume" });
+        assert_eq!(step(Some(&bound("c", "/p/c.jsonl", 0)), &codex("prompt", "t", "")), Step::Reset { epoch: 1 }, "claude, then codex");
+        assert_eq!(step(Some(&t), &fire("startup", "c", "/p/c.jsonl")), Step::Reset { epoch: 2 }, "codex, then claude");
+        assert_eq!(apply(&codex("prompt", "t", ""), &Step::Bind { epoch: 0 }).unwrap().harness, Harness::Codex);
     }
 
     fn scratch() -> PathBuf {

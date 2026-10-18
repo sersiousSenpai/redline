@@ -41,7 +41,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use tauri::AppHandle;
 
-use crate::convo::{self, AskAnswer, AskOption, AskQuestion, ConvoAsk, PendingAsk};
+use crate::convo::{self, AskAnswer, AskOption, AskQuestion, ConvoAsk, PendingAsk, Replier};
 
 /// The hook `timeout`s `hook.rs` installs, in seconds, and the daemon's own
 /// holds just inside them, so a hold that runs out answers `{}` cleanly
@@ -225,7 +225,13 @@ fn mode_name(mode: &str) -> &str {
 /// - question: PreToolUse `allow` with `updatedInput` = the input plus
 ///   `answers` (question text → label);
 /// - `terminal`: `{}`, so the TUI asks itself.
+///
+/// A Codex approval is answered on its app-server request instead
+/// (`convo::codex::reply`).
 pub(crate) fn reply(pending: &PendingAsk, answer: &AskAnswer) -> Result<(Value, &'static str), String> {
+    if let Replier::Codex(_) = pending.reply {
+        return convo::codex::reply(&pending.ask, answer);
+    }
     let question = pending.ask.kind == "question";
     let permission = |decision: Value| json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}});
     Ok(match (question, answer) {
@@ -329,7 +335,7 @@ mod tests {
     fn pending(payload: &str) -> (PendingAsk, oneshot::Receiver<Value>) {
         let request = Request::from_payload(&serde_json::from_str(payload).unwrap()).unwrap();
         let (tx, rx) = oneshot::channel();
-        (PendingAsk { ask: request.card("a1".into()), tool_use_id: request.tool_use_id.clone(), input: request.input.clone(), tx }, rx)
+        (PendingAsk { ask: request.card("a1".into()), tool_use_id: request.tool_use_id.clone(), input: request.input.clone(), reply: Replier::Hook(tx) }, rx)
     }
 
     #[test]

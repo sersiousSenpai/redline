@@ -1,0 +1,28 @@
+[
+  {
+    "epoch": 0,
+    "id": "01a14ec1-c326-78d0-b25a-11f9026b234c",
+    "kind": "user_text",
+    "offset": 1835338428054528,
+    "promptId": null,
+    "text": "Wait a while.",
+    "ts": 1792322683687
+  },
+  {
+    "epoch": 0,
+    "id": "call_18_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338428054530,
+    "summary": "sleep 20",
+    "toolUseId": "call_18_0",
+    "ts": 1792322683882
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-c2ff-7481-9014-4656e89fc91a:end",
+    "kind": "interrupted",
+    "offset": 1835338428054531,
+    "ts": 1792322684426
+  }
+]

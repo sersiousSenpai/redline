@@ -1,0 +1,299 @@
+[
+  {
+    "epoch": 0,
+    "id": "01a14ec1-a56c-7893-9bc6-6fbfb4810f0a",
+    "kind": "user_text",
+    "offset": 1835338420220928,
+    "promptId": null,
+    "text": "Plan a greeting file for this workspace.",
+    "ts": 1792322676077
+  },
+  {
+    "epoch": 0,
+    "id": "rea_2_0",
+    "kind": "thinking",
+    "offset": 1835338420220930,
+    "ts": 1792322676238
+  },
+  {
+    "epoch": 0,
+    "id": "call_2_1:0",
+    "kind": "tool_use",
+    "name": "LS",
+    "offset": 1835338420220932,
+    "summary": ".",
+    "toolUseId": "call_2_1",
+    "ts": 1792322676331
+  },
+  {
+    "epoch": 0,
+    "id": "call_2_1:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338420220932,
+    "preview": "README.md",
+    "toolUseId": "call_2_1",
+    "ts": 1792322676331
+  },
+  {
+    "epoch": 0,
+    "id": "mes_3_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338420220934,
+    "text": "I listed the workspace.",
+    "ts": 1792322676366
+  },
+  {
+    "epoch": 0,
+    "id": "mes_3_1",
+    "kind": "plan_proposed",
+    "offset": 1835338420220936,
+    "sessionId": "01a14ec1-a4b1-7cf0-8925-36df3d39442a",
+    "title": "Add a greeting file",
+    "toolUseId": "mes_3_1",
+    "ts": 1792322676367
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-a759-7002-adab-709ca446e5cd",
+    "kind": "user_text",
+    "offset": 1835338420765696,
+    "promptId": null,
+    "text": "Reply with ok.",
+    "ts": 1792322676570
+  },
+  {
+    "epoch": 0,
+    "id": "mes_4_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338420765698,
+    "text": "Got the short send.",
+    "ts": 1792322676573
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-a9e0-75b1-8d04-73ada742c4fd",
+    "kind": "user_text",
+    "offset": 1835338421407744,
+    "promptId": null,
+    "text": "First line\nsecond line\twith a tab\n\nfourth line",
+    "ts": 1792322677217
+  },
+  {
+    "epoch": 0,
+    "id": "mes_6_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338421407746,
+    "text": "Got the lines send.",
+    "ts": 1792322677220
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-ad73-7362-b79c-809feca967fb",
+    "kind": "user_text",
+    "offset": 1835338422361088,
+    "promptId": null,
+    "text": "00000 the quick brown fox jumps over the lazy dog\n00001 the quick brown fox jumps over the lazy dog\n00002 the quick brown fox jumps over the lazy dog\n00003 the quick brown fox jumps over the lazy dog\n00004 the quick brown fox jumps over the lazy dog\n00005 the quick brown fox jumps over the lazy dog\n00006 the quick brown fox jumps over the lazy dog\n00007 the quick brown fox jumps over the lazy dog\n00008 the quick brown fox jumps over the lazy dog\n00009 the quick brown fox jumps over the lazy dog\n00010 the quick brown fox jumps over the lazy dog\n00011 the quick brown fox jumps over the lazy dog\n00012 the quick brown fox jumps over the lazy dog\n00013 the quick brown fox jumps over the lazy dog\n00014 the quick brown fox jumps over the lazy dog\n00015 the quick brown fox jumps over the lazy dog\n00016 the quick brown fox jumps over the lazy dog\n00017 the quick brown fox jumps over the lazy dog\n00018 the quick brown fox jumps over the lazy dog\n00019 the quick brown fox jumps over the lazy dog\n00020 the quick brown fox jumps over the lazy dog\n00021 the quick brown fox jumps over the lazy dog\n00022 the quick brown fox jumps over the lazy dog\n00023 the quick brown fox jumps over the lazy dog\n00024 the quick brown fox jumps over the lazy dog\n00025 the quick brown fox jumps over the lazy dog\n00026 the quick brown fox jumps over the lazy dog\n00027 the quick brown fox jumps over the lazy dog\n00028 the quick brown fox jumps over the lazy dog\n00029 the quick brown fox jumps over the lazy dog\n00030 the quick brown fox jumps over the lazy dog\n00031 the quick brown fox jumps over the lazy dog\n00032 the quick brown fox jumps over the lazy dog\n00033 the quick brown fox jumps over the lazy dog\n00034 the quick brown fox jumps over the lazy dog\n00035 the quick brown fox jumps over the lazy dog\n00036 the quick brown fox jumps over the lazy dog\n00037 the quick brown fox jumps over the lazy dog\n00038 the quick brown fox jumps over the lazy dog\n00039 the quick brown fox jumps over the lazy dog\n00040 the quick brown fox jumps over the lazy dog\n00041 the quick brown fox jumps over the lazy dog\n00042 the quick brown fox jumps over the lazy dog\n00043 the quick brown fox jumps over the lazy dog\n00044 the quick brown fox jumps over the lazy dog\n00045 the quick brown fox jumps over the lazy dog\n00046 the quick brown fox jumps over the lazy dog\n00047 the quick brown fox jumps over the lazy dog\n00048 the quick brown fox jumps over the lazy dog\n00049 the quick brown fox jumps over the lazy dog\n00050 the quick brown fox jumps over the lazy dog\n00051 the quick brown fox jumps over the lazy dog\n00052 the quick brown fox jumps over the lazy dog\n00053 the quick brown fox jumps over the lazy dog\n00054 the quick brown fox jumps over the lazy dog\n00055 the quick brown fox jumps over the lazy dog\n00056 the quick brown fox jumps over the lazy dog\n00057 the quick brown fox jumps over the lazy dog\n00058 the quick brown fox jumps over the lazy dog\n00059 the quick brown fox jumps over the lazy dog\n00060 the quick brown fox jumps over the lazy dog\n00061 the quick brown fox jumps over the lazy dog\n00062 the quick brown fox jumps over the lazy dog\n00063 the quick brown fox jumps over the lazy dog\n00064 the quick brown fox jumps over the lazy dog\n00065 the quick brown fox jumps over the lazy dog\n00066 the quick brown fox jumps over the lazy dog\n00067 the quick brown fox jumps over the lazy dog\n00068 the quick brown fox jumps over the lazy dog\n00069 the quick brown fox jumps over the lazy dog\n00070 the quick brown fox jumps over the lazy dog\n00071 the quick brown fox jumps over the lazy dog\n00072 the quick brown fox jumps over the lazy dog\n00073 the quick brown fox jumps over the lazy dog\n00074 the quick brown fox jumps over the lazy dog\n00075 the quick brown fox jumps over the lazy dog\n00076 the quick brown fox jumps over the lazy dog\n00077 the quick brown fox jumps over the lazy dog\n00078 the quick brown fox jumps over the lazy dog\n00079 the quick brown fox jumps over the lazy dog\n00080 the quick brown fox jumps over the lazy dog\n00081 the quick brown fox jumps over the lazy dog\n00082 the quick brown fox jumps over the lazy dog\n00083 the quick brown fox jumps over the lazy dog\n00084 the quick brown fox jumps over the lazy dog\n00085 the quick brown fox jumps over the lazy dog\n00086 the quick brown fox jumps over the lazy dog\n00087 the quick brown fox jumps over the lazy dog\n00088 the quick brown fox jumps over the lazy dog\n00089 the quick brown fox jumps over the lazy dog\n00090 the quick brown fox jumps over the lazy dog\n00091 the quick brown fox jumps over the lazy dog\n00092 the quick brown fox jumps over the lazy dog\n00093 the quick brown fox jumps over the lazy dog\n00094 the quick brown fox jumps over the lazy dog\n00095 the quick brown fox jumps over the lazy dog\n00096 the quick brown fox jumps over the lazy dog\n00097 the quick brown fox jumps over the lazy dog\n00098 the quick brown fox jumps over the lazy dog\n00099 the quick brown fox jumps over the lazy dog\n00100 the quick brown fox jumps over the lazy dog\n00101 the quick brown fox jumps over the lazy dog\n00102 the quick brown fox jumps over the lazy dog\n00103 the quick brown fox jumps over the lazy dog\n00104 the quick brown fox jumps over the lazy dog\n00105 the quick brown fox jumps over the lazy dog\n00106 the quick brown fox jumps over the lazy dog\n00107 the quick brown fox jumps over the lazy dog\n00108 the quick brown fox jumps over the lazy dog\n00109 the quick brown fox jumps over the lazy dog\n00110 the quick brown fox jumps over the lazy dog\n00111 the quick brown fox jumps over the lazy dog\n00112 the quick brown fox jumps over the lazy dog\n00113 the quick brown fox jumps over the lazy dog\n00114 the quick brown fox jumps over the lazy dog\n00115 the quick brown fox jumps over the lazy dog\n00116 the quick brown fox jumps over the lazy dog\n00117 the quick brown fox jumps over the lazy dog\n00118 the quick brown fox jumps over the lazy dog\n00119 the quick brown fox jumps over the lazy dog\n00120 the quick brown fox jumps over the lazy dog\n00121 the quick brown fox jumps over the lazy dog\n00122 the quick brown fox jumps over the lazy dog\n00123 the quick brown fox jumps over the lazy dog\n00124 the quick brown fox jumps over the lazy dog\n00125 the quick brown fox jumps over the lazy dog\n00126 the quick brown fox jumps over the lazy dog\n00127 the quick brown fox jumps over the lazy dog\n00128 the quick brown fox jumps over the lazy dog\n00129 the quick brown fox jumps over the lazy dog\n00130 the quick brown fox jumps over the lazy dog\n00131 the quick brown fox jumps over the lazy dog\n00132 the quick brown fox jumps over the lazy dog\n00133 the quick brown fox jumps over the lazy dog\n00134 the quick brown fox jumps over the lazy dog\n00135 the quick brown fox jumps over the lazy dog\n00136 the quick brown fox jumps over the lazy dog\n00137 the quick brown fox jumps over the lazy dog\n00138 the quick brown fox jumps over the lazy dog\n00139 the quick brown fox jumps over the lazy dog\n00140 the quick brown fox jumps over the lazy dog\n00141 the quick brown fox jumps over the lazy dog\n00142 the quick brown fox jumps over the lazy dog\n00143 the quick brown fox jumps over the lazy dog\n00144 the quick brown fox jumps over the lazy dog\n00145 the quick brown fox jumps over the lazy dog\n00146 the quick brown fox jumps over the lazy dog\n00147 the quick brown fox jumps over the lazy dog\n00148 the quick brown fox jumps over the lazy dog\n00149 the quick brown fox jumps over the lazy dog\n00150 the quick brown fox jumps over the lazy dog\n00151 the quick brown fox jumps over the lazy dog\n00152 the quick brown fox jumps over the lazy dog\n00153 the quick brown fox jumps over the lazy dog\n00154 the quick brown fox jumps over the lazy dog\n00155 the quick brown fox jumps over the lazy dog\n00156 the quick brown fox jumps over the lazy dog\n00157 the quick brown fox jumps over the lazy dog\n00158 the quick brown fox jumps over the lazy dog\n00159 the quick brown fox jumps over the lazy dog\n00160 the quick brown fox jumps over the lazy dog\n00161 the quick brown fox jumps over the lazy dog\n00162 the quick brown fox jumps over the lazy dog\n00163 the quick brown fox jumps over the lazy dog\n00164 the quick brown fox jumps over the lazy dog\n00165 the quick brown fox jumps over the lazy dog\n00166 the quick brown fox jumps over the lazy dog\n00167 the quick brown fox jumps over the lazy dog\n00168 the quick brown fox jumps over the lazy dog\n00169 the quick brown fox jumps over the lazy dog\n00170 the quick brown fox jumps over the lazy dog\n00171 the quick brown fox jumps over the lazy dog\n00172 the quick brown fox jumps over the lazy dog\n00173 the quick brown fox jumps over the lazy dog\n00174 the quick brown fox jumps over the lazy dog\n00175 the quick brown fox jumps over the lazy dog\n00176 the quick brown fox jumps over the lazy dog\n00177 the quick brown fox jumps over the lazy dog\n00178 the quick brown fox jumps over the lazy dog\n00179 the quick brown fox jumps over the lazy dog\n00180 the quick brown fox jumps over the lazy dog\n00181 the quick brown fox jumps over the lazy dog\n00182 the quick brown fox jumps over the lazy dog\n00183 the quick brown fox jumps over the lazy dog\n00184 the quick brown fox jumps over the lazy dog\n00185 the quick brown fox jumps over the lazy dog\n00186 the quick brown fox jumps over the lazy dog\n00187 the quick brown fox jumps over the lazy dog\n00188 the quick brown fox jumps over the lazy dog\n00189 the quick brown fox jumps over the lazy dog\n00190 the quick brown fox jumps over the lazy dog\n00191 the quick brown fox jumps over the lazy dog\n00192 the quick brown fox jumps over the lazy dog\n00193 the quick brown fox jumps over the lazy dog\n00194 the quick brown fox jumps over the lazy dog\n00195 the quick brown fox jumps over the lazy dog\n00196 the quick brown fox jumps over the lazy dog\n00197 the quick brown fox jumps over the lazy dog\n00198 the quick brown fox jumps over the lazy dog\n00199 the quick brown fox jumps over the lazy dog\n00200 the quick brown fox jumps over the lazy dog\n00201 the quick brown fox jumps over the lazy dog\n00202 the quick brown fox jumps over the lazy dog\n00203 the quick brown fox jumps over the lazy dog\n00204 the quick brown fox jumps over the lazy dog\n00205 the quick brown fox jumps over the lazy dog\n00206 the quick brown fox jumps over the lazy dog\n00207 the quick brown fox jumps over the lazy dog\n00208 the quick brown fox jumps over the lazy dog\n00209 the quick brown fox jumps over the lazy dog\n00210 the quick brown fox jumps over the lazy dog\n00211 the quick brown fox jumps over the lazy dog\n00212 the quick brown fox jumps over the lazy dog\n00213 the quick brown fox jumps over the lazy dog\n00214 the quick brown fox jumps over the lazy dog\n00215 the quick brown fox jumps over the lazy dog\n00216 the quick brown fox jumps over the lazy dog\n00217 the quick brown fox jumps over the lazy dog\n00218 the quick brown fox jumps over the lazy dog\n00219 the quick brown fox jumps over the lazy dog\n00220 the quick brown fox jumps over the lazy dog\n00221 the quick brown fox jumps over the lazy dog\n00222 the quick brown fox jumps over the lazy dog\n00223 the quick brown fox jumps over the lazy dog\n00224 the quick brown fox jumps over the lazy dog\n00225 the quick brown fox jumps over the lazy dog\n00226 the quick brown fox jumps over the lazy dog\n00227 the quick brown fox jumps over the lazy dog\n00228 the quick brown fox jumps over the lazy dog\n00229 the quick brown fox jumps over the lazy dog\n00230 the quick brown fox jumps over the lazy dog\n00231 the quick brown fox jumps over the lazy dog\n00232 the quick brown fox jumps over the lazy dog\n00233 the quick brown fox jumps over the lazy dog\n00234 the quick brown fox jumps over the lazy dog\n00235 the quick brown fox jumps over the lazy dog\n00236 the quick brown fox jumps over the lazy dog\n00237 the quick brown fox jumps over the lazy dog\n00238 the quick brown fox jumps over the lazy dog\n00239 the quick brown fox jumps over the lazy dog\n00240 the quick brown fox jumps over the lazy dog\n00241 the quick brown fox jumps over the lazy dog\n00242 the quick brown fox jumps over the lazy dog\n00243 the quick brown fox jumps over the lazy dog\n00244 the quick brown fox jumps over the lazy dog\n00245 the quick brown fox jumps over the lazy dog\n00246 the quick brown fox jumps over the lazy dog\n00247 the quick brown fox jumps over the lazy dog\n00248 the quick brown fox jumps over the lazy dog\n00249 the quick brown fox jumps over the lazy dog\n00250 the quick brown fox jumps over the lazy dog\n00251 the quick brown fox jumps over the lazy dog\n00252 the quick brown fox jumps over the lazy dog\n00253 the quick brown fox jumps over the lazy dog\n00254 the quick brown fox jumps over the lazy dog\n00255 the quick brown fox jumps over the lazy dog\n00256 the quick brown fox jumps over the lazy dog\n00257 the quick brown fox jumps over the lazy dog\n00258 the quick brown fox jumps over the lazy dog\n00259 the quick brown fox jumps over the lazy dog\n00260 the quick brown fox jumps over the lazy dog\n00261 the quick brown fox jumps over the lazy dog\n00262 the quick brown fox jumps over the lazy dog\n00263 the quick brown fox jumps over the lazy dog\n00264 the quick brown fox jumps over the lazy dog\n00265 the quick brown fox jumps over the lazy dog\n00266 the quick brown fox jumps over the lazy dog\n00267 the quick brown fox jumps over the lazy dog\n00268 the quick brown fox jumps over the lazy dog\n00269 the quick brown fox jumps over the lazy dog\n00270 the quick brown fox jumps over the lazy dog\n00271 the quick brown fox jumps over the lazy dog\n00272 the quick brown fox jumps over the lazy dog\n00273 the quick brown fox jumps over the lazy dog\n00274 the quick brown fox jumps over the lazy dog\n00275 the quick brown fox jumps over the lazy dog\n00276 the quick brown fox jumps over the lazy dog\n00277 the quick brown fox jumps over the lazy dog\n00278 the quick brown fox jumps over the lazy dog\n00279 the quick brown fox jumps over the lazy dog\n00280 the quick brown fox jumps over the lazy dog\n00281 the quick brown fox jumps over the lazy dog\n00282 the quick brown fox jumps over the lazy dog\n00283 the quick brown fox jumps over the lazy dog\n00284 the quick brown fox jumps over the lazy dog\n00285 the quick brown fox jumps over the lazy dog\n00286 the quick brown fox jumps over the lazy dog\n00287 the quick brown fox jumps over the lazy dog\n00288 the quick brown fox jumps over the lazy dog\n00289 the quick brown fox jumps over the lazy dog\n00290 the quick brown fox jumps over the lazy dog\n00291 the quick brown fox jumps over the lazy dog\n00292 the quick brown fox jumps over the lazy dog\n00293 the quick brown fox jumps over the lazy dog\n00294 the quick brown fox jumps over the lazy dog\n00295 the quick brown fox jumps over the lazy dog\n00296 the quick brown fox jumps over the lazy dog\n00297 the quick brown fox jumps over the lazy dog\n00298 the quick brown fox jumps over the lazy dog\n00299 the quick brown fox jumps over the lazy dog\n00300 the quick brown fox jumps over the lazy dog\n00301 the quick brown fox jumps over the lazy dog\n00302 the quick brown fox jumps over the lazy dog\n00303 the quick brown fox jumps over the lazy dog\n00304 the quick brown fox jumps over the lazy dog\n00305 the quick brown fox jumps over the lazy dog\n00306 the quick brown fox jumps over the lazy dog\n00307 the quick brown fox jumps over the lazy dog\n00308 the quick brown fox jumps over the lazy dog\n00309 the quick brown fox jumps over the lazy dog\n00310 the quick brown fox jumps over the lazy dog\n00311 the quick brown fox jumps over the lazy dog\n00312 the quick brown fox jumps over the lazy dog\n00313 the quick brown fox jumps over the lazy dog\n00314 the quick brown fox jumps over the lazy dog\n00315 the quick brown fox jumps over the lazy dog\n00316 the quick brown fox jumps over the lazy dog\n00317 the quick brown fox jumps over the lazy dog\n00318 the quick brown fox jumps over the lazy dog\n00319 the quick brown fox jumps over the lazy dog\n00320 the quick brown fox jumps over the lazy dog\n00321 the quick brown fox jumps over the lazy dog\n00322 the quick brown fox jumps over the lazy dog\n00323 the quick brown fox jumps over the lazy dog\n00324 the quick brown fox jumps over the lazy dog\n00325 the quick brown fox jumps over the lazy dog\n00326 the quick brown fox jumps over the lazy dog\n00327 the quick brown fox jumps over the lazy dog\n00328 the quick brown fox jumps over the lazy dog\n00329 the quick brown fox jumps over the lazy dog\n00330 the quick brown fox jumps over the lazy dog\n00331 the quick brown fox jumps over the lazy dog\n00332 the quick brown fox jumps over the lazy dog\n00333 the quick brown fox jumps over the lazy dog\n00334 the quick brown fox jumps over the lazy dog\n00335 the quick brown fox jumps over the lazy dog\n00336 the quick brown fox jumps over the lazy dog\n00337 the quick brown fox jumps over the lazy dog\n00338 the quick brown fox jumps over the lazy dog\n00339 the quick brown fox jumps over the lazy dog\n00340 the quick brown fox jumps over the lazy dog\n00341 the quick brown fox jumps over the lazy dog\n00342 the quick brown fox jumps over the lazy dog\n00343 the quick brown fox jumps over the lazy dog\n00344 the quick brown fox jumps over the lazy dog\n00345 the quick brown fox jumps over the lazy dog\n00346 the quick brown fox jumps over the lazy dog\n00347 the quick brown fox jumps over the lazy dog\n00348 the quick brown fox jumps over the lazy dog\n00349 the quick brown fox jumps over the lazy dog\n00350 the quick brown fox jumps over the lazy dog\n00351 the quick brown fox jumps over the lazy dog\n00352 the quick brown fox jumps over the lazy dog\n00353 the quick brown fox jumps over the lazy dog\n00354 the quick brown fox jumps over the lazy dog\n00355 the quick brown fox jumps over the lazy dog\n00356 the quick brown fox jumps over the lazy dog\n00357 the quick brown fox jumps over the lazy dog\n00358 the quick brown fox jumps over the lazy dog\n00359 the quick brown fox jumps over the lazy dog\n00360 the quick brown fox jumps over the lazy dog\n00361 the quick brown fox jumps over the lazy dog\n00362 the quick brown fox jumps over the lazy dog\n00363 the quick brown fox jumps over the lazy dog\n00364 the quick brown fox jumps over the lazy dog\n00365 the quick brown fox jumps over the lazy dog\n00366 the quick brown fox jumps over the lazy dog\n00367 the quick brown fox jumps over the lazy dog\n00368 the quick brown fox jumps over the lazy dog\n00369 the quick brown fox jumps over the lazy dog\n00370 the quick brown fox jumps over the lazy dog\n00371 the quick brown fox jumps over the lazy dog\n00372 the quick brown fox jumps over the lazy dog\n00373 the quick brown fox jumps over the lazy dog\n00374 the quick brown fox jumps over the lazy dog\n00375 the quick brown fox jumps over the lazy dog\n00376 the quick brown fox jumps over the lazy dog\n00377 the quick brown fox jumps over the lazy dog\n00378 the quick brown fox jumps over the lazy dog\n00379 the quick brown fox jumps over the lazy dog\n00380 the quick brown fox jumps over the lazy dog\n00381 the quick brown fox jumps over the lazy dog\n00382 the quick brown fox jumps over the lazy dog\n00383 the quick brown fox jumps over the lazy dog\n00384 the quick brown fox jumps over the lazy dog\n00385 the quick brown fox jumps over the lazy dog\n00386 the quick brown fox jumps over the lazy dog\n00387 the quick brown fox jumps over the lazy dog\n00388 the quick brown fox jumps over the lazy dog\n00389 the quick brown fox jumps over the lazy dog\n00390 the quick brown fox jumps over the lazy dog\n00391 the quick brown fox jumps over the lazy dog\n00392 the quick brown fox jumps over the lazy dog\n00393 the quick brown fox jumps over the lazy dog\n00394 the quick brown fox jumps over the lazy dog\n00395 the quick brown fox jumps over the lazy dog\n00396 the quick brown fox jumps over the lazy dog\n00397 the quick brown fox jumps over the lazy dog\n00398 the quick brown fox jumps over the lazy dog\n00399 the quick brown fox jumps over the lazy dog\n00400 the quick brown fox jumps over the lazy dog\n00401 the quick brown fox jumps over the lazy dog\n00402 the quick brown fox jumps over the lazy dog\n00403 the quick brown fox jumps over the lazy dog\n00404 the quick brown fox jumps over the lazy dog\n00405 the quick brown fox jumps over the lazy dog\n00406 the quick brown fox jumps over the lazy dog\n00407 the quick brown fox jumps over the lazy dog\n00408 the quick brown fox jumps over the lazy dog\n00409 the quick brown fox jumps over the lazy dog\n00410 the quick brown fox jumps over the lazy dog\n00411 the quick brown fox jumps over the lazy dog\n00412 the quick brown fox jumps over the lazy dog\n00413 the quick brown fox jumps over the lazy dog\n00414 the quick brown fox jumps over the lazy dog\n00415 the quick brown fox jumps over the lazy dog\n00416 the quick brown fox jumps over the lazy dog\n00417 the quick brown fox jumps over the lazy dog\n00418 the quick brown fox jumps over the lazy dog\n00419 the quick brown fox jumps over the lazy dog",
+    "ts": 1792322678131
+  },
+  {
+    "epoch": 0,
+    "id": "mes_8_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338422361090,
+    "text": "Got the long send.",
+    "ts": 1792322678135
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-b176-7a83-93d8-775faf7cbcb3",
+    "kind": "user_text",
+    "offset": 1835338423411712,
+    "promptId": null,
+    "text": "Mirror probe prompt.",
+    "ts": 1792322679159
+  },
+  {
+    "epoch": 0,
+    "id": "rea_10_0",
+    "kind": "thinking",
+    "offset": 1835338423411714,
+    "ts": 1792322679164
+  },
+  {
+    "epoch": 0,
+    "id": "call_10_1:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338423411716,
+    "summary": "touch from-rust.txt",
+    "toolUseId": "call_10_1",
+    "ts": 1792322679314
+  },
+  {
+    "epoch": 0,
+    "id": "call_10_1:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338423411716,
+    "preview": "",
+    "toolUseId": "call_10_1",
+    "ts": 1792322679314
+  },
+  {
+    "epoch": 0,
+    "id": "mes_12_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338423411718,
+    "text": "Mirror probe reply.",
+    "ts": 1792322679359
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-b50e-7cb1-a7bc-23e36821aefd",
+    "kind": "user_text",
+    "offset": 1835338424336384,
+    "promptId": null,
+    "text": "Build the approved plan.",
+    "ts": 1792322680079
+  },
+  {
+    "epoch": 0,
+    "id": "call_13_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338424336386,
+    "summary": "touch from-client.txt",
+    "toolUseId": "call_13_0",
+    "ts": 1792322682226
+  },
+  {
+    "epoch": 0,
+    "id": "call_13_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336386,
+    "preview": "",
+    "toolUseId": "call_13_0",
+    "ts": 1792322682226
+  },
+  {
+    "epoch": 0,
+    "id": "call_15_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338424336388,
+    "summary": "touch from-tui.txt",
+    "toolUseId": "call_15_0",
+    "ts": 1792322683404
+  },
+  {
+    "epoch": 0,
+    "id": "call_15_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336388,
+    "preview": "",
+    "toolUseId": "call_15_0",
+    "ts": 1792322683404
+  },
+  {
+    "epoch": 0,
+    "id": "call_16_0:0",
+    "kind": "tool_use",
+    "name": "Write",
+    "offset": 1835338424336390,
+    "summary": "/tmp/probe/workspace/hello.txt",
+    "toolUseId": "call_16_0",
+    "ts": 1792322683525
+  },
+  {
+    "epoch": 0,
+    "id": "call_16_0:1",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 1835338424336390,
+    "preview": "",
+    "toolUseId": "call_16_0",
+    "ts": 1792322683525
+  },
+  {
+    "epoch": 0,
+    "id": "mes_17_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338424336392,
+    "text": "Built it.",
+    "ts": 1792322683563
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-c326-78d0-b25a-11f9026b234c",
+    "kind": "user_text",
+    "offset": 1835338428054528,
+    "promptId": null,
+    "text": "Wait a while.",
+    "ts": 1792322683687
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-cacb-7670-a834-7ff16852d144",
+    "kind": "user_text",
+    "offset": 1835338430034944,
+    "promptId": null,
+    "text": "Are you still there?",
+    "ts": 1792322685644
+  },
+  {
+    "epoch": 0,
+    "id": "mes_20_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338430034946,
+    "text": "Still here.",
+    "ts": 1792322685650
+  },
+  {
+    "epoch": 0,
+    "id": "call_18_0:0",
+    "kind": "tool_use",
+    "name": "exec_command",
+    "offset": 1835338428054530,
+    "summary": "sleep 20",
+    "toolUseId": "call_18_0",
+    "ts": 1792322686372
+  },
+  {
+    "epoch": 0,
+    "id": "call_18_0:1",
+    "isError": true,
+    "kind": "tool_result",
+    "offset": 1835338428054530,
+    "preview": "",
+    "toolUseId": "call_18_0",
+    "ts": 1792322686372
+  },
+  {
+    "epoch": 0,
+    "id": "01a14ec1-d172-7591-b30d-8ef3e4fc2ba1",
+    "kind": "user_text",
+    "offset": 1835338431767552,
+    "promptId": null,
+    "text": "Continue from where we were.",
+    "ts": 1792322687346
+  },
+  {
+    "epoch": 0,
+    "id": "mes_22_0",
+    "kind": "assistant_text",
+    "model": null,
+    "offset": 1835338431767554,
+    "text": "Restored and listening.",
+    "ts": 1792322687350
+  }
+]
