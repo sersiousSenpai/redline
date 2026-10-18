@@ -391,6 +391,16 @@ export default function SessionConversation(props: SessionConversationProps) {
               <button type="button" onClick={onShowTerminal}>
                 Open Terminal
               </button>
+              {/* No composer here, so Talk rides the note: voice stays one
+                  click away on every conversation. */}
+              {props.onTalk && (
+                <>
+                  {" · "}
+                  <button type="button" aria-pressed={!!props.talking} onClick={props.onTalk}>
+                    {props.talking ? "Close Talk" : "Talk"}
+                  </button>
+                </>
+              )}
             </p>
           )}
           {blocks.map((block) => (

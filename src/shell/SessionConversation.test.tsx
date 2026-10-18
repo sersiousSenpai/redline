@@ -184,6 +184,12 @@ describe("SessionConversation", () => {
     expect(q(".rl-convo-note")?.textContent).toBe("This Codex session is shown in its terminal. Open Terminal");
     expect(q(".rl-convo-dock")).toBeNull();
     expect(onShowTerminal).toHaveBeenCalledTimes(1);
+    // With Talk wired, the note carries it: voice stays one click away.
+    const onTalk = vi.fn();
+    await render(props({ harness: "codex", sessionId: "t1", terminalId: "term-cx", onShowTerminal, onTalk }));
+    expect(q(".rl-convo-note")?.textContent).toBe("This Codex session is shown in its terminal. Open Terminal · Talk");
+    await act(async () => (q(".rl-convo-note button:last-child") as HTMLButtonElement).click());
+    expect(onTalk).toHaveBeenCalledTimes(1);
     // Back on the conversation (remounted), the reader's own toggle wins.
     await act(async () => root.render(<div />));
     await render(props({ harness: "codex", sessionId: "t1", terminalId: "term-cx", onShowTerminal }));
