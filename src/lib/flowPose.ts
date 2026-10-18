@@ -171,3 +171,16 @@ export const FLOW_ARTICLE: CSSProperties = {
   marginLeft: "var(--rl-plan-mx, auto)",
   marginRight: "var(--rl-plan-mx, auto)",
 };
+
+/** An orchestrated build's progress as the plan footer counts it — "step 3
+ *  of 11": the steps finished plus the one under way, out of the agents the
+ *  run planned. Null without a plan to count against (a single-agent build,
+ *  or a script whose call sites gave no upper bound). */
+export function buildProgress(
+  run: { totals: { plannedAgents: number | null; done: number; running: number } } | null,
+): { step: number; of: number } | null {
+  const of = run?.totals.plannedAgents ?? null;
+  if (!run || !of || of < 1) return null;
+  const step = Math.min(of, run.totals.done + (run.totals.running > 0 ? 1 : 0));
+  return step > 0 ? { step, of } : null;
+}

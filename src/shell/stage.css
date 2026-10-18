@@ -488,11 +488,14 @@
 }
 
 /* A mark is redlining amber: a tinted run with a 2px rule under it (4c).
-   The one the reader is following turns plan-blue (5a). */
+   The one the reader is following turns plan-blue (5a). Drawn in the theme's
+   own accents, not the mode's text inks: a mark is a graphic under ink-
+   coloured words, and the text inks fall back to black where an accent
+   can't carry text (Basic's gold), which left marks grey. */
 .rl-flow-plan .rl-comment-highlight {
-  background: color-mix(in srgb, var(--color-mode-redline-fg) 18%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
   box-shadow: none;
-  border-bottom: 2px solid var(--color-mode-redline-fg);
+  border-bottom: 2px solid var(--color-warning);
   border-radius: 0;
   transition: none;
 }
@@ -500,8 +503,8 @@
    pose's Feedback tab. In the split pose a clicked mark stays amber. */
 .rl-flow-plan[data-pose="full"] .rl-comment-highlight--focused,
 .rl-flow-plan[data-pose="full"] .rl-comment-highlight--muted.rl-comment-highlight--focused {
-  background: color-mix(in srgb, var(--color-mode-plan-fg) 16%, transparent);
-  border-bottom-color: var(--color-mode-plan-fg);
+  background: color-mix(in srgb, var(--color-info) 16%, transparent);
+  border-bottom-color: var(--color-info);
   box-shadow: none;
 }
 .rl-flow-plan .rl-comment-highlight--muted {

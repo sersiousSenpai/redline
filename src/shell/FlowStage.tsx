@@ -49,6 +49,8 @@ import { feedbackSummary } from "../lib/feedbackThreads";
 import type { Comment, ReviewSession } from "../types";
 import { PlanPanelHeader } from "./PlanPanelHeader";
 import { PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
+import { useOrchestration } from "../hooks/useOrchestration";
+import { buildProgress } from "../lib/flowPose";
 import type { VersionPillProps } from "./VersionPill";
 // The Feedback tab, its header row and its composer are the feedback lane's;
 // they ride this chunk (as does feedback.css, the margin note's look).
@@ -106,6 +108,10 @@ export interface FlowStageProps {
 
 export default function FlowStage(p: FlowStageProps) {
   const sessionId = p.target.kind === "plan" ? p.target.sessionId : null;
+  // "Building v4: step 3 of 11": an orchestrated build's own count, read
+  // here (off the boot path) while its run is live.
+  const run = useOrchestration(sessionId, !!p.footer.approval?.runLive);
+  const runProgress = buildProgress(run);
   const stored = useFlow((s) => (sessionId && s.planPose[sessionId]) || "closed");
   const tab = useFlow((s) => s.panelTab);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -174,7 +180,7 @@ export default function FlowStage(p: FlowStageProps) {
             {p.planBody}
             {!full && composing && <div className="rl-flow-compose-sheet rl-glass rl-glass-sheet">{p.composer}</div>}
           </div>
-          <PlanPanelFooter pose={headerPose} {...p.footer} />
+          <PlanPanelFooter pose={headerPose} {...p.footer} progress={p.footer.progress ?? runProgress} />
         </section>
       )}
       {full && (

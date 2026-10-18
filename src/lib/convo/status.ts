@@ -9,10 +9,13 @@
 //! **The working row, first match wins:**
 //! 1. *Needs you* — an ask is open (or the terminal's own hook says so).
 //! 2. *A tool verb* — "Reading docs/x.md", the step running now.
-//! 3. *Thinking* — the newest thing the turn did was think.
-//! 4. *Writing the plan* — plan mode, a turn running, no tool running and no
+//! 3. *Writing the plan* — plan mode, and the turn has already said what it
+//!    will do: the plan is one tool call the transcript shows only once it is
+//!    whole, so whatever follows (a thought included) is composing it.
+//! 4. *Thinking* — the newest thing the turn did was think.
+//! 5. *Writing the plan* — plan mode, a turn running, no tool running and no
 //!    plan proposed yet: the model is composing it.
-//! 5. *Plan ready* — the latest turn proposed a plan nobody has answered.
+//! 6. *Plan ready* — the latest turn proposed a plan nobody has answered.
 //!
 //! A running turn that matches none of these is just *Working*.
 
@@ -325,6 +328,11 @@ export function workingStatus(
       const phrase = toolPhrase(tool.name, tool.summary, "present", options.projectPath);
       return { kind: "tool", label: phrase.target ? `${phrase.verb} ${phrase.target}` : phrase.verb, since };
     }
+    // In plan mode the plan is one tool call the transcript only shows once
+    // it is whole, so after the turn has said what it will do, the model is
+    // composing it — a thought between there and the plan is part of that.
+    const said = turn.items.some((item) => item.kind === "prose");
+    if (view.mode === "plan" && said) return { kind: "writing-plan", label: "Writing the plan", since };
     if (turn.items[turn.items.length - 1]?.kind === "thinking") return { kind: "thinking", label: "Thinking", since };
     if (view.mode === "plan") return { kind: "writing-plan", label: "Writing the plan", since };
   }
@@ -400,6 +408,9 @@ export function modelDisplayName(
     return cap(claude);
   }
   if (/^gpt-/i.test(id)) return id.split("-").map((part, i) => (i === 0 ? "GPT" : cap(part))).join("-");
+  // A bare family alias from a launch flag (`opus`, `sonnet`) before the
+  // catalog has answered.
+  if (/^[a-z]+$/.test(id)) return cap(id);
   return id;
 }
 

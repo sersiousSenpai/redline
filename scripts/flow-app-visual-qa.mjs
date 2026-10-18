@@ -90,6 +90,9 @@ const DRIVES = {
   "4a": [
     { do: "click", text: "Plan", up: "button, [role=radio], [role=tab]", optional: true, shell: "flow", why: "pick Plan in the Chat | Plan segment" },
     ...typePrompt,
+    // The caret in the box is the focus zoom (everything else recedes); the
+    // board draws the start screen at rest with the sentence typed.
+    { do: "key", key: "Escape", optional: true, shell: "flow", why: "Esc: back to rest, the sentence kept" },
   ],
   "4b": [
     ...typePrompt,
@@ -101,7 +104,7 @@ const DRIVES = {
     // Flow opens the plan beside the chat by itself once it has loaded.
     { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
     { do: "click", text: "Open in panel →", optional: true, why: "open the plan beside the chat (split pose)" },
-    { do: "key", key: "b", modifiers: 4, optional: true, shell: "flow", why: "⌘B collapses the sidebar" },
+    // The split pose folds the sidebar itself (⌘B here would bring it back).
     { do: "click", css: ["[data-comment-id=c-001]", "mark"], optional: true, why: "focus the mark so its margin note shows" },
   ],
   "4d": [
@@ -117,7 +120,7 @@ const DRIVES = {
     // its versions back.
     { do: "waitFor", expr: "!!document.querySelector('.rl-flow-plan:not([hidden]) .rl-prose h1')", timeout: 8000, optional: true, shell: "flow", why: "the plan opens on the stage" },
     { do: "click", text: "Full screen", up: "button", optional: true, shell: "flow", why: "⤢ Full screen: the full pose" },
-    { do: "click", text: "v1", up: "button, [role=button], [role=treeitem], a, li", optional: true, why: "view v1 (read-only)" },
+    { do: "click", css: [".rl-sb-versions li:first-child .rl-sb-version"], text: "v1", up: "button, [role=button], [role=treeitem], a, li", optional: true, why: "view v1 (read-only)" },
     { do: "click", textStarts: "Feedback", up: "button, [role=tab]", optional: true, shell: "flow", why: "the right panel's Feedback tab" },
   ],
 };
@@ -382,8 +385,13 @@ function pageTools() {
     }
     const tokens = {};
     for (const [prop, token] of Object.entries(spec.tokens ?? {})) {
-      const defined = getComputedStyle(document.documentElement).getPropertyValue(token).trim() !== "";
-      const want = resolve(`var(${token})`);
+      // The token's own value off :root (the theme writes concrete colours
+      // there). Resolving `var(token)` through the probe element read every
+      // token as the inherited ink, so only a value that is itself a
+      // reference goes through it.
+      const raw = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+      const defined = raw !== "";
+      const want = raw.includes("var(") ? resolve(`var(${token})`) : raw;
       const got = getComputedStyle(hit.el)[prop];
       tokens[prop] = { token, want: fmt(paint(want)), got: fmt(paint(got)) };
       if (!defined) failures.push(`${token} is not defined`);
@@ -434,7 +442,10 @@ function pageTools() {
       const region = el.closest(".xterm") ? "terminal" : "ui";
       const own = [...el.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).map((n) => n.textContent.trim()).join(" ");
       if (own) texts.push({ text: own.slice(0, 48), ratio: contrast(s.color, el), size: parseFloat(s.fontSize), region });
-      if ((el.tagName === "TEXTAREA" || el.tagName === "INPUT") && el.placeholder && !el.value) {
+      // A placeholder painted transparent is standing in for an overlay
+      // that carries the words (the Feedback composer's two-line hint); the
+      // overlay is swept as text of its own.
+      if ((el.tagName === "TEXTAREA" || el.tagName === "INPUT") && el.placeholder && !el.value && paint(getComputedStyle(el, "::placeholder").color)[3] > 0) {
         texts.push({ text: `placeholder: ${el.placeholder}`.slice(0, 48), ratio: contrast(getComputedStyle(el, "::placeholder").color, el), size: parseFloat(s.fontSize), region });
       }
       if (el.matches("button, [role=button], a[href]") && !norm(el.textContent || "") && el.querySelector("svg")) {

@@ -65,6 +65,8 @@ describe("the working row: first match wins", () => {
     ["a finished tool is not running", view(turn([tool("t", "Read", "/x/a.md", "done")])), {}, "writing-plan", "Writing the plan"],
     ["thinking, newest", view(turn([tool("t", "Read", "/x/a.md"), thinking("k")])), {}, "thinking", "Thinking"],
     ["prose after a tool, in plan mode", view(turn([tool("t", "Read", "/x/a.md"), prose("p")])), {}, "writing-plan", "Writing the plan"],
+    ["a thought after the turn said what it will do, in plan mode (4b)", view(turn([tool("t", "Read", "/x/a.md"), prose("p"), thinking("k")])), {}, "writing-plan", "Writing the plan"],
+    ["a thought after prose, not in plan mode", view(turn([prose("p"), thinking("k")]), { mode: "default" }), {}, "thinking", "Thinking"],
     ["prose, not in plan mode", view(turn([prose("p")]), { mode: "default" }), {}, "working", "Working"],
     ["the plan tool is the plan card, not a verb", view(turn([tool("t", "ExitPlanMode", "# Plan", "running"), plan("p", 5)])), {}, "plan-ready", "Plan ready"],
     ["a plan held for review, turn still open", view(turn([prose("p"), plan("p", 5)])), {}, "plan-ready", "Plan ready"],

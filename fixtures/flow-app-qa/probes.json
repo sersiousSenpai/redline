@@ -115,7 +115,7 @@
       { "name": "plan title", "text": "Din roadmap: next steps", "up": "h1", "expect": { "fontSize": 28, "fontFamily~": "serif" } },
       { "name": "plan lede", "text": "Picks up from note 28 and the 2026-10-17 updates in the build log.", "expect": { "fontSize": 16 } },
       { "name": "plan h2", "text": "1. Finish Track B", "up": "h2", "expect": { "fontSize": 19 } },
-      { "name": "mark", "css": [".rl-flow-plan .rl-comment-highlight[data-comment-id=c-001]", "[data-comment-id=c-001] mark", "mark[data-comment-id=c-001]", ".rl-mark"], "tokens": { "borderBottomColor": "--color-mode-redline-fg" } },
+      { "name": "mark", "css": [".rl-flow-plan .rl-comment-highlight[data-comment-id=c-001]", "[data-comment-id=c-001] mark", "mark[data-comment-id=c-001]", ".rl-mark"], "tokens": { "borderBottomColor": "--color-warning" } },
       { "name": "margin note", "text": "Run this against staging first, not prod.", "up": "[data-margin-note], aside, div", "expect": { "borderRadius": 10, "fontSize": 13 } },
       { "name": "plan footer", "css": ["[data-plan-panel-footer]"], "expect": { "height": 64 } },
       { "name": "Send marks button", "text": "Send marks to Claude", "up": "button", "expect": { "height": 34, "borderRadius": 9 } },

@@ -90,12 +90,16 @@ export function SessionComposer(props: SessionComposerProps) {
     fieldRef.current?.focus();
   }, [props.restore]);
 
-  // The box grows with what's in it, to a cap, then scrolls.
+  // The box grows with what's in it, to a cap, then scrolls. A composer
+  // mounted out of sight (the stage's portal host before it is placed)
+  // measures 0: leave the height to the stylesheet then, or the field stays
+  // pinned at nothing once it is shown.
   useLayoutEffect(() => {
     const field = fieldRef.current;
     if (!field) return;
     field.style.height = "auto";
-    field.style.height = `${Math.min(field.scrollHeight, 220)}px`;
+    const height = field.scrollHeight;
+    field.style.height = height ? `${Math.min(height, 220)}px` : "";
   }, [text]);
 
   // "Switch in terminal" is an answer to one pick, not a standing state.
@@ -251,11 +255,14 @@ function ModeChip({
 }
 
 /** Whether the catalog row `slug` is the model `id` the CLI reported: the
- *  same id, or the alias (`opus`) of that family. */
+ *  same id, or one is the family alias of the other — a launch flag says
+ *  `opus` where the catalog lists `claude-opus-4-5`, and the transcript
+ *  reports the full id where a catalog lists the alias. */
 function isModel(slug: string, id: string | undefined): boolean {
   if (!id) return false;
-  const bare = id.replace(/^claude-/, "");
-  return slug === id || bare === slug || bare.startsWith(`${slug}-`);
+  const bare = (value: string) => value.replace(/^claude-/, "").replace(/\[1m\]$/i, "");
+  const a = bare(slug), b = bare(id);
+  return a === b || a.startsWith(`${b}-`) || b.startsWith(`${a}-`);
 }
 
 /** Whether a second harness is installed, from what the shared health
@@ -308,13 +315,16 @@ function ModelChip({
   const backend = BACKEND[harness];
   const [asked, setAsked] = useState(false);
   const showHarness = useShowHarness(harness, asked);
+  // The chip names the model the way the catalog does ("Opus 4.5"), so the
+  // catalog is read as soon as there is a model to name, not only when the
+  // menu opens; the hook caches it per backend.
   useEffect(() => {
-    if (pop.open) request(backend, backend);
-  }, [pop.open, backend, request]);
+    if (pop.open || model) request(backend, backend);
+  }, [pop.open, !!model, backend, request]);
   const catalog = catalogs[backend] ?? [];
-  const label = modelChipLabel(model, { harness, showHarness, catalog });
   const models = modelsFor(backend, catalogs);
   const current = catalog.find((entry) => isModel(entry.slug, model?.model));
+  const label = modelChipLabel(current && model ? { ...model, model: current.slug } : model, { harness, showHarness, catalog });
   const efforts = current?.efforts.length ? current.efforts : harness === "claude" ? EFFORT_OPTIONS : [];
   const pick = (nextModel: string | null, nextEffort: string | null) => {
     pop.close();

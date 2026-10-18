@@ -541,6 +541,9 @@ function startLaunch(pty: PtyState): void {
     );
     state.convo.set(pty.id, events);
     dispatch("convo-bound", { terminalId: pty.id, sessionId: launch.sessionId, harness: "claude", transcriptPath: null });
+    // The CLI names the session itself (its ai-title, experiment (m) S12)
+    // long before the plan's heading exists: that is 4b's title.
+    if (launch.title) dispatch("convo-title", { terminalId: pty.id, sessionId: launch.sessionId, title: launch.title });
     const attention = { terminalId: pty.id, sessionId: launch.sessionId, at: clock.now, kind: "working" };
     state.attention.set(pty.id, attention);
     dispatch("term-attention", attention);

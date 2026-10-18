@@ -10,6 +10,7 @@ import {
   type PlanPose,
 } from "../shell/flowState";
 import {
+  buildProgress,
   closePlan,
   effectivePose,
   movePose,
@@ -129,4 +130,19 @@ describe("planColumnVars", () => {
     expect(vars("split", true, 820)["--rl-plan-max"]).toBe("none");
     expect(vars("split", false, Number.NaN)["--rl-plan-max"]).toBe("680px");
   });
+});
+
+describe("buildProgress", () => {
+  const run = (plannedAgents: number | null, done: number, running: number) => ({ totals: { plannedAgents, done, running } });
+  it.each([
+    ["5a: two done, one under way, of eleven", run(11, 2, 1), { step: 3, of: 11 }],
+    ["between steps it counts what finished", run(11, 3, 0), { step: 3, of: 11 }],
+    ["parallel agents are still one step under way", run(11, 2, 3), { step: 3, of: 11 }],
+    ["never past the planned count", run(4, 4, 1), { step: 4, of: 4 }],
+    ["nothing started yet", run(11, 0, 0), null],
+    ["no upper bound to count against", run(null, 2, 1), null],
+  ])("%s", (_, input, want) => {
+    expect(buildProgress(input)).toEqual(want);
+  });
+  it("no run, no count", () => expect(buildProgress(null)).toBeNull());
 });
