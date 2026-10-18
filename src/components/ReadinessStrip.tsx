@@ -143,7 +143,9 @@ function ReadinessRow({
 // The palette carries no red (blue/yellow/green — see theme/themes.ts), so
 // severity reads as amber-vs-grey: a blocker is the theme's warning colour
 // with a soft halo, a warning is a quiet mark that doesn't compete with it.
-function Dot({ state }: { state: ReadinessItem["state"] }) {
+// Exported for the flow shell's first-run checklist (shell/FlowStart.tsx),
+// which lists the same items with the same marks and the same fixes.
+export function Dot({ state }: { state: ReadinessItem["state"] }) {
   return (
     <span
       aria-hidden
@@ -155,7 +157,7 @@ function Dot({ state }: { state: ReadinessItem["state"] }) {
 /** The fix, in whatever shape it takes: a `/hooks` chip the user copies into
  *  Claude Code (nothing here can approve it for them — it is Claude Code's
  *  own security check), or a button over a handler App already owns. */
-function FixControl({
+export function FixControl({
   item,
   onFix,
   prominent,

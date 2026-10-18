@@ -1,0 +1,932 @@
+{
+  "startedAt": "2026-10-18T09:13:57.214Z",
+  "fixture": "fixtures/flow-start-qa",
+  "board": "/Users/yusufalbazian/redline-wt/flow-design/b4a.png",
+  "screenshots": [
+    "aurora-4a.png",
+    "aurora-4a-vs-board.png",
+    "aurora-4a-zoomed.png",
+    "aurora-4a-chat.png",
+    "aurora-4a-900x640.png",
+    "aurora-4a-1280x520.png",
+    "aurora-4a-1280x400.png",
+    "aurora-4a.png",
+    "aurora-4a-checklist.png",
+    "basic-4a.png",
+    "basic-4a-vs-board.png",
+    "basic-4a-checklist.png",
+    "studio-4a.png",
+    "studio-4a-vs-board.png",
+    "studio-4a-checklist.png"
+  ],
+  "checks": [
+    {
+      "name": "4a stage: the stand-in shell puts the stage where the board has it (253 × 47 chrome, 1027 × 753 stage)",
+      "passed": true,
+      "details": {
+        "x": 253,
+        "y": 47,
+        "w": 1027,
+        "h": 753
+      }
+    },
+    {
+      "name": "4a composer: 662 × 156 painted (660 + hairline), centred on the stage, at the board's y — ±1px",
+      "passed": true,
+      "details": {
+        "got": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        },
+        "want": {
+          "x": 449,
+          "y": 397,
+          "w": 662,
+          "h": 156
+        }
+      }
+    },
+    {
+      "name": "4a headline: its 49px line box sits 26 above the composer",
+      "passed": true,
+      "details": {
+        "title": {
+          "x": 366.5,
+          "y": 266,
+          "w": 800,
+          "h": 49
+        },
+        "composer": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        }
+      }
+    },
+    {
+      "name": "4a mode track: 34 tall at the composer's 14/12 inset, ±1px",
+      "passed": true,
+      "details": {
+        "got": {
+          "x": 450.5,
+          "y": 354,
+          "w": 146.77,
+          "h": 34
+        },
+        "want": {
+          "x": 464,
+          "y": 410,
+          "w": 146,
+          "h": 34
+        }
+      }
+    },
+    {
+      "name": "4a Plan segment: 26 tall inside the 3px track, ±1px",
+      "passed": true,
+      "details": {
+        "got": {
+          "x": 525.11,
+          "y": 358,
+          "w": 68.16,
+          "h": 26
+        },
+        "want": {
+          "x": 538,
+          "y": 414,
+          "w": 68,
+          "h": 26
+        }
+      }
+    },
+    {
+      "name": "4a prompt: 64 tall (18 + 24 + 22) under the 46px first row",
+      "passed": true,
+      "details": {
+        "x": 436.5,
+        "y": 388,
+        "w": 660,
+        "h": 64
+      }
+    },
+    {
+      "name": "4a chips: 30 tall on the board's row, folder first at the composer's 12px inset",
+      "passed": true,
+      "details": {
+        "folder": {
+          "x": 448.5,
+          "y": 453,
+          "w": 138.94,
+          "h": 30
+        },
+        "model": {
+          "x": 593.44,
+          "y": 453,
+          "w": 215.91,
+          "h": 30
+        }
+      }
+    },
+    {
+      "name": "4a Start plan: 32 tall, its right edge 12 inside the composer, ±1px",
+      "passed": true,
+      "details": {
+        "got": {
+          "x": 980.02,
+          "y": 452,
+          "w": 104.48,
+          "h": 32
+        },
+        "want": {
+          "x": 993,
+          "y": 508,
+          "w": 105,
+          "h": 32
+        }
+      }
+    },
+    {
+      "name": "4a 📎 and the mic: 30px, ahead of Start",
+      "passed": true,
+      "details": {
+        "clip": {
+          "x": 866.67,
+          "y": 453,
+          "w": 30,
+          "h": 30
+        },
+        "mic": {
+          "x": 902.67,
+          "y": 453,
+          "w": 30,
+          "h": 30
+        },
+        "talk": {
+          "x": 932.67,
+          "y": 453,
+          "w": 41.34,
+          "h": 30
+        },
+        "start": {
+          "x": 980.02,
+          "y": 452,
+          "w": 104.48,
+          "h": 32
+        }
+      }
+    },
+    {
+      "name": "4a strip: 18px circles 26 below the composer, centred, ±1px",
+      "passed": true,
+      "details": {
+        "step1": {
+          "x": 546.72,
+          "y": 523,
+          "w": 18,
+          "h": 18
+        },
+        "strip": {
+          "x": 366.5,
+          "y": 523,
+          "w": 800,
+          "h": 18
+        },
+        "want": {
+          "x": 560,
+          "y": 579,
+          "w": 18,
+          "h": 18
+        }
+      }
+    },
+    {
+      "name": "4a headline: serif 36px / 600, the ink, verbatim",
+      "passed": true,
+      "details": {
+        "font-size": "36px",
+        "font-weight": "600",
+        "font-family": "ui-serif, \"Source Serif 4\", Georgia, Cambria, \"Times New Roman\", Times, serif",
+        "line-height": "49px",
+        "letter-spacing": "-0.36px",
+        "color": "rgb(228, 233, 243)"
+      }
+    },
+    {
+      "name": "4a composer: r16, the focus rim, the sheet's 0 20px 60px shadow, 660 content box",
+      "passed": true,
+      "details": {
+        "border-radius": "16px",
+        "box-shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgb(75, 92, 117) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0.35) 0px 20px 60px 0px",
+        "box-sizing": "content-box",
+        "width": "660px"
+      }
+    },
+    {
+      "name": "4a mode track: 3px padding, r9, the window's colour, a hairline",
+      "passed": true,
+      "details": {
+        "padding-top": "3px",
+        "border-radius": "9px",
+        "background-color": "rgb(7, 10, 18)",
+        "border-top-color": "rgb(50, 55, 66)"
+      }
+    },
+    {
+      "name": "4a Plan, chosen: 26px r6 on the plan tint with a blue icon, 12.5px",
+      "passed": true,
+      "details": {
+        "plan": {
+          "height": "26px",
+          "border-radius": "6px",
+          "background-color": "rgb(26, 36, 53)",
+          "color": "rgb(228, 233, 243)",
+          "font-size": "12.5px"
+        },
+        "icon": {
+          "color": "rgb(138, 186, 247)"
+        },
+        "chat": {
+          "color": "rgb(174, 179, 189)"
+        }
+      }
+    },
+    {
+      "name": "4a hint: 12px muted, verbatim",
+      "passed": true,
+      "details": {
+        "font-size": "12px",
+        "color": "rgb(134, 139, 149)"
+      }
+    },
+    {
+      "name": "4a prompt: 16/1.5, padding 18 18 22",
+      "passed": true,
+      "details": {
+        "font-size": "16px",
+        "line-height": "24px",
+        "padding-top": "18px",
+        "padding-right": "18px",
+        "padding-bottom": "22px",
+        "padding-left": "18px",
+        "color": "rgb(228, 233, 243)"
+      }
+    },
+    {
+      "name": "4a chips: 30px r8 on the chip fill, secondary ink, muted 13px icons",
+      "passed": true,
+      "details": {
+        "chip": {
+          "height": "30px",
+          "border-radius": "8px",
+          "background-color": "rgb(20, 25, 36)",
+          "color": "rgb(174, 179, 189)",
+          "font-size": "12.5px",
+          "padding-left": "10px"
+        },
+        "icon": {
+          "color": "rgb(134, 139, 149)",
+          "width": "13px"
+        },
+        "lastUsed": {
+          "color": "rgb(134, 139, 149)"
+        },
+        "clip": {
+          "color": "rgb(134, 139, 149)"
+        }
+      }
+    },
+    {
+      "name": "4a chips: copy verbatim — \"~/projects/din\" first, then \"Opus 4.5 · High · last used\"",
+      "passed": true,
+      "details": [
+        "~/projects/din",
+        "Opus 4.5 · High· last used"
+      ]
+    },
+    {
+      "name": "4a Start plan ↵: 32px r9, ink-filled, 600, verbatim",
+      "passed": true,
+      "details": {
+        "height": "32px",
+        "border-radius": "9px",
+        "background-color": "rgb(228, 233, 243)",
+        "color": "rgb(11, 16, 27)",
+        "font-weight": "600",
+        "font-size": "12.5px"
+      }
+    },
+    {
+      "name": "4a strip: 12.5px muted, 18 apart, step 1 in the plan blue, the rest on the chip fill, verbatim",
+      "passed": true,
+      "details": {
+        "strip": {
+          "font-size": "12.5px",
+          "color": "rgb(134, 139, 149)",
+          "gap": "18px"
+        },
+        "step1": {
+          "background-color": "rgb(26, 36, 53)",
+          "color": "rgb(138, 186, 247)",
+          "font-weight": "700",
+          "border-radius": "50%"
+        },
+        "step2": {
+          "background-color": "rgb(20, 25, 36)"
+        }
+      }
+    },
+    {
+      "name": "4a: no recents, no pill, no tour on the start screen",
+      "passed": true
+    },
+    {
+      "name": "4a: the resting start screen takes no caret",
+      "passed": true
+    },
+    {
+      "name": "zoom: the box never moves under the held press",
+      "passed": true,
+      "details": {
+        "restBox": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        },
+        "held": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        }
+      }
+    },
+    {
+      "name": "zoom: a press in the box zooms — the caret in it, everything else receded, the paper over the window",
+      "passed": true,
+      "details": {
+        "zoom": true,
+        "open": "true",
+        "cx": 640,
+        "cy": 400,
+        "caret": true,
+        "title": [
+          0,
+          "hidden"
+        ],
+        "foot": [
+          0,
+          "hidden"
+        ],
+        "paper": 1
+      }
+    },
+    {
+      "name": "zoom: and the door ends centred in the window",
+      "passed": true,
+      "details": {
+        "zoom": true,
+        "open": "true",
+        "cx": 640,
+        "cy": 400,
+        "caret": true,
+        "title": [
+          0,
+          "hidden"
+        ],
+        "foot": [
+          0,
+          "hidden"
+        ],
+        "paper": 1
+      }
+    },
+    {
+      "name": "zoom: Esc brings the box home and the welcome back",
+      "passed": true,
+      "details": {
+        "back": {
+          "zoom": false,
+          "open": "false",
+          "title": 1,
+          "strip": 1
+        },
+        "backBox": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        },
+        "restBox": {
+          "x": 435.5,
+          "y": 341,
+          "w": 662,
+          "h": 156
+        }
+      }
+    },
+    {
+      "name": "zoom: a keyboard summons arrives zoomed, the caret in the box",
+      "passed": true
+    },
+    {
+      "name": "zoom: a tap outside the box dismisses, back to rest",
+      "passed": true
+    },
+    {
+      "name": "Start pressed on the resting screen launches the plan without zooming the door first",
+      "passed": true
+    },
+    {
+      "name": "Chat: its own hint, \"Start chat ↵\", a chat placeholder",
+      "passed": true
+    },
+    {
+      "name": "Chat | Plan is a radio group: an arrow moves the choice and the focus",
+      "passed": true
+    },
+    {
+      "name": "⌘↩ runs it directly (the Run destination left the door for the key)",
+      "passed": true,
+      "details": "run"
+    },
+    {
+      "name": "900 wide: \"last used\" gives way before the model's name does",
+      "passed": true,
+      "details": {
+        "chip": 198.234375,
+        "line": [
+          464.9375,
+          605.171875,
+          158,
+          140
+        ],
+        "name": [
+          464.9375,
+          555.765625
+        ],
+        "last": 562.765625
+      }
+    },
+    {
+      "name": "900×640: the composer stays inside the stage, Start in full, nothing scrolls sideways; the welcome sheds as the stage shortens",
+      "passed": true,
+      "details": {
+        "fit": {
+          "rest": "full",
+          "inside": true,
+          "goInside": true,
+          "overflow": 0,
+          "title": true,
+          "strip": true
+        },
+        "want": {
+          "title": true,
+          "strip": true
+        }
+      }
+    },
+    {
+      "name": "1280×520: the composer stays inside the stage, Start in full, nothing scrolls sideways; the welcome sheds as the stage shortens",
+      "passed": true,
+      "details": {
+        "fit": {
+          "rest": "pills",
+          "inside": true,
+          "goInside": true,
+          "overflow": 0,
+          "title": false,
+          "strip": true
+        },
+        "want": {
+          "title": false,
+          "strip": true
+        }
+      }
+    },
+    {
+      "name": "1280×400: the composer stays inside the stage, Start in full, nothing scrolls sideways; the welcome sheds as the stage shortens",
+      "passed": true,
+      "details": {
+        "fit": {
+          "rest": "bare",
+          "inside": true,
+          "goInside": true,
+          "overflow": 0,
+          "title": false,
+          "strip": false
+        },
+        "want": {
+          "title": false,
+          "strip": false
+        }
+      }
+    },
+    {
+      "name": "aurora: the checklist hangs below the strip, every blocker with its fix, inside the stage",
+      "passed": true,
+      "details": {
+        "top": 557,
+        "bottom": 783.234375,
+        "foot": 541,
+        "stage": 800,
+        "rows": 3,
+        "fixes": [
+          "Locate it…",
+          "Install integration",
+          "/hooks⧉"
+        ],
+        "links": [
+          "Continue Din retrieval plan",
+          "Continue Din backend: Hono + Fly"
+        ]
+      }
+    },
+    {
+      "name": "aurora: two Continue links to the sessions still in review",
+      "passed": true,
+      "details": [
+        "Continue Din retrieval plan",
+        "Continue Din backend: Hono + Fly"
+      ]
+    },
+    {
+      "name": "aurora: the checklist never moves the composer",
+      "passed": true,
+      "details": {
+        "x": 435.5,
+        "y": 341,
+        "w": 662,
+        "h": 156
+      }
+    },
+    {
+      "name": "aurora: a Continue link opens its session without taking the door",
+      "passed": true
+    },
+    {
+      "name": "aurora: every text reaches 4.5:1 and every bare icon 3:1",
+      "passed": true,
+      "details": {
+        "checked": 29,
+        "short": []
+      }
+    },
+    {
+      "name": "basic: the checklist hangs below the strip, every blocker with its fix, inside the stage",
+      "passed": true,
+      "details": {
+        "top": 557,
+        "bottom": 783.234375,
+        "foot": 541,
+        "stage": 800,
+        "rows": 3,
+        "fixes": [
+          "Locate it…",
+          "Install integration",
+          "/hooks⧉"
+        ],
+        "links": [
+          "Continue Din retrieval plan",
+          "Continue Din backend: Hono + Fly"
+        ]
+      }
+    },
+    {
+      "name": "basic: two Continue links to the sessions still in review",
+      "passed": true,
+      "details": [
+        "Continue Din retrieval plan",
+        "Continue Din backend: Hono + Fly"
+      ]
+    },
+    {
+      "name": "basic: the checklist never moves the composer",
+      "passed": true,
+      "details": {
+        "x": 435.5,
+        "y": 341,
+        "w": 662,
+        "h": 156
+      }
+    },
+    {
+      "name": "basic: a Continue link opens its session without taking the door",
+      "passed": true
+    },
+    {
+      "name": "basic: every text reaches 4.5:1 and every bare icon 3:1",
+      "passed": true,
+      "details": {
+        "checked": 29,
+        "short": []
+      }
+    },
+    {
+      "name": "studio: the checklist hangs below the strip, every blocker with its fix, inside the stage",
+      "passed": true,
+      "details": {
+        "top": 557,
+        "bottom": 783.234375,
+        "foot": 541,
+        "stage": 800,
+        "rows": 3,
+        "fixes": [
+          "Locate it…",
+          "Install integration",
+          "/hooks⧉"
+        ],
+        "links": [
+          "Continue Din retrieval plan",
+          "Continue Din backend: Hono + Fly"
+        ]
+      }
+    },
+    {
+      "name": "studio: two Continue links to the sessions still in review",
+      "passed": true,
+      "details": [
+        "Continue Din retrieval plan",
+        "Continue Din backend: Hono + Fly"
+      ]
+    },
+    {
+      "name": "studio: the checklist never moves the composer",
+      "passed": true,
+      "details": {
+        "x": 435.5,
+        "y": 341,
+        "w": 662,
+        "h": 156
+      }
+    },
+    {
+      "name": "studio: a Continue link opens its session without taking the door",
+      "passed": true
+    },
+    {
+      "name": "studio: every text reaches 4.5:1 and every bare icon 3:1",
+      "passed": true,
+      "details": {
+        "checked": 29,
+        "short": []
+      }
+    }
+  ],
+  "measurements": {
+    "aurora": {
+      "stage": {
+        "x": 253,
+        "y": 47,
+        "w": 1027,
+        "h": 753
+      },
+      "composer": {
+        "x": 435.5,
+        "y": 341,
+        "w": 662,
+        "h": 156
+      },
+      "track": {
+        "x": 450.5,
+        "y": 354,
+        "w": 146.77,
+        "h": 34
+      },
+      "chat": {
+        "x": 454.5,
+        "y": 358,
+        "w": 70.61,
+        "h": 26
+      },
+      "plan": {
+        "x": 525.11,
+        "y": 358,
+        "w": 68.16,
+        "h": 26
+      },
+      "hint": {
+        "x": 607.27,
+        "y": 362,
+        "w": 350.19,
+        "h": 18
+      },
+      "prompt": {
+        "x": 436.5,
+        "y": 388,
+        "w": 660,
+        "h": 64
+      },
+      "folder": {
+        "x": 448.5,
+        "y": 453,
+        "w": 138.94,
+        "h": 30
+      },
+      "model": {
+        "x": 593.44,
+        "y": 453,
+        "w": 215.91,
+        "h": 30
+      },
+      "clip": {
+        "x": 866.67,
+        "y": 453,
+        "w": 30,
+        "h": 30
+      },
+      "mic": {
+        "x": 902.67,
+        "y": 453,
+        "w": 30,
+        "h": 30
+      },
+      "talk": {
+        "x": 932.67,
+        "y": 453,
+        "w": 41.34,
+        "h": 30
+      },
+      "start": {
+        "x": 980.02,
+        "y": 452,
+        "w": 104.48,
+        "h": 32
+      },
+      "title": {
+        "x": 366.5,
+        "y": 266,
+        "w": 800,
+        "h": 49
+      },
+      "strip": {
+        "x": 366.5,
+        "y": 523,
+        "w": 800,
+        "h": 18
+      },
+      "step1": {
+        "x": 546.72,
+        "y": 523,
+        "w": 18,
+        "h": 18
+      },
+      "step2": {
+        "x": 642.25,
+        "y": 523,
+        "w": 18,
+        "h": 18
+      }
+    },
+    "widthDeltas": {
+      "folder": 0.94,
+      "model": -0.09,
+      "start": -0.52
+    },
+    "styles": {
+      "title": {
+        "font-size": "36px",
+        "font-weight": "600",
+        "font-family": "ui-serif, \"Source Serif 4\", Georgia, Cambria, \"Times New Roman\", Times, serif",
+        "line-height": "49px",
+        "letter-spacing": "-0.36px",
+        "color": "rgb(228, 233, 243)"
+      },
+      "composer": {
+        "border-radius": "16px",
+        "box-shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgb(75, 92, 117) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0.35) 0px 20px 60px 0px",
+        "box-sizing": "content-box",
+        "width": "660px"
+      },
+      "track": {
+        "padding-top": "3px",
+        "border-radius": "9px",
+        "background-color": "rgb(7, 10, 18)",
+        "border-top-color": "rgb(50, 55, 66)"
+      },
+      "plan": {
+        "height": "26px",
+        "border-radius": "6px",
+        "background-color": "rgb(26, 36, 53)",
+        "color": "rgb(228, 233, 243)",
+        "font-size": "12.5px"
+      },
+      "planIcon": {
+        "color": "rgb(138, 186, 247)"
+      },
+      "chat": {
+        "color": "rgb(174, 179, 189)"
+      },
+      "hint": {
+        "font-size": "12px",
+        "color": "rgb(134, 139, 149)"
+      },
+      "prompt": {
+        "font-size": "16px",
+        "line-height": "24px",
+        "padding-top": "18px",
+        "padding-right": "18px",
+        "padding-bottom": "22px",
+        "padding-left": "18px",
+        "color": "rgb(228, 233, 243)"
+      },
+      "chip": {
+        "height": "30px",
+        "border-radius": "8px",
+        "background-color": "rgb(20, 25, 36)",
+        "color": "rgb(174, 179, 189)",
+        "font-size": "12.5px",
+        "padding-left": "10px"
+      },
+      "chipIcon": {
+        "color": "rgb(134, 139, 149)",
+        "width": "13px"
+      },
+      "lastUsed": {
+        "color": "rgb(134, 139, 149)"
+      },
+      "clip": {
+        "color": "rgb(134, 139, 149)"
+      },
+      "start": {
+        "height": "32px",
+        "border-radius": "9px",
+        "background-color": "rgb(228, 233, 243)",
+        "color": "rgb(11, 16, 27)",
+        "font-weight": "600",
+        "font-size": "12.5px"
+      },
+      "strip": {
+        "font-size": "12.5px",
+        "color": "rgb(134, 139, 149)",
+        "gap": "18px"
+      },
+      "step1": {
+        "background-color": "rgb(26, 36, 53)",
+        "color": "rgb(138, 186, 247)",
+        "font-weight": "700",
+        "border-radius": "50%"
+      },
+      "step2": {
+        "background-color": "rgb(20, 25, 36)"
+      }
+    },
+    "tokens": {
+      "ink": "rgb(228, 233, 243)",
+      "ink2": "rgb(211, 216, 226)",
+      "ink3": "rgb(174, 179, 189)",
+      "ink4": "rgb(134, 139, 149)",
+      "paper": "rgb(11, 16, 27)",
+      "canvas": "rgb(7, 10, 18)",
+      "rule": "rgb(50, 55, 66)",
+      "fill1": "rgb(20, 25, 36)",
+      "fill3": "rgb(31, 36, 46)",
+      "focus": "rgb(75, 92, 117)",
+      "planBg": "rgb(26, 36, 53)",
+      "planFg": "rgb(138, 186, 247)"
+    },
+    "narrowModelChip": {
+      "chip": 198.234375,
+      "line": [
+        464.9375,
+        605.171875,
+        158,
+        140
+      ],
+      "name": [
+        464.9375,
+        555.765625
+      ],
+      "last": 562.765625
+    }
+  },
+  "contrast": {
+    "aurora": {
+      "checked": 29,
+      "min": "5.14",
+      "short": []
+    },
+    "basic": {
+      "checked": 29,
+      "min": "4.83",
+      "short": []
+    },
+    "studio": {
+      "checked": 29,
+      "min": "5.23",
+      "short": []
+    }
+  },
+  "errors": [],
+  "limitations": [
+    "Headless Chrome component fixture; not WKWebView, not the live app shell (the stage lane renders the real stage).",
+    "Services, model catalog and readiness are synthetic. The model chip reads the fixture's catalog entry \"Opus 4.5\" to mirror the board's copy; the app reads the live catalog.",
+    "The headline is --font-serif, which resolves to the system serif here, not the board's Source Serif 4: its size, weight and line box are matched, its glyphs are not."
+  ],
+  "fixtureUrl": "http://127.0.0.1:5175/fixtures/flow-start-qa/",
+  "finishedAt": "2026-10-18T09:14:21.135Z",
+  "passed": true
+}

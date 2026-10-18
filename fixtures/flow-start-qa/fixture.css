@@ -1,0 +1,12 @@
+/* The stand-in shell around the start screen, at board 4a's rendered
+   geometry: the board's 232px sidebar and 46px top bar are content boxes, so
+   they paint 253px (10px padding each side and a hairline) and 47px (a
+   hairline under). Blank: only their edges matter to where the stage — and
+   the door centred in it — lands. */
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--color-canvas); color: var(--color-ink); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+#root { display: flex; flex-direction: column; }
+.qa-topbar { box-sizing: content-box; background: var(--color-canvas); flex: none; height: 46px; border-bottom: 1px solid var(--color-rule); }
+.qa-body { flex: 1; min-height: 0; display: flex; }
+.qa-sidebar { box-sizing: content-box; background: var(--color-canvas); flex: none; width: 232px; padding: 12px 10px; border-right: 1px solid var(--color-rule); }
+.qa-stage { flex: 1; min-width: 0; background: var(--color-canvas); }
