@@ -8426,12 +8426,29 @@ function App() {
       : [],
     [pendingLaunch],
   );
+  // What only the flow sidebar reads. The classic sidebar gets none of it,
+  // so a chats refresh or the door opening never re-renders it.
+  const flowSidebarData = isFlowShell()
+    ? {
+        layout: "flow" as const,
+        onNewSession: openFrontDoor,
+        startActive: frontDoorOpen && !roomChat,
+        chats,
+        activeChatId: roomChat ? chatId : null,
+        launches: flowLaunches,
+      }
+    : null;
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
   // every shell render.
   const sidebarHandlers = useStableHandlers({
-    onSelect: setActiveId,
+    // Flow: a row puts its session on the stage, so the start screen gives
+    // way (as a door recent does).
+    onSelect: (id: string) => {
+      if (isFlowShell()) setFrontDoorOpen(false);
+      setActiveId(id);
+    },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
     onCombine: (ids: string[]) => void beginCombine(ids),
     onDelete: deleteSession,
@@ -8717,12 +8734,7 @@ function App() {
             <SessionSidebar
               {...sidebarHandlers}
               {...flowSidebarHandlers}
-              layout={isFlowShell() ? "flow" : "classic"}
-              onNewSession={openFrontDoor}
-              startActive={frontDoorOpen && !roomChat}
-              chats={chats}
-              activeChatId={roomChat ? chatId : null}
-              launches={flowLaunches}
+              {...flowSidebarData}
               sessions={summaries}
               activeId={activeId}
               pendingCounts={pendingPerSession}

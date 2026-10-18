@@ -82,6 +82,9 @@ export interface SidebarSection {
   rows: SidebarItem[];
   /** Rows folded behind "Show N more". */
   hidden: number;
+  /** More rows than the section shows at rest, so it can fold back once
+   *  opened ("Show less"). */
+  foldable: boolean;
 }
 
 export interface SidebarModel {
@@ -219,7 +222,7 @@ function fold(
 ): SidebarSection {
   const limit = input.expanded?.has(id) ? Infinity : SECTION_LIMIT[kind];
   const visible = rows.filter((row, index) => index < limit || row.key === input.activeKey);
-  return { id, kind, label, projectPath, rows: visible, hidden: rows.length - visible.length };
+  return { id, kind, label, projectPath, rows: visible, hidden: rows.length - visible.length, foldable: rows.length > SECTION_LIMIT[kind] };
 }
 
 /** Project groups, the most recently active folder first. A group is named

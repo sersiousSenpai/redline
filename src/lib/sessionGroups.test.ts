@@ -144,8 +144,11 @@ describe("Show N more", () => {
     expect(shape({ sessions, activeKey: "plan:p6" })).toEqual([["din", ["plan:p0", "plan:p1", "plan:p2", "plan:p3", "plan:p4", "plan:p6"], 2]]);
   });
 
-  it("an expanded section shows everything", () => {
-    expect(shape({ sessions, expanded: new Set(["project:/code/din"]) })[0][2]).toBe(0);
+  it("an expanded section shows everything, and can fold back only while it has more than its limit", () => {
+    const [open] = buildSidebar({ sessions, expanded: new Set(["project:/code/din"]) }).sections;
+    expect([open.rows.length, open.hidden, open.foldable]).toEqual([8, 0, true]);
+    const [few] = buildSidebar({ sessions: sessions.slice(0, 5), expanded: new Set(["project:/code/din"]) }).sections;
+    expect(few.foldable).toBe(false);
   });
 
   it("never folds Needs you or Building", () => {

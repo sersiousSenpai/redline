@@ -11,7 +11,7 @@
 //! shell never loads it. Every row has a ⋯ (also right-click, and ⌫ to
 //! delete), always visible: faint at rest, full under the pointer.
 
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, FilePenLine, FileText, Loader, MessageSquare, Plus } from "lucide-react";
 import type { SessionSidebarProps } from "../components/SessionSidebar";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "../components/RowMenu";
@@ -53,15 +53,16 @@ export default function FlowSidebar(props: SessionSidebarProps) {
   // The start screen owns the stage when nothing is open; while it shows, no
   // row reads as open even if a plan is still selected underneath.
   const startActive = props.startActive ?? (activeId === null && !activeChatId && !activeLaunchId);
-  const activeKey = startActive
-    ? null
-    : activeLaunchId
-      ? itemKey("launch", activeLaunchId)
-      : activeChatId
-        ? itemKey("chat", activeChatId)
-        : activeId
-          ? itemKey("plan", activeId)
-          : null;
+  // A launch whose plan has arrived is that plan's row now (sessionGroups),
+  // so the open launch is the open plan until the host catches up.
+  const landed = activeLaunchId ? sessions.find((s) => s.heldTerminalId === activeLaunchId) : undefined;
+  const activeKey = (() => {
+    if (startActive) return null;
+    if (landed) return itemKey("plan", landed.sessionId);
+    if (activeLaunchId) return itemKey("launch", activeLaunchId);
+    if (activeChatId) return itemKey("chat", activeChatId);
+    return activeId ? itemKey("plan", activeId) : null;
+  })();
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [archivedOpen, setArchivedOpen] = useState(false);
   const model = useMemo(
@@ -120,11 +121,12 @@ export default function FlowSidebar(props: SessionSidebarProps) {
           className="rl-fs-new"
           data-filled={startActive || undefined}
           aria-current={startActive ? "page" : undefined}
+          aria-keyshortcuts="Meta+N"
           onClick={() => onNewSession?.()}
         >
           <Plus size={14} aria-hidden />
           New session
-          <kbd aria-label="Command N">⌘N</kbd>
+          <kbd aria-hidden>⌘N</kbd>
         </button>
       </div>
       <div className="rl-fs-scroll rl-thin-scroll-y">
@@ -155,22 +157,23 @@ function Section({ section, open, onToggle, onAdd, children }: {
   onAdd?: (projectPath: string) => void;
   children: ReactNode;
 }) {
-  const labelId = `rl-fs-${section.id}`;
+  const labelId = useId();
+  const folder = section.projectPath;
   return (
     <section className="rl-fs-section" aria-labelledby={labelId}>
       <div className="rl-fs-label">
         <span id={labelId}>{section.label}</span>
         {/* A project's own "+": the start screen, pointed at this folder.
             Always there, as faint as the label it sits on. */}
-        {onAdd && section.projectPath && (
-          <button type="button" className="rl-fs-add" aria-label={`New session in ${section.label}`} title={`New session in ${section.projectPath}`}
-            onClick={() => onAdd(section.projectPath!)}>
+        {onAdd && folder && (
+          <button type="button" className="rl-fs-add" aria-label={`New session in ${section.label}`} title={`New session in ${folder}`}
+            onClick={() => onAdd(folder)}>
             <Plus size={12} aria-hidden />
           </button>
         )}
       </div>
       <ul className="rl-fs-rows">{children}</ul>
-      {(section.hidden > 0 || open) && (
+      {(section.hidden > 0 || (open && section.foldable)) && (
         <button type="button" className="rl-fs-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
           {open ? "Show less" : `Show ${section.hidden} more`}
         </button>
@@ -247,8 +250,10 @@ function FlowRowBase({ item, active, viewedVersionNumber, handlers, can }: {
       data-menu={menuOpen || undefined}
       data-need={item.need ? "" : undefined}
       onContextMenu={(e) => {
+        // The rename field keeps the system's own menu (paste).
+        if (renaming || confirming) return;
         e.preventDefault();
-        if (!renaming && !confirming) openMenu({ x: e.clientX, y: e.clientY });
+        openMenu({ x: e.clientX, y: e.clientY });
       }}
     >
       {renaming ? (
