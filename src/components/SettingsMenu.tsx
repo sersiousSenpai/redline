@@ -3,6 +3,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { warmableChunk } from "../lib/warmableChunk";
+import { useStageDim } from "../shell/stageDim";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Button } from "./ui/Button";
@@ -38,6 +39,8 @@ interface SettingsMenuProps {
   font: ReactNode;
   terminal?: ReactNode;
   transparency?: ReactNode;
+  /** Shell — classic or flow (beta); switching reloads the window. */
+  shell?: ReactNode;
   lint: ReactNode;
   /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
   agents: ReactNode;
@@ -48,6 +51,10 @@ interface SettingsMenuProps {
   notifications: ReactNode;
   /** Opens the shared integration-hook modal after closing this menu. */
   onOpenIntegrationHooks?: () => void;
+  /** The flow top bar's bare gear: the glyph alone, styled by
+   *  `triggerClassName`, instead of the classic "⚙ Settings ▾" button. */
+  compact?: boolean;
+  triggerClassName?: string;
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -78,18 +85,24 @@ export function SettingsMenu({
   font,
   terminal,
   transparency,
+  shell,
   lint,
   agents,
   surfaces,
   extensions,
   notifications,
   onOpenIntegrationHooks,
+  compact = false,
+  triggerClassName,
 }: SettingsMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
+  // The flow stage steps back behind it, like every top-bar menu (board 4d);
+  // nothing in the classic shell.
+  useStageDim(open);
 
   useEffect(() => {
     if (!open) return;
@@ -122,10 +135,11 @@ export function SettingsMenu({
         onPointerEnter={warmRows}
         onFocus={warmRows}
         title="Settings — mode, theme, font, notifications"
+        aria-label={compact ? "Settings" : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1.5 px-2 py-1 font-sans"
-        style={{
+        className={compact ? triggerClassName : "flex items-center gap-1.5 px-2 py-1 font-sans"}
+        style={compact ? undefined : {
           fontSize: "var(--rl-text-xs)",
           lineHeight: 0,
           borderRadius: "var(--rl-radius-control)",
@@ -137,8 +151,8 @@ export function SettingsMenu({
       >
         {/* Gear (inherits currentColor). */}
         <svg
-          width="14"
-          height="14"
+          width={compact ? 15 : 14}
+          height={compact ? 15 : 14}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -150,12 +164,14 @@ export function SettingsMenu({
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
+        {!compact && <>
         <span style={{ fontWeight: 600, fontSize: "var(--rl-text-xs)" }}>
           Settings
         </span>
         <span style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}>
           ▾
         </span>
+        </>}
       </button>
 
       {open && (
@@ -176,6 +192,7 @@ export function SettingsMenu({
             <Row label="Font">{font}</Row>
             {terminal && <Row label="Terminal">{terminal}</Row>}
             {transparency && <Row label="Transparency">{transparency}</Row>}
+            {shell && <Row label="Shell">{shell}</Row>}
             <Row label="Linting">{lint}</Row>
             <Row label="Agent Seats">{agents}</Row>
             <Row label="Surfaces">{surfaces}</Row>

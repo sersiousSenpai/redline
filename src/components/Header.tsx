@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { lazy, Suspense, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
@@ -12,7 +12,7 @@ import type { LintName } from "../theme/lint";
 import { DownloadMenu } from "./DownloadMenu";
 import { MemoryStatusPill } from "./MemoryStatusPill";
 import { LiveSessionMenu } from "./LiveSessionMenu";
-import { SettingsMenu, settingsRow } from "./SettingsMenu";
+import { SettingsGear } from "./SettingsGear";
 import { Button } from "./ui/Button";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Pill } from "./ui/Pill";
@@ -20,27 +20,8 @@ import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
 
-// Settings BODIES, not the settings trigger. The gear stays in the static
-// header — it has to, it is chrome — but the panels behind it are two of the
-// heaviest components in the app (the seat chart's model/effort matrix, the
-// extension marketplace) and they are behind a click that most launches never
-// make. `SettingsMenu` only mounts its rows while the menu is open, so `lazy`
-// here means the chunk is fetched on the first open and never on boot.
-const AgentSeats = lazy(() =>
-  import("./AgentSeats").then((m) => ({ default: m.AgentSeats })),
-);
-const ExtensionsPanel = lazy(() =>
-  import("./ExtensionsPanel").then((m) => ({ default: m.ExtensionsPanel })),
-);
-// The lighter rows (mode, theme, font, linting, notifications) share one
-// chunk, warmed as the pointer reaches the gear.
-const ModeToggle = settingsRow("ModeToggle");
-const ThemePicker = settingsRow("ThemePicker");
-const FontPicker = settingsRow("FontPicker");
-const TerminalSettings = settingsRow("TerminalSettings");
-const TransparencySettings = settingsRow("TransparencySettings");
-const LintPicker = settingsRow("LintPicker");
-const AlertSettings = settingsRow("AlertSettings");
+// The gear and its rows (lazy bodies, one warmed rows chunk) live in
+// SettingsGear, which the flow shell's top bar mounts too.
 
 // Programmatic window-drag (there is no native title bar — see windowDrag.ts).
 // Lives in lib/ because the immersive hull rail stands in for this header and
@@ -413,39 +394,27 @@ export function Header({
             onOpenInspector={onOpenMemoryInspector}
           />
         )}
-        <SettingsMenu
-          terminal={<TerminalSettings />}
-          transparency={<TransparencySettings />}
+        <SettingsGear
           onOpenIntegrationHooks={onOpenIntegrationHooks}
-          mode={<ModeToggle mode={mode} onChange={onModeChange} />}
-          theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
-          font={<FontPicker font={font} onFontChange={onFontChange} />}
-          lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
-          agents={
-            <Suspense fallback={null}>
-              <AgentSeats />
-            </Suspense>
-          }
-          surfaces={surfacesPanel}
-          extensions={
-            <Suspense fallback={null}>
-              <ExtensionsPanel />
-            </Suspense>
-          }
-          notifications={
-            <AlertSettings
-              enabled={flashEnabled}
-              onEnabledChange={onFlashEnabledChange}
-              color={flashColor}
-              onColorChange={onFlashColorChange}
-              sound={flashSound}
-              onSoundChange={onFlashSoundChange}
-              soundConfig={flashSoundConfig}
-              onSoundConfigChange={onFlashSoundConfigChange}
-              onSoundPreview={onFlashSoundPreview}
-              onTest={onFlashTest}
-            />
-          }
+          mode={mode}
+          onModeChange={onModeChange}
+          theme={theme}
+          onThemeChange={onThemeChange}
+          font={font}
+          onFontChange={onFontChange}
+          lint={lint}
+          onLintChange={onLintChange}
+          flashEnabled={flashEnabled}
+          onFlashEnabledChange={onFlashEnabledChange}
+          flashColor={flashColor}
+          onFlashColorChange={onFlashColorChange}
+          flashSound={flashSound}
+          onFlashSoundChange={onFlashSoundChange}
+          flashSoundConfig={flashSoundConfig}
+          onFlashSoundConfigChange={onFlashSoundConfigChange}
+          onFlashSoundPreview={onFlashSoundPreview}
+          onFlashTest={onFlashTest}
+          surfacesPanel={surfacesPanel}
         />
         {session && downloadVersion !== undefined && (
           <DownloadMenu

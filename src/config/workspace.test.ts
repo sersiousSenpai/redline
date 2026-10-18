@@ -21,7 +21,10 @@ import {
   MAIN_SURFACE_DESCRIPTORS,
   SURFACE_LABELS,
   TOGGLEABLE_SURFACES,
+  TOOL_DESCRIPTORS,
   WORKSPACE_CACHE_KEY,
+  toolForKey,
+  toolSurfaces,
 } from "./workspace";
 import { canonicalLayout } from "../lib/paneLayout";
 
@@ -453,5 +456,53 @@ describe("the paint cache — the manifest's first-frame mirror", () => {
     const s = storage({ [WORKSPACE_CACHE_KEY]: "not json" });
     // parseWorkspace's leniency applies: bad text = default manifest.
     expect(readWorkspaceCache(s)).toEqual(defaultWorkspace());
+  });
+});
+
+describe("toolSurfaces — the flow shell's Tools menu", () => {
+  it("pins the Tools rows of an untouched install (board 4d)", () => {
+    expect(
+      toolSurfaces(defaultWorkspace()).map((d) => [d.id, d.label, d.key ?? null, d.section]),
+    ).toEqual([
+      ["browser", "Browser", 1, "surfaces"],
+      ["drafter", "Prompt drafter", 2, "surfaces"],
+      ["review", "Code review", 3, "surfaces"],
+      ["servers", "Localhost", 4, "surfaces"],
+      ["runs", "Runs", null, "surfaces"],
+      ["memory", "Memory", null, "more"],
+      ["terminals", "Terminals", null, "more"],
+    ]);
+    // An empty manifest object is the same install.
+    expect(toolSurfaces({})).toEqual(toolSurfaces(defaultWorkspace()));
+  });
+
+  it("hides a row the manifest switches off; the terminal wall is not a surface", () => {
+    let ws = setSurfaceEnabled(defaultWorkspace(), "browser", false);
+    ws = setSurfaceEnabled(ws, "memory", false);
+    const ids = toolSurfaces(ws).map((d) => d.id);
+    expect(ids).toEqual(["drafter", "review", "servers", "runs", "terminals"]);
+  });
+
+  it("keeps its own order whatever the header order says", () => {
+    const ws = moveHeaderSurface(defaultWorkspace(), "servers", -1);
+    expect(headerSurfaces(ws).map((d) => d.id)).not.toEqual(headerSurfaces(defaultWorkspace()).map((d) => d.id));
+    expect(toolSurfaces(ws).map((d) => d.id)).toEqual(TOOL_DESCRIPTORS.map((d) => d.id));
+  });
+
+  it("binds ⌘1–⌘4 to tools, not rows", () => {
+    const ws = defaultWorkspace();
+    expect([1, 2, 3, 4].map((n) => toolForKey(ws, n))).toEqual(["browser", "drafter", "review", "servers"]);
+    // Browser off: ⌘1 does nothing and ⌘2 is still the drafter.
+    const off = setSurfaceEnabled(ws, "browser", false);
+    expect(toolForKey(off, 1)).toBeNull();
+    expect(toolForKey(off, 2)).toBe("drafter");
+    expect(toolForKey(ws, 5)).toBeNull();
+  });
+
+  it("leaves the classic header's composition alone", () => {
+    // headerSurfaces is the classic shell's; the Tools menu is additive.
+    expect(headerSurfaces(defaultWorkspace()).map((d) => d.id)).toEqual(
+      MAIN_SURFACE_DESCRIPTORS.map((d) => d.id),
+    );
   });
 });

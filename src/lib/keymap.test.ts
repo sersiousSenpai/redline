@@ -11,9 +11,16 @@ import {
   isFrontDoorKey,
   isNeedsYouKey,
   isNewPlanKey,
+  isNewSessionKey,
   isPaletteKey,
+  isPlanPanelKey,
+  isSidebarKey,
   isSnapBackKey,
+  isStageKey,
+  FLOW_KEYMAP,
+  shellKeymap,
   shownKeymap,
+  toolKeyOf,
   tourShortcuts,
 } from "./keymap";
 
@@ -214,5 +221,60 @@ describe("renderings", () => {
       "Review",
     ]);
     for (const g of REVIEW_KEYMAP) expect(g.items.length).toBeGreaterThan(0);
+  });
+});
+
+describe("the flow shell's keys (deviation 5)", () => {
+  it("⌘J, ⌘B, ⌘⌥B, ⌘N and ⌘1–4 match on ⌘ alone", () => {
+    expect(isStageKey(combo({ key: "j", code: "KeyJ", metaKey: true }))).toBe(true);
+    expect(isSidebarKey(combo({ key: "b", code: "KeyB", metaKey: true }))).toBe(true);
+    // ⌥ rewrites e.key on a Mac: the plan panel matches on the physical key.
+    expect(isPlanPanelKey(combo({ key: "∫", code: "KeyB", metaKey: true, altKey: true }))).toBe(true);
+    expect(isNewSessionKey(combo({ key: "n", code: "KeyN", metaKey: true }))).toBe(true);
+    expect([1, 2, 3, 4].map((n) => toolKeyOf(combo({ key: String(n), code: `Digit${n}`, metaKey: true })))).toEqual([1, 2, 3, 4]);
+  });
+
+  it("never takes a Ctrl chord — in a terminal Ctrl+J is a newline and Ctrl+B is back-a-char", () => {
+    expect(isStageKey(combo({ key: "j", ctrlKey: true }))).toBe(false);
+    expect(isSidebarKey(combo({ key: "b", ctrlKey: true }))).toBe(false);
+    expect(isPlanPanelKey(combo({ code: "KeyB", ctrlKey: true, altKey: true }))).toBe(false);
+    expect(isNewSessionKey(combo({ key: "n", ctrlKey: true }))).toBe(false);
+    expect(toolKeyOf(combo({ key: "1", ctrlKey: true }))).toBeNull();
+    // ⌘ and Ctrl together is neither.
+    expect(isStageKey(combo({ key: "j", metaKey: true, ctrlKey: true }))).toBe(false);
+  });
+
+  it("keeps the neighbouring chords apart", () => {
+    // ⌘⇧J is the needs-you jump; ⌘⇧N the old new-plan alias.
+    expect(isStageKey(combo({ key: "J", code: "KeyJ", metaKey: true, shiftKey: true }))).toBe(false);
+    expect(isNewSessionKey(combo({ key: "N", code: "KeyN", metaKey: true, shiftKey: true }))).toBe(false);
+    expect(isNewPlanKey(combo({ key: "N", code: "KeyN", metaKey: true, shiftKey: true }))).toBe(true);
+    // ⌘B and ⌘⌥B never both.
+    const plain = combo({ key: "b", code: "KeyB", metaKey: true });
+    const alt = combo({ key: "∫", code: "KeyB", metaKey: true, altKey: true });
+    expect([isSidebarKey(plain), isPlanPanelKey(plain)]).toEqual([true, false]);
+    expect([isSidebarKey(alt), isPlanPanelKey(alt)]).toEqual([false, true]);
+    expect(toolKeyOf(combo({ key: "5", metaKey: true }))).toBeNull();
+    expect(toolKeyOf(combo({ key: "1", metaKey: true, shiftKey: true }))).toBeNull();
+  });
+
+  it("the flow registry swaps the replaced chords for its own and loses nothing else", () => {
+    const ids = FLOW_KEYMAP.map((b) => b.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ["new-session", "stage", "tools", "sidebar", "plan-panel"]) expect(ids).toContain(id);
+    for (const id of ["dock", "new-plan", "pane-sidebar"]) expect(ids).not.toContain(id);
+    const kept = GLOBAL_KEYMAP.filter((b) => !["dock", "new-plan", "pane-sidebar"].includes(b.id)).map((b) => b.id);
+    expect(ids.filter((id) => kept.includes(id)).sort()).toEqual([...kept].sort());
+    expect(FLOW_KEYMAP.find((b) => b.id === "stage")?.keys).toEqual(["⌘", "J"]);
+    expect(FLOW_KEYMAP.find((b) => b.id === "plan-panel")?.keys).toEqual(["⌘", "⌥", "B"]);
+  });
+
+  it("the classic shell keeps its registry exactly", () => {
+    expect(shellKeymap("classic")).toBe(GLOBAL_KEYMAP);
+    expect(shellKeymap("flow")).toBe(FLOW_KEYMAP);
+    // Tests paint classic: nothing flow-only is shown or hinted.
+    expect(shownKeymap().map((b) => b.id)).not.toContain("stage");
+    expect(bindingKeys("dock")).toEqual(["⌘", "J"]);
+    expect(bindingKeys("stage")).toBeUndefined();
   });
 });

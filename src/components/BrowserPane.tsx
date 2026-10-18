@@ -1508,6 +1508,8 @@ function BrowserPaneBase({
       else if (event.kind === "shortcut" && tileIdsRef.current.includes(tab.id) && visibleRef.current) {
         if (event.value === "location") focusAddressRef.current();
         else if (event.value === "toggle-monochat") window.dispatchEvent(new Event("redline:toggle-monochat"));
+        // The flow shell's ⌘B / ⌘⌥B; nothing listens in the classic shell.
+        else if (event.value === "toggle-sidebar" || event.value === "toggle-plan-panel") window.dispatchEvent(new Event(`redline:${event.value}`));
         else if (event.value === "open-front-door") window.dispatchEvent(new Event("redline:open-front-door"));
         else if (event.value === "exit-focus") { if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" }); else { restoreTilesRef.current(); } }
         else if (event.value === "toggle-video-screen") {

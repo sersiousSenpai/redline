@@ -133,6 +133,11 @@ interface TerminalTabsProps {
   /** How many terminals need you (needs-you, or an unread your-turn) —
    *  the footer's "N need you" chip and the ⌘⇧J gate. */
   onNeedsYouChange?: (count: number) => void;
+  /** The terminals whose state is needs-you proper (an agent blocked on a
+   *  question or a permission; an unread your-turn is not one), oldest
+   *  first. The flow top bar's "N needs you" counts these, less the
+   *  session on screen. Called only when the set changes. */
+  onNeedsYouIdsChange?: (ids: string[]) => void;
   /** Dock is fully collapsed (no tile is really visible). */
   collapsed: boolean;
   /** Notified whenever the focused terminal changes. The host (App) uses this
@@ -328,6 +333,7 @@ export const TerminalTabs = memo(
       onTabIdsChange,
       onTileCountChange,
       onNeedsYouChange,
+      onNeedsYouIdsChange,
       collapsed,
       onActiveTabChange,
       onFocusedCwd,
@@ -995,6 +1001,12 @@ export const TerminalTabs = memo(
   useEffect(() => {
     onNeedsYouChange?.(loudTerminals.length);
   }, [loudTerminals.length, onNeedsYouChange]);
+  // Keyed by the ids themselves, so a repaint that moved no terminal in or
+  // out of needs-you never reaches the host.
+  const needsYouKey = loudTerminals.filter((t) => t.state === "needs-you").map((t) => t.id).join("\n");
+  useEffect(() => {
+    onNeedsYouIdsChange?.(needsYouKey ? needsYouKey.split("\n") : []);
+  }, [needsYouKey, onNeedsYouIdsChange]);
   useAttentionAlerts(loudTerminals, collapsed, attentionReady);
 
   // A your-turn is READ once its tile has been on screen and focused, in a

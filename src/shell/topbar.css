@@ -1,0 +1,316 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+
+/* The flow shell's top bar (shell/FlowTopBar.tsx) and its Tools menu
+   (shell/ToolsMenu.tsx), measured off the design boards 4a–4d and 5a. The
+   boards render their boxes content-box, so a "24px" outlined button there is
+   26px tall with its border, and the 250px Tools menu is 264px wide with its
+   padding; these rules size for what the boards draw. Colours are role tokens
+   only (derive.ts); the brand mark is the app icon's own red, the same in
+   every theme. */
+
+:root {
+  --rl-brand-mark: #e5342b;
+  --rl-brand-mark-ink: #fff;
+}
+
+.rl-ftb {
+  /* 46px of bar and its 1px hairline. */
+  height: 47px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-right: 16px;
+  border-bottom: 1px solid var(--color-rule);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: var(--rl-text-chrome);
+  white-space: nowrap;
+  min-width: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.rl-ftb button {
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+.rl-ftb button:focus-visible,
+.rl-tools-menu button:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 1px;
+}
+
+/* A bare glyph (the sidebar toggle, the gear) at the board's position, its
+   hit area grown into the gaps around it by negative margins so nothing
+   moves. */
+.rl-ftb .rl-ftb-icon {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 0 -4.5px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-4);
+  line-height: 0;
+}
+.rl-ftb .rl-ftb-icon:hover,
+.rl-ftb .rl-ftb-icon[aria-expanded="true"] {
+  background: var(--color-fill-1);
+  color: var(--color-ink-2);
+}
+
+.rl-ftb-brand {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.rl-ftb-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: var(--rl-brand-mark);
+  color: var(--rl-brand-mark-ink);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rl-ftb-divider {
+  flex: none;
+  color: var(--color-rule-strong);
+}
+
+.rl-ftb-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-ink);
+}
+.rl-ftb-title[data-empty] {
+  color: var(--color-ink-4);
+}
+/* On a Tools surface the title is the way back to the session. */
+.rl-ftb button.rl-ftb-title:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* The mode chip: Plan mode, Redlining, Building vN, Chat. A solid tint, not
+   glass: it sits on the opaque bar, where glass would show nothing, and the
+   reduced-transparency rule would trade its mode colour for the plain
+   elevated fill. */
+.rl-ftb-mode {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--rl-radius-chip);
+  font-size: var(--rl-text-chip);
+  font-weight: 600;
+}
+
+.rl-ftb .rl-ftb-show-plan {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--rl-radius-chip);
+  color: var(--color-ink-3);
+  font-size: var(--rl-text-chip);
+}
+.rl-ftb .rl-ftb-show-plan:hover {
+  background: var(--color-fill-1);
+  color: var(--color-ink-2);
+}
+
+.rl-ftb-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+  align-self: stretch;
+}
+
+.rl-ftb .rl-ftb-needs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--rl-radius-row);
+  background: var(--color-mode-redline-bg);
+  color: var(--color-mode-redline-fg);
+}
+.rl-ftb .rl-ftb-needs:hover {
+  background: color-mix(in srgb, var(--color-mode-redline-fg) 10%, var(--color-mode-redline-bg));
+}
+.rl-ftb-needs-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Conversation | Terminal: 22px segments in a 2px-padded track. */
+.rl-ftb-seg {
+  flex: none;
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--rl-radius-row);
+  font-size: var(--rl-text-chip);
+}
+.rl-ftb .rl-ftb-seg button {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: 5px;
+  color: var(--color-ink-4);
+}
+.rl-ftb .rl-ftb-seg button:hover {
+  color: var(--color-ink-2);
+}
+.rl-ftb .rl-ftb-seg button[aria-checked="true"] {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+
+/* Tools ▾. At rest the boards draw a bare label; open, an elevated box with a
+   chevron-up. The box is there at rest too, transparent, and drawn out into
+   the gaps by negative margins, so opening the menu changes its fill and
+   nothing moves. */
+.rl-ftb .rl-ftb-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  margin: 0 -10px;
+  border-radius: var(--rl-radius-row);
+  color: var(--color-ink-4);
+}
+.rl-ftb .rl-ftb-tools:hover {
+  background: var(--color-fill-1);
+  color: var(--color-ink-2);
+}
+.rl-ftb .rl-ftb-tools[aria-expanded="true"] {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+
+/* ---- The Tools menu (board 4d) ---- */
+.rl-tools-menu {
+  position: fixed;
+  z-index: 60;
+  width: 264px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-sans);
+  font-size: var(--rl-text-row);
+  color: var(--color-ink);
+  transform-origin: top right;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .rl-tools-menu {
+    animation: rl-tools-menu-in var(--rl-dur-2) var(--rl-ease-spring);
+  }
+}
+@keyframes rl-tools-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.97);
+  }
+}
+.rl-tools-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--rl-radius-menu-row);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rl-tools-menu button:hover,
+.rl-tools-menu button:focus-visible {
+  background: var(--color-fill-1);
+}
+.rl-tools-menu button[aria-current="true"] {
+  background: var(--color-fill-2);
+}
+.rl-tools-menu-icon {
+  flex: none;
+  color: var(--color-ink-4);
+}
+.rl-tools-menu-fill {
+  flex: 1;
+}
+.rl-tools-menu-key {
+  font-size: var(--rl-text-label);
+  color: var(--color-ink-5);
+}
+.rl-tools-menu-live {
+  font-size: var(--rl-text-label);
+  color: var(--color-mode-build-fg);
+}
+.rl-tools-menu-divider {
+  flex: none;
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--color-rule);
+}
+.rl-tools-menu .rl-tools-menu-muted {
+  color: var(--color-ink-3);
+}
+.rl-tools-menu-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: var(--color-mode-build-fg);
+}
+.rl-tools-menu-dot[data-broken] {
+  background: var(--color-mode-danger-fg);
+}
+
+/* ---- The stage steps back while a menu is open over it (board 4d) ----
+   The stage marks its container `.rl-flow-stage`; stageDim.ts stamps the
+   attribute while any top-bar or row menu is open. Opacity only. */
+html[data-rl-shell="flow"] .rl-flow-stage {
+  transition: opacity var(--rl-dur-2) var(--rl-ease-out);
+}
+html[data-rl-shell="flow"][data-rl-stage-dim] .rl-flow-stage {
+  opacity: 0.55;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-rl-shell="flow"] .rl-flow-stage {
+    transition: none;
+  }
+}

@@ -48,7 +48,7 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
             let selectors = payload.get("selectors")?.as_array()?;
             if selectors.len() > 8 || selectors.iter().any(|selector| selector.as_str().is_none_or(|s| s.len() > 4096)) { return None; }
         }
-        "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door"].contains(&value.get("value")?.as_str()?) { return None; } }
+        "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door", "toggle-sidebar", "toggle-plan-panel"].contains(&value.get("value")?.as_str()?) { return None; } }
         // The hold-to-dictate key, pressed in the page (browser_frontdoor_shortcut.js).
         "voice" => {
             let v = value.get("value")?.as_str()?;
@@ -219,6 +219,9 @@ mod tests {
         assert!(parse_signal(r#"{"kind":"focus","command":"read_file"}"#).unwrap().get("command").is_none());
         assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-monochat"}"#).is_some());
         assert!(parse_signal(r#"{"kind":"shortcut","value":"open-front-door"}"#).is_some());
+        // The flow shell's ⌘B and ⌘⌥B, told from the page.
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-sidebar"}"#).is_some());
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-plan-panel"}"#).is_some());
         assert!(!browser_label("main")); assert!(!browser_label("browser-"));
     }
 
@@ -230,6 +233,7 @@ mod tests {
         for raw in [
             r#"{"kind":"shortcut","value":"close-tab"}"#,
             r#"{"kind":"shortcut","value":"toggle-monochat"}"#,
+            r#"{"kind":"shortcut","value":"toggle-sidebar"}"#,
             r#"{"kind":"tabs","value":"https://example.org"}"#,
             r#"{"kind":"inspect","value":{"command":"read_file"}}"#,
             // A scroll, a key or focus inside an embed is not a press.
