@@ -52,6 +52,7 @@ mod extension;
 mod extension_host;
 mod extension_scaffold;
 mod feedback;
+mod flow_menu;
 mod fork;
 mod fsbrowse;
 mod fswatch;
@@ -12880,6 +12881,7 @@ pub fn run() {
             marketplace_index,
             marketplace_install,
             transparency::reduced_transparency,
+            flow_menu::set_flow_menu,
             list_sessions,
             get_session,
             export_revision_markdown,
@@ -14025,7 +14027,17 @@ pub fn run() {
                 "print_page" => {
                     let _ = app.emit("menu-print", ());
                 }
-                _ => {}
+                // The flow shell's ⌘N and ⌘1–⌘4 (flow_menu.rs), present only
+                // while the frontend paints that shell.
+                id => match flow_menu::event_for(id) {
+                    Some((event, Some(n))) => {
+                        let _ = app.emit(event, n);
+                    }
+                    Some((event, None)) => {
+                        let _ = app.emit(event, ());
+                    }
+                    None => {}
+                },
             });
 
             // Background update check on launch: the same comparison the menu

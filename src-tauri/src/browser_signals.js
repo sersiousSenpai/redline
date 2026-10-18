@@ -38,6 +38,15 @@
   document.addEventListener("keydown", (event) => {
     if (!event.isTrusted || event.target?.closest?.("[data-redline-selection]")) return;
     let value;
+    // The flow shell's ⌘B (sidebar) and ⌘⌥B (plan panel), matched on the
+    // physical key because ⌥ rewrites event.key. Told, never taken: the page
+    // keeps its own ⌘B (bold in a web editor, which is why an editable target
+    // is left out entirely), and the classic shell ignores the signal.
+    if (event.metaKey && !event.ctrlKey && !event.shiftKey && event.code === "KeyB") {
+      const t = event.target;
+      if (!(t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName || ""))) post({ kind: "shortcut", value: event.altKey ? "toggle-plan-panel" : "toggle-sidebar" });
+      return;
+    }
     if (event.key === "Escape" && !window.__redline_inspect_stop) value = "exit-focus";
     if (event.metaKey || event.ctrlKey) {
       const key = event.key.toLowerCase();

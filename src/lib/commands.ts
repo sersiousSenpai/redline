@@ -76,6 +76,8 @@ export interface PaletteSurfaceRef {
   id: string;
   label: string;
   title: string;
+  /** The flow shell's ⌘1–⌘4, for the Tools that have one. */
+  keys?: string[];
 }
 
 export interface PaletteSessionRef {
@@ -100,8 +102,13 @@ export interface PaletteConversationRef {
 }
 
 export interface CommandDeps {
+  /** The shell this page paints. The flow shell names a few commands in its
+   *  own words and hints its own chords (lib/keymap's FLOW_KEYMAP); absent
+   *  reads as classic. */
+  shell?: "classic" | "flow";
   /** From headerSurfaces(workspace) — manifest-hidden surfaces are already
-   *  absent, so the palette can't resurrect them by construction. */
+   *  absent, so the palette can't resurrect them by construction. (The flow
+   *  shell hands over its Tools instead, from toolSurfaces.) */
   surfaces: PaletteSurfaceRef[];
   currentSurface: string;
   sessions: PaletteSessionRef[];
@@ -135,8 +142,11 @@ export interface CommandDeps {
     navigateTo?: (t: NavTarget) => void;
     /** Open the dock on one of `conversations`. */
     openConversation?: (kind: string) => void;
-    /** ⌘J — show / hide the conversation column. */
+    /** ⌘J — show / hide the conversation column (flow: the stage's
+     *  Conversation | Terminal). */
     toggleDock?: () => void;
+    /** Flow's ⌘⌥B — the plan panel, closed or beside the conversation. */
+    togglePlanPanel?: () => void;
     /** Come back to a chat by id (it opens in the dock). */
     openChat?: (id: string) => void;
     snapBack: () => void;
@@ -163,17 +173,21 @@ export interface CommandDeps {
  *  never free-typed. */
 export function buildCommands(deps: CommandDeps): PaletteCommand[] {
   const { actions } = deps;
+  const shell = deps.shell ?? "classic";
+  const flow = shell === "flow";
+  const keysFor = (id: string) => bindingKeys(id, shell);
   const commands: PaletteCommand[] = [];
 
   // One name for one place. The sidebar row, the divider pill and this entry
   // are three affordances for the same door, and three different labels for it
-  // read as three different features.
+  // read as three different features. In the flow shell that place is the
+  // New-session screen, under the sidebar's own "+ New session ⌘N".
   commands.push({
     id: "draft-new",
-    title: "Plan a build",
-    detail: "The front door",
+    title: flow ? "New session" : "Plan a build",
+    detail: flow ? "The start screen" : "The front door",
     group: "Plans",
-    keys: bindingKeys("new-plan"),
+    keys: keysFor(flow ? "new-session" : "new-plan"),
     run: actions.draftNewPlan,
   });
   for (const s of deps.sessions) {
@@ -194,6 +208,7 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       title: `Go to ${s.label}`,
       group: "Surfaces",
       detail: s.id === deps.currentSurface ? "showing now" : s.title,
+      keys: s.keys,
       run: () => actions.selectSurface(s.id),
     });
     // …and straight to a tab inside it. Two steps ("go to Memory", then find
@@ -215,9 +230,9 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
   if (actions.toggleDock) {
     commands.push({
       id: "toggle-dock",
-      title: "Show / hide the conversation",
+      title: flow ? "Switch between the conversation and the terminal" : "Show / hide the conversation",
       group: "Conversations",
-      keys: bindingKeys("dock"),
+      keys: keysFor(flow ? "stage" : "dock"),
       run: actions.toggleDock,
     });
   }
@@ -271,42 +286,51 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       id: "snap-back",
       title: "Snap the layout back",
       group: "Layout",
-      keys: bindingKeys("snap-back"),
+      keys: keysFor("snap-back"),
       run: actions.snapBack,
     },
     {
       id: "toggle-sidebar",
       title: "Show / hide the sidebar",
       group: "Layout",
-      keys: bindingKeys("pane-sidebar"),
+      keys: keysFor(flow ? "sidebar" : "pane-sidebar"),
       run: actions.toggleSidebar,
     },
+    ...(flow && actions.togglePlanPanel
+      ? [{
+          id: "toggle-plan-panel",
+          title: "Show / hide the plan",
+          group: "Layout",
+          keys: keysFor("plan-panel"),
+          run: actions.togglePlanPanel,
+        }]
+      : []),
     {
       id: "toggle-discussion",
       title: "Show / hide the discussion pane",
       group: "Layout",
-      keys: bindingKeys("pane-discussion"),
+      keys: keysFor("pane-discussion"),
       run: actions.toggleDiscussion,
     },
     {
       id: "toggle-terminal",
       title: "Show / hide the terminal",
       group: "Layout",
-      keys: bindingKeys("pane-terminal"),
+      keys: keysFor("pane-terminal"),
       run: actions.toggleTerminal,
     },
     {
       id: "toggle-immersive",
       title: "Show / hide the panels on this surface",
       group: "Layout",
-      keys: bindingKeys("immersive"),
+      keys: keysFor("immersive"),
       run: actions.toggleImmersive,
     },
     {
       id: "zoom-reset",
       title: "Reset the zoom",
       group: "Layout",
-      keys: bindingKeys("zoom-reset"),
+      keys: keysFor("zoom-reset"),
       run: actions.zoomReset,
     },
   );
