@@ -659,6 +659,43 @@ reports a missing artifact as a failure. `release.yml` builds per-arch DMGs on
 `v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
 Developer ID secrets land).
 
+### Flow shell (measured 2026-10-18)
+
+The Flow shell (the session-first redesign: sidebar, the conversation
+mirrored from the real CLI, the plan panel's poses, Tools, glass) ships
+**beside** classic behind the `redline.shell` flag, so for now the artifact
+carries both shells. Main was already at 99.8% of the dist ceiling, so it
+gets one raise, measured; the cutover (Wave D) deletes classic's surfaces
+and is where to ratchet it back down. Embedded builds
+(`cargo build --release --features tauri/custom-protocol`) for the binary;
+`npx vite build` and `node scripts/check-size.mjs` for the rest.
+
+| Artifact | Main (`445b74e`) | `integrate/flow` (`d610c1d`) | Delta | Ceiling |
+|---|---|---|---|---|
+| Release binary | 40,301,488 B | 40,782,624 B | +481,136 B (+1.19%) | 41,400,000 B (unchanged, 98.5%) |
+| Boot JS | 641,981 B | 658,668 B | +16,687 B | 660,000 B (unchanged, 99.8%) |
+| Dist total | 9,434,521 B | 9,657,381 B | +222,860 B (+2.36%) | 9,450,000 → **9,760,000 B** (98.9%) |
+
+Where the dist bytes went: 212,728 B are new lazy chunks, the largest the
+conversation (`SessionConversation` 43.0 kB + 13.4 kB CSS), the stage and
+its plan panel (`FlowStage` 37.5 kB + 19.1 kB CSS), the sidebar (16.2 kB)
+and xterm's `addon-unicode11` (12.6 kB: Unicode 11 widths in every
+terminal, so the CLI's wide glyphs line up). Some of that count is code moved out of existing
+chunks rather than added: the comment composer and draft update left
+`CommentCard` (−17.0 kB there), the send button's parts left
+`SendStopButton` (−12.6 kB), and classic's `Footer` became its own chunk.
+On the boot path, the entry chunk grew 15.7 kB (the flag, the flow store,
+App's stage wiring; every flow surface is lazy) and the global stylesheet
+15.0 kB (the glass tiers and the theme tokens both shells read).
+
+The binary's +481 kB is the conversation mirror (`convo/`: the transcript
+tail, the binding, the Codex app-server client) and the transparency
+observer. No new crates: the observer turns on two more `objc2-app-kit`
+features (`NSWorkspace`, `NSAccessibility`).
+
+Boot JS has 1,332 B left. As before, the next boot-path addition needs a
+lever, not a raise.
+
 ### Room for wave 2 (measured 2026-10-10)
 
 Wave 1 of the door and voice program left dist 24.7 KB over its ceiling,
