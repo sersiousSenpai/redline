@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* One quiet line (ContextHint.tsx): the muted ink at the chrome's size, cut
+   with an ellipsis instead of wrapping, so it gives way to the controls
+   beside it in a footer rather than pushing them. */
+.rl-context-hint {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0; margin: 0;
+  font-size: var(--rl-text-chrome); line-height: 1.4; color: var(--color-ink-4);
+  white-space: nowrap;
+}
+.rl-context-hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rl-context-hint-keys { flex: none; font: inherit; font-size: var(--rl-text-label); color: var(--color-ink-4); }
