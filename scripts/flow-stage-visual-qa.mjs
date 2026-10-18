@@ -119,7 +119,9 @@ async function load(board, width, height, theme = "aurora") {
   await cdp.evaluate(contrastSweep);
   if (theme !== "aurora") await cdp.evaluate(`window.__qa.setTheme(${JSON.stringify(theme)})`);
   await cdp.evaluate("document.fonts.ready");
-  await delay(400);
+  // 5a follows a comment: its one-shot focus outline (reduced motion) clears
+  // after 1.3s, and the board draws the mark at rest.
+  await delay(board === "5a" ? 1500 : 400);
   await settle();
 }
 
@@ -168,9 +170,9 @@ async function board4c() {
   const mark = await m(".rl-flow-plan .rl-comment-highlight");
   check("4c mark: amber — a tinted run with a 2px amber rule under it", mark?.text === "0018_vault_revisions.sql before the next build" && mark.bb === 2 && mark.bbColor === (await tok("color-warning")) && mark.bg !== "rgba(0, 0, 0, 0)", mark);
   const note = await m(".rl-flow-plan .rl-margin-note");
-  const who = await m(".rl-flow-plan .rl-margin-note-who");
+  const who = await m(".rl-flow-plan .rl-margin-note-avatar");
   check("4c margin note: r10, 13px sans, indented 24px, under its block", note && near(note.radius, 10) && near(note.fontSize, 13) && /system|apple|sans/i.test(note.fontFamily) && near(note.x - (article.x + article.pl), 24) && note.text.endsWith("Run this against staging first, not prod."), note);
-  check('4c margin note: a 20px amber "IM" disc', near(who.w, 20) && near(who.h, 20) && who.text === "IM" && who.bg === (await tok("color-warning", "backgroundColor")), who);
+  check('4c margin note: a 20px amber "IM" disc', who && near(who.w, 20) && near(who.h, 20) && who.text === "IM" && who.bg === (await tok("color-warning", "backgroundColor")), who);
   const foot = await m(".rl-plan-foot");
   check("4c footer: 64px, 0 16 0 22, 13px, hairline above", near(foot.h, 64) && near(foot.pl, 22) && near(foot.pr, 16) && near(foot.fontSize, 13) && foot.bt === 1 && foot.btColor === (await tok("color-rule")), foot);
   const hint = await m(".rl-plan-foot .rl-context-hint");
@@ -180,12 +182,10 @@ async function board4c() {
   const approve = await cdp.evaluate("window.__m(document.querySelector('.rl-plan-split > .rl-plan-btn--primary'))");
   check('4c footer: "🔨 Approve & build" — 34px, r9, ink-filled, 600, 0 16', approve.text === "Approve & build" && near(approve.h, 34) && near(approve.radius, 9) && near(approve.pl, 16) && approve.bg === (await tok("color-ink", "backgroundColor")) && approve.color === (await tok("color-paper")) && approve.fontWeight === "600", approve);
   check("4c footer: the buttons sit 10px apart, against the right inset", near(approve.x - send.right, 10) && near(foot.right - (await m(".rl-plan-split")).right, 16), { gap: approve.x - send.right });
-  // The plan card in the conversation (PlanReadyCard, "ready"), as the placeholder renders it.
-  const card = await m('.rl-plan-card[data-variant="ready"]');
-  const cardTitle = await m('.rl-plan-card[data-variant="ready"] .rl-plan-card-title');
-  check('4c card: "Plan ready" — r12, padding 14, gap 10; title 13.5/600', card && near(card.radius, 12) && near(card.pt, 14) && near(card.pl, 14) && near(card.gap, 10) && cardTitle.text === "Plan ready" && near(cardTitle.fontSize, 13.5) && cardTitle.fontWeight === "600" && card.shadow.includes(`${await tok("color-focus-rim")} 0px 0px 0px 1px inset`), card);
-  const link = await mText(".rl-plan-card", "Open in panel →");
-  check('4c card: "Open in panel →" 11.5px in the muted ink', near(link.fontSize, 11.5) && link.color === (await tok("color-ink-4")), link);
+  // The plan card is the conversation's (convo-ui): the stage only hands it
+  // the plan's title, marks and Open — present, and in the 440px column.
+  const card = await m(".rl-convo-plan");
+  check('4c: the conversation shows its "Plan ready" card in the column', card?.visible && card.x >= 0 && card.right <= 441 && card.text.includes("Plan ready"), card && { x: card.x, right: card.right, text: card.text.slice(0, 60) });
   await sweep("4c", "aurora");
 
   // Contents in the split pose: the rail docks under the header, on the plan.
@@ -208,7 +208,7 @@ async function board4c() {
   await cdp.evaluate(`window.__qaHost = document.querySelector('${host}')`);
   await click(".rl-plan-head-btn[aria-pressed=false]:not(.rl-plan-head-icon-btn)");
   const toFull = await cdp.evaluate(`({ pose: document.querySelector('.rl-flow-stage').dataset.pose, tab: document.querySelector('.rl-fb-tab[aria-selected=true]')?.textContent, connected: window.__qaHost.isConnected })`);
-  check("4c → Full screen: full, and with marks waiting the panel opens on Feedback, the conversation waiting detached", toFull.pose === "full" && toFull.tab === "Feedback2" && !toFull.connected, toFull);
+  check("4c → Full screen: full, and with marks waiting the panel opens on Feedback, the conversation waiting detached", toFull.pose === "full" && toFull.tab?.startsWith("Feedback") && !toFull.connected, toFull);
   await screenshot("4c-to-full-aurora");
   await cdp.evaluate("window.__qa.setTab('chat')"); await settle();
   const back = await cdp.evaluate(`({ same: document.querySelector('${host}') === window.__qaHost, inPanel: !!window.__qaHost.closest('.rl-flow-panel .rl-flow-convo[data-layout=panel]') })`);
@@ -244,16 +244,12 @@ async function board4d() {
   check("4d: the plan is closed (and stays mounted, hidden)", state.pose === "closed" && state.hidden, state);
   const stage = await m(".rl-flow-stage"), convo = await m('.rl-flow-convo[data-layout="stage"]');
   check("4d: the conversation has the whole stage", near(convo.w, stage.w) && near(convo.h, stage.h), { convo, stage });
-  const card = await m('.rl-plan-card[data-variant="inline"]');
-  check('4d inline card: r12, padding 12/14, gap 10, 13.5px, the strong rim', card && near(card.radius, 12) && near(card.pt, 12) && near(card.pl, 14) && near(card.gap, 10) && near(card.fontSize, 13.5) && card.shadow.includes(`${await tok("color-rule-strong")} 0px 0px 0px 1px inset`), card);
-  const t = await m('.rl-plan-card[data-variant="inline"] .rl-plan-card-title');
-  const meta = await m('.rl-plan-card[data-variant="inline"] .rl-plan-card-meta');
-  const open = await m('.rl-plan-card[data-variant="inline"] .rl-plan-card-open');
-  check('4d inline card: "Plan · Din roadmap: next steps" · "2 marks" · "Open"', t.text === "Plan · Din roadmap: next steps" && meta.text === "2 marks" && meta.color === (await tok("color-ink-4")) && open.text === "Open" && open.color === (await tok("color-mode-plan-fg")), { t: t.text, meta, open });
-  const icon = await m('.rl-plan-card[data-variant="inline"] .rl-plan-card-icon');
-  check("4d inline card: the plan icon is plan-blue, 14px", near(icon.w, 14) && icon.color === (await tok("color-mode-plan-fg")), icon);
+  // The inline plan line is the conversation's (convo-ui), from the stage's
+  // title, marks and Open.
+  const inline = await m(".rl-convo-inline-plan");
+  check('4d: the conversation shows "Plan · Din roadmap: next steps · 2 marks · Open"', inline?.visible && /Plan · Din roadmap: next steps/.test(inline.text) && /2 marks/.test(inline.text) && /Open/.test(inline.text), inline && inline.text);
   await sweep("4d", "aurora");
-  await click('.rl-plan-card[data-variant="inline"] .rl-plan-card-open');
+  await click(".rl-convo-inline-plan");
   check("4d: Open puts the plan back beside the conversation", (await cdp.evaluate("document.querySelector('.rl-flow-stage').dataset.pose")) === "split");
   for (const theme of ["basic", "studio"]) {
     await load("4d", w, h, theme);

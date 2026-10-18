@@ -1,0 +1,629 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+/* The session conversation (SessionConversation, SessionComposer, AskCard),
+   loaded with its lazy chunk. Three poses, one anatomy:
+     stage  (4b) — a 720px column centred on the stage, 15px / 1.65;
+     column (4c) — the 440px chat beside the plan, 14.5px / 1.6;
+     panel  (5a) — the full pose's right-panel Chat tab, the column's type.
+   The conversation itself is solid ground (the window's canvas); what
+   floats on it — the composer, the plan card, an ask — is the glass sheet,
+   its rim tinted through --rl-glass-ring rather than a border of its own.
+   Colours are tokens only; every theme, light ones included, reads. */
+
+.rl-convo {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+}
+.rl-convo-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.rl-convo-list {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  margin: 0 auto;
+  min-width: 0;
+}
+.rl-convo[data-layout="stage"] .rl-convo-list {
+  width: min(720px, calc(100% - 32px));
+  gap: 22px;
+  padding: 36px 0 24px;
+  font-size: var(--rl-text-conversation);
+  line-height: 1.65;
+}
+.rl-convo[data-layout="column"] .rl-convo-list,
+.rl-convo[data-layout="panel"] .rl-convo-list {
+  width: 100%;
+  gap: 18px;
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.rl-convo[data-layout="column"] .rl-convo-list { padding: 28px 26px 18px; }
+.rl-convo[data-layout="panel"] .rl-convo-list { padding: 20px 16px 16px; }
+
+/* One turn's answer: its steps, prose, cards and working row, 12px apart on
+   the stage (4b). The column draws them at its own 18px rhythm (4c). */
+.rl-convo-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.rl-convo[data-layout="column"] .rl-convo-turn,
+.rl-convo[data-layout="panel"] .rl-convo-turn { gap: 18px; }
+
+/* ── Your bubble ── */
+.rl-convo-bubble-wrap {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
+/* The board's measure is the text's (content-box): 520px of words, 548
+   with the padding; 320 and 346 in the column. */
+.rl-convo-bubble {
+  box-sizing: content-box;
+  max-width: min(520px, calc(100% - 28px));
+  padding: 10px 14px;
+  border-radius: var(--rl-radius-composer);
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rl-convo[data-layout="column"] .rl-convo-bubble,
+.rl-convo[data-layout="panel"] .rl-convo-bubble { max-width: min(320px, calc(100% - 26px)); padding: 9px 13px; }
+/* Queued in the CLI behind the running reply: the same bubble, outlined
+   rather than filled until it is a prompt. */
+.rl-convo-bubble-wrap[data-delivery="queued"] .rl-convo-bubble {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-rule-strong);
+}
+.rl-convo-bubble-note {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-ink-4);
+}
+.rl-convo-bubble-wrap[data-delivery="undelivered"] .rl-convo-bubble-note { color: var(--color-warning-text); }
+
+/* ── Steps (4b): 13px, muted, a green ✓, the target a step brighter ── */
+.rl-convo-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-ink-4);
+  min-width: 0;
+}
+.rl-convo-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-ink-4);
+}
+/* The verb, its target and "and 2 more" are flex items 8px apart, as the
+   board spaces them; a long target is the part that gives way. */
+.rl-convo-tool > svg,
+.rl-convo-tool-verb { flex: none; white-space: nowrap; }
+.rl-convo-tool-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink-3);
+}
+.rl-convo-ok { color: var(--color-mode-build-fg); }
+.rl-convo-err { color: var(--color-mode-danger-fg); }
+.rl-convo-stopped { color: var(--color-ink-4); }
+
+/* ── Prose: the settled reply's markdown, at the pose's reading size ── */
+.rl-convo-prose {
+  color: var(--color-ink-2);
+  text-wrap: pretty;
+  min-width: 0;
+}
+.rl-convo .rl-convo-prose .rl-md {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+/* A one-paragraph reply is both the room's first and last child, and the
+   room's first-child rule would keep its bottom margin; the turn's own gap
+   is the spacing here. */
+.rl-convo .rl-convo-prose .rl-md > :last-child,
+.rl-convo .rl-convo-prose .rl-md > p:last-child,
+.rl-convo .rl-convo-prose .rl-md > div:last-child > :last-child { margin-bottom: 0; }
+
+/* ── A settled turn, folded (4c): "✓ Read 4 files · planned in 2m 04s" ── */
+.rl-convo-summary-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+.rl-convo-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--color-ink-4);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-convo-summary > svg { flex: none; }
+.rl-convo-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-convo-summary-caret {
+  opacity: 0;
+  transition: opacity var(--rl-dur-1) var(--rl-ease-out), transform var(--rl-dur-2) var(--rl-ease-out);
+}
+.rl-convo-summary:hover .rl-convo-summary-caret,
+.rl-convo-summary:focus-visible .rl-convo-summary-caret,
+.rl-convo-summary[aria-expanded="true"] .rl-convo-summary-caret { opacity: 1; }
+.rl-convo-summary[aria-expanded="true"] .rl-convo-summary-caret { transform: rotate(180deg); }
+.rl-convo-summary:hover { color: var(--color-ink-3); }
+.rl-convo-folded {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0 0 5px;
+  padding-left: 15px;
+  border-left: 1px solid var(--color-rule);
+}
+
+/* ── The plan (4c, 4d) ── */
+.rl-convo-plan.rl-glass {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  --rl-glass-ring: var(--color-focus-rim);
+}
+.rl-convo-plan-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.rl-convo-plan-icon { flex: none; color: var(--color-mode-plan-fg); }
+.rl-convo-plan-open {
+  /* A 24px target around 11.5px words, without moving them. */
+  margin: -4px -6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--rl-radius-chip);
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-convo-plan-open:hover { color: var(--color-ink); }
+.rl-convo-plan-body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-ink-3);
+}
+.rl-convo-inline-plan.rl-glass {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  --rl-glass-ring: var(--color-rule-strong);
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--color-ink);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-convo-inline-plan.rl-glass:hover { --rl-glass-ring: var(--color-focus-rim); }
+.rl-convo-inline-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-convo-inline-marks { flex: none; color: var(--color-ink-4); }
+.rl-convo-inline-open { flex: none; color: var(--color-mode-plan-fg); }
+
+/* ── The working row (4b): spinner, what it is doing, a faint timer, Stop ── */
+.rl-convo-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-ink-3);
+}
+.rl-convo-working-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-convo-spinner {
+  flex: none;
+  color: var(--color-mode-plan-fg);
+  animation: rl-convo-spin 1.1s linear infinite;
+}
+@keyframes rl-convo-spin { to { transform: rotate(360deg); } }
+.rl-convo-needs {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background: var(--color-mode-redline-fg);
+}
+.rl-convo-working[data-kind="needs-you"] .rl-convo-working-label { color: var(--color-mode-redline-fg); }
+.rl-convo-elapsed {
+  flex: none;
+  color: var(--color-ink-5);
+  font-variant-numeric: tabular-nums;
+}
+.rl-convo-stop {
+  flex: none;
+  /* A 24px target around 13px words, without moving them. */
+  margin: -3px -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--rl-radius-chip);
+  background: none;
+  font: inherit;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-convo-stop:hover { color: var(--color-ink); background: var(--color-fill-1); }
+
+/* ── Quiet lines: dividers, markers, notes ── */
+.rl-convo-spacer { flex: 1 1 auto; min-width: 0; }
+.rl-convo-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11.5px;
+  color: var(--color-ink-4);
+}
+.rl-convo-divider::before,
+.rl-convo-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-rule);
+}
+.rl-convo-quiet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--color-ink-4);
+}
+.rl-convo-older {
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-ink-4);
+}
+.rl-convo-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-warning-text);
+}
+.rl-convo-older button,
+.rl-convo-note button,
+.rl-convo-readiness button,
+.rl-convo-bubble-note button {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-mode-plan-fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+/* ── The dock: queue tray, readiness, composer ── */
+.rl-convo-dock {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+.rl-convo[data-layout="stage"] .rl-convo-dock { padding: 0 0 20px; }
+.rl-convo[data-layout="column"] .rl-convo-dock { padding: 14px 18px 18px; }
+.rl-convo[data-layout="panel"] .rl-convo-dock { padding: 12px 14px 14px; }
+.rl-convo-dock > .rl-queue-anchor,
+.rl-convo-readiness,
+.rl-convo-composer { box-sizing: border-box; width: 100%; }
+.rl-convo[data-layout="stage"] .rl-convo-dock > .rl-queue-anchor,
+.rl-convo[data-layout="stage"] .rl-convo-readiness,
+.rl-convo[data-layout="stage"] .rl-convo-composer { width: min(720px, calc(100% - 32px)); }
+.rl-convo-readiness {
+  margin: 0 0 8px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-ink-4);
+}
+
+.rl-convo-composer.rl-glass {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 12px 10px 16px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-composer);
+  --rl-glass-ring: var(--color-rule-strong);
+}
+.rl-convo-composer.rl-glass:focus-within { --rl-glass-ring: var(--color-focus-rim); }
+.rl-convo-composer.rl-glass[data-layout="column"],
+.rl-convo-composer.rl-glass[data-layout="panel"] { padding: 11px 12px 10px 14px; }
+.rl-convo-field {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14.5px;
+  line-height: 1.2;
+  color: var(--color-ink);
+}
+.rl-convo-composer[data-layout="column"] .rl-convo-field,
+.rl-convo-composer[data-layout="panel"] .rl-convo-field { font-size: 14px; }
+.rl-convo-field::placeholder { color: var(--color-ink-4); opacity: 1; }
+.rl-convo-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--color-ink-3);
+}
+.rl-convo-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 260px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--rl-radius-row);
+  background: var(--color-fill-1);
+  font: inherit;
+  font-size: 12px;
+  color: var(--color-ink-3);
+  white-space: nowrap;
+  cursor: pointer;
+}
+span.rl-convo-chip { cursor: default; }
+.rl-convo-chip > svg { flex: none; }
+.rl-convo-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rl-convo-chip-icon { color: var(--color-ink-4); }
+.rl-convo-chip[data-mode="plan"] { color: var(--color-mode-plan-fg); }
+button.rl-convo-chip:hover,
+.rl-convo-chip[aria-expanded="true"] { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-convo-chip[data-mode="plan"]:hover,
+.rl-convo-chip[data-mode="plan"][aria-expanded="true"] { color: var(--color-mode-plan-fg); }
+.rl-convo-talk[aria-pressed="true"],
+.rl-convo-talk[aria-pressed="true"]:hover { background: var(--color-mode-plan-bg); color: var(--color-mode-plan-fg); }
+.rl-convo-talk[aria-pressed="true"] .rl-convo-chip-icon { color: inherit; }
+.rl-convo-hint {
+  flex: none;
+  height: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--rl-radius-row);
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--color-warning-text);
+  cursor: pointer;
+}
+.rl-convo-mic {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-convo-mic:hover { background: var(--color-fill-1); color: var(--color-ink); }
+.rl-convo-mic[data-hot] { background: var(--color-info); color: var(--color-on-info); }
+/* The send button rests quiet on an empty box, as 4b draws it, and takes
+   the accent once there is something to send. While a turn runs it is Stop,
+   at the same quiet weight: the working row carries Stop too, and the board
+   draws this slot unchanged mid-turn. */
+.rl-convo-composer .rl-send[aria-disabled="true"],
+.rl-convo-composer .rl-send[data-send="stop"] {
+  opacity: 1;
+  background: var(--color-fill-3);
+  color: var(--color-ink-4);
+}
+.rl-convo-composer .rl-send[data-send="stop"]:hover { color: var(--color-ink); }
+
+.rl-convo button:focus-visible,
+.rl-ask-card button:focus-visible,
+.rl-ask-card input:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 2px;
+}
+
+/* ── Ask cards: a question the CLI is holding ── */
+.rl-ask-card.rl-glass {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid transparent;
+  border-radius: var(--rl-radius-card);
+  --rl-glass-ring: var(--color-focus-rim);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-ink);
+}
+.rl-ask-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.rl-ask-icon { flex: none; color: var(--color-mode-redline-fg); }
+.rl-ask-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--rl-radius-chip);
+  background: var(--color-fill-1);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink-3);
+}
+.rl-ask-summary {
+  display: block;
+  padding: 7px 10px;
+  border-radius: var(--rl-radius-menu-row);
+  background: var(--color-fill-1);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--color-ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rl-ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.rl-ask-spacer { flex: 1 1 auto; }
+.rl-ask-btn {
+  height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: var(--rl-radius-row);
+  background: var(--color-fill-2);
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.rl-ask-btn:hover:not(:disabled) { background: var(--color-fill-3); }
+.rl-ask-btn[data-primary] { background: var(--color-ink); color: var(--color-paper); font-weight: 600; }
+.rl-ask-btn[data-danger] { background: var(--color-mode-danger-bg); color: var(--color-mode-danger-fg); }
+.rl-ask-btn:disabled,
+.rl-ask-terminal:disabled { cursor: default; opacity: .5; }
+.rl-ask-terminal {
+  min-height: 24px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--color-ink-4);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.rl-ask-terminal:hover:not(:disabled) { color: var(--color-ink); }
+.rl-ask-rule,
+.rl-ask-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-ink-4);
+}
+.rl-ask-note { color: var(--color-warning-text); }
+.rl-ask-question {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.rl-ask-question > legend { width: 100%; margin: 0 0 8px; }
+.rl-ask-options { display: flex; flex-direction: column; gap: 4px; }
+.rl-ask-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--rl-radius-menu-row);
+  background: var(--color-fill-1);
+  font: inherit;
+  color: var(--color-ink);
+  text-align: left;
+  cursor: pointer;
+}
+.rl-ask-option:hover { background: var(--color-fill-2); }
+.rl-ask-option[aria-checked="true"] {
+  background: var(--color-mode-plan-bg);
+  box-shadow: inset 0 0 0 1px var(--color-focus-rim);
+}
+.rl-ask-option-text { min-width: 0; }
+.rl-ask-option strong { font-weight: 500; }
+.rl-ask-option small { display: block; font-size: 12px; color: var(--color-ink-3); }
+.rl-ask-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+  border: 1.5px solid var(--color-ink-4);
+  border-radius: 50%;
+}
+.rl-ask-mark[data-multi] { border-radius: 4px; }
+.rl-ask-option[aria-checked="true"] .rl-ask-mark {
+  border-color: var(--color-mode-plan-fg);
+  background: var(--color-mode-plan-fg);
+  box-shadow: inset 0 0 0 2px var(--color-mode-plan-bg);
+}
+.rl-ask-other input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--rl-radius-menu-row);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-ink);
+}
+.rl-ask-other input::placeholder { color: var(--color-ink-4); opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-convo-spinner { animation: none; }
+  .rl-convo-summary-caret { transition: none; }
+}

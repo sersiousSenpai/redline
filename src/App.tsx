@@ -8700,6 +8700,14 @@ function App() {
   const stagePlanTitle = stageHasPlan
     ? (summaries.find((s) => s.sessionId === activeId)?.planTitle ?? null)
     : null;
+  // The conversation's Talk: the dock's conversation beside the stage — the
+  // plan's voice panel once there is a plan. A launch with no plan yet has no
+  // voice of its own, so Talk says when it will.
+  const flowTalk = () => {
+    if (voiceDocked) closeDock();
+    else if (dockReachable) openDiscussion();
+    else setToast({ message: "Talk opens on the plan as soon as it arrives.", tone: "info" });
+  };
   const renderFlowStage = (planBody: ReactNode) => {
     if (stageTarget.kind === "start" || !flowConvoHost) return planBody;
     const author = agentLabelFor(session?.backend ?? null);
@@ -11292,6 +11300,12 @@ function App() {
               planOpen={flowStageOwns && flowPainted.pose !== "closed"}
               onOpenPlan={() => { if (stageTarget.kind === "plan") openPlan(stageTarget.sessionId, stageUnresolved, false); }}
               onShowTerminal={() => setStage("terminal")}
+              projectPath={stageTarget.kind === "launch" ? stageTarget.projectPath : (session?.projectPath ?? null)}
+              planMarkdown={stageHasPlan ? (latest?.rawPlanMarkdown ?? null) : null}
+              // Talk is the voice panel, one click away (it IS the
+              // discussion surface): open beside the stage, or closed again.
+              talking={voiceDocked}
+              onTalk={flowTalk}
             />
           </ErrorBoundary>
         </Suspense>,

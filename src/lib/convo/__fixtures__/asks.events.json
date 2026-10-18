@@ -1,0 +1,10 @@
+[
+  { "id": "host:1", "epoch": 0, "offset": 0, "ts": 1760774400000, "kind": "bound", "harness": "claude", "sessionId": "sess-asks", "transcriptPath": null, "source": "startup" },
+  { "id": "l01", "epoch": 0, "offset": 200, "ts": 1760774401000, "kind": "user_text", "text": "Run the tests and tell me what fails", "promptId": "p-1" },
+  { "id": "l02", "epoch": 0, "offset": 800, "ts": 1760774402000, "kind": "tool_use", "toolUseId": "toolu_10", "name": "Bash", "summary": "npm test" },
+  { "id": "host:2", "epoch": 0, "offset": 800, "ts": 1760774402100, "kind": "ask_opened", "ask": { "askId": "ask-1", "kind": "permission", "toolName": "Bash", "summary": "npm test", "input": { "command": "npm test" }, "suggestions": [{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "localSettings" }], "rule": "Always allow Bash(npm test:*) in this project", "questions": null, "openedAt": 1760774402100 } },
+  { "id": "host:3", "epoch": 0, "offset": 800, "ts": 1760774404000, "kind": "ask_closed", "askId": "ask-1", "outcome": "allow" },
+  { "id": "l03", "epoch": 0, "offset": 3400, "ts": 1760774420000, "kind": "tool_result", "toolUseId": "toolu_10", "isError": true, "preview": "2 failed, 318 passed" },
+  { "id": "l04", "epoch": 0, "offset": 4100, "ts": 1760774421000, "kind": "tool_use", "toolUseId": "toolu_11", "name": "AskUserQuestion", "summary": "Which failure first?" },
+  { "id": "host:4", "epoch": 0, "offset": 4100, "ts": 1760774421100, "kind": "ask_opened", "ask": { "askId": "ask-2", "kind": "question", "toolName": "AskUserQuestion", "summary": "Which failure first?", "questions": [{ "question": "Which failure should I fix first?", "header": "Failure", "multiSelect": false, "options": [{ "label": "sizeGuard", "description": "The lazy-chunk guard" }, { "label": "paintGuard", "description": "An infinite paint animation" }] }, { "question": "Anything else to check?", "header": "Extras", "multiSelect": true, "options": [{ "label": "Contrast", "description": null }, { "label": "Types", "description": null }] }], "openedAt": 1760774421100 } }
+]

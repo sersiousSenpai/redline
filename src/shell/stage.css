@@ -136,9 +136,7 @@
 }
 .rl-plan-head-btn:focus-visible,
 .rl-plan-btn:focus-visible,
-.rl-flow-tab:focus-visible,
-.rl-version-pill-go:focus-visible,
-.rl-plan-card button:focus-visible {
+.rl-version-pill-go:focus-visible {
   outline: 2px solid var(--color-focus-rim);
   outline-offset: 2px;
 }
@@ -403,8 +401,19 @@
   margin: 16px 0;
 }
 .rl-flow-plan .rl-prose li,
-.rl-flow-plan .rl-prose li > p {
+.rl-flow-plan .rl-prose li > p,
+.rl-flow-plan .rl-prose td > p,
+.rl-flow-plan .rl-prose th > p {
   margin: 0;
+}
+/* A numbered list reads as the board's numbered lines: "1." on the text's
+   own left edge, the step after it. */
+.rl-flow-plan .rl-prose ol {
+  padding-left: 0;
+  list-style: none;
+}
+.rl-flow-plan .rl-prose ol > li > p:first-child::before {
+  content: counter(list-item) ". ";
 }
 .rl-flow-plan .rl-prose h1,
 .rl-flow-plan .rl-prose h2,
@@ -541,82 +550,4 @@
   background: var(--color-canvas);
   color: var(--color-ink-3);
   font-size: var(--rl-text-row);
-}
-
-/* ── Plan cards in the conversation (PlanReadyCard) ──────────────────── */
-
-.rl-plan-card {
-  border: 1px solid transparent;
-  border-radius: var(--rl-radius-card);
-  color: var(--color-ink);
-}
-/* 4c: r12, the focus rim, padding 14 — it is the thread's one call to act. */
-.rl-plan-card[data-variant="ready"] {
-  --rl-glass-ring: var(--color-focus-rim);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px;
-}
-.rl-plan-card-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.rl-plan-card[data-variant="ready"] .rl-plan-card-title {
-  font-size: 13.5px;
-  font-weight: 600;
-}
-.rl-plan-card-icon {
-  flex: none;
-  color: var(--color-mode-plan-fg);
-}
-.rl-plan-card-spacer {
-  flex: 1;
-}
-.rl-plan-card-link {
-  border: 0;
-  background: none;
-  padding: 0;
-  font: inherit;
-  font-size: var(--rl-text-chip);
-  color: var(--color-ink-4);
-  cursor: pointer;
-}
-.rl-plan-card-link:hover {
-  color: var(--color-ink);
-}
-.rl-plan-card-summary {
-  font-size: var(--rl-text-row);
-  line-height: 1.55;
-  color: var(--color-ink-3);
-}
-/* 4d: one 13.5px line, the rule-strong rim, padding 12/14. */
-.rl-plan-card[data-variant="inline"] {
-  --rl-glass-ring: var(--color-rule-strong);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  font-size: 13.5px;
-  /* The conversation's own leading (4b's 1.65), as the board inherits it. */
-  line-height: 1.65;
-}
-.rl-plan-card[data-variant="inline"] .rl-plan-card-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.rl-plan-card-meta {
-  flex: none;
-  color: var(--color-ink-4);
-}
-.rl-plan-card-open {
-  border: 0;
-  background: none;
-  padding: 0;
-  font: inherit;
-  color: var(--color-mode-plan-fg);
-  cursor: pointer;
 }

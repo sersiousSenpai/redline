@@ -15,7 +15,6 @@ import { ZoomButton } from "../../src/components/ZoomButton";
 import { DocWidthToggle } from "../../src/components/DocWidthToggle";
 import { createBoundedPortalHost } from "../../src/components/PersistentPortalSlot";
 import { FLOW_ARTICLE, openPlan } from "../../src/lib/flowPose";
-import { planReadySummary } from "../../src/lib/planReady";
 import { resetFlowStateForTests, setPanelTab, setPlanPose, setStage, useFlow } from "../../src/shell/flowState";
 import type { PlanFooterApproval } from "../../src/shell/PlanPanelFooter";
 import type { Comment, ReviewSession } from "../../src/types";
@@ -200,10 +199,13 @@ function Fixture() {
           planOpen={painted.pose !== "closed"}
           onOpenPlan={() => openPlan(SPEC.sessionId, 0, false)}
           onShowTerminal={() => setStage("terminal")}
+          projectPath="/Users/imani/projects/din"
+          planMarkdown={SPEC.markdown}
+          talking={false}
+          onTalk={() => {}}
         />,
         host,
       )}
-      <span hidden data-summary={planReadySummary(SPEC.markdown) ?? ""} />
     </>
   );
 }
