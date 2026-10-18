@@ -102,7 +102,6 @@ import { Header } from "./components/Header";
 // The flow shell's top bar is the window-drag region, so unlike the other
 // flow pieces it loads with the app (see shell/FlowTopBar).
 import { FlowTopBar, togglePlanPanel } from "./shell/FlowTopBar";
-import { isFlowShell } from "./lib/shellFlag";
 import { toggleStage, toggleSidebar as toggleFlowSidebar, setPlanPose } from "./shell/flowState";
 import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
 import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
@@ -357,6 +356,8 @@ import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
+import { isFlowShell } from "./lib/shellFlag";
+import { anyApproved, continueLinks, flowPillShown, NEW_SESSION_EVENT } from "./lib/flowStart";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -2431,6 +2432,11 @@ function App() {
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
+  // In the flow shell that same empty plate is the start screen — the
+  // New-session screen, the door at rest on the stage. The stage lane's
+  // target is the authority once it lands: `stageTarget.kind === "start"`
+  // is this, minus a launch that has not become a plan yet.
+  const flowStartOnStage = isFlowShell() && plateAtRest;
   // The front door owns its full-screen layer; surface docks remain columns.
   const conversationExpanded = false;
 
@@ -4035,8 +4041,10 @@ function App() {
     const feedbackUnlisten = listen("menu-open-feedback", () =>
       setShowFeedback(true),
     );
+    // Getting Started: the tour, or in the flow shell the start screen,
+    // which carries the four steps and the first-run checklist itself.
     const tutorialUnlisten = listen("menu-open-tutorial", () =>
-      setTourOpen(true),
+      isFlowShell() ? window.dispatchEvent(new CustomEvent(NEW_SESSION_EVENT, { detail: { via: "pointer" } })) : setTourOpen(true),
     );
     return () => {
       void readmeUnlisten.then((u) => u());
@@ -7152,8 +7160,9 @@ function App() {
   // that is still travelling points at nothing. This is the one legitimate
   // reason to read the choreography: it is about where things ARE, not about
   // when the user may act.
-  const tourActive =
-    tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
+  // The flow shell has no tour: its start screen is the introduction.
+  const tourActive = !isFlowShell() &&
+    (tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating));
   // The open door hides the page. The compact card does not: it is cut out
   // of the webview (useNativeOverlayRegion), never laid over it.
   const browserOverlayActive =
@@ -7680,6 +7689,10 @@ function App() {
       // A plan launched from the open door: the door shows it in place, and
       // hands off into the plan when it lands (`doorLaunchRef`).
       if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
+      // In the flow shell the launch IS the next stage — its conversation,
+      // before any plan exists — so the zoomed door steps aside for it at
+      // once instead of holding the window until the plan lands.
+      if (isFlowShell()) { doorLaunchRef.current = null; setFrontDoorOpen(false); }
       // Handed off: the compact card shrinks back into the pill, which shows
       // the work. The open door shows it in place.
       setDoorCompact(false);
@@ -8115,7 +8128,7 @@ function App() {
             if (isFontName(name)) onFontChange(name);
           },
           zoomReset: () => setDocZoom(1),
-          replayTour: () => setTourOpen(true),
+          replayTour: () => (isFlowShell() ? openStartScreen("pointer") : setTourOpen(true)),
           togglePerfProbe: () => {
             void setPerfProbe(!perfProbe);
             setPerfProbeShown(!perfProbe);
@@ -8267,6 +8280,40 @@ function App() {
     () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
     [summaries, chats, doorTabs],
   );
+  // The flow shell's New session (⌘N, "+ New session", Getting Started): the
+  // start screen as the stage. Navigation the user asked for, so whatever
+  // the door had open closes behind it, and the plate goes back to rest — no
+  // plan selected, the sidebar on its sessions. A keyboard summons arrives
+  // with the caret in the box, which is the focus zoom; a pointer arrives
+  // quiet, the caret left where it was (never stolen between tasks).
+  const openStartScreen = useCallback((via: "key" | "pointer" = "pointer") => {
+    tripDoor();
+    setFrontDoorOpen(false);
+    setDoorCompact(false);
+    selectSessions();
+    setActiveId(null);
+    selectSurface("document");
+    // Once the resting door has landed on the stage it engages like any
+    // keyboard summons.
+    if (via === "key") requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new Event("redline:open-front-door"))));
+  }, [tripDoor, selectSessions, setActiveId, selectSurface]);
+  useEffect(() => {
+    if (!isFlowShell()) return;
+    const onNew = (event: Event) => openStartScreen((event as CustomEvent<{ via?: "key" | "pointer" }>).detail?.via === "key" ? "key" : "pointer");
+    window.addEventListener(NEW_SESSION_EVENT, onNew);
+    return () => window.removeEventListener(NEW_SESSION_EVENT, onNew);
+  }, [openStartScreen]);
+  // The four-step strip retires for good at the first approval: remembered,
+  // so deleting that session never brings it back.
+  const [flowStripRetired, setFlowStripRetired] = usePersistedState("redline.flow.stripRetired", false);
+  const approvedOnce = anyApproved(summaries);
+  useEffect(() => {
+    if (approvedOnce && !flowStripRetired) setFlowStripRetired(true);
+  }, [approvedOnce, flowStripRetired, setFlowStripRetired]);
+  // How many harnesses this machine has: past one, the start screen's model
+  // chip says which will do the work.
+  const harnessCount = (preflight?.claude.found ? 1 : 0) + (preflight?.codex?.found ? 1 : 0)
+    + Object.entries(preflight?.providers ?? {}).filter(([id, probe]) => id !== "claude-code" && id !== "codex" && probe?.found).length;
   const openDoorRecent = (r: DoorRecent) => {
     if (r.kind === "chat") return openChat(r.id);
     tripDoor();
@@ -8408,6 +8455,13 @@ function App() {
                   .slice(0, 4)
                   .map((c) => ({ id: c.companionId, title: c.title })) : undefined}
                 onOpenChat={where === "door" ? openChat : undefined}
+                // The flow shell's start screen is this door, and only it.
+                flow={where === "door" && isFlowShell() ? {
+                  manyHarnesses: harnessCount > 1,
+                  strip: !flowStripRetired && !approvedOnce,
+                  continues: continueLinks(summaries),
+                  onContinue: (id) => openDoorRecent({ kind: "plan", id, label: "", detail: "" }),
+                } : undefined}
               />
     );
   };
@@ -11049,8 +11103,13 @@ function App() {
         </Suspense>
       )}
       <MonochatIsland
-        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
-        landing={plateAtRest && shellReady && !joinedActive && sidebarTab.kind !== "folder"}
+        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${flowStartOnStage}:${bootAnimating}`}
+        // In the flow shell the door rests exactly where the start screen is
+        // the stage — whatever the sidebar holds: a folder there is where it
+        // would launch (A5), not a file viewer covering the plate — and its
+        // pill keeps to Tools pages.
+        landing={plateAtRest && shellReady && !joinedActive && (isFlowShell() ? flowStartOnStage : sidebarTab.kind !== "folder")}
+        pill={!isFlowShell() || flowPillShown(mainSurface)}
         surfaceKey={doorNavKey}
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
@@ -11207,8 +11266,9 @@ function App() {
       />
       {/* Onboarding tour: replay from the menu always, or auto-run once on first
           launch — but only after the hook/skill setup modal is out of the way,
-          so the two never overlap. */}
-      {(() => {
+          so the two never overlap. Never in the flow shell, whose start
+          screen is the introduction (Getting Started opens it). */}
+      {!isFlowShell() && (() => {
         const setupActive = setupModalActive;
         const show =
           tourOpen || (!onboardingDone && !setupActive && !bootAnimating);

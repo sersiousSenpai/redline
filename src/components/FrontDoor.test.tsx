@@ -1135,3 +1135,137 @@ describe("FrontDoor — growing with the text", () => {
     expect(ta.style.height).toBe("");
   });
 });
+
+describe("FrontDoor — the flow shell's start screen", () => {
+  const FLOW = { manyHarnesses: false, strip: true, continues: [], onContinue: () => {} };
+  /** The furniture's chunk (the mode switch, the chips' controls, the strip,
+   *  the checklist and the Continue links), landed. */
+  const foot = async () => { await import("../shell/FlowStart"); await flush(); await flush(); };
+  const flowDoor = async (over: Partial<FrontDoorProps> & { text?: string } = {}) => {
+    await mount({ floating: true, welcome: true, autoFocusOnShow: false, flow: FLOW, ...over });
+    await foot();
+  };
+  const modes = () => [...host.querySelectorAll<HTMLButtonElement>('.rl-fs-modes [role="radio"]')];
+  const key = (init: KeyboardEventInit) => act(async () => {
+    composer()!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  });
+
+  it("asks, with Chat | Plan and one line saying what the mode does", async () => {
+    await flowDoor();
+    expect(host.querySelector(".rl-fs-title")?.textContent).toBe("What are we working on?");
+    expect(modes().map((m) => [m.textContent, m.getAttribute("aria-checked")])).toEqual([["Chat", "false"], ["Plan", "true"]]);
+    expect(host.querySelector(".rl-fs-hint")?.textContent).toBe("Claude writes a plan for you to redline before anything is built.");
+    expect(host.querySelector(".rl-fs-go")?.textContent).toBe("Start plan↵");
+  });
+
+  it("offers no Drafter or Run destination, and no recents", async () => {
+    await flowDoor({ recents: [{ kind: "plan", id: "s1", label: "Earlier plan", detail: "" }], onOpenRecent: () => {} });
+    expect(host.querySelector('[aria-label="Destination"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Jump back in"]')).toBeNull();
+  });
+
+  it("puts the folder first, then the model and effort, saying when it is inherited", async () => {
+    await flowDoor({
+      choice: { path: "/Users/me/projects/din" },
+      backend: { backend: "codex", model: "gpt-5.5", effort: "high" },
+      modelCatalogs: { codex: [{ slug: "gpt-5.5", displayName: "GPT-5.5", description: "", efforts: ["low", "high"], defaultEffort: "low" }] },
+    });
+    const chips = [...host.querySelectorAll(".rl-fd-tools .rl-composer-chip")].map((c) => c.textContent);
+    expect(chips).toEqual(["~/projects/din", "GPT-5.5 · High· last used"]);
+  });
+
+  it("names the harness on the model chip once there is more than one", async () => {
+    await flowDoor({ flow: { ...FLOW, manyHarnesses: true }, backend: { backend: "claude-code", model: null, effort: null } });
+    expect(host.querySelector('.rl-fd-tools [title^="⏎ launches"]')?.textContent).toBe("Claude · Default");
+  });
+
+  it("⏎ starts the mode, ⌘⏎ runs it directly", async () => {
+    const onLaunch = vi.fn(), onRun = vi.fn(), onChat = vi.fn();
+    await flowDoor({ text: "Plan the export", onLaunch, onRun, onChat });
+    await key({ key: "Enter" });
+    expect(onLaunch).toHaveBeenCalledOnce();
+    await key({ key: "Enter", metaKey: true });
+    expect(onRun).toHaveBeenCalledOnce();
+    await flowDoor({ text: "Plan the export", destination: "chat", onLaunch, onRun, onChat });
+    expect(host.querySelector(".rl-fs-go")?.textContent).toBe("Start chat↵");
+    await key({ key: "Enter" });
+    expect(onChat).toHaveBeenCalledOnce();
+    expect(onLaunch).toHaveBeenCalledOnce();
+  });
+
+  it("a Drafter or Run destination left from the classic shell reads as Plan", async () => {
+    const onLaunch = vi.fn(), onDrafter = vi.fn();
+    await flowDoor({ text: "Plan the export", destination: "drafter", onLaunch, onDrafter });
+    expect(modes()[1].getAttribute("aria-checked")).toBe("true");
+    await key({ key: "Enter" });
+    expect(onLaunch).toHaveBeenCalledOnce();
+    expect(onDrafter).not.toHaveBeenCalled();
+  });
+
+  it("switches mode by click and by arrow, as a radio group", async () => {
+    const onDestinationChange = vi.fn();
+    await flowDoor({ onDestinationChange });
+    await act(async () => modes()[0].click());
+    expect(onDestinationChange).toHaveBeenLastCalledWith("chat");
+    await act(async () => { modes()[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })); });
+    expect(onDestinationChange).toHaveBeenLastCalledWith("chat");
+  });
+
+  it("Talk is the spoken way into a chat", async () => {
+    const onDestinationChange = vi.fn();
+    await flowDoor({ onDestinationChange });
+    await act(async () => host.querySelector<HTMLButtonElement>(".rl-fs-talk")!.click());
+    expect(onDestinationChange).toHaveBeenCalledWith("chat");
+    expect(host.querySelector('.rl-fs-voice [aria-label="Dictate"]')).not.toBeNull();
+  });
+
+  it("keeps the headline over a sentence: only the zoom takes it", async () => {
+    await flowDoor({ text: "Plan the export" });
+    expect(host.querySelector(".rl-frontdoor")!.classList.contains("is-engaged")).toBe(false);
+    expect(host.querySelector(".rl-frontdoor")!.classList.contains("is-flow")).toBe(true);
+  });
+
+  it("turns readiness into a first-run checklist with each fix, and the setup chip into one of its rows", async () => {
+    const items: ReadinessItem[] = [
+      { id: "claude-missing", state: "blocked", label: "Can't find the `claude` command", detail: "Point Redline at it.", fix: { label: "Locate it…", kind: "locate-claude" } },
+      { id: "hook-missing", state: "blocked", label: "The plan hook isn't installed", detail: "Install it.", fix: { label: "Install integration", kind: "install-integration" } },
+    ];
+    const onFix = vi.fn(() => Promise.resolve(true));
+    await flowDoor({ readiness: items, onFix });
+    expect(host.querySelector(".rl-fd-setup")).toBeNull();
+    expect([...host.querySelectorAll(".rl-fs-check-label")].map((l) => l.textContent)).toEqual(items.map((i) => i.label));
+    const fix = [...host.querySelectorAll<HTMLButtonElement>(".rl-fs-check button")].find((b) => b.textContent === "Locate it…")!;
+    await act(async () => fix.click());
+    expect(onFix).toHaveBeenCalledWith(items[0]);
+    expect(host.querySelector(".rl-fd-strip")).toBeNull();
+  });
+
+  it("shows the four steps until the first approval, and a couple of ways back in", async () => {
+    const onContinue = vi.fn();
+    await flowDoor({ flow: { ...FLOW, continues: [{ id: "s1", title: "Din retrieval plan" }], onContinue } });
+    expect([...host.querySelectorAll(".rl-flow-strip li")].map((l) => l.textContent)).toEqual(["1Ask", "2Claude plans", "3You redline", "4Build"]);
+    expect(host.querySelector('.rl-flow-strip [aria-current="step"]')?.textContent).toBe("1Ask");
+    const link = host.querySelector<HTMLButtonElement>(".rl-fs-continue button")!;
+    expect(link.textContent).toBe("Continue Din retrieval plan");
+    await act(async () => link.click());
+    expect(onContinue).toHaveBeenCalledWith("s1");
+    await flowDoor({ flow: { ...FLOW, strip: false } });
+    expect(host.querySelector(".rl-flow-strip")).toBeNull();
+    // The slot stays, so the box keeps its place.
+    expect(host.querySelector(".rl-fs-foot")).not.toBeNull();
+  });
+
+  it("holds the composer's rows at their height until the furniture lands", () => {
+    const css = readFileSync(join(process.cwd(), "src/shell/start.css"), "utf8");
+    expect(css).toContain(".rl-fs-slot { display: block; flex: 1; height: 32px; }");
+    expect(css).toContain(".rl-fs-slot.is-modes { flex: none; height: 34px; }");
+  });
+
+  it("leaves the classic door exactly as it was", async () => {
+    await mount({ floating: true, welcome: true, autoFocusOnShow: false });
+    expect(host.querySelector(".rl-fs-moderow, .rl-fs-go, .rl-fs-foot, .rl-fs-title")).toBeNull();
+    expect(host.querySelector(".rl-frontdoor")!.classList.contains("is-flow")).toBe(false);
+    expect(host.querySelector(".rl-fd-title")?.textContent).toBe("Every build starts as a draft.");
+    expect(host.querySelector('[aria-label="Destination"]')).not.toBeNull();
+  });
+});
