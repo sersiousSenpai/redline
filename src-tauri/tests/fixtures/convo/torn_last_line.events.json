@@ -1,0 +1,45 @@
+[
+  {
+    "epoch": 0,
+    "id": "@0:83",
+    "kind": "mode_change",
+    "mode": "default",
+    "offset": 83,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "5ce09ef3-9ebb-4933-8158-1f07d80b58c5",
+    "kind": "user_text",
+    "offset": 507,
+    "promptId": "9716cfbe-cd71-4080-b5b2-69cd94e25f62",
+    "text": "Reply with the single word pong.",
+    "ts": 1792313010594
+  },
+  {
+    "effort": null,
+    "epoch": 0,
+    "id": "40af67d2-1ae8-4436-8321-37b487f2de33",
+    "kind": "model_seen",
+    "model": "claude-haiku-5-5",
+    "offset": 1448,
+    "ts": 1792313010593
+  },
+  {
+    "epoch": 0,
+    "id": "@0:5596",
+    "kind": "mode_change",
+    "mode": "default",
+    "offset": 5596,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "c9f9c886-c4e4-4ff5-98dc-779641507ece",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 5878,
+    "text": "pong",
+    "ts": 1792313011335
+  }
+]

@@ -1,0 +1,48 @@
+[
+  {
+    "epoch": 0,
+    "id": "b0f261f4-43aa-4a20-9fb0-71b278df6cd2",
+    "kind": "user_text",
+    "offset": 236,
+    "promptId": "596ea19e-15e4-4221-83f2-2e3297d52d7a",
+    "text": "Use the AskUserQuestion tool to ask me one question: which color I prefer, with the options Red and Blue (header 'Color'). After I answer, reply with only the color I chose.",
+    "ts": 1792313182015
+  },
+  {
+    "epoch": 0,
+    "id": "b98bec98-a520-4b6b-b98d-5ee75a650e38",
+    "kind": "tool_use",
+    "name": "AskUserQuestion",
+    "offset": 2539,
+    "summary": "Which color do you prefer?",
+    "toolUseId": "toolu_01T9m7iEXc7CmVEadjqYky7p",
+    "ts": 1792313183034
+  },
+  {
+    "epoch": 0,
+    "id": "7d230101-acda-41b0-9b94-2aff9c5bf0ef",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 5012,
+    "preview": "Your questions have been answered: \"Which color do you prefer?\"=\"Blue\". You can now continue with these answers in mind.",
+    "toolUseId": "toolu_01T9m7iEXc7CmVEadjqYky7p",
+    "ts": 1792313183059
+  },
+  {
+    "epoch": 0,
+    "id": "673c083d-bb8c-49ae-9e05-9325d082b272",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 6534,
+    "text": "Blue",
+    "ts": 1792313183631
+  },
+  {
+    "durationMs": 1645,
+    "epoch": 0,
+    "id": "80546baf-8bd1-49fe-82dd-3a531543f8d9",
+    "kind": "turn_end",
+    "offset": 8976,
+    "ts": 1792313183656
+  }
+]

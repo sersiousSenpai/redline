@@ -17,6 +17,10 @@ export interface HookConflictScan {
   conflicts: HookConflict[];
   errors: { sourcePath: string; message: string }[];
   inactivePlugins: string[];
+  /** The user's own Claude Code PermissionRequest hooks. They run beside the
+   *  one behind the session stage's permission cards, and one that decides
+   *  on its own can answer before a card does. Informational only. */
+  permissionHooks?: { sourcePath: string; matcher: string | null; command: string }[];
 }
 export interface HookRemovalReport {
   results: { sourcePath: string; changed: boolean; backupPath: string | null; error: string | null }[];

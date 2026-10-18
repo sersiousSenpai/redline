@@ -1,0 +1,34 @@
+[
+  {
+    "epoch": 0,
+    "id": "ba9b66b0-5b4e-4a3b-a9d3-de5cbd5faa4c",
+    "kind": "user_text",
+    "offset": 476,
+    "promptId": "2f6e2211-e415-495b-8788-806a64f6702b",
+    "text": "Write a 400-word essay about the history of tea.",
+    "ts": 1792313191816
+  },
+  {
+    "epoch": 0,
+    "id": "527dae8c-879b-49fe-afdd-e581e70cb837",
+    "kind": "thinking",
+    "offset": 1483,
+    "ts": 1792313192529
+  },
+  {
+    "epoch": 0,
+    "id": "9e1f318a-52ad-4eaf-b963-17907e9640fc",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 2745,
+    "text": "Tea is one of the oldest and most widely consumed drinks in the world, and its history is tangled with trade, empire, and ritual. According to Chinese legend, the story begins around 2737 BCE, when Emperor Shennong was boiling water under a tree and a few leaves drifted into the pot. Whether or not the tale is true, it points to tea's early place in Chinese culture, where it was first valued for its medicinal qualities before it became a daily pleasure.\n\nFor much of its early history, tea was consumed in China as a bitter herbal brew. During the Tang dynasty (618–907), the poet and scholar Lu Yu wrote *The Classic of Tea*, the first comprehensive treatise on the plant. It described how to cultivate, process, and prepare tea, and it helped turn drinking tea into a refined art. Under the Song dynasty, elaborate whisked tea rituals spread among the elite, while later Ming dynasty practices moved toward the loose-leaf steeping that is common today.\n\nTea reached Japan through Buddhist monks who had studied in China, and by the twelfth century the monk Eisai had written about its health benefits. Over the following centuries, Japanese tea culture developed into the tea ceremony, or *chanoyu*, which emphasized simplicity, precision, and mindfulness. Matcha, the powdered green tea at the center of that",
+    "ts": 1792313195015
+  },
+  {
+    "epoch": 0,
+    "id": "1a589296-9990-4c4f-bf97-ca9634865c57",
+    "kind": "interrupted",
+    "offset": 5221,
+    "ts": 1792313195018
+  }
+]

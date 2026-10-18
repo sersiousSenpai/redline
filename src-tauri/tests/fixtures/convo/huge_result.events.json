@@ -1,0 +1,56 @@
+[
+  {
+    "epoch": 0,
+    "id": "d9a7a8db-e329-4505-8a9a-9bd407847014",
+    "kind": "user_text",
+    "offset": 524,
+    "promptId": "a8e757af-5e5f-4036-93d9-4986d8580104",
+    "text": "Use the Bash tool to run exactly: head -c 300000 big.txt — then reply with the single word read.",
+    "ts": 1792313336170
+  },
+  {
+    "epoch": 0,
+    "id": "85bfb71c-c883-4faa-81f9-65e656a96e71",
+    "kind": "tool_use",
+    "name": "Bash",
+    "offset": 3920,
+    "summary": "head -c 300000 big.txt",
+    "toolUseId": "toolu_01Sth5a1M1zAoXzo2peEX7eD",
+    "ts": 1792313337023
+  },
+  {
+    "epoch": 0,
+    "id": "7a4f7af1-c37c-4416-abeb-53d33beb4d88",
+    "isError": false,
+    "kind": "tool_result",
+    "offset": 5856,
+    "preview": "<persisted-output> Output too large (293KB). Full output saved to: /Users/u/.claude/projects/-tmp-proj/458feddb-24bc-4c69-af98-96b727d6129f/tool-results/bmaqxfbg1.txt Preview (first 2KB): 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef…",
+    "toolUseId": "toolu_01Sth5a1M1zAoXzo2peEX7eD",
+    "ts": 1792313337582
+  },
+  {
+    "epoch": 0,
+    "id": "@0:38543",
+    "kind": "mode_change",
+    "mode": "auto",
+    "offset": 38543,
+    "ts": 0
+  },
+  {
+    "epoch": 0,
+    "id": "580ac40f-7f83-4420-b5bd-84909a120f3c",
+    "kind": "assistant_text",
+    "model": "claude-haiku-5-5",
+    "offset": 39224,
+    "text": "read",
+    "ts": 1792313338172
+  },
+  {
+    "durationMs": 2026,
+    "epoch": 0,
+    "id": "d739108a-88aa-4fa4-b4b2-b5923763d6f4",
+    "kind": "turn_end",
+    "offset": 41817,
+    "ts": 1792313338194
+  }
+]
