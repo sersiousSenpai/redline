@@ -149,10 +149,12 @@ export function planColumnVars(
 ): CSSProperties {
   const extra = Number.isFinite(measure) ? Math.max(0, measure - DOC_MEASURE_MIN) : 0;
   const full = pose === "full";
+  // Full: a 720px TEXT column — 24px of gutter either side, so the text
+  // never meets a docked contents rail, inside a 768px box.
   return {
-    "--rl-plan-max": wide ? "none" : `${(full ? 720 : 680) + extra}px`,
+    "--rl-plan-max": wide ? "none" : `${(full ? 768 : 680) + extra}px`,
     "--rl-plan-pt": full ? "40px" : "34px",
-    "--rl-plan-px": full ? (wide ? "64px" : "0px") : "56px",
+    "--rl-plan-px": full ? (wide ? "64px" : "24px") : "56px",
     "--rl-plan-mx": full ? "auto" : "0px",
   } as CSSProperties;
 }

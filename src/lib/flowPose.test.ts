@@ -117,12 +117,13 @@ describe("planColumnVars", () => {
 
   it("is the board's column at the default measure", () => {
     expect(vars("split", false, 820)).toEqual({ "--rl-plan-max": "680px", "--rl-plan-pt": "34px", "--rl-plan-px": "56px", "--rl-plan-mx": "0px" });
-    expect(vars("full", false, 820)).toEqual({ "--rl-plan-max": "720px", "--rl-plan-pt": "40px", "--rl-plan-px": "0px", "--rl-plan-mx": "auto" });
+    // 5a's 720px text column, with a 24px gutter either side.
+    expect(vars("full", false, 820)).toEqual({ "--rl-plan-max": "768px", "--rl-plan-pt": "40px", "--rl-plan-px": "24px", "--rl-plan-mx": "auto" });
     expect(vars("full", true, 820)["--rl-plan-px"]).toBe("64px");
   });
 
   it("widens by the dragged measure, and wide fills the panel", () => {
-    expect(vars("full", false, 900)["--rl-plan-max"]).toBe("800px");
+    expect(vars("full", false, 900)["--rl-plan-max"]).toBe("848px");
     expect(vars("split", false, 900)["--rl-plan-max"]).toBe("760px");
     expect(vars("full", true, 820)["--rl-plan-max"]).toBe("none");
     expect(vars("split", true, 820)["--rl-plan-max"]).toBe("none");

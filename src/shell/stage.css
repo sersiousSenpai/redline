@@ -506,8 +506,11 @@
   background: color-mix(in srgb, var(--color-ink-muted) 10%, transparent);
   border-bottom-color: var(--color-rule-strong);
 }
-/* The classic gutter dot is the margin note's job here. */
-.rl-flow-plan .rl-has-comments::before {
+/* No classic gutter: the boards draw none, the "has comments" dot is the
+   margin note's job here, and the raw anchor codes ("A.1.p1") gave way to
+   the Feedback tab's human anchors ("§4 · step 4"). */
+.rl-flow-plan .rl-prose > [data-anchor-id]::before,
+.rl-flow-plan .rl-prose > .rl-has-comments[data-anchor-id]::after {
   display: none;
 }
 

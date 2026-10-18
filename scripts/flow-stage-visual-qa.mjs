@@ -278,7 +278,7 @@ async function board5a() {
   check('5a header: "Full screen" on the right inset, 28px, pressed', near(full.h, 28) && near(plan.right - full.right, 16) && (await cdp.evaluate("window.__byText('.rl-plan-head', 'Full screen').closest('button').getAttribute('aria-pressed')")) === "true", full);
   check("5a header: the pill centred between Contents and Full screen", near((pill.x - contents.right) - (full.x - pill.right), 0, 2), { left: pill.x - contents.right, right: full.x - pill.right });
   const article = await m(".rl-flow-plan .doc-article");
-  check("5a body: a 720px column, centred, 40px from the header", near(article.w, 720) && near(article.x - plan.x, (940 - 720) / 2) && near(article.pt, 40), article);
+  check("5a body: a 720px text column, centred, 40px from the header", near(article.w - article.pl - article.pr, 720) && near(article.x + article.pl - plan.x, (940 - 720) / 2) && near(article.pt, 40), article);
   const title = await m(".rl-flow-plan .rl-prose h1"), h2 = await m(".rl-flow-plan .rl-prose h2");
   check("5a body: title 30px/1.25, h2 19px", near(title.fontSize, 30) && near(title.lineHeight, 37.5) && near(h2.fontSize, 19) && h2.fontWeight === "600", { title, h2 });
   const body = await m(".rl-flow-plan .rl-prose > p");
