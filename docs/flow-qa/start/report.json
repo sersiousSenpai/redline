@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:13:57.214Z",
+  "startedAt": "2026-10-19T00:19:41.779Z",
   "fixture": "fixtures/flow-start-qa",
   "board": "/Users/yusufalbazian/redline-wt/flow-design/b4a.png",
   "screenshots": [
@@ -926,7 +926,7 @@
     "Services, model catalog and readiness are synthetic. The model chip reads the fixture's catalog entry \"Opus 4.5\" to mirror the board's copy; the app reads the live catalog.",
     "The headline is --font-serif, which resolves to the system serif here, not the board's Source Serif 4: its size, weight and line box are matched, its glyphs are not."
   ],
-  "fixtureUrl": "http://127.0.0.1:5175/fixtures/flow-start-qa/",
-  "finishedAt": "2026-10-18T09:14:21.135Z",
+  "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-start-qa/",
+  "finishedAt": "2026-10-19T00:20:03.876Z",
   "passed": true
 }
