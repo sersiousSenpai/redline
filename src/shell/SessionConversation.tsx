@@ -34,7 +34,7 @@
 //! 520px, so it is drawn here too.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, Loader, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, LoaderCircle, X } from "lucide-react";
 import { MarkdownView } from "../components/MarkdownView";
 import { QueueTray } from "../components/QueueTray";
 import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
@@ -655,7 +655,8 @@ function SegmentView({
         (segment.plan.plan.toolUseId === plan.latest && !plan.open ? (
           <InlinePlan title={plan.title ?? segment.plan.plan.title} marks={plan.marks} onOpen={onOpenPlan} />
         ) : segment.plan.plan.toolUseId === plan.latest && segment.plan.plan.outcome === null ? (
-          <PlanReady stats={plan.stats} onOpen={onOpenPlan} />
+          // Its panel is open beside it: nothing to open it to.
+          <PlanReady stats={plan.stats} onOpen={null} />
         ) : (
           <div className="rl-convo-quiet">
             <FilePenLine size={13} aria-hidden />
@@ -848,7 +849,7 @@ function WorkingRow({ status, onStop }: { status: WorkingStatus; onStop: (() => 
       {status.kind === "needs-you" ? (
         <span className="rl-convo-needs" aria-hidden />
       ) : (
-        <Loader size={13} aria-hidden className="rl-convo-spinner" />
+        <LoaderCircle size={13} aria-hidden className="rl-convo-spinner" />
       )}
       <span className="rl-convo-working-label">{status.label}</span>
       {status.since !== null && <Elapsed since={status.since} />}

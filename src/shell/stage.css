@@ -90,20 +90,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* "3 to review": Claude answered your marks; the way to them. */
-.rl-plan-head-review {
-  flex: none;
-  height: 22px;
-  margin-left: 10px;
-  padding: 0 8px;
-  border-radius: var(--rl-radius-chip);
-  background: var(--color-mode-redline-bg);
-  color: var(--color-mode-redline-fg);
-  font-size: var(--rl-text-chip);
-  font-weight: 600;
-  cursor: pointer;
-}
-.rl-plan-head-review:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }
+
 .rl-plan-head-spacer {
   flex: 1;
   min-width: 0;

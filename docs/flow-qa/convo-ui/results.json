@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:20:00.312Z",
+  "startedAt": "2026-10-19T00:22:11.526Z",
   "fixture": "fixtures/flow-convo-qa",
   "screenshots": [
     "4b-aurora.png",
@@ -32,10 +32,6 @@
     },
     {
       "name": "4b: voice is one click away (mic + Talk on the composer)",
-      "passed": true
-    },
-    {
-      "name": "4c: Open in panel → calls onOpenPlan",
       "passed": true
     },
     {
@@ -102,7 +98,7 @@
       "details": {
         "expectArgs": {
           "terminalId": "term-qa",
-          "nonce": "8936d721-7801-46cb-b0e8-7a54d6b37da7",
+          "nonce": "41c96879-04c9-4216-b0c5-f8a2a407e665",
           "text": "Also check the D3 crash reports"
         },
         "submitArgs": {
@@ -797,16 +793,9 @@
     },
     {
       "board": "4c",
-      "cell": "Open in panel copy",
-      "expected": "Open in panel →",
-      "actual": "Open in panel →",
-      "pass": true
-    },
-    {
-      "board": "4c",
-      "cell": "Open in panel 11.5px = ink-4",
-      "expected": "11.5px rgb(134, 139, 149)",
-      "actual": "11.5px rgb(134, 139, 149)",
+      "cell": "no Open in panel while the panel is open",
+      "expected": null,
+      "actual": null,
       "pass": true
     },
     {
@@ -980,13 +969,13 @@
   ],
   "errors": [],
   "sourceSha256": {
-    "src/shell/SessionConversation.tsx": "b32984febabd8ce7fe305e6a5ce641b0990ad2e072696c778c26c90c7fef389c",
-    "src/shell/SessionComposer.tsx": "eaf0320e6a2c3143f87a678f46a9fdc645a5029e294cdbc07a5cb70e262d4052",
+    "src/shell/SessionConversation.tsx": "2e8a2cc045beb6a5bb5c3693f8765d17147373417c6fdf60b8d25c0964f7e7ed",
+    "src/shell/SessionComposer.tsx": "bf863ae79d3726f25f50f2ab43bb7001e8ad4473dc57edaa01f8f54d49c5c0a1",
     "src/shell/AskCard.tsx": "38e9e7e5c11dff87583ba667b0031ddd98b627cb4a044d37163f30cb2f1a6720",
-    "src/shell/conversation.css": "b221202883d835458025ba1d95f569f3b37de91363ef3007ae2f9947f0cdf676",
-    "src/lib/convo/reducer.ts": "7280cdd4c5748d31b26e84a4733a62ee4e8846729b75b7da9e00420645e9a81a",
-    "src/lib/convo/status.ts": "abf6319d33cb7a767fa515c35aa9142653f2efb24ba69f7949e960596546397d",
-    "src/lib/convo/readiness.ts": "2cae3f40397b601ff9964fb45a2004cafdac37d3b30d7124e324dc8f1f8a90e6"
+    "src/shell/conversation.css": "1a4af5066b29d4e5c82bd1107d9ed2a84bb520d3bbc13aaf54d020b2fb85c6ce",
+    "src/lib/convo/reducer.ts": "949ece9d807f83a8617c9edab28e2c6fed3c0a9d8e040c65ddf71ca421143698",
+    "src/lib/convo/status.ts": "d89a83f001fa30fbe77ecf5283d70d9ee33aba3ae0ef0d77a085cdc8b1311a69",
+    "src/lib/convo/readiness.ts": "f1d3cbdf9557a083d06875f85b5e66927d492723059dbb6252af3be886b94916"
   },
   "limitations": [
     "Headless Chrome component fixture: not WKWebView, and the shell around the conversation is a stand-in sized like the boards.",
@@ -994,6 +983,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-convo-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:20:28.533Z",
+  "finishedAt": "2026-10-19T00:22:40.166Z",
   "passed": true
 }

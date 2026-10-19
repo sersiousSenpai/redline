@@ -41,7 +41,8 @@ export async function invoke(command: string, args: Record<string, unknown> = {}
     case "model_catalog_snapshot":
       return {
         models: [
-          { slug: "opus", displayName: "Opus", description: "Most capable", defaultEffort: "high", efforts: ["low", "medium", "high", "xhigh", "max"] },
+          // As the CLI's catalog names its aliases: the version it resolves to.
+          { slug: "opus", displayName: "Opus 4.5", description: "Most capable", defaultEffort: "high", efforts: ["low", "medium", "high", "xhigh", "max"] },
           { slug: "sonnet", displayName: "Sonnet", description: "Fast and capable", defaultEffort: "medium", efforts: ["low", "medium", "high"] },
           { slug: "haiku", displayName: "Haiku", description: "Fastest", defaultEffort: null, efforts: [] },
         ],

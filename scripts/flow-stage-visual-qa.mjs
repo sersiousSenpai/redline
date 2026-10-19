@@ -143,8 +143,10 @@ async function board4c() {
   check("4c: App's floating Contents button and Discuss pill stay out of the stage", floating.length === 2 && floating.every((d) => d === "none"), floating);
   const stage = await m(".rl-flow-stage");
   check("4c: the stage paints the window colour", stage.bg === (await tok("color-canvas", "backgroundColor")), stage.bg);
-  const column = await m('.rl-flow-convo-col[data-layout="column"]');
-  check("4c: the conversation is a 440px column with a hairline on its right", near(column?.w, 440) && column.br === 1 && column.brColor === (await tok("color-rule")), column);
+  // Split's left column is the companion (Chat | Feedback), the same one
+  // the full pose puts on the right (POLISH P3).
+  const column = await m('.rl-flow-panel[data-side="left"]');
+  check("4c: the companion column is 440px with a hairline on its right", near(column?.w, 440) && column.br === 1 && column.brColor === (await tok("color-rule")), column);
   const plan = await m(".rl-flow-plan");
   check("4c: the plan panel sits beside it on the paper", near(plan.x, 440) && plan.bg === (await tok("color-paper", "backgroundColor")), { x: plan.x, bg: plan.bg });
   const head = await m(".rl-plan-head");
@@ -178,7 +180,8 @@ async function board4c() {
   const foot = await m(".rl-plan-foot");
   check("4c footer: 64px, 0 16 0 22, 13px, hairline above", near(foot.h, 64) && near(foot.pl, 22) && near(foot.pr, 16) && near(foot.fontSize, 13) && foot.bt === 1 && foot.btColor === (await tok("color-rule")), foot);
   const hint = await m(".rl-plan-foot .rl-context-hint");
-  check('4c footer: "Select text to mark it." in the muted ink', hint.text === "Select text to mark it." && hint.color === (await tok("color-ink-4")) && near(hint.fontSize, 13), hint);
+  // With marks to send, the hint's place carries the tally (POLISH P3).
+  check("4c footer: the tally of what Send carries, in the muted ink", hint.text === "2 marks to send · 2 feedback — requests a revision" && hint.color === (await tok("color-ink-4")) && near(hint.fontSize, 13), hint);
   const send = await mText(".rl-plan-foot", "Send marks to Claude");
   check('4c footer: "Send marks to Claude" — 34px, r9, outlined', near(send.h, 34) && near(send.radius, 9) && near(send.pl, 14) && send.bt === 1 && send.btColor === (await tok("color-rule-strong")) && send.color === (await tok("color-ink-3")), send);
   const approve = await cdp.evaluate("window.__m(document.querySelector('.rl-plan-split > .rl-plan-btn--primary'))");
@@ -190,7 +193,7 @@ async function board4c() {
   check('4c: the conversation shows its "Plan ready" card in the column', card?.visible && card.x >= 0 && card.right <= 441 && card.text.includes("Plan ready"), card && { x: card.x, right: card.right, text: card.text.slice(0, 60) });
   await sweep("4c", "aurora");
   const sendTitle = await cdp.evaluate("[...document.querySelectorAll('.rl-plan-foot .rl-plan-btn')].find(b => b.textContent.startsWith('Send marks'))?.title");
-  check("4c footer: Send carries classic's tally in its tooltip", /^2 pending · 2 feedback — requests a revision$/.test(sendTitle ?? ""), sendTitle);
+  check("4c footer: Send carries classic's tally in its tooltip", /^2 marks to send · 2 feedback — requests a revision$/.test(sendTitle ?? ""), sendTitle);
 
   // The plan's ⋯: classic's Download and Live Session menus.
   await click('.rl-plan-head [aria-label="More plan actions"]');
@@ -230,11 +233,12 @@ async function board4c() {
   await cdp.evaluate("window.__qa.setContents(false)"); await settle();
   const zoom = await m(".rl-doc-zoom");
   check("4c: the zoom/width pill sits above the plan's footer", zoom.visible && near(pane.bottom - zoom.bottom, 80) && near(pane.right - zoom.right, 16), zoom);
-  // A mark being written beside the chat: the composer on a glass sheet.
+  // A mark being written: the column turns to Feedback and the composer
+  // sits there, as it does in full (POLISH P3).
   await cdp.evaluate("window.__qa.setComposing(true)"); await settle();
-  const sheet = await m(".rl-flow-compose-sheet");
-  check("4c: a comment being written sits on a glass sheet over the plan's foot", sheet?.visible && /rl-glass/.test(await cdp.evaluate("document.querySelector('.rl-flow-compose-sheet').className")) && near((await m(".rl-plan-foot")).y - sheet.bottom, 14), sheet);
-  await cdp.evaluate("window.__qa.setComposing(false)"); await settle();
+  const writing = await cdp.evaluate("({ tab: document.querySelector('.rl-flow-panel[data-side=left] .rl-fb-tab[aria-selected=true]')?.textContent ?? null, composer: !!document.querySelector('.rl-flow-panel[data-side=left] .rl-fb-composer-wrap') })");
+  check("4c: a mark being written turns the column to Feedback, where it is written", !!writing.tab?.startsWith("Feedback") && writing.composer, writing);
+  await cdp.evaluate("window.__qa.setComposing(false)"); await cdp.evaluate("window.__qa.setTab('chat')"); await settle();
 
   // The conversation keeps its identity across the poses: the same host
   // node, carried — detached while the Feedback tab has it out of sight.
@@ -340,7 +344,10 @@ async function board5a() {
   const chat = await mText(".rl-fb-tabs", "Chat"), fb = await m('.rl-fb-tab[aria-selected="true"]'), count = await m(".rl-fb-tab-count");
   check('5a tabs: "Chat" quiet; "Feedback 16" selected — 28px, r7, the selected-row fill', near(chat.h, 28) && near(chat.pl, 10) && chat.color === (await tok("color-ink-4")) && fb.text === "Feedback16" && near(fb.h, 28) && near(fb.radius, 7) && fb.bg === (await tok("color-fill-2", "backgroundColor")) && fb.color === (await tok("color-ink")) && count.color === (await tok("color-ink-4")), { chat, fb, count });
   const all = await m(".rl-fb-tabs-status");
-  check('5a: "All resolved" at 11.5px, muted, on the right', all?.text === "All resolved" && near(all.fontSize, 11.5) && all.color === (await tok("color-ink-4")) && near(panel.right - all.right, 12), all);
+  // The board's "All resolved" counts an answer as resolved before you accept
+  // it; Flow names what still waits on you there instead, in the redlining
+  // amber (POLISH P3: the decisions classic's Action Items carried).
+  check('5a: answers still to accept read as "N to review", amber, on the right', /^\d+ to review$/.test(all?.text ?? "") && near(all.fontSize, 11.5) && all.color === (await tok("color-mode-redline-fg")) && near(panel.right - all.right, 12), all);
   await sweep("5a", "aurora");
   for (const theme of ["basic", "studio"]) {
     await load("5a", w, h, theme);

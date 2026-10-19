@@ -293,8 +293,6 @@ export default function FlowStage(p: FlowStageProps) {
             pose={headerPose}
             version={displayVersion}
             marks={marks}
-            toReview={waiting}
-            onReview={() => setPanelTab("feedback")}
             viewing={p.viewing}
             onToggleContents={toggleContents}
             contentsOpen={p.contents.open}

@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T10:44:11.246Z",
+  "startedAt": "2026-10-19T00:17:59.987Z",
   "fixture": "fixtures/flow-stage-qa",
   "screenshots": [
     "4c-aurora.png",
@@ -35,7 +35,7 @@
       "details": "rgb(7, 10, 18)"
     },
     {
-      "name": "4c: the conversation is a 440px column with a hairline on its right",
+      "name": "4c: the companion column is 440px with a hairline on its right",
       "passed": true,
       "details": {
         "x": 0,
@@ -67,7 +67,7 @@
         "blColor": "rgb(228, 233, 243)",
         "brColor": "rgb(50, 55, 66)",
         "shadow": "none",
-        "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan readyOpen in panel →2 sections · 3 steps. Mark anything you'd change, then approve.Why is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighTalk",
+        "text": "ChatFeedback2Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan ready2 sections · 3 steps. Mark anything you'd change, then approve.Why is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighTalk",
         "display": "flex",
         "visible": true
       }
@@ -659,20 +659,20 @@
         "blColor": "rgb(228, 233, 243)",
         "brColor": "rgb(228, 233, 243)",
         "shadow": "none",
-        "text": "Select text to mark it.Send marks to ClaudeApprove & build",
+        "text": "2 marks to send · 2 feedback — requests a revisionSend marks to ClaudeApprove & build",
         "display": "flex",
         "visible": true
       }
     },
     {
-      "name": "4c footer: \"Select text to mark it.\" in the muted ink",
+      "name": "4c footer: the tally of what Send carries, in the muted ink",
       "passed": true,
       "details": {
         "x": 462,
         "y": 758.75,
-        "w": 129.359375,
+        "w": 307.609375,
         "h": 18.1875,
-        "right": 591.359375,
+        "right": 769.609375,
         "bottom": 776.9375,
         "fontSize": 13,
         "lineHeight": 18.2,
@@ -697,7 +697,7 @@
         "blColor": "rgb(134, 139, 149)",
         "brColor": "rgb(134, 139, 149)",
         "shadow": "none",
-        "text": "Select text to mark it.",
+        "text": "2 marks to send · 2 feedback — requests a revision",
         "display": "flex",
         "visible": true
       }
@@ -791,18 +791,18 @@
       "details": {
         "x": 26,
         "right": 413,
-        "text": "Plan readyOpen in panel →2 sections · 3 steps. Mark anything"
+        "text": "Plan ready2 sections · 3 steps. Mark anything you'd change, "
       }
     },
     {
-      "name": "4c aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
+      "name": "4c aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (33 swept)",
       "passed": true,
       "details": []
     },
     {
       "name": "4c footer: Send carries classic's tally in its tooltip",
       "passed": true,
-      "details": "2 pending · 2 feedback — requests a revision"
+      "details": "2 marks to send · 2 feedback — requests a revision"
     },
     {
       "name": "4c ⋯: export, Obsidian, share, invite and move, from the plan's header",
@@ -888,7 +888,7 @@
       "details": "Claude's session for this plan ended. Restore it to send or approve."
     },
     {
-      "name": "4c notices aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
+      "name": "4c notices aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (50 swept)",
       "passed": true,
       "details": []
     },
@@ -1056,41 +1056,11 @@
       }
     },
     {
-      "name": "4c: a comment being written sits on a glass sheet over the plan's foot",
+      "name": "4c: a mark being written turns the column to Feedback, where it is written",
       "passed": true,
       "details": {
-        "x": 462,
-        "y": 676.5,
-        "w": 560,
-        "h": 45.5,
-        "right": 1022,
-        "bottom": 722,
-        "fontSize": 13,
-        "lineHeight": 19.5,
-        "fontWeight": "400",
-        "fontFamily": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
-        "color": "rgb(228, 233, 243)",
-        "bg": "rgba(26, 31, 42, 0.56)",
-        "radius": 12,
-        "pt": 12,
-        "pr": 12,
-        "pb": 12,
-        "pl": 12,
-        "ml": 0,
-        "gap": 0,
-        "maxWidth": "560px",
-        "bt": 1,
-        "bb": 1,
-        "bl": 1,
-        "br": 1,
-        "bbColor": "rgba(0, 0, 0, 0)",
-        "btColor": "rgba(0, 0, 0, 0)",
-        "blColor": "rgba(0, 0, 0, 0)",
-        "brColor": "rgba(0, 0, 0, 0)",
-        "shadow": "rgba(228, 233, 243, 0.22) 1px 1px 0px 0px inset, rgba(228, 233, 243, 0.07) 0px 0px 0px 1px inset, rgba(0, 0, 0, 0.35) 0px 20px 60px 0px",
-        "text": "A comment composer",
-        "display": "block",
-        "visible": true
+        "tab": "Feedback2",
+        "composer": true
       }
     },
     {
@@ -1145,12 +1115,12 @@
       }
     },
     {
-      "name": "4c basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
+      "name": "4c basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (33 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "4c notices basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
+      "name": "4c notices basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (50 swept)",
       "passed": true,
       "details": []
     },
@@ -1163,12 +1133,12 @@
       }
     },
     {
-      "name": "4c studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (32 swept)",
+      "name": "4c studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (33 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "4c notices studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (49 swept)",
+      "name": "4c notices studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (50 swept)",
       "passed": true,
       "details": []
     },
@@ -1248,7 +1218,7 @@
           "blColor": "rgb(228, 233, 243)",
           "brColor": "rgb(228, 233, 243)",
           "shadow": "none",
-          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighdinTalkPlanv1 · 2 marksFull screenClose planDin roadmap: next stepsPicks up from note 28 and the 2026-10-17 updates in the build log.1. Finish Track BCompile the build in Xcode on the Mac.Apply 0018_vault_revisions.sql before the next build runs.Deploy the Worker; D3 crash reports need both.2. Next by priorityC1, D1, D3, D4, C6 are built. Start with D6: the pattern and experiment loop.Select text to mark it.Send marks to ClaudeApprove & build",
+          "text": "Read the obsidian build log and plan the next roadmap stepsRead 4 files · planned in 2m 03sPlan · Din roadmap: next steps2 marksOpenWhy is Xcode compile first?The two pending migrations ship with the next build. Compiling first catches Track A breakage before they run against staging.\nPlanOpus · HighdinTalkPlanv1 · 2 marksFull screenClose planDin roadmap: next stepsPicks up from note 28 and the 2026-10-17 updates in the build log.1. Finish Track BCompile the build in Xcode on the Mac.Apply 0018_vault_revisions.sql before the next build runs.Deploy the Worker; D3 crash reports need both.2. Next by priorityC1, D1, D3, D4, C6 are built. Start with D6: the pattern and experiment loop.2 marks to send · 2 feedback — requests a revisionSend marks to ClaudeApprove & build",
           "display": "flex",
           "visible": true
         }
@@ -1354,7 +1324,7 @@
         "blColor": "rgb(50, 55, 66)",
         "brColor": "rgb(228, 233, 243)",
         "shadow": "none",
-        "text": "ChatFeedback16All resolvedPlanResolved in v2The pilot firm is my own firm.\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 2\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 3\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 4\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 5\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 6\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 7\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 8\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 9\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 10\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 11\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 12\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 13\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 14\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 15\nDone.\nAcceptReopenDiscussPlanResolved in v2Resolved item 16\nDone.\nAcceptReopenDiscussSelect text in the plan, or type feedback…Claude",
+        "text": "ChatFeedback1616 to reviewWaiting on you 16Accept Claude's answer, or reopen itFeedback·PlanResolved in v2The pilot firm is my own firm.\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 2\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 3\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 4\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 5\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 6\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 7\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 8\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 9\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 10\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 11\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 12\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 13\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 14\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 15\nDone.\nAcceptReopenDiscussFeedback·PlanResolved in v2Resolved item 16\nDone.\nAcceptReopenDiscussSelect text in the plan, or type feedback…Claude",
         "display": "flex",
         "visible": true
       }
@@ -1973,7 +1943,7 @@
         "blColor": "rgb(228, 233, 243)",
         "brColor": "rgb(228, 233, 243)",
         "shadow": "none",
-        "text": "ChatFeedback16All resolved",
+        "text": "ChatFeedback1616 to review",
         "display": "flex",
         "visible": true
       }
@@ -2087,55 +2057,55 @@
       }
     },
     {
-      "name": "5a: \"All resolved\" at 11.5px, muted, on the right",
+      "name": "5a: answers still to accept read as \"N to review\", amber, on the right",
       "passed": true,
       "details": {
-        "x": 1524.640625,
-        "y": 61.375,
-        "w": 63.359375,
-        "h": 17.25,
+        "x": 1503.40625,
+        "y": 58,
+        "w": 84.59375,
+        "h": 24,
         "right": 1588,
-        "bottom": 78.625,
+        "bottom": 82,
         "fontSize": 11.5,
         "lineHeight": 17.25,
-        "fontWeight": "400",
+        "fontWeight": "600",
         "fontFamily": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
-        "color": "rgb(134, 139, 149)",
-        "bg": "rgba(0, 0, 0, 0)",
-        "radius": 0,
+        "color": "rgb(227, 191, 133)",
+        "bg": "rgb(37, 37, 40)",
+        "radius": 6,
         "pt": 0,
-        "pr": 0,
+        "pr": 8,
         "pb": 0,
-        "pl": 0,
-        "ml": 158.156,
+        "pl": 8,
+        "ml": 136.922,
         "gap": 0,
         "maxWidth": "none",
         "bt": 0,
         "bb": 0,
         "bl": 0,
         "br": 0,
-        "bbColor": "rgb(134, 139, 149)",
-        "btColor": "rgb(134, 139, 149)",
-        "blColor": "rgb(134, 139, 149)",
-        "brColor": "rgb(134, 139, 149)",
+        "bbColor": "rgb(227, 191, 133)",
+        "btColor": "rgb(227, 191, 133)",
+        "blColor": "rgb(227, 191, 133)",
+        "brColor": "rgb(227, 191, 133)",
         "shadow": "none",
-        "text": "All resolved",
+        "text": "16 to review",
         "display": "block",
         "visible": true
       }
     },
     {
-      "name": "5a aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
+      "name": "5a aurora: every text in the stage reaches 4.5:1, icon-only controls 3:1 (162 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "5a basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
+      "name": "5a basic: every text in the stage reaches 4.5:1, icon-only controls 3:1 (162 swept)",
       "passed": true,
       "details": []
     },
     {
-      "name": "5a studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (143 swept)",
+      "name": "5a studio: every text in the stage reaches 4.5:1, icon-only controls 3:1 (162 swept)",
       "passed": true,
       "details": []
     }
@@ -2148,6 +2118,6 @@
   ],
   "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-stage-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T10:44:26.511Z",
+  "finishedAt": "2026-10-19T00:18:15.334Z",
   "passed": true
 }

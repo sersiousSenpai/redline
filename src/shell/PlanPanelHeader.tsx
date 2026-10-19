@@ -34,9 +34,6 @@ export interface PlanPanelHeaderProps {
   version: number | null;
   /** Unsent marks on the latest version. */
   marks: number;
-  /** Decisions waiting on you in the Feedback tab, and the way to them. */
-  toReview?: number;
-  onReview?: () => void;
   /** Set while an older version is on screen. */
   viewing?: VersionPillProps | null;
   /** The contents rail's toggle; null when the plan has no sections. */
@@ -54,8 +51,6 @@ export function PlanPanelHeader({
   pose,
   version,
   marks,
-  toReview = 0,
-  onReview,
   viewing,
   onToggleContents,
   contentsOpen,
@@ -90,11 +85,7 @@ export function PlanPanelHeader({
           {meta && <span className="rl-plan-head-meta">{meta}</span>}
         </span>
       )}
-      {toReview > 0 && onReview && (
-        <button type="button" className="rl-plan-head-review" onClick={onReview} title="Claude answered your marks: accept or reopen each in Feedback">
-          {toReview} to review
-        </button>
-      )}
+
       {/* The ⋯ on the right is matched on the left in the full pose, so the
           version pill stays centred between Contents and Full screen (5a). */}
       {full && menu.length > 0 && <span className="rl-plan-head-balance" aria-hidden />}

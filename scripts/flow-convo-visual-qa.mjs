@@ -236,8 +236,9 @@ try {
     cell(B, "plan card border = focus-rim", (await cdp.evaluate(`(() => { const p = document.createElement('i'); p.style.color = getComputedStyle(document.querySelector('.rl-convo-plan')).getPropertyValue('--rl-glass-ring'); document.body.append(p); const c = getComputedStyle(p).color; p.remove(); return c; })()`)), await token("focus-rim"));
     cell(B, "Plan ready 13.5/600", Object.values(await style(".rl-convo-plan-title", ["font-size", "font-weight"])).join(" "), "13.5px 600");
     cell(B, "Plan ready copy", await text(".rl-convo-plan-title"), "Plan ready");
-    cell(B, "Open in panel copy", await text(".rl-convo-plan-open"), "Open in panel →");
-    cell(B, "Open in panel 11.5px = ink-4", Object.values(await style(".rl-convo-plan-open", ["font-size", "color"])).join(" "), `11.5px ${await token("ink-4")}`);
+    // The board draws "Open in panel →" beside the panel it would open;
+    // Flow drops it while that panel is open (POLISH P4).
+    cell(B, "no Open in panel while the panel is open", await text(".rl-convo-plan-open"), null);
     cell(B, "card body copy", await text(".rl-convo-plan-body"), "3 sections · 11 steps. Mark anything you'd change, then approve.");
     cell(B, "card body 13px = ink-3", Object.values(await style(".rl-convo-plan-body", ["font-size", "color"])).join(" "), `13px ${await token("ink-3")}`);
     const b2 = await rect(".rl-convo-bubble", 1);
@@ -255,8 +256,7 @@ try {
     cell(B, "first chip at the composer's inset", chips[0]?.x, 33);
     const send = await rect(".rl-convo-composer .rl-send");
     cell(B, "send right", send?.right, 409);
-    await click(".rl-convo-plan-open");
-    check("4c: Open in panel → calls onOpenPlan", await cdp.evaluate("window.__qaOpened === 1"));
+    // Open lives on the closed pose's inline card now (4d, below).
     await click(".rl-convo-summary");
     check("4c: the summary expands to the four reads it folded", await cdp.evaluate("document.querySelectorAll('.rl-convo-folded .rl-convo-tool').length === 2 && document.querySelector('.rl-convo-folded').textContent.includes('28 Roadmap.md') && document.querySelector('.rl-convo-folded').textContent.includes('and 2 more')"));
     await screenshot("4c-aurora-expanded");
@@ -326,7 +326,7 @@ try {
     check("mode chip: a pick goes through convo_set_mode", JSON.stringify((await calls("convo_set_mode")).pop()) === JSON.stringify({ terminalId: "term-qa", mode: "default" }), await calls("convo_set_mode"));
     check("mode chip: a terminal-only answer says Switch in terminal", (await text(".rl-convo-hint")) === "Switch in terminal");
     await click('.rl-convo-chips > .rl-convo-chip:nth-of-type(2)');
-    check("model chip opens the live catalog", await cdp.evaluate("[...document.querySelectorAll('[role=menu][aria-label=\"Model and effort\"] [role=menuitemradio]')].map(e => e.textContent).join(',').startsWith('Opus,Sonnet,Haiku')") && (await calls("model_catalog_snapshot")).length >= 1);
+    check("model chip opens the live catalog", await cdp.evaluate("[...document.querySelectorAll('[role=menu][aria-label=\"Model and effort\"] [role=menuitemradio]')].map(e => e.textContent).join(',').startsWith('Opus 4.5,Sonnet,Haiku')") && (await calls("model_catalog_snapshot")).length >= 1);
     await screenshot("4b-model-menu");
     await key("Escape", "Escape", 27);
     await click(".rl-convo-talk");

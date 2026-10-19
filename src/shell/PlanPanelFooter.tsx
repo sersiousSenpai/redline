@@ -26,7 +26,7 @@
 //! what shows, never what happens.
 
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ChevronDown, Hammer, Loader } from "lucide-react";
+import { ChevronDown, Hammer, LoaderCircle } from "lucide-react";
 
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
 import { ridesSubmit } from "../lib/planSearch";
@@ -127,7 +127,7 @@ export function PlanPanelFooter(p: PlanPanelFooterProps) {
 }
 
 function Spinner({ tone }: { tone: "plan" | "build" }) {
-  return <Loader aria-hidden size={13} strokeWidth={2} className="rl-stage-spin" data-tone={tone} />;
+  return <LoaderCircle aria-hidden size={13} strokeWidth={2} className="rl-stage-spin" data-tone={tone} />;
 }
 
 function Status(p: PlanPanelFooterProps) {
