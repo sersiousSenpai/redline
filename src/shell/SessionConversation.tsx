@@ -34,12 +34,12 @@
 //! 520px, so it is drawn here too.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowRight, Check, ChevronDown, FilePenLine, Loader, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, Loader, X } from "lucide-react";
 import { MarkdownView } from "../components/MarkdownView";
 import { QueueTray } from "../components/QueueTray";
 import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
 import { questionsToRelease } from "../lib/askRelease";
-import type { ConvoAsk, ConvoAskOutcome } from "../lib/convo/types";
+import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "../lib/convo/types";
 import {
   MAX_ROWS,
   convoReducer,
@@ -48,6 +48,7 @@ import {
   normalizeSendText,
   type Block,
   type ConvoView,
+  type ModelFact,
   type PlanFact,
   type ReadinessFact,
   type Turn,
@@ -112,6 +113,25 @@ export interface SessionConversationProps {
   /** Open or close the voice panel; without it, Talk raises
    *  `redline:flow-talk`. */
   onTalk?: () => void;
+  /** Where the plan is in its life, from the session (the transcript's own
+   *  outcome can be paged off, or predate this terminal): the plan card at
+   *  the end of the conversation follows it, so an approved, building or
+   *  built plan never reads "Plan ready … then approve". */
+  planState?: {
+    /** The top bar's mode word and kind: "Building v4", "Approved v2"… */
+    label: string;
+    kind: "chat" | "plan" | "redline" | "build";
+    /** Claude is waiting on this plan's review. */
+    held: boolean;
+    /** Claude's answers waiting on your accept or reopen. */
+    toReview: number;
+    /** A run's own count, when there is one: "step 3 of 11". */
+    step?: string | null;
+  } | null;
+  /** The model and effort the session recorded, until the transcript says
+   *  which answered; and the mode a plan in review is in. */
+  fallbackModel?: ModelFact | null;
+  fallbackMode?: ConvoMode | null;
   /** Out of sight (the terminal view, the Feedback tab, another surface):
    *  its open questions go to the terminal, since a held AskUserQuestion
    *  shows nowhere else (lib/askRelease). It stays subscribed. */
@@ -416,11 +436,23 @@ export default function SessionConversation(props: SessionConversationProps) {
             />
           ))}
           {plan && !planHeld &&
-            (props.planOpen ? (
-              <PlanReady stats={stats} onOpen={props.onOpenPlan} />
+            (props.planState && !props.planState.held ? (
+              <PlanStatus
+                title={props.planTitle ?? plan.title}
+                state={props.planState}
+                open={props.planOpen}
+                onOpen={props.onOpenPlan}
+              />
+            ) : props.planOpen ? (
+              <PlanReady stats={stats} onOpen={null} />
             ) : (
               <InlinePlan title={props.planTitle ?? plan.title} marks={props.planMarks ?? 0} onOpen={props.onOpenPlan} />
             ))}
+          {!plan && !failed && !terminalOnly && blocks.length === 0 && view.pending.length === 0 && !working && (
+            <p className="rl-convo-empty">
+              {terminalId ? `Nothing said here yet.` : "This session isn't running in a Redline terminal, so there is no conversation to show."}
+            </p>
+          )}
           {view.pending.map((bubble) => (
             <Bubble
               key={bubble.id}
@@ -464,8 +496,8 @@ export default function SessionConversation(props: SessionConversationProps) {
             sessionId={props.sessionId}
             harness={props.harness}
             layout={layout}
-            mode={view.mode}
-            model={view.model}
+            mode={view.mode ?? props.fallbackMode ?? null}
+            model={view.model ?? props.fallbackModel ?? null}
             projectPath={props.projectPath}
             working={working}
             placeholder={placeholder}
@@ -735,19 +767,54 @@ function Bubble({ bubble, queued = false, onShowTerminal }: { bubble: UserBubble
 }
 
 /** 4c: the plan is in, and its panel is open beside the conversation. */
-function PlanReady({ stats, onOpen }: { stats: string | null; onOpen: () => void }) {
+function PlanReady({ stats, onOpen }: { stats: string | null; onOpen: (() => void) | null }) {
   return (
     <div className="rl-convo-plan rl-glass rl-glass-sheet">
       <div className="rl-convo-plan-head">
         <FilePenLine size={14} aria-hidden className="rl-convo-plan-icon" />
         <span className="rl-convo-plan-title">Plan ready</span>
         <span className="rl-convo-spacer" />
-        <button type="button" className="rl-convo-plan-open" onClick={onOpen}>
-          Open in panel →
-        </button>
+        {onOpen && (
+          <button type="button" className="rl-convo-plan-open" onClick={onOpen}>
+            Open in panel →
+          </button>
+        )}
       </div>
       <p className="rl-convo-plan-body">{stats ? `${stats}. ` : ""}Mark anything you'd change, then approve.</p>
     </div>
+  );
+}
+
+const PLAN_KIND_ICON = { chat: FilePenLine, plan: FilePenLine, redline: FilePenLine, build: Hammer } as const;
+
+/** A plan past its review (approved, building, built) or back with Claude:
+ *  where it is, in the top bar's words and colour, and the way to it. */
+function PlanStatus({ title, state, open, onOpen }: {
+  title: string | null;
+  state: NonNullable<SessionConversationProps["planState"]>;
+  open: boolean;
+  onOpen: () => void;
+}) {
+  const Icon = PLAN_KIND_ICON[state.kind];
+  const body = (
+    <>
+      <Icon size={14} aria-hidden className="rl-convo-plan-icon" style={{ color: `var(--color-mode-${state.kind === "chat" ? "plan" : state.kind}-fg)` }} />
+      <span className="rl-convo-inline-title">Plan{title ? ` · ${title}` : ""}</span>
+      <span className="rl-convo-plan-state" data-kind={state.kind}>
+        {state.label}
+        {state.step ? `: ${state.step}` : ""}
+      </span>
+      {state.toReview > 0 && <span className="rl-convo-inline-marks">{state.toReview} to review</span>}
+      <span className="rl-convo-spacer" />
+      {!open && <span className="rl-convo-inline-open">Open</span>}
+    </>
+  );
+  return open ? (
+    <div className="rl-convo-inline-plan rl-glass rl-glass-sheet" data-static="">{body}</div>
+  ) : (
+    <button type="button" className="rl-convo-inline-plan rl-glass rl-glass-sheet" onClick={onOpen}>
+      {body}
+    </button>
   );
 }
 

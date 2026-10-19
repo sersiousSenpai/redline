@@ -155,9 +155,20 @@ describe("SessionConversation", () => {
   it("with no terminal yet, sends wait in the queue and nothing subscribes", async () => {
     await render(props({ terminalId: null }));
     expect(log).toEqual([]);
-    expect(q(".rl-convo-readiness")?.textContent).toMatch(/no terminal yet/);
+    expect(q(".rl-convo-readiness")?.textContent).toMatch(/Not running in a terminal: restore the session to send/);
     await typeAndSend("First thought");
     expect(q(".rl-queue-count")?.textContent).toBe("1 queued");
+  });
+
+  it("a plan past its review reads as where it is, not Plan ready", async () => {
+    const onOpenPlan = vi.fn();
+    const planState = { label: "Building v4", kind: "build" as const, held: false, toReview: 1 };
+    await render(props({ planOpen: false, onOpenPlan, planTitle: "Roadmap", planState }));
+    expect(q(".rl-convo-plan-body")).toBeNull();
+    expect(q(".rl-convo-inline-plan")?.textContent).toBe("Plan · RoadmapBuilding v41 to reviewOpen");
+    // With the panel open there is nowhere to open it to.
+    await render(props({ planOpen: true, onOpenPlan, planTitle: "Roadmap", planState }));
+    expect(q(".rl-convo-inline-plan")?.textContent).toBe("Plan · RoadmapBuilding v41 to review");
   });
 
   it("the plan reads as Plan ready while its panel is open, and one line while closed", async () => {

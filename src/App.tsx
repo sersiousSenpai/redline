@@ -2585,14 +2585,24 @@ function App() {
       setFlowPainted((prev) => (prev.pose === pose && prev.layout === layout ? prev : { pose, layout })),
     [],
   );
-  // 4c: the split pose takes the sidebar's width for the plan, and gives it
-  // back on the way out — unless ⌘B moved it in between, which is the
-  // user's say. Through flow's own sidebar switch, so ⌘B works in the pose.
+  // 4c: the split pose takes the sidebar's width for the plan when the
+  // window has none to spare (the sidebar, the 440px column and a readable
+  // plan need about 1300px), and gives it back on the way out — unless ⌘B
+  // moved it in between, which is the user's say. On a wider window the
+  // sidebar stays: it is how you get anywhere else.
   const splitFoldedSidebar = useRef(false);
   const flowSplit = flowStageOwns && flowPainted.pose === "split";
+  const [roomForSidebar, setRoomForSidebar] = useState(() => window.innerWidth >= 1300);
   useEffect(() => {
     if (!flowShell) return;
-    if (flowSplit) {
+    const query = window.matchMedia("(min-width: 1300px)");
+    const update = () => setRoomForSidebar(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, [flowShell]);
+  useEffect(() => {
+    if (!flowShell) return;
+    if (flowSplit && !roomForSidebar) {
       if (getFlowState().sidebar) {
         splitFoldedSidebar.current = true;
         setFlowSidebar(false);
@@ -2601,7 +2611,7 @@ function App() {
       splitFoldedSidebar.current = false;
       if (!getFlowState().sidebar) setFlowSidebar(true);
     }
-  }, [flowShell, flowSplit]);
+  }, [flowShell, flowSplit, roomForSidebar]);
   // The conversation is ONE mounted component in three places — the stage,
   // the split column, the full pose's Chat tab — like the chat room's host
   // below: the stage moves this node between them and the conversation in it
@@ -11799,6 +11809,15 @@ function App() {
               onTalk={flowTalk}
               // Out of sight, its questions go to the terminal (lib/askRelease).
               hidden={!flowConvoOnScreen}
+              // The plan card follows the session, not only the transcript.
+              planState={stageTarget.kind === "plan" && flowSummary ? {
+                label: flowMode?.label ?? "Plan",
+                kind: flowMode?.kind ?? "plan",
+                held: flowSummary.held,
+                toReview: threadComments.filter((c) => c.status === "resolved").length,
+              } : null}
+              fallbackModel={stageTarget.kind === "plan" && session?.model ? { model: session.model, effort: session.effort ?? null } : null}
+              fallbackMode={flowSummary?.status === "in_review" ? "plan" : null}
             />
           </ErrorBoundary>
         </Suspense>,

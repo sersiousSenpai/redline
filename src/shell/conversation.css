@@ -364,6 +364,8 @@
 }
 
 .rl-convo-composer.rl-glass {
+  /* Its own width decides what the chip row can hold (below). */
+  container-type: inline-size;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -402,8 +404,11 @@
   line-height: 1.2;
   color: var(--color-ink-3);
 }
+/* Mode, model and folder give way first, down to an ellipsis; mic, Talk and
+   send keep their size, so the row never pushes them past its edge. */
 .rl-convo-chip {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -420,6 +425,13 @@
   cursor: pointer;
 }
 span.rl-convo-chip { cursor: default; }
+.rl-convo-talk { flex: none; }
+/* A narrow composer (the split column, the full pose's panel): Talk keeps
+   its icon, and the folder goes (the plan panel names it). */
+@container (max-width: 420px) {
+  .rl-convo-talk > span { display: none; }
+  .rl-convo-chip[data-chip="folder"] { display: none; }
+}
 .rl-convo-chip > svg { flex: none; }
 .rl-convo-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rl-convo-chip-icon { color: var(--color-ink-4); }
@@ -626,4 +638,28 @@ button.rl-convo-chip:hover,
 @media (prefers-reduced-motion: reduce) {
   .rl-convo-spinner { animation: none; }
   .rl-convo-summary-caret { transition: none; }
+}
+
+/* The plan card that follows the plan past its review: its state in the top
+   bar's colour. A static one (the panel is open) takes no pointer. */
+.rl-convo-plan-state {
+  flex: none;
+  padding: 0 7px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--rl-radius-chip);
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--color-mode-plan-bg);
+  color: var(--color-mode-plan-fg);
+}
+.rl-convo-plan-state[data-kind="redline"] { background: var(--color-mode-redline-bg); color: var(--color-mode-redline-fg); }
+.rl-convo-plan-state[data-kind="build"] { background: var(--color-mode-build-bg); color: var(--color-mode-build-fg); }
+.rl-convo-inline-plan[data-static] { cursor: default; }
+.rl-convo-empty {
+  margin: 24px 0 0;
+  font-size: 13px;
+  color: var(--color-ink-4);
+  text-align: center;
 }

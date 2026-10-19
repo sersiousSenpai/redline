@@ -151,7 +151,7 @@ export function SessionComposer(props: SessionComposerProps) {
           onResult={switched}
         />
         {stage && folder && (
-          <span className="rl-convo-chip" title={props.projectPath ?? undefined}>
+          <span className="rl-convo-chip" data-chip="folder" title={props.projectPath ?? undefined}>
             <Folder size={12} aria-hidden className="rl-convo-chip-icon" />
             <span>{folder}</span>
           </span>

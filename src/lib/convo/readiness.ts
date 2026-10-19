@@ -52,7 +52,7 @@ export function blockerMessage(blocker: ComposerBlocker, harness: "claude" | "co
   const cli = harness === "codex" ? "Codex" : "Claude";
   switch (blocker) {
     case "no_terminal":
-      return "This session has no terminal yet. Messages wait here.";
+      return "Not running in a terminal: restore the session to send. Messages wait here.";
     case "unbound":
       return `Waiting for ${cli} to start. Messages wait here.`;
     case "no_paste_mode":
