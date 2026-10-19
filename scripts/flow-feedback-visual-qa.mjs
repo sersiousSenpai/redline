@@ -41,6 +41,8 @@ const report = {
   limitations: [
     "Headless Chrome component fixture, not WKWebView or the live app; the stage's own frame (top bar, plan centre) is a stand-in.",
     "Board numbers are read from the design HTML and the rendered board PNGs; text widths depend on the system font, so tab and note widths are held to ±2px where the board's own text sets them.",
+    "POLISH P3 groups the list into piles under small-caps labels, which moves every card down from the board's y: card tops are the current render (measured), and what is inside a card keeps the board's offsets from that top.",
+    "The fixture's header is not given the stage's waiting count, so it still reads \"All resolved\"; \"N to review\" and the cross-version vN badge are checked on the same production components mounted beside it.",
   ],
 };
 let server, chrome, cdp;
@@ -89,7 +91,36 @@ const probe = `window.__qaBox = (selector, from) => {
     border: s.borderTopWidth + ' ' + s.borderTopColor, borderBottom: s.borderBottomWidth + ' ' + s.borderBottomColor,
     pad: [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft].map(parseFloat), clamp: s.webkitLineClamp, overflow: s.overflow };
 };
-window.__qaToken = (name) => { const i = document.createElement('i'); document.body.append(i); i.style.color = 'var(--' + name + ')'; const c = getComputedStyle(i).color; i.remove(); return c; };`;
+window.__qaToken = (name) => { const i = document.createElement('i'); document.body.append(i); i.style.color = 'var(--' + name + ')'; const c = getComputedStyle(i).color; i.remove(); return c; };
+// POLISH P3: the review's piles (lib/feedbackThreads reviewGroups), each a
+// small-caps label "Waiting on you 1" with its hint, then its cards.
+window.__qaPiles = (scope = '') => [...document.querySelectorAll(scope + ' .rl-fb-pile')].map((p) => {
+  const h = p.querySelector('.rl-fb-pile-label'), s = getComputedStyle(h);
+  return { aria: p.getAttribute('aria-label'), label: h.firstChild.textContent.trim() + ' ' + h.querySelector('span').textContent, hint: h.querySelector('em')?.textContent ?? null,
+    box: window.__qaBox(h), style: { size: s.fontSize, transform: s.textTransform, spacing: s.letterSpacing, weight: s.fontWeight, color: s.color },
+    ids: [...p.querySelectorAll('[data-comment-id]')].map((e) => e.dataset.commentId) };
+});
+// POLISH P3: one more production piece, rendered beside the fixture's own with
+// the page's React (the same vite modules main.tsx loaded), for what the
+// fixture's frame does not wire: the stage's waiting count, another version.
+window.__qaMount = async (build) => {
+  window.__qaUnmount?.();
+  const dep = (name) => performance.getEntriesByType('resource').map((e) => e.name).find((u) => new URL(u).pathname.endsWith('/deps/' + name));
+  // The prebundled deps are CommonJS: their exports sit on the default.
+  const cjs = async (name) => { const m = await import(dep(name)); return m.default ?? m; };
+  const React = await cjs('react.js'), { createRoot } = await cjs('react-dom_client.js');
+  const mods = { h: React.createElement, panel: await import('/src/shell/FeedbackPanel.tsx'), threads: await import('/src/lib/feedbackThreads.ts'), board: await import('/fixtures/flow-feedback-qa/board.ts') };
+  const host = document.createElement('div');
+  host.dataset.qaMount = '';
+  host.style.cssText = 'position: fixed; left: 0; top: 0; width: 400px; height: 960px; display: flex; flex-direction: column; background: var(--color-canvas); z-index: 10';
+  document.body.append(host);
+  const root = createRoot(host);
+  root.render(build(mods));
+  await new Promise((r) => setTimeout(r, 120));
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  window.__qaUnmount = () => { root.unmount(); host.remove(); window.__qaUnmount = null; };
+  return host.childElementCount;
+};`;
 
 // Every visible text in a subtree, with its WCAG contrast on what it is
 // painted on (the monochat sweep's pattern), plus icon-only controls.
@@ -166,7 +197,8 @@ try {
   const B = (sel, from) => cdp.evaluate(`window.__qaBox(${JSON.stringify(sel)}${from ? `, ${JSON.stringify(from)}` : ""})`);
   const tok = (name) => cdp.evaluate(`window.__qaToken(${JSON.stringify(name)})`);
   const T = {};
-  for (const name of ["color-ink", "color-ink-2", "color-ink-3", "color-ink-4", "color-fill-2", "color-rule", "color-rule-strong", "color-paper", "color-canvas", "color-focus-rim", "color-mode-plan-fg", "color-mode-build-fg", "color-mode-build-bg", "color-glass-3", "color-bg-elevated", "color-warning", "color-on-warning"]) T[name] = await tok(name);
+  for (const name of ["color-ink", "color-ink-2", "color-ink-3", "color-ink-4", "color-ink-5", "color-fill-2", "color-rule", "color-rule-strong", "color-paper", "color-canvas", "color-focus-rim", "color-mode-plan-fg", "color-mode-build-fg", "color-mode-build-bg", "color-mode-redline-fg", "color-mode-redline-bg", "color-glass-3", "color-bg-elevated", "color-warning", "color-on-warning"]) T[name] = await tok(name);
+  T["font-mono"] = await cdp.evaluate("(() => { const i = document.createElement('i'); i.style.fontFamily = 'var(--font-mono)'; document.body.append(i); const f = getComputedStyle(i).fontFamily; i.remove(); return f; })()");
   report.tokens = T;
 
   // Header row: 48px + hairline, tabs 28px, "All resolved" 12 from the edge.
@@ -180,17 +212,42 @@ try {
   check("5a tab count \"16\" in muted ink", count.text === "16" && count.color === T["color-ink-4"], count);
   const status = await B(".rl-fb-tabs-status");
   check("5a \"All resolved\": 11.5px muted, right edge 12 from the panel's", status.text === "All resolved" && status.font === 11.5 && status.color === T["color-ink-4"] && near(status.right, 388), status);
+  // POLISH P3 (new): the stage hands the header its waiting count
+  // (FlowStage `waiting`); the fixture's header above is not given one. The
+  // same header with this session's summary trades "All resolved" for an
+  // amber "1 to review" that opens the review.
+  await cdp.evaluate("window.__qaMount(({ h, panel, threads, board }) => { const s = threads.feedbackSummary(board.boardSession, 1); return h(panel.FeedbackTabs, { tab: 'chat', onTab: (t) => { window.__qaTab = t; }, count: s.count, allResolved: s.allResolved, waiting: s.waiting }); })");
+  const review = await B(".rl-fb-tabs-status", "[data-qa-mount]");
+  const reviewTag = await cdp.evaluate("document.querySelector('[data-qa-mount] .rl-fb-tabs-status')?.tagName");
+  const reviewRatio = (await cdp.evaluate("window.__qaContrast('[data-qa-mount]', 'canvas')")).find((r) => r.text === "1 to review")?.ratio;
+  await click("[data-qa-mount] .rl-fb-tabs-status");
+  const reviewOpens = await cdp.evaluate("window.__qaTab === 'feedback'");
+  check("5a header with the stage's waiting count: \"1 to review\" in place of \"All resolved\", a button (--color-mode-redline-fg on --color-mode-redline-bg, 600, ≥ 4.5:1) at the right that opens the review",
+    review?.text === "1 to review" && reviewTag === "BUTTON" && review.color === T["color-mode-redline-fg"] && review.bg === T["color-mode-redline-bg"] && review.weight === "600" && near(review.right, 388) && reviewRatio >= 4.5 && reviewOpens
+      && !(await cdp.evaluate("document.querySelector('[data-qa-mount]').textContent.includes('All resolved')")), { review, reviewTag, reviewRatio, reviewOpens });
+  await cdp.evaluate("window.__qaUnmount()");
 
   // The list and the open thread.
   const list = await B(".rl-fb-list");
   check("5a list: from y 96, padding 14, 13px / 1.55", near(list.y, 96) && list.pad.every((p) => p === 14) && list.font === 13 && near(list.lineHeight, 20.15, 0.1), list);
   const open = await B('[data-comment-id="c-001"]');
-  check("5a open card: x 14, y 110, 372 × 230.7 (board 110 → 339), r12", near(open.x, 14) && near(open.y, 110) && near(open.w, 372) && near(open.h, 230.7) && near(open.radius, 12), open);
+  const piles = await cdp.evaluate("window.__qaPiles('[data-qa=panel]')");
+  // POLISH P3: the list is in piles; the open card now sits under the
+  // "Waiting on you" label (its pile's 10px gap), 27px below the board's 110.
+  check("5a open card: first in \"Waiting on you\", 10 under its label: x 14, y 137, 372 × 230.7 (the board's 110 → 339 card), r12", near(open.x, 14) && near(open.y, piles[0]?.box.bottom + 10) && near(open.y, 137) && near(open.w, 372) && near(open.h, 230.7) && near(open.radius, 12), { open, pile: piles[0]?.box });
+  // POLISH P3 (new): the piles themselves, and the resolved-but-not-accepted
+  // answer waiting on you rather than sitting among the resolved.
+  check("5a piles: small-caps labels (11px, uppercase, .04em, 600) \"Waiting on you 1\" in the redlining amber with its hint, holding the voice note Claude answered and you have not accepted; then \"Resolved 15\" in --color-ink-4",
+    piles.map((p) => p.label).join("|") === "Waiting on you 1|Resolved 15" && piles[0].hint === "Accept Claude's answer, or reopen it" && piles[0].ids.join() === "c-001" && piles[0].style.color === T["color-mode-redline-fg"] && piles[1].style.color === T["color-ink-4"] && piles[1].hint === null
+      && piles.every((p) => p.style.size === "11px" && p.style.transform === "uppercase" && p.style.spacing === "0.44px" && p.style.weight === "600" && near(p.box.x, 14)), piles);
   check("5a open card: glass sheet fill, focus rim from --color-focus-rim, no drop shadow", open.bg === T["color-glass-3"] && open.shadow.includes(`${T["color-focus-rim"]} 0px 0px 0px 1px inset`) && open.shadow.endsWith("rgba(0, 0, 0, 0) 0px 0px 0px 0px"), { bg: open.bg, shadow: open.shadow });
   check("5a open card: content 15 in (board 14 + its 1px border)", open.pad.every((p) => p === 15), open.pad);
   const meta = await B('[data-comment-id="c-001"] .rl-fb-meta');
-  check("5a open meta copy: \"Context · ¶3 · voice note … Resolved in v2\"", meta.text === "Context · ¶3·voice noteResolved in v2", meta.text);
-  check("5a open meta: 11.5px muted, first line at y 125 (board text 128–139)", meta.font === 11.5 && meta.color === T["color-ink-4"] && near(meta.y, 125), meta);
+  const type = await B('[data-comment-id="c-001"] .rl-fb-type');
+  // POLISH P3: the meta line leads with the mark's type, in its colour.
+  check("5a open meta copy: \"Feedback · Context · ¶3 · voice note … Resolved in v2\" (the mark type first)", meta.text === "Feedback·Context · ¶3·voice noteResolved in v2", meta.text);
+  // POLISH P3: positions are the board's, from the card's own top (board 110).
+  check("5a open meta: 11.5px muted, led by \"Feedback\" in the redlining amber (--color-mode-redline-fg, 600); first line 15 under the card's top (board 110 → 125)", meta.font === 11.5 && meta.color === T["color-ink-4"] && type.text === "Feedback" && type.color === T["color-mode-redline-fg"] && type.weight === "600" && near(meta.y, open.y + 15), { meta, type });
   const anchor = await B('[data-comment-id="c-001"] .rl-fb-anchor');
   check("5a open anchor in plan blue (--color-mode-plan-fg)", anchor.color === T["color-mode-plan-fg"], anchor.color);
   const mStatus = await B('[data-comment-id="c-001"] .rl-fb-status');
@@ -198,31 +255,40 @@ try {
   const mic = await B('[data-comment-id="c-001"] .rl-fb-voice svg');
   check("5a voice-note mic icon 11px", near(mic.w, 11) && near(mic.h, 11), mic);
   const note = await B('[data-comment-id="c-001"] .rl-fb-note');
-  check("5a note: ink, three lines from y 153", note.color === T["color-ink"] && near(note.y, 153) && near(note.h, 60.45, 1.5), note);
+  // POLISH P3: the board's offset from the card's top (153 − 110).
+  check("5a note: ink, three lines from 43 under the card's top (board 110 → 153)", note.color === T["color-ink"] && near(note.y, open.y + 43) && near(note.h, 60.45, 1.5), note);
   check("5a note copy verbatim", note.text.trim() === "The pilot firm is my own firm. Keep the vendor-terms and notice gates anyway, and get notice-text sign-off from someone other than me.", note.text);
   const reply = await B('[data-comment-id="c-001"] .rl-fb-reply');
   const rule = await B('[data-comment-id="c-001"] .rl-fb-reply-rule');
-  check("5a reply: secondary ink behind a 2px --color-rule-strong rule, gap 10, 2px above", reply.color === T["color-ink-3"] && near(rule.w, 2) && rule.bg === T["color-rule-strong"] && reply.pad[0] === 2 && near(reply.y, 223), { reply, rule });
+  // POLISH P3: the board's offset from the card's top (223 − 110).
+  check("5a reply: secondary ink behind a 2px --color-rule-strong rule, gap 10, 2px above, 113 under the card's top (board 110 → 223)", reply.color === T["color-ink-3"] && near(rule.w, 2) && rule.bg === T["color-rule-strong"] && reply.pad[0] === 2 && near(reply.y, open.y + 113), { reply, rule });
   check("5a reply copy verbatim", reply.text.trim() === "Done. §3 and §4 now treat R1 as internal dogfooding. Both gates stay. Notice-text sign-off goes to outside counsel in step 6.", reply.text);
   const [accept, reopen, discuss] = await cdp.evaluate(`[...document.querySelectorAll('[data-comment-id="c-001"] .rl-fb-actions button')].map(e => window.__qaBox(e))`);
   check("5a actions copy: Accept · Reopen … Discuss", [accept.text, reopen.text, discuss.text].join("|") === "Accept|Reopen|Discuss", [accept.text, reopen.text, discuss.text]);
-  check("5a ✓ Accept: 28px, r7, green tint (--color-mode-build-bg/fg), 12px, at y 297", near(accept.h, 28) && near(accept.radius, 7) && accept.bg === T["color-mode-build-bg"] && accept.color === T["color-mode-build-fg"] && accept.font === 12 && near(accept.y, 297), accept);
+  // POLISH P3: the board's offset from the card's top (297 − 110).
+  check("5a ✓ Accept: 28px, r7, green tint (--color-mode-build-bg/fg), 12px, 187 under the card's top (board 110 → 297)", near(accept.h, 28) && near(accept.radius, 7) && accept.bg === T["color-mode-build-bg"] && accept.color === T["color-mode-build-fg"] && accept.font === 12 && near(accept.y, open.y + 187), accept);
   check("5a Reopen: 28px, secondary ink, 8 after Accept", near(reopen.h, 28) && reopen.color === T["color-ink-3"] && near(reopen.x - accept.right, 8), reopen);
   check("5a Discuss: muted ink, flush right", discuss.color === T["color-ink-4"] && near(discuss.right, 14 + 372 - 15), discuss);
 
   // Resolved threads: paper, hairline, two lines, at the board's rows.
-  // The board's raster rows (its layout is fractional: 352.7, 456.8, 560.9).
-  const tops = [352, 457, 561];
+  // POLISH P3: they open the "Resolved" pile, under its label and 10 apart
+  // (the pile's gap; the board's list spaced them 12), measured 414.8, 516.8,
+  // 618.9 below the Waiting on you pile.
+  const tops = [415, 517, 619];
+  let above = piles[1]?.box.bottom;
   for (const [i, id] of ["c-002", "c-003", "c-004"].entries()) {
     const card = await B(`[data-comment-id="${id}"]`);
     const cNote = await B(`[data-comment-id="${id}"] .rl-fb-note`);
     const cLabel = await B(`[data-comment-id="${id}"] .rl-fb-anchor`);
-    check(`5a resolved ${i + 1}: y ${tops[i]}, 372 × 92.1, r12, paper with a --color-rule hairline, padding 12/14`, near(card.y, tops[i]) && near(card.h, 92.1) && near(card.w, 372) && near(card.radius, 12) && card.bg === T["color-paper"] && card.border === `1px ${T["color-rule"]}` && card.pad.join() === "12,14,12,14", card);
+    check(`5a resolved ${i + 1}: in the "Resolved" pile, 10 under the ${i ? "card above" : "pile's label"} (y ${tops[i]}), 372 × 92.1, r12, paper with a --color-rule hairline, padding 12/14`, piles[1]?.ids[i] === id && near(card.y, above + 10) && near(card.y, tops[i]) && near(card.h, 92.1) && near(card.w, 372) && near(card.radius, 12) && card.bg === T["color-paper"] && card.border === `1px ${T["color-rule"]}` && card.pad.join() === "12,14,12,14", { card, above });
+    above = card.bottom;
     check(`5a resolved ${i + 1}: two clamped lines of secondary ink, anchor muted`, cNote.clamp === "2" && near(cNote.h, 40.3, 1) && cNote.color === T["color-ink-3"] && cLabel.color === T["color-ink-4"], { cNote, cLabel: cLabel.color });
     check(`5a resolved ${i + 1}: anchor copy`, cLabel.text === ["§4 · step 4", "§4 · releases", "§4"][i], cLabel.text);
   }
   const more = await B(".rl-fb-more");
-  check("5a \"12 more resolved\": 12px muted, padding 2/4, at y 665 (glyphs 670–679 on the board)", more.text === "12 more resolved" && more.font === 12 && more.color === T["color-ink-4"] && more.pad.join() === "2,4,2,4" && near(more.y, 665), more);
+  // POLISH P3: it closes the Resolved pile, 10 under its third card.
+  check("5a \"12 more resolved\": 12px muted, padding 2/4, 10 under the third resolved card (y 721), closing the Resolved pile", more.text === "12 more resolved" && more.font === 12 && more.color === T["color-ink-4"] && more.pad.join() === "2,4,2,4" && near(more.y, above + 10) && near(more.y, 721)
+    && (await cdp.evaluate("document.querySelector('.rl-fb-more').closest('.rl-fb-pile')?.getAttribute('aria-label') === 'Resolved'")), { more, above });
 
   // The composer.
   const wrap = await B(".rl-fb-composer-wrap");
@@ -238,6 +304,16 @@ try {
   check("5a no c-0xx id anywhere", !(await cdp.evaluate("/c-0\\d\\d/.test(document.querySelector('[data-qa=panel]').textContent)")));
   check("5a nothing spills past the 400px panel", await cdp.evaluate("document.documentElement.scrollWidth <= 400 && [...document.querySelectorAll('[data-qa=panel] *')].every(e => e.getBoundingClientRect().right <= 400.5)"));
   check("5a nothing moves: no transitions or animations on the panel", await cdp.evaluate("[...document.querySelectorAll('[data-qa=panel] *')].every(e => { const s = getComputedStyle(e); return e.getAnimations().length === 0 && s.transitionDuration.split(',').every(d => parseFloat(d) === 0); })"));
+  // POLISH P3 (new): with the latest (v4) on screen, the review reads the
+  // whole thread, so the v1 marks are from another version and say so in
+  // their anchor; on the version they were made on (above) none does.
+  await cdp.evaluate("window.__qaMount(({ h, panel, board }) => h(panel.default, { session: board.boardSession, viewingVersion: 4, onJumpToAnchor: () => {}, composer: null }))");
+  const badges = await cdp.evaluate("[...document.querySelectorAll('[data-qa-mount] [data-comment-id]')].map((c) => { const b = c.querySelector('.rl-fb-anchor .rl-fb-elsewhere'), s = b && getComputedStyle(b); return { id: c.dataset.commentId, anchor: c.querySelector('.rl-fb-anchor').textContent, title: c.querySelector('.rl-fb-anchor').title, badge: b?.textContent, font: s?.fontFamily, size: s?.fontSize, border: s && s.borderTopWidth + ' ' + s.borderTopColor, color: s?.color }; })");
+  const piles4 = await cdp.evaluate("window.__qaPiles('[data-qa-mount]')");
+  check("5a viewing v4: every v1 mark shows a \"v1\" badge in its anchor (10px mono, --color-rule hairline, --color-ink-4; \"Show it on v1, where it was made\"), the piles unchanged; on v1 itself no card has one",
+    badges.length === 4 && badges.every((b) => b.badge === "v1" && b.anchor.endsWith("v1") && b.title === "Show it on v1, where it was made" && b.font === T["font-mono"] && b.size === "10px" && b.border === `1px ${T["color-rule"]}` && b.color === T["color-ink-4"])
+      && piles4.map((p) => p.label).join("|") === "Waiting on you 1|Resolved 15" && !(await cdp.evaluate("!!document.querySelector('[data-qa=panel] .rl-fb-elsewhere')")), { badges, piles: piles4.map((p) => p.label) });
+  await cdp.evaluate("window.__qaUnmount()");
 
   // Behaviour: a resolved thread opens and jumps; the fold opens; typing arms send.
   await click('[data-comment-id="c-002"] .rl-fb-note');
@@ -269,9 +345,23 @@ try {
   // ── Every other thread state (draft, with Claude, reopened, question,
   //    suggestion, outside reviewer), for the eye and the sweep ────────────
   await boot("states", 400, 960);
+  await cdp.evaluate(probe);
   await screenshot("5a-states-aurora");
-  check("states: each thread says where it stands", (await cdp.evaluate("[...document.querySelectorAll('.rl-fb-status')].map(e => e.textContent).join('|')")) === "Not sent yet|With Claude|Reopened|Resolved in v2|Suggested by agent-1|Follow-up with Claude", await cdp.evaluate("[...document.querySelectorAll('.rl-fb-status')].map(e => e.textContent)"));
-  check("states: anchors read as places — a step, a table row, a section", (await cdp.evaluate("[...document.querySelectorAll('.rl-fb-anchor')].map(e => e.textContent).join('|')")) === "§4 · step 5|§5 · ¶1|§3|Decisions you made · first pilot|Context · ¶2|§4 · releases", await cdp.evaluate("[...document.querySelectorAll('.rl-fb-anchor')].map(e => e.textContent)"));
+  // POLISH P3: the threads are read pile by pile (Waiting on you: the answered
+  // question and the agent's suggestion; Your marks: the draft and the
+  // reopened one; With Claude: the two sent), not in the order written.
+  const statePiles = await cdp.evaluate("window.__qaPiles('[data-qa=panel]')");
+  check("states: each thread says where it stands, in its pile: Waiting on you 2 (Resolved in v2, Suggested by agent-1) · Your marks 2 (Not sent yet, Reopened) · With Claude 2 (With Claude, Follow-up with Claude)",
+    (await cdp.evaluate("[...document.querySelectorAll('.rl-fb-status')].map(e => e.textContent).join('|')")) === "Resolved in v2|Suggested by agent-1|Not sent yet|Reopened|With Claude|Follow-up with Claude"
+      && statePiles.map((p) => `${p.label}: ${p.ids.join()}`).join("|") === "Waiting on you 2: s-004,s-005|Your marks 2: s-001,s-003|With Claude 2: s-002,s-006" && statePiles[1].hint === "Ride your next Send" && statePiles[2].hint === null,
+    { status: await cdp.evaluate("[...document.querySelectorAll('.rl-fb-status')].map(e => e.textContent)"), piles: statePiles.map((p) => [p.label, p.ids, p.hint]) });
+  check("states: anchors read as places — a table row, a paragraph, a step, a section — in pile order, none from another version (no vN badge)", (await cdp.evaluate("[...document.querySelectorAll('.rl-fb-anchor')].map(e => e.textContent).join('|')")) === "Decisions you made · first pilot|Context · ¶2|§4 · step 5|§3|§5 · ¶1|§4 · releases" && !(await cdp.evaluate("!!document.querySelector('.rl-fb-elsewhere')")), await cdp.evaluate("[...document.querySelectorAll('.rl-fb-anchor')].map(e => e.textContent)"));
+  // POLISH P3 (new): every card's meta line leads with the mark's type in its
+  // colour (lib/feedbackThreads markType), then "·" and the anchor.
+  const types = await cdp.evaluate("[...document.querySelectorAll('[data-qa=panel] [data-comment-id]')].map((c) => { const t = c.querySelector('.rl-fb-meta > .rl-fb-type'); return { id: c.dataset.commentId, first: t === c.querySelector('.rl-fb-meta').firstElementChild, text: t?.textContent, color: t && getComputedStyle(t).color, then: t?.nextElementSibling?.textContent, anchor: t?.nextElementSibling?.nextElementSibling?.classList.contains('rl-fb-anchor') }; })");
+  const wantTypes = [["s-004", "Question", "color-mode-build-fg"], ["s-005", "Edit", "color-mode-plan-fg"], ["s-001", "Feedback", "color-mode-redline-fg"], ["s-003", "Feedback", "color-mode-redline-fg"], ["s-002", "Question", "color-mode-build-fg"], ["s-006", "Feedback", "color-mode-redline-fg"]];
+  check("states: each card's meta starts with its mark type in its colour (Question green, Edit blue, Feedback amber), then \"·\" and the anchor",
+    types.length === wantTypes.length && wantTypes.every(([id, text, token], i) => types[i].id === id && types[i].first && types[i].text === text && types[i].color === T[token] && types[i].then === "·" && types[i].anchor), types);
   check("states: a selection in the plan shows where the composer's note will land", (await cdp.evaluate("document.querySelector('.rl-fb-composer-anchor')?.textContent")) === "§4 · step 5");
   check("states: nothing pulses or fades — every state holds still", await cdp.evaluate("[...document.querySelectorAll('[data-qa=panel] *')].every(e => e.getAnimations().length === 0 && Number(getComputedStyle(e).opacity) === 1)"));
 

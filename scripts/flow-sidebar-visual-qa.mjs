@@ -39,6 +39,7 @@ const report = {
     "Headless Chrome component fixture: not WKWebView or the live app.",
     "Sessions, chats and launches are synthetic; the sidebar, row menu, grouping and themes are the production modules.",
     "Expected geometry is what the design HTML (flow.html) renders, measured in the same Chrome; board crops are the rendered PNGs.",
+    "POLISH P2 redesigned the rows (two lines, status in colour on every row, sections Needs you then projects): row, version, fold, ⋯ and menu geometry is the current render measured in this Chrome, not the boards'.",
   ],
 };
 let server, chrome, cdp;
@@ -83,24 +84,50 @@ async function scene(name, theme = "aurora") {
 // What the design HTML renders for each board's sidebar, relative to the
 // sidebar's top-left (measured from flow.html in this Chrome: its boxes are
 // content-box, so the 232px column is 253 wide and an outlined button 36 tall).
+// POLISH P2: the rows are no longer the boards' one-line 32/34px rows: each
+// is two lines (47px, a rename or delete ask included, 2 apart), and the
+// sections are Needs you then one per project, so every row, version, fold
+// and ⋯ below is the current render, measured in this Chrome; the frame
+// (width, New session, the first label) is still the board's.
 const DESIGN = {
   "4a": { width: 253, newSession: [10, 12, 232, 34], plus: [20, 22, 14, 14], kbd: [213.6, 22.5, 18.4, 13], labels: [["DIN", 10, 60, 232, 19]],
-    rows: [["Din backend: Hono + Fly", 10, 81, 232, 32], ["Din retrieval plan", 10, 115, 232, 32], ["Review status check", 10, 149, 232, 32]] },
+    rows: [["Din backend: Hono + Fly", 10, 81, 232, 47], ["Din retrieval plan", 10, 130, 232, 47], ["Review status check", 10, 179, 232, 47]] },
   "4b": { width: 253, newSession: [10, 12, 232, 36], plus: [21, 23, 14, 14], kbd: [212.6, 23.5, 18.4, 13], labels: [["DIN", 10, 62, 232, 19]],
-    rows: [["Din roadmap: next steps", 10, 83, 232, 32], ["Din backend: Hono + Fly", 10, 117, 232, 32], ["Din retrieval plan", 10, 151, 232, 32], ["Review status check", 10, 185, 232, 32]],
-    activeDots: [218, 92, 14, 14] },
+    rows: [["Din roadmap: next steps", 10, 83, 232, 47], ["Din backend: Hono + Fly", 10, 132, 232, 47], ["Din retrieval plan", 10, 181, 232, 47], ["Review status check", 10, 230, 232, 47]],
+    activeDots: [219, 91, 14, 14] },
   "4d": { width: 253, newSession: [10, 12, 232, 36], plus: [21, 23, 14, 14], kbd: [212.6, 23.5, 18.4, 13], labels: [["DIN", 10, 62, 232, 19]],
-    rows: [["Din roadmap: next steps", 10, 83, 232, 32], ["Din backend: Hono + Fly", 10, 117, 232, 32], ["Din retrieval plan", 10, 151, 232, 32], ["Review status check", 10, 185, 232, 32]],
-    menu: [206, 104, 204, 153], items: [["Open plan", 213, 111, 190, 32], ["Rename", 213, 143, 190, 32], ["Archive", 213, 175, 190, 32], ["Delete plan", 213, 218, 190, 32]],
-    rule: [217, 212, 182, 1], key: [381.8, 227.5, 11.3, 13], menuDots: [218, 126, 14, 14] },
+    rows: [["Din roadmap: next steps", 10, 83, 232, 47], ["Din backend: Hono + Fly", 10, 132, 232, 47], ["Din retrieval plan", 10, 181, 232, 47], ["Review status check", 10, 230, 232, 47]],
+    // The menu as the board places it over its own ⋯ (12 left of and 22 above
+    // the ⋯'s glyph), now with a plan's run/state/move/download items.
+    menuFromDots: [-12, -22], menuSize: [204, 292],
+    items: [["Open plan", 214, 125, 190, 32], ["Rename", 214, 157, 190, 32], ["Archive", 214, 189, 190, 32], ["Mark as built", 214, 232, 190, 32], ["Back to in review", 214, 264, 190, 32],
+      ["Move to repo…", 214, 296, 190, 32], ["Download as Markdown", 214, 328, 190, 32], ["Delete plan", 214, 371, 190, 32]],
+    rules: [[218, 226, 182, 1], [218, 365, 182, 1]], keyFromItem: [168.8, 9.5], menuDots: [219, 140, 14, 14] },
   "5a": { width: 281, newSession: [10, 12, 260, 36], plus: [21, 23, 14, 14], kbd: [240.6, 23.5, 18.4, 13],
-    labels: [["NEEDS YOU", 10, 64, 260, 19], ["BUILDING", 10, 135, 260, 19], ["IN REVIEW", 10, 344, 260, 19]],
-    rows: [["Every vehicle gets a 3D model", 10, 85, 260, 34], ["Dialcrown: fastest credible launch", 10, 156, 260, 34], ["MachineOS \"Full Bore\" sprint", 10, 294, 260, 34],
-      ["Component meshes from a splat", 10, 365, 260, 34], ["Foundation docs for gpu-harness", 10, 401, 260, 34], ["Skip the \"trust this folder\" prompt", 10, 437, 260, 34],
-      ["Memory surface: kill the jank", 10, 473, 260, 34], ["Theme cull + light theme", 10, 509, 260, 34]],
-    nest: [10, 156, 260, 136], versions: [["v1", 40, 190, 224, 24], ["v2", 40, 214, 224, 24], ["v3", 40, 238, 224, 24], ["v4 · latest", 40, 262, 224, 24]],
-    more: ["Show 9 more", 10, 545, 260, 34], dot: [20, 98.5, 7, 7], tag: [213, 95.5, 47, 13], activeDots: [246, 166, 14, 14] },
+    labels: [["NEEDS YOU", 10, 64, 260, 19], ["DIALCROWN", 10, 148, 260, 19], ["MACHINEOS", 10, 615, 260, 19]],
+    labelsNote: " (Needs you, then one per project: no Building or In review section)",
+    rows: [["Every vehicle gets a 3D model", 10, 85, 260, 47], ["Dialcrown: fastest credible launch", 10, 169, 260, 47],
+      ["Component meshes from a splat", 10, 320, 260, 47], ["Foundation docs for gpu-harness", 10, 369, 260, 47], ["Skip the \"trust this folder\" prompt", 10, 418, 260, 47],
+      ["Memory surface: kill the jank", 10, 467, 260, 47], ["Theme cull + light theme", 10, 516, 260, 47], ["MachineOS \"Full Bore\" sprint", 10, 636, 260, 47]],
+    nest: [10, 169, 260, 149], versions: [["v1", 40, 216, 224, 24], ["v2", 40, 240, 224, 24], ["v3", 40, 264, 224, 24], ["v4 · latest", 40, 288, 224, 24]],
+    more: ["Show 9 more", 10, 565, 260, 34], dot: [23.5, 96.5, 7, 7], activeDots: [247, 177, 14, 14] },
 };
+// POLISH P2: where each row is in its life (lib/sessionGroups `rowStatus`):
+// [title, status word, tone, lucide icon ("dot" for Needs you), spinning,
+// the version at the right (null: a chat or a launch, which has none)].
+const APPROVED = ["Approved · not built", "build", "circle-check", false, "v1"];
+const CHAT = ["Review status check", "Chat", "quiet", "message-square", false, null];
+const STATUS = {
+  "4a": [["Din backend: Hono + Fly", ...APPROVED], ["Din retrieval plan", ...APPROVED], CHAT],
+  "4b": [["Din roadmap: next steps", "Planning", "plan", "loader-circle", true, null], ["Din backend: Hono + Fly", ...APPROVED], ["Din retrieval plan", ...APPROVED], CHAT],
+  "4d": [["Din roadmap: next steps", "In review", "redline", "file-pen-line", false, "v1"], ["Din backend: Hono + Fly", ...APPROVED], ["Din retrieval plan", ...APPROVED], CHAT],
+  "5a": [["Every vehicle gets a 3D model", "Question for you", "redline", "dot", false, "v1"], ["Dialcrown: fastest credible launch", "Approved", "build", "hammer", false, "v4"],
+    ...["Component meshes from a splat", "Foundation docs for gpu-harness", "Skip the \"trust this folder\" prompt", "Memory surface: kill the jank", "Theme cull + light theme"].map((t) => [t, "In review", "redline", "file-pen-line", false, "v1"]),
+    ["MachineOS \"Full Bore\" sprint", "Running", "build", "loader-circle", true, "v1"]],
+};
+const TONE_TOKEN = { plan: "color-mode-plan-fg", redline: "color-mode-redline-fg", build: "color-mode-build-fg", quiet: "color-ink-4" };
+// "· now", "· 5m", "· 3h", "· 2d", then "· Oct 12": the fixture's dates are fixed, the clock is not.
+const AGE = /^· (now|\d+[mhd]|[A-Za-z]{3,} \d{1,2})$/;
 // Where each board's sidebar sits in its PNG (the board's top-left, plus the
 // 47px top bar), and how wide a crop shows it (4d also shows its row menu).
 const CROPS = {
@@ -120,14 +147,22 @@ const MEASURE = `(() => {
   const style = (e, ...props) => { if (!e) return null; const s = getComputedStyle(e); return Object.fromEntries(props.map((p) => [p, s.getPropertyValue(p)])); };
   const probe = document.createElement('i'); document.body.append(probe);
   const token = (name) => { probe.style.color = 'var(--' + name + ')'; return getComputedStyle(probe).color; };
-  const tokens = Object.fromEntries(['color-canvas','color-rule','color-fill-1','color-fill-2','color-fill-3','color-focus-rim','color-ink','color-ink-3','color-ink-4','color-ink-5','color-glass-2','color-mode-plan-fg','color-mode-redline-fg','color-mode-build-fg','color-mode-danger-fg','color-mode-danger-bg'].map((n) => [n, token(n)]));
+  const tokens = Object.fromEntries(['color-canvas','color-rule','color-fill-1','color-fill-2','color-fill-3','color-focus-rim','color-ink','color-ink-2','color-ink-3','color-ink-4','color-ink-5','color-glass-2','color-mode-plan-fg','color-mode-redline-fg','color-mode-redline-bg','color-mode-build-fg','color-mode-danger-fg','color-mode-danger-bg'].map((n) => [n, token(n)]));
+  probe.style.fontFamily = 'var(--font-mono)'; tokens['font-mono'] = getComputedStyle(probe).fontFamily;
   probe.remove();
   const neu = document.querySelector('.rl-sb-new');
+  // POLISH P2: a row is two lines (title + version/count, then the status
+  // meta line), so the status word, the meta line and the row's end are read too.
   const rows = [...document.querySelectorAll('.rl-sb-item')].map((li) => {
     const row = li.querySelector('.rl-sb-row'), icon = li.querySelector('.rl-sb-icon > *'), dots = li.querySelector('.rl-sb-dots svg');
-    return { title: li.querySelector('.rl-sb-title')?.textContent, li: rel(li), row: rel(row), icon: rel(icon), titleRect: rel(li.querySelector('.rl-sb-title')), dots: rel(dots), tag: rel(li.querySelector('.rl-sb-tag')),
-      active: li.hasAttribute('data-active'), nest: li.hasAttribute('data-nest'), menu: li.hasAttribute('data-menu'),
-      rowStyle: style(row, 'background-color', 'color', 'border-radius', 'font-size', 'box-shadow'), liStyle: style(li, 'background-color', 'border-radius'),
+    const meta = li.querySelector('.rl-sb-row .rl-sb-meta'), word = li.querySelector('.rl-sb-row .rl-sb-status'), ver = li.querySelector('.rl-sb-row .rl-sb-ver'), end = li.querySelector('.rl-sb-row .rl-sb-end');
+    return { title: li.querySelector('.rl-sb-title')?.textContent, li: rel(li), row: rel(row), icon: rel(icon), titleRect: rel(li.querySelector('.rl-sb-title')), dots: rel(dots),
+      iconName: icon && (icon.classList.contains('rl-sb-dot') ? 'dot' : [...icon.classList].find((c) => c.startsWith('lucide-') && c !== 'lucide')?.slice(7)),
+      meta: rel(meta), metaText: meta && [...meta.children].map((c) => c.textContent.trim()).join(' '), metaStyle: style(meta, 'font-size', 'line-height', 'color'),
+      word: word?.textContent, wordColor: word && getComputedStyle(word).color, ver: ver?.textContent, verStyle: style(ver, 'color', 'font-family', 'font-size'), count: li.querySelector('.rl-sb-row .rl-sb-count')?.textContent ?? null,
+      endVisibility: end && getComputedStyle(end).visibility,
+      active: li.hasAttribute('data-active'), nest: li.hasAttribute('data-nest'), menu: li.hasAttribute('data-menu'), need: li.hasAttribute('data-need'),
+      rowStyle: style(row, 'background-color', 'color', 'border-radius', 'font-size', 'box-shadow', 'min-height'), liStyle: style(li, 'background-color', 'border-radius'),
       iconColor: icon && getComputedStyle(icon).color, iconBg: icon && getComputedStyle(icon).backgroundColor, dotsColor: dots && getComputedStyle(dots).color, dotsOpacity: dots && getComputedStyle(li.querySelector('.rl-sb-dots')).opacity, spinning: !!li.querySelector('.rl-sb-row .rl-sb-spin') };
   });
   const labels = [...document.querySelectorAll('.rl-sb-label')].map((e) => ({ text: e.innerText.trim(), rect: rel(e), style: style(e, 'font-size', 'letter-spacing', 'color', 'text-transform'), add: rel(e.querySelector('.rl-sb-add')) }));
@@ -135,8 +170,8 @@ const MEASURE = `(() => {
   const folds = [...document.querySelectorAll('.rl-sb-fold')].map((e) => ({ text: e.textContent.trim(), rect: rel(e), style: style(e, 'font-size', 'color') }));
   const layer = document.querySelector('.rl-row-menu-layer');
   const menu = layer && { rect: rel(layer), surface: style(layer.firstElementChild, 'border-radius', 'padding-top', 'background-color'), glass: layer.firstElementChild.className,
-    items: [...layer.querySelectorAll('.rl-row-menu-item')].map((e) => ({ text: e.querySelector('.rl-row-menu-label').textContent, rect: rel(e), style: style(e, 'background-color', 'color', 'border-radius', 'font-size'), icon: rel(e.querySelector('svg')), focused: document.activeElement === e })),
-    rule: rel(layer.querySelector('.rl-row-menu-rule')), key: rel(layer.querySelector('.rl-row-menu-key')), keyText: layer.querySelector('.rl-row-menu-key')?.textContent };
+    items: [...layer.querySelectorAll('.rl-row-menu-item')].map((e) => ({ text: e.querySelector('.rl-row-menu-label').textContent, rect: rel(e), style: style(e, 'background-color', 'color', 'border-radius', 'font-size'), icon: rel(e.querySelector('svg')), focused: document.activeElement === e, danger: e.hasAttribute('data-danger') })),
+    rule: rel(layer.querySelector('.rl-row-menu-rule')), rules: [...layer.querySelectorAll('.rl-row-menu-rule')].map(rel), key: rel(layer.querySelector('.rl-row-menu-key')), keyText: layer.querySelector('.rl-row-menu-key')?.textContent };
   return { side: [side.width, side.height], sideStyle: style(document.querySelector('.rl-sb'), 'border-right-color', 'border-right-width'),
     newSession: { rect: rel(neu), plus: rel(neu.querySelector('svg')), kbd: rel(neu.querySelector('kbd')), style: style(neu, 'background-color', 'color', 'border-top-color', 'border-top-width', 'border-radius', 'font-size'), current: neu.getAttribute('aria-current') },
     labels, rows, versions, folds, menu, tokens };
@@ -189,17 +224,41 @@ function geometry(name, m) {
   check(`${name}: "+ New session ⌘N" at the board's rect, r8, 13px`, rectNear(m.newSession.rect, want.newSession) && rectNear(m.newSession.plus, want.plus) && rectNear(m.newSession.kbd, want.kbd) && m.newSession.style["border-radius"] === "8px" && m.newSession.style["font-size"] === "13px",
     { got: m.newSession, want: { rect: want.newSession, plus: want.plus, kbd: want.kbd } });
   const labels = m.labels.map((l) => [l.text, ...l.rect]);
-  check(`${name}: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5`, want.labels.every(([text, ...rect], i) => labels[i]?.[0] === text && rectNear(labels[i].slice(1), rect)) && m.labels.every((l) => l.style["font-size"] === "11px" && l.style["letter-spacing"] === "0.44px" && l.style["text-transform"] === "uppercase" && l.style.color === m.tokens["color-ink-5"]),
+  // POLISH P2 (5a only): the sections are Needs you, then one per project.
+  check(`${name}: group labels${want.labelsNote ?? ""}: copy, rects, 11px, .04em, uppercase, --color-ink-5`, labels.length === want.labels.length && want.labels.every(([text, ...rect], i) => labels[i]?.[0] === text && rectNear(labels[i].slice(1), rect)) && m.labels.every((l) => l.style["font-size"] === "11px" && l.style["letter-spacing"] === "0.44px" && l.style["text-transform"] === "uppercase" && l.style.color === m.tokens["color-ink-5"]),
     { got: m.labels.map((l) => [l.text, l.rect, l.style]), want: want.labels });
   const rows = m.rows.filter((r) => r.title !== undefined);
-  check(`${name}: rows: copy, order, rects (r7, 13px)`, want.rows.every(([title, ...rect], i) => rows[i]?.title === title && rectNear(rows[i].row, rect)) && rows.every((r) => r.rowStyle["border-radius"] === "7px" && r.rowStyle["font-size"] === "13px"),
-    { got: rows.map((r) => [r.title, r.row]), want: want.rows });
-  check(`${name}: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred`, rows.every((r) => {
-    const dot = r.icon && r.icon[2] === 7;
-    return near(r.icon[0], 20) && near(r.icon[1] + r.icon[3] / 2, r.row[1] + r.row[3] / 2) && near(r.titleRect[0], dot ? 36 : 42) && near(r.titleRect[3], 16) && (dot || near(r.icon[2], 13));
-  }), rows.map((r) => [r.title, r.icon, r.titleRect]));
-  check(`${name}: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5`, rows.filter((r) => !r.active && !r.nest && !r.menu && r.icon[2] !== 7).every((r) => r.rowStyle.color === m.tokens["color-ink-3"] && r.iconColor === m.tokens["color-ink-4"] && r.dotsColor === m.tokens["color-ink-5"]),
-    rows.map((r) => [r.title, r.rowStyle.color, r.iconColor, r.dotsColor]));
+  // POLISH P2: two-line rows, 47px whatever they hold (a rename keeps it).
+  check(`${name}: rows: copy, order, two-line rects (min-height 47; r7, 13px)`, rows.length === want.rows.length && want.rows.every(([title, ...rect], i) => rows[i]?.title === title && rectNear(rows[i].row, rect)) && rows.every((r) => r.rowStyle["border-radius"] === "7px" && r.rowStyle["font-size"] === "13px" && r.rowStyle["min-height"] === "47px"),
+    { got: rows.map((r) => [r.title, r.row, r.rowStyle["min-height"]]), want: want.rows });
+  // POLISH P2: line 1 is a 14px status icon, the title and the version at the
+  // right; line 2 is the meta line, under the title.
+  check(`${name}: line 1: a 14px status icon at x 20 (Needs you: a 7px dot centred in it) centred on the title at x 43, a faint mono "vN" (--color-ink-5, 10.5px) at the right of each plan, none on a chat or launch; line 2: the 11.5px / 16px meta line 1px under the title, at its x`,
+    rows.length === STATUS[name].length && rows.every((r, i) => {
+      const dot = r.iconName === "dot";
+      const lineMid = r.titleRect[1] + r.titleRect[3] / 2;
+      const iconOk = dot ? near(r.icon[0], 23.5) && near(r.icon[2], 7) : near(r.icon[0], 20) && near(r.icon[2], 14) && near(r.icon[3], 14);
+      const ver = STATUS[name][i][5];
+      const verOk = ver === null ? r.ver === undefined && r.count === null
+        : r.ver === ver && r.verStyle.color === m.tokens["color-ink-5"] && r.verStyle["font-family"] === m.tokens["font-mono"] && r.verStyle["font-size"] === "10.5px";
+      return iconOk && near(r.icon[1] + r.icon[3] / 2, lineMid) && near(r.titleRect[0], 43) && near(r.titleRect[3], 16) && near(lineMid, r.row[1] + 15)
+        && near(r.meta[0], 43) && near(r.meta[1], r.titleRect[1] + 19) && near(r.meta[3], 16) && r.metaStyle["font-size"] === "11.5px" && r.metaStyle["line-height"] === "16px" && verOk;
+    }),
+    rows.map((r) => [r.title, r.iconName, r.icon, r.titleRect, r.meta, r.metaStyle, r.ver, r.verStyle, r.count]));
+  // POLISH P2: status colour on every row, not only the open one; a spinner
+  // only while something runs; the ⋯ hidden until hover, focus or its menu.
+  const status = STATUS[name];
+  check(`${name}: every row's status word and icon wear its tone (plan blue, redlining amber, building green, --color-ink-4 when quiet), a spinner only while live, then "· age" (Needs you: "project ·" first, no age); titles --color-ink-2 (ink when open, needed or under the menu); ⋯ hidden at rest`,
+    rows.length === status.length && rows.every((r, i) => {
+      const [title, word, tone, icon, spin] = status[i];
+      const colour = m.tokens[TONE_TOKEN[tone]];
+      const parts = r.metaText?.split(word);
+      const metaOk = r.need ? parts?.[0] === "dialcrown · " && parts[1] === "" : parts?.[0] === "" && AGE.test(parts[1]?.trim() ?? "");
+      const ink = r.active || r.nest || r.need || r.menu ? m.tokens["color-ink"] : m.tokens["color-ink-2"];
+      return r.title === title && r.word === word && r.wordColor === colour && r.iconName === icon && (icon === "dot" ? r.iconBg === colour : r.iconColor === colour)
+        && r.spinning === spin && metaOk && r.rowStyle.color === ink && (r.menu || r.dotsOpacity === "0");
+    }),
+    rows.map((r) => [r.title, r.word, r.wordColor, r.iconName, r.iconColor, r.iconBg, r.spinning, r.metaText, r.rowStyle.color, r.dotsOpacity]));
 }
 
 try {
@@ -238,7 +297,9 @@ try {
   let m = await cdp.evaluate(MEASURE);
   geometry("4a", m);
   check("4a: New session is filled (--color-fill-2, ink, no rule) and current", m.newSession.style["background-color"] === m.tokens["color-fill-2"] && m.newSession.style.color === m.tokens["color-ink"] && m.newSession.style["border-top-width"] === "0px" && m.newSession.current === "page", m.newSession);
-  check("4a: plans wear the doc icon, the chat the chat icon, and no row is open", await cdp.evaluate("(() => { const icons = [...document.querySelectorAll('.rl-sb-icon svg')].map(s => [...s.classList].find(c => c.startsWith('lucide-') && c !== 'lucide')); return JSON.stringify(icons) === JSON.stringify(['lucide-file-text','lucide-file-text','lucide-message-square']) && !document.querySelector('[data-active]'); })()"));
+  // POLISH P2: the icon is the status's, so an approved plan wears the check.
+  check("4a: approved plans wear the green check-circle, the chat the quiet chat icon, and no row is open", await cdp.evaluate("(() => { const icons = [...document.querySelectorAll('.rl-sb-icon svg')].map(s => [...s.classList].find(c => c.startsWith('lucide-') && c !== 'lucide')); return JSON.stringify(icons) === JSON.stringify(['lucide-circle-check','lucide-circle-check','lucide-message-square']) && !document.querySelector('[data-active]'); })()"),
+    await cdp.evaluate("[...document.querySelectorAll('.rl-sb-icon svg')].map(s => s.getAttribute('class'))"));
   builds["4a"] = await shot("4a-sidebar-aurora", { x: 0, y: 47, width: 253, height: 753 });
   await shot("4a-aurora");
   await contrast("4a aurora", ".rl-sb");
@@ -250,8 +311,10 @@ try {
   geometry("4b", m);
   const active = m.rows.find((r) => r.active);
   check("4b: New session is outlined (1px --color-rule, --color-ink-3) and not current", m.newSession.style["background-color"] === "rgba(0, 0, 0, 0)" && m.newSession.style["border-top-color"] === m.tokens["color-rule"] && m.newSession.style.color === m.tokens["color-ink-3"] && !m.newSession.current, m.newSession);
-  check("4b: the active row: --color-fill-2, ink, a spinner in the plan blue, its ⋯ visible at the board's spot in --color-ink-4",
-    active?.title === "Din roadmap: next steps" && active.rowStyle["background-color"] === m.tokens["color-fill-2"] && active.rowStyle.color === m.tokens["color-ink"] && active.spinning && active.iconColor === m.tokens["color-mode-plan-fg"] && rectNear(active.dots, DESIGN["4b"].activeDots) && active.dotsColor === m.tokens["color-ink-4"], active);
+  // POLISH P2: the ⋯ is hidden at rest on every row, the open one too.
+  check("4b: the active row: --color-fill-2, ink, a spinner and \"Planning\" in the plan blue, no version yet (a launch), its ⋯ hidden until hover (opacity 0, on the title line at x 219)",
+    active?.title === "Din roadmap: next steps" && active.rowStyle["background-color"] === m.tokens["color-fill-2"] && active.rowStyle.color === m.tokens["color-ink"] && active.spinning && active.iconColor === m.tokens["color-mode-plan-fg"]
+    && active.word === "Planning" && active.wordColor === m.tokens["color-mode-plan-fg"] && active.ver === undefined && rectNear(active.dots, DESIGN["4b"].activeDots) && active.dotsOpacity === "0", active);
   builds["4b"] = await shot("4b-sidebar-aurora", { x: 0, y: 47, width: 253, height: 753 });
   await shot("4b-aurora");
   await contrast("4b aurora", ".rl-sb");
@@ -269,13 +332,23 @@ try {
   const redline = m.rows.find((r) => r.active);
   const target = m.rows.find((r) => r.menu);
   check("4d: the open row's icon is the amber pen (Redlining)", redline?.title === "Din roadmap: next steps" && redline.iconColor === m.tokens["color-mode-redline-fg"] && redline.rowStyle["background-color"] === m.tokens["color-fill-2"], redline);
-  check("4d: the row under the menu: menu fill, an inset --color-focus-rim ring, ink, its ⋯ lit", target?.title === "Din backend: Hono + Fly" && target.rowStyle["background-color"] === m.tokens["color-glass-2"] && target.rowStyle["box-shadow"].includes(m.tokens["color-focus-rim"]) && target.rowStyle["box-shadow"].includes("inset") && target.rowStyle.color === m.tokens["color-ink"] && target.dotsColor === m.tokens["color-ink"] && rectNear(target.dots, want.menuDots), target);
-  check("4d: the menu: 204 × 153 at the board's spot, glass menu tier, r12, 6px padding", rectNear(m.menu?.rect, want.menu) && /rl-glass rl-glass-menu/.test(m.menu.glass) && m.menu.surface["border-radius"] === "12px" && m.menu.surface["padding-top"] === "6px", { got: m.menu?.rect, want: want.menu, surface: m.menu?.surface });
-  check("4d: menu rows: Open plan · Rename · Archive · rule · Delete plan, 190 × 32, r8, 13px, 14px icons at x+10",
-    want.items.every(([text, ...rect], i) => m.menu.items[i]?.text === text && rectNear(m.menu.items[i].rect, rect) && near(m.menu.items[i].icon[0], rect[0] + 10) && near(m.menu.items[i].icon[2], 14)) && m.menu.items.every((it) => it.style["border-radius"] === "8px" && it.style["font-size"] === "13px") && rectNear(m.menu.rule, want.rule),
-    { got: m.menu.items.map((it) => [it.text, it.rect, it.icon]), rule: m.menu.rule });
-  const del = m.menu.items[3];
-  check("4d: Delete plan is tinted (--color-mode-danger-fg on -bg) with ⌫ at the right", del.style["background-color"] === m.tokens["color-mode-danger-bg"] && del.style.color === m.tokens["color-mode-danger-fg"] && m.menu.keyText === "⌫" && rectNear(m.menu.key, want.key, 1.5), { del, key: m.menu.key, want: want.key });
+  // POLISH P2: the ⋯ is shown (not re-inked) while its menu is open, in the
+  // place of the row's version, which steps aside.
+  check("4d: the row under the menu: menu fill, an inset --color-focus-rim ring, ink, its ⋯ lit (opacity 1, full ink) on the title line in place of its version (hidden)", target?.title === "Din backend: Hono + Fly" && target.rowStyle["background-color"] === m.tokens["color-glass-2"] && target.rowStyle["box-shadow"].includes(m.tokens["color-focus-rim"]) && target.rowStyle["box-shadow"].includes("inset") && target.rowStyle.color === m.tokens["color-ink"]
+    && target.dotsOpacity === "1" && target.dotsColor === m.tokens["color-ink"] && target.endVisibility === "hidden" && rectNear(target.dots, want.menuDots), target);
+  // POLISH P2: a plan's menu has eight items now, so it is taller; it still
+  // opens over its own ⋯ as on the board.
+  const menuWant = target?.dots && [target.dots[0] + want.menuFromDots[0], target.dots[1] + want.menuFromDots[1], ...want.menuSize];
+  check("4d: the menu: 204 × 292 (eight items), over its own ⋯ as on the board (12 left of it, 22 above), glass menu tier, r12, 6px padding", rectNear(m.menu?.rect, menuWant) && /rl-glass rl-glass-menu/.test(m.menu.glass) && m.menu.surface["border-radius"] === "12px" && m.menu.surface["padding-top"] === "6px", { got: m.menu?.rect, want: menuWant, surface: m.menu?.surface });
+  // POLISH P2: the row chips' acts (state, move, download) sit before Delete.
+  check("4d: menu rows: Open plan · Rename · Archive · rule · Mark as built · Back to in review · Move to repo… · Download as Markdown · rule · Delete plan, 190 × 32, r8, 13px, 14px icons at x+10",
+    m.menu.items.length === want.items.length && want.items.every(([text, ...rect], i) => m.menu.items[i]?.text === text && rectNear(m.menu.items[i].rect, rect) && near(m.menu.items[i].icon[0], rect[0] + 10) && near(m.menu.items[i].icon[2], 14)) && m.menu.items.every((it) => it.style["border-radius"] === "8px" && it.style["font-size"] === "13px")
+    && m.menu.rules.length === want.rules.length && want.rules.every((rule, i) => rectNear(m.menu.rules[i], rule)),
+    { got: m.menu.items.map((it) => [it.text, it.rect, it.icon]), rules: m.menu.rules });
+  // POLISH P2: Delete is the last item now, not the fourth; ⌫ sits where it did on its row.
+  const del = m.menu.items.find((it) => it.danger);
+  const keyWant = del && [del.rect[0] + want.keyFromItem[0], del.rect[1] + want.keyFromItem[1], 11.3, 13];
+  check("4d: Delete plan, last after its rule, is tinted (--color-mode-danger-fg on -bg) with ⌫ at the right", del === m.menu.items.at(-1) && del.text === "Delete plan" && del.style["background-color"] === m.tokens["color-mode-danger-bg"] && del.style.color === m.tokens["color-mode-danger-fg"] && m.menu.keyText === "⌫" && rectNear(m.menu.key, keyWant, 1.5), { del, key: m.menu.key, want: keyWant });
   check("4d: a mouse-opened menu shows no focus ring, but its first item holds focus for the keyboard", m.menu.items[0].focused && m.menu.items[0].style["background-color"] === "rgba(0, 0, 0, 0)", m.menu.items[0]);
   builds["4d"] = await shot("4d-sidebar-aurora", { x: 0, y: 47, width: 420, height: 753 });
   await shot("4d-aurora");
@@ -299,7 +372,10 @@ try {
   check("Right-click opens the row menu at the pointer, on that row", ctx && near(ctx.x, point.x) && near(ctx.y, point.y) && ctx.row === "Din retrieval plan", { ctx, point });
   await click('.rl-row-menu-item:nth-child(2)');
   const editing = await cdp.evaluate("(() => { const i = document.querySelector('.rl-sb-rename'); if (!i) return null; const row = i.closest('.rl-sb-row').getBoundingClientRect(); return { focused: document.activeElement === i, selected: i.selectionStart === 0 && i.selectionEnd === i.value.length, value: i.value, rowH: row.height, inputX: i.getBoundingClientRect().x + 6 - document.querySelector('.rl-sb').getBoundingClientRect().x }; })()");
-  check("Rename edits in place: the row keeps its height, the title selected where it stood", editing?.focused && editing.selected && editing.value === "Din retrieval plan" && near(editing.rowH, 32) && near(editing.inputX, 42), editing);
+  // POLISH P2: the row it keeps is the two-line row as it measured at rest
+  // (47), and the title it stands in for starts at x 43.
+  const restRow = m.rows.find((r) => r.title === "Din retrieval plan")?.row;
+  check("Rename edits in place: the row keeps its two-line height (as at rest), the title selected where it stood (x 43)", editing?.focused && editing.selected && editing.value === "Din retrieval plan" && near(editing.rowH, restRow?.[3]) && near(editing.inputX, 43), { ...editing, restH: restRow?.[3] });
   await shot("rename-inline-aurora", { x: 0, y: 47, width: 253, height: 260 });
   await cdp.evaluate("window.__qa.calls.length = 0");
   await type("Din retrieval v2");
@@ -343,30 +419,46 @@ try {
   geometry("5a", m);
   const d5 = DESIGN["5a"];
   const nest = m.rows.find((r) => r.nest);
-  check("5a: the open session is one grouped container (menu fill, r8) at the board's rect", rectNear(nest?.li, d5.nest) && nest.liStyle["background-color"] === m.tokens["color-glass-2"] && nest.liStyle["border-radius"] === "8px" && nest.rowStyle["background-color"] === "rgba(0, 0, 0, 0)" && nest.rowStyle.color === m.tokens["color-ink"], nest);
-  check("5a: its spinner is the building green; its ⋯ at the board's spot", nest.spinning && nest.iconColor === m.tokens["color-mode-build-fg"] && rectNear(nest.dots, d5.activeDots), nest);
-  check("5a: versions: v1 … v4 · latest, 24px rows at 12px, r5, dates at the right; v1 is on screen (--color-fill-3, ink), latest --color-ink-3",
+  // POLISH P2: the container holds the two-line row, so it is taller and lower.
+  check("5a: the open session is one grouped container (menu fill, r8): its two-line row and its versions, 260 × 149 at y 169", rectNear(nest?.li, d5.nest) && nest.liStyle["background-color"] === m.tokens["color-glass-2"] && nest.liStyle["border-radius"] === "8px" && nest.rowStyle["background-color"] === "rgba(0, 0, 0, 0)" && nest.rowStyle.color === m.tokens["color-ink"], nest);
+  // POLISH P2: a build handed to an agent whose terminal is idle never spins.
+  check("5a: the open plan, handed to an agent to build (runState building, terminal idle): a static green hammer and \"Approved\" in --color-mode-build-fg, no spinner; its version v4; its ⋯ hidden until hover, on the title line at x 247",
+    !nest.spinning && nest.iconName === "hammer" && nest.iconColor === m.tokens["color-mode-build-fg"] && nest.word === "Approved" && nest.wordColor === m.tokens["color-mode-build-fg"] && nest.ver === "v4" && nest.dotsOpacity === "0" && rectNear(nest.dots, d5.activeDots), nest);
+  // POLISH P2: same versions, 26px lower under the two-line row.
+  check("5a: versions under the two-line row: v1 … v4 · latest, 24px rows at 12px, r5, dates at the right; v1 is on screen (--color-fill-3, ink), latest --color-ink-3",
     d5.versions.every(([text, ...rect], i) => m.versions[i]?.text === text && rectNear(m.versions[i].rect, rect)) && m.versions.every((v) => v.style["font-size"] === "12px" && v.style["border-radius"] === "5px")
     && m.versions[0].current === "true" && m.versions[0].style["background-color"] === m.tokens["color-fill-3"] && m.versions[0].style.color === m.tokens["color-ink"]
     && m.versions[3].style.color === m.tokens["color-ink-3"] && m.versions[1].style.color === m.tokens["color-ink-4"] && m.versions.map((v) => v.date).join() === "Oct 14,Oct 14,Oct 15,Oct 15",
     m.versions);
   const needRow = m.rows.find((r) => r.title === "Every vehicle gets a 3D model");
-  check("5a: Needs you: an amber dot, ink title, the reason tag at the right (11px, --color-ink-4), its ⋯ held back until hover", rectNear(needRow?.icon, d5.dot) && needRow.iconBg === m.tokens["color-mode-redline-fg"] && needRow.rowStyle.color === m.tokens["color-ink"] && rectNear(needRow.tag, d5.tag) && needRow.dotsOpacity === "0", needRow);
+  // POLISH P2: the reason is the meta line's status word, after the project,
+  // in amber; the version holds the row's right end.
+  check("5a: Needs you: an amber dot centred in the icon slot, ink title, \"dialcrown · Question for you\" under it (the project, then the reason in --color-mode-redline-fg, no age), v1 at the right, its ⋯ held back until hover",
+    rectNear(needRow?.icon, d5.dot) && needRow.iconBg === m.tokens["color-mode-redline-fg"] && needRow.rowStyle.color === m.tokens["color-ink"] && needRow.metaText === "dialcrown · Question for you" && needRow.wordColor === m.tokens["color-mode-redline-fg"] && needRow.ver === "v1" && needRow.dotsOpacity === "0", needRow);
   const sprint = m.rows.find((r) => r.title === "MachineOS \"Full Bore\" sprint");
-  check("5a: a building row that is not open: a --color-ink-4 spinner, --color-ink-3 title", sprint?.spinning && sprint.iconColor === m.tokens["color-ink-4"] && sprint.rowStyle.color === m.tokens["color-ink-3"], sprint);
-  check("5a: In review rows wear the pen; then Show 9 more (12.5px, --color-ink-4) at the board's rect", m.rows.filter((r) => r.title && m.rows.indexOf(r) >= 3).every((r) => !r.spinning) && m.folds[0]?.text === d5.more[0] && rectNear(m.folds[0].rect, d5.more.slice(1)) && m.folds[0].style["font-size"] === "12.5px" && m.folds[0].style.color === m.tokens["color-ink-4"], m.folds);
+  // POLISH P2: a live run spins in its tone on every row, not only the open one.
+  check("5a: a live orchestrated run that is not open: a spinner and \"Running\" in the building green (--color-mode-build-fg), --color-ink-2 title, in its own project (MACHINEOS)", sprint?.spinning && sprint.iconColor === m.tokens["color-mode-build-fg"] && sprint.word === "Running" && sprint.wordColor === m.tokens["color-mode-build-fg"] && sprint.rowStyle.color === m.tokens["color-ink-2"] && m.labels.at(-1)?.text === "MACHINEOS" && sprint.row[1] > m.labels.at(-1).rect[1], sprint);
+  // POLISH P2: In review is a status on the row, inside its project, not a section.
+  const reviews = m.rows.filter((r) => r.word === "In review");
+  check("5a: In review rows sit in their project (DIALCROWN) and wear the amber pen and \"In review\", none spinning; then Show 9 more (12.5px, --color-ink-4) closes that group, before MACHINEOS",
+    reviews.length === 5 && reviews.every((r) => !r.spinning && r.iconName === "file-pen-line" && r.iconColor === m.tokens["color-mode-redline-fg"] && r.wordColor === m.tokens["color-mode-redline-fg"] && r.row[1] > m.labels[1].rect[1] && r.row[1] < m.labels[2].rect[1])
+    && m.folds[0]?.text === d5.more[0] && rectNear(m.folds[0].rect, d5.more.slice(1)) && m.folds[0].style["font-size"] === "12.5px" && m.folds[0].style.color === m.tokens["color-ink-4"] && m.folds[0].rect[1] < m.labels[2].rect[1],
+    { folds: m.folds, reviews: reviews.map((r) => [r.title, r.iconName, r.iconColor, r.row]) });
   builds["5a"] = await shot("5a-sidebar-aurora", { x: 0, y: 47, width: 281, height: 913 });
   await shot("5a-aurora");
   await contrast("5a aurora", ".rl-sb");
   await smallTargets("5a", ".rl-sb");
-  // Hovering the Needs you row trades its tag for the ⋯.
+  // Hovering the Needs you row trades its version for the ⋯.
+  // POLISH P2: there is no reason tag any more; the ⋯ takes the version's place.
   await mouse("mouseMoved", await centre('.rl-sb-item[data-need] .rl-sb-title'));
   await settle();
-  check("5a: under the pointer, the Needs you row shows its ⋯ in place of the tag", await cdp.evaluate("(() => { const li = document.querySelector('.rl-sb-item[data-need]'); return getComputedStyle(li.querySelector('.rl-sb-dots')).opacity === '1' && getComputedStyle(li.querySelector('.rl-sb-tag')).visibility === 'hidden'; })()"));
+  check("5a: under the pointer, the Needs you row shows its ⋯ in place of its version (the row's end hidden), and no other row's ⋯ shows", await cdp.evaluate("(() => { const li = document.querySelector('.rl-sb-item[data-need]'); return getComputedStyle(li.querySelector('.rl-sb-dots')).opacity === '1' && getComputedStyle(li.querySelector('.rl-sb-row .rl-sb-end')).visibility === 'hidden' && !!li.querySelector('.rl-sb-row .rl-sb-ver') && [...document.querySelectorAll('.rl-sb-item:not([data-need]) > .rl-sb-dots')].every((d) => getComputedStyle(d).opacity === '0'); })()"));
   await click('.rl-sb-version:not([aria-current])');
   check("5a: a version row shows that revision", await cdp.evaluate("JSON.stringify(window.__qa.calls.at(-1)) === JSON.stringify(['revision','dial',2])"), await cdp.evaluate("window.__qa.calls.at(-1)"));
   await click('.rl-sb-fold');
-  check("5a: Show 9 more opens all fourteen, then offers Show less", await cdp.evaluate("document.querySelectorAll('.rl-sb-section:nth-child(3) .rl-sb-item').length === 14 && document.querySelector('.rl-sb-section:nth-child(3) .rl-sb-fold').textContent === 'Show less'"));
+  // POLISH P2: the fold is the DIALCROWN project's (second section), and it
+  // holds the open plan with its fourteen in review.
+  check("5a: Show 9 more opens all fifteen in DIALCROWN (the open plan and fourteen in review), then offers Show less", await cdp.evaluate("document.querySelector('.rl-sb-section:nth-child(2) .rl-sb-label').innerText.trim() === 'DIALCROWN' && document.querySelectorAll('.rl-sb-section:nth-child(2) .rl-sb-item').length === 15 && document.querySelector('.rl-sb-section:nth-child(2) .rl-sb-fold').textContent === 'Show less'"));
   await shot("5a-expanded-aurora", { x: 0, y: 47, width: 281, height: 913 });
 
   // ── Archived fold, chats without a folder ──────────────────────────────

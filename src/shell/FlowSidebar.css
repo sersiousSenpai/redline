@@ -88,7 +88,9 @@
   align-items: flex-start;
   gap: 9px;
   width: 100%;
-  min-height: 44px;
+  /* Two lines' height whatever the row holds, so a rename or a delete ask
+     (one line) never moves the rows below it. */
+  min-height: 47px;
   padding: 6px 8px 6px 10px;
   border-radius: var(--rl-radius-row);
   color: var(--color-ink-2);
@@ -191,6 +193,7 @@
 }
 .rl-sb-dots:hover { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-dots { opacity: 1; }
+.rl-sb-item[data-menu] > .rl-sb-dots { color: var(--color-ink); }
 .rl-sb-item:is(:hover, :focus-within, [data-menu]) > .rl-sb-row .rl-sb-end { visibility: hidden; }
 .rl-sb-dots:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: -2px; }
 

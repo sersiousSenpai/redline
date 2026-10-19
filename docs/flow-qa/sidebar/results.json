@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-10-18T09:29:31.718Z",
+  "startedAt": "2026-10-19T00:40:02.926Z",
   "fixture": "fixtures/flow-sidebar-qa",
   "screenshots": [
     "4a-sidebar-aurora.png",
@@ -131,7 +131,7 @@
       }
     },
     {
-      "name": "4a: rows: copy, order, rects (r7, 13px)",
+      "name": "4a: rows: copy, order, two-line rects (min-height 47; r7, 13px)",
       "passed": true,
       "details": {
         "got": [
@@ -141,26 +141,29 @@
               10,
               81,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Din retrieval plan",
             [
               10,
-              115,
+              130,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Review status check",
             [
               10,
-              149,
+              179,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ]
         ],
         "want": [
@@ -169,97 +172,168 @@
             10,
             81,
             232,
-            32
+            47
           ],
           [
             "Din retrieval plan",
             10,
-            115,
+            130,
             232,
-            32
+            47
           ],
           [
             "Review status check",
             10,
-            149,
+            179,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4a: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "name": "4a: line 1: a 14px status icon at x 20 (Needs you: a 7px dot centred in it) centred on the title at x 43, a faint mono \"vN\" (--color-ink-5, 10.5px) at the right of each plan, none on a chat or launch; line 2: the 11.5px / 16px meta line 1px under the title, at its x",
       "passed": true,
       "details": [
         [
           "Din backend: Hono + Fly",
+          "circle-check",
           [
             20,
-            90.5,
-            13,
-            13
+            89,
+            14,
+            14
           ],
           [
-            42,
-            89,
-            167,
+            43,
+            88,
+            147.7,
             16
-          ]
+          ],
+          [
+            43,
+            106,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Din retrieval plan",
+          "circle-check",
           [
             20,
-            124.5,
-            13,
-            13
+            138,
+            14,
+            14
           ],
           [
-            42,
-            123,
-            167,
+            43,
+            137,
+            101.8,
             16
-          ]
+          ],
+          [
+            43,
+            155,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Review status check",
+          "message-square",
           [
             20,
-            158.5,
-            13,
-            13
+            187,
+            14,
+            14
           ],
           [
-            42,
-            157,
-            167,
+            43,
+            186,
+            123.7,
             16
-          ]
+          ],
+          [
+            43,
+            204,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          null,
+          null,
+          null
         ]
       ]
     },
     {
-      "name": "4a: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "name": "4a: every row's status word and icon wear its tone (plan blue, redlining amber, building green, --color-ink-4 when quiet), a spinner only while live, then \"· age\" (Needs you: \"project ·\" first, no age); titles --color-ink-2 (ink when open, needed or under the menu); ⋯ hidden at rest",
       "passed": true,
       "details": [
         [
           "Din backend: Hono + Fly",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 2d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Din retrieval plan",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 3d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Review status check",
-          "rgb(174, 179, 189)",
+          "Chat",
           "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "message-square",
+          "rgb(134, 139, 149)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Chat · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ]
       ]
     },
@@ -297,11 +371,16 @@
       }
     },
     {
-      "name": "4a: plans wear the doc icon, the chat the chat icon, and no row is open",
-      "passed": true
+      "name": "4a: approved plans wear the green check-circle, the chat the quiet chat icon, and no row is open",
+      "passed": true,
+      "details": [
+        "lucide lucide-circle-check",
+        "lucide lucide-circle-check",
+        "lucide lucide-message-square"
+      ]
     },
     {
-      "name": "4a aurora: every text ≥ 4.5:1 (5 runs), every icon-only control ≥ 3:1 (4)",
+      "name": "4a aurora: every text ≥ 4.5:1 (13 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -416,7 +495,7 @@
       }
     },
     {
-      "name": "4b: rows: copy, order, rects (r7, 13px)",
+      "name": "4b: rows: copy, order, two-line rects (min-height 47; r7, 13px)",
       "passed": true,
       "details": {
         "got": [
@@ -426,35 +505,39 @@
               10,
               83,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Din backend: Hono + Fly",
             [
               10,
-              117,
+              132,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Din retrieval plan",
             [
               10,
-              151,
+              181,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Review status check",
             [
               10,
-              185,
+              230,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ]
         ],
         "want": [
@@ -463,125 +546,217 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             "Din backend: Hono + Fly",
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             "Din retrieval plan",
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             "Review status check",
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4b: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "name": "4b: line 1: a 14px status icon at x 20 (Needs you: a 7px dot centred in it) centred on the title at x 43, a faint mono \"vN\" (--color-ink-5, 10.5px) at the right of each plan, none on a chat or launch; line 2: the 11.5px / 16px meta line 1px under the title, at its x",
       "passed": true,
       "details": [
         [
           "Din roadmap: next steps",
+          "loader-circle",
           [
             20,
-            92.5,
-            13,
-            13
+            91,
+            14,
+            14
           ],
           [
-            42,
-            91,
-            167,
+            43,
+            90,
+            147.2,
             16
-          ]
+          ],
+          [
+            43,
+            108,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          null,
+          null,
+          null
         ],
         [
           "Din backend: Hono + Fly",
+          "circle-check",
           [
             20,
-            126.5,
-            13,
-            13
+            140,
+            14,
+            14
           ],
           [
-            42,
-            125,
-            167,
+            43,
+            139,
+            147.7,
             16
-          ]
+          ],
+          [
+            43,
+            157,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Din retrieval plan",
+          "circle-check",
           [
             20,
-            160.5,
-            13,
-            13
+            189,
+            14,
+            14
           ],
           [
-            42,
-            159,
-            167,
+            43,
+            188,
+            101.8,
             16
-          ]
+          ],
+          [
+            43,
+            206,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Review status check",
+          "message-square",
           [
             20,
-            194.5,
-            13,
-            13
+            238,
+            14,
+            14
           ],
           [
-            42,
-            193,
-            167,
+            43,
+            237,
+            123.7,
             16
-          ]
+          ],
+          [
+            43,
+            255,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          null,
+          null,
+          null
         ]
       ]
     },
     {
-      "name": "4b: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "name": "4b: every row's status word and icon wear its tone (plan blue, redlining amber, building green, --color-ink-4 when quiet), a spinner only while live, then \"· age\" (Needs you: \"project ·\" first, no age); titles --color-ink-2 (ink when open, needed or under the menu); ⋯ hidden at rest",
       "passed": true,
       "details": [
         [
           "Din roadmap: next steps",
-          "rgb(228, 233, 243)",
+          "Planning",
           "rgb(138, 186, 247)",
-          "rgb(134, 139, 149)"
+          "loader-circle",
+          "rgb(138, 186, 247)",
+          "rgba(0, 0, 0, 0)",
+          true,
+          "Planning · 1d",
+          "rgb(228, 233, 243)",
+          "0"
         ],
         [
           "Din backend: Hono + Fly",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 2d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Din retrieval plan",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 3d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Review status check",
-          "rgb(174, 179, 189)",
+          "Chat",
           "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "message-square",
+          "rgb(134, 139, 149)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Chat · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ]
       ]
     },
@@ -619,7 +794,7 @@
       }
     },
     {
-      "name": "4b: the active row: --color-fill-2, ink, a spinner in the plan blue, its ⋯ visible at the board's spot in --color-ink-4",
+      "name": "4b: the active row: --color-fill-2, ink, a spinner and \"Planning\" in the plan blue, no version yet (a launch), its ⋯ hidden until hover (opacity 0, on the title line at x 219)",
       "passed": true,
       "details": {
         "title": "Din roadmap: next steps",
@@ -627,42 +802,61 @@
           10,
           83,
           232,
-          32
+          47
         ],
         "row": [
           10,
           83,
           232,
-          32
+          47
         ],
         "icon": [
           20,
-          92.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
           91,
-          167,
-          16
-        ],
-        "dots": [
-          218,
-          92,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          90,
+          147.2,
+          16
+        ],
+        "dots": [
+          219,
+          91,
+          14,
+          14
+        ],
+        "iconName": "loader-circle",
+        "meta": [
+          43,
+          108,
+          160,
+          16
+        ],
+        "metaText": "Planning · 1d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Planning",
+        "wordColor": "rgb(138, 186, 247)",
+        "verStyle": null,
+        "count": null,
+        "endVisibility": "visible",
         "active": true,
         "nest": false,
         "menu": false,
+        "need": false,
         "rowStyle": {
           "background-color": "rgb(24, 29, 40)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
@@ -670,18 +864,18 @@
         },
         "iconColor": "rgb(138, 186, 247)",
         "iconBg": "rgba(0, 0, 0, 0)",
-        "dotsColor": "rgb(134, 139, 149)",
-        "dotsOpacity": "1",
+        "dotsColor": "rgb(174, 179, 189)",
+        "dotsOpacity": "0",
         "spinning": true
       }
     },
     {
-      "name": "4b aurora: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4b aurora: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "5.79"
+        "min": "4.93"
       }
     },
     {
@@ -786,7 +980,7 @@
       }
     },
     {
-      "name": "4d: rows: copy, order, rects (r7, 13px)",
+      "name": "4d: rows: copy, order, two-line rects (min-height 47; r7, 13px)",
       "passed": true,
       "details": {
         "got": [
@@ -796,35 +990,39 @@
               10,
               83,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Din backend: Hono + Fly",
             [
               10,
-              117,
+              132,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Din retrieval plan",
             [
               10,
-              151,
+              181,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Review status check",
             [
               10,
-              185,
+              230,
               232,
-              32
-            ]
+              47
+            ],
+            "47px"
           ]
         ],
         "want": [
@@ -833,125 +1031,221 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             "Din backend: Hono + Fly",
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             "Din retrieval plan",
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             "Review status check",
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4d: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "name": "4d: line 1: a 14px status icon at x 20 (Needs you: a 7px dot centred in it) centred on the title at x 43, a faint mono \"vN\" (--color-ink-5, 10.5px) at the right of each plan, none on a chat or launch; line 2: the 11.5px / 16px meta line 1px under the title, at its x",
       "passed": true,
       "details": [
         [
           "Din roadmap: next steps",
+          "file-pen-line",
           [
             20,
-            92.5,
-            13,
-            13
+            91,
+            14,
+            14
           ],
           [
-            42,
-            91,
-            167,
+            43,
+            90,
+            147.2,
             16
-          ]
+          ],
+          [
+            43,
+            108,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Din backend: Hono + Fly",
+          "circle-check",
           [
             20,
-            126.5,
-            13,
-            13
+            140,
+            14,
+            14
           ],
           [
-            42,
-            125,
-            167,
+            43,
+            139,
+            147.7,
             16
-          ]
+          ],
+          [
+            43,
+            157,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Din retrieval plan",
+          "circle-check",
           [
             20,
-            160.5,
-            13,
-            13
+            189,
+            14,
+            14
           ],
           [
-            42,
-            159,
-            167,
+            43,
+            188,
+            101.8,
             16
-          ]
+          ],
+          [
+            43,
+            206,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Review status check",
+          "message-square",
           [
             20,
-            194.5,
-            13,
-            13
+            238,
+            14,
+            14
           ],
           [
-            42,
-            193,
-            167,
+            43,
+            237,
+            123.7,
             16
-          ]
+          ],
+          [
+            43,
+            255,
+            160,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          null,
+          null,
+          null
         ]
       ]
     },
     {
-      "name": "4d: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "name": "4d: every row's status word and icon wear its tone (plan blue, redlining amber, building green, --color-ink-4 when quiet), a spinner only while live, then \"· age\" (Needs you: \"project ·\" first, no age); titles --color-ink-2 (ink when open, needed or under the menu); ⋯ hidden at rest",
       "passed": true,
       "details": [
         [
           "Din roadmap: next steps",
-          "rgb(228, 233, 243)",
+          "In review",
           "rgb(227, 191, 133)",
-          "rgb(134, 139, 149)"
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 1d",
+          "rgb(228, 233, 243)",
+          "0"
         ],
         [
           "Din backend: Hono + Fly",
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 2d",
           "rgb(228, 233, 243)",
-          "rgb(134, 139, 149)",
-          "rgb(228, 233, 243)"
+          "1"
         ],
         [
           "Din retrieval plan",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "Approved · not built",
+          "rgb(124, 227, 195)",
+          "circle-check",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · not built · 3d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Review status check",
-          "rgb(174, 179, 189)",
+          "Chat",
           "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "message-square",
+          "rgb(134, 139, 149)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Chat · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ]
       ]
     },
@@ -964,42 +1258,66 @@
           10,
           83,
           232,
-          32
+          47
         ],
         "row": [
           10,
           83,
           232,
-          32
+          47
         ],
         "icon": [
           20,
-          92.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
           91,
-          167,
-          16
-        ],
-        "dots": [
-          218,
-          92,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          90,
+          147.2,
+          16
+        ],
+        "dots": [
+          219,
+          91,
+          14,
+          14
+        ],
+        "iconName": "file-pen-line",
+        "meta": [
+          43,
+          108,
+          160,
+          16
+        ],
+        "metaText": "In review · 1d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "In review",
+        "wordColor": "rgb(227, 191, 133)",
+        "ver": "v1",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "visible",
         "active": true,
         "nest": false,
         "menu": false,
+        "need": false,
         "rowStyle": {
           "background-color": "rgb(24, 29, 40)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
@@ -1007,62 +1325,86 @@
         },
         "iconColor": "rgb(227, 191, 133)",
         "iconBg": "rgba(0, 0, 0, 0)",
-        "dotsColor": "rgb(134, 139, 149)",
-        "dotsOpacity": "1",
+        "dotsColor": "rgb(174, 179, 189)",
+        "dotsOpacity": "0",
         "spinning": false
       }
     },
     {
-      "name": "4d: the row under the menu: menu fill, an inset --color-focus-rim ring, ink, its ⋯ lit",
+      "name": "4d: the row under the menu: menu fill, an inset --color-focus-rim ring, ink, its ⋯ lit (opacity 1, full ink) on the title line in place of its version (hidden)",
       "passed": true,
       "details": {
         "title": "Din backend: Hono + Fly",
         "li": [
           10,
-          117,
+          132,
           232,
-          32
+          47
         ],
         "row": [
           10,
-          117,
+          132,
           232,
-          32
+          47
         ],
         "icon": [
           20,
-          126.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
-          125,
-          167,
-          16
-        ],
-        "dots": [
-          218,
-          126,
+          140,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          139,
+          147.7,
+          16
+        ],
+        "dots": [
+          219,
+          140,
+          14,
+          14
+        ],
+        "iconName": "circle-check",
+        "meta": [
+          43,
+          157,
+          160,
+          16
+        ],
+        "metaText": "Approved · not built · 2d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Approved · not built",
+        "wordColor": "rgb(124, 227, 195)",
+        "ver": "v1",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "hidden",
         "active": false,
         "nest": false,
         "menu": true,
+        "need": false,
         "rowStyle": {
           "background-color": "rgba(26, 31, 42, 0.62)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "rgb(75, 92, 117) 0px 0px 0px 1px inset"
+          "box-shadow": "rgb(75, 92, 117) 0px 0px 0px 1px inset",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
           "border-radius": "7px"
         },
-        "iconColor": "rgb(134, 139, 149)",
+        "iconColor": "rgb(124, 227, 195)",
         "iconBg": "rgba(0, 0, 0, 0)",
         "dotsColor": "rgb(228, 233, 243)",
         "dotsOpacity": "1",
@@ -1070,20 +1412,20 @@
       }
     },
     {
-      "name": "4d: the menu: 204 × 153 at the board's spot, glass menu tier, r12, 6px padding",
+      "name": "4d: the menu: 204 × 292 (eight items), over its own ⋯ as on the board (12 left of it, 22 above), glass menu tier, r12, 6px padding",
       "passed": true,
       "details": {
         "got": [
-          206,
-          104,
+          207,
+          118,
           204,
-          153
+          292
         ],
         "want": [
-          206,
-          104,
+          207,
+          118,
           204,
-          153
+          292
         ],
         "surface": {
           "border-radius": "12px",
@@ -1093,21 +1435,21 @@
       }
     },
     {
-      "name": "4d: menu rows: Open plan · Rename · Archive · rule · Delete plan, 190 × 32, r8, 13px, 14px icons at x+10",
+      "name": "4d: menu rows: Open plan · Rename · Archive · rule · Mark as built · Back to in review · Move to repo… · Download as Markdown · rule · Delete plan, 190 × 32, r8, 13px, 14px icons at x+10",
       "passed": true,
       "details": {
         "got": [
           [
             "Open plan",
             [
-              213,
-              111,
+              214,
+              125,
               190,
               32
             ],
             [
-              223,
-              120,
+              224,
+              134,
               14,
               14
             ]
@@ -1115,14 +1457,14 @@
           [
             "Rename",
             [
-              213,
-              143,
+              214,
+              157,
               190,
               32
             ],
             [
-              223,
-              152,
+              224,
+              166,
               14,
               14
             ]
@@ -1130,14 +1472,74 @@
           [
             "Archive",
             [
-              213,
-              175,
+              214,
+              189,
               190,
               32
             ],
             [
-              223,
-              184,
+              224,
+              198,
+              14,
+              14
+            ]
+          ],
+          [
+            "Mark as built",
+            [
+              214,
+              232,
+              190,
+              32
+            ],
+            [
+              224,
+              241,
+              14,
+              14
+            ]
+          ],
+          [
+            "Back to in review",
+            [
+              214,
+              264,
+              190,
+              32
+            ],
+            [
+              224,
+              273,
+              14,
+              14
+            ]
+          ],
+          [
+            "Move to repo…",
+            [
+              214,
+              296,
+              190,
+              32
+            ],
+            [
+              224,
+              305,
+              14,
+              14
+            ]
+          ],
+          [
+            "Download as Markdown",
+            [
+              214,
+              328,
+              190,
+              32
+            ],
+            [
+              224,
+              337,
               14,
               14
             ]
@@ -1145,36 +1547,44 @@
           [
             "Delete plan",
             [
-              213,
-              218,
+              214,
+              371,
               190,
               32
             ],
             [
-              223,
-              227,
+              224,
+              380,
               14,
               14
             ]
           ]
         ],
-        "rule": [
-          217,
-          212,
-          182,
-          1
+        "rules": [
+          [
+            218,
+            226,
+            182,
+            1
+          ],
+          [
+            218,
+            365,
+            182,
+            1
+          ]
         ]
       }
     },
     {
-      "name": "4d: Delete plan is tinted (--color-mode-danger-fg on -bg) with ⌫ at the right",
+      "name": "4d: Delete plan, last after its rule, is tinted (--color-mode-danger-fg on -bg) with ⌫ at the right",
       "passed": true,
       "details": {
         "del": {
           "text": "Delete plan",
           "rect": [
-            213,
-            218,
+            214,
+            371,
             190,
             32
           ],
@@ -1185,22 +1595,23 @@
             "font-size": "13px"
           },
           "icon": [
-            223,
-            227,
+            224,
+            380,
             14,
             14
           ],
-          "focused": false
+          "focused": false,
+          "danger": true
         },
         "key": [
-          381.8,
-          227.5,
+          382.8,
+          380.5,
           11.3,
           13
         ],
         "want": [
-          381.8,
-          227.5,
+          382.8,
+          380.5,
           11.3,
           13
         ]
@@ -1212,8 +1623,8 @@
       "details": {
         "text": "Open plan",
         "rect": [
-          213,
-          111,
+          214,
+          125,
           190,
           32
         ],
@@ -1224,16 +1635,17 @@
           "font-size": "13px"
         },
         "icon": [
-          223,
-          120,
+          224,
+          134,
           14,
           14
         ],
-        "focused": true
+        "focused": true,
+        "danger": false
       }
     },
     {
-      "name": "4d menu aurora: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "name": "4d menu aurora: every text ≥ 4.5:1 (8 runs), every icon-only control ≥ 3:1 (0)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -1242,12 +1654,12 @@
       }
     },
     {
-      "name": "4d sidebar aurora: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4d sidebar aurora: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "5.79"
+        "min": "4.93"
       }
     },
     {
@@ -1271,25 +1683,26 @@
       "passed": true,
       "details": {
         "ctx": {
-          "x": 125,
-          "y": 214,
+          "x": 93,
+          "y": 243,
           "row": "Din retrieval plan"
         },
         "point": {
-          "x": 125.5,
-          "y": 214
+          "x": 93.8984375,
+          "y": 243
         }
       }
     },
     {
-      "name": "Rename edits in place: the row keeps its height, the title selected where it stood",
+      "name": "Rename edits in place: the row keeps its two-line height (as at rest), the title selected where it stood (x 43)",
       "passed": true,
       "details": {
         "focused": true,
         "selected": true,
         "value": "Din retrieval plan",
-        "rowH": 32,
-        "inputX": 42
+        "rowH": 47,
+        "inputX": 43,
+        "restH": 47
       }
     },
     {
@@ -1333,12 +1746,12 @@
       }
     },
     {
-      "name": "delete confirm aurora: every text ≥ 4.5:1 (8 runs), every icon-only control ≥ 3:1 (4)",
+      "name": "delete confirm aurora: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "5.79"
+        "min": "4.93"
       }
     },
     {
@@ -1440,7 +1853,7 @@
       }
     },
     {
-      "name": "5a: group labels: copy, rects, 11px, .04em, uppercase, --color-ink-5",
+      "name": "5a: group labels (Needs you, then one per project: no Building or In review section): copy, rects, 11px, .04em, uppercase, --color-ink-5",
       "passed": true,
       "details": {
         "got": [
@@ -1460,10 +1873,10 @@
             }
           ],
           [
-            "BUILDING",
+            "DIALCROWN",
             [
               10,
-              135,
+              148,
               260,
               19
             ],
@@ -1475,10 +1888,10 @@
             }
           ],
           [
-            "IN REVIEW",
+            "MACHINEOS",
             [
               10,
-              344,
+              615,
               260,
               19
             ],
@@ -1499,16 +1912,16 @@
             19
           ],
           [
-            "BUILDING",
+            "DIALCROWN",
             10,
-            135,
+            148,
             260,
             19
           ],
           [
-            "IN REVIEW",
+            "MACHINEOS",
             10,
-            344,
+            615,
             260,
             19
           ]
@@ -1516,7 +1929,7 @@
       }
     },
     {
-      "name": "5a: rows: copy, order, rects (r7, 13px)",
+      "name": "5a: rows: copy, order, two-line rects (min-height 47; r7, 13px)",
       "passed": true,
       "details": {
         "got": [
@@ -1526,71 +1939,79 @@
               10,
               85,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Dialcrown: fastest credible launch",
             [
               10,
-              156,
+              169,
               260,
-              34
-            ]
-          ],
-          [
-            "MachineOS \"Full Bore\" sprint",
-            [
-              10,
-              294,
-              260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Component meshes from a splat",
             [
               10,
-              365,
+              320,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Foundation docs for gpu-harness",
             [
               10,
-              401,
+              369,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Skip the \"trust this folder\" prompt",
             [
               10,
-              437,
+              418,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Memory surface: kill the jank",
             [
               10,
-              473,
+              467,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
           ],
           [
             "Theme cull + light theme",
             [
               10,
-              509,
+              516,
               260,
-              34
-            ]
+              47
+            ],
+            "47px"
+          ],
+          [
+            "MachineOS \"Full Bore\" sprint",
+            [
+              10,
+              636,
+              260,
+              47
+            ],
+            "47px"
           ]
         ],
         "want": [
@@ -1599,285 +2020,509 @@
             10,
             85,
             260,
-            34
+            47
           ],
           [
             "Dialcrown: fastest credible launch",
             10,
-            156,
+            169,
             260,
-            34
-          ],
-          [
-            "MachineOS \"Full Bore\" sprint",
-            10,
-            294,
-            260,
-            34
+            47
           ],
           [
             "Component meshes from a splat",
             10,
-            365,
+            320,
             260,
-            34
+            47
           ],
           [
             "Foundation docs for gpu-harness",
             10,
-            401,
+            369,
             260,
-            34
+            47
           ],
           [
             "Skip the \"trust this folder\" prompt",
             10,
-            437,
+            418,
             260,
-            34
+            47
           ],
           [
             "Memory surface: kill the jank",
             10,
-            473,
+            467,
             260,
-            34
+            47
           ],
           [
             "Theme cull + light theme",
             10,
-            509,
+            516,
             260,
-            34
+            47
+          ],
+          [
+            "MachineOS \"Full Bore\" sprint",
+            10,
+            636,
+            260,
+            47
           ]
         ]
       }
     },
     {
-      "name": "5a: each row's icon 13px at x 20 (a 7px dot on Needs you), title at x 42 (36), centred",
+      "name": "5a: line 1: a 14px status icon at x 20 (Needs you: a 7px dot centred in it) centred on the title at x 43, a faint mono \"vN\" (--color-ink-5, 10.5px) at the right of each plan, none on a chat or launch; line 2: the 11.5px / 16px meta line 1px under the title, at its x",
       "passed": true,
       "details": [
         [
           "Every vehicle gets a 3D model",
+          "dot",
           [
-            20,
-            98.5,
+            23.5,
+            96.5,
             7,
             7
           ],
           [
-            36,
-            94,
-            168,
+            43,
+            92,
+            182.4,
             16
-          ]
+          ],
+          [
+            43,
+            110,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Dialcrown: fastest credible launch",
+          "hammer",
           [
             20,
-            166.5,
-            13,
-            13
+            177,
+            14,
+            14
           ],
           [
-            42,
-            165,
-            195,
+            43,
+            176,
+            188,
             16
-          ]
-        ],
-        [
-          "MachineOS \"Full Bore\" sprint",
-          [
-            20,
-            304.5,
-            13,
-            13
           ],
           [
-            42,
-            303,
-            195,
+            43,
+            194,
+            188,
             16
-          ]
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v4",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Component meshes from a splat",
+          "file-pen-line",
           [
             20,
-            375.5,
-            13,
-            13
+            328,
+            14,
+            14
           ],
           [
-            42,
-            374,
-            195,
+            43,
+            327,
+            188,
             16
-          ]
+          ],
+          [
+            43,
+            345,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Foundation docs for gpu-harness",
+          "file-pen-line",
           [
             20,
-            411.5,
-            13,
-            13
+            377,
+            14,
+            14
           ],
           [
-            42,
-            410,
-            195,
+            43,
+            376,
+            188,
             16
-          ]
+          ],
+          [
+            43,
+            394,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Skip the \"trust this folder\" prompt",
+          "file-pen-line",
           [
             20,
-            447.5,
-            13,
-            13
+            426,
+            14,
+            14
           ],
           [
-            42,
-            446,
-            195,
+            43,
+            425,
+            188,
             16
-          ]
+          ],
+          [
+            43,
+            443,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Memory surface: kill the jank",
+          "file-pen-line",
           [
             20,
-            483.5,
-            13,
-            13
+            475,
+            14,
+            14
           ],
           [
-            42,
-            482,
-            195,
+            43,
+            474,
+            173.9,
             16
-          ]
+          ],
+          [
+            43,
+            492,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ],
         [
           "Theme cull + light theme",
+          "file-pen-line",
           [
             20,
-            519.5,
-            13,
-            13
+            524,
+            14,
+            14
           ],
           [
-            42,
-            518,
-            195,
+            43,
+            523,
+            149.8,
             16
-          ]
+          ],
+          [
+            43,
+            541,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
+        ],
+        [
+          "MachineOS \"Full Bore\" sprint",
+          "loader-circle",
+          [
+            20,
+            644,
+            14,
+            14
+          ],
+          [
+            43,
+            643,
+            176.5,
+            16
+          ],
+          [
+            43,
+            661,
+            188,
+            16
+          ],
+          {
+            "font-size": "11.5px",
+            "line-height": "16px",
+            "color": "rgb(134, 139, 149)"
+          },
+          "v1",
+          {
+            "color": "rgb(134, 139, 149)",
+            "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+            "font-size": "10.5px"
+          },
+          null
         ]
       ]
     },
     {
-      "name": "5a: idle rows read --color-ink-3, their icons --color-ink-4, their ⋯ --color-ink-5",
+      "name": "5a: every row's status word and icon wear its tone (plan blue, redlining amber, building green, --color-ink-4 when quiet), a spinner only while live, then \"· age\" (Needs you: \"project ·\" first, no age); titles --color-ink-2 (ink when open, needed or under the menu); ⋯ hidden at rest",
       "passed": true,
       "details": [
         [
           "Every vehicle gets a 3D model",
-          "rgb(228, 233, 243)",
+          "Question for you",
+          "rgb(227, 191, 133)",
+          "dot",
           "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "rgb(227, 191, 133)",
+          false,
+          "dialcrown · Question for you",
+          "rgb(228, 233, 243)",
+          "0"
         ],
         [
           "Dialcrown: fastest credible launch",
-          "rgb(228, 233, 243)",
+          "Approved",
           "rgb(124, 227, 195)",
-          "rgb(134, 139, 149)"
-        ],
-        [
-          "MachineOS \"Full Bore\" sprint",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "hammer",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "Approved · 2d",
+          "rgb(228, 233, 243)",
+          "0"
         ],
         [
           "Component meshes from a splat",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "In review",
+          "rgb(227, 191, 133)",
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Foundation docs for gpu-harness",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "In review",
+          "rgb(227, 191, 133)",
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Skip the \"trust this folder\" prompt",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "In review",
+          "rgb(227, 191, 133)",
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 4d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Memory surface: kill the jank",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "In review",
+          "rgb(227, 191, 133)",
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 5d",
+          "rgb(211, 216, 226)",
+          "0"
         ],
         [
           "Theme cull + light theme",
-          "rgb(174, 179, 189)",
-          "rgb(134, 139, 149)",
-          "rgb(134, 139, 149)"
+          "In review",
+          "rgb(227, 191, 133)",
+          "file-pen-line",
+          "rgb(227, 191, 133)",
+          "rgba(0, 0, 0, 0)",
+          false,
+          "In review · 5d",
+          "rgb(211, 216, 226)",
+          "0"
+        ],
+        [
+          "MachineOS \"Full Bore\" sprint",
+          "Running",
+          "rgb(124, 227, 195)",
+          "loader-circle",
+          "rgb(124, 227, 195)",
+          "rgba(0, 0, 0, 0)",
+          true,
+          "Running · 3d",
+          "rgb(211, 216, 226)",
+          "0"
         ]
       ]
     },
     {
-      "name": "5a: the open session is one grouped container (menu fill, r8) at the board's rect",
+      "name": "5a: the open session is one grouped container (menu fill, r8): its two-line row and its versions, 260 × 149 at y 169",
       "passed": true,
       "details": {
         "title": "Dialcrown: fastest credible launch",
         "li": [
           10,
-          156,
+          169,
           260,
-          136
+          149
         ],
         "row": [
           10,
-          156,
+          169,
           260,
-          34
+          47
         ],
         "icon": [
           20,
-          166.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
-          165,
-          195,
-          16
-        ],
-        "dots": [
-          246,
-          166,
+          177,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          176,
+          188,
+          16
+        ],
+        "dots": [
+          247,
+          177,
+          14,
+          14
+        ],
+        "iconName": "hammer",
+        "meta": [
+          43,
+          194,
+          188,
+          16
+        ],
+        "metaText": "Approved · 2d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Approved",
+        "wordColor": "rgb(124, 227, 195)",
+        "ver": "v4",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "visible",
         "active": true,
         "nest": true,
         "menu": false,
+        "need": false,
         "rowStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(26, 31, 42, 0.62)",
@@ -1885,56 +2530,80 @@
         },
         "iconColor": "rgb(124, 227, 195)",
         "iconBg": "rgba(0, 0, 0, 0)",
-        "dotsColor": "rgb(134, 139, 149)",
-        "dotsOpacity": "1",
-        "spinning": true
+        "dotsColor": "rgb(174, 179, 189)",
+        "dotsOpacity": "0",
+        "spinning": false
       }
     },
     {
-      "name": "5a: its spinner is the building green; its ⋯ at the board's spot",
+      "name": "5a: the open plan, handed to an agent to build (runState building, terminal idle): a static green hammer and \"Approved\" in --color-mode-build-fg, no spinner; its version v4; its ⋯ hidden until hover, on the title line at x 247",
       "passed": true,
       "details": {
         "title": "Dialcrown: fastest credible launch",
         "li": [
           10,
-          156,
+          169,
           260,
-          136
+          149
         ],
         "row": [
           10,
-          156,
+          169,
           260,
-          34
+          47
         ],
         "icon": [
           20,
-          166.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
-          165,
-          195,
-          16
-        ],
-        "dots": [
-          246,
-          166,
+          177,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          176,
+          188,
+          16
+        ],
+        "dots": [
+          247,
+          177,
+          14,
+          14
+        ],
+        "iconName": "hammer",
+        "meta": [
+          43,
+          194,
+          188,
+          16
+        ],
+        "metaText": "Approved · 2d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Approved",
+        "wordColor": "rgb(124, 227, 195)",
+        "ver": "v4",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "visible",
         "active": true,
         "nest": true,
         "menu": false,
+        "need": false,
         "rowStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(26, 31, 42, 0.62)",
@@ -1942,13 +2611,13 @@
         },
         "iconColor": "rgb(124, 227, 195)",
         "iconBg": "rgba(0, 0, 0, 0)",
-        "dotsColor": "rgb(134, 139, 149)",
-        "dotsOpacity": "1",
-        "spinning": true
+        "dotsColor": "rgb(174, 179, 189)",
+        "dotsOpacity": "0",
+        "spinning": false
       }
     },
     {
-      "name": "5a: versions: v1 … v4 · latest, 24px rows at 12px, r5, dates at the right; v1 is on screen (--color-fill-3, ink), latest --color-ink-3",
+      "name": "5a: versions under the two-line row: v1 … v4 · latest, 24px rows at 12px, r5, dates at the right; v1 is on screen (--color-fill-3, ink), latest --color-ink-3",
       "passed": true,
       "details": [
         {
@@ -1956,7 +2625,7 @@
           "date": "Oct 14",
           "rect": [
             40,
-            190,
+            216,
             224,
             24
           ],
@@ -1973,7 +2642,7 @@
           "date": "Oct 14",
           "rect": [
             40,
-            214,
+            240,
             224,
             24
           ],
@@ -1990,7 +2659,7 @@
           "date": "Oct 15",
           "rect": [
             40,
-            238,
+            264,
             224,
             24
           ],
@@ -2007,7 +2676,7 @@
           "date": "Oct 15",
           "rect": [
             40,
-            262,
+            288,
             224,
             24
           ],
@@ -2022,7 +2691,7 @@
       ]
     },
     {
-      "name": "5a: Needs you: an amber dot, ink title, the reason tag at the right (11px, --color-ink-4), its ⋯ held back until hover",
+      "name": "5a: Needs you: an amber dot centred in the icon slot, ink title, \"dialcrown · Question for you\" under it (the project, then the reason in --color-mode-redline-fg, no age), v1 at the right, its ⋯ held back until hover",
       "passed": true,
       "details": {
         "title": "Every vehicle gets a 3D model",
@@ -2030,47 +2699,66 @@
           10,
           85,
           260,
-          34
+          47
         ],
         "row": [
           10,
           85,
           260,
-          34
+          47
         ],
         "icon": [
-          20,
-          98.5,
+          23.5,
+          96.5,
           7,
           7
         ],
         "titleRect": [
-          36,
-          94,
-          168,
+          43,
+          92,
+          182.4,
           16
         ],
         "dots": [
-          246,
-          95,
+          247,
+          93,
           14,
           14
         ],
-        "tag": [
-          213,
-          95.5,
-          47,
-          13
+        "iconName": "dot",
+        "meta": [
+          43,
+          110,
+          188,
+          16
         ],
+        "metaText": "dialcrown · Question for you",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Question for you",
+        "wordColor": "rgb(227, 191, 133)",
+        "ver": "v1",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "visible",
         "active": false,
         "nest": false,
         "menu": false,
+        "need": true,
         "rowStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
           "color": "rgb(228, 233, 243)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
@@ -2078,89 +2766,172 @@
         },
         "iconColor": "rgb(134, 139, 149)",
         "iconBg": "rgb(227, 191, 133)",
-        "dotsColor": "rgb(134, 139, 149)",
+        "dotsColor": "rgb(174, 179, 189)",
         "dotsOpacity": "0",
         "spinning": false
       }
     },
     {
-      "name": "5a: a building row that is not open: a --color-ink-4 spinner, --color-ink-3 title",
+      "name": "5a: a live orchestrated run that is not open: a spinner and \"Running\" in the building green (--color-mode-build-fg), --color-ink-2 title, in its own project (MACHINEOS)",
       "passed": true,
       "details": {
         "title": "MachineOS \"Full Bore\" sprint",
         "li": [
           10,
-          294,
+          636,
           260,
-          34
+          47
         ],
         "row": [
           10,
-          294,
+          636,
           260,
-          34
+          47
         ],
         "icon": [
           20,
-          304.5,
-          13,
-          13
-        ],
-        "titleRect": [
-          42,
-          303,
-          195,
-          16
-        ],
-        "dots": [
-          246,
-          304,
+          644,
           14,
           14
         ],
-        "tag": null,
+        "titleRect": [
+          43,
+          643,
+          176.5,
+          16
+        ],
+        "dots": [
+          247,
+          644,
+          14,
+          14
+        ],
+        "iconName": "loader-circle",
+        "meta": [
+          43,
+          661,
+          188,
+          16
+        ],
+        "metaText": "Running · 3d",
+        "metaStyle": {
+          "font-size": "11.5px",
+          "line-height": "16px",
+          "color": "rgb(134, 139, 149)"
+        },
+        "word": "Running",
+        "wordColor": "rgb(124, 227, 195)",
+        "ver": "v1",
+        "verStyle": {
+          "color": "rgb(134, 139, 149)",
+          "font-family": "ui-monospace, SFMono-Regular, \"SF Mono\", Menlo, Consolas, \"Liberation Mono\", monospace",
+          "font-size": "10.5px"
+        },
+        "count": null,
+        "endVisibility": "visible",
         "active": false,
         "nest": false,
         "menu": false,
+        "need": false,
         "rowStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
-          "color": "rgb(174, 179, 189)",
+          "color": "rgb(211, 216, 226)",
           "border-radius": "7px",
           "font-size": "13px",
-          "box-shadow": "none"
+          "box-shadow": "none",
+          "min-height": "47px"
         },
         "liStyle": {
           "background-color": "rgba(0, 0, 0, 0)",
           "border-radius": "7px"
         },
-        "iconColor": "rgb(134, 139, 149)",
+        "iconColor": "rgb(124, 227, 195)",
         "iconBg": "rgba(0, 0, 0, 0)",
-        "dotsColor": "rgb(134, 139, 149)",
-        "dotsOpacity": "1",
+        "dotsColor": "rgb(174, 179, 189)",
+        "dotsOpacity": "0",
         "spinning": true
       }
     },
     {
-      "name": "5a: In review rows wear the pen; then Show 9 more (12.5px, --color-ink-4) at the board's rect",
+      "name": "5a: In review rows sit in their project (DIALCROWN) and wear the amber pen and \"In review\", none spinning; then Show 9 more (12.5px, --color-ink-4) closes that group, before MACHINEOS",
       "passed": true,
-      "details": [
-        {
-          "text": "Show 9 more",
-          "rect": [
-            10,
-            545,
-            260,
-            34
-          ],
-          "style": {
-            "font-size": "12.5px",
-            "color": "rgb(134, 139, 149)"
+      "details": {
+        "folds": [
+          {
+            "text": "Show 9 more",
+            "rect": [
+              10,
+              565,
+              260,
+              34
+            ],
+            "style": {
+              "font-size": "12.5px",
+              "color": "rgb(134, 139, 149)"
+            }
           }
-        }
-      ]
+        ],
+        "reviews": [
+          [
+            "Component meshes from a splat",
+            "file-pen-line",
+            "rgb(227, 191, 133)",
+            [
+              10,
+              320,
+              260,
+              47
+            ]
+          ],
+          [
+            "Foundation docs for gpu-harness",
+            "file-pen-line",
+            "rgb(227, 191, 133)",
+            [
+              10,
+              369,
+              260,
+              47
+            ]
+          ],
+          [
+            "Skip the \"trust this folder\" prompt",
+            "file-pen-line",
+            "rgb(227, 191, 133)",
+            [
+              10,
+              418,
+              260,
+              47
+            ]
+          ],
+          [
+            "Memory surface: kill the jank",
+            "file-pen-line",
+            "rgb(227, 191, 133)",
+            [
+              10,
+              467,
+              260,
+              47
+            ]
+          ],
+          [
+            "Theme cull + light theme",
+            "file-pen-line",
+            "rgb(227, 191, 133)",
+            [
+              10,
+              516,
+              260,
+              47
+            ]
+          ]
+        ]
+      }
     },
     {
-      "name": "5a aurora: every text ≥ 4.5:1 (22 runs), every icon-only control ≥ 3:1 (7)",
+      "name": "5a aurora: every text ≥ 4.5:1 (45 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -2174,7 +2945,7 @@
       "details": []
     },
     {
-      "name": "5a: under the pointer, the Needs you row shows its ⋯ in place of the tag",
+      "name": "5a: under the pointer, the Needs you row shows its ⋯ in place of its version (the row's end hidden), and no other row's ⋯ shows",
       "passed": true
     },
     {
@@ -2187,7 +2958,7 @@
       ]
     },
     {
-      "name": "5a: Show 9 more opens all fourteen, then offers Show less",
+      "name": "5a: Show 9 more opens all fifteen in DIALCROWN (the open plan and fourteen in review), then offers Show less",
       "passed": true
     },
     {
@@ -2239,30 +3010,30 @@
             10,
             81,
             232,
-            32
+            47
           ],
           [
             10,
-            115,
+            130,
             232,
-            32
+            47
           ],
           [
             10,
-            149,
+            179,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4a basic: every text ≥ 4.5:1 (5 runs), every icon-only control ≥ 3:1 (4)",
+      "name": "4a basic: every text ≥ 4.5:1 (13 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "4.98"
+        "min": "4.96"
       }
     },
     {
@@ -2274,36 +3045,36 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4b basic: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4b basic: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "4.98"
+        "min": "4.89"
       }
     },
     {
@@ -2315,40 +3086,40 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4d basic: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4d basic: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "4.98"
+        "min": "4.80"
       }
     },
     {
-      "name": "4d menu basic: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "name": "4d menu basic: every text ≥ 4.5:1 (8 runs), every icon-only control ≥ 3:1 (0)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -2365,60 +3136,60 @@
             10,
             85,
             260,
-            34
+            47
           ],
           [
             10,
-            156,
+            169,
             260,
-            34
+            47
           ],
           [
             10,
-            294,
+            320,
             260,
-            34
+            47
           ],
           [
             10,
-            365,
+            369,
             260,
-            34
+            47
           ],
           [
             10,
-            401,
+            418,
             260,
-            34
+            47
           ],
           [
             10,
-            437,
+            467,
             260,
-            34
+            47
           ],
           [
             10,
-            473,
+            516,
             260,
-            34
+            47
           ],
           [
             10,
-            509,
+            636,
             260,
-            34
+            47
           ]
         ]
       }
     },
     {
-      "name": "5a basic: every text ≥ 4.5:1 (22 runs), every icon-only control ≥ 3:1 (7)",
+      "name": "5a basic: every text ≥ 4.5:1 (45 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "4.82"
+        "min": "4.80"
       }
     },
     {
@@ -2430,25 +3201,25 @@
             10,
             81,
             232,
-            32
+            47
           ],
           [
             10,
-            115,
+            130,
             232,
-            32
+            47
           ],
           [
             10,
-            149,
+            179,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4a studio: every text ≥ 4.5:1 (5 runs), every icon-only control ≥ 3:1 (4)",
+      "name": "4a studio: every text ≥ 4.5:1 (13 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -2465,36 +3236,36 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4b studio: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4b studio: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (1)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "6.30"
+        "min": "4.97"
       }
     },
     {
@@ -2506,40 +3277,40 @@
             10,
             83,
             232,
-            32
+            47
           ],
           [
             10,
-            117,
+            132,
             232,
-            32
+            47
           ],
           [
             10,
-            151,
+            181,
             232,
-            32
+            47
           ],
           [
             10,
-            185,
+            230,
             232,
-            32
+            47
           ]
         ]
       }
     },
     {
-      "name": "4d studio: every text ≥ 4.5:1 (6 runs), every icon-only control ≥ 3:1 (5)",
+      "name": "4d studio: every text ≥ 4.5:1 (16 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
         "lowIcons": [],
-        "min": "6.30"
+        "min": "4.97"
       }
     },
     {
-      "name": "4d menu studio: every text ≥ 4.5:1 (4 runs), every icon-only control ≥ 3:1 (0)",
+      "name": "4d menu studio: every text ≥ 4.5:1 (8 runs), every icon-only control ≥ 3:1 (0)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -2556,55 +3327,55 @@
             10,
             85,
             260,
-            34
+            47
           ],
           [
             10,
-            156,
+            169,
             260,
-            34
+            47
           ],
           [
             10,
-            294,
+            320,
             260,
-            34
+            47
           ],
           [
             10,
-            365,
+            369,
             260,
-            34
+            47
           ],
           [
             10,
-            401,
+            418,
             260,
-            34
+            47
           ],
           [
             10,
-            437,
+            467,
             260,
-            34
+            47
           ],
           [
             10,
-            473,
+            516,
             260,
-            34
+            47
           ],
           [
             10,
-            509,
+            636,
             260,
-            34
+            47
           ]
         ]
       }
     },
     {
-      "name": "5a studio: every text ≥ 4.5:1 (22 runs), every icon-only control ≥ 3:1 (7)",
+      "name": "5a studio: every text ≥ 4.5:1 (45 runs), every icon-only control ≥ 3:1 (2)",
       "passed": true,
       "details": {
         "lowText": [],
@@ -2616,19 +3387,20 @@
   "errors": [],
   "sourceSha256": {
     "src/components/SessionSidebar.tsx": "0ca3745cde01c32c0536e43ad3634c5b22e18c4adf7be25ec01530077ba92552",
-    "src/shell/FlowSidebar.tsx": "4037301382264bbc9ff90bf7e78d28fee924ba25754e6c795141255f448b2a05",
-    "src/shell/FlowSidebar.css": "01afd5a86023a63247db7bc7b113375342ca79b6249dc262809489a620c73f90",
-    "src/components/RowMenu.tsx": "8a8b73e07f4463708ed59133fd2d87d2c0d2b0252cc91261e7a8914445b20728",
-    "src/lib/sessionGroups.ts": "ace552595fce3cf99a7905909157a2ad130eb269b669109604e591d687e10a84",
-    "src/lib/sessionMode.ts": "09a0b22327219ae1c5f2b0be0652b19637659b52651ca7bf649a9e6ca0e6ae5f"
+    "src/shell/FlowSidebar.tsx": "e7cf4afa3570f593b3e22ce283b0a4f80cc4d3669a0bd457201a4569dbb10a2a",
+    "src/shell/FlowSidebar.css": "902f56bc5facc369d15fcc520b6b66150048c1c39b12b78f52462cafcd0f54c9",
+    "src/components/RowMenu.tsx": "d26d4452c8f94921d38cb29bc7b81047ff1ded85a1c5328220e4213168e7efe3",
+    "src/lib/sessionGroups.ts": "73f375317605661e87d659a03e77e52974a1971035480734788d5173d7edf6b0",
+    "src/lib/sessionMode.ts": "fec2db0ba5c268b8ad8e16d1731d2456411f7fbbb88ee8b5aa98bddfea260859"
   },
   "limitations": [
     "Headless Chrome component fixture: not WKWebView or the live app.",
     "Sessions, chats and launches are synthetic; the sidebar, row menu, grouping and themes are the production modules.",
-    "Expected geometry is what the design HTML (flow.html) renders, measured in the same Chrome; board crops are the rendered PNGs."
+    "Expected geometry is what the design HTML (flow.html) renders, measured in the same Chrome; board crops are the rendered PNGs.",
+    "POLISH P2 redesigned the rows (two lines, status in colour on every row, sections Needs you then projects): row, version, fold, ⋯ and menu geometry is the current render measured in this Chrome, not the boards'."
   ],
-  "fixtureUrl": "http://127.0.0.1:5174/fixtures/flow-sidebar-qa/",
+  "fixtureUrl": "http://127.0.0.1:5173/fixtures/flow-sidebar-qa/",
   "browserVersion": "Chrome/155.0.8059.80",
-  "finishedAt": "2026-10-18T09:29:46.417Z",
+  "finishedAt": "2026-10-19T00:40:17.999Z",
   "passed": true
 }
