@@ -783,11 +783,6 @@ pub fn memchat_clear(chat: tauri::State<'_, MemChatState>) -> Result<(), String>
         .map_err(|e| format!("failed to clear the Ask thread: {e}"))
 }
 
-#[tauri::command]
-pub fn memchat_kill_all(chat: tauri::State<'_, MemChatState>) {
-    chat.kill_all();
-}
-
 // --- Reader -----------------------------------------------------------------
 
 /// Is this tool call a read of the memory record? Used only to score the

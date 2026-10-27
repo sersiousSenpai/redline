@@ -1751,27 +1751,6 @@ pub async fn review_question_send(
     Ok(())
 }
 
-/// Discard a review annotation's whole thread: kill any in-flight turn,
-/// delete its messages, clear the resume session. The annotation stays.
-#[tauri::command]
-pub fn review_thread_discard(
-    fork: tauri::State<'_, ForkState>,
-    review_id: String,
-    annotation_id: String,
-) -> Result<(), String> {
-    let key = fork_key(&review_id, &annotation_id);
-    if let Some(mut child) = fork.turns.take(&key).and_then(|p| p.child) {
-        let _ = child.start_kill();
-    }
-    fork.db
-        .delete_thread(&review_id, &annotation_id)
-        .map_err(|e| format!("failed to delete thread: {e}"))?;
-    fork.db
-        .clear_review_annotation_fork_session(&review_id, &annotation_id)
-        .map_err(|e| format!("failed to clear fork session: {e}"))?;
-    Ok(())
-}
-
 /// First-turn grounding for a Prompt Drafter sidecar thread: the anchored
 /// block + quoted selection + the live-doc route + the block-SCOPED write
 /// contract (this thread may only propose edits to its own block).
@@ -1972,7 +1951,6 @@ pub async fn draft_thread_send(
 
 /// Discard a draft comment's whole thread: kill any in-flight turn, delete its
 /// messages, clear the resume session. The comment stays.
-#[tauri::command]
 pub fn draft_thread_discard(
     fork: tauri::State<'_, ForkState>,
     draft_id: String,
@@ -2058,14 +2036,6 @@ pub fn fork_thread_discard(
     fork.db
         .clear_comment_fork(&session_id, &comment_id)
         .map_err(|e| format!("failed to clear fork session: {e}"))?;
-    Ok(())
-}
-
-/// Kill every running fork — also invoked on app teardown. Mirrors
-/// `pty::pty_kill_all`.
-#[tauri::command]
-pub fn fork_kill_all(fork: tauri::State<'_, ForkState>) -> Result<(), String> {
-    fork.kill_all();
     Ok(())
 }
 

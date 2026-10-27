@@ -1952,11 +1952,6 @@ pub fn companion_unqueue(
     Ok(Some(turn.text))
 }
 
-#[tauri::command]
-pub fn companion_kill_all(companion: tauri::State<'_, CompanionState>) {
-    companion.kill_all();
-}
-
 // --- Reader ---------------------------------------------------------------
 
 async fn write_native(stdin: &mut ChildStdin, value: &Value) -> Result<(), String> {

@@ -486,13 +486,6 @@ fn parse_catalog(backend: &str, text: &str, efforts: &[String]) -> Result<Vec<Co
         Ok(rows)
     }
 }
-pub fn model_catalog(backend: &str) -> Result<Vec<CodexModel>, String> {
-    let bin = resolve(backend)?;
-    if !bin.found {
-        return Err("Provider CLI was not found".into());
-    }
-    model_catalog_for_bin(backend, &bin.path)
-}
 
 pub fn model_catalog_for_bin(backend: &str, bin: &str) -> Result<Vec<CodexModel>, String> {
     let caps = capabilities(backend, bin)?;
@@ -562,7 +555,7 @@ mod tests {
             let caps = capabilities(backend, &bin).unwrap();
             assert!(caps.usable, "{backend} help lost required capabilities");
             assert!(caps.version.is_some());
-            let catalog = model_catalog(backend).unwrap();
+            let catalog = model_catalog_for_bin(backend, &bin).unwrap();
             assert!(!catalog.is_empty());
             let health = probe(backend).unwrap();
             assert_eq!(health.authentication, "signed-in");

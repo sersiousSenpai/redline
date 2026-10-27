@@ -1219,22 +1219,6 @@ fn scan_with(db: &Database, own_pid: u32, frontend: Option<u16>) -> Result<DevSe
     })
 }
 
-/// Remember a freshly-captured thumbnail against its card's row, so the picture
-/// outlives the process it depicts: stop the server and the card keeps showing
-/// what it was serving.
-#[tauri::command]
-pub fn dev_server_set_thumb(
-    store: tauri::State<'_, SessionStore>,
-    project_path: String,
-    port: u16,
-    path: String,
-) -> Result<(), String> {
-    store
-        .database()
-        .set_dev_server_thumb(&normalize_path(&project_path), port, &path)
-        .map_err(|e| e.to_string())
-}
-
 /// The manifest facts and ranked commands needed by the project launch dialog.
 /// Bodies explain suggestions; execution invokes the script by its quoted name.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -2395,7 +2379,7 @@ else:
     }
 
     #[test]
-    fn upsert_keeps_first_seen_and_the_thumbnail_across_rescans() {
+    fn upsert_keeps_first_seen_across_rescans() {
         let db = Database::open_in_memory().unwrap();
         db.upsert_dev_server(
             "/a",
@@ -2410,8 +2394,6 @@ else:
         )
         .unwrap();
         let id = db.list_dev_servers(10).unwrap()[0].id;
-        db.set_dev_server_thumb("/a", 5173, "/thumbs/p5173-abc.png")
-            .unwrap();
         // A later scan sees the same server with a churned run command.
         db.upsert_dev_server(
             "/a",
@@ -2429,11 +2411,6 @@ else:
         assert_eq!(rows.len(), 1, "the (path, port) key is the same server");
         assert_eq!(rows[0].run_command, "pnpm run dev");
         assert_eq!(rows[0].last_seen_at, 2_000);
-        assert_eq!(
-            rows[0].thumb_path.as_deref(),
-            Some("/thumbs/p5173-abc.png"),
-            "a rescan must never blank a captured thumbnail"
-        );
         assert_eq!(
             db.dev_server_first_seen(id).unwrap(),
             1_000,

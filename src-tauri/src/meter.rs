@@ -788,20 +788,6 @@ pub fn thread_meters(
         .collect()
 }
 
-/// One PTY plan session's tailed meter (`plan_meter`). `None` until the
-/// tailer has seen an assistant turn — a session that has only been asked a
-/// question has spent nothing yet.
-#[tauri::command]
-pub fn plan_session_meter(
-    store: tauri::State<'_, crate::state::SessionStore>,
-    session_id: String,
-) -> Option<Value> {
-    store
-        .database()
-        .session_meter(&session_id)
-        .and_then(|j| serde_json::from_str(&j).ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

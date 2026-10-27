@@ -21,21 +21,12 @@ CREATE TABLE IF NOT EXISTS git_workspaces (id TEXT PRIMARY KEY, repo TEXT NOT NU
 
 #[derive(Debug)]
 pub(crate) enum GuidedOp {
-    AbortRevert,
-    Revert { revision: String },
-    RestoreFile { revision: String, path: String },
     UndoFile { path: String },
     ReversePatch { check: bool, index: bool },
-    RestoreProject { revision: String },
 }
 impl GuidedOp {
     pub(crate) fn args(&self) -> Vec<String> {
         let args: Vec<&str> = match self {
-            Self::AbortRevert => vec!["revert", "--abort"],
-            Self::Revert { revision } => vec!["revert", "--no-commit", "--mainline", "1", revision],
-            Self::RestoreFile { revision, path } => {
-                vec!["restore", "--source", revision, "--", path]
-            }
             Self::UndoFile { path } => {
                 return [
                     "restore".into(),
@@ -51,30 +42,13 @@ impl GuidedOp {
             Self::ReversePatch { check: true, .. } => vec!["apply", "--reverse", "--check"],
             Self::ReversePatch { index: true, .. } => vec!["apply", "--reverse", "--index"],
             Self::ReversePatch { .. } => vec!["apply", "--reverse"],
-            Self::RestoreProject { revision } => vec![
-                "restore",
-                "--source",
-                revision,
-                "--staged",
-                "--worktree",
-                "--",
-                ".",
-            ],
         };
         args.into_iter().map(str::to_string).collect()
     }
     fn meaning(&self) -> &'static str {
         match self {
-            Self::AbortRevert => {
-                "Cancelled the unfinished operation and restored its starting point."
-            }
-            Self::Revert { .. } => "Prepared an undo as unsaved changes for you to review.",
-            Self::RestoreFile { .. } => "Restored this file as an unsaved change.",
             Self::ReversePatch { .. } | Self::UndoFile { .. } => {
                 "Undid the reviewed change in this file."
-            }
-            Self::RestoreProject { .. } => {
-                "Prepared the old project's contents as unsaved changes, preserving history."
             }
         }
     }
@@ -136,18 +110,6 @@ pub(crate) async fn read(dir: &Path, args: &[&str]) -> Result<String, String> {
     } else {
         Err(crate::git_human::explain(&out.stderr).message)
     }
-}
-pub(crate) async fn require_clean(dir: &Path) -> Result<(), String> {
-    if !read(dir, &["status", "--porcelain=v1", "-z"])
-        .await?
-        .is_empty()
-    {
-        return Err("Save or undo your current changes first.".into());
-    }
-    if crate::push::in_progress_op(dir).await.is_some() {
-        return Err("Cancel or finish the unfinished operation first.".into());
-    }
-    Ok(())
 }
 pub(crate) async fn revision(dir: &Path, value: &str) -> Result<String, String> {
     crate::code::safe_token(value)?;
@@ -217,23 +179,12 @@ mod tests {
     #[test]
     fn whitelisted_ops_build_fixed_arg_vectors() {
         let ops = [
-            GuidedOp::AbortRevert,
-            GuidedOp::Revert {
-                revision: "a".into(),
-            },
-            GuidedOp::RestoreFile {
-                revision: "a".into(),
-                path: ":(literal)a".into(),
-            },
             GuidedOp::UndoFile {
                 path: "[id]".into(),
             },
             GuidedOp::ReversePatch {
                 check: false,
                 index: true,
-            },
-            GuidedOp::RestoreProject {
-                revision: "a".into(),
             },
         ];
         for op in ops {

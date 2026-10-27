@@ -257,8 +257,6 @@ pub async fn execute(app: tauri::AppHandle, request: ActionRequest) -> Result<Ac
 pub fn parse_request(value: Value) -> Result<ActionRequest, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
-#[tauri::command]
-pub async fn browser_action(app: tauri::AppHandle, request: Value) -> Result<ActionResult, String> { execute(app, parse_request(request)?).await }
 #[cfg(test)]
 mod tests {
     use super::*;

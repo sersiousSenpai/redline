@@ -1345,7 +1345,7 @@ mod tests {
             resolved_at: None,
         })
         .unwrap();
-        db.resolve_shipwright_finding("f1", "dismissed", None).unwrap();
+        db.dismiss_shipwright_finding_for_test("f1").unwrap();
         let d = build_code_digest(&db, "/nonexistent/repo");
         assert_eq!(d.dismissed_summaries, vec!["No test workflow".to_string()]);
         let block = render_code_digest_prompt_block(&d);

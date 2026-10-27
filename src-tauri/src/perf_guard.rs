@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn build_redline_reads_stay_off_the_main_thread() {
         let src = include_str!("self_develop.rs");
-        for func in ["self_develop_patch", "self_develop_preflight", "self_develop_discard"] {
+        for func in ["self_develop_patch", "self_develop_preflight"] {
             assert_off_main_command(src, "self_develop.rs", func);
         }
     }
@@ -152,7 +152,6 @@ mod tests {
     #[test]
     fn heavy_devmap_commands_stay_off_the_main_thread() {
         let src = include_str!("devmap.rs");
-        assert_off_main_command(src, "devmap.rs", "dev_server_set_thumb");
         assert_off_main_command(src, "devmap.rs", "dev_servers_scan");
         assert_off_main_command(src, "devmap.rs", "dev_server_stop");
         assert_off_main_command(src, "devmap.rs", "dev_server_stop_plan");
@@ -329,8 +328,6 @@ mod tests {
             "memory_forget",
             "memory_note_write",
             "export_context_bundle",
-            "context_search",
-            "memory_restore",
             "mirror_status",
             "mirror_sync",
             "mirror_rebuild",
@@ -396,7 +393,6 @@ mod tests {
             "orchestration_agent_tail",
             "companion_build_activity",
             "thread_meters",
-            "plan_session_meter",
             "browse_thread_harness",
             "browse_thread_set_harness",
             // Polled through a launch handoff.
@@ -406,7 +402,6 @@ mod tests {
             // Its liveness check takes each terminal's session lock, which PTY
             // I/O can hold.
             "term_attention_snapshot",
-            "get_workspace",
             "save_workspace",
             "list_harnesses",
             "get_ui_prefs",
@@ -414,8 +409,6 @@ mod tests {
             "get_session",
             "build_plan_snapshot",
             "prepare_restore",
-            "memory_note_get",
-            "memory_notes_list",
             "install_hook",
             "install_codex_hook",
             "install_codex_profile",

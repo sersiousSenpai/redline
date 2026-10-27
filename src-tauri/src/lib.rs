@@ -1412,13 +1412,6 @@ impl DaemonStatus {
             _ => DaemonState::Starting,
         }
     }
-    /// Legacy boolean view for `get_daemon_status`, whose contract is "can
-    /// this window capture plans". A still-`Starting` daemon answers `true`:
-    /// the caller is asking whether to show the blocking banner, and the
-    /// answer to that while a bind is in flight is "not yet".
-    fn is_bound(&self) -> bool {
-        self.state() != DaemonState::Failed
-    }
 }
 
 #[derive(Clone)]
@@ -6918,14 +6911,6 @@ async fn browser_suspend(app: AppHandle, label: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Mount-time check: did the daemon bind its port? `false` → another process
-/// holds 7676 and this window cannot capture plans. A bind still in flight
-/// answers `true`; `daemon_state` is the three-state answer.
-#[tauri::command]
-fn get_daemon_status(daemon_status: tauri::State<'_, DaemonStatus>) -> bool {
-    daemon_status.is_bound()
-}
-
 /// "starting" | "ready" | "failed". The launch boundary polls this: shell
 /// rendering never waits for the daemon, but starting a harness into a window
 /// that owns no port would send the resulting plan to a different instance —
@@ -7872,55 +7857,6 @@ fn delete_comment(
         refresh_tray(&app, &store);
     }
     Ok(removed)
-}
-
-/// Agent-in-doc (M4): same core as POST /v1/sessions/:id/suggestions, for
-/// in-process callers. The suggestion lands as a draft [edit] comment with
-/// `author`; the editor materializes it as pending marks.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-fn agent_suggest_edit(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    session_id: String,
-    block_id: String,
-    kind: String,
-    original: Option<String>,
-    revised: String,
-    agent_id: String,
-    body: Option<String>,
-) -> Result<Comment, String> {
-    let comment = agent::suggest_edit_core(
-        &store,
-        &session_id,
-        agent::SuggestEditRequest {
-            block_id,
-            kind,
-            original,
-            revised,
-            agent_id,
-            body,
-        },
-    )
-    .map_err(|e| e.message().to_string())?;
-    let _ = app.emit(
-        "comments-changed",
-        SessionEvent {
-            session_id: session_id.clone(),
-        },
-    );
-    refresh_tray(&app, &store);
-    Ok(comment)
-}
-
-/// Agent-in-doc (M4): the published plan + flat block index, same core as
-/// GET /v1/sessions/:id/plan.
-#[tauri::command]
-fn get_latest_plan(
-    store: tauri::State<'_, SessionStore>,
-    session_id: String,
-) -> Result<agent::LatestPlanResponse, String> {
-    agent::get_latest_plan_core(&store, &session_id).map_err(|e| e.message().to_string())
 }
 
 /// Record the in-place acceptance of a still-draft agent suggestion. The
@@ -8906,11 +8842,6 @@ fn attach_discussion(
     Ok(())
 }
 
-#[tauri::command]
-fn get_interception_mode(settings: tauri::State<'_, Settings>) -> String {
-    settings.get().as_str().to_string()
-}
-
 /// Single source of truth for a mode transition: persist it, release any held
 /// POSTs if we're no longer in Active, and broadcast `mode-changed` so the UI and
 /// the tray menu stay in sync regardless of who initiated the change.
@@ -9094,15 +9025,6 @@ async fn codex_model_catalog() -> Result<Vec<codex_app_server::CodexModel>, Stri
 #[tauri::command(async)]
 async fn claude_model_catalog() -> Vec<claude_models::ClaudeModel> {
     claude_models::model_catalog().await
-}
-
-#[tauri::command(async)]
-async fn provider_model_catalog(
-    backend: String,
-) -> Result<Vec<codex_app_server::CodexModel>, String> {
-    tokio::task::spawn_blocking(move || plan_provider::model_catalog(&backend))
-        .await
-        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command(async)]
@@ -9345,19 +9267,6 @@ fn list_share_returns(
     store
         .database()
         .list_share_returns(&session_id)
-        .map_err(|e| e.to_string())
-}
-
-/// Replace the owner secret (e.g. key rotation after a suspected leak).
-/// Outstanding shared snapshots stop verifying their returns.
-#[tauri::command]
-fn set_owner_secret(settings: tauri::State<'_, Settings>, secret: String) -> Result<(), String> {
-    if secret.trim().is_empty() {
-        return Err("owner secret cannot be empty".into());
-    }
-    settings
-        .db
-        .set_setting(SETTING_COLLAB_OWNER_SECRET, secret.trim())
         .map_err(|e| e.to_string())
 }
 
@@ -10854,20 +10763,6 @@ fn memory_map(store: tauri::State<'_, SessionStore>) -> Result<context::MemoryMa
     Ok(context::build_memory_map(&store.database()))
 }
 
-/// BM25 search over captured browse pages — the Timeline's page-content
-/// search. Same query/clamp discipline as `GET /v1/context/browse/search`.
-#[tauri::command]
-fn context_search(
-    store: tauri::State<'_, SessionStore>,
-    q: String,
-    limit: Option<i64>,
-) -> Result<Vec<db::BrowseHit>, String> {
-    store
-        .database()
-        .search_browse_events(&q, limit.unwrap_or(20).clamp(1, 100))
-        .map_err(|e| e.to_string())
-}
-
 /// One session-tree node with parent + child digests — the Timeline's session
 /// grouping drill-down. Same assembly as `GET /v1/context/tree/:kind/:id`.
 #[tauri::command]
@@ -11564,63 +11459,6 @@ async fn shipwright_agent(
     })
 }
 
-/// Flip accepted findings to `shipped` when a later commit touched a file their
-/// `files` array named. **Detection, not self-declaration** — self-declared
-/// success is the one number an agent will always report favourably. Returns
-/// how many flipped.
-#[tauri::command(async)]
-async fn shipwright_detect_shipped(
-    store: tauri::State<'_, SessionStore>,
-    repo_path: String,
-) -> Result<usize, String> {
-    let db = store.database();
-    let candidates = db.shipwright_unshipped().map_err(|e| e.to_string())?;
-    if candidates.is_empty() {
-        return Ok(0);
-    }
-    // Files touched by the last 50 commits — a window wide enough to catch work
-    // that landed over a few sessions, narrow enough to stay cheap.
-    let repo = repo_path.clone();
-    let touched: std::collections::HashSet<String> = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("/usr/bin/git")
-            .arg("-C")
-            .arg(&repo)
-            .args([
-                "--no-optional-locks",
-                "log",
-                "-50",
-                "--name-only",
-                "--format=",
-            ])
-            .stdin(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let mut flipped = 0;
-    for (id, files_json) in candidates {
-        let files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
-        if files.iter().any(|f| touched.contains(f.as_str())) {
-            db.resolve_shipwright_finding(&id, "shipped", None)
-                .map_err(|e| e.to_string())?;
-            flipped += 1;
-        }
-    }
-    Ok(flipped)
-}
-
 /// `GET /v1/context/codehealth` — the same digest as JSON, so an agent can
 /// re-read it mid-conversation. The Shipwright never *depends* on this (its
 /// digest is baked into the spawn prompt); it is for the Companion, the voice
@@ -11997,41 +11835,6 @@ fn memory_embed_settings(
     }))
 }
 
-/// Put a cold-compacted prompt's words back.
-///
-/// The other half of Phase 1.4, and the reason archiving was worth doing at
-/// all: a cold compaction is a GUESS that you were finished with something, and
-/// a guess you cannot undo is just a deletion with better manners. The inflated
-/// bytes are re-hashed against the archive's recorded hash before they go
-/// anywhere near the row — the archive is derived data outside the chain, so it
-/// gets no trust it hasn't just earned.
-///
-/// Returns `false` when there is nothing archived: never compacted, compacted
-/// before archiving existed, or forgotten on purpose (a forget deletes the
-/// archive too — forget means forget).
-#[tauri::command]
-fn memory_restore(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    prompt_id: i64,
-) -> Result<bool, String> {
-    let db = store.database();
-    let restored = db
-        .restore_prompt_body(prompt_id)
-        .map_err(|e| e.to_string())?;
-    if restored {
-        let _ = app.emit("memory-changed", ());
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged {
-                ts_ms: extension_host::now_ms(),
-            },
-        );
-    }
-    Ok(restored)
-}
-
 /// Explicit forget: release a prompt's words now (a manual compaction). The
 /// ledger keeps the fact that it happened + the original body hash. Returns the
 /// new ledger seq, or `null` if the prompt was already compacted/absent.
@@ -12093,34 +11896,6 @@ fn memory_note_write(
         context::NoteOutcome::Unchanged(n) => Ok(n),
         context::NoteOutcome::Rejected(why) => Err(why),
     }
-}
-
-/// The note row annotating one target, if any — the detail rail's read (the
-/// Timeline row already carries `starred`/`note`, so this serves the Catalog
-/// and any non-timeline caller).
-#[tauri::command]
-fn memory_note_get(
-    store: tauri::State<'_, SessionStore>,
-    target_kind: String,
-    target_id: String,
-) -> Result<Option<context::UserNote>, String> {
-    store
-        .database()
-        .get_user_note(&target_kind, &target_id)
-        .map_err(|e| e.to_string())
-}
-
-/// Every note row (optionally starred-only), most recently touched first.
-#[tauri::command]
-fn memory_notes_list(
-    store: tauri::State<'_, SessionStore>,
-    starred_only: Option<bool>,
-    limit: Option<i64>,
-) -> Result<Vec<context::UserNote>, String> {
-    store
-        .database()
-        .list_user_notes(starred_only.unwrap_or(false), limit.unwrap_or(500))
-        .map_err(|e| e.to_string())
 }
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
@@ -12470,7 +12245,6 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "dictation_status",
     // Waits for the main thread to end the capture, then for Whisper.
     "dictation_stop",
-    "draft_source_add",
     "draft_source_delete",
     "draft_source_import_file",
     "draft_source_list",
@@ -12478,7 +12252,6 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "get_run_state",
     "get_session",
     "get_ui_prefs",
-    "get_workspace",
     "install_codex_hook",
     "install_codex_profile",
     "install_codex_skill",
@@ -12487,13 +12260,10 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "list_harnesses",
     "list_orchestrations",
     "list_sessions",
-    "memory_note_get",
-    "memory_notes_list",
     // Re-read on every turn while the activity panel is open.
     "monochat_traces",
     "orchestration_agent_tail",
     "orchestration_snapshot",
-    "plan_session_meter",
     "prepare_restore",
     "runner_get",
     "runner_graph_view",
@@ -12625,20 +12395,16 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "browser_workspace_list",
     "browser_workspace_read",
     "browser_workspace_write",
-    "context_search",
     "dev_server_probe",
-    "dev_server_set_thumb",
     "dev_server_stop",
     "dev_server_stop_plan",
     "dev_servers_scan",
     "get_work_graph",
     "memchat_clear",
     "memchat_thread",
-    "memory_restore",
     "mission_add_finding",
     "remove_hook_conflicts",
     "scan_hook_conflicts",
-    "self_develop_discard",
     "self_develop_patch",
     "self_develop_preflight",
     "unwatch_hook_conflicts",
@@ -12811,7 +12577,6 @@ pub fn run() {
             browser_events::browser_inspect,
             browser_events::browser_set_appearance,
             browser_overlay::browser_overlay_regions,
-            browser_actions::browser_action,
             browser_workspace::browser_protect_tabs,
             browser_workspace::browser_workspace_read,
             browser_workspace::browser_workspace_write,
@@ -12844,8 +12609,6 @@ pub fn run() {
             add_comment,
             update_comment,
             delete_comment,
-            agent_suggest_edit,
-            get_latest_plan,
             accept_agent_suggestion,
             submit_review,
             approve_plan,
@@ -12856,7 +12619,6 @@ pub fn run() {
             scaled::scaled_pause_decide,
             scaled::scaled_stop,
             scaled::scaled_pending,
-            scaled::scaled_run_for,
             approve_plan_later,
             mark_plan_build,
             write_plan_handoff,
@@ -12875,10 +12637,7 @@ pub fn run() {
             self_develop::self_develop_available,
             self_develop::self_develop_start,
             self_develop::self_develop_list,
-            self_develop::self_develop_get,
             self_develop::self_develop_prepare,
-            self_develop::self_develop_cancel,
-            self_develop::self_develop_discard,
             self_develop::self_develop_patch,
             self_develop::self_develop_preflight,
             self_develop::self_develop_restart,
@@ -12891,7 +12650,6 @@ pub fn run() {
             accept_resolution,
             reopen_resolution,
             attach_discussion,
-            get_interception_mode,
             set_interception_mode,
             preflight::preflight_status,
             project::project_create,
@@ -12906,7 +12664,6 @@ pub fn run() {
             codex_model_catalog,
             model_catalog_snapshot,
             claude_model_catalog,
-            provider_model_catalog,
             install_provider_integration,
             set_provider_bin_override,
             runner::runner_list,
@@ -12927,15 +12684,12 @@ pub fn run() {
             seat::get_seat_roster,
             work::get_work_graph,
             work::work_ready_count,
-            userconfig::get_workspace,
             userconfig::save_workspace,
             userconfig::list_harnesses,
-            userconfig::harness_flavor,
             userconfig::harness_uninstall,
             get_relay_config,
             set_relay_config,
             get_owner_secret,
-            set_owner_secret,
             build_plan_snapshot,
             import_shared_plan,
             record_share,
@@ -12947,7 +12701,6 @@ pub fn run() {
             set_collab_requests,
             get_collab_share,
             set_collab_share,
-            get_daemon_status,
             daemon_state,
             bootstrap_state,
             claim_review,
@@ -13011,12 +12764,9 @@ pub fn run() {
             fork::fork_thread_set_model,
             fork::review_thread_send,
             fork::review_question_send,
-            fork::review_thread_discard,
-            fork::fork_kill_all,
             inspect::inspect_set,
             inspect::inspect_read,
             meter::thread_meters,
-            meter::plan_session_meter,
             browse::browse_send,
             browse::browse_turn_status,
             browse::get_browse_thread,
@@ -13025,7 +12775,6 @@ pub fn run() {
             browse::browse_cancel,
             browse::browse_unqueue,
             browse::browse_discard,
-            browse::browse_kill_all,
             browse_list::browse_list_get,
             browse_list::browse_list_start,
             browse_list::browse_list_add,
@@ -13048,7 +12797,6 @@ pub fn run() {
             mission::mission_cancel,
             mission::mission_unqueue,
             mission::mission_turn_status,
-            mission::mission_kill_all,
             mission_set_active,
             review_hold_active,
             submit_review_feedback,
@@ -13067,7 +12815,6 @@ pub fn run() {
             ai_review::ai_review_cancel,
             ai_review::ai_review_active,
             push::push_status,
-            push::review_restore_undo,
             push::review_push,
             git_gui::git_gui_status,
             git_gui::git_gui_file_diff,
@@ -13100,13 +12847,10 @@ pub fn run() {
             git_gui::git_gui_stash_apply,
             git_gui::git_gui_stash_drop,
             git_gui::git_gui_stash_files,
-            review::history_list,
-            review::history_restore,
             push::review_revert,
             push::review_last_push,
             ai_commit::ai_commit_draft,
             review::review_sessions_list,
-            review::review_delete,
             review::review_annotation_add,
             review::review_annotation_update,
             review::review_annotation_delete,
@@ -13118,8 +12862,6 @@ pub fn run() {
             voice::voice_interrupt,
             voice::voice_clean,
             voice::voice_session_stop,
-            voice::voice_forget,
-            voice::voice_kill_all,
             voice::voice_session_probe,
             voice::voice_session_status,
             voice::voice_thread,
@@ -13148,7 +12890,6 @@ pub fn run() {
             devmap::dev_server_stop,
             devmap::dev_server_stop_plan,
             devmap::dev_server_probe,
-            devmap::dev_server_set_thumb,
             browser_navigate,
             browser_create_tab,
             browse_organize::browser_organize_tabs,
@@ -13194,14 +12935,12 @@ pub fn run() {
             bookshelf::bookshelf_move_folder,
             bookshelf::bookshelf_folder_impact,
             bookshelf::bookshelf_delete_folder,
-            bookshelf::draft_source_add,
             bookshelf::draft_source_import_file,
             bookshelf::draft_source_list,
             bookshelf::draft_source_delete,
             draft_chat::draft_instruct,
             draft_chat::draft_turn_status,
             draft_chat::draft_chat_cancel,
-            draft_chat::draft_chat_kill_all,
             draft_chat::draft_comment_add,
             draft_chat::draft_comment_list,
             draft_chat::draft_comment_delete,
@@ -13216,14 +12955,12 @@ pub fn run() {
             harness::harness_agent_preview,
             harness::harness_preview_discard,
             fork::draft_thread_send,
-            fork::draft_thread_discard,
             memchat::memchat_send,
             memchat::memchat_turn_status,
             memchat::memchat_thread,
             memchat::memchat_cancel,
             memchat::memchat_unqueue,
             memchat::memchat_clear,
-            memchat::memchat_kill_all,
             companion::companion_create,
             companion::companion_list,
             companion::companion_get_thread,
@@ -13247,7 +12984,6 @@ pub fn run() {
             companion::companion_queue_promote,
             companion_build::companion_changes,
             companion_build::companion_undo,
-            companion::companion_kill_all,
             companion::companion_prewarm,
             companion::companion_release,
             companion::companion_context,
@@ -13262,7 +12998,6 @@ pub fn run() {
             ledger_prompt_body,
             ledger_prompt_models,
             context_stats,
-            context_search,
             context_thread_tree,
             memory_map,
             ledger_get_capture_external,
@@ -13281,15 +13016,11 @@ pub fn run() {
             memory_catalog_health,
             memory_status,
             memory_forget,
-            memory_restore,
             memory_set_embed_provider,
             memory_embed_settings,
             memory_note_write,
-            memory_note_get,
-            memory_notes_list,
             librarian_agent,
             shipwright_agent,
-            shipwright_detect_shipped,
             export_context_bundle,
             mirror_status,
             pick_mirror_dir,

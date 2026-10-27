@@ -278,12 +278,6 @@ mod tests {
         // A plan session is one long-lived process, not a spawn per tick.
         assert_eq!(plan.spawns, 0);
 
-        // The session row carries the meter and the observed model.
-        let stored = db.session_meter("plan-sid").expect("persisted");
-        let back: TurnMeter = serde_json::from_str(&stored).unwrap();
-        assert_eq!(back.output_tokens, 440);
-        assert_eq!(back.model.as_deref(), Some("claude-sonnet-5"));
-
         let _ = std::fs::remove_dir_all(dir);
     }
 

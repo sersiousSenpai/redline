@@ -397,42 +397,6 @@ pub fn bookshelf_delete_folder(
 // Sources (attached to a document, never to a folder)
 // ---------------------------------------------------------------------------
 
-/// Attach a non-file source: a captured `browse_events` page, a
-/// `mission_findings` row, a bare URL, or a digest the agent wrote.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn draft_source_add(
-    store: tauri::State<'_, SessionStore>,
-    draft_id: String,
-    kind: String,
-    ref_id: Option<String>,
-    url: Option<String>,
-    title: Option<String>,
-    excerpt: Option<String>,
-) -> Result<DraftSource, String> {
-    if draft_id.trim().is_empty() {
-        return Err("missing draft id".to_string());
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    let db = store.database();
-    db.add_draft_source(
-        &id,
-        &draft_id,
-        &kind,
-        ref_id.as_deref(),
-        url.as_deref(),
-        title.as_deref(),
-        excerpt.as_deref(),
-        None,
-    )
-    .map_err(|e| e.to_string())?;
-    db.list_draft_sources(&draft_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "the source vanished on write".to_string())
-}
-
 /// Copy a dropped file into this document's source directory and attach it.
 /// Reuses `fsbrowse`'s attachment discipline: copy at capture time (a source
 /// the user later moves or trashes would break silently), sanitize the

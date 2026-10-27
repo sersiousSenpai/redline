@@ -888,15 +888,6 @@ pub fn scaled_pending(app: AppHandle, scaled: tauri::State<'_, ScaledState>) -> 
     scaled.pending(|sid| live_tokens(&app, sid))
 }
 
-/// The latest build of a plan session (the chip, and the Runs header).
-#[tauri::command]
-pub fn scaled_run_for(app: AppHandle, scaled: tauri::State<'_, ScaledState>, plan_session_id: String) -> Option<ScaledView> {
-    let db = app.state::<crate::state::SessionStore>().database();
-    let run_id = db.latest_scaled_run_id(&plan_session_id).ok().flatten()?;
-    scaled.ensure_loaded(&db, &run_id);
-    scaled.with(&run_id, |c| view(&app, c))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,7 +1027,6 @@ await agent('Verify the whole change against the plan and run the tests', { labe
         let back = db.get_scaled_run("sb-1").unwrap().unwrap();
         assert_eq!((back.limits.agents, back.phase.clone(), back.started_at), (5, Phase::Running, Some(0)));
         assert_eq!(back.config, ctl.config);
-        assert_eq!(db.latest_scaled_run_id("plan-1").unwrap().as_deref(), Some("sb-1"));
         // A pre-flight cannot still be held after a restart.
         ctl.phase = Phase::Preflight;
         db.upsert_scaled_run(&ctl).unwrap();

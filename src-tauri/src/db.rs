@@ -2884,16 +2884,6 @@ impl Database {
         Ok(Some(ctl))
     }
 
-    pub fn latest_scaled_run_id(&self, plan_session_id: &str) -> rusqlite::Result<Option<String>> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT run_id FROM scaled_runs WHERE plan_session_id = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![plan_session_id],
-            |r| r.get(0),
-        )
-        .optional()
-    }
-
     /// The newest journal rows of one kind, newest first. The chat room's
     /// workspace brief reads its "recently browsed" list from the `nav` rows.
     pub fn list_recent_journal_kind(&self, kind: &str, limit: i64) -> rusqlite::Result<Vec<JournalRow>> {
@@ -3798,6 +3788,18 @@ impl Database {
         Ok(Some(f.id.clone()))
     }
 
+    /// Test fixture: mark a finding dismissed. No production path dismisses a
+    /// finding since `shipwright_detect_shipped` went, but rows written by
+    /// earlier builds can carry the flag, so the readers stay pinned.
+    #[cfg(test)]
+    pub(crate) fn dismiss_shipwright_finding_for_test(&self, id: &str) -> rusqlite::Result<()> {
+        self.lock_conn().execute(
+            "UPDATE shipwright_findings SET status = 'dismissed', dismissed = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Findings, newest first. `include_dismissed = false` is what the digest
     /// carries as "open"; the dismissed *summaries* go in separately so the
     /// agent is told not to re-word them.
@@ -3834,43 +3836,6 @@ impl Database {
                 resolved_at: r.get(12)?,
             })
         })?;
-        rows.collect()
-    }
-
-    /// Record what you did with a finding. `accepted` is set when it survives
-    /// your trim into the launched document; `dismissed` also sets the flag the
-    /// dedupe reads, which is what makes a dismissal stick.
-    pub fn resolve_shipwright_finding(
-        &self,
-        id: &str,
-        status: &str,
-        draft_id: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        let now = crate::ledger::now_millis();
-        let dismissed = i64::from(status == "dismissed");
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE shipwright_findings
-             SET status = ?2,
-                 dismissed = MAX(dismissed, ?3),
-                 draft_id = COALESCE(?4, draft_id),
-                 resolved_at = ?5
-             WHERE id = ?1",
-            params![id, status, dismissed, draft_id, now],
-        )?;
-        Ok(())
-    }
-
-    /// Accepted findings that haven't shipped yet, as `(id, files_json)` — the
-    /// input to shipped-**detection**. The caller compares each `files` entry
-    /// against the paths a later commit touched; nothing here is self-declared.
-    pub fn shipwright_unshipped(&self) -> rusqlite::Result<Vec<(String, String)>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, COALESCE(files, '[]') FROM shipwright_findings
-             WHERE status = 'accepted'",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect()
     }
 
@@ -4788,17 +4753,6 @@ impl Database {
             "UPDATE sessions SET meter_json = ?2 WHERE session_id = ?1",
             params![sid, meter_json],
         )? > 0)
-    }
-
-    pub fn session_meter(&self, sid: &str) -> Option<String> {
-        let conn = self.read_conn();
-        conn.query_row(
-            "SELECT meter_json FROM sessions WHERE session_id = ?1",
-            params![sid],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
     }
 
     /// Plan sessions whose transcript is known, newest activity first — the
@@ -6989,27 +6943,6 @@ impl Database {
         )
     }
 
-    /// Attach a freshly-captured thumbnail to a row — the only writer of
-    /// `thumb_path`. Keyed on `(project_path, port)` rather than the row id
-    /// because that pair IS a card's identity everywhere else in this feature;
-    /// keying on the id would mean carrying one through the capture pipeline for
-    /// no other reason. A capture for a row that has since been pruned is a
-    /// silent no-op.
-    pub fn set_dev_server_thumb(
-        &self,
-        project_path: &str,
-        port: u16,
-        path: &str,
-    ) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE dev_servers SET thumb_path = ?3
-             WHERE project_path = ?1 AND port = ?2",
-            params![project_path, port as i64, path],
-        )?;
-        Ok(())
-    }
-
     // --- code-review surface -------------------------------------------------
 
     const REVIEW_SESSION_COLS: &'static str =
@@ -7093,29 +7026,6 @@ impl Database {
             Self::map_code_review,
         )
         .ok()
-    }
-
-    pub fn delete_code_review(&self, review_id: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM review_annotations WHERE review_id = ?1",
-            params![review_id],
-        )?;
-        tx.execute(
-            "DELETE FROM review_viewed WHERE review_id = ?1",
-            params![review_id],
-        )?;
-        tx.execute(
-            "DELETE FROM review_pushes WHERE review_id = ?1",
-            params![review_id],
-        )?;
-        tx.execute(
-            "DELETE FROM review_sessions WHERE review_id = ?1",
-            params![review_id],
-        )?;
-        tx.commit()?;
-        Ok(())
     }
 
     const REVIEW_PUSH_COLS: &'static str = "id, review_id, repo_path, remote, branch, \
@@ -7574,18 +7484,6 @@ impl Database {
         rows.collect()
     }
 
-    /// Wipe a voice key's visible transcript. Paired with
-    /// `clear_voice_fork_session` by `voice_forget`, so "forget" is a true
-    /// reset: neither the agent's recollection nor the screen survives it.
-    pub fn clear_voice_messages(&self, session_key: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "DELETE FROM voice_messages WHERE session_key = ?1",
-            params![session_key],
-        )?;
-        Ok(())
-    }
-
     // --- Offered plan items (staged, not written) ---------------------------
     // See `CommentOffer`. Rows here are proposals: nothing reaches the plan
     // until `claim_comment_offer` wins and `add_feedback_from_offer` writes the
@@ -7724,18 +7622,6 @@ impl Database {
             params![id, status],
         )?;
         Ok(changed > 0)
-    }
-
-    /// Wipe a session's offers. Paired with `clear_voice_messages` by
-    /// `voice_forget` — a chip outliving the conversation it came from would be
-    /// an offer with no visible provenance.
-    pub fn clear_comment_offers(&self, session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "DELETE FROM comment_offers WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        Ok(())
     }
 
     /// Durable history totals for diagnostics; query failure is never an
@@ -11490,7 +11376,7 @@ mod tests {
         // Same (category, summary) → skipped, even before any dismissal.
         assert!(db.insert_shipwright_finding(&f("b", "No test workflow")).unwrap().is_none());
 
-        db.resolve_shipwright_finding("a", "dismissed", None).unwrap();
+        db.dismiss_shipwright_finding_for_test("a").unwrap();
         // …and still skipped afterwards: a dismissed finding never resurfaces
         // under the same wording. This is the property the whole loop rests on.
         assert!(db.insert_shipwright_finding(&f("c", "No test workflow")).unwrap().is_none());
@@ -11499,46 +11385,6 @@ mod tests {
 
         // A genuinely new summary still lands.
         assert!(db.insert_shipwright_finding(&f("d", "No typecheck script")).unwrap().is_some());
-    }
-
-    #[test]
-    fn shipped_is_detected_from_files_not_self_declared() {
-        let db = Database::open_in_memory().unwrap();
-        let f = ShipwrightFinding {
-            id: "f1".to_string(),
-            run_id: "run-1".to_string(),
-            category: "command_hygiene".to_string(),
-            summary: "drafter_set_doc is sync".to_string(),
-            evidence: None,
-            proposal: None,
-            guard: None,
-            files: Some(r#"["src-tauri/src/lib.rs"]"#.to_string()),
-            status: "pending".to_string(),
-            dismissed: false,
-            draft_id: None,
-            created_at: 1,
-            resolved_at: None,
-        };
-        db.insert_shipwright_finding(&f).unwrap();
-        // Pending findings aren't candidates — only accepted ones.
-        assert!(db.shipwright_unshipped().unwrap().is_empty());
-
-        db.resolve_shipwright_finding("f1", "accepted", Some("d1")).unwrap();
-        let unshipped = db.shipwright_unshipped().unwrap();
-        assert_eq!(unshipped.len(), 1);
-        assert!(unshipped[0].1.contains("lib.rs"));
-
-        db.resolve_shipwright_finding("f1", "shipped", None).unwrap();
-        assert!(db.shipwright_unshipped().unwrap().is_empty());
-        let scores = db.shipwright_scores().unwrap();
-        assert_eq!(scores[0].category, "command_hygiene");
-        assert_eq!(scores[0].shipped, 1);
-        assert_eq!(scores[0].accepted, 1, "shipped still counts as accepted");
-        assert_eq!(scores[0].dismissed, 0);
-
-        // The draft binding survives a later status change (COALESCE, not clobber).
-        let rows = db.list_shipwright_findings(true).unwrap();
-        assert_eq!(rows[0].draft_id.as_deref(), Some("d1"));
     }
 
     #[test]
@@ -13449,14 +13295,9 @@ mod tests {
         db.unmark_review_viewed("rev-1", "src/lib.rs").unwrap();
         assert_eq!(db.list_review_viewed("rev-1").unwrap().len(), 1);
 
-        // Deleting the review sweeps annotations + viewed rows with it.
+        // Deleting an annotation removes it.
         db.delete_review_annotation("rev-1", "rc-001").unwrap();
         assert!(db.list_review_annotations("rev-1").unwrap().is_empty());
-        db.insert_review_annotation(&a).unwrap();
-        db.delete_code_review("rev-1").unwrap();
-        assert!(db.get_code_review("rev-1").is_none());
-        assert!(db.list_review_annotations("rev-1").unwrap().is_empty());
-        assert!(db.list_review_viewed("rev-1").unwrap().is_empty());
     }
 
     #[test]
@@ -14395,11 +14236,6 @@ mod tests {
         assert_eq!(thread[0].text, "first");
         assert_eq!(thread[2].role, "note", "markers are part of the transcript");
         assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
-
-        // "Forget" is a true reset for this key only.
-        db.clear_voice_messages("plan-1").unwrap();
-        assert!(db.list_voice_messages("plan-1").unwrap().is_empty());
-        assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
     }
 
     fn mk_offer(id: &str, session: &str, at: i64) -> CommentOffer {
@@ -14448,11 +14284,6 @@ mod tests {
             "only a pending row transitions",
         );
         assert_eq!(db.list_open_comment_offers("plan-1").unwrap().len(), 1);
-
-        // Scoped wipe, for `voice_forget`.
-        db.clear_comment_offers("plan-1").unwrap();
-        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
-        assert_eq!(db.list_open_comment_offers("plan-2").unwrap().len(), 1);
     }
 
     #[test]
@@ -15697,7 +15528,6 @@ body.
         }
         // The history load that crashed reads the column; the build table works.
         db.load_all().expect("the history load reads the research column");
-        assert!(db.latest_scaled_run_id("plan").unwrap().is_none());
         drop(db);
         let _ = std::fs::remove_file(&path);
     }
@@ -17466,13 +17296,6 @@ impl Database {
             .release_list(200)?
             .into_iter()
             .find(|r| r.status().holds_activation()))
-    }
-
-    pub fn release_delete(&self, release_id: &str) -> Result<(), String> {
-        self.lock_conn()
-            .execute("DELETE FROM releases WHERE release_id=?1", [release_id])
-            .map_err(|e| e.to_string())?;
-        Ok(())
     }
 
     pub fn runner_claims(

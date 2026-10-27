@@ -1360,13 +1360,6 @@ pub fn browse_discard(
     Ok(())
 }
 
-/// Kill every running browse agent — also invoked on app teardown.
-#[tauri::command]
-pub fn browse_kill_all(browse: tauri::State<'_, BrowseState>) -> Result<(), String> {
-    browse.kill_all();
-    Ok(())
-}
-
 // --- Streaming reader ------------------------------------------------------
 
 /// How a browse turn's agent starts.
