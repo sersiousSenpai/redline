@@ -543,12 +543,18 @@ or an open plan.
 | Daily dev app, long-running, as sampled by the planning session | 15–19% | 8–11% | ~8%, ~1,000 wakeups/s | — | — |
 | Fresh dev app, Browser surface, before (three 12 s samples) | 0.0–0.1% | 0.0% | 0.7–2.1% | 15–25 | 8–10 ticks per 12 s |
 | Fresh dev app, Browser surface, after | 0.0% | 0.0% | 0.7% | 0 | 0 |
-| Release build, Front Door, before → after | to be measured | | | | |
+| Release bundle of main 1441715, Browser surface, 12 s after the window | 1.4% | 0.9% | 2.7% | 15 | 23 ticks per 12 s |
+| Release bundle of main 1441715, same scene, 60 s after the window | 0.2% | 0.0% | 0.4% | 0 | 15 ticks per 12 s |
+| Release bundle of this branch, same scene, 60 s after the window | 0.3% | 0.1% | 0.3% | 0 | 15 ticks per 12 s |
 
-A fresh instance never reproduces the long-running app's heat — it has no
-stale `working`, no spinning PulseLogo and no transcript tail at 150 ms —
-which is why the rules above are guarded at the source rather than only by
-these numbers.
+The 12 s-after row is the boot tail (post-boot work, the first polls); the
+new bundle's own 12 s-after sample caught the host at 54% for the same
+reason, so compare the 60 s rows. A fresh instance never reproduces the
+long-running app's heat — it has no stale `working`, no spinning PulseLogo
+and no transcript tail at 150 ms — which is why the rules above are guarded
+at the source rather than only by these numbers. The before/after that
+matters is the one the user feels: a day-old app with sessions that finished
+hours ago.
 
 ### Targets (release build, at idle, no live agent output)
 
