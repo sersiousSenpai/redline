@@ -719,7 +719,13 @@ export const TerminalTabs = memo(
   }, [setTabs, ackInput]);
 
   const handleInterrupt = useCallback(
-    (id: string) => ackInput(id, true),
+    (id: string) => {
+      ackInput(id, true);
+      // No hook reports an interrupt. The dock has cleared its own badge
+      // above; the daemon clears it for everything else that reads
+      // `term-attention` — the sidebar's rows, the conversation's turn.
+      void invoke("term_attention_interrupted", { terminalId: id }).catch(() => {});
+    },
     [ackInput],
   );
 

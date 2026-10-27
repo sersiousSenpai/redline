@@ -65,6 +65,13 @@ const EXPECT_WINDOW: Duration = Duration::from_secs(45);
 /// How long a terminal nobody watches keeps its ring and tail, so switching
 /// between Conversation and Terminal doesn't re-read the transcript.
 const UNWATCHED_GRACE: Duration = Duration::from_secs(60);
+/// A turn whose transcript has not moved for this long is called over: the
+/// Stop that should have closed it was lost (a daemon restart, a hook the
+/// CLI never fired), and without this the tail would read at [`FAST_TICK`]
+/// and the stage would say "Working" until the next prompt. Generous, because
+/// one long tool call writes nothing until it returns; a result that lands
+/// after the cap still renders.
+const WORKING_CAP: Duration = Duration::from_secs(30 * 60);
 /// How far back an opening permission ask looks for its `tool_use` row.
 const ASK_MATCH_WINDOW: usize = 40;
 
@@ -199,6 +206,9 @@ struct Term {
     /// that was never armed, or one its Notification reported.
     dialog: bool,
     working: bool,
+    /// Since when the transcript has been still during a turn (for
+    /// [`WORKING_CAP`]); cleared by every transcript event.
+    quiet_since: Option<Instant>,
     next_read: Option<Instant>,
     readiness: Option<(bool, Option<Blocker>)>,
     mode: Option<String>,
@@ -251,6 +261,12 @@ impl Term {
         for event in &events {
             if !matches!(event.body, Body::Readiness { .. } | Body::AskOpened { .. } | Body::AskClosed { .. }) {
                 self.ring.push(event.clone());
+            }
+            if matches!(
+                event.body,
+                Body::UserText { .. } | Body::AssistantText { .. } | Body::Thinking | Body::ToolUse { .. } | Body::ToolResult { .. }
+            ) {
+                self.quiet_since = None;
             }
         }
         for sub in &mut self.subs {
@@ -603,6 +619,33 @@ impl Term {
         (next, title, bound)
     }
 
+    /// Close a turn the transcript never closed: `working` off, and a host
+    /// `turn_end` so every subscriber's open turn ends. False when no turn
+    /// was open.
+    fn ended_by_host(&mut self) -> bool {
+        if !self.working {
+            return false;
+        }
+        self.working = false;
+        self.dialog = false;
+        self.quiet_since = None;
+        let event = self.host(format!("turn-end:{}", now_ms()), Body::TurnEnd { duration_ms: None });
+        self.emit(vec![event]);
+        true
+    }
+
+    /// The [`WORKING_CAP`]: a turn with no transcript movement for that long
+    /// is over. True when this pass ended it, so the caller can retire the
+    /// terminal's attention too.
+    fn retire_if_quiet(&mut self, now: Instant) -> bool {
+        if !self.working {
+            self.quiet_since = None;
+            return false;
+        }
+        let since = *self.quiet_since.get_or_insert(now);
+        now.duration_since(since) >= WORKING_CAP && self.ended_by_host()
+    }
+
     /// Deliver what each subscription is owed, at most one batch per
     /// [`BATCH_GAP`]. Returns when a held-back batch is due.
     fn flush(&mut self, now: Instant) -> Instant {
@@ -876,6 +919,19 @@ fn input(app: &AppHandle, id: &str) -> Option<InputState> {
     app.try_state::<crate::pty::PtyState>().and_then(|ptys| crate::pty::input_state(&ptys, id))
 }
 
+/// Term attention retired this terminal's agent to idle — its shell has the
+/// foreground again, or the user interrupted it. The turn is over for the
+/// mirror too: the stage's working row closes and the tail drops to its idle
+/// cadence. Nothing happens when no turn was open.
+pub fn note_idle(app: &AppHandle, terminal_id: &str) {
+    let Some(state) = app.try_state::<ConvoState>() else { return };
+    let Some(term) = state.term(terminal_id) else { return };
+    let ended = lock(&term).ended_by_host();
+    if ended {
+        state.wake(app);
+    }
+}
+
 fn tail_loop(app: AppHandle, state: ConvoState) {
     loop {
         let now = Instant::now();
@@ -891,9 +947,13 @@ fn tail_loop(app: AppHandle, state: ConvoState) {
             if let (Some(title), Some(b)) = (title, &t.binding) {
                 let _ = app.emit(TITLE_EVENT, TitleNotice { terminal_id: id.clone(), session_id: b.session_id.clone(), title });
             }
+            let capped = t.retire_if_quiet(now).then(|| t.binding.as_ref().map(|b| b.session_id.clone()));
             drop(t);
             if let Some(bound) = bound {
                 announce(&app, &id, bound);
+            }
+            if let Some(session_id) = capped {
+                crate::term_attention::retire(&app, &id, session_id.as_deref());
             }
         }
         // A closed terminal nobody watches has nothing left to say.

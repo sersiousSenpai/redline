@@ -13060,6 +13060,7 @@ pub fn run() {
             pty::pty_cwds,
             pty::pty_procs,
             term_attention::term_attention_snapshot,
+            term_attention::term_attention_interrupted,
             term_attention::set_attention_badge,
             convo::convo_subscribe,
             convo::convo_unsubscribe,
@@ -13544,6 +13545,18 @@ pub fn run() {
 
             app.manage(pty::PtyState::new());
             app.manage(term_attention::TermAttentionState::default());
+            {
+                // A `working` whose agent went back to the shell is retired
+                // here (term_attention::retire_finished): a 10 s look at the
+                // ptys' foreground groups, no fork, idle when nothing works.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(term_attention::RETIRE_TICK).await;
+                        term_attention::retire_finished(&handle);
+                    }
+                });
+            }
             app.manage(convo::ConvoState::default());
             app.manage(scaled::ScaledState::default());
             app.manage(seatassign::SeatAssignState::new());

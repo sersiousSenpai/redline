@@ -410,6 +410,67 @@ pub(crate) async fn handle_event(
     Json(json!({}))
 }
 
+/// A `working` or `needs-you` at least this old whose shell is back in the
+/// foreground is over: its agent exited, or was interrupted and then quit.
+/// Younger ones are left alone — the scan can land between a prompt's hook
+/// firing and the CLI taking the foreground.
+const RETIRE_AFTER_MS: i64 = 5_000;
+/// How often [`retire_finished`] looks. It reads each pty's foreground
+/// process group from the kernel — no fork — so it is cheap enough to run
+/// always, and does nothing while no terminal reports work.
+pub const RETIRE_TICK: Duration = Duration::from_secs(10);
+
+/// Retire the `working` and `needs-you` entries whose terminal's shell has
+/// the foreground again: the agent that reported them is gone, and no hook
+/// says so. Every reader of `term-attention` sees it — the sidebar's rows,
+/// which used to spin until the terminal's next prompt, as well as the dock —
+/// and the conversation mirror closes its turn and drops to its idle cadence.
+pub fn retire_finished(app: &AppHandle) {
+    let (Some(state), Some(ptys)) = (app.try_state::<TermAttentionState>(), app.try_state::<PtyState>()) else {
+        return;
+    };
+    let now = crate::ledger::now_millis();
+    let stale: HashMap<String, Option<String>> = state
+        .map()
+        .iter()
+        .filter(|(_, e)| {
+            now - e.at >= RETIRE_AFTER_MS && matches!(e.attention, Attention::Working | Attention::NeedsYou { .. })
+        })
+        .map(|(id, e)| (id.clone(), e.session_id.clone()))
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    for (id, shell, foreground) in crate::pty::foreground_snapshot(&ptys) {
+        let Some(session_id) = stale.get(&id) else { continue };
+        if shell.is_some() && foreground == shell {
+            retire(app, &id, session_id.as_deref());
+        }
+    }
+}
+
+/// Clear a terminal's `working` / `needs-you` to `idle`: its agent is at the
+/// prompt, or gone, with nothing pending. Broadcast like any transition, and
+/// told to the conversation mirror so its turn closes too.
+pub fn retire(app: &AppHandle, terminal_id: &str, session_id: Option<&str>) {
+    if apply(app, terminal_id, Attention::Idle, session_id).is_some() {
+        crate::convo::note_idle(app, terminal_id);
+    }
+}
+
+/// The user pressed Esc or Ctrl-C in a dock terminal: whatever its agent was
+/// doing or asking is over, and no hook will say so (an interrupt fires
+/// neither Stop nor the idle notification, measured). The dock already clears
+/// its own badge; this clears it for everyone else who reads `term-attention`.
+#[tauri::command]
+pub fn term_attention_interrupted(app: AppHandle, state: tauri::State<'_, TermAttentionState>, terminal_id: String) {
+    let current = state.map().get(&terminal_id).cloned();
+    let Some(entry) = current else { return };
+    if matches!(entry.attention, Attention::Working | Attention::NeedsYou { .. }) {
+        retire(&app, &terminal_id, entry.session_id.as_deref());
+    }
+}
+
 /// Every live terminal's latest attention, for a frontend that is (re)booting.
 #[tauri::command]
 pub fn term_attention_snapshot(
