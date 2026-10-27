@@ -791,7 +791,9 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     onBlur={() => { if (!live.current.open && !live.current.compactOpen) returnFocus.current = null; }}
     onPointerEnter={hoverIn} onPointerLeave={hoverOut}
     // Enter or Space on the pill is a click with no pointer behind it.
-    onClick={event => { if (onPillClick && event.detail > 0) { window.clearTimeout(dwell.current); if (live.current.compactOpen) compactChange.current?.(false); onPillClick(); return; } engage(event.detail > 0 ? "pointer" : "key"); }}>
+    // A click, or Enter / Space on the pill: the host's own place when it
+    // has one (a door tab), the door otherwise.
+    onClick={event => { if (onPillClick) { window.clearTimeout(dwell.current); if (live.current.compactOpen) compactChange.current?.(false); onPillClick(); return; } engage(event.detail > 0 ? "pointer" : "key"); }}>
     <span ref={membrane} className="rl-portal-membrane" aria-hidden="true">
       <PulseLogo state={busy ? "thinking" : "idle"} size={14} decorative/>
       <span className="rl-pill-label">{label}</span>

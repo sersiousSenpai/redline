@@ -516,6 +516,7 @@ import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } f
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import { doorDraftKey } from "./workbench/model";
+import type { WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
 // the first frame needs the store and the stored state, not the actions
@@ -1829,6 +1830,11 @@ function App() {
   // ⌘T's door, for the mount-once key listener below.
   const openDoorTabRef = useRef<() => void>(() => {});
   const openDoorTab = useCallback(() => {
+    // The flow shell has no tabs: ⌘T is its door.
+    if (!classicWb) {
+      openFrontDoorRef.current();
+      return;
+    }
     beginMeasure("wb:new-tab-caret");
     setDoorCompact(false);
     const { set, tab } = activePanes(wb.getState());
@@ -2705,7 +2711,12 @@ function App() {
   // else the tab. Never the window: ⌘⇧W is the window, and the reducer
   // refills a set whose last tab closed, so Home always keeps a door.
   const closeFromInside = useCallback(() => {
-    if (!classicWb) return;
+    // The flow shell (until W2) has pages but no tabs: a browser page, or
+    // nothing — never the window.
+    if (!classicWb) {
+      if (mainSurfaceRef.current === "browser") window.dispatchEvent(new CustomEvent("redline:browser-close-page"));
+      return;
+    }
     const { set, tab } = activePanes(wb.getState());
     if (!set || !tab) return;
     const focused = set.panes[tab.focusedPaneId];
@@ -2724,20 +2735,28 @@ function App() {
     if (isSplit(tab.root)) wb.dispatch({ type: "closePane", paneId: pane.id });
     else wb.dispatch({ type: "closeTab", tabId: tab.id });
   }, []);
+  // Every event the native menu emits for the workbench has exactly one
+  // listener, here, in both shells (flow keeps them until W2; its tab
+  // actions are no-ops there): File ▸ New Tab, Reopen Closed Tab, Close,
+  // Close Window, and the Tabs submenu. BrowserPane keeps only menu-print;
+  // browser_signals.js forwards the rest from a page.
   useEffect(() => {
-    if (!classicWb) return;
+    const tabs = (action: WorkbenchAction) => {
+      if (classicWb) wb.dispatch(action);
+    };
     const subs = [
+      listen("menu-new-tab", () => openDoorTabRef.current()),
       listen("menu-close-tab", closeFromInside),
       listen("menu-close-window", () => void getCurrentWindow().close()),
-      listen("menu-reopen-tab", () => wb.dispatch({ type: "reopenClosed" })),
-      listen<number>("menu-tab-index", (e) => wb.dispatch({ type: "selectTabIndex", index: e.payload })),
+      listen("menu-reopen-tab", () => tabs({ type: "reopenClosed" })),
+      listen<number>("menu-tab-index", (e) => tabs({ type: "selectTabIndex", index: e.payload })),
       listen<number>("menu-tab-cycle", (e) => {
         beginMeasure("wb:tab-switch");
-        wb.dispatch({ type: "cycleTab", delta: e.payload < 0 ? -1 : 1 });
+        tabs({ type: "cycleTab", delta: e.payload < 0 ? -1 : 1 });
       }),
     ];
     // A page's ⌘⌥← / ⌘⌥→, forwarded by BrowserPane.
-    const fromPage = (e: Event) => wb.dispatch({ type: "cycleTab", delta: (e as CustomEvent<number>).detail < 0 ? -1 : 1 });
+    const fromPage = (e: Event) => tabs({ type: "cycleTab", delta: (e as CustomEvent<number>).detail < 0 ? -1 : 1 });
     window.addEventListener("redline:workbench-tab-cycle", fromPage);
     // The same chords from the keyboard, on `e.code` and in the capture
     // phase, ahead of xterm: the native menu normally takes them first (a
@@ -2753,7 +2772,7 @@ function App() {
         openDoorTabRef.current();
       } else if (isReopenTabKey(e)) {
         claim();
-        wb.dispatch({ type: "reopenClosed" });
+        tabs({ type: "reopenClosed" });
       } else if (isCloseWindowKey(e)) {
         claim();
         void getCurrentWindow().close();
@@ -2766,16 +2785,16 @@ function App() {
         if (index !== null) {
           claim();
           beginMeasure("wb:tab-switch");
-          wb.dispatch({ type: "selectTabIndex", index });
+          tabs({ type: "selectTabIndex", index });
         } else if (delta !== null) {
           claim();
           beginMeasure("wb:tab-switch");
-          wb.dispatch({ type: "cycleTab", delta });
+          tabs({ type: "cycleTab", delta });
         }
       }
     };
     window.addEventListener("keydown", onKey, true);
-    void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
+    if (classicWb) void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
       for (const p of subs) void p.then((un) => un());
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
@@ -4869,7 +4888,11 @@ function App() {
           action: { label, onAction: openArrival },
           ...(mainSurfaceRef.current === "browser" ? { placement: "top" as const } : {}),
         });
-        const writing = frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now());
+        // A door that sent this very launch is never "writing", caret in its
+        // box or not: its ⏎ asked for this plan, so it arrives on screen —
+        // from a door tab it springs out of the box and the door retires.
+        const ownDoorTab = classicWb && !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId;
+        const writing = !ownDoorTab && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));
         const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
           const chatId = arrivingLaunch.chatId;
