@@ -11,6 +11,7 @@ import {
   LEGACY_SPLIT_RATIO_KEY,
   LEGACY_SPLIT_VERTICAL_KEY,
   WORKBENCH_KEY,
+  bootToHome,
   migrateToWorkbenchOnce,
   parseWorkbench,
   persistWorkbench,
@@ -163,7 +164,7 @@ describe("persistWorkbench", () => {
 
   it("writes 250 ms after the last change, flushes on pagehide, and on stop", () => {
     const storage = new MemoryStorage();
-    const store = createWorkbenchStore(emptyWorkbench());
+    const store = createWorkbenchStore(emptyWorkbench(), reduce);
     const listeners = new Map<string, () => void>();
     const target = {
       addEventListener: (type: string, fn: () => void) => listeners.set(type, fn),
@@ -243,5 +244,39 @@ describe("migrateToWorkbenchOnce", () => {
     drafter.setItem(LEGACY_MAIN_SURFACE_KEY, JSON.stringify("drafter"));
     drafter.setItem(LEGACY_SPLIT_RATIO_KEY, "garbage");
     expect(Object.values(migrateToWorkbenchOnce(drafter)!.sets.home!.panes).map((p) => p.kind)).toEqual(["door"]);
+  });
+});
+
+// ── W1: boot lands on Home's door ───────────────────────────────────────────
+
+describe("bootToHome", () => {
+  it("selects Home and its first door tab, leaving the other sets' tabs alone", () => {
+    let s = reduce(emptyWorkbench(), { type: "ensureDefaults", key: "home", tabIds: ["door-tab"], paneIds: ["door"] });
+    s = reduce(s, { type: "openSurface", key: "home", kind: "browser", tabId: "browser-tab", paneId: "browser" });
+    s = reduce(s, { type: "selectSession", key: "plan:S", defaults: {} });
+    expect(s.activeKey).toBe("plan:S");
+    expect(s.sets.home?.activeTabId).toBe("browser-tab");
+    const booted = bootToHome(s);
+    expect(booted.activeKey).toBe("home");
+    expect(booted.sets.home?.activeTabId).toBe("door-tab");
+    expect(booted.sets["plan:S"]?.order).toHaveLength(1);
+  });
+  it("opens a door in front when Home has none", () => {
+    let s = reduce(emptyWorkbench(), { type: "openSurface", key: "home", kind: "browser", tabId: "browser-tab", paneId: "browser" });
+    s = bootToHome(s, { tabId: "new-door", paneId: "new-door-pane" });
+    expect(s.sets.home?.order).toEqual(["new-door", "browser-tab"]);
+    expect(s.sets.home?.activeTabId).toBe("new-door");
+    expect(s.sets.home?.panes["new-door-pane"]?.kind).toBe("door");
+  });
+  it("accepts a drafter with no draft yet and a review with no repo yet", () => {
+    const parsed = parseWorkbench({
+      v: 1,
+      activeKey: "home",
+      sets: { home: { order: ["a", "b"], activeTabId: "a", tabs: { a: { id: "a", root: { pane: "d" }, focusedPaneId: "d" }, b: { id: "b", root: { pane: "r" }, focusedPaneId: "r" } }, panes: { d: { id: "d", kind: "drafter", data: { draftId: "" } }, r: { id: "r", kind: "review", data: { repo: "", source: "uncommitted" } } }, closed: [] } },
+      mru: ["home"],
+      owners: {},
+      stowed: [],
+    });
+    expect(parsed?.sets.home?.order).toEqual(["a", "b"]);
   });
 });

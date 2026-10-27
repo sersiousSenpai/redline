@@ -136,13 +136,17 @@ const focusMain = () => {
   main.focus({ preventScroll: true });
 };
 
-export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, pill = true, onVisibilityChange, context, busy, announce = "", onNewChat, surfaceKey = "", clearanceKey = "", children }: {
+export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpen = false, onCompactChange, compact, landing = false, pill = true, onVisibilityChange, context, busy, announce = "", onNewChat, onPillClick, surfaceKey = "", clearanceKey = "", children }: {
   /** The door: the full-page room. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The door is closing into the plan it launched: it fades where it is, as
    *  the plan springs out of its composer, and the caret goes to the plan. */
   handoff?: boolean;
+  /** A click on the pill, when the host has somewhere of its own for it
+   *  (the workbench opens a door tab); hover keeps the compact card, and
+   *  the keys keep the door. Without it a click engages the door. */
+  onPillClick?: () => void;
   /** The compact card. Its content is rendered while it is open, and held as
    *  it last was while the card goes back into the pill. */
   compactOpen?: boolean;
@@ -787,7 +791,7 @@ export function MonochatIsland({ open, onOpenChange, handoff = false, compactOpe
     onBlur={() => { if (!live.current.open && !live.current.compactOpen) returnFocus.current = null; }}
     onPointerEnter={hoverIn} onPointerLeave={hoverOut}
     // Enter or Space on the pill is a click with no pointer behind it.
-    onClick={event => engage(event.detail > 0 ? "pointer" : "key")}>
+    onClick={event => { if (onPillClick && event.detail > 0) { window.clearTimeout(dwell.current); if (live.current.compactOpen) compactChange.current?.(false); onPillClick(); return; } engage(event.detail > 0 ? "pointer" : "key"); }}>
     <span ref={membrane} className="rl-portal-membrane" aria-hidden="true">
       <PulseLogo state={busy ? "thinking" : "idle"} size={14} decorative/>
       <span className="rl-pill-label">{label}</span>

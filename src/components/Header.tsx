@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
@@ -10,7 +10,9 @@ import type { ThemeName } from "../theme/themes";
 import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
 import { DownloadMenu } from "./DownloadMenu";
-import { MemoryStatusPill } from "./MemoryStatusPill";
+// The memory pill polls and renders a popover of its own; it is not first
+// paint, so it rides its own chunk (about 9 kB of boot JS, W1).
+const MemoryStatusPill = lazy(() => import("./MemoryStatusPill").then((m) => ({ default: m.MemoryStatusPill })));
 import { LiveSessionMenu } from "./LiveSessionMenu";
 import { SettingsGear } from "./SettingsGear";
 import { Button } from "./ui/Button";
@@ -389,10 +391,12 @@ export function Header({
         {/* The ambient memory pill — Memory's one entry point (deliberately
             not a main-radio button; the pill opens the surface). */}
         {memoryEnabled && (
+          <Suspense fallback={null}>
           <MemoryStatusPill
             onOpenMemory={onOpenMemory}
             onOpenInspector={onOpenMemoryInspector}
           />
+          </Suspense>
         )}
         <SettingsGear
           onOpenIntegrationHooks={onOpenIntegrationHooks}

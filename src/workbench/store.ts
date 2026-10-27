@@ -4,12 +4,17 @@
 // A tiny external store over the reducer, read with `useSyncExternalStore`.
 // This is the only piece of `src/workbench/` meant for the boot path: it
 // holds one state object, hands out the same one until an action changes
-// it, and tells listeners. No React import beyond the hook at the bottom.
+// it, and tells listeners. No React import beyond the hook at the bottom,
+// and no static import of the reducer: App hands it a loader, and the
+// actions dispatched before the chunk lands (none, in practice — it is
+// fetched as the app boots) queue and apply in order once it has.
 
 import { useSyncExternalStore } from "react";
 
 import type { WorkbenchState } from "./model";
-import { reduce, type WorkbenchAction } from "./reducer";
+import type { WorkbenchAction } from "./reducer";
+
+export type Reducer = (state: WorkbenchState, action: WorkbenchAction) => WorkbenchState;
 
 export interface WorkbenchStore {
   getState(): WorkbenchState;
@@ -19,15 +24,31 @@ export interface WorkbenchStore {
   subscribe(listener: () => void): () => void;
 }
 
-export function createWorkbenchStore(initial: WorkbenchState): WorkbenchStore {
+export function createWorkbenchStore(initial: WorkbenchState, reducer: Reducer | (() => Promise<Reducer>)): WorkbenchStore {
   let state = initial;
   const listeners = new Set<() => void>();
   const notify = () => {
     for (const l of Array.from(listeners)) l();
   };
+  let reduce: Reducer | null = typeof reducer === "function" && reducer.length === 2 ? (reducer as Reducer) : null;
+  const queue: WorkbenchAction[] = [];
+  if (!reduce) {
+    void (reducer as () => Promise<Reducer>)().then((fn) => {
+      reduce = fn;
+      let next = state;
+      for (const action of queue.splice(0)) next = fn(next, action);
+      if (next === state) return;
+      state = next;
+      notify();
+    });
+  }
   return {
     getState: () => state,
     dispatch(action) {
+      if (!reduce) {
+        queue.push(action);
+        return;
+      }
       const next = reduce(state, action);
       if (next === state) return;
       state = next;

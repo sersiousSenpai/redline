@@ -43,8 +43,8 @@ html[data-rl-transparency="reduced"] .rl-glass {
 
 /* A session row's ⋯ menu (RowMenu, board 4d): 190px of rows inside 6px of
    padding and the glass tier's 1px rim, 32px rows with a 14px glyph, Delete
-   tinted below a rule. The classic row keeps its boxed ⋯ chip; the flow row
-   draws its own bare glyph (FlowSidebar.css). */
+   tinted below a rule. A plan row keeps its boxed ⋯ chip; a chat row
+   draws its own bare glyph (components/SessionSidebar.css). */
 .rl-row-menu-trigger { position: absolute; right: 10px; top: 7px; z-index: 10; display: grid; place-items: center; width: 26px; height: 24px; border: 1px solid var(--color-rule); border-radius: 6px; background: var(--color-paper); color: var(--color-ink-muted); cursor: pointer; }
 .rl-row-menu-layer { position: fixed; z-index: 1000; width: 204px; }
 .rl-row-menu { display: flex; flex-direction: column; padding: 6px; }
@@ -3452,6 +3452,20 @@ html[data-rl-tile-drag] * {
 .rl-term-dock[data-collapsed] {
   content-visibility: hidden;
 }
+
+/* ── The workbench (W1): the stage, its kept tabs and its panes ─────────────
+   A hidden kept tab stays mounted (its webview, editor and terminal state
+   survive the switch) but is `inert` and skips layout and paint. The strip's
+   own rules ride the TabStrip chunk (workbench/workbench.css); these are the
+   structural ones the first frame needs. */
+.rl-wb-stage { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.rl-wb-tabs { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.rl-wb-tab-body { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.rl-wb-tab-body[data-hidden] { content-visibility: hidden; visibility: hidden; pointer-events: none; }
+.rl-wb-pane { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.rl-wb-door-plate { flex: 1; min-height: 0; background: var(--color-paper); }
+.rl-wb-pane-fallback { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-ink-muted); font-size: 13px; }
+
 html[data-rl-dock-caps] .rl-term-dock.rl-plate {
   border-radius: 0;
 }

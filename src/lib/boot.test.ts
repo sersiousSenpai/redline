@@ -216,6 +216,13 @@ describe("boot-path JS contract", () => {
     // The chat room. Not optional: the boot path sits at ~97% of its ceiling,
     // so a room in the entry chunk would blow `size-budget.json` outright.
     "ChatRoom",
+    // W1: the workbench's store, adapter and stored state joined the boot
+    // path (about 18 kB), paid for by these — each rendered only on a
+    // gesture: the drafter's documents menu, a live session's presence bar
+    // and the plan's table-of-contents rail.
+    "DocumentsMenu",
+    "PresenceBar",
+    "PlanToc",
   ];
 
   it("the heavy surfaces never return to App's static import list", () => {
@@ -251,6 +258,28 @@ describe("boot-path JS contract", () => {
     const shim = readFileSync(join(process.cwd(), "src/shell/flowStateLazy.ts"), "utf8");
     expect(shim).toContain('import("./flowState")');
     expect(shim.match(/^import (?!type\b)[^;]*from "\.\/flowState"/m)).toBe(null);
+  });
+
+  // The workbench (W1): the store and the persisted state are read on the
+  // first frame, so `store`, `persist`, `model` and `legacy` are static; the
+  // reducer (28 kB of actions no first frame dispatches) reaches the store
+  // through a loader, and the stage with its tab strip is a lazy chunk
+  // fetched as the app boots. Either coming back static is the regression.
+  it("the workbench reducer and stage never return to App's static import list", () => {
+    for (const name of ["reducer", "WorkbenchStage", "TabStrip"]) {
+      const staticImport = new RegExp(`^import (?!type\\b)[^;]*from "\\./workbench/${name}"`, "m");
+      expect(app.match(staticImport), `workbench/${name} is statically imported`).toBe(null);
+    }
+    expect(app).toContain('import("./workbench/reducer")');
+    expect(app).toContain('import("./workbench/WorkbenchStage")');
+    const store = readFileSync(join(process.cwd(), "src/workbench/store.ts"), "utf8");
+    expect(store.match(/^import (?!type\b)[^;]*from "\.\/reducer"/m)).toBe(null);
+    const persist = readFileSync(join(process.cwd(), "src/workbench/persist.ts"), "utf8");
+    expect(persist.match(/^import (?!type\b)[^;]*from "\.\/reducer"/m)).toBe(null);
+    // The memory pill is the header's, lazy there for the same reason.
+    const header = readFileSync(join(process.cwd(), "src/components/Header.tsx"), "utf8");
+    expect(header.match(/^import (?!type\b)[^;]*from "\.\/MemoryStatusPill"/m)).toBe(null);
+    expect(header).toContain('import("./MemoryStatusPill")');
   });
 
   // The raw-wire inspector is devtools: most turns never open it, and it is

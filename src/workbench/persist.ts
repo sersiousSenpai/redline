@@ -11,6 +11,7 @@
 
 import {
   CLOSED_CAP,
+  DEFAULT_DOOR_DRAFT_KEY,
   HOME_KEY,
   MAX_WALL_TILES,
   SET_CAP,
@@ -31,7 +32,6 @@ import {
   type WorkbenchState,
 } from "./model";
 import type { DiffSource } from "../types";
-import { DEFAULT_DOOR_DRAFT_KEY } from "./reducer";
 import type { WorkbenchStore } from "./store";
 
 export const WORKBENCH_KEY = "redline.workbench.v1";
@@ -91,11 +91,13 @@ function parsePane(raw: unknown): AnyPane | null {
       pane = { id: raw.id, kind: "browser", data: { workspace: str(d.workspace) && d.workspace ? d.workspace : "regular" } };
       break;
     case "drafter":
-      if (!str(d.draftId) || !d.draftId) return null;
+      // An empty id is the drafter's own open document (App keeps which).
+      if (!str(d.draftId)) return null;
       pane = { id: raw.id, kind: "drafter", data: { draftId: d.draftId } };
       break;
     case "review":
-      if (!str(d.repo) || !d.repo || !isDiffSource(d.source)) return null;
+      // An empty repo is the review surface with its own picker.
+      if (!str(d.repo) || !isDiffSource(d.source)) return null;
       pane = { id: raw.id, kind: "review", data: { repo: d.repo, source: d.source } };
       break;
     case "servers":
@@ -295,6 +297,42 @@ export function persistWorkbench(store: WorkbenchStore, storage: Pick<Storage, "
     unsubscribe();
     target?.removeEventListener("pagehide", flush);
     flush();
+  };
+}
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+
+/** Every launch lands on Home's door (what `bootOnFrontDoor` did for the
+ *  surface key): Home is the active set, and its active tab is a door — the
+ *  first one it has, or a new one in front. The other sets keep their tabs
+ *  for when their session is selected. */
+export function bootToHome(state: WorkbenchState, opts: { tabId?: string; paneId?: string } = {}): WorkbenchState {
+  // By hand rather than through the reducer: this runs on the first frame,
+  // and the reducer is a lazy chunk (store.ts).
+  const home = state.sets.home ?? emptyTabSet();
+  const door = home.order.find((tabId) => {
+    const tab = home.tabs[tabId];
+    return tab && paneIdsOf(tab.root).some((id) => home.panes[id]?.kind === "door");
+  });
+  let next: TabSet;
+  if (door) {
+    next = home.activeTabId === door ? home : { ...home, activeTabId: door };
+  } else {
+    const paneId = opts.paneId ?? `pane-boot-door-${Date.now().toString(36)}`;
+    const tabId = opts.tabId ?? `tab-boot-door-${Date.now().toString(36)}`;
+    next = {
+      ...home,
+      order: [tabId, ...home.order],
+      activeTabId: tabId,
+      tabs: { ...home.tabs, [tabId]: { id: tabId, root: { pane: paneId }, focusedPaneId: paneId } },
+      panes: { ...home.panes, [paneId]: { id: paneId, kind: "door", data: { draftKey: DEFAULT_DOOR_DRAFT_KEY } } },
+    };
+  }
+  return {
+    ...state,
+    activeKey: HOME_KEY,
+    mru: [HOME_KEY, ...state.mru.filter((k) => k !== HOME_KEY)],
+    sets: { ...state.sets, home: next },
   };
 }
 

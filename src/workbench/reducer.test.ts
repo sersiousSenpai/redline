@@ -454,3 +454,43 @@ describe("terminals", () => {
     expect(kinds(h)).toEqual(["door"]);
   });
 });
+
+// ── W1: renamePane and moveTab ──────────────────────────────────────────────
+
+describe("renamePane", () => {
+  it("sets a title of the user's own and an empty title clears it", () => {
+    let s = reduce(emptyWorkbench(), { type: "openTab", key: "home", pane: { kind: "browser", data: { workspace: "regular" } }, tabId: "t", paneId: "p" });
+    s = reduce(s, { type: "renamePane", key: "home", paneId: "p", title: "  Docs  " });
+    expect(s.sets.home?.panes.p?.titleOverride).toBe("Docs");
+    const same = reduce(s, { type: "renamePane", key: "home", paneId: "p", title: "Docs" });
+    expect(same).toBe(s);
+    s = reduce(s, { type: "renamePane", key: "home", paneId: "p", title: "" });
+    expect(s.sets.home?.panes.p?.titleOverride).toBeUndefined();
+  });
+  it("is a no-op for an unknown pane", () => {
+    const s = emptyWorkbench();
+    expect(reduce(s, { type: "renamePane", paneId: "nope", title: "x" })).toBe(s);
+  });
+});
+
+describe("moveTab", () => {
+  it("carries a tab and its panes from one set to another, activating it there, and the empty source refills", () => {
+    let s = reduce(emptyWorkbench(), { type: "ensureDefaults", key: "home", tabIds: ["home-door"], paneIds: ["door-1"] });
+    s = reduce(s, { type: "moveTab", from: "home", to: "launch:L", tabId: "home-door" });
+    expect(s.sets["launch:L"]?.order).toEqual(["home-door"]);
+    expect(s.sets["launch:L"]?.activeTabId).toBe("home-door");
+    expect(s.sets["launch:L"]?.panes["door-1"]?.kind).toBe("door");
+    // Home refilled with a fresh door, and the moved tab is not on its ⌘⇧T stack.
+    expect(s.sets.home?.order).toHaveLength(1);
+    expect(s.sets.home?.order[0]).not.toBe("home-door");
+    expect(s.sets.home?.closed).toHaveLength(0);
+    // The moved door is what rekeySession turns into the Plan tab.
+    s = reduce(s, { type: "rekeySession", from: "launch:L", to: "plan:S" });
+    expect(s.sets["plan:S"]?.panes["door-1"]?.kind).toBe("plan");
+  });
+  it("is a no-op for a missing tab or the same set", () => {
+    const s = reduce(emptyWorkbench(), { type: "ensureDefaults", key: "home", tabIds: ["t"], paneIds: ["p"] });
+    expect(reduce(s, { type: "moveTab", from: "home", to: "home", tabId: "t" })).toBe(s);
+    expect(reduce(s, { type: "moveTab", from: "home", to: "plan:S", tabId: "nope" })).toBe(s);
+  });
+});

@@ -14,9 +14,11 @@
 
 import {
   CLOSED_CAP,
+  DEFAULT_DOOR_DRAFT_KEY,
   HOME_KEY,
   MAX_WALL_TILES,
   activeTabOf,
+  doorDraftKey,
   emptyTabSet,
   isSplit,
   launchIdOf,
@@ -35,16 +37,9 @@ import {
   type WorkbenchState,
 } from "./model";
 
-/** The sentence the Front Door shares with the footer pill's compact
- *  composer (`FRONT_DOOR_TEXT_KEY`): Home's first door keeps sharing it, so
- *  the pill and the door tab are one draft. Spelled here so the model stays
- *  a leaf; `legacy.test.ts` pins it to the real constant. */
-export const DEFAULT_DOOR_DRAFT_KEY = "redline.frontDoor.text";
-
-/** Every other door tab has a draft of its own. */
-export function doorDraftKey(paneId: string): string {
-  return `redline.workbench.door.${paneId}`;
-}
+// The door draft keys live in model.ts (a leaf persist.ts can read without
+// this module); re-exported for the callers that learnt them here.
+export { DEFAULT_DOOR_DRAFT_KEY, doorDraftKey } from "./model";
 
 /** What the defaults need to know that the state does not hold. */
 export interface DefaultsContext {
@@ -90,6 +85,11 @@ export type WorkbenchAction =
   | { type: "closePane"; key?: SessionKey; paneId: string }
   | { type: "replacePreview"; key?: SessionKey; pane: PaneInit; tabId?: string; paneId?: string }
   | { type: "pinPane"; key?: SessionKey; paneId: string }
+  /** A title of the user's own; empty clears it. */
+  | { type: "renamePane"; key?: SessionKey; paneId: string; title: string }
+  /** A tab leaves one set for another, panes and all (the door a launch
+   *  came through follows the launch; W5 drags tabs between sessions). */
+  | { type: "moveTab"; from: SessionKey; to: SessionKey; tabId: string; at?: number; activate?: boolean }
   | { type: "focusPane"; key?: SessionKey; paneId: string }
   | { type: "focusPane"; key?: SessionKey; dir: FocusDirection }
   | { type: "resizeSplit"; key?: SessionKey; tabId?: string; path: number[]; weights: number[] }
@@ -766,6 +766,45 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const pinned = { ...pane } as AnyPane;
       delete pinned.preview;
       return putSet(state, key, { ...set, panes: { ...set.panes, [action.paneId]: pinned } });
+    }
+
+    case "renamePane": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      const pane = set?.panes[action.paneId];
+      if (!set || !pane) return state;
+      const title = action.title.trim();
+      if ((pane.titleOverride ?? "") === title) return state;
+      const next = { ...pane } as AnyPane;
+      if (title) next.titleOverride = title;
+      else delete next.titleOverride;
+      return putSet(state, key, { ...set, panes: { ...set.panes, [action.paneId]: next } });
+    }
+
+    case "moveTab": {
+      const { from, to, tabId } = action;
+      const source = setOf(state, from);
+      const tab = source?.tabs[tabId];
+      if (!source || !tab || from === to) return state;
+      const target = setOf(state, to) ?? emptyTabSet();
+      const ids = paneIdsOf(tab.root);
+      const panes = { ...target.panes };
+      for (const id of ids) {
+        const pane = source.panes[id];
+        if (pane) panes[id] = pane;
+      }
+      const order = target.order.filter((id) => id !== tabId);
+      order.splice(action.at === undefined ? order.length : clamp(action.at, 0, order.length), 0, tabId);
+      const moved: TabSet = {
+        ...target,
+        order,
+        activeTabId: action.activate ?? true ? tabId : (target.activeTabId ?? tabId),
+        tabs: { ...target.tabs, [tabId]: tab },
+        panes,
+      };
+      // Gone from its old set without a ⌘⇧T entry: it is still open.
+      const left = removeTab(source, tabId, false);
+      return refillEmpty({ ...state, sets: { ...state.sets, [from]: left, [to]: moved } });
     }
 
     case "focusPane": {

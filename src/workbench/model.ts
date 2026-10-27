@@ -38,6 +38,17 @@ export function launchIdOf(key: SessionKey): string | null {
   return key.startsWith("launch:") ? key.slice(7) : null;
 }
 
+/** The sentence the Front Door shares with the footer pill's compact
+ *  composer (`FRONT_DOOR_TEXT_KEY`): Home's first door keeps sharing it, so
+ *  the pill and the door tab are one draft. Spelled here so the model stays
+ *  a leaf; `legacy.test.ts` pins it to the real constant. */
+export const DEFAULT_DOOR_DRAFT_KEY = "redline.frontDoor.text";
+
+/** Every other door tab has a draft of its own. */
+export function doorDraftKey(paneId: string): string {
+  return `redline.workbench.door.${paneId}`;
+}
+
 export function isSessionKey(value: unknown): value is SessionKey {
   return (
     typeof value === "string" &&

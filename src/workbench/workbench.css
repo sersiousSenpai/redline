@@ -1,0 +1,268 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+
+/* The Workbench's own rules (W1). Imported by the tab strip, which the stage
+   loads lazily, so they ride its chunk. Prefix `rl-wb-`; tokens only
+   (styles.css). The strip is the canvas colour; the active tab takes the
+   paper colour and merges into the pane below it, so the bottom rule is
+   drawn by each cell rather than by the strip, and the active tab paints
+   its own in paper. Spinners are HTML (`.rl-spinner`), the needs-you dot
+   pulses opacity only, and nothing here animates a paint property. */
+
+/* ── Strip ─────────────────────────────────────────────────────────────── */
+
+.rl-wb-strip {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: 34px;
+  min-width: 0;
+  box-sizing: border-box;
+  background: var(--color-canvas);
+  color: var(--color-ink-muted);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The tabs' own row: shrinks before the + cell does, and only once every tab
+   is at its narrowest does it scroll — the + cell is never pushed off. */
+.rl-wb-tablist {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* ── Tab ───────────────────────────────────────────────────────────────── */
+
+.rl-wb-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 1 auto;
+  min-width: 64px;
+  max-width: 220px;
+  height: 34px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-right: 1px solid var(--color-rule);
+  border-bottom: 1px solid var(--color-rule);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: default;
+  touch-action: none;
+}
+.rl-wb-tab:hover {
+  color: var(--color-ink);
+}
+.rl-wb-tab[aria-selected="true"] {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  border-bottom-color: var(--color-paper);
+}
+.rl-wb-tab:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--color-focus-rim);
+}
+.rl-wb-tab[data-status="exited"] {
+  color: var(--color-ink-quiet);
+}
+.rl-wb-tab[data-status="exited"] .rl-wb-icon,
+.rl-wb-tab[data-status="exited"] .rl-wb-title {
+  opacity: 0.6;
+}
+.rl-wb-tab[data-preview] .rl-wb-title {
+  font-style: italic;
+}
+.rl-wb-tab[data-dragging] {
+  opacity: 0.45;
+}
+
+.rl-wb-icon {
+  flex: none;
+}
+.rl-wb-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rl-wb-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--color-ink-quiet);
+}
+
+/* The × only reads on hover or on the active tab; it keeps its width so
+   titles never shift. */
+.rl-wb-tab-x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink-quiet);
+  opacity: 0;
+  cursor: pointer;
+}
+.rl-wb-tab:hover .rl-wb-tab-x,
+.rl-wb-tab:focus-within .rl-wb-tab-x,
+.rl-wb-tab[aria-selected="true"] .rl-wb-tab-x {
+  opacity: 1;
+}
+.rl-wb-tab-x:hover {
+  color: var(--color-ink);
+  background: var(--color-fill-2);
+}
+.rl-wb-tab-x:focus-visible {
+  outline: none;
+  opacity: 1;
+  box-shadow: 0 0 0 1px var(--color-focus-rim);
+}
+
+/* Needs you: a 6px amber dot whose opacity breathes. Opacity only — the
+   compositor animates it without a repaint (paintGuard). */
+.rl-wb-dot {
+  flex: none;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  animation: rl-wb-pulse 2s ease-in-out infinite;
+}
+@keyframes rl-wb-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-wb-dot {
+    animation: none;
+  }
+}
+
+/* The inline rename sits where the title was. */
+.rl-wb-rename {
+  flex: 1 1 auto;
+  min-width: 60px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--color-focus-rim);
+  border-radius: 4px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: inherit;
+  outline: none;
+}
+
+/* The drop indicator while a tab is dragged: a 2px info-coloured bar at the
+   slot the tab would take. */
+.rl-wb-drop {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--color-info);
+  pointer-events: none;
+}
+
+/* ── The + cell, the spacer and the right cluster ──────────────────────── */
+
+.rl-wb-new {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid var(--color-rule);
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-ink-quiet);
+  cursor: pointer;
+}
+.rl-wb-new:hover {
+  color: var(--color-ink);
+}
+.rl-wb-new:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--color-focus-rim);
+}
+
+.rl-wb-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.rl-wb-right {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--color-rule);
+}
+.rl-wb-right-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-ink-quiet);
+  cursor: pointer;
+}
+.rl-wb-right-btn:hover {
+  background: var(--color-fill-2);
+  color: var(--color-ink);
+}
+.rl-wb-right-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--color-focus-rim);
+}
+
+/* The context menu reuses RowMenu, whose ⋯ trigger the strip has no place
+   for: the menu opens at the pointer, so the trigger is kept out of sight. */
+.rl-wb-menu-anchor {
+  position: absolute;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
