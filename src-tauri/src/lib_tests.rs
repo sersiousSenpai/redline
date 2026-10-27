@@ -866,7 +866,7 @@ fn both_ingest_bind_arms_follow_the_claim_row_hash() {
 /// and the Companion's account of what you did.
 #[test]
 fn the_launch_origin_filter_accepts_combine() {
-    let body = std::fs::read_to_string(file!()).expect("read own source");
+    let body = include_str!("lib.rs");
     let f = body
         .split_once("fn record_plan_launch(")
         .expect("record_plan_launch exists")
