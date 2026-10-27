@@ -19,9 +19,6 @@ export interface ShelfChip {
   text: string | null;
   /** The lowest port a serving terminal listens on. */
   port: number | null;
-  /** Just parked: it leads the shelf for a few seconds (tilePolicy's
-   *  `shelfOrder`) and is outlined so the eye can follow it there. */
-  fresh: boolean;
 }
 
 interface TerminalShelfProps {
@@ -80,7 +77,6 @@ export const TerminalShelf = memo(function TerminalShelf({
             className="rl-shelf-chip"
             data-shelf-id={chip.id}
             data-term-state={chip.state}
-            data-fresh={chip.fresh || undefined}
             aria-label={`Show ${chip.label}${words ? ` — ${words}` : ""}`}
             title={[
               chip.label,

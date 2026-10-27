@@ -2344,9 +2344,6 @@ p.rl-block-modified {
   border-color: color-mix(in srgb, var(--color-info) 65%, var(--color-rule));
   box-shadow: 0 0 6px color-mix(in srgb, var(--color-info) 35%, transparent);
 }
-.rl-shelf-chip[data-fresh] {
-  border-color: var(--color-ink-muted);
-}
 @keyframes rl-shelf-glow {
   0%, 100% { opacity: 0; }
   50% { opacity: 1; }

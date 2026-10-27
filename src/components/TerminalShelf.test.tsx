@@ -21,7 +21,6 @@ const chip = (id: string, extra: Partial<ShelfChip> = {}): ShelfChip => ({
   state: "idle",
   text: null,
   port: null,
-  fresh: false,
   ...extra,
 });
 
@@ -46,7 +45,7 @@ describe("terminal shelf", () => {
       chip("agent", { state: "needs-you", text: "Claude needs your permission" }),
       chip("web", { state: "serving", port: 5173 }),
       chip("vite", { state: "serving", port: 5174, text: "vite" }),
-      chip("shell", { fresh: true }),
+      chip("shell"),
     ]);
     const strip = container.querySelector("[role='toolbar']") as HTMLElement;
     expect(strip.style.height).toBe(`${SHELF_H}px`);
@@ -62,8 +61,6 @@ describe("terminal shelf", () => {
     // Native titles: the strip clips a CSS tooltip.
     expect(chips[0].title).toContain("needs you");
     expect(chips[0].title).toContain("Claude needs your permission");
-    expect(chips[3].hasAttribute("data-fresh")).toBe(true);
-    expect(chips[0].hasAttribute("data-fresh")).toBe(false);
   });
 
   it("a click places the terminal; a primary press offers a drag", () => {

@@ -97,17 +97,13 @@ export function fitsAnotherTile(
 }
 
 /** The shelf's order: loud first, then busy (working, running), then quiet;
- *  within a tier most-recently-evicted first (`mru`), then creation order.
- *  A just-parked terminal (`fresh`) leads for a few seconds so the chip that
- *  just left the wall is where the eye follows it. */
+ *  within a tier most-recently-evicted first (`mru`), then creation order. */
 export function shelfOrder(
   untiled: readonly string[],
   states: ReadonlyMap<string, TermState>,
   mru: readonly string[],
-  fresh: string | null,
 ): string[] {
   const tier = (id: string): number => {
-    if (id === fresh) return -1;
     const s = states.get(id) ?? "idle";
     return isLoud(s) ? 0 : isQuiet(s) ? 2 : 1;
   };
@@ -119,61 +115,6 @@ export function shelfOrder(
   return [...untiled].sort(
     (a, b) => tier(a) - tier(b) || recency(a) - recency(b),
   );
-}
-
-// ── Parking ───────────────────────────────────────────────────────────────
-
-/** How long a tile must stay quiet, untouched, before it parks itself. A dev
- *  server, a held plan or a dead shell has nothing to watch; an idle shell
- *  is often about to be typed in, so it gets far longer. */
-export const PARK_SETTLE_MS: Partial<Record<TermState, number>> = {
-  serving: 15_000,
-  held: 15_000,
-  exited: 15_000,
-  idle: 120_000,
-};
-
-export interface ParkInput {
-  tiles: readonly string[];
-  states: ReadonlyMap<string, TermState>;
-  pinned: ReadonlySet<string>;
-  focusIdx: number;
-  zoomedId: string | null;
-  /** When each terminal entered its current state. */
-  since: ReadonlyMap<string, number>;
-  /** When each terminal was last typed in, placed, or focused away from —
-   *  anything that says the user was just there. */
-  touched: ReadonlyMap<string, number>;
-  now: number;
-}
-
-/** The ONE tile to park now, or null. Parking takes a tile off the wall
- *  (its terminal goes to the shelf); never the focused, zoomed or a pinned
- *  tile, never the last one, and only after its settle window. Among the
- *  settled, the quietest goes first, then the longest overdue — one per call,
- *  so the grid reshapes at most once per tick. */
-export function parkCandidate(p: ParkInput): number | null {
-  if (p.tiles.length <= 1) return null;
-  let best: number | null = null;
-  let bestRank = Infinity;
-  let bestOverdue = -Infinity;
-  for (let i = 0; i < p.tiles.length; i++) {
-    const id = p.tiles[i];
-    if (i === p.focusIdx || id === p.zoomedId || p.pinned.has(id)) continue;
-    const state = p.states.get(id);
-    const settle = state ? PARK_SETTLE_MS[state] : undefined;
-    if (!state || settle === undefined) continue;
-    const quietSince = Math.max(p.since.get(id) ?? p.now, p.touched.get(id) ?? -Infinity);
-    const overdue = p.now - quietSince - settle;
-    if (overdue < 0) continue;
-    const rank = evictionRank(state);
-    if (rank < bestRank || (rank === bestRank && overdue > bestOverdue)) {
-      best = i;
-      bestRank = rank;
-      bestOverdue = overdue;
-    }
-  }
-  return best;
 }
 
 // ── Drag-to-arrange ───────────────────────────────────────────────────────

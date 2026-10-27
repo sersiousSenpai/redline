@@ -6,12 +6,9 @@ import type { TermState } from "./termState";
 import {
   EVICTION_ORDER,
   fitsAnotherTile,
-  parkCandidate,
-  PARK_SETTLE_MS,
   placeTarget,
   shelfOrder,
   tileAtPoint,
-  type ParkInput,
 } from "./tilePolicy";
 
 const states = (entries: Record<string, TermState>) => new Map(Object.entries(entries));
@@ -91,58 +88,11 @@ describe("shelfOrder", () => {
   const s = states({ q1: "idle", busy: "running", ask: "needs-you", q2: "serving", turn: "your-turn", work: "working" });
 
   it("puts loud first, then busy, then quiet", () => {
-    expect(shelfOrder(["q1", "busy", "ask", "q2", "turn", "work"], s, [], null)).toEqual(["ask", "turn", "busy", "work", "q1", "q2"]);
+    expect(shelfOrder(["q1", "busy", "ask", "q2", "turn", "work"], s, [])).toEqual(["ask", "turn", "busy", "work", "q1", "q2"]);
   });
 
   it("orders each tier most-recently-evicted first, then creation order", () => {
-    expect(shelfOrder(["q1", "q2", "busy", "work"], s, ["q2", "work"], null)).toEqual(["work", "busy", "q2", "q1"]);
-  });
-
-  it("a just-parked terminal leads, whatever its tier", () => {
-    expect(shelfOrder(["ask", "q1", "q2"], s, [], "q2")).toEqual(["q2", "ask", "q1"]);
-  });
-});
-
-describe("parkCandidate", () => {
-  const T0 = 1_000_000;
-  const input = (extra: Partial<ParkInput>): ParkInput => ({
-    tiles: ["f", "srv", "idle"],
-    states: states({ f: "idle", srv: "serving", idle: "idle" }),
-    pinned: none,
-    focusIdx: 0,
-    zoomedId: null,
-    since: new Map([["f", T0], ["srv", T0], ["idle", T0]]),
-    touched: new Map(),
-    now: T0,
-    ...extra,
-  });
-
-  it("waits out each state's settle window: 15 s for a server, 2 min for an idle shell", () => {
-    expect(PARK_SETTLE_MS).toEqual({ serving: 15_000, held: 15_000, exited: 15_000, idle: 120_000 });
-    expect(parkCandidate(input({ now: T0 + 14_999 }))).toBeNull();
-    expect(parkCandidate(input({ now: T0 + 15_000 }))).toBe(1);
-    // Both settled: the quieter state goes first.
-    expect(parkCandidate(input({ now: T0 + 120_000 }))).toBe(2);
-  });
-
-  it("input restarts the clock", () => {
-    expect(parkCandidate(input({ now: T0 + 20_000, touched: new Map([["srv", T0 + 10_000]]) }))).toBeNull();
-    expect(parkCandidate(input({ now: T0 + 25_000, touched: new Map([["srv", T0 + 10_000]]) }))).toBe(1);
-  });
-
-  it("never parks the focused, the zoomed, a pinned or the last tile, nor a busy or loud one", () => {
-    const late = T0 + 600_000;
-    const busyFirst = states({ f: "working", srv: "serving", idle: "idle" });
-    expect(parkCandidate(input({ now: late, focusIdx: 1, tiles: ["f", "srv"], states: busyFirst }))).toBeNull();
-    expect(parkCandidate(input({ now: late, zoomedId: "srv", tiles: ["f", "srv"] }))).toBeNull();
-    expect(parkCandidate(input({ now: late, pinned: new Set(["srv", "idle"]) }))).toBeNull();
-    expect(parkCandidate(input({ now: late, tiles: ["srv"], focusIdx: 3 }))).toBeNull();
-    const loud = states({ f: "idle", srv: "needs-you", idle: "working" });
-    expect(parkCandidate(input({ now: late, states: loud }))).toBeNull();
-  });
-
-  it("a terminal with no recorded state change is not settled yet", () => {
-    expect(parkCandidate(input({ now: T0 + 600_000, since: new Map() }))).toBeNull();
+    expect(shelfOrder(["q1", "q2", "busy", "work"], s, ["q2", "work"])).toEqual(["work", "busy", "q2", "q1"]);
   });
 });
 
