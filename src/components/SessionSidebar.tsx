@@ -1,14 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+//! The one sessions sidebar (Workbench W1). Top to bottom: the Places (Home,
+//! Runs, Localhost), a "Sessions" label with Combine, the joined-session
+//! shadow, then project groups from lib/sessionGroups — Needs you first while
+//! something does — each holding the rich plan rows (status colour, v{n},
+//! pending count, unseen pulse, run chips, detached/codex chips, the revision
+//! tree and a ⋯ menu), chat rows, and the launches whose plan has not arrived.
+//! Under each plan row sit its terminals in the shared status vocabulary
+//! (workbench/status.ts): needs you is an amber opacity pulse, working is the
+//! shared Spinner, idle is nothing, exited is muted. A "New tab" row closes it.
+//!
+//! Rows are memoized with id-based handlers: a summaries read rebuilds every
+//! item, but an unchanged session keeps its object (App's `refreshSummaries`),
+//! so only the rows that changed render.
+
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown, FileText, Globe, House, MessageSquare, Plus, Terminal, TriangleAlert, Workflow } from "lucide-react";
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
-import { planRowActions, RowMenu, RowRename } from "./RowMenu";
+import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
+import { Spinner } from "./Spinner";
 import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
-import type { FlowChat, FlowLaunch, NeedReason } from "../lib/sessionGroups";
-import { isFlowShell } from "../lib/shellFlag";
+import type { PaneStatus } from "../workbench/status";
+import {
+  buildSidebar,
+  itemKey,
+  rowAge,
+  rowStatus,
+  type FlowChat,
+  type FlowLaunch,
+  type NeedReason,
+  type SidebarItem,
+  type SidebarSection,
+  type StatusIcon,
+  type StatusTone,
+} from "../lib/sessionGroups";
 import { MIN_COMBINE } from "../lib/launch";
 import {
   computeRevisionDisplay,
@@ -20,20 +48,20 @@ import {
   SEQUENTIAL_FALLBACK_NOTE,
 } from "../lib/orchestration";
 import { detachedPillTitle } from "../lib/restoreHarness";
+import "./SessionSidebar.css";
 
-// The flow shell's sidebar is its own lazy chunk: the classic shell never
-// loads it. Under the flow shell it is fetched as this module evaluates, so
-// it lands alongside this chunk rather than one round trip behind it.
-const loadFlowSidebar = () => import("../shell/FlowSidebar");
-const FlowSidebar = lazy(loadFlowSidebar);
-if (isFlowShell()) void loadFlowSidebar().catch(() => {});
+/** The sidebar's Places: Home (the door and its tabs), the Runs monitor and
+ *  the Localhost dashboard. */
+export type SidebarPlace = "home" | "runs" | "servers";
+
+/** A terminal under its plan row, in the shared status vocabulary. */
+export interface SidebarTerminal {
+  id: string;
+  title: string;
+  status: PaneStatus;
+}
 
 export interface SessionSidebarProps {
-  /** `classic` (the default) is the sessions list below; `flow` is the flow
-   *  shell's sidebar (shell/FlowSidebar.tsx), which reads the props marked
-   *  "Flow" and ignores the classic-only ones (Combine, joined session, the
-   *  run chips, export). */
-  layout?: "classic" | "flow";
   sessions: SessionSummary[];
   activeId: string | null;
   pendingCounts: Record<string, number>;
@@ -72,40 +100,55 @@ export interface SessionSidebarProps {
   /** Open the RunReport container for an orchestrated run (chip click). */
   onOpenRunReport?: (sessionId: string) => void;
   /** Hand N selected plans to the Front Door as combine pills. Does what
-   *  "＋ Plan a build" already does — clears the selection — and seeds the
-   *  pills; the composer there becomes the place to add an instruction.
-   *  Absent when the host has no Front Door to hand them to. */
+   *  Home already does — clears the selection — and seeds the pills; the
+   *  composer there becomes the place to add an instruction. Absent when
+   *  the host has no Front Door to hand them to. */
   onCombine?: (sessionIds: string[]) => void;
-  /** Deselect every session so the document plate shows the front door.
-   *  This is the ONLY way back to it: boot auto-selects the most recent plan
-   *  and nothing else ever clears the selection, so without this row the
-   *  front door is unreachable for anyone who has ever reviewed a plan. */
+  /** Home, when the host has no `onSelectPlace`: deselect every session so
+   *  the document plate shows the front door. Boot auto-selects the most
+   *  recent plan and nothing else ever clears the selection, so without this
+   *  row the front door is unreachable for anyone who has reviewed a plan. */
   onNewPlan?: () => void;
-  /** Flow: "+ New session ⌘N", the start screen. */
+  /** Home's fallback when `onNewPlan` is absent: the start screen. */
   onNewSession?: () => void;
-  /** Flow: a project group's "+", a new session in that folder. */
+  /** A project group's "+", a new session in that folder. */
   onNewSessionIn?: (projectPath: string) => void;
-  /** Flow: the start screen is on the stage, so "+ New session" reads as
-   *  selected and no row does. Defaults to nothing being open. */
+  /** The start screen is on the stage, so Home reads as selected and no row
+   *  does. Only read when `place` is not given. */
   startActive?: boolean;
-  /** Flow: chats (companion conversations), rows among the plans. */
+  /** Chats (companion conversations), rows among the plans. */
   chats?: readonly FlowChat[];
   activeChatId?: string | null;
   onSelectChat?: (companionId: string) => void;
   onRenameChat?: (companionId: string, title: string) => void;
   onArchiveChat?: (companionId: string, archived: boolean) => void;
   onDeleteChat?: (companionId: string) => void;
-  /** Flow: sessions launched into a terminal whose plan has not arrived
-   *  (the BRIEF's "Session identity in flow"). */
+  /** Sessions launched into a terminal whose plan has not arrived, rendered
+   *  in their project's section. */
   launches?: readonly FlowLaunch[];
   activeLaunchId?: string | null;
   onSelectLaunch?: (terminalId: string) => void;
-  /** Flow: why a row needs you, by row key (`plan:<id>`, `chat:<id>`,
+  /** Why a row needs you, by row key (`plan:<id>`, `chat:<id>`,
    *  `launch:<terminalId>`), from the engine's open asks. A run waiting on
    *  its code review (Review) or stalled is read off the session without it. */
   needs?: Readonly<Record<string, NeedReason>>;
-  /** Flow: row keys whose Claude is mid-turn (a spinner). */
+  /** Row keys whose Claude is mid-turn (a spinner). */
   working?: ReadonlySet<string>;
+  /** Which Place reads selected. `null` means none; absent means the host
+   *  has no Places and Home is "nothing open" (`startActive`/no active id). */
+  place?: SidebarPlace | null;
+  /** Given, all three Places render and Home goes here; absent, only Home
+   *  renders and it calls `onNewPlan`/`onNewSession`. */
+  onSelectPlace?: (place: SidebarPlace) => void;
+  /** Runs in flight, on the Runs place when > 0. */
+  runsLive?: number;
+  /** Local dev servers' ports (":5173"), summarized on the Localhost place. */
+  localhostPorts?: readonly string[];
+  /** Each plan's terminals, by session id; always shown under the row. */
+  terminals?: Readonly<Record<string, readonly SidebarTerminal[]>>;
+  onSelectTerminal?: (sessionId: string, terminalId: string) => void;
+  /** The footer's "＋ New tab ⌘T"; the row renders only when given. */
+  onNewTab?: () => void;
 }
 
 /** Chip palette for the orchestrated-run lifecycle. `stalled` warns; `landed`
@@ -140,6 +183,14 @@ const STATUS_LABELS: Record<SessionSummary["status"], string> = {
   aborted: "aborted",
 };
 
+/** A chat or launch status's colour: the top bar's mode inks. */
+const TONE: Record<StatusTone, string> = {
+  plan: "var(--color-mode-plan-fg)",
+  redline: "var(--color-mode-redline-fg)",
+  build: "var(--color-mode-build-fg)",
+  quiet: "var(--color-ink-4)",
+};
+
 /** Compact HH:MM for a revision's received-at epoch-millis. */
 function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], {
@@ -148,32 +199,64 @@ function formatTime(ms: number): string {
   });
 }
 
-function SessionSidebarBase({
-  sessions,
-  activeId,
-  pendingCounts,
-  joined,
-  onSelectJoined,
-  onLeaveJoined,
-  onSelect,
-  onDelete,
-  onRename, onArchive,
-  onSetPlanState, onMoveProject,
-  onExport,
-  onSelectRevision,
-  viewedVersionNumber,
-  unseenIds,
-  arrivalGlow,
-  onOpenRunReport,
-  onCombine,
-  onNewPlan,
-}: SessionSidebarProps) {
+/** What a chat or launch row does; id-based so a memoized row keeps them. */
+interface LightHandlers {
+  pick: (item: SidebarItem) => void;
+  rename: (item: SidebarItem, title: string) => void;
+  archive: (item: SidebarItem) => void;
+  remove: (item: SidebarItem) => void;
+}
+
+interface LightCan {
+  renameChat: boolean;
+  archiveChat: boolean;
+  deleteChat: boolean;
+}
+
+const PLACE_TITLES: Record<SidebarPlace, string> = {
+  home: "Home — the front door and its tabs",
+  runs: "Runs — the orchestration monitor",
+  servers: "Localhost — your local dev servers",
+};
+
+function SessionSidebarBase(props: SessionSidebarProps) {
+  const {
+    sessions, activeId, pendingCounts, joined, onSelectJoined, onLeaveJoined,
+    onSelect, onDelete, onRename, onArchive, onSetPlanState, onMoveProject, onExport,
+    onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow, onOpenRunReport,
+    onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
+    onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
+    onSelectLaunch, needs, working, place, onSelectPlace, runsLive, localhostPorts,
+    terminals, onSelectTerminal, onNewTab,
+  } = props;
+
+  // Home reads selected when it is the Place, or — with no Places — when
+  // nothing is open (the start screen, or no session selected).
+  const nothingOpen = props.startActive ?? (activeId === null && !activeChatId && !activeLaunchId);
+  const homeCurrent = place !== undefined ? place === "home" : nothingOpen;
+  // No row reads as open while another Place or the start screen owns the
+  // stage, even if a plan is still selected underneath.
+  const rowsQuiet = place !== undefined ? place !== null && place !== "home" : nothingOpen;
+  // A launch whose plan has arrived is that plan's row now (sessionGroups),
+  // so the open launch is the open plan until the host catches up.
+  const landed = activeLaunchId ? sessions.find((s) => s.heldTerminalId === activeLaunchId) : undefined;
+  const activeKey = rowsQuiet
+    ? null
+    : landed
+      ? itemKey("plan", landed.sessionId)
+      : activeLaunchId
+        ? itemKey("launch", activeLaunchId)
+        : activeChatId
+          ? itemKey("chat", activeChatId)
+          : activeId
+            ? itemKey("plan", activeId)
+            : null;
+
   // Which sessions are expanded to show their revision tree. The active
   // session auto-expands so its history is visible the moment it's selected.
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(activeId ? [activeId] : []),
   );
-  const [showArchived, setShowArchived] = useState(false);
   useEffect(() => {
     if (!activeId) return;
     setExpanded((prev) => {
@@ -183,7 +266,6 @@ function SessionSidebarBase({
       return next;
     });
   }, [activeId]);
-
   const toggleExpand = useCallback(
     (id: string) =>
       setExpanded((prev) => {
@@ -193,6 +275,21 @@ function SessionSidebarBase({
         return next;
       }),
     [],
+  );
+
+  // Section ids opened past their "Show N more", and the archived fold.
+  const [openSections, setOpenSections] = useState<ReadonlySet<string>>(() => new Set());
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const toggleSection = useCallback((id: string) => setOpenSections((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  }), []);
+
+  const model = useMemo(
+    () => buildSidebar({ sessions, chats, launches, needs, working, activeKey, expanded: openSections }),
+    [sessions, chats, launches, needs, working, activeKey, openSections],
   );
 
   // Combine selection. Local because nothing outside the sidebar watches it —
@@ -239,75 +336,96 @@ function SessionSidebarBase({
     });
   }, [combining, sessions]);
 
-  // The list renders in the backend's `updated_at DESC` order, full stop.
-  // It used to hoist the open plan to index 0, which meant clicking a row
-  // teleported it out from under the cursor in the same frame (stable keys, so
-  // React performs a real DOM move with no transition) while the auto-expand
-  // effect grew a revision tree at the new top and shoved everything else
-  // down. Selection is already legible from the row itself — the inset accent
-  // stripe, the bolder title, the expanded tree — so moving it as well bought
-  // nothing and cost the one thing a list owes you: staying put.
+  const lightHandlers = useMemo<LightHandlers>(() => ({
+    pick: (item) => {
+      if (item.kind === "chat") onSelectChat?.(item.id);
+      else if (item.kind === "launch") onSelectLaunch?.(item.id);
+    },
+    // A chat must keep a name: an emptied field is a cancel.
+    rename: (item, title) => { if (item.kind === "chat" && title) onRenameChat?.(item.id, title); },
+    archive: (item) => { if (item.kind === "chat") onArchiveChat?.(item.id, item.archivedAt === null); },
+    remove: (item) => { if (item.kind === "chat") onDeleteChat?.(item.id); },
+  }), [onSelectChat, onSelectLaunch, onRenameChat, onArchiveChat, onDeleteChat]);
+  const can = useMemo<LightCan>(() => ({
+    renameChat: !!onRenameChat, archiveChat: !!onArchiveChat, deleteChat: !!onDeleteChat,
+  }), [onRenameChat, onArchiveChat, onDeleteChat]);
+
+  const selectPlace = useCallback((p: SidebarPlace) => {
+    if (onSelectPlace) return onSelectPlace(p);
+    // Home IS the door: with no Places to go to, it is where new plans
+    // come from.
+    (onNewPlan ?? onNewSession)?.();
+  }, [onSelectPlace, onNewPlan, onNewSession]);
+
+  const archivedShown = archivedOpen || model.archived.some((item) => item.key === activeKey);
+
+  const row = (item: SidebarItem) => {
+    if (item.kind === "plan" && item.session) {
+      const s = item.session;
+      const active = item.key === activeKey;
+      return (
+        <SessionRow
+          key={item.key}
+          session={s}
+          active={active}
+          expanded={expanded.has(s.sessionId)}
+          pending={pendingCounts[s.sessionId] ?? 0}
+          unseen={unseenIds?.has(s.sessionId) ?? false}
+          glowNonce={arrivalGlow?.sessionId === s.sessionId ? arrivalGlow.nonce : undefined}
+          viewedVersionNumber={active ? viewedVersionNumber : null}
+          combining={combining}
+          pickedAt={picked.indexOf(s.sessionId)}
+          need={item.need}
+          working={item.working}
+          terminals={terminals?.[s.sessionId]}
+          onClick={clickRow}
+          onToggleExpand={toggleExpand}
+          onDelete={onDelete}
+          onRename={onRename}
+          onArchive={onArchive}
+          onSetPlanState={onSetPlanState}
+          onMoveProject={onMoveProject}
+          onExport={onExport}
+          onSelectRevision={onSelectRevision}
+          onOpenRunReport={onOpenRunReport}
+          onSelectTerminal={onSelectTerminal}
+        />
+      );
+    }
+    return (
+      <LightRow
+        key={item.key}
+        item={item}
+        active={item.key === activeKey}
+        handlers={lightHandlers}
+        can={can}
+      />
+    );
+  };
+
+  const empty = model.sections.length === 0 && model.archived.length === 0 && !joined;
+  const ports = localhostPorts ?? [];
+  const portsSummary = ports.length === 0
+    ? null
+    : ports.slice(0, 3).join(" · ") + (ports.length > 3 ? ` +${ports.length - 3}` : "");
+
   return (
-    <div
-      className="flex-1 overflow-y-auto rl-thin-scroll-y"
-      style={{ background: "var(--color-paper)" }}
-    >
-      {/* The front door's entry point. It sits above the list rather than in
-          it because it isn't a session — it is where new ones come from. A
-          contextual row here, not a header button (the header is a closed set
-          of surfaces). Reads as selected when nothing else is, so "where am
-          I" stays answerable. */}
-      {onNewPlan && (
-        <button
-          type="button"
-          onClick={onNewPlan}
-          // "I am on the front door" was communicated by background colour
-          // alone — invisible to a screen reader and to anyone who can't tell
-          // --color-anchor-bg from the paper. `aria-current` says it.
-          aria-current={activeId === null ? "page" : undefined}
-          title="Plan a build — the front door (⌘⇧N)"
-          className="flex w-full items-center gap-2 px-3 py-2.5 border-b text-left"
-          style={{
-            borderColor: "var(--color-rule)",
-            background:
-              activeId === null ? "var(--color-anchor-bg)" : "transparent",
-            color:
-              activeId === null
-                ? "var(--color-anchor-text)"
-                : "var(--color-ink)",
-            fontSize: "12.5px",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          <span aria-hidden style={{ opacity: 0.7 }}>
-            ＋
-          </span>
-          Plan a build
-        </button>
-      )}
-      {joined && (
-        <>
-          <div
-            className="rl-chrome-label px-3 py-2 border-b"
-            style={{ borderColor: "var(--color-rule)" }}
-          >
-            Joined session
-          </div>
-          <JoinedRow
-            joined={joined}
-            active={activeId === joined.key}
-            onClick={() => onSelectJoined?.()}
-            onLeave={() => onLeaveJoined?.()}
-          />
-        </>
-      )}
-      <div
-        className="rl-chrome-label px-3 py-2 border-b flex items-center gap-2"
-        style={{ borderColor: "var(--color-rule)" }}
-      >
+    <nav className="rl-sb" aria-label="Sessions">
+      {/* The Places. Home is the door and its tabs; Runs and Localhost are
+          full views. Without `onSelectPlace` there is nowhere but Home. */}
+      <div className="rl-sb-places">
+        <PlaceRow id="home" icon={House} label="Home" current={homeCurrent} onSelect={selectPlace} />
+        {onSelectPlace && (
+          <PlaceRow id="runs" icon={Workflow} label="Runs" current={place === "runs"} onSelect={selectPlace}
+            end={runsLive ? <span className="rl-sb-place-live">{runsLive} live</span> : null} />
+        )}
+        {onSelectPlace && (
+          <PlaceRow id="servers" icon={Globe} label="Localhost" current={place === "servers"} onSelect={selectPlace}
+            end={portsSummary ? <span className="rl-sb-place-ports" title={ports.join(" · ")}>{portsSummary}</span> : null} />
+        )}
+      </div>
+      <div className="rl-sb-head">
         <span>Sessions</span>
-        <div className="flex-1" />
         {/* A text button on the label row, not a header control: the header is
             a closed set of surfaces, and this is an action on the list under
             it. Hidden below MIN_COMBINE, where it could only ever refuse. */}
@@ -322,44 +440,39 @@ function SessionSidebarBase({
           </button>
         )}
       </div>
-      {sessions.length === 0 ? (
-        <div
-          className="px-3 py-4 italic"
-          style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}
-        >
-          No plans yet.
-        </div>
-      ) : (
-        <ul>
-          {sessions.filter(s => !s.archivedAt || showArchived).map((s) => (
-            <SessionRow
-              key={s.sessionId}
-              session={s}
-              active={s.sessionId === activeId}
-              expanded={expanded.has(s.sessionId)}
-              pending={pendingCounts[s.sessionId] ?? 0}
-              unseen={unseenIds?.has(s.sessionId) ?? false}
-              glowNonce={arrivalGlow?.sessionId === s.sessionId ? arrivalGlow.nonce : undefined}
-              viewedVersionNumber={
-                s.sessionId === activeId ? viewedVersionNumber : null
-              }
-              combining={combining}
-              pickedAt={picked.indexOf(s.sessionId)}
-              onClick={clickRow}
-              onToggleExpand={toggleExpand}
-              onDelete={onDelete}
-              onRename={onRename}
-              onArchive={onArchive}
-              onSetPlanState={onSetPlanState}
-              onMoveProject={onMoveProject}
-              onExport={onExport}
-              onSelectRevision={onSelectRevision}
-              onOpenRunReport={onOpenRunReport}
+      <div className="rl-sb-scroll rl-thin-scroll-y">
+        {joined && (
+          <section className="rl-sb-section" aria-label="Joined session">
+            <div className="rl-sb-label"><span>Joined session</span></div>
+            <JoinedRow
+              joined={joined}
+              active={activeId === joined.key}
+              onClick={() => onSelectJoined?.()}
+              onLeave={() => onLeaveJoined?.()}
             />
-          ))}
-        </ul>
-      )}
-      {sessions.some(s => s.archivedAt) && <button type="button" className="rl-menu-item px-3 py-2 text-left" aria-expanded={showArchived} onClick={() => setShowArchived(v => !v)}>{showArchived ? "▾" : "▸"} Archived · {sessions.filter(s => s.archivedAt).length}</button>}
+          </section>
+        )}
+        {model.sections.map((section) => (
+          <Section key={section.id} section={section} open={openSections.has(section.id)} onToggle={toggleSection}
+            onAdd={section.projectPath && onNewSessionIn ? onNewSessionIn : undefined}>
+            {section.rows.map(row)}
+          </Section>
+        ))}
+        {empty && (
+          <p className="rl-sb-empty">
+            No sessions yet. Start one from <b>Home</b>.
+          </p>
+        )}
+        {model.archived.length > 0 && (
+          <section className="rl-sb-section">
+            <button type="button" className="rl-sb-fold" aria-expanded={archivedShown} onClick={() => setArchivedOpen((v) => !v)}>
+              Archived · {model.archived.length}
+              <ChevronDown size={12} aria-hidden data-open={archivedShown || undefined} />
+            </button>
+            {archivedShown && <ul className="rl-sb-rows" data-archived="">{model.archived.map(row)}</ul>}
+          </section>
+        )}
+      </div>
       {combining && (
         <div className="rl-cmb-bar">
           {/* States the operation, not the mechanic: "3 plans → 1 plan" is
@@ -395,7 +508,72 @@ function SessionSidebarBase({
           </button>
         </div>
       )}
-    </div>
+      {onNewTab && (
+        <button type="button" className="rl-sb-newtab" aria-keyshortcuts="Meta+T" title="New tab (⌘T)" onClick={() => onNewTab()}>
+          <Plus size={14} aria-hidden />
+          <span>New tab</span>
+          <kbd aria-hidden>⌘T</kbd>
+        </button>
+      )}
+    </nav>
+  );
+}
+
+function PlaceRow({ id, icon: Icon, label, current, end, onSelect }: {
+  id: SidebarPlace;
+  icon: typeof House;
+  label: string;
+  current: boolean;
+  end?: ReactNode;
+  onSelect: (place: SidebarPlace) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="rl-sb-place"
+      data-place={id}
+      // Background colour alone is invisible to a screen reader and to
+      // anyone who can't tell the fills apart. `aria-current` says it.
+      aria-current={current ? "page" : undefined}
+      title={PLACE_TITLES[id]}
+      onClick={() => onSelect(id)}
+    >
+      <Icon size={16} aria-hidden />
+      <span className="rl-sb-place-label">{label}</span>
+      {end}
+    </button>
+  );
+}
+
+function Section({ section, open, onToggle, onAdd, children }: {
+  section: SidebarSection;
+  open: boolean;
+  onToggle: (id: string) => void;
+  onAdd?: (projectPath: string) => void;
+  children: ReactNode;
+}) {
+  const labelId = useId();
+  const folder = section.projectPath;
+  return (
+    <section className="rl-sb-section" aria-labelledby={labelId} data-kind={section.kind}>
+      <div className="rl-sb-label">
+        <span id={labelId}>{section.label}</span>
+        {/* A project's own "+": the start screen, pointed at this folder.
+            Always there, as faint as the label it sits on. */}
+        {onAdd && folder && (
+          <button type="button" className="rl-sb-add" aria-label={`New session in ${section.label}`} title={`New session in ${folder}`}
+            onClick={() => onAdd(folder)}>
+            <Plus size={12} aria-hidden />
+          </button>
+        )}
+      </div>
+      <ul className="rl-sb-rows">{children}</ul>
+      {(section.hidden > 0 || (open && section.foldable)) && (
+        <button type="button" className="rl-sb-fold" aria-expanded={open} onClick={() => onToggle(section.id)}>
+          {open ? "Show less" : `Show ${section.hidden} more`}
+        </button>
+      )}
+    </section>
   );
 }
 
@@ -502,6 +680,42 @@ function JoinedRow({
   );
 }
 
+/** A terminal under its plan: the shared vocabulary, 28px. */
+function TerminalRowBase({ sessionId, terminal, onSelect }: {
+  sessionId: string;
+  terminal: SidebarTerminal;
+  onSelect?: (sessionId: string, terminalId: string) => void;
+}) {
+  const { id, title, status } = terminal;
+  return (
+    <li className="rl-sb-term" data-status={status}>
+      <button
+        type="button"
+        className="rl-sb-term-row"
+        title={`${title} — ${status === "needs" ? "needs you" : status}`}
+        onClick={() => onSelect?.(sessionId, id)}
+      >
+        <Terminal size={13} aria-hidden />
+        <span className="rl-sb-term-title">{title}</span>
+        {status === "needs" && (
+          <>
+            <i className="rl-sb-dot rl-sb-need" aria-hidden />
+            <span className="rl-sb-term-state">needs you</span>
+          </>
+        )}
+        {status === "working" && (
+          <>
+            <Spinner size={10} className="rl-sb-spin" />
+            <span className="rl-sb-term-state">working</span>
+          </>
+        )}
+        {status === "exited" && <span className="rl-sb-term-state">exited</span>}
+      </button>
+    </li>
+  );
+}
+const TerminalRow = memo(TerminalRowBase);
+
 function SessionRowBase({
   session,
   active,
@@ -512,6 +726,9 @@ function SessionRowBase({
   viewedVersionNumber,
   combining = false,
   pickedAt = -1,
+  need = null,
+  working = false,
+  terminals,
   onClick,
   onToggleExpand,
   onDelete,
@@ -520,6 +737,7 @@ function SessionRowBase({
   onExport,
   onSelectRevision,
   onOpenRunReport,
+  onSelectTerminal,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -538,6 +756,12 @@ function SessionRowBase({
   /** Which revision the active pane is viewing — only relevant on the active
    *  session row, used to highlight the corresponding RevisionRow. */
   viewedVersionNumber: number | null;
+  /** Why the row sits in Needs you, from the engine's open asks. */
+  need?: NeedReason | null;
+  /** Claude is mid-turn in this plan's terminal. */
+  working?: boolean;
+  /** The plan's terminals, always listed under the row. */
+  terminals?: readonly SidebarTerminal[];
   onClick: (sessionId: string) => void;
   onToggleExpand: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
@@ -548,6 +772,7 @@ function SessionRowBase({
   onExport: (sessionId: string, versionNumber: number) => void;
   onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
   onOpenRunReport?: (sessionId: string) => void;
+  onSelectTerminal?: (sessionId: string, terminalId: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -565,9 +790,13 @@ function SessionRowBase({
   const picked = pickedAt >= 0;
   const rowName =
     session.titleOverride || session.planTitle || session.projectName || session.projectPath || session.sessionId;
+  // The row wears the needs dot for its own ask and for any terminal of its
+  // that is blocked on you — even outside the Needs you section.
+  const termNeeds = terminals?.some((t) => t.status === "needs") ?? false;
+  const needWord = need ? rowStatus({ kind: "plan", need, working: false, session }).word : null;
 
   return (
-    <li className="rl-session-row relative group" onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
+    <li className="rl-session-row relative group" data-need={need || termNeeds ? "" : undefined} onContextMenu={e => { if (!combining) { e.preventDefault(); setMenuAt({ x: e.clientX, y: e.clientY }); setMenuOpen(true); } }} onKeyDown={e => {
       if (!combining && (e.key === "Backspace" || e.key === "Delete") && (e.target as HTMLElement).tagName !== "INPUT") { e.preventDefault(); setConfirming(true); }
     }}>
       {renaming && <RowRename className="rl-row-rename" label="Session title" value={rowName} onDone={(title, how) => {
@@ -619,7 +848,7 @@ function SessionRowBase({
       )}
       {confirming && !combining ? (
         <div
-          className="absolute right-3 top-2 z-10 flex items-center gap-1"
+          className="rl-session-confirm absolute right-3 top-2 z-10 flex items-center gap-1"
           onClick={(e) => e.stopPropagation()}
           style={{
             background: "var(--color-bg-elevated)",
@@ -641,7 +870,7 @@ function SessionRowBase({
               setConfirming(false);
               onDelete(session.sessionId);
             }}
-            className="rounded px-1.5"
+            className="rl-session-confirm-yes rounded px-1.5"
             style={{
               color: "var(--color-on-accent)",
               background: "var(--color-warning)",
@@ -659,7 +888,7 @@ function SessionRowBase({
               e.stopPropagation();
               setConfirming(false);
             }}
-            className="rounded px-1.5"
+            className="rl-session-confirm-no rounded px-1.5"
             style={{
               color: "var(--color-ink-muted)",
               background: "var(--color-anchor-bg)",
@@ -684,6 +913,7 @@ function SessionRowBase({
         type="button"
         onClick={() => onClick(session.sessionId)}
         aria-pressed={combining ? picked : undefined}
+        aria-current={!combining && active ? "page" : undefined}
         aria-label={
           combining
             ? picked
@@ -776,6 +1006,13 @@ function SessionRowBase({
               }}
             />
           )}
+          {/* Needs you: the amber pulse, and the reason when the engine named
+              one. Working: the shared ring. The one status vocabulary. */}
+          {(need || termNeeds) && !combining && (
+            <i className="rl-sb-dot rl-sb-need" title={needWord ?? "A terminal of this plan needs you"} aria-label="Needs you" />
+          )}
+          {needWord && !combining && <span className="rl-sb-needword">{needWord}</span>}
+          {working && !combining && <Spinner size={10} className="rl-sb-spin" />}
           <span
             style={{
               color: STATUS_COLORS[session.status],
@@ -920,6 +1157,15 @@ function SessionRowBase({
           )}
         </div>
       </button>
+      {/* The plan's terminals, always: a terminal blocked on you is news
+          whether or not the revision tree is open. */}
+      {terminals && terminals.length > 0 && (
+        <ul className="rl-sb-terms" aria-label="Terminals">
+          {terminals.map((t) => (
+            <TerminalRow key={t.id} sessionId={session.sessionId} terminal={t} onSelect={onSelectTerminal} />
+          ))}
+        </ul>
+      )}
       {expandable && expanded && (
         <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
           {session.revisions.map((r, idx) => {
@@ -1000,6 +1246,7 @@ function RevisionRow({
         type="button"
         onClick={onSelect}
         title={title}
+        aria-current={viewed ? "true" : undefined}
         className="hover-elevated w-full text-left flex items-center justify-between gap-2 pl-8 pr-2 py-1"
         style={{
           background: viewed ? "var(--color-bg-elevated)" : "transparent",
@@ -1070,18 +1317,200 @@ function RevisionRow({
   );
 }
 
-/** One shell for the life of the page (`isFlowShell` is read once), so a
- *  mounted sidebar never switches layout under its own state. */
-function SessionSidebarLayout(props: SessionSidebarProps) {
-  if (props.layout !== "flow") return <SessionSidebarBase {...props} />;
-  // Null while the chunk lands: the house rule is a quietly blank plate.
+// ── Chat and launch rows ────────────────────────────────────────────────────
+
+function StatusGlyph({ icon, tone, need }: { icon: StatusIcon; tone: StatusTone; need: boolean }) {
+  // Needs you is the amber pulse, in the one vocabulary.
+  if (icon === "dot") return <i className={`rl-sb-dot${need ? " rl-sb-need" : ""}`} aria-hidden style={need ? undefined : { background: TONE[tone] }} />;
+  // Working turns the shared ring: an HTML element the compositor spins. A
+  // rotating <svg> is repainted on the main thread every frame.
+  if (icon === "spin") return <Spinner size={12} className="rl-sb-spin" style={{ color: TONE[tone] }} />;
+  if (icon === "alert") return <TriangleAlert size={14} aria-hidden style={{ color: TONE[tone] }} />;
+  if (icon === "chat") return <MessageSquare size={14} aria-hidden style={{ color: TONE[tone] }} />;
+  return <FileText size={14} aria-hidden style={{ color: TONE[tone] }} />;
+}
+
+/** A chat, or a launch whose plan has not arrived: a light two-line row
+ *  (a launch is one line, italic, tagged "launching"). Every row has a ⋯
+ *  (also right-click, and ⌫ to delete a chat). */
+function LightRowBase({ item, active, handlers, can }: {
+  item: SidebarItem;
+  active: boolean;
+  handlers: LightHandlers;
+  can: LightCan;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const rowButton = useRef<HTMLButtonElement>(null);
+  const chat = item.kind === "chat";
+  const deletable = chat && can.deleteChat;
+  const acts = {
+    open: () => handlers.pick(item),
+    rename: chat && can.renameChat ? () => setRenaming(true) : undefined,
+    archive: chat && can.archiveChat ? () => handlers.archive(item) : undefined,
+    remove: deletable ? () => setConfirming(true) : undefined,
+  };
+  // A launch has no record yet, so nothing to rename, archive or delete: its
+  // menu only opens it.
+  const actions: RowAction[] = chat
+    ? chatRowActions(item, acts)
+    : [{ label: "Open session", icon: <FileText size={14} aria-hidden />, onSelect: acts.open }];
+  const openMenu = (at: { x: number; y: number } | null) => {
+    setMenuAt(at);
+    setMenuOpen(true);
+  };
+  // Rename and the delete ask both stand in for the row button, so focus
+  // can only go back to it once it is mounted again.
+  const refocus = useRef(false);
+  useLayoutEffect(() => {
+    if (refocus.current && rowButton.current) {
+      refocus.current = false;
+      rowButton.current.focus();
+    }
+  });
+  const back = (focus: boolean) => {
+    refocus.current = focus;
+    setRenaming(false);
+    setConfirming(false);
+  };
+  const status = rowStatus(item);
+  const icon = <span className="rl-sb-icon"><StatusGlyph icon={status.icon} tone={status.tone} need={item.need !== null} /></span>;
+  const tooltip = [item.title, item.projectPath, status.detail].filter(Boolean).join("\n");
   return (
-    <Suspense fallback={null}>
-      <FlowSidebar {...props} />
-    </Suspense>
+    <li
+      className="rl-sb-item"
+      data-kind={item.kind}
+      data-active={active || undefined}
+      data-menu={menuOpen || undefined}
+      data-need={item.need ? "" : undefined}
+      // The row's keys, from the row or its ⋯ (the menu, the rename field and
+      // the delete ask keep their own).
+      onKeyDown={(e) => {
+        const from = e.target as HTMLElement;
+        if (from !== rowButton.current && !from.classList.contains("rl-sb-dots")) return;
+        if ((e.key === "Backspace" || e.key === "Delete") && deletable) {
+          e.preventDefault();
+          setConfirming(true);
+        } else if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+          e.preventDefault();
+          openMenu(null);
+        }
+      }}
+      onContextMenu={(e) => {
+        // The rename field keeps the system's own menu (paste).
+        if (renaming || confirming) return;
+        e.preventDefault();
+        openMenu({ x: e.clientX, y: e.clientY });
+      }}
+    >
+      {renaming ? (
+        <div className="rl-sb-row" data-editing="">
+          {icon}
+          <RowRename className="rl-sb-rename" label="Chat title" value={item.title} onDone={(title, how) => {
+            back(how !== "blur");
+            if (title !== null) handlers.rename(item, title);
+          }} />
+        </div>
+      ) : confirming ? (
+        <div className="rl-sb-row" data-confirming="">
+          {icon}
+          <span className="rl-sb-title">{item.title}</span>
+          <ConfirmDelete
+            onConfirm={() => { back(false); handlers.remove(item); }}
+            onCancel={() => back(true)}
+          />
+        </div>
+      ) : (
+        <>
+          <button
+            ref={rowButton}
+            type="button"
+            className="rl-sb-row"
+            aria-current={active ? "page" : undefined}
+            title={tooltip}
+            onClick={() => handlers.pick(item)}
+          >
+            {icon}
+            {chat ? (
+              <span className="rl-sb-text">
+                <span className="rl-sb-line">
+                  <span className="rl-sb-title">{item.title}</span>
+                </span>
+                <span className="rl-sb-meta">
+                  <span className="rl-sb-status" style={{ color: TONE[status.tone] }}>{status.word}</span>
+                  <span className="rl-sb-age">· {rowAge(item.at)}</span>
+                </span>
+              </span>
+            ) : (
+              <>
+                <span className="rl-sb-title">{item.title}</span>
+                <span className="rl-sb-tag">{item.need ? status.word : "launching"}</span>
+              </>
+            )}
+          </button>
+          <RowMenu
+            open={menuOpen}
+            onOpenChange={(open) => { setMenuOpen(open); if (!open) setMenuAt(null); }}
+            at={menuAt}
+            label={item.title}
+            actions={actions}
+            triggerClassName="rl-sb-dots"
+          />
+        </>
+      )}
+    </li>
+  );
+}
+
+/** Rows re-render only when something they show changed: a summaries read
+ *  rebuilds every item object, so comparing the fields is enough. */
+const LightRow = memo(LightRowBase, (a, b) =>
+  a.active === b.active &&
+  a.handlers === b.handlers &&
+  a.can === b.can &&
+  a.item.key === b.item.key &&
+  a.item.title === b.item.title &&
+  a.item.at === b.item.at &&
+  a.item.mode === b.item.mode &&
+  a.item.need === b.item.need &&
+  a.item.working === b.item.working &&
+  a.item.archivedAt === b.item.archivedAt,
+);
+
+/** The two-step delete, inline in the row: ⌫ or the menu asks, Delete
+ *  confirms, Escape or Cancel backs out. */
+function ConfirmDelete({ onConfirm, onCancel }: {
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="rl-sb-confirm"
+      role="group"
+      aria-label="Delete this chat?"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className="rl-sb-confirm-yes"
+        autoFocus
+        title="Delete (cannot be undone)"
+        onClick={onConfirm}
+      >
+        Delete
+      </button>
+      <button type="button" className="rl-sb-confirm-no" onClick={onCancel}>Cancel</button>
+    </div>
   );
 }
 
 /** Memoized: the sidebar reconciles the whole session list, and a sidebar
  *  drag changes only its width. */
-export const SessionSidebar = memo(SessionSidebarLayout);
+export const SessionSidebar = memo(SessionSidebarBase);

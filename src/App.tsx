@@ -2862,19 +2862,17 @@ function App() {
   const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
   // A held plan names the terminal its CLI is waiting in.
   useEffect(() => {
-    if (!flowShell) return;
     bindSessionTerminals(
       summaries.flatMap((s) =>
         s.heldTerminalId ? [{ sessionId: s.sessionId, terminalId: s.heldTerminalId }] : [],
       ),
     );
-  }, [flowShell, summaries, bindSessionTerminals]);
+  }, [summaries, bindSessionTerminals]);
   // The handoff: a launch's plan arriving binds its session to the launch's
   // terminal and, when the stage is on that launch, flips it to the plan —
   // the same conversation, now with a plan. The general arrival rule (the
   // `plan-received` listener below) still decides everything else.
   useEffect(() => {
-    if (!flowShell) return;
     const unlisten = listen<PlanReceivedEvent>("plan-received", (e) => {
       const { launchId, sessionId } = e.payload;
       const launch = launchId
@@ -2883,7 +2881,9 @@ function App() {
       if (!launch) return;
       bindSessionTerminals([{ sessionId, terminalId: launch.terminalId }]);
       noteFlowLaunch({ type: "arrived", launchId: launch.launchId });
-      if (focusedLaunchRef.current !== launch.terminalId) return;
+      // Both shells keep the launch registry (the sidebar's pending rows);
+      // only flow's stage follows a launch onto its plan.
+      if (!flowShell || focusedLaunchRef.current !== launch.terminalId) return;
       selectSessions();
       setActiveId(sessionId);
       setViewedVersionNumber(null);
@@ -2905,8 +2905,8 @@ function App() {
   // The sidebar's launch rows (its flow layout): `launches`, with
   // `activeLaunchId` and `selectFlowLaunch`.
   const flowSidebarLaunches = useMemo(
-    () => (flowShell ? sidebarLaunches(flowLaunches, terminalKinds, terminalTitles) : []),
-    [flowShell, flowLaunches, terminalKinds, terminalTitles],
+    () => sidebarLaunches(flowLaunches, terminalKinds, terminalTitles),
+    [flowLaunches, terminalKinds, terminalTitles],
   );
   // Its spinners and "Needs you" reasons, from the CLIs' own hooks.
   const { working: flowWorking, needs: flowNeeds } = useMemo(
@@ -7168,13 +7168,13 @@ function App() {
     }
     // Flow: the session exists from here, before any plan row does. A launch
     // the user asked to see puts the stage on it.
-    if (flowShell) {
-      noteFlowLaunch({
-        type: "launched",
-        launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
-      });
-      if (!req.background) selectFlowLaunch(terminalId);
-    }
+    // The launch registry feeds the sidebar's pending rows in both shells;
+    // flow's stage also goes to the launch.
+    noteFlowLaunch({
+      type: "launched",
+      launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
+    });
+    if (flowShell && !req.background) selectFlowLaunch(terminalId);
     if (run) {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
@@ -7943,8 +7943,8 @@ function App() {
   // Flow's launches obey the same law: one whose terminal closed is gone
   // from the stage and the sidebar, since no plan can come from a dead PTY.
   useEffect(() => {
-    if (flowShell) noteFlowLaunch({ type: "terminals", live: liveTermIds });
-  }, [flowShell, liveTermIds, noteFlowLaunch]);
+    noteFlowLaunch({ type: "terminals", live: liveTermIds });
+  }, [liveTermIds, noteFlowLaunch]);
 
   // The run's pill retires itself once the run is under way: no plan arrives
   // to clear it, and a run's tile is its own status from then on. Keyed on
@@ -9230,22 +9230,41 @@ function App() {
   // Launches are the stage's registry (lib/flowSessions): every launch until
   // its plan arrives or its terminal closes, the one on the stage active.
   const flowSidebarData = useMemo(
-    () =>
-      isFlowShell()
+    () => ({
+      launches: flowSidebarLaunches,
+      activeLaunchId,
+      working: flowWorking,
+      needs: flowNeeds,
+      ...(isFlowShell()
         ? {
-            layout: "flow" as const,
             startActive: flowStartOnStage && !roomChat,
             chats,
             activeChatId: roomChat ? chatId : null,
-            launches: flowSidebarLaunches,
-            activeLaunchId,
-            onSelectLaunch: selectFlowLaunch,
-            working: flowWorking,
-            needs: flowNeeds,
           }
-        : null,
-    [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, selectFlowLaunch, flowWorking, flowNeeds],
+        : {}),
+    }),
+    [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
+  // The workbench sidebar's own data (W1): which Place reads selected, the
+  // live runs and Localhost ports beside them, and each session's terminals
+  // in the shared status vocabulary — its agent's terminal from
+  // `useSessionTerminals`, its state from the CLI's own hooks.
+  const sidebarPlace = !classicWb ? null : wbView.focusedKind === "runs" ? "runs" as const : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
+  const sidebarRunsLive = useMemo(() => summaries.filter((s) => isLiveRunState(s.runState)).length, [summaries]);
+  const sidebarPorts = useMemo(() => (devServers.scan?.running ?? []).map((r) => `:${r.port}`), [devServers.scan]);
+  const sidebarTerminals = useMemo(() => {
+    const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited" }[]> = {};
+    for (const [sessionId, terminalId] of sessionTerminals) {
+      const attention = terminalAttention.get(terminalId);
+      const status = liveTermIds && !liveTermIds.includes(terminalId)
+        ? "exited" as const
+        : attention?.kind === "needs-you" || attention?.kind === "your-turn" ? "needs" as const
+        : attention?.kind === "working" ? "working" as const
+        : "idle" as const;
+      (out[sessionId] ??= []).push({ id: terminalId, title: terminalTitles.get(terminalId) || "claude", status });
+    }
+    return out;
+  }, [sessionTerminals, terminalAttention, terminalTitles, liveTermIds]);
 
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
@@ -9265,6 +9284,39 @@ function App() {
       setActiveId(id);
     },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
+    // The Places (W1): Home is the workbench's Home set (its door lands),
+    // Runs and Localhost open in the current set.
+    onSelectPlace: (place: "home" | "runs" | "servers") => {
+      if (place === "home") {
+        tripDoor();
+        setActiveId(null);
+        return;
+      }
+      selectSurface(place);
+    },
+    // A session's terminal row: the dock's tile, hailed. (Terminal panes in
+    // the centre are W3's.)
+    onSelectTerminal: (_sessionId: string, terminalId: string) => {
+      if (isFlowShell()) {
+        flowShowTerminalRef.current(terminalId, "terminal");
+        return;
+      }
+      revealTerm();
+      terminalsRef.current?.selectTab(terminalId);
+      terminalsRef.current?.hailTerminal(terminalId);
+    },
+    // A pending launch's row: flow puts its stage on it; classic shows the
+    // terminal it is planning in.
+    onSelectLaunch: (terminalId: string) => {
+      if (isFlowShell()) {
+        selectFlowLaunch(terminalId);
+        return;
+      }
+      revealTerm();
+      terminalsRef.current?.selectTab(terminalId);
+      terminalsRef.current?.hailTerminal(terminalId);
+    },
+    onNewTab: openDoorTab,
     onCombine: (ids: string[]) => void beginCombine(ids),
     onDelete: deleteSession,
     onRename: renameSession,
@@ -10004,6 +10056,10 @@ function App() {
               viewedVersionNumber={viewedVersionNumber}
               unseenIds={unseenPlanIds}
               arrivalGlow={arrivalGlow}
+              place={sidebarPlace}
+              runsLive={sidebarRunsLive}
+              localhostPorts={sidebarPorts}
+              terminals={sidebarTerminals}
             />
             </Suspense>
           ) : (

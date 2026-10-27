@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Flow sidebar fidelity check (PLAN Wave C, step C2): the production
-// SessionSidebar in its flow layout, in a vite fixture with synthetic Tauri
+// SessionSidebar, in a vite fixture with synthetic Tauri
 // services, driven by headless Chrome over CDP. Each board state (4a, 4b,
 // 4d with its row menu, 5a) is measured against the geometry the design HTML
 // renders, captured beside the board's own sidebar crop, then re-captured in
@@ -263,7 +263,7 @@ function geometry(name, m) {
 
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/components/SessionSidebar.tsx", "src/shell/FlowSidebar.tsx", "src/shell/FlowSidebar.css", "src/components/RowMenu.tsx", "src/lib/sessionGroups.ts", "src/lib/sessionMode.ts"]) {
+  for (const file of ["src/components/SessionSidebar.tsx", "src/components/SessionSidebar.css", "src/components/RowMenu.tsx", "src/lib/sessionGroups.ts", "src/lib/sessionMode.ts"]) {
     report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   }
   server = await createServer({

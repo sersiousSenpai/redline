@@ -1,4 +1,4 @@
-// Flow sidebar fixture: the production SessionSidebar in its flow layout,
+// Sidebar fixture: the production SessionSidebar (one layout, grouped rows),
 // laid out as the boards lay it out (a 46px top bar and its rule, then the
 // sidebar column), with the data each board shows. Only the data is made up.
 import { useEffect, useMemo, useState } from "react";
@@ -161,7 +161,6 @@ function Fixture() {
           <SessionSidebar
             key={name}
             {...handlers}
-            layout={scene.classic ? "classic" : "flow"}
             sessions={scene.sessions}
             chats={scene.chats}
             launches={scene.launches}
