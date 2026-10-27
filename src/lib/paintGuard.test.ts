@@ -651,23 +651,23 @@ describe("paint guard: SVG stays still", () => {
     const css = {
       rel: "a.css",
       text: `@keyframes turn { to { transform: rotate(360deg); } }
-        @media (prefers-reduced-motion: no-preference) { .rl-sb-spin { animation: turn 1.1s linear infinite; } }
-        .rl-pulse-blades[data-state="thinking"] { animation: turn 1.2s linear infinite; }
+        @media (prefers-reduced-motion: no-preference) { .row-spin { animation: turn 1.1s linear infinite; } }
+        .mark-blades[data-state="thinking"] { animation: turn 1.2s linear infinite; }
         .still { animation: none; }
         .rl-fold svg[data-open] { transform: rotate(180deg); }`,
     };
     const tsx = {
       rel: "a.tsx",
       text: `import { LoaderCircle as Loader, Hammer } from "lucide-react";
-        const a = <Loader size={14} className={busy ? "rl-sb-spin" : undefined} onClick={() => x > 1} />;
-        const b = <svg><g className="rl-pulse-blades" data-state={s}><line x1={1} /></g></svg>;
-        const c = <span className="rl-sb-spin" />;
+        const a = <Loader size={14} className={busy ? "row-spin" : undefined} onClick={() => x > 1} />;
+        const b = <svg><g className="mark-blades" data-state={s}><line x1={1} /></g></svg>;
+        const c = <span className="row-spin" />;
         const d = <Hammer className="still" />;
         const e = <svg className={\`icon \${tone}\`} />;`,
     };
     expect(svgAnimationViolations([css, tsx])).toEqual([
-      expect.stringContaining("a.tsx:2 <Loader>: wears .rl-sb-spin, which a.css:2 animates"),
-      expect.stringContaining("a.tsx:3 <g>: wears .rl-pulse-blades, which a.css:3 animates"),
+      expect.stringContaining("a.tsx:2 <Loader>: wears .row-spin, which a.css:2 animates"),
+      expect.stringContaining("a.tsx:3 <g>: wears .mark-blades, which a.css:3 animates"),
     ]);
   });
 
