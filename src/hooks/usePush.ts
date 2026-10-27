@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { usePoll } from "./usePoll";
+import { useGitWatch } from "./useFsWatch";
 
 import type {
   CommitDraft,
@@ -30,10 +31,12 @@ export function usePush(repo: string | null, reviewId: string | null) {
   const reviewIdRef = useRef(reviewId);
   reviewIdRef.current = reviewId;
 
-  // Status follows the repo; a modest poll keeps the strip honest while the
-  // agent (or the user's terminal) works underneath it. Every status read,
-  // the poll's and the ones a push asks for, goes through the poll, so a
-  // status that didn't change keeps its object and costs the pane no render.
+  // Status follows the repo: git's own moves arrive through the .git watch,
+  // a window focus re-reads for working-tree edits made elsewhere, and a
+  // once-a-minute poll is the backstop (a worktree's .git is a file the
+  // watch can't follow). Every status read, those and the ones a push asks
+  // for, goes through the poll, so a status that didn't change keeps its
+  // object and costs the pane no render.
   const refreshStatus = usePoll(
     () => {
       const r = repoRef.current;
@@ -41,10 +44,16 @@ export function usePush(repo: string | null, reviewId: string | null) {
         ? invoke<GitStatus>("push_status", { repo: r }).catch(() => null)
         : null;
     },
-    repo ? 10_000 : null,
+    repo ? 60_000 : null,
     { pauseWhenHidden: true, skipIfUnchanged: true, onResult: setStatus },
     [repo],
   );
+  useGitWatch(repo, refreshStatus);
+  useEffect(() => {
+    const onFocus = () => refreshStatus();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshStatus]);
   useEffect(() => setStatus(null), [repo]);
 
   const refreshLastPush = useCallback(async () => {

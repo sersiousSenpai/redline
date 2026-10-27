@@ -325,8 +325,9 @@ describe("terminal state", () => {
     ];
     await emit({ terminalId: agent, sessionId: "s", at: Date.now() - 1000, kind: "working" });
     await emit(yourTurn(oneShot, Date.now() - 1000));
-    // Async: each fleet tick's reads land before the next tick fires.
-    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    // Async: each fleet tick's reads land before the next tick fires; the
+    // process sample rides every 12 s tick.
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(stateOf(server)).toBe("serving");
     expect(host.querySelector<HTMLElement>(`[data-header-id="${server}"]`)?.dataset.port).toBe("5173");
     expect(stateOf(agent)).toBe("working");
@@ -334,7 +335,7 @@ describe("terminal state", () => {
     // Both agents exit (one killed mid-turn, one a `claude -p` that ended
     // after its Stop): their shells hold the foreground in the next sample.
     mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }, { id: oneShot, fgComm: "zsh", fgIsShell: true, ports: [] }];
-    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(stateOf(agent)).toBe("idle");
     expect(stateOf(oneShot)).toBe("your-turn");
   });
@@ -348,12 +349,12 @@ describe("terminal state", () => {
     await mount();
     const scans = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_procs").length;
     // Run the fleet poll until a sample is out on a scan that never returns.
-    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     const first = scans();
     await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(scans()).toBe(first);
     await act(async () => { release([]); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
     expect(scans()).toBe(first + 1);
   });
 });
@@ -368,13 +369,25 @@ describe("the fleet poll", () => {
     vi.useRealTimers();
   });
 
-  it("reads every visible cwd on one clock, and what each terminal runs on every other tick", async () => {
+  it("reads every visible cwd and what each terminal runs on one 12 s clock, while the dock is open", async () => {
     await mount();
     const cwds = count("pty_cwds");
     const procs = count("pty_procs");
-    await tick(8000);
+    await tick(48_000);
     expect(count("pty_cwds") - cwds).toBe(4);
-    expect(count("pty_procs") - procs).toBe(2);
+    expect(count("pty_procs") - procs).toBe(4);
+  });
+
+  it("reads nothing while the dock is collapsed, and everything the moment it opens", async () => {
+    await mount({ collapsed: true });
+    const cwds = count("pty_cwds");
+    const procs = count("pty_procs");
+    await tick(48_000);
+    expect(count("pty_cwds")).toBe(cwds);
+    expect(count("pty_procs")).toBe(procs);
+    await mount({ collapsed: false });
+    expect(count("pty_cwds")).toBeGreaterThan(cwds);
+    expect(count("pty_procs")).toBeGreaterThan(procs);
   });
 
   // The process scan is a system-wide `lsof` of listening sockets, the read
@@ -386,10 +399,10 @@ describe("the fleet poll", () => {
     mocks.invoke.mockImplementation(async (command, args) =>
       command === "pty_procs" ? new Promise(() => {}) : base(command, args));
     await mount();
-    await tick(4000);
+    await tick(6000);
     const cwds = count("pty_cwds");
     const procs = count("pty_procs");
-    await tick(8000);
+    await tick(48_000);
     expect(count("pty_cwds") - cwds).toBe(4);
     expect(count("pty_procs")).toBe(procs);
   });
@@ -402,7 +415,7 @@ describe("the fleet poll", () => {
     await open();
     expect(count("pty_cwds")).toBeGreaterThan(cwds);
     expect(count("pty_procs")).toBe(procs);
-    await tick(3000);
+    await tick(12_000);
     expect(count("pty_procs")).toBe(procs + 1);
   });
 
@@ -431,10 +444,10 @@ describe("the fleet poll", () => {
     await mount({ onFocusedCwd: (id, cwd) => seen.push([id, cwd]) });
     const id = focused()!;
     expect(seen).toEqual([[id, "/work/api"]]);
-    await tick(4000);
+    await tick(6000);
     expect(seen).toHaveLength(1);
     mocks.cwd = "/work/web";
-    await tick(2000);
+    await tick(6000);
     expect(seen).toEqual([[id, "/work/api"], [id, "/work/web"]]);
   });
 });

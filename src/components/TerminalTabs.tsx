@@ -189,15 +189,17 @@ const MAX_UNTILED_MRU = 32;
  *  under it, the press is the chip's ordinary click. */
 const DRAG_THRESHOLD_PX = 4;
 
-/** The fleet poll's tick: every visible tile's live cwd, in one `lsof`. */
-const FLEET_POLL_MS = 2000;
+/** The fleet poll's tick: every visible tile's live cwd (a kernel read per
+ *  shell, no fork) and the process sample. Twelve seconds, and only while
+ *  the dock is open: a label that follows a `cd` a few seconds late costs
+ *  nothing, and the events that matter (a tile shown, the focus moved, the
+ *  menu opened) sample at once. */
+const FLEET_POLL_MS = 12_000;
 
 /** How often `pty_procs` samples every terminal's foreground program and
- *  ports (one `ps` + one `lsof` for the whole fleet, perf-budget rule 5) —
- *  every other fleet tick. Slower than the cwds: a state badge a few seconds
- *  late costs nothing, and the settle windows that act on it are fifteen
- *  seconds and up. */
-const PROCS_POLL_MS = 2 * FLEET_POLL_MS;
+ *  ports — the one fork left, a system-wide `lsof` of listening sockets
+ *  (perf-budget rule 5) — every fleet tick, while tiles are on screen. */
+const PROCS_POLL_MS = FLEET_POLL_MS;
 
 /** The intercept strip. Text can't be injected into the held PTY, so this fakes
  *  one line of terminal output: terminal bg + mono font + matching padding so
@@ -850,7 +852,8 @@ export const TerminalTabs = memo(
   // process scan keeps its own flag and runs beside it, never in front of it,
   // because its system-wide `lsof` is the read that crawls or hangs, and the
   // cwds are what the labels and the host's folder-follow wait on. Paused
-  // while the window is hidden. Hidden terminals keep their last-known label
+  // while the window is hidden and while the dock is collapsed — nothing it
+  // reads is on screen. Hidden terminals keep their last-known label
   // and refresh the instant they're shown (a `tiles` change samples now) or
   // the menu opens (refreshAllCwds).
   const procsAtRef = useRef(-Infinity);
@@ -877,10 +880,14 @@ export const TerminalTabs = memo(
           /* keep last-known labels */
         });
     },
-    FLEET_POLL_MS,
+    collapsed ? null : FLEET_POLL_MS,
     { pauseWhenHidden: true, leading: false },
+    [collapsed],
   );
-  useEffect(() => sampleFleetNow(), [tiles, sampleFleetNow]);
+  // A tile shown, the focus moved, or the dock opened: read now.
+  useEffect(() => {
+    if (!collapsed) sampleFleetNow();
+  }, [tiles, focusedId, collapsed, sampleFleetNow]);
 
   const focusedCwd = focusedId ? liveCwds.get(focusedId) : undefined;
   useEffect(() => {

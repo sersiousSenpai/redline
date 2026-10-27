@@ -1237,6 +1237,96 @@ fn parse_lsof_client_pid(output: &str, peer_port: u16) -> Option<u32> {
     None
 }
 
+/// What `ps` and `lsof -d cwd` used to be forked for, read from the kernel
+/// instead: one `proc_pidinfo` per process, no subprocess. A fork per poll
+/// was the host's steadiest idle cost (docs/perf-budget.md "Idle heat").
+#[cfg(target_os = "macos")]
+mod libproc {
+    use std::collections::HashMap;
+    use std::mem::{size_of, MaybeUninit};
+
+    fn c_str(bytes: &[libc::c_char]) -> String {
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end].iter().map(|&b| b as u8).collect::<Vec<u8>>()).into_owned()
+    }
+
+    fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+        let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: the kernel fills at most `size` bytes of a buffer that large;
+        // a short answer (a pid that is gone, or not ours to read) is rejected
+        // before the buffer is assumed initialized.
+        let got = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+        (got == size).then(|| unsafe { info.assume_init() })
+    }
+
+    /// A process's parent.
+    pub fn ppid(pid: u32) -> Option<u32> {
+        bsd_info(pid).map(|info| info.pbi_ppid)
+    }
+
+    /// The process's current directory — `lsof -d cwd`'s answer.
+    pub fn cwd(pid: u32) -> Option<String> {
+        let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::uninit();
+        let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // SAFETY: as in `bsd_info`.
+        let got = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDVNODEPATHINFO, 0, info.as_mut_ptr().cast(), size) };
+        if got != size {
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        // libc declares the MAXPATHLEN buffer as 32 × 32 bytes; it is one C string.
+        let path: &[libc::c_char] = unsafe { std::slice::from_raw_parts(info.pvi_cdir.vip_path.as_ptr().cast(), 32 * 32) };
+        Some(c_str(path)).filter(|p| !p.is_empty())
+    }
+
+    /// pid → (ppid, name) for every process — what `ps -A -o pid=,ppid=,comm=`
+    /// printed. The name is the kernel's own (`p_name`, else `p_comm`).
+    pub fn table() -> HashMap<u32, (u32, String)> {
+        let mut pids: Vec<libc::c_int> = vec![0; 2048];
+        loop {
+            let bytes = (pids.len() * size_of::<libc::c_int>()) as libc::c_int;
+            // SAFETY: the kernel writes at most `bytes` into the vector's buffer.
+            let got = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+            if got < 0 {
+                return HashMap::new();
+            }
+            let got = got as usize;
+            if got < pids.len() {
+                pids.truncate(got);
+                break;
+            }
+            // Filled to the brim: there may be more.
+            pids.resize(pids.len() * 2, 0);
+        }
+        pids.into_iter()
+            .filter(|&pid| pid > 0)
+            .filter_map(|pid| {
+                let info = bsd_info(pid as u32)?;
+                let name = match c_str(&info.pbi_name) {
+                    n if n.is_empty() => c_str(&info.pbi_comm),
+                    n => n,
+                };
+                Some((pid as u32, (info.pbi_ppid, name)))
+            })
+            .collect()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod libproc {
+    use std::collections::HashMap;
+    pub fn ppid(_pid: u32) -> Option<u32> {
+        None
+    }
+    pub fn cwd(_pid: u32) -> Option<String> {
+        None
+    }
+    pub fn table() -> HashMap<u32, (u32, String)> {
+        HashMap::new()
+    }
+}
+
 /// Climb the parent chain from `start_pid` until a registered shell pid is
 /// hit. Bounded: the real chain is short (claude → shell), and a pid that
 /// escapes to launchd (pid ≤ 1) was never ours.
@@ -1258,89 +1348,35 @@ fn walk_to_terminal(
     None
 }
 
+/// A process's parent, from the kernel — no fork per hop.
 fn ppid_of(pid: u32) -> Option<u32> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    libproc::ppid(pid)
 }
 
 /// The live working directory of a terminal's shell — so "open a terminal
-/// here" can follow wherever the user `cd`'d. macOS/Linux: ask `lsof` for the
-/// shell pid's `cwd` fd. Returns `None` if it can't be determined.
+/// here" can follow wherever the user `cd`'d. Read from the kernel, no fork.
+/// `None` when it can't be determined.
 #[tauri::command]
 pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> {
     let session = session_of(&state, &id)?;
     let pid = lock_ok(&session).pid?;
-    let output = std::process::Command::new("lsof")
-        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|l| l.strip_prefix('n').map(|p| p.to_string()))
-        .filter(|p| !p.is_empty())
+    libproc::cwd(pid)
 }
 
-/// Batched twin of `pty_cwd`: the live cwds of every requested terminal in ONE
-/// `lsof` fork. The frontend polls every *visible* tile each tick, and the tile
-/// menu refreshes the whole fleet on open — per-id `pty_cwd` calls made that one
-/// subprocess per terminal per tick (the exact regression the old two-pane cap
-/// existed to contain). Ids with no live session, no pid, or no `lsof` answer
-/// are simply absent from the map — absence is the "keep your last-known label"
-/// signal, never an error.
+/// Batched twin of `pty_cwd`: the live cwds of every requested terminal, one
+/// kernel read per shell — this used to fork one `lsof` for the fleet every
+/// two seconds. Ids with no live session, no pid, or no answer are simply
+/// absent from the map: absence is the "keep your last-known label" signal,
+/// never an error.
 #[tauri::command]
 pub fn pty_cwds(state: tauri::State<'_, PtyState>, ids: Vec<String>) -> HashMap<String, String> {
-    let mut pid_to_id: HashMap<u32, String> = HashMap::new();
-    for id in ids {
-        if let Some(session) = session_of(&state, &id) {
-            if let Some(pid) = lock_ok(&session).pid {
-                pid_to_id.insert(pid, id);
-            }
-        }
-    }
-    if pid_to_id.is_empty() {
-        return HashMap::new();
-    }
-    let pid_list = pid_to_id
-        .keys()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    // Don't gate on exit status: lsof exits non-zero when ANY listed pid is
-    // already gone, while still printing the groups for the live ones.
-    let Ok(output) = std::process::Command::new("lsof")
-        .args(["-a", "-p", &pid_list, "-d", "cwd", "-Fpn"])
-        .output()
-    else {
-        return HashMap::new();
-    };
-    parse_lsof_cwds(&String::from_utf8_lossy(&output.stdout))
-        .into_iter()
-        .filter_map(|(pid, path)| pid_to_id.get(&pid).map(|id| (id.clone(), path)))
+    ids.into_iter()
+        .filter_map(|id| {
+            let session = session_of(&state, &id)?;
+            let pid = lock_ok(&session).pid?;
+            Some((id, libproc::cwd(pid)?))
+        })
         .collect()
-}
-
-/// Demultiplex `lsof -Fpn` output into pid → cwd. Groups arrive as `p<pid>` /
-/// `fcwd` / `n<path>` lines; the `p` field scopes every following `n` until the
-/// next `p`. `f` lines (and anything else) are skipped, an `n` before any `p`
-/// is dropped rather than misattributed.
-fn parse_lsof_cwds(output: &str) -> HashMap<u32, String> {
-    let mut out = HashMap::new();
-    let mut current_pid: Option<u32> = None;
-    for line in output.lines() {
-        if let Some(pid) = line.strip_prefix('p') {
-            current_pid = pid.trim().parse().ok();
-        } else if let Some(path) = line.strip_prefix('n') {
-            if let Some(pid) = current_pid {
-                if !path.is_empty() {
-                    out.insert(pid, path.to_string());
-                }
-            }
-        }
-    }
-    out
 }
 
 /// What a terminal is running right now, for the tile wall's state badges
@@ -1361,21 +1397,18 @@ pub struct TermProc {
     ports: Vec<u16>,
 }
 
-/// One row per live terminal from two subprocesses for the whole fleet — one
-/// `ps` process table and one `lsof` of listening sockets — never one per
-/// terminal (perf-budget rule 5). The process table also serves the
-/// listener → shell ancestry walk, which would otherwise fork a `ps` per hop.
+/// One row per live terminal. The process table is read from the kernel
+/// (`proc_listallpids` + `proc_pidinfo`, no fork); the listening sockets are
+/// still one `lsof` for the whole fleet — never one per terminal (perf-budget
+/// rule 5) — which is why the frontend only asks while tiles are on screen.
+/// The table also serves the listener → shell ancestry walk.
 #[tauri::command]
 pub fn pty_procs(state: tauri::State<'_, PtyState>) -> Vec<TermProc> {
     let terminals = foreground_snapshot(&state);
     if terminals.is_empty() {
         return Vec::new();
     }
-    let table = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,comm="])
-        .output()
-        .map(|o| parse_ps_table(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default();
+    let table = libproc::table();
     // Don't gate on exit status: lsof exits non-zero when it can't inspect
     // some process, while still printing the ones it could.
     let listeners = std::process::Command::new("lsof")
@@ -1387,7 +1420,7 @@ pub fn pty_procs(state: tauri::State<'_, PtyState>) -> Vec<TermProc> {
 }
 
 /// `(id, shell pid, foreground process group)` for every live terminal.
-fn foreground_snapshot(state: &PtyState) -> Vec<(String, Option<u32>, Option<u32>)> {
+pub(crate) fn foreground_snapshot(state: &PtyState) -> Vec<(String, Option<u32>, Option<u32>)> {
     // Snapshot the Arcs first: never lock a session while holding the registry.
     let sessions: Vec<_> = lock_ok(&state.0)
         .iter()
@@ -1412,20 +1445,6 @@ fn foreground_snapshot(state: &PtyState) -> Vec<(String, Option<u32>, Option<u32
         .collect()
 }
 
-/// `ps -A -o pid=,ppid=,comm=` → pid → (ppid, comm). The command name is the
-/// last column and may contain spaces (an app bundle's executable path).
-fn parse_ps_table(output: &str) -> HashMap<u32, (u32, String)> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
-            let rest = rest.trim_start();
-            let (ppid, comm) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-            Some((pid.parse().ok()?, (ppid.parse().ok()?, comm.trim().to_string())))
-        })
-        .collect()
-}
-
 /// The program's name as a person would say it: `/usr/local/bin/node` →
 /// `node`, a login shell's `-zsh` → `zsh`. `comm` rather than the process
 /// title, because claude retitles itself to its version number.
@@ -1436,7 +1455,7 @@ fn comm_name(comm: &str) -> Option<String> {
 
 /// Demultiplex `lsof -Fpn` listening sockets into pid → ports. Names arrive
 /// as `*:5173`, `127.0.0.1:7676` or `[::1]:5173`; the port follows the last
-/// colon. Scoped by the `p` field exactly like `parse_lsof_cwds`.
+/// colon. Groups arrive as `p<pid>` lines, each scoping the `n` lines after it.
 fn parse_lsof_listeners(output: &str) -> HashMap<u32, Vec<u16>> {
     let mut out: HashMap<u32, Vec<u16>> = HashMap::new();
     let mut current_pid: Option<u32> = None;
@@ -2105,49 +2124,6 @@ mod tests {
     }
 
     #[test]
-    fn lsof_cwds_demultiplexes_on_the_p_field() {
-        // One `lsof -a -p a,b,c -d cwd -Fpn` answers for the whole fleet; the
-        // parser must scope each `n<path>` to the `p<pid>` group it follows.
-        let lsof = "p100\nfcwd\nn/Users/dev/redline\np200\nfcwd\nn/Users/dev/api\n";
-        let map = parse_lsof_cwds(lsof);
-        assert_eq!(map.len(), 2);
-        assert_eq!(
-            map.get(&100).map(String::as_str),
-            Some("/Users/dev/redline")
-        );
-        assert_eq!(map.get(&200).map(String::as_str), Some("/Users/dev/api"));
-    }
-
-    #[test]
-    fn lsof_cwds_tolerates_missing_groups_and_garbage() {
-        // A pid that died between the registry snapshot and the fork simply has
-        // no group; stray lines and an `n` with no preceding `p` must be
-        // dropped, never misattributed or panicked on.
-        let map = parse_lsof_cwds("n/orphan/path\np300\nfcwd\nn/Users/dev/polis\nu501\n");
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get(&300).map(String::as_str), Some("/Users/dev/polis"));
-        // Empty output (every pid gone) → empty map, not an error.
-        assert!(parse_lsof_cwds("").is_empty());
-        // Unparseable pid poisons its group, not the whole parse.
-        let map = parse_lsof_cwds("pXYZ\nn/never/attributed\np400\nn/real\n");
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get(&400).map(String::as_str), Some("/real"));
-    }
-
-    #[test]
-    fn ps_table_parses_paths_with_spaces_and_skips_garbage() {
-        let table = parse_ps_table(
-            "    1     0 /sbin/launchd\n  412     1 /Applications/Foo Bar.app/Contents/MacOS/Foo Bar\n\
-             64166 64165 -zsh\nnot a row\n  77   1\n",
-        );
-        assert_eq!(table.get(&1), Some(&(0, "/sbin/launchd".to_string())));
-        assert_eq!(table.get(&412).map(|r| r.1.as_str()), Some("/Applications/Foo Bar.app/Contents/MacOS/Foo Bar"));
-        assert_eq!(table.get(&64166), Some(&(64165, "-zsh".to_string())));
-        assert_eq!(table.get(&77), Some(&(1, String::new())), "a missing name is empty, not a misparse");
-        assert_eq!(table.len(), 4);
-    }
-
-    #[test]
     fn comm_names_drop_the_path_and_the_login_dash() {
         assert_eq!(comm_name("/usr/local/bin/node").as_deref(), Some("node"));
         assert_eq!(comm_name("-zsh").as_deref(), Some("zsh"));
@@ -2170,9 +2146,14 @@ mod tests {
     /// foreground of another, and a listener no terminal owns.
     #[test]
     fn term_procs_attribute_ports_by_ancestry_and_name_the_foreground() {
-        let table = parse_ps_table(
-            "10 1 -zsh\n11 10 npm\n12 11 /usr/local/bin/node\n20 1 -zsh\n21 20 claude\n30 1 /usr/sbin/sshd\n",
-        );
+        let table: HashMap<u32, (u32, String)> = HashMap::from([
+            (10, (1, "-zsh".to_string())),
+            (11, (10, "npm".to_string())),
+            (12, (11, "/usr/local/bin/node".to_string())),
+            (20, (1, "-zsh".to_string())),
+            (21, (20, "claude".to_string())),
+            (30, (1, "/usr/sbin/sshd".to_string())),
+        ]);
         let listeners = HashMap::from([(12, vec![5173, 24678]), (30, vec![22])]);
         let terminals = vec![
             ("b".to_string(), Some(20), Some(21)),
@@ -2199,11 +2180,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let snapshot = foreground_snapshot(&terminal.state);
-            let table = std::process::Command::new("ps")
-                .args(["-A", "-o", "pid=,ppid=,comm="])
-                .output()
-                .map(|o| parse_ps_table(&String::from_utf8_lossy(&o.stdout)))
-                .unwrap();
+            let table = libproc::table();
             let rows = term_procs(&snapshot, &table, &HashMap::new());
             assert_eq!(rows.len(), 1);
             if rows[0].fg_comm.as_deref() == Some("cat") {

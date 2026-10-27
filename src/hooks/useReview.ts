@@ -19,7 +19,7 @@ import type {
  *  The active review id is persisted
  *  so the pane restores on reload; the diff itself is always re-resolved live
  *  (it's the working tree — never cache it). */
-export function useReview() {
+export function useReview(visible = true) {
   const [activeReviewId, setActiveReviewId] = usePersistedState<string | null>(
     "redline.review.activeReviewId",
     null,
@@ -98,12 +98,12 @@ export function useReview() {
     }
   }, [repo, source, base, sha]);
 
-  // The staleness poll runs only while a diff is showing and not yet stale,
-  // and not while the window is hidden. The shell owns this hook, so the
-  // poll runs on every surface; a hidden window costs no git subprocess.
+  // The staleness poll runs only while the Review surface (`visible`) shows
+  // a diff that isn't stale yet, and not while the window is hidden. The
+  // shell owns this hook, so without the gate it forked git on every surface.
   usePoll(
     () => invoke<string>("review_fingerprint", { repo, source, base, sha }),
-    repo && diff && !stale ? 5000 : null,
+    repo && diff && !stale && visible ? 5000 : null,
     {
       pauseWhenHidden: true,
       leading: false,
@@ -113,7 +113,7 @@ export function useReview() {
         }
       },
     },
-    [repo, source, base, sha, diff],
+    [repo, source, base, sha, diff, visible],
   );
 
   useEffect(() => {

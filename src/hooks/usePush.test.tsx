@@ -62,12 +62,12 @@ describe("usePush's status poll", () => {
     const first = push.status;
     expect(first).toMatchObject({ ahead: 1 });
     const settled = renders;
-    await advance(30_000);
+    await advance(180_000);
     expect(statusReads()).toBe(4);
     expect(push.status).toBe(first);
     expect(renders).toBe(settled);
     ahead = 0;
-    await advance(10_000);
+    await advance(60_000);
     expect(push.status).toMatchObject({ ahead: 0 });
   });
 
@@ -77,7 +77,7 @@ describe("usePush's status poll", () => {
     await act(async () => mocks.listeners.get("review-push-done")!({ payload: "review-1" }));
     expect(push.status).toMatchObject({ ahead: 0 });
     ahead = 1;
-    await advance(10_000);
+    await advance(60_000);
     expect(push.status).toMatchObject({ ahead: 1 });
   });
 

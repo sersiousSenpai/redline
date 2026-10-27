@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -86,4 +86,37 @@ export function useLiveFile(path: string, reload: () => void): void {
       void invoke("unwatch_dir", { path: dir }).catch(() => {});
     };
   }, [path, reload]);
+}
+
+/** Run `onChange` when git's own state moves under `repo`: a commit, a
+ *  checkout, a fetch, a stage. Watches `.git` and `.git/refs/heads`
+ *  non-recursively — the index, HEAD, ORIG_HEAD, FETCH_HEAD, packed-refs and
+ *  the branch tips all land there, each written by rename, which the watch
+ *  reports. Working-tree edits are not git state (the callers re-read on
+ *  focus and on a slow backstop), and a worktree's `.git` is a file the watch
+ *  can't follow, so neither replaces the backstop. */
+export function useGitWatch(repo: string | null, onChange: () => void): void {
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  useEffect(() => {
+    if (!repo) return;
+    const dirs = [`${repo}/.git`, `${repo}/.git/refs/heads`];
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fire = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        onChangeRef.current();
+      }, RELOAD_DEBOUNCE_MS);
+    };
+    const unsubscribes = dirs.map((dir) => {
+      void invoke("watch_dir", { path: dir }).catch(() => {});
+      return subscribeFsChange(dir, fire);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      for (const unsubscribe of unsubscribes) unsubscribe();
+      for (const dir of dirs) void invoke("unwatch_dir", { path: dir }).catch(() => {});
+    };
+  }, [repo]);
 }

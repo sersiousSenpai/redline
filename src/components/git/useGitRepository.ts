@@ -7,8 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { GitOpResult, GitRefs, GitWorkingStatus } from "../../lib/git/types";
 import { gitApi } from "./api";
+import { useGitWatch } from "../../hooks/useFsWatch";
 
-export const POLL_MS = 4000;
+export const POLL_MS = 60_000;
 
 export interface GitOpRecord {
   label: string;
@@ -98,6 +99,9 @@ export function useGitRepository(repo: string) {
       window.clearInterval(timer);
     };
   }, [refresh]);
+  // Git's own moves (commit, checkout, fetch, stage) through the .git watch;
+  // the interval above is the once-a-minute backstop.
+  useGitWatch(repo, refresh);
 
   /** Run one write. Records git's raw output for the drawer (opened on error or
    *  conflicts), then refreshes. Resolves to the result, or null on failure. */

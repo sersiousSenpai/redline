@@ -110,11 +110,11 @@ mod tests {
         assert_off_main_command(src, "repoicon.rs", "repo_icon");
     }
 
-    /// The cwd polls fork `lsof` — per call for `pty_cwd`, once for the whole
-    /// fleet for `pty_cwds` (the batched twin the tile grid polls every tick).
-    /// `pty_procs` (the wall's foreground program and ports) forks one `ps`
-    /// and one `lsof` for the whole fleet. A subprocess fork on the WebView
-    /// main thread is exactly perf-budget rule 4.
+    /// The cwd reads and the process table are kernel reads now (`libproc`),
+    /// but `pty_procs` (the wall's foreground program and ports) still forks
+    /// one `lsof` for the whole fleet, and all three walk the registry. A
+    /// subprocess fork on the WebView main thread is exactly perf-budget
+    /// rule 4.
     #[test]
     fn heavy_pty_cwd_commands_stay_off_the_main_thread() {
         let src = include_str!("pty.rs");
@@ -132,18 +132,24 @@ mod tests {
         }
     }
 
-    /// Rule 5: what the wall polls scales per call, never per terminal. One
-    /// `ps` table and one `lsof` for every terminal, and the ancestry walk
-    /// reads that table instead of forking `ps` per hop (`ppid_of`).
+    /// Rule 5: what the wall polls scales per call, never per terminal — and
+    /// since the 2026-10-27 idle-heat work, never forks for what the kernel
+    /// will say. `pty_procs` forks exactly one `lsof` (the listening sockets)
+    /// and reads the process table through `proc_pidinfo`; the ancestry walk
+    /// reads that table instead of forking per hop; `pty_cwds` forks nothing.
     #[test]
-    fn pty_procs_forks_twice_for_the_whole_fleet() {
+    fn pty_procs_forks_once_for_the_whole_fleet() {
         let src = include_str!("pty.rs");
         let start = src.find("pub fn pty_procs(").unwrap();
         let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
-        assert_eq!(body.matches("Command::new(").count(), 2, "{body}");
+        assert_eq!(body.matches("Command::new(").count(), 1, "{body}");
+        assert!(body.contains("libproc::table()"), "the process table is a kernel read");
         assert!(!body.contains("ppid_of"), "the walk must read the snapshot, not fork per hop");
         let assemble = &src[src.find("fn term_procs(").unwrap()..];
         assert!(!assemble[..assemble.find("\n}\n").unwrap()].contains("Command::new("));
+        let cwds = src.find("pub fn pty_cwds(").unwrap();
+        let cwds = &src[cwds..cwds + src[cwds..].find("\n}\n").unwrap()];
+        assert!(!cwds.contains("Command::new("), "the cwd batch is a kernel read per shell: {cwds}");
     }
 
     /// The Localhost dashboard's scan forks three subprocesses and reads

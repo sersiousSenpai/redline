@@ -2110,7 +2110,7 @@ function App() {
     window.addEventListener("redline:toggle-monochat", toggleDoor);
     return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleDoor); };
   }, [toggleDoor]);
-  const codeReview = useReview();
+  const codeReview = useReview(reviewOpen);
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
   const devServers = useDevServers(serversOpen);
