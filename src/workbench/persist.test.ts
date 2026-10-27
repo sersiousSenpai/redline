@@ -39,6 +39,7 @@ const sample = (): WorkbenchState => {
   s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "browser", data: { workspace: "regular" } }, newPaneId: "b" });
   s = reduce(s, { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "ag" } });
   s = reduce(s, { type: "revealTerminal", ptyId: "sh", key: "plan:s1" });
+  s = reduce(s, { type: "openTab", pane: { kind: "review", data: { repo: "/r", source: "lastCommit" } }, tabId: "rv" });
   s = reduce(s, { type: "openTab", pane: { kind: "file", data: { path: "/a.ts", line: 3 }, preview: true }, tabId: "f", paneId: "fp" });
   s = reduce(s, { type: "closeTab", tabId: "f" });
   return s;
@@ -121,6 +122,12 @@ describe("the stored shape", () => {
     expect(parsed!.mru).toEqual(["launch:l", "home"]);
     expect(parsed!.owners).toEqual({ a: "launch:l" });
     expect(parsed!.stowed).toEqual(["x"]);
+  });
+
+  it("keeps a review on every DiffSource and drops one on none", () => {
+    const review = (source: unknown) => parseWorkbench({ v: 1, sets: { home: { order: ["t"], tabs: { t: { id: "t", root: { pane: "r" } } }, panes: { r: { id: "r", kind: "review", data: { repo: "/r", source } } } } } })!.sets.home!.panes.r;
+    for (const source of ["uncommitted", "staged", "unstagedPlusUntracked", "lastCommit", "vsBase", "commitSha", "runBranch"]) expect(review(source)?.data).toEqual({ repo: "/r", source });
+    expect(review("nope")).toBeUndefined();
   });
 
   it("clamps a wall's tiles, focus, zoom and pins to what exists", () => {

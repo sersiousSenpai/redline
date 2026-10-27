@@ -55,6 +55,9 @@ export function legacyView(state: WorkbenchState): LegacyView {
   return {
     mainSurface,
     docPinned: mainSurface !== "document" && hasDocument,
+    // Never the collab joined key (`joined:<sid>:<threadStart>`) that
+    // `setActiveId(joinedInfo.key)` writes today: W1's setActiveId wrapper
+    // must special-case a joined room, which has no session key here.
     activeId: sessionIdOf(state.activeKey),
     activeFile: focusedFile?.data.path ?? null,
     focusedKind: focused?.kind ?? null,

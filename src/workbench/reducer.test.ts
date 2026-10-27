@@ -173,13 +173,19 @@ describe("tabs", () => {
     expect(set(s).closed[CLOSED_CAP - 1].tab.id).toBe(`n${CLOSED_CAP + 2}`);
   });
 
-  it("closing the last tab on Home grows a door back; on a plan, its Plan", () => {
+  it("closing the last tab on Home grows a door back; on a plan, its Plan; on a launch, its Agent", () => {
     let s = home(file("/a"));
     s = reduce(s, { type: "closeTab", tabId: "t1" });
     expect(kinds(s)).toEqual(["door"]);
     let p = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1" });
     p = reduce(p, { type: "closeTab", tabId: set(p).order[0] });
     expect(kinds(p)).toEqual(["plan"]);
+    let l = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l1", defaults: { agentTerminalId: "t1" } });
+    l = reduce(l, { type: "closeTab", tabId: set(l).order[0] });
+    expect(kinds(l)).toEqual(["chat"]);
+    const agent = set(l).panes[activeTabOf(set(l))!.focusedPaneId];
+    expect(agent.kind === "chat" && agent.data).toEqual({ source: "agent", terminalId: "t1", sessionId: null });
+    expect(set(l).activeTabId).not.toBeNull();
   });
 });
 
@@ -262,6 +268,31 @@ describe("previews and surfaces", () => {
     expect(set(s).order).toEqual(["t1", "pv", "pv2", "t2"]);
   });
 
+  it("openSurface without data never means the session's agent chat; a plan is the set's own session", () => {
+    const agent: PaneInit = { kind: "chat", data: { source: "agent", terminalId: "t", sessionId: "s1" } };
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t" } });
+    s = reduce(s, { type: "openTab", pane: { kind: "file", data: { path: "/x" } }, tabId: "f" });
+    // A chat surface is a companion room: with none open and no room named, nothing happens — the Agent tab is not it.
+    expect(reduce(s, { type: "openSurface", kind: "chat" })).toBe(s);
+    s = reduce(s, { type: "openTab", pane: { kind: "chat", data: { source: "companion", companionId: "c" } }, tabId: "room", activate: false });
+    s = reduce(s, { type: "openSurface", kind: "chat" });
+    expect(set(s).activeTabId).toBe("room");
+    // "document" on a plan set is its Plan tab…
+    s = reduce(s, { type: "openSurface", kind: "plan" });
+    expect(set(s).activeTabId).toBe(set(s).order[0]);
+    expect(set(s).panes[activeTabOf(set(s))!.focusedPaneId].kind).toBe("plan");
+    // …and reopens one when it was closed.
+    s = reduce(s, { type: "closeTab", tabId: set(s).order[0] });
+    expect(tabKinds(s)).toEqual(["chat", "file", "chat"]);
+    s = reduce(s, { type: "openSurface", kind: "plan", tabId: "again" });
+    expect(set(s).activeTabId).toBe("again");
+    expect(set(s).panes[activeTabOf(set(s))!.focusedPaneId].data).toEqual({ sessionId: "s1", version: null });
+    // Home has no session: a plan surface without data is nothing to open.
+    const h0 = home(agent);
+    expect(reduce(h0, { type: "openSurface", kind: "plan" })).toBe(h0);
+    expect(set(reduce(home(door(1)), { type: "openSurface", kind: "plan" })).order).toHaveLength(1);
+  });
+
   it("openSurface brings an open pane forward in the current set, else opens a tab; a door is always new", () => {
     let s = home(door(1), { kind: "memory", data: {} });
     s = reduce(s, { type: "selectTab", tabId: "t1" });
@@ -299,15 +330,36 @@ describe("sessions", () => {
     const agent = Object.values(ps.panes).find((p) => p.kind === "chat")!;
     expect(agent.kind === "chat" && agent.data).toEqual({ source: "agent", terminalId: "t1", sessionId: "s9" });
     expect(ps.order).toHaveLength(2);
+    expect(ps.activeTabId).toBe("dr");
   });
 
-  it("a launch with only an Agent tab gains a Plan tab first, without moving the active tab", () => {
+  it("converts exactly one door — the first in the strip — and leaves any other door a door", () => {
     let s = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l1", defaults: { agentTerminalId: "t1" } });
-    const agentTab = set(s).activeTabId;
+    s = reduce(s, { type: "openTab", pane: door(2), tabId: "d1", paneId: "dp1" });
+    s = reduce(s, { type: "openTab", pane: door(3), tabId: "d2", paneId: "dp2" });
+    s = reduce(s, { type: "reorderTab", tabId: "d2", to: 0 });
     s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s1" });
     const ps = set(s, "plan:s1");
-    expect(ps.activeTabId).toBe(agentTab);
-    expect(ps.panes[(ps.tabs[ps.order[0]].root as { pane: string }).pane].kind).toBe("plan");
+    expect(ps.panes.dp2.kind).toBe("plan");
+    expect(ps.panes.dp1.kind).toBe("door");
+    expect(tabKinds(s, "plan:s1")).toEqual(["plan", "chat", "door"]);
+    expect(ps.activeTabId).toBe("d2");
+  });
+
+  it("D1: a launch with only an Agent tab gains a Plan tab first — selected when the user is on that set, left alone when they are elsewhere", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l1", defaults: { agentTerminalId: "t1" } });
+    s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s1", planTabId: "pt" });
+    expect(tabKinds(s, "plan:s1")).toEqual(["plan", "chat"]);
+    expect(set(s, "plan:s1").order[0]).toBe("pt");
+    expect(set(s, "plan:s1").activeTabId).toBe("pt");
+
+    let away = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l2", defaults: { agentTerminalId: "t2" } });
+    const agentTab = set(away).activeTabId;
+    away = reduce(away, { type: "selectSession", key: HOME_KEY });
+    away = reduce(away, { type: "rekeySession", from: "launch:l2", to: "plan:s2" });
+    expect(away.activeKey).toBe(HOME_KEY);
+    expect(tabKinds(away, "plan:s2")).toEqual(["plan", "chat"]);
+    expect(set(away, "plan:s2").activeTabId).toBe(agentTab);
   });
 
   it("selectSession keeps an already-active selection as the same state object", () => {
@@ -337,6 +389,18 @@ describe("terminals", () => {
     expect(away.activeKey).toBe("plan:s1");
     expect(away.stowed).toEqual([]);
     expect(kinds(away)).toEqual(["terminals"]);
+  });
+
+  it("revealing under another key is an adoption: the tile leaves its old wall, so no PTY is on two walls", () => {
+    let s = home(wall(["a", "b"]));
+    s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY } };
+    s = reduce(s, { type: "revealTerminal", ptyId: "b", key: "plan:s1", tabId: "w", paneId: "wp" });
+    expect(s.activeKey).toBe("plan:s1");
+    expect(s.owners.b).toBe("plan:s1");
+    expect(set(s, HOME_KEY).panes.p1.data).toMatchObject({ tiles: ["a"] });
+    expect(set(s, "plan:s1").panes.wp.data).toMatchObject({ tiles: ["b"] });
+    const walls = (Object.keys(s.sets) as SessionKey[]).flatMap((k) => Object.values(s.sets[k]!.panes)).filter((p) => p.kind === "terminals" && p.data.tiles.includes("b"));
+    expect(walls).toHaveLength(1);
   });
 
   it("adopting moves ownership and the tile off every other wall", () => {

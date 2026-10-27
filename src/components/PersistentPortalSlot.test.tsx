@@ -69,13 +69,12 @@ describe("persistent workspace portal containment", () => {
     const textarea = host.querySelector("textarea");
     expect(container.querySelector("section textarea")).toBe(textarea);
     expect(container.querySelector("aside textarea")).toBeNull();
-    expect(container.querySelector("aside [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(false);
+    // Inactive is invisible in the DOM: the slot renders exactly as before.
+    expect(container.querySelector("aside [data-surface-slot]")?.attributes.length).toBe(container.querySelector("section [data-surface-slot]")?.attributes.length);
 
     await act(async () => root.render(<Workspace showing="b" />));
     expect(container.querySelector("aside textarea")).toBe(textarea);
     expect(container.querySelector("section textarea")).toBeNull();
-    expect(container.querySelector("section [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(false);
-    expect(container.querySelector("aside [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(true);
 
     // Both inactive: the host is held by neither, and nothing unmounted.
     await act(async () => root.render(<Workspace showing="none" />));

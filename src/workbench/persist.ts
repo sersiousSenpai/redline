@@ -30,6 +30,7 @@ import {
   type TabSet,
   type WorkbenchState,
 } from "./model";
+import type { DiffSource } from "../types";
 import { DEFAULT_DOOR_DRAFT_KEY } from "./reducer";
 import type { WorkbenchStore } from "./store";
 
@@ -50,7 +51,9 @@ const str = (v: unknown): v is string => typeof v === "string";
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter(str) : []);
 
 const DOOR_DESTINATIONS: readonly DoorDestination[] = ["plan", "run", "chat", "drafter", "browser", "review", "memory", "servers", "runs"];
-const DIFF_SOURCES = ["uncommitted", "staged", "unstagedPlusUntracked"];
+/** Every DiffSource, as a record so a new member is a type error here. */
+const DIFF_SOURCE_SET: Record<DiffSource, true> = { uncommitted: true, staged: true, unstagedPlusUntracked: true, lastCommit: true, vsBase: true, commitSha: true, runBranch: true };
+const isDiffSource = (v: unknown): v is DiffSource => typeof v === "string" && Object.prototype.hasOwnProperty.call(DIFF_SOURCE_SET, v);
 
 function parsePane(raw: unknown): AnyPane | null {
   if (!isRecord(raw) || !str(raw.id) || !isPaneKind(raw.kind)) return null;
@@ -91,12 +94,10 @@ function parsePane(raw: unknown): AnyPane | null {
       if (!str(d.draftId) || !d.draftId) return null;
       pane = { id: raw.id, kind: "drafter", data: { draftId: d.draftId } };
       break;
-    case "review": {
-      const source = DIFF_SOURCES.find((x) => x === d.source);
-      if (!str(d.repo) || !d.repo || !source) return null;
-      pane = { id: raw.id, kind: "review", data: { repo: d.repo, source: source as "uncommitted" } };
+    case "review":
+      if (!str(d.repo) || !d.repo || !isDiffSource(d.source)) return null;
+      pane = { id: raw.id, kind: "review", data: { repo: d.repo, source: d.source } };
       break;
-    }
     case "servers":
     case "memory":
     case "runs":

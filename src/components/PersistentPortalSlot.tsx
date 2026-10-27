@@ -27,5 +27,5 @@ export function PersistentPortalSlot({ host, name, active = true }: { host: HTML
       if (host.parentElement === slot) host.remove();
     };
   }, [host, active]);
-  return <div ref={slotRef} data-surface-slot={name} data-slot-active={active ? "" : undefined} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />;
+  return <div ref={slotRef} data-surface-slot={name} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />;
 }

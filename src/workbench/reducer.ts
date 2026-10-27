@@ -58,7 +58,7 @@ export type FocusDirection = "left" | "right" | "up" | "down";
 
 export type WorkbenchAction =
   | { type: "selectSession"; key: SessionKey; defaults?: DefaultsContext }
-  | { type: "rekeySession"; from: SessionKey; to: SessionKey }
+  | { type: "rekeySession"; from: SessionKey; to: SessionKey; planTabId?: string }
   | {
       type: "openTab";
       key?: SessionKey;
@@ -463,7 +463,9 @@ function fillDefaults(
     const i = n++;
     return { tabId: tabIds?.[i], paneId: paneIds?.[i] };
   };
-  const agent = defaults?.agentTerminalId ?? null;
+  // A launch IS its agent terminal; when nothing says which, the one the
+  // set owns is it (a refill after its last tab closed).
+  const agent = defaults?.agentTerminalId ?? (launchIdOf(key) ? (ownedPtys(state, key)[0] ?? null) : null);
   const sessionId = sessionIdOf(key);
   if (set.order.length === 0) {
     if (key === HOME_KEY) {
@@ -488,21 +490,49 @@ function fillDefaults(
   return set === state.sets[key] ? next : putSet(next, key, set);
 }
 
-/** A set never shows nothing: Home grows a door back, a plan its Plan. */
+/** A set never shows nothing: Home grows a door back, a plan its Plan, a
+ *  launch its Agent. */
 function refillEmpty(state: WorkbenchState): WorkbenchState {
   let next = state;
   for (const k of Object.keys(state.sets) as SessionKey[]) {
-    if (state.sets[k]?.order.length === 0 && (k === HOME_KEY || sessionIdOf(k))) next = fillDefaults(next, k, undefined, undefined, undefined);
+    if (state.sets[k]?.order.length === 0) next = fillDefaults(next, k, undefined, undefined, undefined);
   }
   return next;
 }
 
+/** Make `key` the owner of `ptyId` and show it there. One attachment per
+ *  PTY holds: the tile leaves every other set's wall first. */
+function takeTerminal(state: WorkbenchState, key: SessionKey, ptyId: string, ids: { tabId?: string; paneId?: string }): WorkbenchState {
+  const gone = (id: string) => id === ptyId;
+  let sets = state.sets;
+  for (const k of Object.keys(state.sets) as SessionKey[]) {
+    if (k === key) continue;
+    const set = state.sets[k];
+    if (!set) continue;
+    const stripped = stripSetTiles(set, gone);
+    if (stripped !== set) sets = { ...sets, [k]: stripped };
+  }
+  const next: WorkbenchState = {
+    ...state,
+    sets,
+    owners: { ...state.owners, [ptyId]: key },
+    stowed: state.stowed.filter((p) => p !== ptyId),
+  };
+  const set = setOf(next, key) ?? emptyTabSet();
+  return refillEmpty(putSet(next, key, showOnWall(set, ptyId, ids)));
+}
+
 /** Data a kind can open with when none is given; undefined means the kind
- *  needs explicit data (a plan, a file, a chat, a draft, a review). */
-function defaultData(kind: PaneKind, paneId: string): PaneDataByKind[PaneKind] | undefined {
+ *  needs explicit data (a file, a chat room, a draft, a review). A plan is
+ *  the set's own session, so a plan set has one and Home has none. */
+function defaultData(kind: PaneKind, paneId: string, key: SessionKey): PaneDataByKind[PaneKind] | undefined {
   switch (kind) {
     case "door":
       return { draftKey: doorDraftKey(paneId) };
+    case "plan": {
+      const sessionId = sessionIdOf(key);
+      return sessionId ? { sessionId, version: null } : undefined;
+    }
     case "browser":
       return { workspace: "regular" };
     case "terminals":
@@ -514,6 +544,16 @@ function defaultData(kind: PaneKind, paneId: string): PaneDataByKind[PaneKind] |
     default:
       return undefined;
   }
+}
+
+/** Whether `openSurface(kind)` with no data means this pane: a chat surface
+ *  is a companion room (never the session's own agent chat, which is the
+ *  dock's), a plan surface is the set's own session; other kinds are one of
+ *  a kind. */
+function isSurfacePane(pane: AnyPane, key: SessionKey): boolean {
+  if (pane.kind === "chat") return pane.data.source === "companion";
+  if (pane.kind === "plan") return pane.data.sessionId === sessionIdOf(key);
+  return true;
 }
 
 // ── The reducer ────────────────────────────────────────────────────────────
@@ -535,15 +575,19 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       if (!moving || from === to) return state;
       const sessionId = sessionIdOf(to);
       // The launch's panes learn their session: the agent's chat binds, and
-      // the door that launched it becomes the Plan tab in place.
+      // the door that launched it — the first door in the strip, exactly
+      // one — becomes the Plan tab in place. Any other door stays a door.
+      const firstDoor = moving.order.flatMap((tabId) => paneIdsOf(moving.tabs[tabId]?.root ?? { pane: "" })).find((id) => moving.panes[id]?.kind === "door");
       const panes: Record<string, AnyPane> = {};
       let hasPlan = false;
+      let planTabId: string | null = null;
       for (const [id, pane] of Object.entries(moving.panes)) {
         if (pane.kind === "chat" && pane.data.source === "agent" && pane.data.sessionId === null && sessionId) {
           panes[id] = { ...pane, data: { ...pane.data, sessionId } };
-        } else if (pane.kind === "door" && sessionId) {
+        } else if (pane.kind === "door" && id === firstDoor && sessionId) {
           panes[id] = { id, kind: "plan", data: { sessionId, version: null } };
           hasPlan = true;
+          planTabId = tabHolding(moving, id)?.id ?? null;
         } else {
           if (pane.kind === "plan") hasPlan = true;
           panes[id] = pane;
@@ -564,8 +608,14 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
         hasPlan = hasPlan || panesOfKind(existing, "plan").length > 0;
       }
       if (!hasPlan && sessionId) {
-        merged = addTab(merged, { kind: "plan", data: { sessionId, version: null } }, {}, 0, false).set;
+        const added = addTab(merged, { kind: "plan", data: { sessionId, version: null } }, { tabId: action.planTabId }, 0, false);
+        merged = added.set;
+        planTabId = added.tabId;
       }
+      // D1: the plan arriving is what the user was waiting for, so when they
+      // are looking at this set the Plan tab is selected; on another set it
+      // lands without moving anything under them.
+      if (planTabId && state.activeKey === from) merged = { ...merged, activeTabId: planTabId };
       const sets: WorkbenchState["sets"] = { ...state.sets, [to]: merged };
       delete sets[from];
       const owners: Record<string, SessionKey> = {};
@@ -764,7 +814,7 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       // A door is always new (⌘T); anything else comes forward if it is open
       // with the same data, in the current set, never navigating away.
       if (action.kind !== "door") {
-        const open = panesOfKind(set, action.kind).find(({ pane }) => action.data === undefined || sameData(pane.data, action.data));
+        const open = panesOfKind(set, action.kind).find(({ pane }) => (action.data === undefined ? isSurfacePane(pane, key) : sameData(pane.data, action.data)));
         if (open) {
           const { tab, pane } = open;
           if (set.activeTabId === tab.id && tab.focusedPaneId === pane.id) return state;
@@ -776,44 +826,25 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
         }
       }
       const paneId = action.paneId ?? newId("pane");
-      const data = action.data ?? defaultData(action.kind, paneId);
+      const data = action.data ?? defaultData(action.kind, paneId, key);
       if (data === undefined) return state;
       const { set: next } = addTab(set, { kind: action.kind, data } as PaneInit, { tabId: action.tabId, paneId });
       return putSet(state, key, next);
     }
 
     case "revealTerminal": {
+      // Shown where it is owned; an explicit other key is an adoption (the
+      // tile leaves its old wall), so a PTY is never on two walls.
       const key = action.key ?? state.owners[action.ptyId] ?? state.activeKey;
-      let next: WorkbenchState = state;
-      if (state.owners[action.ptyId] !== key) next = { ...next, owners: { ...next.owners, [action.ptyId]: key } };
-      if (next.stowed.includes(action.ptyId)) next = { ...next, stowed: next.stowed.filter((p) => p !== action.ptyId) };
-      const set = setOf(next, key) ?? emptyTabSet();
-      next = putSet(next, key, showOnWall(set, action.ptyId, { tabId: action.tabId, paneId: action.paneId }));
+      let next = takeTerminal(state, key, action.ptyId, { tabId: action.tabId, paneId: action.paneId });
       if (next.activeKey !== key) next = { ...next, activeKey: key, mru: mruFront(next.mru, key) };
       return next;
     }
 
-    case "adoptTerminal": {
-      // Ownership moves; one attachment per PTY holds, so the tile leaves
-      // every other set's wall before it shows on the new owner's.
-      const gone = (id: string) => id === action.ptyId;
-      let sets = state.sets;
-      for (const k of Object.keys(state.sets) as SessionKey[]) {
-        if (k === action.key) continue;
-        const set = state.sets[k];
-        if (!set) continue;
-        const stripped = stripSetTiles(set, gone);
-        if (stripped !== set) sets = { ...sets, [k]: stripped };
-      }
-      const next: WorkbenchState = {
-        ...state,
-        sets,
-        owners: { ...state.owners, [action.ptyId]: action.key },
-        stowed: state.stowed.filter((p) => p !== action.ptyId),
-      };
-      const set = setOf(next, action.key) ?? emptyTabSet();
-      return refillEmpty(putSet(next, action.key, showOnWall(set, action.ptyId, { tabId: action.tabId, paneId: action.paneId })));
-    }
+    case "adoptTerminal":
+      // Ownership moves without navigating: the tile shows on the new
+      // owner's wall and leaves every other.
+      return takeTerminal(state, action.key, action.ptyId, { tabId: action.tabId, paneId: action.paneId });
 
     case "prune": {
       const live = new Set(action.liveSessions);
