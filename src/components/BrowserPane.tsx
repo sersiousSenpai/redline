@@ -1358,9 +1358,14 @@ function BrowserPaneBase({
         }
         // A page event or explicit navigation may have overtaken this poll.
         if (tabsRef.current.find((tab) => tab.id === id)?.url !== requestedUrl) return;
-        const favicon = await invoke<string>("browser_eval_result", { label: `browser-${id}`, script: "String(document.querySelector('link[rel~=icon]')?.href || new URL('/favicon.ico',location.href))" }).catch(() => "");
-        if (/^https?:/.test(favicon)) setTabs(prev => prev.map(tab => tab.id === id && tab.favicon !== favicon ? { ...tab, favicon } : tab));
-        const changed = tabsRef.current.find((t) => t.id === id)?.url !== url;
+        const current = tabsRef.current.find((t) => t.id === id);
+        const changed = current?.url !== url;
+        // The favicon is a script evaluation in the page: read it when the
+        // page moves, or while the tab has none, never on every tick.
+        if (changed || !current?.favicon) {
+          const favicon = await invoke<string>("browser_eval_result", { label: `browser-${id}`, script: "String(document.querySelector('link[rel~=icon]')?.href || new URL('/favicon.ico',location.href))" }).catch(() => "");
+          if (/^https?:/.test(favicon)) setTabs(prev => prev.map(tab => tab.id === id && tab.favicon !== favicon ? { ...tab, favicon } : tab));
+        }
         // Only re-key state when the URL actually moved — `ts.map` would
         // otherwise allocate a fresh array every poll tick (once a second) and
         // re-render the whole pane + discussion, which churns the chat DOM and
