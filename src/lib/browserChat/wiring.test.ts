@@ -129,8 +129,8 @@ describe("the skill and the prompt teach what the backend does", () => {
     expect(fnBody(libRs, "handle_browser_thread")).toContain("browse.load_thread(");
     expect(browseRs).toMatch(/pub fn load_thread\([^)]*\)[^{]*\{\s*self\.db\.load_browse_thread_about\(/);
     expect(fnBody(browseRs, "browse_send")).toContain("target_browse_id");
-    pinnedBy("src-tauri/src/db.rs", "fn a_tabs_thread_includes_the_shared_chat_turns_about_it");
-    pinnedBy("src-tauri/src/db.rs", "fn a_v8_database_gains_the_browse_message_target");
+    pinnedBy("src-tauri/src/db_tests.rs", "fn a_tabs_thread_includes_the_shared_chat_turns_about_it");
+    pinnedBy("src-tauri/src/db_tests.rs", "fn a_v8_database_gains_the_browse_message_target");
   });
   it("BC-23 pinned by browse.rs first_turn_prompt_embeds_active_mission_goal", () => pinnedBy("src-tauri/src/browse.rs", "fn first_turn_prompt_embeds_active_mission_goal"));
   it("BC-17 pinned by browse.rs project_cards_are_once_per_session_and_never_match_snapshot_text", () => pinnedBy("src-tauri/src/browse.rs", "fn project_cards_are_once_per_session_and_never_match_snapshot_text"));
@@ -138,7 +138,7 @@ describe("the skill and the prompt teach what the backend does", () => {
     pinnedBy("src-tauri/src/browse.rs", "fn a_provider_switch_never_resumes_the_other_providers_id");
     pinnedBy("src-tauri/src/browse.rs", "fn a_switched_provider_is_handed_the_turns_it_missed");
   });
-  it("BC-30 pinned by db.rs a_browse_chat_pick_outlives_its_session_but_not_its_thread", () => pinnedBy("src-tauri/src/db.rs", "fn a_browse_chat_pick_outlives_its_session_but_not_its_thread"));
+  it("BC-30 pinned by db_tests.rs a_browse_chat_pick_outlives_its_session_but_not_its_thread", () => pinnedBy("src-tauri/src/db_tests.rs", "fn a_browse_chat_pick_outlives_its_session_but_not_its_thread"));
 });
 
 describe("the activity line names what the agent is doing", () => {
