@@ -2506,7 +2506,7 @@ function App() {
     attention: terminalAttention,
     titles: terminalTitles,
     bind: bindSessionTerminals,
-  } = useSessionTerminals(flowShell);
+  } = useSessionTerminals(true);
   const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
   // A held plan names the terminal its CLI is waiting in.
   useEffect(() => {
@@ -5972,10 +5972,11 @@ function App() {
           setToast("Couldn't open a terminal to build in", 6000);
           return;
         }
-        if (flowShell) {
-          bindSessionTerminals([{ sessionId, terminalId: id }]);
-          void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
-        }
+        // The build is this session's conversation from now on, in either
+        // shell: bound before the resumed CLI starts (as a restore is), so
+        // the workbench's Agent tab finds its terminal the moment it exists.
+        bindSessionTerminals([{ sessionId, terminalId: id }]);
+        void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
         const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
         if (!delivery.ok) {
           setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000);
@@ -6431,12 +6432,11 @@ function App() {
       fail("Couldn't open a terminal to resume in.");
       return;
     }
-    // Flow: the plan's conversation is this terminal's from now on — bound
-    // before the resumed CLI's SessionStart, so it binds the moment it does.
-    if (flowShell) {
-      bindSessionTerminals([{ sessionId, terminalId: id }]);
-      void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
-    }
+    // The plan's conversation is this terminal's from now on — bound before
+    // the resumed CLI's SessionStart, so it binds the moment it does. In
+    // either shell: the workbench's per-session Agent tab reads this binding.
+    bindSessionTerminals([{ sessionId, terminalId: id }]);
+    void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
     onRestore({
       type: "dispatched",
       sessionId,
