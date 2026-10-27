@@ -129,7 +129,7 @@ function basename(path: string): string {
 
 /** What a plan session's row is called: the user's name for it, the plan's
  *  own heading, then where it lives. */
-export function planRowTitle(s: SessionSummary): string {
+function planRowTitle(s: SessionSummary): string {
   return s.titleOverride || s.planTitle || s.projectName || s.projectPath || s.sessionId;
 }
 

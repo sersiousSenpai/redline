@@ -34,11 +34,6 @@ export type SidecarId =
       words: WordRange | null;
     };
 
-/** Block id this sidecar lives under — always present. */
-export function sidecarBlockId(id: SidecarId): string {
-  return id.blockId;
-}
-
 /** Canonical string form — inverse of `parseSidecarIdTyped`. Round-trips
  *  byte-identically with the roundtrip gate. */
 export function sidecarIdToString(id: SidecarId): string {

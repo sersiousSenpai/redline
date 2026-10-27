@@ -33,7 +33,7 @@ const HEADING_BY_LEVEL = [
 
 /** Numbering reference for ordered lists; each top-level list gets its own
  *  instance so numbering restarts per list instead of continuing globally. */
-export const ORDERED_REF = "rl-ordered";
+const ORDERED_REF = "rl-ordered";
 
 /** Document-level numbering config consumed by the exporter's `Document`. */
 export function orderedNumberingConfig() {

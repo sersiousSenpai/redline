@@ -28,7 +28,7 @@ export function orderedMarker(style: string | null, value: number): string {
   return `${sym}. `;
 }
 
-export function orderedSymbol(style: string, value: number): string {
+function orderedSymbol(style: string, value: number): string {
   if (style.startsWith("lower-alpha")) return toAlpha(value);
   if (style.startsWith("upper-alpha")) return toAlpha(value).toUpperCase();
   if (style.startsWith("lower-roman")) return toRoman(value);
@@ -40,7 +40,7 @@ export function orderedSymbol(style: string, value: number): string {
 }
 
 // 1 → "a", 26 → "z", 27 → "aa" (bijective base-26), mirroring CSS `lower-alpha`.
-export function toAlpha(n: number): string {
+function toAlpha(n: number): string {
   if (n <= 0) return `${n}`;
   let s = "";
   let x = n;
@@ -57,7 +57,7 @@ const ROMAN: [number, string][] = [
   [50, "l"], [40, "xl"], [10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"],
 ];
 
-export function toRoman(n: number): string {
+function toRoman(n: number): string {
   if (n <= 0) return `${n}`;
   let r = "";
   let x = n;
@@ -73,7 +73,7 @@ export function toRoman(n: number): string {
 // The 24-letter lowercase Greek alphabet, matching CSS `lower-greek`. Past ω it
 // falls back to the number (CSS would continue αα… — a rare, acceptable drift).
 const GREEK = "αβγδεζηθικλμνξοπρστυφχψω";
-export function toGreek(n: number): string {
+function toGreek(n: number): string {
   return n >= 1 && n <= GREEK.length ? GREEK[n - 1] : `${n}`;
 }
 

@@ -127,7 +127,7 @@ export function quotedTextForRange(files: DiffFile[], range: ReviewRange): strin
 }
 
 /** Next id in a `{prefix}-NNN` series, ignoring foreign ids. */
-export function nextIdInSeries(existing: { id: string }[], prefix: string): string {
+function nextIdInSeries(existing: { id: string }[], prefix: string): string {
   let max = 0;
   const re = new RegExp(`^${prefix}-(\\d+)$`);
   for (const a of existing) {

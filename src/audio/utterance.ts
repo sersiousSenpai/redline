@@ -32,7 +32,7 @@ const SILENCE_PHRASES = new Set([
 ]);
 
 /** Lowercase words only: punctuation and runs of space folded away. */
-export function normalizeUtterance(text: string): string {
+function normalizeUtterance(text: string): string {
   return text
     .toLowerCase()
     .replace(/[‘’]/g, "'")

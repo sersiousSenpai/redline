@@ -7,7 +7,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { ParagraphDiffStatus, SubBlockDiffEntry } from "../../diff";
 import { resolveSubBlockId } from "../subBlockResolve";
 
-export const redlineDecorationsKey = new PluginKey("redlineDecorations");
+const redlineDecorationsKey = new PluginKey("redlineDecorations");
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {

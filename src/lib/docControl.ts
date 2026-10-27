@@ -30,8 +30,8 @@ export const DOC_PAD_R_NARROW = 32;
 export const DOC_PAD_R_WIDE = 64;
 
 export const DOC_MEASURE_MIN = 820;
-export const DOC_MEASURE_DRAG_TRAVEL = 160;
-export const DOC_MEASURE_SNAP = 40;
+const DOC_MEASURE_DRAG_TRAVEL = 160;
+const DOC_MEASURE_SNAP = 40;
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
 export function docMeasureStart({ wide, measure, full }: { wide: boolean; measure: number; full: number }): number {
@@ -62,20 +62,15 @@ export function docArticleWidth(wide: boolean, measure: number) {
 }
 
 /** The control's distance from the pane's right edge, px. */
-export const DOC_CTRL_INSET = 16;
+const DOC_CTRL_INSET = 16;
 
 /** Clearance the text must keep from the control before it's allowed to stay. */
-export const DOC_CTRL_GAP = 12;
+const DOC_CTRL_GAP = 12;
 
 /** The control's width laid out as a row (− 100% + and the width toggle), used
  *  only before it has ever been measured — once hidden it is unmounted, and the
  *  "would it fit again?" question needs a width from somewhere. */
 export const DOC_CTRL_ROW_W = 120;
-
-/** …and stacked into a column: one 22px button plus the pill's 3px padding and
- *  1px border either side. A fallback only — the live element is measured — so
- *  an approximation is enough. */
-export const DOC_CTRL_COL_W = 30;
 
 /** All viewport-space x-coordinates, as read from bounding rects. */
 export function docControlFits({

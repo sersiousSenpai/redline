@@ -13,7 +13,7 @@ import type { JSONContent } from "@tiptap/react";
 /** localStorage key that held the TipTap doc before the Bookshelf owned it. */
 export const LEGACY_DOC_KEY = "redline.drafter.doc";
 /** localStorage key holding the currently-open draft id. Still a preference. */
-export const OPEN_DRAFT_KEY = "redline.drafter.draftId";
+const OPEN_DRAFT_KEY = "redline.drafter.draftId";
 
 export interface BookshelfFolder {
   folderId: string;
@@ -225,23 +225,6 @@ export const deleteSource = (id: string) =>
 
 export const importSourceFile = (draftId: string, srcPath: string) =>
   invoke<DraftSource>("draft_source_import_file", { draftId, srcPath });
-
-export const addSource = (s: {
-  draftId: string;
-  kind: string;
-  refId?: string | null;
-  url?: string | null;
-  title?: string | null;
-  excerpt?: string | null;
-}) =>
-  invoke<DraftSource>("draft_source_add", {
-    draftId: s.draftId,
-    kind: s.kind,
-    refId: s.refId ?? null,
-    url: s.url ?? null,
-    title: s.title ?? null,
-    excerpt: s.excerpt ?? null,
-  });
 
 export interface ShipwrightFinding {
   priority: number;

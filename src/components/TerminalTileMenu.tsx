@@ -46,7 +46,7 @@ export const TILE_MENU_WIDTH = 320;
  *  A threshold is all this can be. The real budget is now the room beside the
  *  anchor (`placeUnder` → `maxHeight`), which differs per tile and per window
  *  size; the list scrolls when it exceeds that, whatever this number says. */
-export const MENU_FILTER_THRESHOLD = 12;
+const MENU_FILTER_THRESHOLD = 12;
 
 /** Everything a header/menu can DO, one stable object for all N tiles —
  *  every callback takes the tile index up front so one identity serves the

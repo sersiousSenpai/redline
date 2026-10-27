@@ -12,7 +12,7 @@
 // way when the transcript reloads as it did live.
 
 /** The line that ends the spoken part. */
-export const SCREEN_MARKER = "⟦screen⟧";
+const SCREEN_MARKER = "⟦screen⟧";
 
 /** How far an opened ⟦ may run without its ⟧ and still be a marker: every
  *  real one is shorter, and text after a stray ⟦ is spoken, not held back

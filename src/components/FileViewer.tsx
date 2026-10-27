@@ -46,7 +46,7 @@ const codeEditorImport = () => import("./CodeEditor");
 
 let codeEditorPreloaded: Promise<unknown> | null = null;
 /** Warm the CodeEditor chunk (Edit hover/click). Idempotent. */
-export function preloadCodeEditor(): void {
+function preloadCodeEditor(): void {
   if (!codeEditorPreloaded) codeEditorPreloaded = codeEditorImport();
 }
 

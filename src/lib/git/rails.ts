@@ -38,7 +38,7 @@
 import type { GitCommit, GitRefs } from "./types";
 import { LANE_COLOR_COUNT } from "./graph";
 
-export const DEFAULT_BRANCH_NAMES = ["main", "master", "trunk", "develop"] as const;
+const DEFAULT_BRANCH_NAMES = ["main", "master", "trunk", "develop"] as const;
 
 export type RailKind = "head" | "local" | "remote" | "tag" | "anon";
 

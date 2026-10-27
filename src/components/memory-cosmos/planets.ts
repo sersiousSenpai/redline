@@ -2,7 +2,7 @@ import { BufferAttribute, Color, Mesh, ShaderMaterial, SphereGeometry } from "th
 import { mergeVertices } from "three/addons/utils/BufferGeometryUtils.js";
 import { seedOf, type CosmosNode } from "../../lib/memoryMap3d";
 
-export const SOMA_COLORS = { class: "#b7e2d6", digest: "#b2aad8", session: "#8bbfd0", thread: "#85cbbb" };
+const SOMA_COLORS = { class: "#b7e2d6", digest: "#b2aad8", session: "#8bbfd0", thread: "#85cbbb" };
 export const somaColor = (node: CosmosNode) => node.pinned ? "#e4c58e" : SOMA_COLORS[node.kind];
 export function planet(node: CosmosNode, detail: boolean) {
   const phase = seedOf(node.id) / 4294967296 * Math.PI * 2;

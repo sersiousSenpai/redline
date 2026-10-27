@@ -45,12 +45,12 @@ export const UNFINISHED_SILENCE_MS = 2500;
  *  goes quiet. */
 export const CAP_MS = 6000;
 /** "Send now" ends the turn as soon as they stop. */
-export const SEND_NOW_SILENCE_MS = 250;
+const SEND_NOW_SILENCE_MS = 250;
 /** A turn ends only once the transcript has caught up with the audio, or
  *  this long after the rule's time: the recognizer writes the last word
  *  0.27 s after the voice stops (p90 0.47 s, now and then over 0.7 s), and
  *  until it has, the words being judged may lack the one that trails off. */
-export const CATCH_UP_MS = 300;
+const CATCH_UP_MS = 300;
 /** Speaking again this soon after a turn ended, before its reply is heard,
  *  carries that turn on. */
 export const RESUME_MS = 1500;
@@ -58,7 +58,7 @@ export const RESUME_MS = 1500;
  *  voice, not a click (150 ms). */
 const RESUME_RUN = 3;
 /** Words over a running reply that interrupt it — or one of these alone. */
-export const BARGE_WORDS = 2;
+const BARGE_WORDS = 2;
 const STOP_WORD = /^\W*(?:stop|wait|pause|quiet|hold on|hang on)\W*$/i;
 
 /** The scorer is first asked after this much silence… */
@@ -67,14 +67,14 @@ export const SCORE_AFTER_MS = 250;
  *  transcript has caught up: no sooner, or a trailing "and" not yet written
  *  could not hold the turn (the recognizer wrote the last word 0.27 s after
  *  the voice stopped on the dictation test set, p90 0.47 s)… */
-export const SCORE_SURE = 0.95;
+const SCORE_SURE = 0.95;
 export const EARLY_END_MS = 600;
 /** …and from `END_SILENCE_MS` on, asked every `SCORE_EVERY_MS`, ends it at
  *  this, holding it until `UNFINISHED_SILENCE_MS` otherwise. */
-export const SCORE_DONE = 0.5;
-export const SCORE_EVERY_MS = 250;
+const SCORE_DONE = 0.5;
+const SCORE_EVERY_MS = 250;
 /** An answer slower than this (in audio) is not waited for. */
-export const SCORE_WAIT_MS = 200;
+const SCORE_WAIT_MS = 200;
 
 export type EndReason = "silence" | "unfinished" | "scored" | "cap" | "send-now";
 

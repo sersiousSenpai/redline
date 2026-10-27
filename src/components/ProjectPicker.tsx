@@ -5,11 +5,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Folder } from "lucide-react";
 import { ComposerMenu } from "./ComposerMenu";
 
-/** Panel width, px. Exported for the same reason `PANEL_WIDTH` is: the
- *  placement clamp and the rendered panel must agree, or the clamp keeps a
- *  narrower box on screen than the one that paints. */
-export const PICKER_WIDTH = 304;
-
 export interface ProjectOption {
   /** Absolute directory path. */
   path: string;

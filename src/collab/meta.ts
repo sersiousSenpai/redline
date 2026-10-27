@@ -10,7 +10,7 @@
  */
 import type * as Y from "yjs";
 
-export const META_FIELD = "meta";
+const META_FIELD = "meta";
 
 export interface CollabMeta {
   /** Latest revision number — the room a collaborator should be in. */

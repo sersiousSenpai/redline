@@ -160,7 +160,7 @@ export interface OrchestrateTiming {
   maxPromptRetries: number;
 }
 
-export const DEFAULT_ORCHESTRATE_TIMING: OrchestrateTiming = {
+const DEFAULT_ORCHESTRATE_TIMING: OrchestrateTiming = {
   spawnTimeoutMs: SPAWN_TIMEOUT_MS,
   readyTimeoutMs: 30_000,
   readyFallbackMs: READY_FALLBACK_MS,

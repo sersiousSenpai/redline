@@ -38,7 +38,7 @@ function apply(value: ReviewPose) {
   }
   listeners.forEach((fn) => fn());
 }
-export function setReviewPose(value: ReviewPose) {
+function setReviewPose(value: ReviewPose) {
   if (value === pose) return;
   revision++;
   apply(value);
@@ -88,15 +88,4 @@ export function useReviewPose(
       });
   }, [hydrate]);
   return [value, setReviewPose];
-}
-
-/** Test seam: forget the module-level state so each test starts cold. */
-export function __resetReviewPoseForTest() {
-  initialized = false;
-  revision = 0;
-  try {
-    pose = normalizeReviewPose(JSON.parse(localStorage.getItem(key) ?? '"review"'));
-  } catch {
-    pose = "review";
-  }
 }

@@ -17,9 +17,9 @@
 
 import type { RunGraph, XY } from "./schema";
 
-export const LAYOUT_COL_GAP = 310;
-export const LAYOUT_ROW_GAP = 180;
-export const LAYOUT_MARGIN = 40;
+const LAYOUT_COL_GAP = 310;
+const LAYOUT_ROW_GAP = 180;
+const LAYOUT_MARGIN = 40;
 const ORDERING_SWEEPS = 4;
 
 export interface RunLayoutResult {

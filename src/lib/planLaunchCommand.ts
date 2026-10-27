@@ -106,7 +106,7 @@ export function buildRunLaunchCommand(
 }
 
 /** Keep the contract compact: the canonical skill owns revision semantics. */
-export const NATIVE_PLAN_PREFIX =
+const NATIVE_PLAN_PREFIX =
   "Use the installed redline-plan-review skill. Remain in read-only research and planning mode. " +
   "Finish with exactly one complete <proposed_plan>...</proposed_plan> envelope containing the full plan.\n\n";
 

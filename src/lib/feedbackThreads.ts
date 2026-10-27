@@ -92,7 +92,7 @@ export interface ReviewGroups {
 
 /** The revisions the review reads: the current thread while the latest is
  *  on screen, else just the version shown. */
-export function reviewScope(session: ReviewSession, viewingVersion: number): Revision[] {
+function reviewScope(session: ReviewSession, viewingVersion: number): Revision[] {
   const revisions = session.revisions;
   const latest = revisions[revisions.length - 1];
   if (!latest) return [];

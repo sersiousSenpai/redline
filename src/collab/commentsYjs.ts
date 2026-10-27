@@ -19,7 +19,7 @@ import type { Comment } from "../types";
 export const SQLITE_MIRROR = "rl-sqlite-mirror";
 
 /** The Y.Map field on the room doc: commentId → Comment JSON. */
-export const COMMENTS_FIELD = "comments";
+const COMMENTS_FIELD = "comments";
 
 export function commentsMap(ydoc: Y.Doc): Y.Map<Comment> {
   return ydoc.getMap<Comment>(COMMENTS_FIELD);

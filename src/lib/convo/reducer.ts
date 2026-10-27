@@ -229,7 +229,7 @@ function keyOf(event: ConvoEvent, seq: Readonly<Record<string, number>>): EventK
   return { epoch: event.epoch, offset: event.offset, seq: seq[event.id] ?? 0 };
 }
 
-export function compareKeys(a: EventKey, b: EventKey): number {
+function compareKeys(a: EventKey, b: EventKey): number {
   return a.epoch - b.epoch || a.offset - b.offset || a.seq - b.seq;
 }
 

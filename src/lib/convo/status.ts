@@ -68,7 +68,7 @@ const TOOLS: Record<string, ToolWords> = {
  *  ask card. */
 const CARD_TOOLS = new Set(["ExitPlanMode", "AskUserQuestion"]);
 
-export function isCardTool(name: string): boolean {
+function isCardTool(name: string): boolean {
   return CARD_TOOLS.has(name);
 }
 

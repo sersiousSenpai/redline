@@ -24,7 +24,7 @@ export interface VoicePrefs {
   rate: number;
 }
 
-export const DEFAULT_VOICE_PREFS: VoicePrefs = { voiceURI: null, rate: 1 };
+const DEFAULT_VOICE_PREFS: VoicePrefs = { voiceURI: null, rate: 1 };
 
 const PREFS_KEY = "redline.voice.prefs";
 

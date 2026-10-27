@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-export const TAB_DRAG_THRESHOLD = 4;
-export const TAB_REORDER_HYSTERESIS = 3;
-export const TAB_STRIP_SLOP = 40;
+const TAB_DRAG_THRESHOLD = 4;
+const TAB_REORDER_HYSTERESIS = 3;
+const TAB_STRIP_SLOP = 40;
 export const crossedDragThreshold = (dx: number, dy = 0) => Math.hypot(dx, dy) >= TAB_DRAG_THRESHOLD;
 
 /** Move to the target tab's original array index, matching the preview in

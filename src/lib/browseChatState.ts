@@ -18,7 +18,7 @@ export type ChatStateMap = Record<string, ChatEntry>;
 
 /** How many closed-tab entries to keep. Small — this is UI memory for tabs that
  *  no longer exist in the open workspace, not a history. */
-export const KEEP_IDLE = 32;
+const KEEP_IDLE = 32;
 
 /** Keep the map bounded without ever forgetting a tab that still exists.
  *

@@ -45,7 +45,7 @@ export function nextCollapsed(
 export type ClearanceStage = "full" | "stowed" | "icon";
 
 /** Widest → narrowest; the ladder walks this order. */
-export const STAGE_ORDER: readonly ClearanceStage[] = ["full", "stowed", "icon"];
+const STAGE_ORDER: readonly ClearanceStage[] = ["full", "stowed", "icon"];
 
 /** Widest stage whose right edge clears `deskLeft`; steps back up only at
  *  EXPAND_GAP.

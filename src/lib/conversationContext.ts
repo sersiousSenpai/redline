@@ -41,16 +41,6 @@ export type ConversationKind =
   | "mission"
   | "companion";
 
-/** The one member of the union that is NOT a conversation: a browser tab's
- *  working list.
- *
- *  It is here because the dock is the app's ONE right column, and the list has
- *  always shared that column with the page discussion — the two hand items
- *  back and forth (`💬` on an item seeds the chat; a reply appends to the
- *  list), so splitting them across two columns would be a step backwards from
- *  what the browser already had. It is never voice-capable and never leads. */
-export const NON_CONVERSATION_KINDS: readonly ConversationKind[] = ["browselist"];
-
 /** The kinds the browser pane owns and renders itself (into the dock's slot). */
 export const BROWSER_DOCK_KINDS: readonly ConversationKind[] = [
   "browse",
@@ -87,7 +77,7 @@ export interface ConversationDescriptor {
 
 /** The kinds `voice.rs` accepts today. A7 adds "companion" here and in the
  *  Rust key-shape dispatch — one line on each side. */
-export const VOICE_CAPABLE_KINDS: readonly ConversationKind[] = [
+const VOICE_CAPABLE_KINDS: readonly ConversationKind[] = [
   "voice",
   "drafter",
 ];

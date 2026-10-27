@@ -78,7 +78,7 @@ export type HealthProbe = (query: HealthQuery) => Promise<IntegrationHealth>;
 /** How long an answer stays good. Long enough that ⌘-tabbing between Redline
  *  and a terminal doesn't re-probe on every trip; short enough that fixing
  *  something in that terminal and coming back shows the fix. */
-export const HEALTH_TTL_MS = 30_000;
+const HEALTH_TTL_MS = 30_000;
 
 export interface HealthService {
   /** The current answer for `query`, probing only if there isn't a fresh one.

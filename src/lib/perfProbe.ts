@@ -29,14 +29,14 @@
 // Started from main.tsx through `perfProbeSwitch.ts`, never imported eagerly.
 
 /** Longest window a snapshot can summarize; older samples are dropped. */
-export const RETAIN_MS = 120_000;
+const RETAIN_MS = 120_000;
 /** What a snapshot summarizes when the caller doesn't say. */
-export const DEFAULT_WINDOW_MS = 60_000;
+const DEFAULT_WINDOW_MS = 60_000;
 /** Event Timing's minimum `durationThreshold`: faster events go unreported. */
 export const EVENT_FLOOR_MS = 16;
 /** Frame-gap histogram bucket ceilings: a 120 Hz frame, a 60 Hz frame, one
  *  and two dropped 60 Hz frames, then the visible stalls. */
-export const FRAME_BUCKETS_MS = [9, 17.5, 34, 50, 100, 250] as const;
+const FRAME_BUCKETS_MS = [9, 17.5, 34, 50, 100, 250] as const;
 /** How long the frame sampler runs on after the last input. */
 export const FRAME_TAIL_MS = 2_000;
 

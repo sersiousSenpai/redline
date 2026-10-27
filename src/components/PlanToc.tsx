@@ -42,7 +42,7 @@ function cssEscape(s: string): string {
 
 /** The nearest scrollable ancestor of the rendered plan, or null when the
  *  window itself scrolls. */
-export function scrollContainerOf(scope: HTMLElement): HTMLElement | null {
+function scrollContainerOf(scope: HTMLElement): HTMLElement | null {
   let node: HTMLElement | null = scope;
   while (node && node !== document.body) {
     const oy = getComputedStyle(node).overflowY;

@@ -66,7 +66,7 @@ export function harnessLabel(h: RestoreHarness): string {
 }
 
 /** The short name for mid-sentence use ("Codex is no longer waiting"). */
-export function harnessShortLabel(h: RestoreHarness): string {
+function harnessShortLabel(h: RestoreHarness): string {
   return backendLabel(h);
 }
 

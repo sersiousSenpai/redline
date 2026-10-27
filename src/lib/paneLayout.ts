@@ -17,9 +17,9 @@ export function docMinFor(winWidth: number): number {
 /** Minimum useful document-strip HEIGHT above the terminal dock — the vertical
  *  twin of DOC_MIN/docMinFor, for the dock's tile-driven growth. `docMinFor`
  *  is a *width* rule and the wrong instrument for a vertical cap. */
-export const DOC_MIN_H = 220;
+const DOC_MIN_H = 220;
 /** On tall windows the absolute floor reads squeezed shut; scale it. */
-export const DOC_MIN_H_FRAC = 0.2;
+const DOC_MIN_H_FRAC = 0.2;
 /** The effective document floor above the dock for a window: the larger of
  *  the absolute minimum and the window fraction. */
 export function docMinHFor(winHeight: number): number {

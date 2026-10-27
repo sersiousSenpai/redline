@@ -9,7 +9,7 @@ export interface CosmosView { camera?: CosmosCamera; selectedId?: string | null;
 
 export const COSMOS_LAYOUT_VERSION = 2;
 export const PHI = (1 + Math.sqrt(5)) / 2;
-export const GOLDEN_ANGLE = 2 * Math.PI / (PHI * PHI);
+const GOLDEN_ANGLE = 2 * Math.PI / (PHI * PHI);
 
 export function seedOf(id: string): number {
   let h = 2166136261;
