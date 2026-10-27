@@ -498,6 +498,7 @@ import {
 import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
 import { markOnce } from "./lib/bootMarks";
+import { beginMeasure, endMeasure } from "./workbench/perf";
 import { perfProbeOn, setPerfProbe } from "./lib/perfProbeSwitch";
 import type { BootstrapState, DaemonState } from "./types";
 import {
@@ -4659,6 +4660,12 @@ function App() {
   // `activeId` flipping and `session` being repopulated by get_session.
   const sessionReady =
     session !== null && session.sessionId === activeId;
+  // The end of `wb:session-switch`: the loaded session matches the clicked
+  // id and this commit has painted it. A no-op unless a sidebar click began
+  // the measure (the Performance targets in docs/perf-budget.md).
+  useEffect(() => {
+    if (sessionReady) endMeasure("wb:session-switch");
+  }, [sessionReady, activeId]);
 
   const latest = session?.revisions[session.revisions.length - 1];
   // The revision currently displayed in the document pane. Null
@@ -8808,6 +8815,10 @@ function App() {
         setFrontDoorOpen(false);
         flowRowToStage();
       }
+      // `wb:session-switch`: the click to the stage showing the session
+      // (ended once `sessionReady` flips, below). A re-click of the open
+      // session is not a switch.
+      if (id !== activeId) beginMeasure("wb:session-switch");
       setActiveId(id);
     },
     onSelectJoined: () => joinedInfo && setActiveId(joinedInfo.key),
@@ -8823,7 +8834,10 @@ function App() {
       // might not be the active one yet — flip activeId first so the pane
       // mounts the right session before the viewed-version applies.
       if (isFlowShell()) flowRowToStage();
-      if (sessionId !== activeId) setActiveId(sessionId);
+      if (sessionId !== activeId) {
+        beginMeasure("wb:session-switch");
+        setActiveId(sessionId);
+      }
       setViewedVersionNumber(versionNumber);
     },
     onOpenRunReport: (sessionId: string) => {
