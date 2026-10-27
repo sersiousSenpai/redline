@@ -1457,12 +1457,6 @@ impl SelfDevelopState {
             set.remove(release_id);
         }
     }
-    pub fn is_preparing(&self, release_id: &str) -> bool {
-        self.preparing
-            .lock()
-            .map(|set| set.contains(release_id))
-            .unwrap_or(false)
-    }
 }
 
 /// Whether this copy of Redline can build its own replacement, and if not, the
@@ -1678,11 +1672,6 @@ pub fn self_develop_list(app: AppHandle) -> Result<Vec<Release>, String> {
     db(&app)?.release_list(50)
 }
 
-#[tauri::command]
-pub fn self_develop_get(app: AppHandle, release_id: String) -> Result<Option<Release>, String> {
-    db(&app)?.release_get(&release_id)
-}
-
 /// Move a release to a new status, refusing transitions the lifecycle does not
 /// allow.
 fn set_status(
@@ -1825,57 +1814,6 @@ fn signing_identity() -> Option<String> {
     String::from_utf8_lossy(&out.stdout)
         .contains("\"Redline Dev\"")
         .then(|| "Redline Dev".to_string())
-}
-
-/// True while this process is running a pipeline for `release_id`.
-fn preparing_now(app: &AppHandle, release_id: &str) -> bool {
-    app.try_state::<SelfDevelopState>()
-        .map(|state| state.is_preparing(release_id))
-        .unwrap_or(false)
-}
-
-#[tauri::command]
-pub fn self_develop_cancel(app: AppHandle, release_id: String) -> Result<Release, String> {
-    let mut release = db(&app)?
-        .release_get(&release_id)?
-        .ok_or("no such release")?;
-    if preparing_now(&app, &release_id) {
-        return Err(
-            "this release is being built right now. Wait for the build to finish, or quit \
-             Redline to stop it."
-                .into(),
-        );
-    }
-    if release.status().holds_activation() {
-        return Err(
-            "this release is already being installed; it cannot be cancelled from here.".into(),
-        );
-    }
-    set_status(&app, &mut release, ReleaseStatus::Cancelled, "cancelled")?;
-    Ok(release)
-}
-
-/// Delete a release's workspace and output. The record stays, so the history
-/// still shows what happened.
-#[tauri::command]
-pub fn self_develop_discard(app: AppHandle, release_id: String) -> Result<(), String> {
-    let data_dir = data_dir(&app)?;
-    let release = db(&app)?
-        .release_get(&release_id)?
-        .ok_or("no such release")?;
-    if release.status().holds_activation() {
-        return Err("this release is being installed right now.".into());
-    }
-    // Deleting the workspace under a live pipeline would leave `npm ci` or a
-    // linker writing into a directory that no longer exists, and the failure
-    // would read as a broken build rather than as this.
-    if preparing_now(&app, &release_id) {
-        return Err("this release is being built right now.".into());
-    }
-    let _ = std::fs::remove_dir_all(data_dir.join(CANDIDATES_DIR).join(&release_id));
-    db(&app)?.release_delete(&release_id)?;
-    let _ = app.emit("self-develop-changed", serde_json::Value::Null);
-    Ok(())
 }
 
 /// The agents' work as a reviewable patch, and whether it would still apply to
@@ -2283,14 +2221,12 @@ mod tests {
         // that is neither.
         let state = SelfDevelopState::new();
         assert!(state.claim("rel-1"));
-        assert!(state.is_preparing("rel-1"));
         assert!(!state.claim("rel-1"), "a second claim must be refused");
         // A different candidate is unaffected — they have separate workspaces.
         assert!(state.claim("rel-2"));
         state.release("rel-1");
-        assert!(!state.is_preparing("rel-1"));
         assert!(state.claim("rel-1"), "claimable again once it has finished");
-        assert!(state.is_preparing("rel-2"), "the other one is still running");
+        assert!(!state.claim("rel-2"), "the other one is still running");
     }
 
     #[test]

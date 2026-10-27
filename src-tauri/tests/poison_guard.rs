@@ -16,6 +16,8 @@
 mod common;
 
 static DB_RS: &str = include_str!("../src/db.rs");
+/// db.rs's `mod tests`, which lives in its own #[path] file.
+static DB_TESTS_RS: &str = include_str!("../src/db_tests.rs");
 
 /// Production code takes the connection through `lock_conn()` and nowhere
 /// else.
@@ -115,7 +117,7 @@ fn store_conn_is_never_locked_with_unwrap() {
 #[test]
 fn behavioural_poison_recovery_test_still_exists() {
     assert!(
-        DB_RS.contains("fn poisoned_conn_recovers()"),
+        DB_TESTS_RS.contains("fn poisoned_conn_recovers()"),
         "db::tests::poisoned_conn_recovers is the only test that proves the \
          recovery actually works — a source invariant alone would pass against \
          an accessor that still panicked"

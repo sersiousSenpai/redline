@@ -1190,69 +1190,6 @@ async fn finish_undo(
         "The change was undone. A recovery copy is available if you change your mind.".into();
     Ok(action)
 }
-#[tauri::command]
-pub async fn review_restore_undo(
-    state: tauri::State<'_, ReviewState>,
-    repo: String,
-    id: String,
-) -> Result<crate::guided::ActionResult, String> {
-    let dir = review::checked_repo_dir(&state.db, &repo).await?;
-    let _lock = crate::guided::repo_lock(&dir).await;
-    let folder = undo_folder(&dir, &id).await?;
-    let meta: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(folder.join("meta.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    let root = std::fs::canonicalize(&dir).map_err(|e| e.to_string())?;
-    if meta["repo"].as_str() != root.to_str() {
-        return Err("This recovery copy belongs to another project.".into());
-    }
-    let current = review::fingerprint_for(&dir, DiffSource::Uncommitted, None, None).await?;
-    if meta["fingerprint"].as_str() != Some(current.as_str()) {
-        return Err("The project changed after that undo. Save your current work before restoring the recovery copy.".into());
-    }
-    let path = review::safe_rel_path(meta["path"].as_str().ok_or("Invalid recovery copy.")?)?;
-    let target = root.join(path);
-    let parent = target.parent().ok_or("Invalid recovery path.")?;
-    let mut ancestor = parent;
-    while !ancestor.exists() {
-        ancestor = ancestor.parent().ok_or("Invalid recovery path.")?;
-    }
-    if !std::fs::canonicalize(ancestor)
-        .map_err(|e| e.to_string())?
-        .starts_with(&root)
-    {
-        return Err("This recovery path points outside the project.".into());
-    }
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    if !std::fs::canonicalize(parent)
-        .map_err(|e| e.to_string())?
-        .starts_with(&root)
-        || target
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-    {
-        return Err("This recovery path points outside the project.".into());
-    }
-    let command = if meta["hadFile"].as_bool() == Some(true) {
-        std::fs::copy(folder.join("contents"), &target).map_err(|e| e.to_string())?;
-        format!("fs::copy({:?}, {:?})", folder.join("contents"), target)
-    } else {
-        if target.exists() {
-            std::fs::remove_file(&target).map_err(|e| e.to_string())?;
-        }
-        format!("fs::remove_file({:?})", target)
-    };
-    Ok(crate::guided::ActionResult {
-        commands: vec![crate::guided::ActionCommand {
-            command,
-            meaning: "Restored the recovery copy as an unsaved change.".into(),
-            ok: true,
-        }],
-        message: "Your earlier edit is restored. Review it before saving.".into(),
-        ..Default::default()
-    })
-}
 
 async fn is_tracked(dir: &Path, path: &str) -> bool {
     git_write(

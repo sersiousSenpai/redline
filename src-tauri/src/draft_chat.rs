@@ -909,11 +909,6 @@ pub fn draft_chat_cancel(
     Ok(())
 }
 
-#[tauri::command]
-pub fn draft_chat_kill_all(chat: tauri::State<'_, DraftChatState>) {
-    chat.kill_all();
-}
-
 // --- Draft comments (the sidecar) -------------------------------------------
 
 /// Add a comment anchored to a draft block (the drafter sidecar).

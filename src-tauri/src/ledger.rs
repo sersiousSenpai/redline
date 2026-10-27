@@ -41,7 +41,7 @@ use crate::db::Database;
 // keeps its path, and a `&Database` coerces to `&PolisStore` through Deref.
 #[allow(unused_imports)]
 pub use polis_store::record::{
-    record_browse_event, record_decision, record_moot_turn, record_prompt, record_prompt_at,
+    record_browse_event, record_decision, record_prompt, record_prompt_at,
     record_revision_event, record_session_link, record_work_event, resolve_parent, BrowseAction,
     BrowseEventInput, DecisionInput, PromptInput, ThreadRef,
 };
@@ -332,7 +332,6 @@ mod tests {
             ("companion.rs", include_str!("companion.rs")),
             ("draft_chat.rs", include_str!("draft_chat.rs")),
             ("fork.rs", include_str!("fork.rs")),
-            ("intake.rs", include_str!("intake.rs")),
             ("keeper.rs", include_str!("keeper.rs")),
             ("ledger.rs", include_str!("ledger.rs")),
             ("lib.rs", include_str!("lib.rs")),
@@ -340,8 +339,6 @@ mod tests {
             ("memchat.rs", include_str!("memchat.rs")),
             ("mission.rs", include_str!("mission.rs")),
             ("polis_host.rs", include_str!("polis_host.rs")),
-            ("moot.rs", include_str!("moot.rs")),
-            ("queue.rs", include_str!("queue.rs")),
             ("seatassign.rs", include_str!("seatassign.rs")),
             ("shipwright.rs", include_str!("shipwright.rs")),
             ("voice.rs", include_str!("voice.rs")),

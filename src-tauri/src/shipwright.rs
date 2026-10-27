@@ -692,7 +692,7 @@ That's the lot."#;
             .unwrap();
         if dismissed {
             if let Some(id) = inserted.as_deref() {
-                db.resolve_shipwright_finding(id, "dismissed", None).unwrap();
+                db.dismiss_shipwright_finding_for_test(id).unwrap();
             }
         }
         inserted

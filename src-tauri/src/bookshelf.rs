@@ -397,42 +397,6 @@ pub fn bookshelf_delete_folder(
 // Sources (attached to a document, never to a folder)
 // ---------------------------------------------------------------------------
 
-/// Attach a non-file source: a captured `browse_events` page, a
-/// `mission_findings` row, a bare URL, or a digest the agent wrote.
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn draft_source_add(
-    store: tauri::State<'_, SessionStore>,
-    draft_id: String,
-    kind: String,
-    ref_id: Option<String>,
-    url: Option<String>,
-    title: Option<String>,
-    excerpt: Option<String>,
-) -> Result<DraftSource, String> {
-    if draft_id.trim().is_empty() {
-        return Err("missing draft id".to_string());
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    let db = store.database();
-    db.add_draft_source(
-        &id,
-        &draft_id,
-        &kind,
-        ref_id.as_deref(),
-        url.as_deref(),
-        title.as_deref(),
-        excerpt.as_deref(),
-        None,
-    )
-    .map_err(|e| e.to_string())?;
-    db.list_draft_sources(&draft_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|s| s.id == id)
-        .ok_or_else(|| "the source vanished on write".to_string())
-}
-
 /// Copy a dropped file into this document's source directory and attach it.
 /// Reuses `fsbrowse`'s attachment discipline: copy at capture time (a source
 /// the user later moves or trashes would break silently), sanitize the
@@ -663,9 +627,9 @@ mod tests {
 
     #[test]
     fn a_renamed_title_survives_every_mirror_writer() {
-        // FIVE writers mirror the document and every one re-derives a title
+        // FOUR writers mirror the document and every one re-derives a title
         // from the markdown and passes it: the 400ms autosave, the ✦ turn, the
-        // Discuss pill, the one-shot migration, the moot's land. A call-site
+        // Discuss pill, the one-shot migration. A call-site
         // contract ("pass None to keep the name") is what `voice.rs` already
         // broke by hand-rolling the same preservation for `project_path` and
         // not generalizing it — so the pin lives on the row instead.
@@ -676,9 +640,6 @@ mod tests {
             db.upsert_draft("d1", crate::draft_title_from_markdown(md).as_deref(), None, md, None)
                 .unwrap();
         }
-        // ...and the moot's reset-doc lander, which is the same write.
-        db.upsert_draft_reset_doc("d1", Some("Round 2 output"), None, "# Round 2 output")
-            .unwrap();
         let row = db.list_drafts().unwrap().into_iter().find(|d| d.draft_id == "d1").unwrap();
         assert_eq!(row.title.as_deref(), Some("Q3 auth rewrite"));
     }

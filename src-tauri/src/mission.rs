@@ -1081,13 +1081,6 @@ pub fn mission_unqueue(
     Ok(Some(turn.text))
 }
 
-/// Kill every running orchestrator — also invoked on app teardown.
-#[tauri::command]
-pub fn mission_kill_all(mission: tauri::State<'_, MissionState>) -> Result<(), String> {
-    mission.kill_all();
-    Ok(())
-}
-
 // --- Streaming reader ------------------------------------------------------
 
 /// Drive one orchestrator turn: stream stdout JSONL → `mission-delta` events,

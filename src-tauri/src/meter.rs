@@ -788,20 +788,6 @@ pub fn thread_meters(
         .collect()
 }
 
-/// One PTY plan session's tailed meter (`plan_meter`). `None` until the
-/// tailer has seen an assistant turn — a session that has only been asked a
-/// question has spent nothing yet.
-#[tauri::command]
-pub fn plan_session_meter(
-    store: tauri::State<'_, crate::state::SessionStore>,
-    session_id: String,
-) -> Option<Value> {
-    store
-        .database()
-        .session_meter(&session_id)
-        .and_then(|j| serde_json::from_str(&j).ok())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,8 +1067,6 @@ mod tests {
     fn silent_drains_use_the_seated_collector() {
         const SILENT: &[(&str, &str)] = &[
             ("browse_locate.rs", include_str!("browse_locate.rs")),
-            ("intake.rs", include_str!("intake.rs")),
-            ("moot.rs", include_str!("moot.rs")),
         ];
         for (name, src) in SILENT {
             assert!(
@@ -1099,13 +1083,10 @@ mod tests {
         }
     }
 
-    /// The overnight queue no longer owns a child/pipe. Native task and
-    /// structured-model readers share cancellation-safe booking in the runner.
+    /// Native task and structured-model readers share cancellation-safe
+    /// booking in the runner.
     #[test]
-    fn native_queue_delegates_and_runner_books_on_drop() {
-        let queue=include_str!("queue.rs");
-        assert!(queue.contains("runner.start("));
-        assert!(!queue.contains("collect_turn("));
+    fn runner_books_on_drop() {
         let runner=include_str!("runner.rs");
         assert!(runner.contains("crate::turn::push_meta("));
         assert!(runner.contains(".meter.observe(&v)"));

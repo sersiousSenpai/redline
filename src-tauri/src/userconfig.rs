@@ -68,8 +68,7 @@ pub fn write_workspace_under(root: &std::path::Path, json: &str) -> Result<(), S
     std::fs::write(root.join("workspace.json"), json).map_err(|e| e.to_string())
 }
 
-/// Tauri command: the raw `~/.redline/workspace.json` text, if present.
-#[tauri::command]
+/// The raw `~/.redline/workspace.json` text, if present.
 pub fn get_workspace() -> Option<String> {
     read_workspace_under(&config_root())
 }
@@ -157,7 +156,6 @@ pub fn harness_uninstall(id: String) -> Result<(), String> {
 /// Tauri command: which harness this BUILD is, if any — the boot entry's
 /// direction signal (A7 boots into it with the exit hidden; a user-entered
 /// harness never consults this). None in every normal build.
-#[tauri::command]
 pub fn harness_flavor() -> Option<String> {
     build_flavor().map(str::to_string)
 }
