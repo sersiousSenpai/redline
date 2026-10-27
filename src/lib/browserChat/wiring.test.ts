@@ -3,7 +3,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { agentCapabilities } from "./chrome";
 import contract from "./contract.json";
 
 // Cross-file conformance: the laws a future edit could break silently because
@@ -103,8 +102,8 @@ describe("the skill and the prompt teach what the backend does", () => {
   });
   it("BC-19 BC-21 every route the page agent may call is taught by its first turn or the skill", () => {
     const docs = fnBody(browseRs, "build_first_turn_prompt");
-    const reach = agentCapabilities("claude-code", true);
-    for (const route of [...reach.read, ...reach.mutate, ...reach.write]) {
+    const reach = [...contract.readRoutes, ...contract.codeRoutes, contract.actionRoute, ...contract.tabRoutes, contract.writeRoute];
+    for (const route of reach) {
       expect(docs.includes(route) || skill.includes(route), `nothing teaches ${route}`).toBe(true);
     }
   });

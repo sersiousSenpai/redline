@@ -18,18 +18,13 @@ import { useMenuOverlay } from "./menuOverlay";
 import { useNativeOverlayRegion } from "../hooks/useNativeOverlayRegion";
 
 // The floating-panel idiom extracted from RepoBubbles (a pure move): a
-// viewport-fixed, body-portalled panel with hover- and click-opened variants,
-// shared dismissal, and placement clamped inside the viewport. Anything that
+// viewport-fixed, body-portalled, click-opened panel with shared dismissal
+// and placement clamped inside the viewport. Anything that
 // needs a popover which must escape an `overflow: hidden` strip or a
 // `contain: layout paint` wrapper builds on these.
 
 /** Panel width, px — placement math and the panel itself must agree on it. */
 export const PANEL_WIDTH = 272;
-// Long enough that sweeping the pointer across a strip on the way elsewhere
-// doesn't fire a panel; short enough to feel like a hover.
-const OPEN_DELAY_MS = 320;
-// Grace period so the pointer can travel from the anchor into the panel.
-const CLOSE_DELAY_MS = 160;
 /** Anchor edge to panel edge. */
 const GAP = 6;
 /** Keep-out from the viewport edges. */
@@ -141,33 +136,6 @@ export function PanelHeader({ children }: { children: React.ReactNode }) {
     >
       <bdi>{children}</bdi>
     </div>
-  );
-}
-
-export function PanelFooter({
-  children,
-  onClick,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitem"
-      onClick={onClick}
-      className="rl-menu-item w-full text-left px-3 py-1.5 font-sans"
-      style={{
-        display: "block",
-        flexShrink: 0,
-        fontSize: "11px",
-        color: "var(--color-ink-muted)",
-        borderTop: "1px solid var(--color-rule)",
-        cursor: "pointer",
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -333,84 +301,6 @@ export function useDismiss(
     // `refs` is a fresh array each render; its contents are stable refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, close]);
-}
-
-/** Hover-with-intent popover: a delay before opening (so crossing a strip
- *  doesn't pop panels) and a grace period before closing (so the pointer can
- *  reach the panel). */
-export function useHoverPopover(anchorRef: React.RefObject<HTMLElement | null>) {
-  const [open, setOpen] = useState(false);
-  const [style, setStyle] = useState<CSSProperties>({});
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const openTimer = useRef<number | null>(null);
-  const closeTimer = useRef<number | null>(null);
-
-  useMenuOverlay(open);
-
-  const cancel = (t: React.RefObject<number | null>) => {
-    if (t.current !== null) {
-      window.clearTimeout(t.current);
-      t.current = null;
-    }
-  };
-
-  // Timers must not outlive the anchor — it can leave the DOM mid-hover.
-  useEffect(
-    () => () => {
-      cancel(openTimer);
-      cancel(closeTimer);
-    },
-    [],
-  );
-
-  // Stable so the dismissal listeners below don't re-subscribe every render.
-  const close = useCallback(() => {
-    cancel(openTimer);
-    cancel(closeTimer);
-    setOpen(false);
-  }, []);
-
-  const onPointerEnter = () => {
-    cancel(closeTimer);
-    if (open || openTimer.current !== null) return;
-    openTimer.current = window.setTimeout(() => {
-      openTimer.current = null;
-      const pos = placeUnder(anchorRef.current, "left");
-      if (!pos) return;
-      setStyle(pos);
-      setOpen(true);
-    }, OPEN_DELAY_MS);
-  };
-
-  const onPointerLeave = () => {
-    cancel(openTimer);
-    cancel(closeTimer);
-    closeTimer.current = window.setTimeout(() => {
-      closeTimer.current = null;
-      setOpen(false);
-    }, CLOSE_DELAY_MS);
-  };
-
-  useDismiss(open, close, [anchorRef, panelRef]);
-  useReplaceWhileOpen(
-    open,
-    () => placeUnder(anchorRef.current, "left"),
-    setStyle,
-  );
-
-  return {
-    open,
-    close,
-    anchorProps: { onPointerEnter, onPointerLeave },
-    panelProps: {
-      style,
-      panelRef: (el: HTMLDivElement | null) => {
-        panelRef.current = el;
-      },
-      onPointerEnter: () => cancel(closeTimer),
-      onPointerLeave,
-    },
-  };
 }
 
 /** An anchored popover holding a single text input — the app's replacement for

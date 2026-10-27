@@ -14,7 +14,6 @@ they are written down and executed.
 | `scope.ts` | `ChatWorld` (tabs, the tab on screen vs the anchored tab, linked mode, the momentary flip, one shared thread per workspace), every gesture as a `ChatEvent`, `reduceChatWorld` (normalizes after every event), `resolveConversation`, `contextLine`, `dockDescriptor`. **Nothing else derives a thread id.** |
 | `turn.ts` | `turnEnvelope` (exactly `browse_send`'s arguments), `capturedWorkspace`, `needsSnapshot`, `seedPolicy` (highlight, element, Task-list item, plan Search), `composerModel` (the one round button: mic, send, queue, stop), `replyActions`. |
 | `transcript.ts` | How a turn is drawn: `workRows` (a reply's steps as verb + object rows, reads folded, a page action's outcome in place of its call), `liveSteps` and `liveStepLabel` (the one live line), `composeTurn` and `userTurnParts` (the chips a message carries, both ways), `follows` and `parkAt` (when the thread follows). |
-| `chrome.ts` | The pill's hover composer on the browser (Plan and Run), the dock's three browser panels, the agent's reach per provider. |
 | `contract.json` | Values both languages must agree on: send parameters, scope phrases, routes, action kinds, the queue and project caps, activity phrases, what the skill must and must not teach. |
 | `invariants.ts` | The numbered rules (BC-1 to BC-37, and BC-R1 to BC-R5 for rejected designs), each with the memory note, plan or code it was decided in. |
 

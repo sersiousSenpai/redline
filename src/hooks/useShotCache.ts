@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// Lazy loader for the picture store, mirroring `useThumbCapture`'s discipline.
+// Lazy loader for the picture store.
 //
 // Three constraints shape this, and none of them are obvious:
 //
