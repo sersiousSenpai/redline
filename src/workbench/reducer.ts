@@ -87,6 +87,9 @@ export type WorkbenchAction =
   | { type: "pinPane"; key?: SessionKey; paneId: string }
   /** A title of the user's own; empty clears it. */
   | { type: "renamePane"; key?: SessionKey; paneId: string; title: string }
+  /** The pane becomes something else in place — a door tab converting into
+   *  the destination picked in it — keeping its id, its tab and its focus. */
+  | { type: "replacePane"; key?: SessionKey; paneId: string; pane: PaneInit }
   /** A tab leaves one set for another, panes and all (the door a launch
    *  came through follows the launch; W5 drags tabs between sessions). */
   | { type: "moveTab"; from: SessionKey; to: SessionKey; tabId: string; at?: number; activate?: boolean }
@@ -779,6 +782,13 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       if (title) next.titleOverride = title;
       else delete next.titleOverride;
       return putSet(state, key, { ...set, panes: { ...set.panes, [action.paneId]: next } });
+    }
+
+    case "replacePane": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key);
+      if (!set || !set.panes[action.paneId]) return state;
+      return putSet(state, key, { ...set, panes: { ...set.panes, [action.paneId]: makePane(action.pane, action.paneId) } });
     }
 
     case "moveTab": {

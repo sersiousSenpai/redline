@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./planSearch";
+import { browserTarget, researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./planSearch";
 
 describe("search from the plan", () => {
   it("builds the seed from the selection plus the instruction", () => {
@@ -24,5 +24,17 @@ describe("search from the plan", () => {
     expect(ridesSubmit({ status: "draft" })).toBe(true);
     expect(ridesSubmit({ status: "reopened" })).toBe(true);
     expect(ridesSubmit({ status: "submitted" })).toBe(false);
+  });
+});
+
+describe("browserTarget", () => {
+  it("opens what looks like an address and searches for anything else", () => {
+    expect(browserTarget("https://example.com/x")).toBe("https://example.com/x");
+    expect(browserTarget("example.com")).toBe("https://example.com");
+    expect(browserTarget("docs.rs/tokio")).toBe("https://docs.rs/tokio");
+    expect(browserTarget("localhost:5173")).toBe("http://localhost:5173");
+    expect(browserTarget(":7676/health")).toBe("http://localhost:7676/health");
+    expect(browserTarget("portable-pty resize race")).toBe("https://www.google.com/search?q=portable-pty%20resize%20race");
+    expect(browserTarget("what is tauri.conf")).toBe("https://www.google.com/search?q=what%20is%20tauri.conf");
   });
 });

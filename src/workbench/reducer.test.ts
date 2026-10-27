@@ -494,3 +494,17 @@ describe("moveTab", () => {
     expect(reduce(s, { type: "moveTab", from: "home", to: "plan:S", tabId: "nope" })).toBe(s);
   });
 });
+
+describe("replacePane", () => {
+  it("turns a pane into another kind in place, keeping its id, tab and focus", () => {
+    let s = reduce(emptyWorkbench(), { type: "ensureDefaults", key: "home", tabIds: ["t"], paneIds: ["d"] });
+    s = reduce(s, { type: "replacePane", key: "home", paneId: "d", pane: { kind: "browser", data: { workspace: "regular" } } });
+    expect(s.sets.home?.panes.d).toEqual({ id: "d", kind: "browser", data: { workspace: "regular" } });
+    expect(s.sets.home?.tabs.t?.focusedPaneId).toBe("d");
+    expect(s.sets.home?.order).toEqual(["t"]);
+  });
+  it("is a no-op for an unknown pane", () => {
+    const s = emptyWorkbench();
+    expect(reduce(s, { type: "replacePane", paneId: "nope", pane: { kind: "runs", data: {} } })).toBe(s);
+  });
+});

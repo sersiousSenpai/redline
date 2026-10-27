@@ -28,7 +28,10 @@ export const FRONT_DOOR_TEXT_KEY = "redline.frontDoor.text";
  *  agent that builds it (`--permission-mode auto` on Claude, no approvals and
  *  no sandbox on Codex). Offered only where `runSupported` says the harness's
  *  non-plan flags are verified. */
-export type LaunchDestination = "plan" | "drafter" | "chat" | "run";
+/** `browser` is the door tab's fifth (W1): the sentence opens as an address
+ *  or a search in the browser the tab converts into. Offered only by a door
+ *  pane with that destination among its Open targets. */
+export type LaunchDestination = "plan" | "drafter" | "chat" | "run" | "browser";
 
 export type SubmitAction = LaunchDestination | "newline" | "ignore";
 

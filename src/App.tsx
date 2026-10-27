@@ -53,7 +53,7 @@ import {
 import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
 import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow } from "./lib/planArrival";
-import { researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
+import { browserTarget, researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
 import {
@@ -858,6 +858,12 @@ const surfaceFallback =
 let doorSentenceKey = FRONT_DOOR_TEXT_KEY;
 const getFrontDoorText = () => readSharedDraft(doorSentenceKey);
 const setFrontDoorText = (text: string) => writeSharedDraft(doorSentenceKey, text);
+const selectFocusedDoorDestination = (state: WorkbenchState): LaunchDestination | null => {
+  const { set, tab } = activePanes(state);
+  const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
+  const d = focused?.kind === "door" ? focused.data.destination : undefined;
+  return d === "plan" || d === "run" || d === "chat" || d === "drafter" || d === "browser" ? d : null;
+};
 const selectFocusedDoorDraftKey = (state: WorkbenchState): string => {
   const { set, tab } = activePanes(state);
   const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
@@ -1337,6 +1343,12 @@ function App() {
         : headerSurfaces(effectiveWorkspace),
     [activeHarness, effectiveWorkspace],
   );
+  // The door tab's "Open" destinations (W1): what the header radio used to
+  // offer, so the manifest and a harness still say which surfaces exist.
+  const doorOpenTargets = useMemo(
+    () => headerSurfaceList.filter((s) => s.id !== "document" && s.id !== "chat").map((s) => ({ id: s.id, label: s.label })),
+    [headerSurfaceList],
+  );
   // Workspace-nudge bookkeeping (src/lib/nudge.ts): the launch-habit history
   // feeding the one quiet suggestion. Loaded with the other DB prefs; every
   // change writes back so "fires at most once" survives restarts.
@@ -1771,6 +1783,27 @@ function App() {
   // so an untouched one (nothing typed) closes again on Esc or when the
   // user goes elsewhere — a tab that never became anything is not kept.
   const doorDraftKeyNow = useWorkbench(wb, selectFocusedDoorDraftKey);
+  const doorPaneDestination = useWorkbench(wb, selectFocusedDoorDestination);
+  // A door tab converting into the destination picked in it: the pane
+  // becomes that surface in place (its id, tab and focus kept), springing
+  // out of the island's box. The browser gets no spring — a native webview
+  // ignores DOM transforms — and the drafter has its own (`drafterSurface`).
+  const convertedPaneRef = useRef<string | null>(null);
+  const convertDoorPane = useCallback((init: PaneInit): boolean => {
+    const { tab, set, panes } = activePanes(wb.getState());
+    const door = panes.length === 1 && panes[0].kind === "door" ? panes[0] : null;
+    if (!tab || !set || !door || tab.focusedPaneId !== door.id) return false;
+    untouchedDoors.current.delete(door.id);
+    const from = boxOf(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
+    if (from && init.kind !== "browser") {
+      convertedPaneRef.current = door.id;
+      setSwapFrom(from);
+    }
+    wb.dispatch({ type: "replacePane", paneId: door.id, pane: init });
+    // The door's own draft leaves with it; the shared sentence stays the pill's.
+    if (door.data.draftKey !== FRONT_DOOR_TEXT_KEY) writeSharedDraft(door.data.draftKey, "");
+    return true;
+  }, []);
   doorSentenceKey = classicWb ? doorDraftKeyNow : FRONT_DOOR_TEXT_KEY;
   const wbActiveKey = useWorkbench(wb, (st) => st.activeKey);
   const wbActiveTabId = useWorkbench(wb, (st) => st.sets[st.activeKey]?.activeTabId ?? null);
@@ -2376,6 +2409,8 @@ function App() {
         return;
       }
     }
+    // From a door tab the destination takes the door's place.
+    if (convertDoorPane(paneInitFor(next))) return;
     const doc = panes.find((p) => isDocumentKind(p.kind));
     if (docPinnedPref && doc && tab && set && panes.length <= 2) {
       const other = panes.find((p) => p.id !== doc.id);
@@ -9032,6 +9067,23 @@ function App() {
   // One composer in three places — the door's own (resting or open), the
   // compact card's, a chat's — and one sentence: each is a FrontDoor on the
   // same shared draft, so what you typed in one is there in the next.
+  // A door tab's Open target: the browser takes the sentence as an address
+  // or a search; the others open at once with the sentence kept.
+  const openDoorTarget = (id: string, text: string) => {
+    if (id === "browser") {
+      const url = browserTarget(text);
+      if (!convertDoorPane({ kind: "browser", data: { workspace: "regular" } })) selectSurface("browser");
+      setBrowserOpenRequest({ url, nonce: Date.now() });
+      return;
+    }
+    if (doorOpenTargets.some((t) => t.id === id)) selectSurface(id as MainSurface);
+  };
+  const setDoorDestination = (next: LaunchDestination) => {
+    setFrontDoorDest(next);
+    const { set, tab } = activePanes(wb.getState());
+    const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
+    if (focused?.kind === "door") wb.dispatch({ type: "replacePane", paneId: focused.id, pane: { kind: "door", data: { ...focused.data, destination: next } } });
+  };
   const renderMonochatComposer = (where: "door" | "card" | "chat", accessories?: React.ReactNode, workbench?: ChatWorkbenchComposer) => {
     const card = where === "card";
     const shown = where === "door" ? doorVisible : card ? doorCompact : roomChat || chatDocked;
@@ -9083,8 +9135,13 @@ function App() {
                 // The browser's card is Plan and Run alone: a page has no
                 // Drafter or Chat of its own to grow into.
                 allowedDestinations={card && mainSurface === "browser" ? ["plan", "run"] : undefined}
-                destination={card ? cardDestination : frontDoorDest}
-                onDestinationChange={card ? growCardTo : setFrontDoorDest}
+                // A door tab's Open targets, and the destination the pane
+                // remembers (a door opened from a browser pane starts on
+                // Browser); the global default follows every pick.
+                openTargets={where === "door" && classicWb ? doorOpenTargets : undefined}
+                onOpenTarget={where === "door" && classicWb ? openDoorTarget : undefined}
+                destination={card ? cardDestination : where === "door" && classicWb ? (doorPaneDestination ?? frontDoorDest) : frontDoorDest}
+                onDestinationChange={card ? growCardTo : where === "door" && classicWb ? setDoorDestination : setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
                 modelCatalogs={modelCatalogs}
@@ -10768,6 +10825,10 @@ function App() {
             // bodies (the browser, the companion chat) mount once, in their
             // portals; a pane shows only their slot.
             if (classicWb) {
+              const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
+                swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
+                  ? <SpringSwap from={swapFrom} onArrived={() => { convertedPaneRef.current = null; setSwapFrom(null); }}>{body}</SpringSwap>
+                  : body;
               const renderPane = (pane: AnyPane, ctx: PaneContext): ReactNode => {
                 switch (pane.kind) {
                   case "door":
@@ -10793,13 +10854,13 @@ function App() {
                   case "drafter":
                     return drafterSurface;
                   case "review":
-                    return reviewBody;
+                    return spring(pane, reviewBody);
                   case "servers":
-                    return serversBody;
+                    return spring(pane, serversBody);
                   case "memory":
-                    return memoryBody;
+                    return spring(pane, memoryBody);
                   case "runs":
-                    return runsBody;
+                    return spring(pane, runsBody);
                 }
               };
               return (

@@ -14,7 +14,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Check, ChevronDown, ChevronRight, CornerDownLeft, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, CornerDownLeft, Globe, Mic, Plus, Square, X, Sparkles, MessageSquare, FileText, Play } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -173,6 +173,13 @@ export interface FrontDoorProps {
   chatEnabled: boolean;
   /** Compact surfaces may offer only the destinations they can launch in place. */
   allowedDestinations?: LaunchDestination[];
+  /** The door tab's "Open" destinations (W1): the surfaces the workspace
+   *  manifest lists, so the manifest and a harness still control them. The
+   *  door converts in place into the one picked. `browser` among them is a
+   *  real destination — ⏎ opens the sentence as an address or a search —
+   *  and the others open at once, sentence kept. */
+  openTargets?: readonly { id: string; label: string }[];
+  onOpenTarget?: (id: string, text: string) => void;
   /** Where ⏎ sends. Sticky and persisted — `Plan ▾` sets it. */
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
@@ -300,6 +307,8 @@ function FrontDoorView(props: FrontDoorProps) {
     onChat,
     chatEnabled,
     allowedDestinations,
+    openTargets,
+    onOpenTarget,
     destination,
     onDestinationChange,
     workbench,
@@ -615,6 +624,12 @@ function FrontDoorView(props: FrontDoorProps) {
         onDrafter();
         return;
       }
+      if (to === "browser") {
+        setBlocked(null);
+        setRefusedWhy(null);
+        onOpenTarget?.("browser", text);
+        return;
+      }
       if (to === "run") {
         // A run's gate is the harness alone (`runBlockingItems`): no plan
         // comes back, so the hook, the interception mode and the daemon port
@@ -664,6 +679,7 @@ function FrontDoorView(props: FrontDoorProps) {
       onDrafter,
       onRun,
       onChat,
+      onOpenTarget,
       chatPending,
       readiness,
       attemptLaunch,
@@ -682,7 +698,8 @@ function FrontDoorView(props: FrontDoorProps) {
   const liveDestination: LaunchDestination =
     (allowedDestinations && !allowedDestinations.includes(destination)) ||
     (destination === "chat" && !chatEnabled) ||
-    (destination === "run" && !runSupported(backend.backend))
+    (destination === "run" && !runSupported(backend.backend)) ||
+    (destination === "browser" && !openTargets?.some((t) => t.id === "browser"))
       ? "plan"
       : destination;
 
@@ -1144,6 +1161,8 @@ function FrontDoorView(props: FrontDoorProps) {
                 chatEnabled={chatEnabled}
                 allowedDestinations={allowedDestinations}
                 runEnabled={runSupported(backend.backend)}
+                openTargets={openTargets}
+                onOpenTarget={onOpenTarget ? (id) => onOpenTarget(id, text) : undefined}
               />
             )}
             {/* Honesty, in the chip row and never as a modal: a direct run
@@ -1217,7 +1236,9 @@ function FrontDoorView(props: FrontDoorProps) {
                       ? "Talk this through (⏎)"
                       : liveDestination === "run"
                         ? "Run this now (⏎)"
-                        : "Plan this (⏎)"
+                        : liveDestination === "browser"
+                          ? "Open it, or search for it (⏎)"
+                          : "Plan this (⏎)"
               }
               className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
             >
@@ -1412,7 +1433,13 @@ const DESTINATIONS: { id: LaunchDestination; label: string; chip: string }[] = [
   // The fourth: no plan, no review — straight to an agent that builds it.
   // Hidden on harnesses whose non-plan flags aren't verified (`runSupported`).
   { id: "run", label: "Just run it", chip: "Run" },
+  // The fifth, a door tab's: the sentence as an address or a search. Shown
+  // only when the host lists the browser among the door's Open targets.
+  { id: "browser", label: "Open in the browser", chip: "Browser" },
 ];
+
+/** The prefix an "Open" row's value carries in the destination menu. */
+const OPEN_PREFIX = "open:";
 
 /** `Plan ▾` — a DESTINATION picker, not a model picker, and a STICKY one.
  *  Choosing a row sets where ⏎ goes and leaves it set: a session spent
@@ -1428,19 +1455,33 @@ function PlanMenu({
   chatEnabled,
   runEnabled,
   allowedDestinations,
+  openTargets,
+  onOpenTarget,
 }: {
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
   chatEnabled: boolean;
   runEnabled: boolean;
   allowedDestinations?: LaunchDestination[];
+  openTargets?: readonly { id: string; label: string }[];
+  onOpenTarget?: (id: string) => void;
 }) {
-  const rows = DESTINATIONS.filter(d => (!allowedDestinations || allowedDestinations.includes(d.id)) && (d.id !== "chat" || chatEnabled) && (d.id !== "run" || runEnabled));
+  const browserOffered = !!openTargets?.some((t) => t.id === "browser");
+  const rows = DESTINATIONS.filter(d => (!allowedDestinations || allowedDestinations.includes(d.id)) && (d.id !== "chat" || chatEnabled) && (d.id !== "run" || runEnabled) && (d.id !== "browser" || browserOffered));
   const current = rows.find(d => d.id === destination) ?? rows[0];
   const alternate = rows.some(row => row.id === fallbackDestination(destination)) ? fallbackDestination(destination) : rows.find(row => row.id !== destination)?.id;
-  return <ComposerMenu label="Destination" value={destination} onChange={next => onDestinationChange(next as LaunchDestination)}
-    icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : destination === "run" ? <Play size={12}/> : <Sparkles size={12}/>}
-    options={rows.map(d => ({ value: d.id, label: d.label, detail: d.id === destination ? "Enter to send" : d.id === alternate ? "⌘ Enter shortcut" : undefined }))}>
+  // The other Open targets act at once: picking one converts the door tab
+  // into that surface, sentence kept.
+  const opens = onOpenTarget ? (openTargets ?? []).filter((t) => t.id !== "browser" && !rows.some((d) => d.id === t.id)) : [];
+  return <ComposerMenu label="Destination" value={destination} onChange={next => {
+      if (next.startsWith(OPEN_PREFIX)) onOpenTarget?.(next.slice(OPEN_PREFIX.length));
+      else onDestinationChange(next as LaunchDestination);
+    }}
+    icon={destination === "chat" ? <MessageSquare size={12}/> : destination === "drafter" ? <FileText size={12}/> : destination === "run" ? <Play size={12}/> : destination === "browser" ? <Globe size={12}/> : <Sparkles size={12}/>}
+    options={[
+      ...rows.map(d => ({ value: d.id, label: d.label, detail: d.id === destination ? "Enter to send" : d.id === alternate ? "⌘ Enter shortcut" : undefined })),
+      ...opens.map((t) => ({ value: `${OPEN_PREFIX}${t.id}`, label: `Open ${t.label}`, group: "Open" })),
+    ]}>
     {current.chip}
   </ComposerMenu>;
 }

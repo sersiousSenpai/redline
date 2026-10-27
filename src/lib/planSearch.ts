@@ -30,6 +30,18 @@ export function researchSearchUrl(selection: string, instruction: string): strin
   return `${SEARCH_URL}${encodeURIComponent(terms)}`;
 }
 
+/** What the door's Browser destination opens for a sentence: text that
+ *  looks like an address (a scheme, a host with a dot, localhost, or a bare
+ *  port) goes there; anything else is a web search for it. */
+export function browserTarget(text: string): string {
+  const t = text.trim();
+  if (!t) return SEARCH_URL.replace(/\?.*$/, "");
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return t;
+  if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?(\/\S*)?$/i.test(t) || /^:\d{2,5}(\/\S*)?$/.test(t)) return `http://${t.startsWith(":") ? "localhost" + t : t}`;
+  if (/^[\w-]+(\.[\w-]+)+(:\d+)?(\/\S*)?$/.test(t) && !/\s/.test(t)) return `https://${t}`;
+  return `${SEARCH_URL}${encodeURIComponent(t)}`;
+}
+
 /** The tab chat's first message — sent on its own (auto-send). */
 export function researchSeed(selection: string, instruction: string, planTitle?: string | null): string {
   const quoted = clampSelection(selection)
