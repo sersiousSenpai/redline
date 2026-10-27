@@ -359,7 +359,9 @@ describe("the island never moves on its own", () => {
     const palette = app.slice(app.indexOf("openSession: (id) => {"), app.indexOf("toggleDock: toggleDoor,"));
     expect(palette.match(/tripDoor\(\);/g)).toHaveLength(3);
     expect(app.slice(app.indexOf("const openDoorRecent = (r: DoorRecent) => {"), app.indexOf("// Leaving the room carries"))).toContain("tripDoor();");
-    expect(app).toMatch(/onOpenPlan=\{id => \{ tripDoor\(\); selectSurface\("document"\);/);
+    // W1: the session is selected before "document", which acts on the
+    // selected set (openSurface("document") brings that set's Plan tab).
+    expect(app).toMatch(/onOpenPlan=\{id => \{ tripDoor\(\); selectSessions\(\); setActiveId\(id\); selectSurface\("document"\);/);
   });
 
   it("tells a screen reader when a launch is handed off and a plan arrives", () => {
