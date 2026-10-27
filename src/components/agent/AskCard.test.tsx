@@ -3,10 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AskQuestion, ConvoAsk } from "../lib/convo/types";
+import type { AskQuestion, ConvoAsk } from "./convo/types";
 
 const { answers } = vi.hoisted(() => ({ answers: [] as unknown[] }));
-vi.mock("../lib/convo/api", () => ({ answerAsk: vi.fn(async (askId: string, answer: unknown) => void answers.push({ askId, answer })) }));
+vi.mock("./convo/api", () => ({ answerAsk: vi.fn(async (askId: string, answer: unknown) => void answers.push({ askId, answer })) }));
 import { AskCard, answerFor } from "./AskCard";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

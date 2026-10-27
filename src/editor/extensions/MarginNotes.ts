@@ -108,7 +108,7 @@ export const MarginNotes = Extension.create<unknown, MarginNotesStorage>({
   },
 });
 
-/** The note's DOM: the same classes as shell/MarginNote's `marginNoteElement`
+/** The note's DOM: the same classes as components/plan/MarginNote's `marginNoteElement`
  *  (the feedback lane's), so one stylesheet says how a note looks. Built here
  *  rather than imported, so the plan editor's chunk carries no flow CSS. */
 function noteDom(note: MarginNote, storage: MarginNotesStorage): HTMLElement {

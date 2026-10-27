@@ -209,7 +209,7 @@ const CHAT: Pair[] = [
   { what: "the warning accent as text", color: "var(--color-warning-text)", on: BOTH },
 ];
 
-const START = "shell/start.css", STRIP_CSS = "shell/FlowStrip.css", HINT = "shell/ContextHint.css";
+const START = "shell/start.css", STRIP_CSS = "shell/FlowStrip.css", HINT = "components/plan/ContextHint.css";
 /** The flow shell's start screen (board 4a): the door at rest on the stage,
  *  which is the window's colour or the paper, and the composer's glass sheet
  *  over it. The headline and strip are read on the stage; everything in the

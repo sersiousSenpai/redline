@@ -36,7 +36,7 @@ import {
   CONVO_TITLE_EVENT,
   type ConvoBoundNotice,
   type ConvoTitleNotice,
-} from "./convo/types";
+} from "../components/agent/convo/types";
 import type { NeedReason } from "./sessionGroups";
 
 /** What the session stage shows. */

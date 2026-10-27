@@ -17,7 +17,7 @@
 //! capture runs in America/Los_Angeles, so "1m 12s", "2m 04s", "2h ago" and
 //! the Oct 14 / Oct 15 version dates come out exactly as drawn.
 
-import type { ConvoEvent } from "../../src/lib/convo/types";
+import type { ConvoEvent } from "../../src/components/agent/convo/types";
 
 /** 2026-10-17 16:20:00 in America/Los_Angeles (PDT, UTC−7). */
 export const NOW = Date.UTC(2026, 9, 17, 23, 20, 0);

@@ -6,7 +6,7 @@
 //! keeps running in its terminal exactly as before; the composer types into
 //! that same PTY, and Stop is its Esc.
 //!
-//! - **State** is `lib/convo/reducer.ts`, fed by `convoSubscribe` (the tail
+//! - **State** is `components/agent/convo/reducer.ts`, fed by `convoSubscribe` (the tail
 //!   now, batches after) and `convoPage` when the reader scrolls to the top.
 //!   A new `terminalId` is a new subscription; unmounting unsubscribes, and
 //!   a hook only arms in-conversation asks while someone is subscribed.
@@ -35,12 +35,12 @@
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
-import { MarkdownView } from "../components/MarkdownView";
-import { QueueTray } from "../components/QueueTray";
-import { Spinner } from "../components/Spinner";
-import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
-import { questionsToRelease } from "../lib/askRelease";
-import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "../lib/convo/types";
+import { MarkdownView } from "../MarkdownView";
+import { QueueTray } from "../QueueTray";
+import { Spinner } from "../Spinner";
+import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "./convo/api";
+import { questionsToRelease } from "./askRelease";
+import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "./convo/types";
 import {
   MAX_ROWS,
   convoReducer,
@@ -55,7 +55,7 @@ import {
   type Turn,
   type TurnItem,
   type UserBubble,
-} from "../lib/convo/reducer";
+} from "./convo/reducer";
 import {
   formatElapsed,
   planStats,
@@ -66,7 +66,7 @@ import {
   type Segment,
   type ToolRow,
   type WorkingStatus,
-} from "../lib/convo/status";
+} from "./convo/status";
 import {
   HELD_RETRY_MS,
   composerReadiness,
@@ -76,8 +76,8 @@ import {
   routeSend,
   unqueueSend,
   type QueuedSend,
-} from "../lib/convo/readiness";
-import type { TermState } from "../lib/termState";
+} from "./convo/readiness";
+import type { TermState } from "../../lib/termState";
 import { AskCard } from "./AskCard";
 import { SessionComposer } from "./SessionComposer";
 import "./conversation.css";
@@ -135,7 +135,7 @@ export interface SessionConversationProps {
   fallbackMode?: ConvoMode | null;
   /** Out of sight (the terminal view, the Feedback tab, another surface):
    *  its open questions go to the terminal, since a held AskUserQuestion
-   *  shows nowhere else (lib/askRelease). It stays subscribed. */
+   *  shows nowhere else (components/agent/askRelease). It stays subscribed. */
   hidden?: boolean;
 }
 
@@ -180,7 +180,7 @@ function SessionConversation(props: SessionConversationProps) {
     };
   }, [terminalId]);
 
-  // ── A question never waits out of sight (lib/askRelease) ──
+  // ── A question never waits out of sight (components/agent/askRelease) ──
   // Hidden, every open question is released to the terminal as it arrives;
   // unmounting (another session on the stage) releases what is still open.
   const released = useRef(new Set<string>());

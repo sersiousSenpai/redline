@@ -28,18 +28,18 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AudioLines, Check, FilePenLine, Folder, Mic, Sparkles } from "lucide-react";
-import { Panel, useClickPopover } from "../components/popover";
-import { SendStopButton, sendState } from "../components/SendStopButton";
-import { useDictationComposer } from "../lib/dictationComposer";
-import { useModelCatalogs } from "../hooks/useModelCatalogs";
-import { integrationHealth } from "../lib/integrationHealth";
-import { modelsFor, type Backend } from "../lib/backendChoice";
-import { EFFORT_OPTIONS } from "../lib/seatAssign";
-import { convoSetMode, convoSetModel } from "../lib/convo/api";
-import type { ConvoMode, SwitchResult } from "../lib/convo/types";
-import type { ModelFact } from "../lib/convo/reducer";
-import { effortLabel, modeLabel, modelChipLabel } from "../lib/convo/status";
-import "../components/ComposerMenu.css";
+import { Panel, useClickPopover } from "../popover";
+import { SendStopButton, sendState } from "../SendStopButton";
+import { useDictationComposer } from "../../lib/dictationComposer";
+import { useModelCatalogs } from "../../hooks/useModelCatalogs";
+import { integrationHealth } from "../../lib/integrationHealth";
+import { modelsFor, type Backend } from "../../lib/backendChoice";
+import { EFFORT_OPTIONS } from "../../lib/seatAssign";
+import { convoSetMode, convoSetModel } from "./convo/api";
+import type { ConvoMode, SwitchResult } from "./convo/types";
+import type { ModelFact } from "./convo/reducer";
+import { effortLabel, modeLabel, modelChipLabel } from "./convo/status";
+import "../ComposerMenu.css";
 
 export interface SessionComposerProps {
   terminalId: string | null;

@@ -10,7 +10,7 @@
 //!   the right.
 //!
 //! The companion column is one thing in both poses: its Chat tab is the
-//! conversation and its Feedback tab is the review (shell/FeedbackPanel),
+//! conversation and its Feedback tab is the review (components/plan/FeedbackPanel),
 //! which comes forward by itself when there is something to decide: a mark
 //! being written, a highlight or margin note clicked, a new version arriving
 //! with answers waiting on you.
@@ -55,13 +55,13 @@ import { setPanelTab, setStage, useFlow, type PlanPose } from "./flowState";
 import { feedbackSummary } from "../lib/feedbackThreads";
 import { latestDisplayVersion } from "../lib/revisionVersions";
 import type { Comment, ReviewSession } from "../types";
-import { PlanPanelHeader, type PlanMenuItem } from "./PlanPanelHeader";
-import { footerTally, PlanPanelFooter, type PlanPanelFooterProps } from "./PlanPanelFooter";
-import { PlanNotices, type PlanNoticesProps } from "./PlanNotices";
+import { PlanPanelHeader, type PlanMenuItem } from "../components/plan/PlanPanelHeader";
+import { footerTally, PlanPanelFooter, type PlanPanelFooterProps } from "../components/plan/PlanPanelFooter";
+import { PlanNotices, type PlanNoticesProps } from "../components/plan/PlanNotices";
 import { DiscussionZoomContext } from "../components/DiscussionViewContext";
 import { useOrchestration } from "../hooks/useOrchestration";
 import { buildProgress } from "../lib/flowPose";
-import type { VersionPillProps } from "./VersionPill";
+import type { VersionPillProps } from "../components/plan/VersionPill";
 // The Feedback tab, its header row and its composer are the feedback lane's;
 // they ride this chunk (as does feedback.css, the margin note's look).
 import FeedbackPanel, {
@@ -69,7 +69,7 @@ import FeedbackPanel, {
   FeedbackTabs,
   type FeedbackActions,
   type FeedbackComposerProps,
-} from "./FeedbackPanel";
+} from "../components/plan/FeedbackPanel";
 import "./stage.css";
 
 export type ConversationLayout = "stage" | "column" | "panel";

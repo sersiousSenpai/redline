@@ -19,9 +19,9 @@
 //!
 //! A running turn that matches none of these is just *Working*.
 
-import { foldSteps, type StepRow } from "../replySteps";
-import { formatDuration, type Activity } from "../turnMeter";
-import type { TermState } from "../termState";
+import { foldSteps, type StepRow } from "../../../lib/replySteps";
+import { formatDuration, type Activity } from "../../../lib/turnMeter";
+import type { TermState } from "../../../lib/termState";
 import type { ConvoMode } from "./types";
 import type { ConvoView, ModelFact, Turn, TurnItem } from "./reducer";
 

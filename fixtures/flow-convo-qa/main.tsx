@@ -7,13 +7,13 @@
 // state, `?theme=` the theme.
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import SessionConversation, { type SessionConversationProps } from "../../src/shell/SessionConversation";
+import SessionConversation, { type SessionConversationProps } from "../../src/components/agent/SessionConversation";
 import { applyTheme } from "../../src/theme/applyTheme";
 import type { ThemeName } from "../../src/theme/themes";
-import type { ConvoEvent } from "../../src/lib/convo/types";
-import planLive from "../../src/lib/convo/__fixtures__/plan-live.events.json";
-import planTurn from "../../src/lib/convo/__fixtures__/plan-turn.events.json";
-import asks from "../../src/lib/convo/__fixtures__/asks.events.json";
+import type { ConvoEvent } from "../../src/components/agent/convo/types";
+import planLive from "../../src/components/agent/convo/__fixtures__/plan-live.events.json";
+import planTurn from "../../src/components/agent/convo/__fixtures__/plan-turn.events.json";
+import asks from "../../src/components/agent/convo/__fixtures__/asks.events.json";
 import "../../src/styles.css";
 import "./fixture.css";
 

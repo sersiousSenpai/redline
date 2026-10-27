@@ -17,9 +17,9 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-import { boardComments, boardSession } from "../../fixtures/flow-feedback-qa/board";
-import { resetShellFlagForTests, SHELL_KEY } from "../lib/shellFlag";
-import type { Comment, ReviewSession } from "../types";
+import { boardComments, boardSession } from "../../../fixtures/flow-feedback-qa/board";
+import { resetShellFlagForTests, SHELL_KEY } from "../../lib/shellFlag";
+import type { Comment, ReviewSession } from "../../types";
 import FeedbackPanel, { FeedbackComposer, FeedbackTabs, sessionModelLabel } from "./FeedbackPanel";
 
 let host: HTMLDivElement;

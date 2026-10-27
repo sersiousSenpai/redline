@@ -45,16 +45,16 @@ import {
   type ReactNode,
 } from "react";
 
-import { AttachmentChips } from "../components/AttachmentChips";
-import { CommentThread } from "../components/CommentThread";
-import { MarkdownView } from "../components/MarkdownView";
-import { compactEditPreview } from "../editor/wordDiff";
-import { blockIdByAnchorId } from "../editor/sectionMaps";
-import type { SelectionState } from "../hooks/useTextSelection";
-import { createAnchorDisplay } from "../lib/anchorDisplay";
-import { agentLabelFor } from "../lib/backendChoice";
-import { useDictationComposer } from "../lib/dictationComposer";
-import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
+import { AttachmentChips } from "../AttachmentChips";
+import { CommentThread } from "../CommentThread";
+import { MarkdownView } from "../MarkdownView";
+import { compactEditPreview } from "../../editor/wordDiff";
+import { blockIdByAnchorId } from "../../editor/sectionMaps";
+import type { SelectionState } from "../../hooks/useTextSelection";
+import { createAnchorDisplay } from "../../lib/anchorDisplay";
+import { agentLabelFor } from "../../lib/backendChoice";
+import { useDictationComposer } from "../../lib/dictationComposer";
+import { buildDraftCommentUpdate } from "../../lib/draftCommentUpdate";
 import {
   commentTarget,
   isSettled,
@@ -66,11 +66,11 @@ import {
   reviewGroups,
   statusNote,
   type Placed,
-} from "../lib/feedbackThreads";
-import { shortModel } from "../lib/modelInfo";
-import { researchStatus } from "../lib/planSearch";
-import type { PanelTab } from "./flowState";
-import type { Comment, NewCommentRequest, ReviewSession, UpdateCommentRequest } from "../types";
+} from "../../lib/feedbackThreads";
+import { shortModel } from "../../lib/modelInfo";
+import { researchStatus } from "../../lib/planSearch";
+import type { PanelTab } from "../../shell/flowState";
+import type { Comment, NewCommentRequest, ReviewSession, UpdateCommentRequest } from "../../types";
 
 /** The comment actions a thread offers. By default each is the Tauri command
  *  App's own handlers call; the stage may pass App's handlers instead. */

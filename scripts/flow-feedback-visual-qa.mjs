@@ -109,7 +109,7 @@ window.__qaMount = async (build) => {
   // The prebundled deps are CommonJS: their exports sit on the default.
   const cjs = async (name) => { const m = await import(dep(name)); return m.default ?? m; };
   const React = await cjs('react.js'), { createRoot } = await cjs('react-dom_client.js');
-  const mods = { h: React.createElement, panel: await import('/src/shell/FeedbackPanel.tsx'), threads: await import('/src/lib/feedbackThreads.ts'), board: await import('/fixtures/flow-feedback-qa/board.ts') };
+  const mods = { h: React.createElement, panel: await import('/src/components/plan/FeedbackPanel.tsx'), threads: await import('/src/lib/feedbackThreads.ts'), board: await import('/fixtures/flow-feedback-qa/board.ts') };
   const host = document.createElement('div');
   host.dataset.qaMount = '';
   host.style.cssText = 'position: fixed; left: 0; top: 0; width: 400px; height: 960px; display: flex; flex-direction: column; background: var(--color-canvas); z-index: 10';

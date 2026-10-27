@@ -481,7 +481,7 @@
 }
 
 /* A margin note (4c): its look is the feedback lane's (feedback.css,
-   shell/MarginNote); the stage seats it in the plan's block flow, a block's
+   components/plan/MarginNote); the stage seats it in the plan's block flow, a block's
    width under the mark, and keeps it out of a text selection. */
 .rl-flow-plan .rl-margin-note {
   margin: 0 0 16px 24px;

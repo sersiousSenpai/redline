@@ -411,7 +411,7 @@ import { FLOW_ARTICLE } from "./lib/flowPose";
 const loadCommentComposer = () => import("./components/CommentComposer");
 const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
 const loadFlowStage = () => import("./shell/FlowStage");
-const loadSessionConversation = () => import("./shell/SessionConversation");
+const loadSessionConversation = () => import("./components/agent/SessionConversation");
 const FlowStage = lazy(loadFlowStage);
 const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
@@ -6532,7 +6532,7 @@ function App() {
         // shell: bound before the resumed CLI starts (as a restore is), so
         // the workbench's Agent tab finds its terminal the moment it exists.
         bindSessionTerminals([{ sessionId, terminalId: id }]);
-        void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
+        void import("./components/agent/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
         const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
         if (!delivery.ok) {
           setToast(`Couldn't start the build (${delivery.stage}): ${delivery.reason}`, 6000);
@@ -6992,7 +6992,7 @@ function App() {
     // the resumed CLI's SessionStart, so it binds the moment it does. In
     // either shell: the workbench's per-session Agent tab reads this binding.
     bindSessionTerminals([{ sessionId, terminalId: id }]);
-    void import("./lib/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
+    void import("./components/agent/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
     onRestore({
       type: "dispatched",
       sessionId,
@@ -9623,7 +9623,7 @@ function App() {
               terminals: stageTerminalId ? 1 : 0,
               onShowTerminal: stageTerminalId ? () => setStage("terminal") : undefined,
             }}
-            // Classic's plan-pane notices, every one (shell/PlanNotices).
+            // Classic's plan-pane notices, every one (components/plan/PlanNotices).
             notices={{
               askModeViolation,
               onDismissAskMode: () => setAskModeViolation(false),
@@ -12508,7 +12508,7 @@ function App() {
               // discussion surface): open beside the stage, or closed again.
               talking={voiceDocked}
               onTalk={flowTalk}
-              // Out of sight, its questions go to the terminal (lib/askRelease).
+              // Out of sight, its questions go to the terminal (components/agent/askRelease).
               hidden={!flowConvoOnScreen}
               // The plan card follows the session, not only the transcript.
               planState={stageTarget.kind === "plan" && flowSummary ? {

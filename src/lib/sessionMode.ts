@@ -22,7 +22,7 @@
 //! - a launch with no plan yet → Plan mode, unless the CLI has said it left
 //!   plan mode (then it is a conversation: Chat).
 
-import type { ConvoMode } from "./convo/types";
+import type { ConvoMode } from "../components/agent/convo/types";
 import type { SessionStatus } from "../types";
 import { latestDisplayVersion } from "./revisionVersions";
 

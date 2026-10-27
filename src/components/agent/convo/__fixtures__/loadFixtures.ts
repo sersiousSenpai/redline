@@ -20,7 +20,7 @@ import type { ConvoBatch, ConvoEvent, ConvoEventKind, ConvoPage, ConvoSnapshot }
 import { convoReducer, initialConvoState, type ConvoAction, type ConvoState } from "../reducer";
 
 export const FIXTURE_DIRS = [
-  join(process.cwd(), "src/lib/convo/__fixtures__"),
+  join(process.cwd(), "src/components/agent/convo/__fixtures__"),
   join(process.cwd(), "src-tauri/tests/fixtures/convo"),
 ];
 

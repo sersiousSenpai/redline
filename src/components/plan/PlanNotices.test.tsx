@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Comment } from "../types";
+import type { Comment } from "../../types";
 import { hasNotices, PlanNotices, type PlanNoticesProps } from "./PlanNotices";
 import { footerTally } from "./PlanPanelFooter";
 

@@ -4,7 +4,7 @@
 // SessionConversation, SessionComposer and AskCard, fed scripted ConvoEvents
 // through a fake `convo_subscribe` channel. Every command a component sends
 // is recorded on `window.__qaCalls` so the script can assert on it.
-import type { ConvoEvent } from "../../src/lib/convo/types";
+import type { ConvoEvent } from "../../src/components/agent/convo/types";
 
 const noop = () => {};
 type Page = Window & {

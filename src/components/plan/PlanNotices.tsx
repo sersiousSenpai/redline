@@ -20,9 +20,9 @@
 
 import { X } from "lucide-react";
 
-import { FixControl } from "../components/ReadinessStrip";
-import type { ReadinessItem } from "../lib/readiness";
-import type { RestoreHarness } from "../lib/restoreHarness";
+import { FixControl } from "../ReadinessStrip";
+import type { ReadinessItem } from "../../lib/readiness";
+import type { RestoreHarness } from "../../lib/restoreHarness";
 
 const HARNESSES: [RestoreHarness, string][] = [
   ["claude-code", "Claude Code"],

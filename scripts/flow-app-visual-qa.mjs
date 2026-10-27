@@ -547,7 +547,7 @@ async function screenshot(file) {
 // ── Self-test ──────────────────────────────────────────────────────────────
 //
 // The fake's conversation plumbing, proven through the real wrappers in
-// src/lib/convo/api.ts (imported into the 4c page): a subscription returns
+// src/components/agent/convo/api.ts (imported into the 4c page): a subscription returns
 // the seeded tail, a pushed batch reaches the subscriber through its
 // Channel, a reset batch replaces, and a composer send is accepted. On this
 // branch nothing in App subscribes yet, so this is what says the mirror
@@ -558,7 +558,7 @@ async function selfTest(base) {
   await cdp.call("Page.navigate", { url: `${base}?board=4c&theme=aurora&shell=classic` });
   await waitFor("!!(window.__qa && window.__qa.booted)", 60000);
   return cdp.evaluate(`(async () => {
-    const api = await import("/src/lib/convo/api.ts");
+    const api = await import("/src/components/agent/convo/api.ts");
     const batches = [];
     const snap = await api.convoSubscribe("t-din-roadmap", (b) => batches.push(b));
     const seeded = window.__qa.scenario().terminals[0].convo.length;

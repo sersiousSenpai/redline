@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConvoBatch, ConvoEvent, SubmitResult } from "../lib/convo/types";
+import type { ConvoBatch, ConvoEvent, SubmitResult } from "./convo/types";
 
 const { api, log } = vi.hoisted(() => {
   const log: string[] = [];
@@ -16,7 +16,7 @@ const { api, log } = vi.hoisted(() => {
   };
   return { api, log };
 });
-vi.mock("../lib/convo/api", () => ({
+vi.mock("./convo/api", () => ({
   convoSubscribe: vi.fn(async (terminalId: string, onBatch: (batch: ConvoBatch) => void) => {
     log.push(`subscribe ${terminalId}`);
     api.batches.set(terminalId, onBatch);
@@ -36,8 +36,8 @@ vi.mock("../lib/convo/api", () => ({
   convoSetModel: vi.fn(async () => ({ status: "sent" })),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => null, Channel: class {} }));
-vi.mock("../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
-vi.mock("../components/MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div data-md>{body}</div> }));
+vi.mock("../../lib/dictationComposer", () => ({ useDictationComposer: () => ({ listening: false, toggle: () => {} }) }));
+vi.mock("../MarkdownView", () => ({ MarkdownView: ({ body }: { body: string }) => <div data-md>{body}</div> }));
 import SessionConversation, { type SessionConversationProps } from "./SessionConversation";
 import { FLOW_TALK_EVENT } from "./SessionComposer";
 
@@ -228,11 +228,11 @@ describe("a question never waits out of sight", () => {
   const QUESTION = ev("a1", 40, { kind: "ask_opened", ask: { askId: "q1", kind: "question", toolName: "AskUserQuestion", summary: "Which key?", questions: [{ question: "Which key?", options: [{ label: "A" }] }], openedAt: 1 } });
   const PERMISSION = ev("a2", 41, { kind: "ask_opened", ask: { askId: "p1", kind: "permission", toolName: "Bash", summary: "npm test", openedAt: 1 } });
   const released = async () => {
-    const { answerAsk } = await import("../lib/convo/api");
+    const { answerAsk } = await import("./convo/api");
     return (answerAsk as unknown as { mock: { calls: unknown[][] } }).mock.calls;
   };
   beforeEach(async () => {
-    const { answerAsk } = await import("../lib/convo/api");
+    const { answerAsk } = await import("./convo/api");
     (answerAsk as unknown as { mockClear: () => void }).mockClear();
   });
 

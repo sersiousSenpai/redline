@@ -17,7 +17,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Ellipsis, FileText, List, Maximize2, Minimize2, X } from "lucide-react";
 
-import { MenuSurface } from "../components/ui/MenuSurface";
+import { MenuSurface } from "../ui/MenuSurface";
 import { VersionPill, type VersionPillProps } from "./VersionPill";
 
 /** One row of the plan's ⋯ menu. */

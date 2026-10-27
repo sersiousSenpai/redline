@@ -28,7 +28,7 @@ import {
   type SeedSession,
   type SeedTerminal,
 } from "./scenarios";
-import type { ConvoBatch, ConvoEvent } from "../../src/lib/convo/types";
+import type { ConvoBatch, ConvoEvent } from "../../src/components/agent/convo/types";
 
 type Args = Record<string, unknown> | undefined;
 type Handler = (args: Args) => unknown;
@@ -763,7 +763,7 @@ const handlers: Record<string, Handler> = {
     })),
   term_attention_snapshot: () => [...state.attention.values()],
 
-  // The conversation mirror (src/lib/convo/api.ts).
+  // The conversation mirror (src/components/agent/convo/api.ts).
   convo_subscribe: (a) => {
     const terminalId = String(a?.terminalId);
     const channel = a?.onBatch as Channel<ConvoBatch>;

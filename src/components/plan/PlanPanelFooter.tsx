@@ -28,16 +28,16 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { ChevronDown, Hammer } from "lucide-react";
 
-import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
-import { ridesSubmit } from "../lib/planSearch";
-import type { Comment } from "../types";
-import type { ManualPlanState, PlanStateTarget } from "../components/PlanStateMenu";
-import { MenuSurface } from "../components/ui/MenuSurface";
-import { Spinner as Ring } from "../components/Spinner";
+import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../../lib/teamBuildItems";
+import { ridesSubmit } from "../../lib/planSearch";
+import type { Comment } from "../../types";
+import type { ManualPlanState, PlanStateTarget } from "../PlanStateMenu";
+import { MenuSurface } from "../ui/MenuSurface";
+import { Spinner as Ring } from "../Spinner";
 import { ContextHint } from "./ContextHint";
 
 const PlanStateMenu = lazy(() =>
-  import("../components/PlanStateMenu").then((m) => ({ default: m.PlanStateMenu })),
+  import("../PlanStateMenu").then((m) => ({ default: m.PlanStateMenu })),
 );
 
 export interface PlanFooterApproval {

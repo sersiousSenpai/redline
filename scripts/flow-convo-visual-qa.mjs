@@ -122,7 +122,7 @@ const smallTargets = (rootSelector) => cdp.evaluate(`[...document.querySelectorA
 
 try {
   await mkdir(output, { recursive: true });
-  for (const file of ["src/shell/SessionConversation.tsx", "src/shell/SessionComposer.tsx", "src/shell/AskCard.tsx", "src/shell/conversation.css", "src/lib/convo/reducer.ts", "src/lib/convo/status.ts", "src/lib/convo/readiness.ts"])
+  for (const file of ["src/components/agent/SessionConversation.tsx", "src/components/agent/SessionComposer.tsx", "src/components/agent/AskCard.tsx", "src/components/agent/conversation.css", "src/components/agent/convo/reducer.ts", "src/components/agent/convo/status.ts", "src/components/agent/convo/readiness.ts"])
     report.sourceSha256[file] = createHash("sha256").update(await readFile(path.join(root, file))).digest("hex");
   server = await createServer({
     configFile: false, root, cacheDir: path.join(temporary, "vite-cache"),

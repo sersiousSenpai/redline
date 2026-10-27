@@ -12,8 +12,8 @@
 
 import { useState } from "react";
 import { CircleHelp, ShieldQuestion } from "lucide-react";
-import { answerAsk } from "../lib/convo/api";
-import type { AskAnswer, AskQuestion, ConvoAsk } from "../lib/convo/types";
+import { answerAsk } from "./convo/api";
+import type { AskAnswer, AskQuestion, ConvoAsk } from "./convo/types";
 
 export interface AskCardProps {
   ask: ConvoAsk;

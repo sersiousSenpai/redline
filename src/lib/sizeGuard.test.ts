@@ -260,9 +260,9 @@ describe("size guard", () => {
     // `lazy(() => import(…))` may reach it, and its tests.
     const offenders = files
       .filter(({ rel, text }) =>
-        !rel.startsWith("shell/") &&
+        !rel.startsWith("components/agent/") &&
         !/\.test\.tsx?$/.test(rel) &&
-        /from\s+["'][^"']*shell\/(SessionConversation|SessionComposer|AskCard)["']/.test(text.replace(/import\s+type\s[^;]*;/g, "")),
+        /from\s+["'][^"']*components\/agent\/(SessionConversation|SessionComposer|AskCard)["']/.test(text.replace(/import\s+type\s[^;]*;/g, "")),
       )
       .map(({ rel }) => rel);
     expect(offenders, "import SessionConversation through React.lazy").toEqual([]);

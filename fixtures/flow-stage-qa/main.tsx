@@ -9,14 +9,14 @@ import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import FlowStage from "../../src/shell/FlowStage";
-import SessionConversation from "../../src/shell/SessionConversation";
+import SessionConversation from "../../src/components/agent/SessionConversation";
 import { PlanEditor } from "../../src/components/PlanEditor";
 import { ZoomButton } from "../../src/components/ZoomButton";
 import { DocWidthToggle } from "../../src/components/DocWidthToggle";
 import { createBoundedPortalHost } from "../../src/components/PersistentPortalSlot";
 import { FLOW_ARTICLE, openPlan } from "../../src/lib/flowPose";
 import { resetFlowStateForTests, setPanelTab, setPlanPose, setStage, useFlow } from "../../src/shell/flowState";
-import type { PlanFooterApproval } from "../../src/shell/PlanPanelFooter";
+import type { PlanFooterApproval } from "../../src/components/plan/PlanPanelFooter";
 import type { Comment, ReviewSession } from "../../src/types";
 import { applyTheme } from "../../src/theme/applyTheme";
 import "../../src/styles.css";
