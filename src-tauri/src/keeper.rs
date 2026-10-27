@@ -277,9 +277,8 @@ fn stall_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
         || !running_sessions(ctx).is_empty()
 }
 
-/// Walk every over-window `orchestrating` session to `stalled` — the periodic,
-/// restart-surviving form of the one-shot `arm_orchestrate_stall_watchdog`
-/// (which stays at its call sites as cheap belt-and-braces). Re-checks
+/// Walk every over-window `orchestrating` session to `stalled` — periodic and
+/// restart-surviving, where a one-shot task dies with a restart. Re-checks
 /// `orchestrate_stall_should_fire` right before walking, so the sweep only
 /// ever stalls a chip still reading `orchestrating`.
 fn stall_watch_act(ctx: &WatchCtx, now: i64) {

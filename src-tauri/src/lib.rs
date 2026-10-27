@@ -1192,27 +1192,6 @@ pub(crate) fn abandoned_run_should_stall(
         && !review_link_live
 }
 
-/// One-shot stall detection for an orchestrated launch, in the
-/// `arm_revise_watchdog` shape. A later beacon simply overwrites `stalled`
-/// (`set_run_state` enforces no ordering — the beacons are the truth), so a
-/// false positive from a slow launch self-corrects.
-///
-/// Kept at its call sites as cheap belt-and-braces: the durable detector is
-/// now the keeper bus's `orchestrate-stall-sweep` watch, which periodically
-/// walks ANY session sitting in `orchestrating` past the window to `stalled`
-/// — including one whose one-shot task died with a restart. This one-shot
-/// merely catches the common case a sweep-cadence earlier.
-fn arm_orchestrate_stall_watchdog(app: AppHandle, store: SessionStore, session_id: String) {
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(ORCHESTRATE_STALL_WINDOW).await;
-        let state = store.database().get_run_state(&session_id);
-        if orchestrate_stall_should_fire(state.as_deref()) {
-            tracing::info!(session_id = %session_id, "orchestrate stall watchdog fired");
-            advance_run_state(&app, &store, &session_id, "stalled");
-        }
-    });
-}
-
 /// review_id → plan session id for orchestrated runs: written when the
 /// orchestrator's review curl carries `?plan=`, read by the feedback path to
 /// cycle the run chip back to `running`. In-memory only — a held review
@@ -8557,14 +8536,6 @@ fn workflow_availability(project_path: Option<String>) -> hook::WorkflowAvailabi
     hook::workflow_availability(dir.as_deref())
 }
 
-/// Write the launch modal's checked Bash allow rules before the orchestrator
-/// spawns (workflow subagents inherit the allowlist; unallowlisted Bash
-/// queues permission prompts mid-fan-out).
-#[tauri::command]
-fn apply_orchestrate_allows(rules: Vec<String>) -> Result<(), String> {
-    hook::apply_orchestrate_allows(&rules)
-}
-
 /// Terminal tabs orchestrated runs were launched into, keyed by plan session
 /// id. In-memory (a tab id is meaningless across restarts); folded into the
 /// `orchestrations` row when the ingest claim writes it, so a run's tab
@@ -8639,37 +8610,6 @@ fn reset_run(
         None,
     );
     tracing::info!(session_id = %session_id, "run reset");
-    Ok(())
-}
-
-/// B2 (backend half): re-enter the run lifecycle for an already-approved
-/// plan. Deliberately NOT `orchestrate_plan_inner` — that requires a held
-/// `oneshot::Sender` which no longer exists after the original approval,
-/// which is exactly why re-running was impossible. The frontend follows this
-/// with the same record-launch → seats → verified-handoff sequence as a
-/// first launch.
-#[tauri::command]
-fn relaunch_run(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    session_id: String,
-) -> Result<(), String> {
-    let session = store
-        .get(&session_id)
-        .ok_or_else(|| "no such session".to_string())?;
-    if session.status != SessionStatus::Approved {
-        return Err("only an approved plan can be re-launched".to_string());
-    }
-    reset_run_inner(&app, &store, &session_id);
-    let _ = store.database().append_journal(
-        "orchestrate_relaunch",
-        Some("session"),
-        Some(&session_id),
-        None,
-        None,
-    );
-    advance_run_state(&app, &store, &session_id, "orchestrating");
-    arm_orchestrate_stall_watchdog(app.clone(), (*store).clone(), session_id.clone());
     Ok(())
 }
 
@@ -8889,13 +8829,6 @@ fn record_handoff_event(
         )
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// The launch modal's inferred allow-rule candidates for a project (repo
-/// markers → build/test Bash rules).
-#[tauri::command]
-fn orchestrate_allow_candidates(project_path: String) -> Vec<hook::AllowCandidate> {
-    hook::orchestrate_allow_candidates(std::path::Path::new(&project_path))
 }
 
 #[tauri::command]
@@ -12930,10 +12863,7 @@ pub fn run() {
             resume_startup_cwd,
             record_orchestration_launch,
             workflow_availability,
-            apply_orchestrate_allows,
-            orchestrate_allow_candidates,
             reset_run,
-            relaunch_run,
             unapprove_plan,
             set_plan_state,
             set_session_project,
