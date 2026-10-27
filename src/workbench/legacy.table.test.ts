@@ -214,17 +214,33 @@ describe("legacyView: the way back to the document", () => {
     expect(s.sets.home!.order).toHaveLength(3);
   });
 
-  it("a launch rekeyed to its plan: activeId appears, the surface tab keeps its kind", () => {
+  it("a launch rekeyed to its plan while the user is on it (D1): the Plan tab lands at index 0 and is selected", () => {
     let s = reduce(ownerState("launch"), { type: "openSurface", kind: "browser" });
     expect(legacyView(s)).toMatchObject({ mainSurface: "browser", activeId: null });
-    s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s9" });
-    expect(legacyView(s)).toMatchObject({ mainSurface: "browser", activeId: "s9", docPinned: false });
     // No door was in the launch set (rekey would have turned it into the
-    // plan), so rekey inserts a Plan tab at index 0 unactivated: the usual
-    // way back finds it.
-    s = reduce(s, { type: "openSurface", kind: "plan" });
+    // plan), so rekey inserts a Plan tab at index 0 — and selects it, since
+    // the plan arriving is what the user on this set was waiting for.
+    s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s9" });
     expect(legacyView(s)).toEqual({ ...OWNER_ALONE.plan, activeId: "s9" });
     expect(s.sets["plan:s9"]!.order.indexOf(s.sets["plan:s9"]!.activeTabId!)).toBe(0);
+    // The browser tab is still there, at the end of the strip, with its kind.
+    s = reduce(s, { type: "selectTabIndex", index: -1 });
+    expect(legacyView(s)).toMatchObject({ mainSurface: "browser", activeId: "s9", docPinned: false });
+  });
+
+  it("a launch rekeyed while the user is elsewhere (D1): the Plan tab lands at index 0 without being selected", () => {
+    let s = reduce(ownerState("launch"), { type: "openSurface", kind: "browser" });
+    s = reduce(s, { type: "selectSession", key: HOME_KEY });
+    s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s9" });
+    expect(legacyView(s)).toEqual(OWNER_ALONE.home);
+    const set = s.sets["plan:s9"]!;
+    expect(set.panes[set.tabs[set.order[0]].focusedPaneId].kind).toBe("plan");
+    expect(set.order.indexOf(set.activeTabId!)).toBe(2);
+    // Coming back finds the browser still showing; the usual way back finds the plan.
+    s = reduce(s, { type: "selectSession", key: "plan:s9" });
+    expect(legacyView(s)).toMatchObject({ mainSurface: "browser", activeId: "s9", docPinned: false });
+    s = reduce(s, { type: "openSurface", kind: "plan" });
+    expect(legacyView(s)).toEqual({ ...OWNER_ALONE.plan, activeId: "s9" });
   });
 });
 
