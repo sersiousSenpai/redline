@@ -1,27 +1,39 @@
 #!/bin/bash
-# Sample Redline's WebKit GPU and renderer processes while the app sits idle,
-# and report the numbers that found the 2026-10-09 paint storm
-# (docs/perf-budget.md "Responsiveness"):
+# Sample Redline while it sits idle — its WebKit GPU and renderer processes and
+# the host (the app's own process) — and report the numbers that found the
+# 2026-10-09 paint storm and the 2026-10-27 idle heat (docs/perf-budget.md
+# "Responsiveness" and "Idle heat"):
 #
-#   - the GPU process's CPU, and the share of its rendering threads' samples
-#     spent in WebCore::Gradient::paint (repainting a gradient every frame);
+#   - per process: CPU over the window, idle wakeups per second (top's idlew
+#     delta) and physical footprint;
+#   - the GPU process's share of rendering-thread samples in
+#     WebCore::Gradient::paint (repainting a gradient every frame);
 #   - how much of the renderer's layer-commit queue
-#     (RemoteLayerTreeDrawingArea.CommitQueue) is spent waiting on the GPU
-#     process in flushAndCollectHandles — every keystroke's frame commits
-#     behind that backlog;
-#   - each process's physical footprint;
+#     (RemoteLayerTreeDrawingArea.CommitQueue) waits on the GPU process in
+#     flushAndCollectHandles — every keystroke's frame commits behind it;
+#   - the host's display link: how often its CVDisplayLink thread is awake. A
+#     still window parks it; an animation that WebKit cannot composite keeps
+#     it ticking every vsync;
+#   - the idle-heat flags, per process: LegacyRenderSVG* (an <svg> painted on
+#     the main thread every frame — a rotating SVG spinner),
+#     setAnimatedPropertiesInStyle (CSS animations resolved per frame),
+#     paintBoxShadow, IOWorkLoop (GPU submission), posix_spawn (a fork per
+#     poll);
+#   - child processes the host spawned during the window (lsof/ps polls);
 #   - the responsiveness probe's own numbers from GET /v1/perf, if it is on,
 #     and the renderer footprint Redline reads for itself (`renderer`).
 #
 # The probe can stay on: its frame sampler runs only while you interact.
-# Touch nothing for a few seconds before and while it samples.
+# Touch nothing for a few seconds before and while it samples. Twelve seconds
+# is a good idle window; the default three is enough for a smoke check.
 #
 # Usage: scripts/perf-idle.sh [--seconds N] [--app NAME] [--port P] [--keep]
-#                             [--gpu PID] [--renderer PID]
-#   --app       whose WebKit processes to sample (default Redline; any WebKit
-#               app works, e.g. --app Safari, to check the recipe itself)
-#   --gpu, --renderer   skip discovery and sample these pids
-#   --keep      keep the raw `sample` reports and print where they are
+#                             [--gpu PID] [--renderer PID] [--host PID]
+#   --app       whose processes to sample (default Redline; any WebKit app
+#               works, e.g. --app Safari, to check the recipe itself). The
+#               dev binary is `redline`, the bundle `Redline`; both match.
+#   --gpu, --renderer, --host   skip discovery and sample these pids
+#   --keep      keep the raw `sample` and `top` reports and print where they are
 set -euo pipefail
 
 SECONDS_TO_SAMPLE=3
@@ -30,6 +42,7 @@ PORT=7676
 KEEP=0
 GPU=""
 RENDERER=""
+HOST_PID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --seconds) SECONDS_TO_SAMPLE=$2; shift 2 ;;
@@ -38,7 +51,8 @@ while [ $# -gt 0 ]; do
     --keep) KEEP=1; shift ;;
     --gpu) GPU=$2; shift 2 ;;
     --renderer) RENDERER=$2; shift 2 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --host) HOST_PID=$2; shift 2 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -67,29 +81,70 @@ oldest() { [ $# -gt 0 ] || return 0; ps -o etime=,pid= -p "$(IFS=,; echo "$*")" 
 if [ -z "$GPU" ]; then GPU=$(oldest $(find_helpers GPU "graphics and media")); fi
 RENDERERS=$(find_helpers WebContent "web content" | tr '\n' ' ')
 if [ -z "$RENDERER" ]; then RENDERER=$(oldest $RENDERERS); fi
+# The host is the app itself: the process named after it (`redline` from
+# `tauri dev`, `Redline` from the bundle). The oldest one, should a second
+# instance be up.
+if [ -z "$HOST_PID" ]; then HOST_PID=$(oldest $(pgrep -xi "$APP" || true)); fi
 if [ -z "$GPU" ] || [ -z "$RENDERER" ]; then
   echo "✗ no running $APP WebKit processes found (gpu='${GPU}' renderer='${RENDERER}')." >&2
   echo "  Is $APP open? Pass --gpu/--renderer pids to skip discovery." >&2
   exit 1
 fi
+if [ -z "$HOST_PID" ]; then
+  echo "✗ no process named $APP found for the host (pass --host PID)." >&2
+  exit 1
+fi
 
 TMP=${TMPDIR:-/tmp}
 OUT=$(mktemp -d "${TMP%/}/redline-perf-idle.XXXXXX")
-cpu_seconds() { ps -o time= -p "$1" | awk '{ n = split($1, a, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + a[i]; print s }'; }
+
+# Children the host spawns during the window: anything that appears under it
+# and wasn't there at the start (a pty shell is; an `lsof` or `ps` per poll
+# isn't). Polled every 200 ms, so a fork shorter than that can slip through —
+# the posix_spawn flag below is the second witness.
+spawn_watch() { # <host pid> <seconds> → count of new child pids
+  local end before seen c
+  end=$(( $(date +%s) + $2 ))
+  before=" $(pgrep -P "$1" | tr '\n' ' ') "
+  seen=" "
+  while [ "$(date +%s)" -lt "$end" ]; do
+    for c in $(pgrep -P "$1" || true); do
+      case "$before$seen" in *" $c "*) ;; *) seen="$seen$c " ;; esac
+    done
+    sleep 0.2
+  done
+  echo "$seen" | wc -w | tr -d ' '
+}
 
 OTHERS=$(echo "$RENDERERS" | tr ' ' '\n' | awk -v r="$RENDERER" 'NF && $0 != r' | xargs)
-echo "Sampling $APP for ${SECONDS_TO_SAMPLE}s — GPU pid $GPU, renderer pid $RENDERER${OTHERS:+ (other renderers, e.g. browser tabs: $OTHERS)}"
-g0=$(cpu_seconds "$GPU"); r0=$(cpu_seconds "$RENDERER"); t0=$(date +%s.%N)
+echo "Sampling $APP for ${SECONDS_TO_SAMPLE}s — host pid $HOST_PID, GPU pid $GPU, renderer pid $RENDERER${OTHERS:+ (other renderers, e.g. browser tabs: $OTHERS)}"
+# `top -l 2` prints one sample now and one after the delay; the second one's
+# %CPU is the window's average and its IDLEW, minus the first's, the wakeups.
+top -l 2 -s "$SECONDS_TO_SAMPLE" -stats pid,idlew,cpu -pid "$GPU" -pid "$RENDERER" -pid "$HOST_PID" > "$OUT/top.txt" 2>/dev/null &
 sample "$GPU" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/gpu.txt" >/dev/null 2>&1 &
 sample "$RENDERER" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/renderer.txt" >/dev/null 2>&1 &
+sample "$HOST_PID" "$SECONDS_TO_SAMPLE" -mayDie -file "$OUT/host.txt" >/dev/null 2>&1 &
+SPAWNS=$(spawn_watch "$HOST_PID" "$SECONDS_TO_SAMPLE")
 wait
-g1=$(cpu_seconds "$GPU"); r1=$(cpu_seconds "$RENDERER"); t1=$(date +%s.%N)
-pct() { awk -v a="$1" -v b="$2" -v s="$t0" -v e="$t1" 'BEGIN { printf "%.1f%%", 100 * (b - a) / (e - s) }'; }
+
+# "pid<TAB>wakeups/s<TAB>cpu%" per process, from top's two samples.
+top_rows() {
+  awk -v secs="$SECONDS_TO_SAMPLE" '
+    /^PID/ { block++; next }
+    block > 0 && $1 ~ /^[0-9]+$/ { idlew[block, $1] = $2; cpu[block, $1] = $3; pids[$1] = 1 }
+    END {
+      for (p in pids) if ((2, p) in idlew)
+        printf "%s\t%.0f\t%s\n", p, (idlew[2, p] - idlew[1, p]) / secs, cpu[2, p]
+    }' "$OUT/top.txt"
+}
+top_field() { # <pid> <2=wakeups|3=cpu>
+  top_rows | awk -F'\t' -v p="$1" -v f="$2" '$1 == p { print $f; found = 1 } END { if (!found) print "?" }'
+}
 
 # Per thread of a `sample` call graph: its sample count, and how many of
 # those sit under a frame matching PATTERN (outermost match only, so
 # recursion isn't counted twice). Prints "samples<TAB>matched<TAB>thread".
-share() { # <report> <frame pattern>
+share() { # <report> <frame pattern (substring)>
   awk -v pat="$2" '
     /^Call graph:/ { on = 1; next }
     on && /^Total number in stack/ { flush(); on = 0 }
@@ -102,6 +157,22 @@ share() { # <report> <frame pattern>
       depth = RSTART; count = substr($0, RSTART, RLENGTH - 1) + 0
       if (at >= 0 && depth <= at) at = -1
       if (at < 0 && index($0, pat) > 0) { hit += count; at = depth }
+    }' "$1"
+}
+# Same, with PATTERN an extended regex matched against the whole frame line.
+share_re() { # <report> <frame regex>
+  awk -v pat="$2" '
+    /^Call graph:/ { on = 1; next }
+    on && /^Total number in stack/ { flush(); on = 0 }
+    function flush() { if (name != "") printf "%d\t%d\t%s\n", total, hit, name; name = "" }
+    on && /^    [0-9]+ Thread_/ {
+      flush(); total = $1; hit = 0; at = -1
+      name = $0; sub(/^ +[0-9]+ /, "", name); gsub(/  +/, " ", name); next
+    }
+    on && match($0, /[0-9]+ /) {
+      depth = RSTART; count = substr($0, RSTART, RLENGTH - 1) + 0
+      if (at >= 0 && depth <= at) at = -1
+      if (at < 0 && $0 ~ pat) { hit += count; at = depth }
     }' "$1"
 }
 # The worst thread matching THREAD PATTERN (a pool, like the GPU process's
@@ -119,17 +190,55 @@ report() { # <report> <thread pattern> <frame pattern> <label>
       printf "    %-32s %5.1f%% of all %d samples\n", "  …across the process", (all ? 100 * hits / all : 0), all
     }'
 }
+# The idle-heat flags: each pattern's share of the whole process's samples.
+# `sample` records every thread at every tick, parked or not, so a share is
+# "of all thread-ticks"; what matters is zero versus not.
+FLAGS="LegacyRenderSVG setAnimatedPropertiesInStyle paintBoxShadow IOWorkLoop posix_spawn"
+flags() { # <report>
+  local pat
+  for pat in $FLAGS; do
+    share "$1" "$pat" | awk -F'\t' -v label="$pat" '
+      { all += $1; hits += $2 }
+      END { printf "    %-32s %6d samples  (%.2f%% of %d)%s\n", label, hits, (all ? 100 * hits / all : 0), all, (hits ? "  ◀" : "") }'
+  done
+}
+# A thread's awake share: its ticks not sitting in a wait syscall. For the
+# host's CVDisplayLink thread this is the display link firing.
+WAIT_RE='mach_msg2_trap|__psynch_cvwait|__ulock_wait|semaphore_wait_trap|__workq_kernreturn|kevent|__semwait_signal|__select|poll'
+awake() { # <report> <thread pattern> <label>
+  share_re "$1" "$WAIT_RE" | awk -F'\t' -v tp="$2" -v label="$3" -v secs="$SECONDS_TO_SAMPLE" '
+    $3 ~ tp { n++; total += $1; awake += $1 - $2 }
+    END {
+      if (!n) { printf "    %-32s no such thread in this sample\n", label; exit }
+      per = awake / secs
+      printf "    %-32s awake %d of %d ticks  (%.0f/s%s) → %s\n", label, awake, total, per, (n > 1 ? sprintf(", %d threads", n) : ""), (per >= 5 ? "FIRING" : "parked")
+    }'
+}
 footprint_of() { sed -n 's/^Physical footprint: *//p' "$1" | head -1; }
 
 echo
-echo "GPU process ($(display_name "$GPU"), pid $GPU)"
-printf "    %-32s %6s   footprint %s\n" "CPU" "$(pct "$g0" "$g1")" "$(footprint_of "$OUT/gpu.txt")"
-report "$OUT/gpu.txt" "RemoteRenderingBackend" "Gradient::paint" "Gradient::paint"
+printf "%-44s %8s %12s   %s\n" "Process" "CPU" "wakeups/s" "footprint"
+printf "%-44s %7s%% %12s   %s\n" "host ($(display_name "$HOST_PID" | cut -c1-30), pid $HOST_PID)" "$(top_field "$HOST_PID" 3)" "$(top_field "$HOST_PID" 2)" "$(footprint_of "$OUT/host.txt")"
+printf "%-44s %7s%% %12s   %s\n" "GPU process (pid $GPU)" "$(top_field "$GPU" 3)" "$(top_field "$GPU" 2)" "$(footprint_of "$OUT/gpu.txt")"
+printf "%-44s %7s%% %12s   %s\n" "renderer (pid $RENDERER)" "$(top_field "$RENDERER" 3)" "$(top_field "$RENDERER" 2)" "$(footprint_of "$OUT/renderer.txt")"
+
 echo
-echo "Renderer ($(display_name "$RENDERER"), pid $RENDERER)"
-printf "    %-32s %6s   footprint %s\n" "CPU" "$(pct "$r0" "$r1")" "$(footprint_of "$OUT/renderer.txt")"
+echo "Host"
+awake "$OUT/host.txt" "CVDisplayLink" "display link"
+printf "    %-32s %d new child process(es) in %ss  (%.0f/min)\n" "spawned children" "$SPAWNS" "$SECONDS_TO_SAMPLE" "$(awk -v n="$SPAWNS" -v s="$SECONDS_TO_SAMPLE" 'BEGIN { print 60 * n / s }')"
+flags "$OUT/host.txt"
+
+echo
+echo "GPU process"
+report "$OUT/gpu.txt" "RemoteRenderingBackend" "Gradient::paint" "Gradient::paint"
+flags "$OUT/gpu.txt"
+
+echo
+echo "Renderer"
 report "$OUT/renderer.txt" "CommitQueue" "flushAndCollectHandles" "commit queue waiting on GPU"
 report "$OUT/renderer.txt" "com.apple.main-thread" "Gradient::paint" "main thread in Gradient::paint"
+awake "$OUT/renderer.txt" "com.apple.main-thread" "main thread"
+flags "$OUT/renderer.txt"
 
 echo
 echo "Responsiveness probe (GET :$PORT/v1/perf, last ${SECONDS_TO_SAMPLE}s)"
