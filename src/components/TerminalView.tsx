@@ -392,7 +392,9 @@ export const TerminalView = memo(function TerminalView({
       fontSize: prefs.size,
       lineHeight: prefs.lineHeight,
       allowProposedApi: true,
-      cursorBlink: true,
+      // Only while the window is focused (onFocusChanged below keeps it
+      // honest): each blink repaints the cell, and nobody is looking.
+      cursorBlink: document.hasFocus(),
       theme: readXtermTheme(theme),
       scrollback: 5000,
     });
@@ -572,6 +574,7 @@ export const TerminalView = memo(function TerminalView({
     let heldFocusAtBlur = false;
     const focusPromise = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {
+        if (termRef.current) termRef.current.options.cursorBlink = focused;
         if (!focused) {
           heldFocusAtBlur = host.contains(document.activeElement);
           return;
