@@ -506,6 +506,61 @@ and the app's uptime:
 | GPU process CPU at idle | `perf-idle.sh` | < 5% | to be measured |
 | Renderer footprint at 1 h and 8 h of uptime | `/v1/perf` → `renderer.footprintBytes` (or `perf-idle.sh`) | 8 h within 20% of 1 h | to be measured |
 
+## Idle heat (measured 2026-10-27)
+
+An idle Redline should cost nothing: no spinner, poll, fork or timer runs for
+someone who is reading. On 2026-10-27 the daily dev app, left alone, held the
+renderer at 15–19% CPU, the GPU process at 8–11% and the host near 8% with
+about 1,000 wakeups a second (`top`; `sample` showed `LegacyRenderSVG*`,
+`setAnimatedPropertiesInStyle` and `paintBoxShadow` on the renderer's main
+thread, `posix_spawn` in the host and a display link ticking every vsync).
+The causes, and the rules that keep them out:
+
+| Cause | Rule | Where |
+|---|---|---|
+| A spinner that rotates an SVG element. WebKit's legacy SVG engine lays out and repaints a transformed `<g>` or `<path>` on the main thread every frame, and repaints the layer it sits in (a glass pill) with it. Measured in Safari on this machine: six marks spinning an inner `<g>` held the GPU process at 7% and 250 MB; the same six as HTML rings cost 0.1%. | **Spinners are HTML.** One `Spinner` (`components/Spinner.tsx`), a `currentColor` ring the compositor turns; PulseLogo's strike-line is an HTML bar over a static blob. The paint guard (`paintGuard.test.ts`, "SVG stays still") rejects any animation on an svg, on anything inside one, or on a lucide icon. | `styles.css` `.rl-spinner`, `.rl-pulse-blades` |
+| A `working` that never ends. An Esc interrupt fires no hook and a Stop can be lost, so a row spun until the terminal's next prompt, and the conversation tail read the transcript every 150 ms for as long. | **Working retires itself.** The daemon clears a `working` or `needs-you` whose shell has the foreground again (`term_attention::retire_finished`: a 10 s look at the ptys' foreground groups, no fork), the dock reports an Esc (`term_attention_interrupted`), and the mirror closes a turn whose transcript has not moved for 30 min (`convo` `WORKING_CAP`). Every reader of `term-attention` sees the same retirement. | `term_attention.rs`, `convo/mod.rs` |
+| A fork per poll: `lsof` for every tile's cwd every 2 s and `ps` + `lsof` for the process sample every 4 s, dock open or not; `git status` every 4–10 s; the review fingerprint on every surface. | **No fork while nothing is on screen, and none for what the kernel will say.** cwds and the process table come from `proc_pidinfo`; the one `lsof` left (listening sockets, for the port badges) runs on the 12 s fleet tick, only while the dock is open. Git status follows a watch on `.git` and `.git/refs/heads`, a window focus, and a once-a-minute backstop. The Review staleness poll runs only while Review is showing. | `pty.rs` `libproc`, `TerminalTabs.tsx`, `useFsWatch.ts` `useGitWatch`, `useReview.ts` |
+| Timers that re-render the whole app: a 5 s readiness clock while a launch was pending. | **A timer fires when something becomes due, in the leaf that shows it.** The `/hooks` nudge arms one timeout for its moment; elapsed counters live in their own components and unmount with the working row. | `App.tsx` `readinessNow` |
+| A running `AudioContext` keeps an audio render thread awake with nothing to play. | **Audio parks.** The beep's context suspends when its motif ends and closes after five quiet seconds; the voice sample's does the same. | `audio/beep.ts`, `audio/cloudTts.ts` |
+| Smaller: the terminal cursor blinking in an unfocused window; a favicon script evaluated in every tab every 5 s; a folded dock whose terminals were still laid out; a page-sized backdrop blur under the island's own. | Cursor blink follows window focus; the favicon is read when the page moves; the folded dock is skipped (`content-visibility`, the one place it is allowed besides the file rows); the drafter sheet is translucent without a blur. | `TerminalView.tsx`, `BrowserPane.tsx`, `styles.css` |
+
+### Measuring
+
+`scripts/perf-idle.sh --seconds 12` samples the host, GPU and renderer
+processes together: CPU and wakeups per second (wakeups need `sudo` — `top`
+cannot read another process's power info without it), footprints, whether
+the host's display link is awake, the child processes the host spawned
+during the window, and the share of samples under each flag frame. Hands
+off the app for the window. A browser tab showing a live page is not idle:
+its own animations keep the display link firing. Measure on the Front Door
+or an open plan.
+
+### Measured
+
+| Scene, build | Renderer CPU | GPU CPU | Host CPU | Spawns / min | Renderer main thread awake |
+|---|---|---|---|---|---|
+| Daily dev app, long-running, as sampled by the planning session | 15–19% | 8–11% | ~8%, ~1,000 wakeups/s | — | — |
+| Fresh dev app, Browser surface, before (three 12 s samples) | 0.0–0.1% | 0.0% | 0.7–2.1% | 15–25 | 8–10 ticks per 12 s |
+| Fresh dev app, Browser surface, after | 0.0% | 0.0% | 0.7% | 0 | 0 |
+| Release build, Front Door, before → after | to be measured | | | | |
+
+A fresh instance never reproduces the long-running app's heat — it has no
+stale `working`, no spinning PulseLogo and no transcript tail at 150 ms —
+which is why the rules above are guarded at the source rather than only by
+these numbers.
+
+### Targets (release build, at idle, no live agent output)
+
+| Metric | Target |
+|---|---|
+| Renderer CPU | ≤ 2% |
+| GPU process CPU | ≤ 1% |
+| Host wakeups | ≤ 50/s |
+| Display link | not firing |
+| Process spawns per minute | 0 |
+| Dev build | report its idle numbers; ≤ 5% renderer CPU |
+
 ## Boot budget
 
 The size budget above governs how much code ships. This one governs **how long
