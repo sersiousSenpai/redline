@@ -215,8 +215,7 @@
 .rl-plan-foot-faint {
   color: var(--color-ink-5);
 }
-.rl-plan-foot-terminals,
-.rl-plan-foot-link {
+.rl-plan-foot-terminals {
   border: 0;
   background: none;
   padding: 0;
@@ -224,14 +223,6 @@
   cursor: pointer;
 }
 .rl-plan-foot-terminals:disabled {
-  cursor: default;
-}
-.rl-plan-foot-link {
-  color: var(--color-info-text);
-  text-decoration: underline;
-}
-.rl-plan-foot-link:disabled {
-  color: var(--color-ink-4);
   cursor: default;
 }
 /* PlanStateMenu's bare trigger, quiet beside the hint. */
@@ -358,32 +349,6 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-stage-spin {
-    animation: none;
-  }
-}
-
-/* The comment composer, while a mark is being written beside the chat: a
-   glass sheet over the plan's foot, the plan scrolling beneath it. */
-.rl-flow-compose-sheet {
-  position: absolute;
-  left: 22px;
-  right: 22px;
-  bottom: 14px;
-  z-index: 25;
-  max-width: 560px;
-  padding: 12px;
-  border: 1px solid transparent;
-  border-radius: var(--rl-radius-card);
-  animation: rl-stage-rise var(--rl-dur-2) var(--rl-ease-spring);
-}
-@keyframes rl-stage-rise {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .rl-flow-compose-sheet {
     animation: none;
   }
 }
