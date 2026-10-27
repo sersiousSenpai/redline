@@ -60,4 +60,26 @@ describe("persistent workspace portal containment", () => {
     expect(slot.classList.contains("min-w-0")).toBe(true);
     expect(slot.classList.contains("overflow-hidden")).toBe(true);
   });
+
+  it("an inactive slot never takes the host, so a hidden kept tab cannot steal it from the showing one", async () => {
+    function Workspace({ showing }: { showing: "a" | "b" | "none" }) {
+      return <><section><PersistentPortalSlot name="a" host={host} active={showing === "a"} /></section><aside><PersistentPortalSlot name="b" host={host} active={showing === "b"} /></aside>{createPortal(<textarea defaultValue="Kept" />, host)}</>;
+    }
+    await act(async () => root.render(<Workspace showing="a" />));
+    const textarea = host.querySelector("textarea");
+    expect(container.querySelector("section textarea")).toBe(textarea);
+    expect(container.querySelector("aside textarea")).toBeNull();
+    expect(container.querySelector("aside [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(false);
+
+    await act(async () => root.render(<Workspace showing="b" />));
+    expect(container.querySelector("aside textarea")).toBe(textarea);
+    expect(container.querySelector("section textarea")).toBeNull();
+    expect(container.querySelector("section [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(false);
+    expect(container.querySelector("aside [data-surface-slot]")?.hasAttribute("data-slot-active")).toBe(true);
+
+    // Both inactive: the host is held by neither, and nothing unmounted.
+    await act(async () => root.render(<Workspace showing="none" />));
+    expect(host.parentElement).toBeNull();
+    expect(host.querySelector("textarea")).toBe(textarea);
+  });
 });

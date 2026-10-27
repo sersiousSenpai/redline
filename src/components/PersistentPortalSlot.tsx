@@ -12,16 +12,20 @@ export function createBoundedPortalHost(name: string): HTMLDivElement {
   return host;
 }
 
-/** Own the imperative child separately from React's ordinary surface bodies. */
-export function PersistentPortalSlot({ host, name }: { host: HTMLElement; name: string }) {
+/** Own the imperative child separately from React's ordinary surface bodies.
+ *  The slot takes the host only while `active` (default true): a slot in a
+ *  hidden kept tab stays mounted and must not steal the host from the one
+ *  that is showing. Going inactive hands the host back the same way
+ *  unmounting does. */
+export function PersistentPortalSlot({ host, name, active = true }: { host: HTMLElement; name: string; active?: boolean }) {
   const slotRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const slot = slotRef.current;
-    if (!slot) return;
+    if (!slot || !active) return;
     slot.appendChild(host);
     return () => {
       if (host.parentElement === slot) host.remove();
     };
-  }, [host]);
-  return <div ref={slotRef} data-surface-slot={name} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />;
+  }, [host, active]);
+  return <div ref={slotRef} data-surface-slot={name} data-slot-active={active ? "" : undefined} className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" />;
 }

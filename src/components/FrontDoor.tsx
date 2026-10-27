@@ -108,6 +108,10 @@ export interface FrontDoorProps {
   onOpenRecent?: (recent: DoorRecent) => void;
   /** The surface's context chips, above the box: what a send attaches. */
   chips?: React.ReactNode;
+  /** Where the sentence lives (`useSharedDraft`). The one door shares the
+   *  Front Door's own key with the footer pill's compact composer; a door
+   *  tab of its own passes its own key, so two doors never share a draft. */
+  draftKey?: string;
   autoFocusOnShow?: boolean;
   chatPending?: boolean;
   accessories?: React.ReactNode;
@@ -315,11 +319,12 @@ function FrontDoorView(props: FrontDoorProps) {
     chats = [],
     onOpenChat,
     flow,
+    draftKey = FRONT_DOOR_TEXT_KEY,
   } = props;
 
   // The sentence is the composer's own, so a keystroke re-renders this door
   // and nothing around it. App reads it only when something is sent.
-  const [text, setText] = useSharedDraft(FRONT_DOOR_TEXT_KEY);
+  const [text, setText] = useSharedDraft(draftKey);
   // Where ⏎ would launch. The guess regex-scans the sentence once per known
   // project, so it runs on the deferred text and the keystroke paints first.
   const deferredText = useDeferredValue(text);
