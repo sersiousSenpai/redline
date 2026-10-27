@@ -440,14 +440,12 @@ import {
   defaultWorkspace,
   headerSurfaces,
   initialSurface,
-  moveHeaderSurface,
   parseWorkspace,
   projectKind,
   readWorkspaceCache,
   registerProject,
   serializeWorkspace,
   setLanding,
-  setSurfaceEnabled,
   storeWorkspaceCache,
   surfaceEnabled,
   workspaceImmersive,
@@ -1223,7 +1221,9 @@ function App() {
   // "was immersive" is exactly the stale bit this design refuses to store.
   const [immersiveBroken, setImmersiveBroken] = useState(false);
   const [panelBreaks, setPanelBreaks] = useState({ sidebar: false, pane: false });
-  const [splitVertical, setSplitVertical] = usePersistedState(
+  // Its orientation stays persisted for the tile the pin preference makes;
+  // the button that flipped it left the header with the workbench (W1).
+  const [splitVertical] = usePersistedState(
     "redline.split.vertical",
     false,
   );
@@ -9890,15 +9890,6 @@ function App() {
           setFlashSeq((n) => n + 1);
           if (flashSound) playInterceptBeep(flashSoundConfig);
         }}
-        surface={mainSurface}
-        onSelectSurface={selectSurface}
-        surfaces={headerSurfaceList}
-        onHideSurface={(id) =>
-          updateWorkspace((ws) => setSurfaceEnabled(ws, id, false))
-        }
-        onMoveSurface={(id, delta) =>
-          updateWorkspace((ws) => moveHeaderSurface(ws, id, delta))
-        }
         collabEnabled={surfaceEnabled(effectiveWorkspace, "collab")}
         memoryEnabled={surfaceEnabled(effectiveWorkspace, "memory")}
         // In harness mode the panel is a lens on the HARNESS's arrangement
@@ -9919,16 +9910,6 @@ function App() {
         onExitHarness={
           activeHarness && activeHarness.entry !== "boot" ? exitHarness : null
         }
-        docPinned={docPinned}
-        onToggleDocPin={() => {
-          // Entering/leaving a tile — reset the split so both panes show.
-          setSplitRatio(0.5);
-          // Reads the EFFECTIVE pin: immersive masks the tile away, so the
-          // button means "tile the document back in" — and asking for the
-          // document back is a break-out like any other.
-          setImmersiveBroken(true);
-          setDocPinned(!docPinned);
-        }}
         onOpenMemory={() => selectSurface("memory")}
         onOpenMemoryInspector={() => setMemoryInspectorOpen(true)}
         collabActive={!!collabShare || !!joinedRoom}
@@ -9937,13 +9918,6 @@ function App() {
         onJoinSession={() => setJoinOpen(true)}
         canShare={sessionReady && !!latest}
         onShareSnapshot={() => setShareOpen(true)}
-        splitActive={docPinned && mainSurface !== "document"}
-        splitVertical={splitVertical}
-        onToggleSplitOrientation={() => {
-          // Flipping orientation resets to 50/50 so a folded-away pane reappears.
-          setSplitRatio(0.5);
-          setSplitVertical((v) => !v);
-        }}
         onSnapBack={snapBack}
         onOpenPalette={() => setPaletteOpen(true)}
       />
