@@ -178,3 +178,25 @@ describe("boot takes no caret", () => {
     expect(reveal).toMatch(/if \(host && revealMayFocus\(host\)\) term\?\.focus\(\);/);
   });
 });
+
+// W1 round 2: an arriving plan never pulls someone off another door, and a
+// summaries read never prunes what it could not have seen.
+describe("the workbench's arrivals and prunes", () => {
+  it("the launch door's arrival lands on screen only while the user is still on that tab; elsewhere it retires quietly and the Plan tab waits unselected", () => {
+    const arrival = between("const planUnlisten =", "const detachedUnlisten =");
+    expect(arrival).toContain("launchDoor.key === wbNow.activeKey && wbNow.sets[launchDoor.key]?.activeTabId === launchDoor.tabId");
+    const elsewhere = arrival.slice(arrival.indexOf("if (launchDoor && !ownDoorTab) {"), arrival.indexOf("const writing ="));
+    expect(elsewhere).toContain("retireDoorLaunchTab(payload.launchId);");
+    expect(elsewhere).toContain('wb.dispatch({ type: "ensureDefaults", key: planKey(payload.sessionId) });');
+    expect(elsewhere).not.toContain("setActiveId");
+  });
+
+  it("a summaries read prunes only sets it could have listed, never the active one", () => {
+    const refresh = between("async function refreshSummaries", "const setPlanState");
+    // Snapshotted BEFORE the await: a set made while the read was in flight
+    // is newer than the list, not absent from it.
+    expect(refresh.indexOf("const setsBefore = new Set(Object.keys(wb.getState().sets));")).toBeLessThan(refresh.indexOf("await invoke<SessionSummary[]>"));
+    expect(refresh).toContain("key === state.activeKey || !setsBefore.has(key)");
+    expect(refresh).toContain('wb.dispatch({ type: "prune"');
+  });
+});

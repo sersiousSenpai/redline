@@ -514,7 +514,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
-import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, sessionIdOf, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import { doorDraftKey } from "./workbench/model";
 import type { WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
@@ -4569,6 +4569,11 @@ function App() {
   const planActionsRef = useRef<PlanEditorActions | null>(null);
 
   async function refreshSummaries(): Promise<SessionSummary[]> {
+    // The sets that existed when this read began: a set made or selected
+    // while the read was in flight is not "absent", it is newer than the
+    // list — only a session this read positively no longer lists, among
+    // those it could have listed, is gone.
+    const setsBefore = new Set(Object.keys(wb.getState().sets));
     try {
       const list = await invoke<SessionSummary[]>("list_sessions");
       // Every read is a fresh list. Keep the previous one, or each row that
@@ -4578,11 +4583,17 @@ function App() {
       setSummaries((prev) => keepEqualRows(prev, list, (s) => s.sessionId));
       // Sets whose session is gone go with it (a joined room's mirrored set
       // stays while joined); terminals are not the workbench's yet (W3).
+      // Never the active set, and never a set newer than this read.
       if (classicWb) {
+        const state = wb.getState();
         const live = list.map((s) => s.sessionId);
         const joined = activeIdRef.current && isJoinedSessionId(activeIdRef.current) ? activeIdRef.current.split(":")[1] : null;
         if (joined) live.push(joined);
-        wb.dispatch({ type: "prune", liveSessions: live, livePtys: Object.keys(wb.getState().owners) });
+        for (const key of Object.keys(state.sets) as SessionKey[]) {
+          const sid = sessionIdOf(key);
+          if (sid && (key === state.activeKey || !setsBefore.has(key))) live.push(sid);
+        }
+        wb.dispatch({ type: "prune", liveSessions: live, livePtys: Object.keys(state.owners) });
       }
       return list;
     } catch (err) {
@@ -4891,7 +4902,17 @@ function App() {
         // A door that sent this very launch is never "writing", caret in its
         // box or not: its ⏎ asked for this plan, so it arrives on screen —
         // from a door tab it springs out of the box and the door retires.
-        const ownDoorTab = classicWb && !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId;
+        // Only while the user is STILL on that door tab: someone who ⌘T'd
+        // another door and is typing in it is busy — the launch door retires
+        // quietly, the plan's set gets its Plan tab without being selected
+        // (D1's "elsewhere"), and the row's pulse carries the news.
+        const launchDoor = classicWb && !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId ? doorLaunchTabRef.current : null;
+        const wbNow = wb.getState();
+        const ownDoorTab = !!launchDoor && launchDoor.key === wbNow.activeKey && wbNow.sets[launchDoor.key]?.activeTabId === launchDoor.tabId;
+        if (launchDoor && !ownDoorTab) {
+          retireDoorLaunchTab(payload.launchId);
+          wb.dispatch({ type: "ensureDefaults", key: planKey(payload.sessionId) });
+        }
         const writing = !ownDoorTab && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));
         const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
