@@ -38,6 +38,33 @@ const LEAD = 0.03;
 
 let ctx: AudioContext | null = null;
 
+// A running AudioContext keeps an audio render thread awake, tones or no
+// tones, so an app that beeped once would hold it all day. The context is
+// suspended as soon as the motif has finished and closed (and dropped) after a
+// few quiet seconds; the next beep makes a new one, which costs milliseconds.
+const SETTLE_MS = 150;
+const CLOSE_AFTER_MS = 5000;
+let idleTimer: number | undefined;
+let closeTimer: number | undefined;
+
+function cancelParking(): void {
+  window.clearTimeout(idleTimer);
+  window.clearTimeout(closeTimer);
+}
+
+function parkAfter(audio: AudioContext, ms: number): void {
+  cancelParking();
+  idleTimer = window.setTimeout(() => {
+    if (ctx !== audio || audio.state !== "running") return;
+    void audio.suspend().catch(() => {});
+    closeTimer = window.setTimeout(() => {
+      if (ctx !== audio) return;
+      ctx = null;
+      void audio.close().catch(() => {});
+    }, CLOSE_AFTER_MS);
+  }, ms);
+}
+
 function getContext(): AudioContext | null {
   try {
     const Ctor =
@@ -56,8 +83,9 @@ function getContext(): AudioContext | null {
 }
 
 // Schedule the motif. Called only once the context is confirmed running, so the
-// start time is always valid and every tone actually plays.
-function scheduleTones(audio: AudioContext, config: SoundConfig): void {
+// start time is always valid and every tone actually plays. Returns how long
+// the motif plays, in seconds.
+function scheduleTones(audio: AudioContext, config: SoundConfig): number {
   const tones =
     Array.isArray(config?.tones) && config.tones.length
       ? config.tones
@@ -80,11 +108,13 @@ function scheduleTones(audio: AudioContext, config: SoundConfig): void {
     osc.stop(at + tone.dur);
     at += tone.dur + GAP;
   }
+  return at - audio.currentTime;
 }
 
 export function playInterceptBeep(config: SoundConfig = DEFAULT_SOUND): void {
   const audio = getContext();
   if (!audio) return;
+  cancelParking();
   // Autoplay policies / a backgrounded window / OS sleep can leave the context
   // suspended. resume() is async — schedule the tones only AFTER it resolves,
   // otherwise they're queued against a frozen clock and never sound. resume()
@@ -93,7 +123,7 @@ export function playInterceptBeep(config: SoundConfig = DEFAULT_SOUND): void {
     .resume()
     .then(() => {
       try {
-        scheduleTones(audio, config);
+        parkAfter(audio, scheduleTones(audio, config) * 1000 + SETTLE_MS);
       } catch (err) {
         console.warn("intercept beep: scheduling failed", err);
       }

@@ -357,6 +357,22 @@ export function cloudTtsDriver(
 }
 
 let sampleCtx: AudioContext | null = null;
+let sampleParkTimer: number | undefined;
+
+/** Suspend the sample context once its clip is over, and close it after a few
+ *  idle seconds: a running context keeps an audio render thread awake, and
+ *  the settings ▶ is pressed a few times a year. */
+function parkSample(): void {
+  window.clearTimeout(sampleParkTimer);
+  const ctx = sampleCtx;
+  if (!ctx) return;
+  if (ctx.state === "running") void ctx.suspend().catch(() => {});
+  sampleParkTimer = window.setTimeout(() => {
+    if (sampleCtx !== ctx) return;
+    sampleCtx = null;
+    void ctx.close().catch(() => {});
+  }, 5000);
+}
 
 /** The settings ▶: synthesize a sample sentence in Kokoro `voice` (one the user
  *  is auditioning, not necessarily the saved one) at `rate`, and play it.
@@ -380,6 +396,7 @@ export function playVoiceSample(
         voice,
       });
       if (stopped) return;
+      window.clearTimeout(sampleParkTimer);
       const ctx = (sampleCtx ??= new AudioContext());
       if (ctx.state !== "running") await ctx.resume();
       const bytes = base64ToBytes(res.audioBase64);
@@ -387,8 +404,10 @@ export function playVoiceSample(
       if (stopped) return;
       playing = playClip(ctx, { audio, speed: res.speed || 1 }, rate);
       await playing?.done;
+      parkSample();
       if (!stopped) onEnd();
     } catch (e) {
+      parkSample();
       if (!stopped) onEnd(e instanceof Error ? e.message : String(e));
     }
   })();
@@ -396,6 +415,7 @@ export function playVoiceSample(
     if (stopped) return;
     stopped = true;
     playing?.stop();
+    parkSample();
     void invoke("tts_cancel", { generation }).catch(() => {});
   };
 }
