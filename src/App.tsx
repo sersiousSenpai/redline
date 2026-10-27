@@ -99,10 +99,19 @@ import {
 import { isLiveRunState } from "./lib/orchestration";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 import { Header } from "./components/Header";
-// The flow shell's top bar is the window-drag region, so unlike the other
-// flow pieces it loads with the app (see shell/FlowTopBar).
-import { FlowTopBar, togglePlanPanel } from "./shell/FlowTopBar";
-import { toggleStage, setPlanPose } from "./shell/flowState";
+// The flow shell's top bar and its store ride their own chunks: about
+// 16.7 kB of boot JS the classic shell never painted (the workbench's
+// headroom, W1). Flow fetches both at mount; until W2 deletes the shell its
+// top bar lands a beat after the first frame.
+const loadFlowTopBar = () => import("./shell/FlowTopBar");
+const FlowTopBar = lazy(() => loadFlowTopBar().then((m) => ({ default: m.FlowTopBar })));
+const togglePlanPanel = (sessionId: string) => void loadFlowTopBar().then((m) => m.togglePlanPanel(sessionId)).catch(() => {});
+import { flowStateNow, loadFlowState, useFlowLazy as useFlow, withFlowState } from "./shell/flowStateLazy";
+const toggleStage = () => withFlowState((m) => m.toggleStage());
+const setPlanPose = (sessionId: string, pose: PlanPose) => withFlowState((m) => m.setPlanPose(sessionId, pose));
+const setStage = (view: StageView) => withFlowState((m) => m.setStage(view));
+const setFlowSidebar = (open: boolean) => withFlowState((m) => m.setSidebar(open));
+const getFlowState = flowStateNow;
 import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
 import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
 import { TOOL_DESCRIPTORS, toolForKey, toolSurfaces, type ToolId } from "./config/workspace";
@@ -310,7 +319,6 @@ function prefetchSurfaceChunk(surface: string): void {
 }
 import { useReview } from "./hooks/useReview";
 import { useStableHandlers, useStableValue } from "./hooks/useStable";
-import { setSidebar as setFlowSidebar, useFlow } from "./shell/flowState";
 import { keepEqual, keepEqualRows } from "./lib/keepEqual";
 import { useTextClearance } from "./hooks/useTextClearance";
 import { useDevServers } from "./hooks/useDevServers";
@@ -389,7 +397,7 @@ import type { TerminalTabsHandle } from "./components/TerminalTabs";
 // The flow shell's session stage: what it shows (lib/flowSessions), the plan
 // panel's pose rules (lib/flowPose) and its body, a lazy chunk the classic
 // shell never fetches.
-import { getFlowState, setStage, type PlanPose, type StageView } from "./shell/flowState";
+import type { PlanPose, StageView } from "./shell/flowState";
 import { useStageDock } from "./lib/stageDock";
 import type { ConversationLayout } from "./shell/FlowStage";
 import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
@@ -2475,6 +2483,9 @@ function App() {
   // shell is up, so the first plan or launch doesn't wait on a fetch.
   useEffect(() => {
     if (!flowShell) return;
+    // The store first: the top bar, the sidebar and the stage read it.
+    void loadFlowState().catch(() => {});
+    void loadFlowTopBar().catch(() => {});
     const warm = () => {
       void loadFlowStage().catch(() => {});
       void loadSessionConversation().catch(() => {});
@@ -9310,6 +9321,7 @@ function App() {
           header on the browser surface would simply be invisible. */}
       <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
       {isFlowShell() ? (
+        <Suspense fallback={<div className="rl-app-header" style={{ height: 38 }} />}>
         <FlowTopBar
           title={flowTitle}
           mode={flowMode}
@@ -9363,6 +9375,7 @@ function App() {
             ),
           }}
         />
+        </Suspense>
       ) : (
       <Header
         onOpenIntegrationHooks={hookConflicts.openDialog}

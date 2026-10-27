@@ -51,8 +51,14 @@ function set(next: Partial<FlowState>): void {
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
+
+/** Subscribe from outside React (`flowStateLazy` bridges App to this
+ *  store once it has loaded). */
+export const subscribeFlow = subscribe;
 
 export function getFlowState(): FlowState {
   return state;

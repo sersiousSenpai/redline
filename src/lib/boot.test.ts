@@ -234,6 +234,25 @@ describe("boot-path JS contract", () => {
     }
   });
 
+  // The flow shell's top bar and its store (W1). They were the last static
+  // flow imports in App — about 16.7 kB of boot JS the classic shell never
+  // painted — and the workbench needed that headroom. App reads the store
+  // through shell/flowStateLazy (a 1 kB shim that answers with defaults
+  // until the flow shell has fetched the module) and mounts the top bar
+  // through lazy(); a value import of either is the regression. Both go
+  // when W2 deletes the flow shell.
+  it("the flow top bar and the flow store never return to App's static import list", () => {
+    for (const name of ["FlowTopBar", "flowState"]) {
+      const staticImport = new RegExp(`^import (?!type\\b)[^;]*from "\\./shell/${name}"`, "m");
+      expect(app.match(staticImport), `shell/${name} is statically imported`).toBe(null);
+    }
+    expect(app).toContain('import("./shell/FlowTopBar")');
+    expect(app).toContain('from "./shell/flowStateLazy"');
+    const shim = readFileSync(join(process.cwd(), "src/shell/flowStateLazy.ts"), "utf8");
+    expect(shim).toContain('import("./flowState")');
+    expect(shim.match(/^import (?!type\b)[^;]*from "\.\/flowState"/m)).toBe(null);
+  });
+
   // The raw-wire inspector is devtools: most turns never open it, and it is
   // reached from a reply's tail rather than from App. So the guard
   // is not "App doesn't import it" — it is "NOTHING imports it statically",
