@@ -13,8 +13,8 @@ Verification:
 - Four regression cases failed before the fix, reproducing the rightward index error and stale address focus.
 - All 56 focused tests passed across tab dragging, BrowserChrome, BrowserPane, pane lifecycle, and tile controls.
 - TypeScript and `git diff --check` passed.
-- The [browser fixture](browser-tab-position-visual-qa-2026-09-25/results.json) passed 145 checks with 36 screenshots and no console errors, using the same reorder function as production. It also rechecked full/partial address copying and captured [tab selection without address highlighting](browser-tab-position-visual-qa-2026-09-25/1600x900-tab-selected.png) and [new-tab spacing](browser-tab-position-visual-qa-2026-09-25/1600x900-new-tab-spacing.png).
-- The final macOS build includes all four tab corrections, its activation helper, and release identity `rel-1790406390-f96e167`. Strict code-signature verification and all size budgets passed. [Build measurements](browser-tab-position-visual-qa-2026-09-25/build.json): executable 38,231,792 B; boot JavaScript 600,006 B; frontend assets 8,972,246 B.
+- The browser fixture passed 145 checks with 36 screenshots and no console errors, using the same reorder function as production. It also rechecked full/partial address copying and captured tab selection without address highlighting and new-tab spacing.
+- The final macOS build includes all four tab corrections, its activation helper, and release identity `rel-1790406390-f96e167`. Strict code-signature verification and all size budgets passed. Build measurements: executable 38,231,792 B; boot JavaScript 600,006 B; frontend assets 8,972,246 B.
 
 Updated package: [`Redline.app`](../src-tauri/target/release/bundle/macos/Redline.app).
 

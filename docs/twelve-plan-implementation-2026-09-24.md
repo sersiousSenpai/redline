@@ -41,19 +41,18 @@ The final integrated tree passed:
 
 Focused visual and behavior evidence includes:
 
-- [Document controls visual report](document-controls-visual-qa-2026-09-24.md):
+- Document controls visual report (removed from the repo with the dated QA folders):
   **142 checks and 25 screenshots**, using actual components at 1600, 900 and
   520 pixels. The Table scrollbar issue was found by visual inspection and
   verified against the scroll viewport's client bounds after repair.
-- [Cosmos structured results](memory-cosmos-visual-qa-2026-09-24/results.json):
+- Cosmos structured results (likewise removed):
   **16 checks passed**, covering orbit, flight, exact Timeline focus, camera
   restoration, filters, resize, reduced motion, empty/single/over-limit data,
   context loss/retry and repeated Map–Timeline switching. With 150 nodes,
   Chrome on this Mac measured **16.7 ms median and 16.7 ms p95 frame intervals**
   at 900×680 and pixel ratio 1. These are browser frame intervals, not GPU
   timing or a native WKWebView benchmark.
-- [Cosmos overview](memory-cosmos-visual-qa-2026-09-24/overview-150.png) and
-  [close-range planet](memory-cosmos-visual-qa-2026-09-24/close-range-planet.png).
+- Cosmos overview and close-range planet screenshots (likewise removed).
   Images were inspected; foreground geometry now increases detail near the
   camera and the peripheral visor remains subtle.
 - [Browser/fullscreen audit](browser-fullscreen-2026-09-24.md) records stage,

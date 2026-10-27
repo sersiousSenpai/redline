@@ -29,7 +29,7 @@ Implemented the supplied **Simplify the Redline browser v2** plan against the ex
 | Visual fixture | 118 checks, 34 screenshots, zero errors |
 | Whitespace | `git diff --check` passed |
 
-The [visual results](browser-simplification-visual-qa-2026-09-25/results.json) include real Chrome pointer input for tab motion, commit-on-release, tile swaps, tab-to-tile assignment, and cross-highlighting. They also exercise menus, layout previews, resizing, bounded chat scrolling, light/dark themes, and Mosaics.
+The visual results (removed from the repo with the dated QA folders) include real Chrome pointer input for tab motion, commit-on-release, tile swaps, tab-to-tile assignment, and cross-highlighting. They also exercise menus, layout previews, resizing, bounded chat scrolling, light/dark themes, and Mosaics.
 
 The inspector failure was reproduced before editing in a DOM fixture: clicking without a preceding pointer move produced no signal and left picking active. A missing transport was also silent. Regression tests cover both, immediate chat seeding, page ownership, cancellation, and timeout errors.
 
@@ -44,9 +44,9 @@ Built the saved pre-change frontend source separately with the same Vite configu
 
 The empty dock descriptor now lives with the app's dock mapping, keeping browser-only state helpers out of the boot import path. Size ceilings were not changed.
 
-The fresh release executable is **38,215,248 B / 38,500,000 B**; the separately built activation helper is **546,112 B / 800,000 B**. The signed executable inside the package is 38,234,336 B. Exact [artifact measurements](browser-simplification-visual-qa-2026-09-25/sizes.json) distinguish the build outputs from the signed package.
+The fresh release executable is **38,215,248 B / 38,500,000 B**; the separately built activation helper is **546,112 B / 800,000 B**. The signed executable inside the package is 38,234,336 B. Exact artifact measurements (likewise removed) distinguish the build outputs from the signed package.
 
-The prepared app is at [`src-tauri/target/release/bundle/macos/Redline.app`](../src-tauri/target/release/bundle/macos/Redline.app), release identity `rel-1790403456-f96e167`. Its [isolated native probe](browser-simplification-visual-qa-2026-09-25/native-probe.json) reached frontend interaction in 2,367 ms and exited successfully after checking storage and settings. It was not installed.
+The prepared app is at [`src-tauri/target/release/bundle/macos/Redline.app`](../src-tauri/target/release/bundle/macos/Redline.app), release identity `rel-1790403456-f96e167`. Its isolated native probe (likewise removed) reached frontend interaction in 2,367 ms and exited successfully after checking storage and settings. It was not installed.
 
 ## Verification limits
 

@@ -15,10 +15,10 @@ Follow-up to the browser simplification, addressing the reported need to place d
 
 - `npx tsc --noEmit` passed.
 - 45 focused tests passed across tab dragging, browser chrome, pane lifecycle, and tile controls. The final clipboard fallback guard was followed by another successful run of all eight BrowserChrome tests.
-- The [Chrome visual fixture](browser-tab-copy-visual-qa-2026-09-25/results.json) passed **123 checks**, with **34 screenshots** and no console errors. New cases cover short edge grabs, diagonal release, release-position continuity, stationary-pointer edge scrolling, and actual clipboard reads after ⌘C for full and partial address selections.
+- The Chrome visual fixture passed **123 checks**, with **34 screenshots** and no console errors. New cases cover short edge grabs, diagonal release, release-position continuity, stationary-pointer edge scrolling, and actual clipboard reads after ⌘C for full and partial address selections.
 - `git diff --check` passed.
 - The refreshed macOS package built successfully, includes its activation helper and release identity, and passed strict signature verification. Release: `rel-1790404956-f96e167`.
-- Strict size budgets passed: release executable **38,231,792 B**, boot JavaScript **600,006 B**, frontend assets **8,971,905 B**. See [exact build measurements](browser-tab-copy-visual-qa-2026-09-25/build.json).
+- Strict size budgets passed: release executable **38,231,792 B**, boot JavaScript **600,006 B**, frontend assets **8,971,905 B**. See exact build measurements.
 
 Updated package: [`Redline.app`](../src-tauri/target/release/bundle/macos/Redline.app).
 
