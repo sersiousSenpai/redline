@@ -73,7 +73,6 @@ mod marketplace;
 /// served by the daemon at `/mcp` (`polis_mcp::http_service`, nested in
 /// `run_server`); no proxy binary ships any more.
 pub mod mcp;
-mod moot;
 mod plan_launch;
 mod plan_provider;
 mod plan_submission;
@@ -13260,7 +13259,6 @@ pub fn run() {
             surface_set_active,
             drafter_set_doc,
             drafter_get_doc,
-            moot::moot_start,
             record_render_crash,
             bookshelf::bookshelf_list,
             bookshelf::bookshelf_migrate_local,

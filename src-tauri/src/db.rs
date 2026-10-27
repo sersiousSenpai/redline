@@ -8702,44 +8702,6 @@ impl Database {
         }
         Ok(Some(id))
     }
-
-    /// Moot-only upsert (see `moot::land_doc`): like [`Database::upsert_draft`]
-    /// but RESETS `doc_json` to NULL alongside the fresh markdown mirror.
-    /// `upsert_draft`'s COALESCE deliberately protects a TipTap body from
-    /// markdown-only writers — the right law for every one-shot landing path
-    /// (intake triage, Shipwright, draft_chat's flush). The moot is the one
-    /// writer that re-renders the WHOLE document on every land: a human
-    /// Drafter save between rounds stores a `doc_json` that would otherwise
-    /// win on open forever (the Drafter prefers the TipTap body), hiding
-    /// every later round behind a stale body. Clearing it makes the mirror
-    /// the document again; the frontend rebuilds the body from it on next
-    /// open. The tradeoff — TipTap-only detail in the human's save is
-    /// dropped — is documented and accepted at the moot call site, which
-    /// folds the human's mirror delta into the transcript BEFORE landing.
-    /// Keep this out of every other landing path.
-    pub fn upsert_draft_reset_doc(
-        &self,
-        draft_id: &str,
-        title: Option<&str>,
-        project_path: Option<&str>,
-        doc_markdown: &str,
-    ) -> rusqlite::Result<()> {
-        let now = crate::ledger::now_millis();
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
-             ON CONFLICT(draft_id) DO UPDATE SET
-                title = CASE WHEN drafts.title_is_user_set = 1 THEN drafts.title
-                             ELSE COALESCE(excluded.title, drafts.title) END,
-                project_path = excluded.project_path,
-                doc_markdown = excluded.doc_markdown,
-                doc_json = NULL,
-                updated_at = excluded.updated_at",
-            params![draft_id, title, project_path, doc_markdown, now],
-        )?;
-        Ok(())
-    }
 }
 
 /// One `browse_list_items` row → a `BrowseListItem`.
