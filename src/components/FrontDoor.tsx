@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  memo,
   lazy,
   Suspense,
   useCallback,
@@ -263,7 +264,7 @@ const RECENT_SECTIONS = [
   { kind: "browse", label: "Searches" },
 ] as const;
 
-export function FrontDoor(props: FrontDoorProps) {
+function FrontDoorView(props: FrontDoorProps) {
   const {
     visible,
     floating = false,
@@ -1829,3 +1830,7 @@ function NewProjectOffer({
     </div>
   );
 }
+
+/** Memoized: App re-renders on every event the shell hears; the door's props
+ *  change on none of them. */
+export const FrontDoor = memo(FrontDoorView);

@@ -178,6 +178,11 @@ describe("content-visibility", () => {
   it("nowhere else: comment cards and transcripts scroll to and pin rows it would misplace", () => {
     const users = css("src").filter((path) => /content-visibility/.test(read(path)));
     expect(users).toEqual([join("src", "styles.css")]);
-    expect(read("src/styles.css").match(/content-visibility:/g)).toHaveLength(1);
+    // Two declarations: the rows' `auto` above, and `hidden` on the folded
+    // terminal dock — a 0px fold nothing scrolls to, whose xterm layers would
+    // otherwise be kept warm behind it (perf-budget "Idle heat").
+    const styles = read("src/styles.css");
+    expect(styles.match(/content-visibility:/g)).toHaveLength(2);
+    expect(styles).toMatch(/\.rl-term-dock\[data-collapsed\]\s*\{\s*content-visibility:\s*hidden;\s*\}/);
   });
 });

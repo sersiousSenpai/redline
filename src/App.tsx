@@ -78,6 +78,7 @@ import {
   type PreflightStatus,
   type ReadinessInput,
   type ReadinessItem,
+  HOOK_SILENCE_MS,
 } from "./lib/readiness";
 import {
   detachedBannerCopy,
@@ -7537,13 +7538,15 @@ function App() {
     return () => clearTimeout(t);
   }, [runFlight]);
 
-  // The `/hooks` nudge is the only time-based item, so the clock only ticks
-  // while a launch is actually pending.
+  // The `/hooks` nudge is the only time-based item: it appears once a launch
+  // has waited HOOK_SILENCE_MS for its plan. One timer for that moment — not
+  // a 5 s clock re-rendering the whole app while a launch is pending.
   const [readinessNow, setReadinessNow] = useState(() => Date.now());
   useEffect(() => {
     if (!pendingLaunch) return;
-    const t = setInterval(() => setReadinessNow(Date.now()), 5000);
-    return () => clearInterval(t);
+    const due = pendingLaunch.startedAt + HOOK_SILENCE_MS + 50 - Date.now();
+    const t = setTimeout(() => setReadinessNow(Date.now()), Math.max(0, due));
+    return () => clearTimeout(t);
   }, [pendingLaunch]);
 
   // Where ⏎ would launch, as the composer last reported it: the composer
@@ -11318,6 +11321,10 @@ function App() {
                 `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
           }
           data-rl-pane={termFullscreen || flowTermStage ? undefined : ""}
+          // Folded, the dock's terminals are not rendered at all (styles.css
+          // `.rl-term-dock[data-collapsed]`): their layers and layout would
+          // otherwise be kept warm behind a 0px fold.
+          data-collapsed={!termFullscreen && !flowTermStage && termCollapsed ? "" : undefined}
           // Height is owned by `applyLiveLayout` (it folds in the collapsed
           // state), so the dock tracks the divider without a render — and
           // without touching style for anything else on the page.

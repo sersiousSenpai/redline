@@ -3447,6 +3447,11 @@ html[data-rl-tile-drag] * {
    on-device, stamp data-rl-dock-caps on <html> — the dock keeps a square clip
    and the glow overlay restores the plate read with an inset hairline ring
    plus four canvas-colored corner caps (visual rounding, no clip change). */
+/* Folded to height 0, the dock's terminals would still be laid out and their
+   layers kept; content-visibility skips both until it opens again. */
+.rl-term-dock[data-collapsed] {
+  content-visibility: hidden;
+}
 html[data-rl-dock-caps] .rl-term-dock.rl-plate {
   border-radius: 0;
 }
@@ -4754,11 +4759,11 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    Opacity is the legibility budget — this carries sustained serif body text,
    so it sits far denser than the front door's island (which holds one line).
    92% keeps the ruled desk reading as depth THROUGH the sheet without ever
-   competing with the words on it. */
+   competing with the words on it. No backdrop blur: a page-sized blur layer
+   is re-sampled on every frame anything under it moves, and the island
+   already carries one; at 92% the desk reads through the sheet without it. */
 .rl-page-workspace--drafter .rl-page {
   background: color-mix(in srgb, var(--color-bg-elevated) 92%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
-  backdrop-filter: blur(20px) saturate(150%);
   border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
   border-radius: 14px;
   box-shadow:

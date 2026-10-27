@@ -148,7 +148,7 @@ const PAGE_AT = 160;
 /** How close to the bottom still counts as following the live end. */
 const STICK_WITHIN = 48;
 
-export default function SessionConversation(props: SessionConversationProps) {
+function SessionConversation(props: SessionConversationProps) {
   const { terminalId, layout, onShowTerminal } = props;
   const [state, dispatch] = useReducer(convoReducer, undefined, initialConvoState);
   const view = useMemo(() => convoView(state), [state]);
@@ -874,3 +874,7 @@ function Elapsed({ since }: { since: number }) {
   }, []);
   return <span className="rl-convo-elapsed">{formatElapsed(now - since)}</span>;
 }
+
+/** Memoized: the shell re-renders on every event it hears (attention, polls,
+ *  the island); the stage's props change on few of them. */
+export default memo(SessionConversation);
