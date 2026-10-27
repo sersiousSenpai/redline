@@ -421,7 +421,7 @@ const CommandPalette = lazy(() => import("./components/CommandPalette").then((m)
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isDockKey, isNeedsYouKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isReopenTabKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -1808,8 +1808,11 @@ function App() {
   const wbActiveKey = useWorkbench(wb, (st) => st.activeKey);
   const wbActiveTabId = useWorkbench(wb, (st) => st.sets[st.activeKey]?.activeTabId ?? null);
   const untouchedDoors = useRef(new Set<string>());
+  // ⌘T's door, for the mount-once key listener below.
+  const openDoorTabRef = useRef<() => void>(() => {});
   const openDoorTab = useCallback(() => {
     beginMeasure("wb:new-tab-caret");
+    setDoorCompact(false);
     const { set, tab } = activePanes(wb.getState());
     const focused = tab && set ? set.panes[tab.focusedPaneId] : null;
     const paneId = newDoorPaneId();
@@ -1832,6 +1835,7 @@ function App() {
     document.addEventListener("focusin", landed, true);
     window.setTimeout(() => document.removeEventListener("focusin", landed, true), 2000);
   }, []);
+  openDoorTabRef.current = openDoorTab;
   /** The tab at `key` is a ⌘T door nobody typed in, in a set with other
    *  tabs: close it. */
   const closeUntouchedDoor = useCallback((key: SessionKey, tabId: string | null) => {
@@ -2698,12 +2702,50 @@ function App() {
     // A page's ⌘⌥← / ⌘⌥→, forwarded by BrowserPane.
     const fromPage = (e: Event) => wb.dispatch({ type: "cycleTab", delta: (e as CustomEvent<number>).detail < 0 ? -1 : 1 });
     window.addEventListener("redline:workbench-tab-cycle", fromPage);
+    // The same chords from the keyboard, on `e.code` and in the capture
+    // phase, ahead of xterm: the native menu normally takes them first (a
+    // browser page focused or not), but a page with no native menu still
+    // has them. ⌘-only — Ctrl+T, Ctrl+W and friends are the terminal's.
+    const onKey = (e: KeyboardEvent) => {
+      const claim = () => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      if (isNewTabKey(e)) {
+        claim();
+        openDoorTabRef.current();
+      } else if (isReopenTabKey(e)) {
+        claim();
+        wb.dispatch({ type: "reopenClosed" });
+      } else if (isCloseWindowKey(e)) {
+        claim();
+        void getCurrentWindow().close();
+      } else if (isCloseKey(e)) {
+        claim();
+        closeFromInside();
+      } else {
+        const index = tabIndexKeyOf(e);
+        const delta = tabCycleKeyOf(e);
+        if (index !== null) {
+          claim();
+          beginMeasure("wb:tab-switch");
+          wb.dispatch({ type: "selectTabIndex", index });
+        } else if (delta !== null) {
+          claim();
+          beginMeasure("wb:tab-switch");
+          wb.dispatch({ type: "cycleTab", delta });
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
     void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
       for (const p of subs) void p.then((un) => un());
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
+      window.removeEventListener("keydown", onKey, true);
     };
   }, [closeFromInside]);
+
 
   // A browser download or page save landed (or failed): Safari's notice, with
   // Open / Show in Finder. Native, so it fires for background tabs too; the
@@ -9739,7 +9781,7 @@ function App() {
       ["redline:toggle-plan-panel", planPanel],
     ];
     for (const [name, run] of fromPage) window.addEventListener(name, run);
-    // The native menu's accelerators (lib.rs `flow_menu`), installed now and
+    // The native menu's accelerators (workbench_menu.rs's flow set), installed now and
     // taken out again by the Settings switch before it reloads to classic.
     const onNew = listen("menu-new-session", () => keys().newSession());
     const onSurface = listen<number>("menu-surface", (e) => void tool(e.payload));

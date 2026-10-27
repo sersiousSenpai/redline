@@ -88,10 +88,11 @@ const sharedThread = () => JSON.parse(localStorage.getItem("redline.browser.foll
 const clickTab = (id: string) => act(async () => host.querySelector<HTMLElement>(`[data-tab-id="t-${id}"]`)!.click());
 const clickDock = (label: string) => act(async () => [...dock.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === label)!.click());
 
-it.each(["button", "shortcut"])("opens the new-tab home without a native webview via %s", async (via) => {
+// Only the button: ⌘T is the workbench's door tab now (a native menu item),
+// so no page posts a "new-tab" shortcut any more.
+it("opens the new-tab home without a native webview via the button", async () => {
   await mount();
-  if (via === "button") await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
-  else await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "new-tab" });
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
   await settle();
   const tab = host.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
   expect(tab.querySelector(".rb-tab-title")!.textContent).toBe("New tab");
@@ -189,9 +190,9 @@ it("adopts background mission tabs without stealing focus and ignores foreign wo
   expect(host.querySelector('[data-tab-id="t-three"]')).not.toBeNull();
   expect((host.querySelector('[aria-label="Address or search"]') as HTMLInputElement).value).toBe("https://two.test");
   expect(mocks.revision).toHaveBeenCalledWith("regular", 2);
-  await event("browser-page-event", { label: "browser-t-foreign", kind: "shortcut", value: "next-tab" });
+  await event("browser-page-event", { label: "browser-t-foreign", kind: "shortcut", value: "next-page" });
   expect((host.querySelector('[aria-label="Address or search"]') as HTMLInputElement).value).toBe("https://two.test");
-  await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-tab" });
+  await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-page" });
   expect((host.querySelector('[aria-label="Address or search"]') as HTMLInputElement).value).toBe("https://three.test");
 });
 
@@ -504,7 +505,7 @@ describe("video fullscreen", () => {
 it("ignores native and app keyboard shortcuts while another surface is active", async () => {
   await mount({ surfaceActive: false });
   const address = host.querySelector('[aria-label="Address or search"]') as HTMLInputElement;
-  for (const value of ["next-tab", "new-tab", "toggle-focus", "location"]) {
+  for (const value of ["next-page", "next-tab", "toggle-focus", "location"]) {
     await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value });
   }
   await event("browser-page-event", { label: "browser-t-one", kind: "focus" });
@@ -518,6 +519,34 @@ it("ignores native and app keyboard shortcuts while another surface is active", 
   expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2);
   expect(host.textContent).not.toContain("Exit focus");
   expect([...mocks.views.values()].every((view) => !view.visible && !view.log.includes("show"))).toBe(true);
+});
+
+it("hands a page's ⌘⌥← / ⌘⌥→ to the workbench and closes the page in front on App's ⌘W relay", async () => {
+  const cycled = vi.fn();
+  window.addEventListener("redline:workbench-tab-cycle", cycled);
+  try {
+    await mount();
+    // The workbench's tabs, not the browser's pages: the address stays put.
+    await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-tab" });
+    await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "previous-tab" });
+    expect(cycled.mock.calls.map(([e]) => (e as CustomEvent).detail)).toEqual([1, -1]);
+    expect((host.querySelector('[aria-label="Address or search"]') as HTMLInputElement).value).toBe("https://two.test");
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    // ⌘W is a native menu item App owns; it relays to the browser pane in
+    // front as this window event, which closes the active page.
+    await act(async () => { window.dispatchEvent(new Event("redline:browser-close-page")); });
+    await settle();
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(1);
+  } finally {
+    window.removeEventListener("redline:workbench-tab-cycle", cycled);
+  }
+});
+
+it("ignores App's ⌘W relay while another surface is in front", async () => {
+  await mount({ surfaceActive: false });
+  await act(async () => { window.dispatchEvent(new Event("redline:browser-close-page")); });
+  await settle();
+  expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2);
 });
 
 it("tells the island about a press inside the visible page, never a scroll or a hidden page", async () => {
@@ -568,7 +597,7 @@ it("keeps native pages hidden when their creation callbacks arrive after unmount
 
 it("flushes pending layout state when the pane closes", async () => {
   await mount();
-  await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-tab" });
+  await event("browser-page-event", { label: "browser-t-two", kind: "shortcut", value: "next-page" });
   await act(async () => root.render(null));
   expect(mocks.save).toHaveBeenLastCalledWith("regular", expect.objectContaining({ layout: expect.objectContaining({ focused: "one" }) }));
 });

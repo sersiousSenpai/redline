@@ -54,7 +54,7 @@ mod extension;
 mod extension_host;
 mod extension_scaffold;
 mod feedback;
-mod flow_menu;
+mod workbench_menu;
 mod fork;
 mod fsbrowse;
 mod fswatch;
@@ -12596,7 +12596,8 @@ pub fn run() {
             marketplace_index,
             marketplace_install,
             transparency::reduced_transparency,
-            flow_menu::set_flow_menu,
+            workbench_menu::set_flow_menu,
+            workbench_menu::set_workbench_menu,
             list_sessions,
             get_session,
             export_revision_markdown,
@@ -13644,20 +13645,21 @@ pub fn run() {
                     1,
                 )?;
             }
-            // Make Cmd+W close the active browser TAB (or the window when the
-            // browser isn't open) instead of always slamming the whole window
-            // shut. The stock File submenu (index 1 on macOS) holds only "Close
-            // Window" bound to Cmd+W; swap it for our own item carrying that
-            // accelerator, and let the frontend decide tab-vs-window on the
-            // `menu-close-tab` event. A menu key-equivalent fires regardless of
-            // which (native) webview has focus, so it works even while a video
-            // tab is focused.
+            // ⌘W never closes the window. The stock File submenu (index 1 on
+            // macOS) holds only "Close Window" bound to Cmd+W; swap it for our
+            // own item carrying that accelerator and let the frontend close
+            // from the inside out on the `menu-close-tab` event — browser
+            // page → pane → tab (App owns the event; it routes a browser
+            // page's close to the pane in front). The window closes on ⌘⇧W,
+            // a workbench_menu.rs item. A menu key-equivalent fires regardless
+            // of which (native) webview has focus, so it works even while a
+            // video tab is focused.
             if let Some(MenuItemKind::Submenu(file_submenu)) = top_items.get(1) {
                 while !file_submenu.items()?.is_empty() {
                     file_submenu.remove_at(0)?;
                 }
                 // Neutral "Close" label — honest whether it closes a browser
-                // tab (pane open) or the window (pane closed).
+                // page, a pane or a tab.
                 let close_tab = MenuItemBuilder::with_id("close_tab", "Close")
                     .accelerator("CmdOrCtrl+W")
                     .build(app)?;
@@ -13709,17 +13711,20 @@ pub fn run() {
                     let _ = app.emit(event, ());
                 }
                 "remove_hook" => remove_hook_via_menu(app),
-                // Cmd+W → the browser pane closes its active tab; if the browser
-                // isn't open, App falls back to closing the window.
+                // Cmd+W → App closes from the inside out: browser page →
+                // pane → tab. Never the window (that is ⌘⇧W, below).
                 "close_tab" => {
                     let _ = app.emit("menu-close-tab", ());
                 }
                 "print_page" => {
                     let _ = app.emit("menu-print", ());
                 }
-                // The flow shell's ⌘N and ⌘1–⌘4 (flow_menu.rs), present only
-                // while the frontend paints that shell.
-                id => match flow_menu::event_for(id) {
+                // The shells' own items (workbench_menu.rs): the flow shell's
+                // ⌘N and ⌘1–⌘4, or the workbench's ⌘T / ⌘⇧T / ⌘⇧W and its
+                // Tabs submenu — present only while the frontend paints that
+                // shell. The number is an i32: a flow tool (1–4), a cycle
+                // direction (±1) or a tab index (0..7, −1 = last).
+                id => match workbench_menu::event_for(id) {
                     Some((event, Some(n))) => {
                         let _ = app.emit(event, n);
                     }

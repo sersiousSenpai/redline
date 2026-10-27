@@ -1521,11 +1521,16 @@ function BrowserPaneBase({
           if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();
           else if (videoFsRef.current.stage === "screen") void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
         }
-        else if (event.value === "new-tab") openTabRef.current(NEWTAB);
-        else if (event.value === "close-tab") closeTabRef.current(tab.id);
-        else if (event.value === "next-tab" || event.value === "previous-tab") {
-          const id = shortcutTabId(tabsRef.current.map((page) => page.id), tab.id, event.value);
+        // ⌃Tab / ⌃⇧Tab from the page: the browser's own pages.
+        else if (event.value === "next-page" || event.value === "previous-page") {
+          const id = shortcutTabId(tabsRef.current.map((page) => page.id), tab.id, event.value === "next-page" ? "next-tab" : "previous-tab");
           if (id) selectTabRef.current(id);
+        }
+        // ⌘⌥← / ⌘⌥→ from the page: the WORKBENCH's tabs, which App owns.
+        // (⌘T, ⌘W and ⌘⇧[ / ⌘⇧] are native menu items: the menu takes them
+        // before the page sees them, so no page ever posts them.)
+        else if (event.value === "next-tab" || event.value === "previous-tab") {
+          window.dispatchEvent(new CustomEvent("redline:workbench-tab-cycle", { detail: event.value === "next-tab" ? 1 : -1 }));
         }
       }
       else if (event.kind === "inspect" && event.value && typeof event.value === "object") {
@@ -2114,20 +2119,20 @@ function BrowserPaneBase({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mission.activeMissionId, mission.activeMission, mission.missionsLoaded, mission.error]);
 
-  // Cmd+W (native File ▸ Close Tab) closes the active tab. A menu accelerator
-  // fires even while the native webview has focus — which a JS keydown listener
-  // can't catch — so the keystroke is delivered as this event instead. Kept in
-  // a ref so the once-subscribed listener always calls the latest closeTab
-  // (which closes the pane via onClose when the last tab goes).
-  const closeTabRef = useRef(closeTab);
-  closeTabRef.current = closeTab;
+  // Cmd+W (the native File ▸ Close item) closes the active page. A menu
+  // accelerator fires even while the native webview has focus — which a JS
+  // keydown listener can't catch — so the keystroke reaches the app as the
+  // `menu-close-tab` Tauri event. App owns that event (⌘W closes from the
+  // inside out: browser page → pane → tab) and dispatches this window event
+  // when the pane in front is a browser pane. Kept in a ref so the
+  // once-subscribed listener always calls the latest closeTab (which closes
+  // the pane via onClose when the last page goes).
   const closeActiveRef = useRef<() => void>(() => {});
   closeActiveRef.current = () => closeTab(activeIdRef.current);
   useEffect(() => {
-    const p = listen("menu-close-tab", () => { if (surfaceActiveRef.current) closeActiveRef.current(); });
-    return () => {
-      void p.then((un) => un());
-    };
+    const close = () => { if (surfaceActiveRef.current) closeActiveRef.current(); };
+    window.addEventListener("redline:browser-close-page", close);
+    return () => window.removeEventListener("redline:browser-close-page", close);
   }, []);
   // File ▸ Print… (⌘P) prints the page in front; the page menu offers it too,
   // beside Save page/PDF, which saves through the tab's own cookies.
@@ -2330,14 +2335,14 @@ function BrowserPaneBase({
         else void Window.getCurrent().setFullscreen(false).catch((error) => setWorkspaceError(String(error)));
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); openTabRef.current(NEWTAB); return; }
+      // ⌘T is the workbench's door tab, and ⌘⌥←/→ and ⌘⇧[/] its tab cycle
+      // (keymap.ts, App): none of them are the pane's any more.
       if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r") { event.preventDefault(); reloadPageRef.current(); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l") { event.preventDefault(); focusAddressRef.current(); }
-      if ((event.metaKey || event.ctrlKey) && event.altKey && ["ArrowLeft", "ArrowRight"].includes(event.key)) {
-        event.preventDefault(); const ids = tileIdsRef.current; const i = ids.indexOf(activeIdRef.current); const next = ids[(i + (event.key === "ArrowRight" ? 1 : ids.length - 1)) % ids.length]; if (next) selectTabRef.current(next);
-      }
-      if (event.metaKey && event.shiftKey && ["BracketLeft", "BracketRight"].includes(event.code)) {
-        event.preventDefault(); const next = shortcutTabId(tabsRef.current.map((tab) => tab.id), activeIdRef.current, event.code === "BracketRight" ? "next-tab" : "previous-tab"); if (next) selectTabRef.current(next);
+      // ⌃Tab / ⌃⇧Tab cycle the pane's pages (browser_signals.js posts the
+      // same chord from inside a page as next-page / previous-page).
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === "Tab") {
+        event.preventDefault(); const next = shortcutTabId(tabsRef.current.map((tab) => tab.id), activeIdRef.current, event.shiftKey ? "previous-tab" : "next-tab"); if (next) selectTabRef.current(next);
       }
       if (event.key === "Escape") {
         pickerRef.current.cancel();

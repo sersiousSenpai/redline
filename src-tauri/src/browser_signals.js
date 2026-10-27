@@ -53,11 +53,15 @@
       if (key === "l") value = "location";
       if (key === "j" && !event.shiftKey && !event.altKey) value = "toggle-monochat";
       if (key === "f" && event.metaKey && event.ctrlKey && window.__redline_fs) value = "toggle-video-screen";
-      if (key === "t" && !event.shiftKey) value = "new-tab";
-      if (key === "w" && !event.shiftKey) value = "close-tab";
-      if (event.key === "Tab") value = event.shiftKey ? "previous-tab" : "next-tab";
-      if (event.metaKey && event.shiftKey && (event.code === "BracketRight" || event.key === "]")) value = "next-tab";
-      if (event.metaKey && event.shiftKey && (event.code === "BracketLeft" || event.key === "[")) value = "previous-tab";
+      // ⌃Tab / ⌃⇧Tab cycle the browser's PAGES (Ctrl, not ⌘: the ⌘ chords
+      // below are the workbench's). ⌘T, ⌘W and ⌘⇧[ / ⌘⇧] are not forwarded:
+      // they are native menu items now, and the menu takes them before the
+      // page sees them.
+      if (event.key === "Tab" && event.ctrlKey && !event.metaKey) value = event.shiftKey ? "previous-page" : "next-page";
+      // ⌘⌥← / ⌘⌥→ — the previous / next WORKBENCH tab, an alias of the
+      // menu's ⌘⇧[ / ⌘⇧] (a menu item carries one accelerator). On the
+      // physical key: ⌥ rewrites event.key.
+      if (event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && (event.code === "ArrowLeft" || event.code === "ArrowRight")) value = event.code === "ArrowRight" ? "next-tab" : "previous-tab";
     }
     if (value) { event.preventDefault(); event.stopImmediatePropagation(); post({ kind: "shortcut", value }); }
   }, true);

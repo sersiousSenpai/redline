@@ -3,23 +3,31 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { saveHoldKey } from "../audio/holdKey";
 import {
+  CLASSIC_KEYMAP,
   GLOBAL_KEYMAP,
   REVIEW_KEYMAP,
+  WORKBENCH_KEYMAP,
   bindingKeys,
   globalShortcutGroups,
+  isCloseKey,
+  isCloseWindowKey,
   isDockKey,
   isFrontDoorKey,
   isNeedsYouKey,
   isNewPlanKey,
   isNewSessionKey,
+  isNewTabKey,
   isPaletteKey,
   isPlanPanelKey,
+  isReopenTabKey,
   isSidebarKey,
   isSnapBackKey,
   isStageKey,
   FLOW_KEYMAP,
   shellKeymap,
   shownKeymap,
+  tabCycleKeyOf,
+  tabIndexKeyOf,
   toolKeyOf,
   tourShortcuts,
 } from "./keymap";
@@ -149,17 +157,19 @@ describe("isFrontDoorKey", () => {
 });
 
 describe("the registry", () => {
-  it("has unique ids", () => {
-    const ids = GLOBAL_KEYMAP.map((b) => b.id);
+  it("has unique ids across the classic registry", () => {
+    const ids = CLASSIC_KEYMAP.map((b) => b.id);
     expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBe(GLOBAL_KEYMAP.length + WORKBENCH_KEYMAP.length);
   });
   it("wires exactly the globals this module dispatches — the rest is documentation", () => {
     expect(
       GLOBAL_KEYMAP.filter((b) => b.wired).map((b) => b.id).sort(),
     ).toEqual(["dock", "front-door", "needs-you", "new-plan", "palette", "snap-back"]);
+    expect(WORKBENCH_KEYMAP.every((b) => b.wired)).toBe(true);
   });
   it("every binding renders: non-empty caps and label", () => {
-    for (const b of GLOBAL_KEYMAP) {
+    for (const b of CLASSIC_KEYMAP) {
       expect(b.keys.length).toBeGreaterThan(0);
       expect(b.keys.every((k) => k.length > 0)).toBe(true);
       expect(b.label.length).toBeGreaterThan(0);
@@ -167,6 +177,7 @@ describe("the registry", () => {
   });
   it("bindingKeys finds a binding by id", () => {
     expect(bindingKeys("palette")).toEqual(["⌘", "K"]);
+    expect(bindingKeys("new-tab")).toEqual(["⌘", "T"]);
     expect(bindingKeys("nope")).toBeUndefined();
   });
 });
@@ -174,13 +185,13 @@ describe("the registry", () => {
 describe("renderings", () => {
   it("tourShortcuts covers the whole registry in order", () => {
     const rows = tourShortcuts();
-    expect(rows.map((r) => r.text)).toEqual(GLOBAL_KEYMAP.map((b) => b.label));
+    expect(rows.map((r) => r.text)).toEqual(CLASSIC_KEYMAP.map((b) => b.label));
     expect(rows[0].keys).toEqual(["⌘", "K"]);
   });
   it("globalShortcutGroups partitions the registry without losing entries", () => {
     const groups = globalShortcutGroups();
     const total = groups.reduce((n, g) => n + g.items.length, 0);
-    expect(total).toBe(GLOBAL_KEYMAP.length);
+    expect(total).toBe(CLASSIC_KEYMAP.length);
     // ShortcutHelp splits on spaces — caps must survive the round-trip.
     const snap = groups
       .flatMap((g) => g.items)
@@ -208,7 +219,7 @@ describe("renderings", () => {
       saveHoldKey("off");
       expect(dictate()).toBeUndefined();
       expect(shownKeymap().map((b) => b.id)).not.toContain("dictate");
-      expect(globalShortcutGroups().flatMap((g) => g.items)).toHaveLength(GLOBAL_KEYMAP.length - 1);
+      expect(globalShortcutGroups().flatMap((g) => g.items)).toHaveLength(CLASSIC_KEYMAP.length - 1);
       // The registry itself still documents it.
       expect(bindingKeys("dictate")).toEqual(["hold", "right\u00a0⌥"]);
     });
@@ -269,12 +280,115 @@ describe("the flow shell's keys (deviation 5)", () => {
     expect(FLOW_KEYMAP.find((b) => b.id === "plan-panel")?.keys).toEqual(["⌘", "⌥", "B"]);
   });
 
-  it("the classic shell keeps its registry exactly", () => {
-    expect(shellKeymap("classic")).toBe(GLOBAL_KEYMAP);
+  it("the classic shell is the global registry merged with the workbench's, and the flow shell its own", () => {
+    expect(shellKeymap("classic")).toBe(CLASSIC_KEYMAP);
     expect(shellKeymap("flow")).toBe(FLOW_KEYMAP);
+    // Nothing of the classic registry is lost, and within a group nothing is
+    // reordered (the merge groups Global ahead of Layout, as FLOW_KEYMAP does).
+    for (const group of ["Global", "Layout", "Document"] as const) {
+      const merged = CLASSIC_KEYMAP.filter((b) => b.group === group && GLOBAL_KEYMAP.includes(b)).map((b) => b.id);
+      expect(merged).toEqual(GLOBAL_KEYMAP.filter((b) => b.group === group).map((b) => b.id));
+    }
     // Tests paint classic: nothing flow-only is shown or hinted.
     expect(shownKeymap().map((b) => b.id)).not.toContain("stage");
     expect(bindingKeys("dock")).toEqual(["⌘", "J"]);
     expect(bindingKeys("stage")).toBeUndefined();
+    // The flow shell does not hint the workbench's chords either.
+    expect(FLOW_KEYMAP.map((b) => b.id)).not.toContain("new-tab");
+  });
+});
+
+describe("the workbench's keys (W1)", () => {
+  const cmd = (over: Parameters<typeof combo>[0]) => combo({ metaKey: true, ...over });
+
+  it("⌘T, ⌘⇧T, ⌘W and ⌘⇧W match on the physical key", () => {
+    expect(isNewTabKey(cmd({ key: "t", code: "KeyT" }))).toBe(true);
+    expect(isReopenTabKey(cmd({ key: "T", code: "KeyT", shiftKey: true }))).toBe(true);
+    expect(isCloseKey(cmd({ key: "w", code: "KeyW" }))).toBe(true);
+    expect(isCloseWindowKey(cmd({ key: "W", code: "KeyW", shiftKey: true }))).toBe(true);
+    // A non-US layout: the physical key decides, not the character.
+    expect(isNewTabKey(cmd({ key: "е", code: "KeyT" }))).toBe(true);
+  });
+
+  it("⌘1–⌘8 are tab indices 0..7 and ⌘9 is the last tab", () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8].map((n) => tabIndexKeyOf(cmd({ key: String(n), code: `Digit${n}` })))).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(tabIndexKeyOf(cmd({ key: "9", code: "Digit9" }))).toBe(-1);
+    expect(tabIndexKeyOf(cmd({ key: "0", code: "Digit0" }))).toBeNull();
+    expect(tabIndexKeyOf(cmd({ key: "1", code: "Numpad1" }))).toBeNull();
+  });
+
+  it("⌘⌥← / ⌘⌥→ and ⌘⇧[ / ⌘⇧] cycle −1 / +1", () => {
+    expect(tabCycleKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft", altKey: true }))).toBe(-1);
+    expect(tabCycleKeyOf(cmd({ key: "ArrowRight", code: "ArrowRight", altKey: true }))).toBe(1);
+    // ⇧ rewrites e.key ("[" → "{"): the code decides.
+    expect(tabCycleKeyOf(cmd({ key: "{", code: "BracketLeft", shiftKey: true }))).toBe(-1);
+    expect(tabCycleKeyOf(cmd({ key: "}", code: "BracketRight", shiftKey: true }))).toBe(1);
+  });
+
+  it("never takes a Ctrl chord — in a terminal Ctrl+T, Ctrl+W and Ctrl+[ are the shell's", () => {
+    expect(isNewTabKey(combo({ key: "t", code: "KeyT", ctrlKey: true }))).toBe(false);
+    expect(isReopenTabKey(combo({ key: "T", code: "KeyT", ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(isCloseKey(combo({ key: "w", code: "KeyW", ctrlKey: true }))).toBe(false);
+    expect(isCloseWindowKey(combo({ key: "W", code: "KeyW", ctrlKey: true, shiftKey: true }))).toBe(false);
+    expect(tabIndexKeyOf(combo({ key: "1", code: "Digit1", ctrlKey: true }))).toBeNull();
+    expect(tabCycleKeyOf(combo({ code: "BracketLeft", ctrlKey: true, shiftKey: true }))).toBeNull();
+    expect(tabCycleKeyOf(combo({ code: "ArrowLeft", ctrlKey: true, altKey: true }))).toBeNull();
+    // ⌘ and Ctrl together is neither.
+    expect(isNewTabKey(combo({ key: "t", code: "KeyT", metaKey: true, ctrlKey: true }))).toBe(false);
+    expect(tabIndexKeyOf(combo({ key: "1", code: "Digit1", metaKey: true, ctrlKey: true }))).toBeNull();
+    // And a bare key is a keystroke, not a command.
+    expect(isCloseKey(combo({ key: "w", code: "KeyW" }))).toBe(false);
+    expect(tabCycleKeyOf(combo({ code: "ArrowLeft", altKey: true }))).toBeNull();
+  });
+
+  it("keeps the neighbouring chords apart", () => {
+    // ⌘T vs ⌘⇧T vs ⌘⇧N: never two at once.
+    const t = cmd({ key: "t", code: "KeyT" });
+    const shiftT = cmd({ key: "T", code: "KeyT", shiftKey: true });
+    const shiftN = cmd({ key: "N", code: "KeyN", shiftKey: true });
+    expect([isNewTabKey(t), isReopenTabKey(t), isNewPlanKey(t)]).toEqual([true, false, false]);
+    expect([isNewTabKey(shiftT), isReopenTabKey(shiftT), isNewPlanKey(shiftT)]).toEqual([false, true, false]);
+    expect([isNewTabKey(shiftN), isReopenTabKey(shiftN), isNewPlanKey(shiftN)]).toEqual([false, false, true]);
+    // ⌥ opts out of both T chords (⌘⌥T stays free).
+    expect(isNewTabKey(cmd({ key: "†", code: "KeyT", altKey: true }))).toBe(false);
+    expect(isReopenTabKey(cmd({ key: "ˇ", code: "KeyT", altKey: true, shiftKey: true }))).toBe(false);
+    // ⌘W vs ⌘⇧W: the page/pane/tab vs the window, never both.
+    const w = cmd({ key: "w", code: "KeyW" });
+    const shiftW = cmd({ key: "W", code: "KeyW", shiftKey: true });
+    expect([isCloseKey(w), isCloseWindowKey(w)]).toEqual([true, false]);
+    expect([isCloseKey(shiftW), isCloseWindowKey(shiftW)]).toEqual([false, true]);
+    expect(isCloseKey(cmd({ key: "∑", code: "KeyW", altKey: true }))).toBe(false);
+    // ⌘1–9 vs the snap-back ⌘⇧0 and the zoom reset ⌘0.
+    const snap = cmd({ key: ")", code: "Digit0", shiftKey: true });
+    expect([tabIndexKeyOf(snap), isSnapBackKey(snap)]).toEqual([null, true]);
+    expect(tabIndexKeyOf(cmd({ key: "0", code: "Digit0" }))).toBeNull();
+    expect(tabIndexKeyOf(cmd({ key: "!", code: "Digit1", shiftKey: true }))).toBeNull();
+    expect(tabIndexKeyOf(cmd({ key: "¡", code: "Digit1", altKey: true }))).toBeNull();
+    // ⌘⌥← vs plain ⌘← (the line start in a text field), ⌘⇧← and ⌘⌥⇧←.
+    expect(tabCycleKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft" }))).toBeNull();
+    expect(tabCycleKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft", shiftKey: true }))).toBeNull();
+    expect(tabCycleKeyOf(cmd({ key: "ArrowLeft", code: "ArrowLeft", altKey: true, shiftKey: true }))).toBeNull();
+    // ⌘[ alone is the browser's back, and ⌘⌥[ stays free.
+    expect(tabCycleKeyOf(cmd({ key: "[", code: "BracketLeft" }))).toBeNull();
+    expect(tabCycleKeyOf(cmd({ key: "“", code: "BracketLeft", altKey: true }))).toBeNull();
+    // ⌘⌥↑ / ⌘⌥↓ belong to CodeMirror.
+    expect(tabCycleKeyOf(cmd({ key: "ArrowUp", code: "ArrowUp", altKey: true }))).toBeNull();
+    // The flow shell's ⌘1–4 and the workbench's ⌘1–8 are the same chords:
+    // the native menu holds one set at a time (workbench_menu.rs), and the
+    // page listener asks only the matcher of the shell it paints.
+    const one = cmd({ key: "1", code: "Digit1" });
+    expect([toolKeyOf(one), tabIndexKeyOf(one)]).toEqual([1, 0]);
+  });
+
+  it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
+    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle"]);
+    expect(WORKBENCH_KEYMAP.every((b) => b.keys[0] === "⌘")).toBe(true);
+    const ids = CLASSIC_KEYMAP.map((b) => b.id);
+    // The workbench globals follow the palette; its layout rows lead Layout.
+    expect(ids.slice(0, 5)).toEqual(["palette", "new-tab", "reopen-tab", "close", "close-window"]);
+    const layout = CLASSIC_KEYMAP.filter((b) => b.group === "Layout").map((b) => b.id);
+    expect(layout.slice(0, 2)).toEqual(["tab-n", "tab-cycle"]);
+    expect(bindingKeys("close", "classic")).toEqual(["⌘", "W"]);
+    expect(bindingKeys("tab-cycle", "classic")).toEqual(["⌘", "⌥", "←/→"]);
   });
 });

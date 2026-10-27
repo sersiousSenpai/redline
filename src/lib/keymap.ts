@@ -7,10 +7,15 @@
 // binding can't drift between the surfaces that describe it.
 //
 // Honest scope: only the wired globals (⌘K palette, ⌘⇧N new plan, ⇧⏎ front
-// door, ⌘⇧0 snap-back, ⌘J front-door toggle, ⌘⇧J needs-you jump, and the flow
-// shell's own — FLOW_KEYMAP) use the matchers below; every other entry
-// documents an existing listener that still owns its own keydown handling
-// (`wired: false`).
+// door, ⌘⇧0 snap-back, ⌘J front-door toggle, ⌘⇧J needs-you jump), the
+// workbench's tab chords (WORKBENCH_KEYMAP: ⌘T / ⌘⇧T / ⌘W / ⌘⇧W, ⌘1–9,
+// ⌘⌥←→ and ⌘⇧[]) and the flow shell's own (FLOW_KEYMAP) use the matchers
+// below; every other entry documents an existing listener that still owns its
+// own keydown handling (`wired: false`). The workbench chords are native menu
+// items too (src-tauri workbench_menu.rs), the only mechanism that fires
+// while an embedded web page has focus; the matchers here are the same chords
+// for a page with no native menu (a web preview, a menu that failed to
+// install) and for the ⌘⌥←→ aliases, which no menu item can carry.
 // Rewiring those long-proven listeners through a generic dispatcher would be
 // churn without benefit — the registry's job is a single source of truth for
 // what exists, not a new event system.
@@ -79,7 +84,7 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
 // The session-first shell takes the chords people already know from other
 // desktop agents: ⌘N a new session, ⌘B the sidebar, ⌘J the conversation or
 // the terminal, ⌘⌥B the plan, ⌘1–⌘4 the Tools. ⌘N and ⌘1–4 are native menu
-// accelerators (lib.rs `flow_menu`), so they work while a browser page has
+// accelerators (src-tauri `workbench_menu.rs`), so they work while a browser page has
 // focus; ⌘B, ⌘⌥B and ⌘J are App's listeners, forwarded from the browser by
 // browser_signals.js. ⌘⇧N still opens the start screen for one release, but
 // is no longer shown anywhere.
@@ -107,9 +112,36 @@ export const FLOW_KEYMAP: KeyBinding[] = [
   ...GLOBAL_KEYMAP.filter((b) => !FLOW_REPLACES.has(b.id) && b.group !== "Global"),
 ];
 
+// ---- The workbench's shortcuts (W1) -------------------------------------------
+// Per-session tabs with a door tab: the chords every tabbed desktop app has.
+// All native menu items (workbench_menu.rs) except the ⌘⌥←→ cycle aliases,
+// which the window listener matches and browser_signals.js forwards from a
+// page. ⌘W closes from the inside out — browser page → pane → tab — and never
+// the window; that is ⌘⇧W.
+
+export const WORKBENCH_KEYMAP: KeyBinding[] = [
+  { id: "new-tab", keys: ["⌘", "T"], label: "New tab", group: "Global", wired: true },
+  { id: "reopen-tab", keys: ["⌘", "⇧", "T"], label: "Reopen the last closed tab", group: "Global", wired: true },
+  { id: "close", keys: ["⌘", "W"], label: "Close the page, pane or tab", group: "Global", wired: true },
+  { id: "close-window", keys: ["⌘", "⇧", "W"], label: "Close the window", group: "Global", wired: true },
+  { id: "tab-n", keys: ["⌘", "1–9"], label: "Tab 1–8, 9 = last", group: "Layout", wired: true },
+  { id: "tab-cycle", keys: ["⌘", "⌥", "←/→"], label: "Previous / next tab", group: "Layout", wired: true },
+];
+
+/** The classic shell's registry with the workbench's chords folded in: the
+ *  workbench globals right after the palette, its layout rows at the top of
+ *  Layout, and the rest of the classic registry in its own order. */
+export const CLASSIC_KEYMAP: KeyBinding[] = [
+  GLOBAL_KEYMAP[0],
+  ...WORKBENCH_KEYMAP.filter((b) => b.group === "Global"),
+  ...GLOBAL_KEYMAP.slice(1).filter((b) => b.group === "Global"),
+  ...WORKBENCH_KEYMAP.filter((b) => b.group === "Layout"),
+  ...GLOBAL_KEYMAP.filter((b) => b.group !== "Global"),
+];
+
 /** The registry of the shell this page paints. */
 export function shellKeymap(shell: Shell = shellFlag()): KeyBinding[] {
-  return shell === "flow" ? FLOW_KEYMAP : GLOBAL_KEYMAP;
+  return shell === "flow" ? FLOW_KEYMAP : CLASSIC_KEYMAP;
 }
 
 /** Hint keycaps for a binding id — the palette's hint column. Only the
@@ -207,6 +239,60 @@ export function toolKeyOf(e: KeyComboInfo): 1 | 2 | 3 | 4 | null {
   if (!commandOnly(e) || e.shiftKey || e.altKey) return null;
   const n = Number(e.key);
   return n === 1 || n === 2 || n === 3 || n === 4 ? n : null;
+}
+
+// ---- The workbench's matchers ----------------------------------------------------
+// ⌘ only, never Ctrl, and on e.code: in a terminal Ctrl+T, Ctrl+W and Ctrl+[
+// are the shell's (transpose, kill-word, Esc), and ⌥ and ⇧ rewrite e.key.
+// Where a native menu item carries the same chord the menu fires first and
+// the page never sees the keydown; these answer the same way when it didn't.
+
+/** ⌘T — a new (door) tab. */
+export function isNewTabKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && !e.altKey && e.code === "KeyT";
+}
+
+/** ⌘⇧T — reopen the last closed tab. */
+export function isReopenTabKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && e.shiftKey && !e.altKey && e.code === "KeyT";
+}
+
+/** ⌘W — close from the inside out: browser page → pane → tab. Never the
+ *  window. */
+export function isCloseKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && !e.altKey && e.code === "KeyW";
+}
+
+/** ⌘⇧W — close the window (the close-confirm applies). */
+export function isCloseWindowKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && e.shiftKey && !e.altKey && e.code === "KeyW";
+}
+
+/** ⌘1–⌘8 → the tab index 0..7; ⌘9 → −1, the last tab; null otherwise.
+ *  Shift opts out (⌘⇧0 is the snap-back) and so does ⌥. */
+export function tabIndexKeyOf(e: KeyComboInfo): number | null {
+  if (!commandOnly(e) || e.shiftKey || e.altKey) return null;
+  const m = /^Digit([1-9])$/.exec(e.code);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return n === 9 ? -1 : n - 1;
+}
+
+/** ⌘⌥← / ⌘⌥→ and ⌘⇧[ / ⌘⇧] → −1 / 1, the previous / next tab; null
+ *  otherwise. Exactly those modifiers: plain ⌘← is the line start in a text
+ *  field and ⌘⌥⇧← stays free. */
+export function tabCycleKeyOf(e: KeyComboInfo): -1 | 1 | null {
+  if (!commandOnly(e)) return null;
+  if (e.altKey && !e.shiftKey) {
+    if (e.code === "ArrowLeft") return -1;
+    if (e.code === "ArrowRight") return 1;
+    return null;
+  }
+  if (e.shiftKey && !e.altKey) {
+    if (e.code === "BracketLeft") return -1;
+    if (e.code === "BracketRight") return 1;
+  }
+  return null;
 }
 
 /** Shift+Enter summons the front door without colliding with modified sends.
