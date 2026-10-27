@@ -1081,7 +1081,6 @@ mod tests {
     fn silent_drains_use_the_seated_collector() {
         const SILENT: &[(&str, &str)] = &[
             ("browse_locate.rs", include_str!("browse_locate.rs")),
-            ("intake.rs", include_str!("intake.rs")),
             ("moot.rs", include_str!("moot.rs")),
         ];
         for (name, src) in SILENT {

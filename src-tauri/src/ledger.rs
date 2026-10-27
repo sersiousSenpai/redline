@@ -332,7 +332,6 @@ mod tests {
             ("companion.rs", include_str!("companion.rs")),
             ("draft_chat.rs", include_str!("draft_chat.rs")),
             ("fork.rs", include_str!("fork.rs")),
-            ("intake.rs", include_str!("intake.rs")),
             ("keeper.rs", include_str!("keeper.rs")),
             ("ledger.rs", include_str!("ledger.rs")),
             ("lib.rs", include_str!("lib.rs")),

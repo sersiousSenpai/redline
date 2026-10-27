@@ -64,7 +64,6 @@ mod hook;
 mod hook_config;
 mod hook_conflicts;
 mod inspect;
-mod intake;
 mod keeper;
 mod ledger;
 mod librarian;
@@ -13261,7 +13260,6 @@ pub fn run() {
             surface_set_active,
             drafter_set_doc,
             drafter_get_doc,
-            intake::intake_triage,
             moot::moot_start,
             record_render_crash,
             bookshelf::bookshelf_list,
