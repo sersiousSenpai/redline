@@ -305,5 +305,4 @@ describe("legacyView: diverges from today (pinned so W1 sees it)", () => {
   it.todo("splitVertical / splitRatio / splitDragging: not LegacyView fields; App:10378-10381 and the browserVisible gate at App:7469 read them directly, and the reducer holds direction + weights per split instead");
   it.todo("the launch's door: today a launch shows the door's flight pill on the plate (mainSurface document, docPinned pref applies); the W0 reducer's launch set holds only the agent chat, and no action moves the home door tab into the launch set (the doorLaunchRef handoff is W1), so launch + pinned surface cannot be built");
   it.todo("the immersive mask: today `docPinned` at the read sites is the MASKED value (maskPanels at App:2718; immersive surfaces hide the tile until the user breaks out); legacyView reports the structural pin, and the mask stays an App-level overlay on top of it");
-  it.todo("reopening the document after its tab was closed: today selectSurface(document) always lands; `openSurface(plan)` without data is a no-op when no plan pane exists (defaultData has no plan default), so the adapter's writer must pass { sessionId, version: null }");
 });
