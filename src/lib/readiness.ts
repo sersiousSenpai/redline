@@ -151,7 +151,7 @@ export interface ReadinessInput {
   preflight: PreflightStatus | null;
   /** This window's daemon owns :7676. A second instance captures nothing. */
   daemonBound: boolean;
-  /** `HookSetupModal` is up: it is unskippable and renders over everything,
+  /** `IntegrationSetupDialog` is up: it is unskippable and renders over everything,
    *  so the hook/skill items are unreachable by construction. */
   hookModalActive: boolean;
   /** A plan has landed in Redline at least once on this machine. */
@@ -349,8 +349,8 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
     });
   }
 
-  // Recovery copy, not onboarding copy: on a true first run `HookSetupModal`
-  // has already run and these are unreachable. Reaching them means the hook
+  // Recovery copy, not onboarding copy: on a true first run the
+  // `IntegrationSetupDialog` has already run and these are unreachable. Reaching them means the hook
   // was REMOVED later — via the app menu, or a foreign hook overwriting ours.
   if (backend === "claude-code" && pf && (!input.hookModalActive || input.requireIntegration) && !pf.hook.installed) {
     items.push({
