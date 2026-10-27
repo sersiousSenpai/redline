@@ -523,6 +523,7 @@ import type { PaneContext } from "./workbench/WorkbenchStage";
 const loadWorkbenchStage = () => import("./workbench/WorkbenchStage");
 const WorkbenchStage = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.WorkbenchStage })));
 const SingletonSlot = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.SingletonSlot })));
+const SingletonElsewhere = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.SingletonElsewhere })));
 import { Columns2 } from "lucide-react";
 import { latestDisplayVersion } from "./lib/revisionVersions";
 import { perfProbeOn, setPerfProbe } from "./lib/perfProbeSwitch";
@@ -973,7 +974,11 @@ function App() {
     const value = typeof next === "function" ? next(activeIdRef.current) : next;
     if (value === activeIdRef.current) return;
     if (value && isJoinedSessionId(value)) {
+      // `joined:<sid>:<threadStart>`: the room shows in the plan set of the
+      // session it mirrors, its Plan tab in front.
       setJoinedId(value);
+      const sid = value.split(":")[1];
+      if (sid) wb.dispatch({ type: "selectSession", key: planKey(sid) });
       return;
     }
     setJoinedId(null);
@@ -1207,6 +1212,12 @@ function App() {
   const [chatRegularSlot, setChatRegularSlot] = useState<HTMLDivElement | null>(null);
   const [chatDockSlot, setChatDockSlot] = useState<HTMLDivElement | null>(null);
   const [browserHost] = useState(() => createBoundedPortalHost("browser"));
+  // The plan body is a per-session singleton like the browser (decision
+  // D3): one editor, one pair of refs, mounted once in this host; a plan
+  // pane shows its slot, and the visible, focused one holds it. A second
+  // plan pane of the same session shows where it is and can bring it here.
+  const [planHost] = useState(() => createBoundedPortalHost("plan"));
+  const [planHolder, setPlanHolder] = useState<string | null>(null);
   const [browserMounted, setBrowserMounted] = useState(browserOpen);
   useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
   const drafterOpen = mainSurface === "drafter";
@@ -1794,6 +1805,13 @@ function App() {
     const door = panes.length === 1 && panes[0].kind === "door" ? panes[0] : null;
     if (!tab || !set || !door || tab.focusedPaneId !== door.id) return false;
     untouchedDoors.current.delete(door.id);
+    // One of a kind: a surface the set already holds comes forward and the
+    // door closes, rather than a second body (and a second Cosmos) mounting.
+    if (init.kind !== "door" && init.kind !== "file" && init.kind !== "plan" && findPane(wb.getState(), init.kind)) {
+      wb.dispatch({ type: "closeTab", tabId: tab.id });
+      wb.dispatch({ type: "openSurface", kind: init.kind, data: init.kind === "drafter" || init.kind === "review" ? undefined : init.data });
+      return true;
+    }
     const from = boxOf(".rl-frontdoor-focus[data-visible='true'] .rl-fd-island");
     if (from && init.kind !== "browser") {
       convertedPaneRef.current = door.id;
@@ -1849,6 +1867,28 @@ function App() {
     untouchedDoors.current.delete(pane.id);
     wb.dispatch({ type: "closeTab", key, tabId: tab.id });
     return true;
+  }, []);
+  // A door pane that has left the workbench (closed, converted, pruned)
+  // takes its draft with it; the shared sentence stays the pill's. Watched
+  // on the store, so every way a door goes — the strip's ×, ⌘W, Esc, the
+  // launch's handoff — forgets its key.
+  useEffect(() => {
+    if (!classicWb) return;
+    const doors = (state: WorkbenchState) => {
+      const out = new Map<string, string>();
+      for (const set of Object.values(state.sets)) {
+        if (!set) continue;
+        for (const pane of Object.values(set.panes)) if (pane.kind === "door") out.set(pane.id, pane.data.draftKey);
+        for (const entry of set.closed) for (const pane of entry.panes) if (pane.kind === "door") out.set(pane.id, pane.data.draftKey);
+      }
+      return out;
+    };
+    let known = doors(wb.getState());
+    return wb.subscribe(() => {
+      const now = doors(wb.getState());
+      for (const [id, key] of known) if (!now.has(id) && key !== FRONT_DOOR_TEXT_KEY) writeSharedDraft(key, "");
+      known = now;
+    });
   }, []);
   const previousTabRef = useRef<{ key: SessionKey; tabId: string | null } | null>(null);
   useEffect(() => {
@@ -2390,13 +2430,10 @@ function App() {
     const { key, set, tab, panes } = activePanes(state);
     if (next === "chat") return;
     if (next === "document") {
-      const doc = panes.find((p) => isDocumentKind(p.kind));
-      const surface = panes.find((p) => !isDocumentKind(p.kind) && p.kind !== "terminals");
-      if (doc && surface) {
-        wb.dispatch({ type: "closePane", paneId: surface.id });
-        wb.dispatch({ type: "focusPane", paneId: doc.id });
-        return;
-      }
+      // Never closes a pane (a surface's own ✕ does that): the set's Plan
+      // tab comes forward — the plan half of a tile keeps its neighbour —
+      // or Home's door. Reads the set selected NOW, so a caller that also
+      // switches session switches first.
       if (kindForSurface("document", key) === "plan") {
         wb.dispatch({ type: "openSurface", kind: "plan" });
         return;
@@ -2965,7 +3002,8 @@ function App() {
     const key = `plan:${pane.data.sessionId}`;
     const version = summary?.revisions.length ? latestDisplayVersion(summary.revisions, summary.latestVersion) : null;
     return {
-      title: summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
+      // A title the user gave the tab wins (`paneTitle` reads it).
+      title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
       status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
   }, [summaries, flowNeeds, flowWorking]);
@@ -4519,6 +4557,14 @@ function App() {
       // from `summaries` skip the render. Rows pair by id: a bumped session
       // re-sorts to the top.
       setSummaries((prev) => keepEqualRows(prev, list, (s) => s.sessionId));
+      // Sets whose session is gone go with it (a joined room's mirrored set
+      // stays while joined); terminals are not the workbench's yet (W3).
+      if (classicWb) {
+        const live = list.map((s) => s.sessionId);
+        const joined = activeIdRef.current && isJoinedSessionId(activeIdRef.current) ? activeIdRef.current.split(":")[1] : null;
+        if (joined) live.push(joined);
+        wb.dispatch({ type: "prune", liveSessions: live, livePtys: Object.keys(wb.getState().owners) });
+      }
       return list;
     } catch (err) {
       console.error("list_sessions failed", err);
@@ -4812,8 +4858,9 @@ function App() {
         // its card step aside for the plan, as for any trip the user asks for.
         const openArrival = () => {
           tripDoor();
-          selectSurfaceRef.current("document");
+          // The session first: the plan's set is what "document" acts on.
           focusIntercepted();
+          selectSurfaceRef.current("document");
         };
         // At the top on the browser, where the native page covers the corner.
         const notice = (message: string, label: string) => setToast({
@@ -4870,8 +4917,8 @@ function App() {
           setDoorHandoff(true);
           setFrontDoorOpen(false);
           retireDoorLaunchTab(payload.launchId);
-          selectSurfaceRef.current("document");
           focusIntercepted();
+          selectSurfaceRef.current("document");
           announceDoor(arrivalMessage(title));
           return;
         }
@@ -9293,6 +9340,8 @@ function App() {
   // `useSessionTerminals`, its state from the CLI's own hooks.
   const sidebarPlace = !classicWb ? null : wbView.focusedKind === "runs" ? "runs" as const : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
   const sidebarRunsLive = useMemo(() => summaries.filter((s) => isLiveRunState(s.runState)).length, [summaries]);
+  // Read off the Localhost scan, which runs only while that pane is on
+  // screen; a ports chip of its own comes with W7's discovery.
   const sidebarPorts = useMemo(() => (devServers.scan?.running ?? []).map((r) => `:${r.port}`), [devServers.scan]);
   const sidebarTerminals = useMemo(() => {
     const out: Record<string, { id: string; title: string; status: "needs" | "working" | "idle" | "exited" }[]> = {};
@@ -9795,6 +9844,9 @@ function App() {
     };
   }, []);
 
+  // The plan body, built inside the centre's render below and mounted once
+  // in `planHost` after it (siblings render in order).
+  let planBodyNow: ReactNode = null;
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
@@ -10897,6 +10949,9 @@ function App() {
             // bodies (the browser, the companion chat) mount once, in their
             // portals; a pane shows only their slot.
             if (classicWb) {
+              planBodyNow = planBody;
+              const { panes: activeVisiblePanes, tab: activeTabNow } = activePanes(wb.getState());
+              const activeFocusedPaneId = activeTabNow?.focusedPaneId ?? null;
               const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
                 swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
                   ? <SpringSwap from={swapFrom} onArrived={() => { convertedPaneRef.current = null; setSwapFrom(null); }}>{body}</SpringSwap>
@@ -10907,8 +10962,20 @@ function App() {
                     // The island lands on this plate while the pane is on
                     // screen and focused (MonochatIsland reads the attribute).
                     return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.visible && ctx.focused ? "" : undefined} />;
-                  case "plan":
-                    return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBody}</SpringSwap> : planBody;
+                  case "plan": {
+                    // The holder: the pane asked for, while on screen; else
+                    // the focused plan pane; else the first visible one.
+                    const visiblePlans = activeVisiblePanes.filter((p) => p.kind === "plan").map((p) => p.id);
+                    const holder = planHolder && visiblePlans.includes(planHolder) ? planHolder : visiblePlans.includes(activeFocusedPaneId ?? "") ? activeFocusedPaneId : visiblePlans[0] ?? null;
+                    if (ctx.visible && holder !== pane.id) {
+                      return (
+                        <Suspense fallback={null}>
+                          <SingletonElsewhere what="the plan" onBringHere={() => setPlanHolder(pane.id)} />
+                        </Suspense>
+                      );
+                    }
+                    return <SingletonSlot host={planHost} name="plan" active={ctx.visible && holder === pane.id} />;
+                  }
                   case "file":
                     return (
                       <Suspense fallback={null}>
@@ -12355,7 +12422,7 @@ function App() {
               queuedInstruction={queuedChatPlans.queued[chatId]?.instruction ?? null}
               onCancelQueuedPlan={() => { queuedChatPlans.cancel(chatId); }}
               onShowTerminal={id => { setFrontDoorOpen(false); void showRawTerminal(id); }}
-              onOpenPlan={id => { tripDoor(); selectSurface("document"); selectSessions(); setActiveId(id); setViewedVersionNumber(null); void loadSession(id); }}
+              onOpenPlan={id => { tripDoor(); selectSessions(); setActiveId(id); selectSurface("document"); setViewedVersionNumber(null); void loadSession(id); }}
               onFix={applyReadinessFix}
                             onSelectChat={openChat}
               onEmpty={() => { setChatId(null); setChatSeed(null); refreshChats(); }}
@@ -12424,6 +12491,10 @@ function App() {
           </ErrorBoundary>
         </Suspense>,
         flowConvoHost,
+      )}
+      {classicWb && activeId && createPortal(
+        planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBodyNow}</SpringSwap> : planBodyNow,
+        planHost,
       )}
       {browserMounted && createPortal(
 <Suspense fallback={null}>

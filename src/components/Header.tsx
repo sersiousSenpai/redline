@@ -228,7 +228,7 @@ export function Header({
         {/* The ambient memory pill — Memory's one entry point (deliberately
             not a main-radio button; the pill opens the surface). */}
         {memoryEnabled && (
-          <Suspense fallback={null}>
+          <Suspense fallback={<span className="rl-mem-pill-slot" aria-hidden />}>
           <MemoryStatusPill
             onOpenMemory={onOpenMemory}
             onOpenInspector={onOpenMemoryInspector}

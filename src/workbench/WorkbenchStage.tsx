@@ -17,13 +17,13 @@
 // poll resuming). Singleton bodies never mount inside a tab — only their
 // slots do (`SingletonSlot`).
 
-import { lazy, memo, Suspense, useCallback, useDeferredValue, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { PersistentPortalSlot } from "../components/PersistentPortalSlot";
 import { SplitPane } from "../components/SplitPane";
 import { activeTabOf, isSplit, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
-import { endMeasure } from "./perf";
+import { beginMeasure, endMeasure } from "./perf";
 import type { PaneStatus } from "./status";
 import { useWorkbench, type WorkbenchStore } from "./store";
 import type { TabStripItem } from "./TabStrip";
@@ -90,15 +90,11 @@ export function WorkbenchStage({ store, renderPane, describePane, onSplitDraggin
     return trimmed;
   }, [set, activeKey, activeTabId]);
 
-  // `wb:tab-switch` ends once the new active tab has painted.
-  useEffect(() => {
-    if (!activeTabId) return;
-    const frame = requestAnimationFrame(() => endMeasure("wb:tab-switch"));
-    return () => cancelAnimationFrame(frame);
-  }, [activeTabId]);
-
   const dispatch = store.dispatch;
-  const onSelect = useCallback((tabId: string) => dispatch({ type: "selectTab", tabId }), [dispatch]);
+  const onSelect = useCallback((tabId: string) => {
+    beginMeasure("wb:tab-switch");
+    dispatch({ type: "selectTab", tabId });
+  }, [dispatch]);
   const onClose = useCallback((tabId: string) => dispatch({ type: "closeTab", tabId }), [dispatch]);
   const onReorder = useCallback((tabId: string, to: number) => dispatch({ type: "reorderTab", tabId, to }), [dispatch]);
   const onReopen = useCallback(() => dispatch({ type: "reopenClosed" }), [dispatch]);
@@ -174,6 +170,14 @@ const TabBody = memo(function TabBody({ tab, panes, active, visible, renderPane,
   onResize: (tabId: string, path: number[], weights: number[]) => void;
   onSplitDragging?: (dragging: boolean) => void;
 }) {
+  // `wb:tab-switch` ends when THIS tab's panes have committed as the active
+  // ones and the next frame has painted them — the pane's paint, not the
+  // strip's.
+  useLayoutEffect(() => {
+    if (!active) return;
+    const frame = requestAnimationFrame(() => endMeasure("wb:tab-switch"));
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
   return (
     <div
       className="rl-wb-tab-body"
@@ -264,6 +268,17 @@ function PaneFallback({ region, error, reset }: { region: string; error: Error; 
  *  second visible slot (W5's splits) shows where the body went. */
 export function SingletonSlot({ host, name, active }: { host: HTMLElement; name: string; active: boolean }) {
   return <PersistentPortalSlot host={host} name={name} active={active} />;
+}
+
+/** What a second pane of a singleton shows while another pane holds the
+ *  body: where it is, and a way to bring it here. */
+export function SingletonElsewhere({ what, onBringHere }: { what: string; onBringHere: () => void }) {
+  return (
+    <div className="rl-wb-elsewhere" role="status">
+      <p>Showing {what} in the other pane</p>
+      <button type="button" onClick={onBringHere}>Bring here</button>
+    </div>
+  );
 }
 
 /** The focused visible pane of the active tab, for App's door/drafter rules. */

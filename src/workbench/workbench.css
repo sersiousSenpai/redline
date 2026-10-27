@@ -253,6 +253,32 @@
   box-shadow: inset 0 0 0 1px var(--color-focus-rim);
 }
 
+/* A singleton's second pane: where the body is, and the way to bring it. */
+.rl-wb-elsewhere {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--color-ink-muted);
+  font-size: 13px;
+  background: var(--color-paper);
+}
+.rl-wb-elsewhere p { margin: 0; }
+.rl-wb-elsewhere button {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--color-rule);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  cursor: pointer;
+}
+.rl-wb-elsewhere button:hover { background: var(--color-bg-elevated); }
+
 /* The context menu reuses RowMenu, whose ⋯ trigger the strip has no place
    for: the menu opens at the pointer, so the trigger is kept out of sight. */
 .rl-wb-menu-anchor {
