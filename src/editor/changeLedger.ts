@@ -154,7 +154,7 @@ const EDITOR_TYPES: ReadonlySet<string> = new Set([
 /** A comment is owned by the in-document editor iff it is a draft/reopened
  *  edit/structural comment carrying a blockId. Sidebar-only edits, feedback,
  *  questions, and submitted/resolved comments are never touched by sync. */
-export function isEditorComment(c: Comment): boolean {
+function isEditorComment(c: Comment): boolean {
   return (
     EDITOR_TYPES.has(c.type) &&
     !!c.blockId &&

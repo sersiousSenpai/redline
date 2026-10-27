@@ -22,7 +22,7 @@ export type WorkspaceKey = string;
 export type WorkspaceKind = "regular" | "mission" | "mosaic";
 export const MOSAIC_PREFIX = "mosaic:";
 /** The shared chat's name, the title BrowserPane has always given it. */
-export const SHARED_TITLE = "Browser chat";
+const SHARED_TITLE = "Browser chat";
 
 export function workspaceKind(key: WorkspaceKey): WorkspaceKind {
   if (key === "regular") return "regular";

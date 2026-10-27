@@ -111,7 +111,7 @@ export const polishEngine: PolishEngine = {
 };
 
 /** Shorter dictations are left as the rules made them. */
-export const POLISH_MIN_WORDS = 12;
+const POLISH_MIN_WORDS = 12;
 /** A polish never lands sooner than this after the words it replaces: an
  *  editor keeps a separate undo step for it. */
 export const POLISH_SETTLE_MS = 600;

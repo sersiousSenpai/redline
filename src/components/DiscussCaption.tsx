@@ -40,7 +40,7 @@ export function captionBox(
 }
 
 /** What the caption says, for its line and for a screen reader. */
-export function captionLine(c: VoiceCaption, now: number): { text: string; spoken: string } {
+function captionLine(c: VoiceCaption, now: number): { text: string; spoken: string } {
   switch (c.phase) {
     case "hearing":
       return { text: c.text || "Listening…", spoken: "Listening" };

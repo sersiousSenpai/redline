@@ -4,7 +4,7 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-export const commentMarkersKey = new PluginKey("commentMarkers");
+const commentMarkersKey = new PluginKey("commentMarkers");
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {

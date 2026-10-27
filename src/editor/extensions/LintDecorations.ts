@@ -20,9 +20,9 @@ import { tokenizeLint } from "./lintTokenize";
 
 /** The window event applyLint() dispatches when the user picks a lint theme,
  *  so every mounted editor refreshes its decorations without prop threading. */
-export const LINT_CHANGE_EVENT = "redline:lintchange";
+const LINT_CHANGE_EVENT = "redline:lintchange";
 
-export const lintDecorationsKey = new PluginKey("lintDecorations");
+const lintDecorationsKey = new PluginKey("lintDecorations");
 
 /** Read the active lint theme off <html data-lint>. `off`/absent/unknown all
  *  mean "no coloring". Kept here so the plugin has a single source of truth. */

@@ -32,7 +32,7 @@ export function isLiveRunState(state: string | null | undefined): boolean {
  *
  *  `relaunchOrchestrator` used to recover the path from `summaries` alone and
  *  hand `summary?.projectPath || null` straight to the launch builder. A miss
- *  yields `null`, `buildOrchestrateLaunchCommand` then emits no `cd`, and the
+ *  yields `null`, the launch builder then emits no `cd`, and the
  *  PTY spawns in `$HOME`. The orchestrator runs `--permission-mode
  *  acceptEdits`, so the severity is not "it fails" — it is "it succeeds,
  *  write-capable, in the wrong tree". The first launch reads the path off the

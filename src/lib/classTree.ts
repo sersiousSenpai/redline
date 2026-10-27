@@ -198,7 +198,7 @@ export function proposalSubject(p: ProposalView): string {
 
 /** How many verifier attempts a queued proposal gets before it expires
  *  (`polis_store::runs::PROPOSAL_TTL_ATTEMPTS`). */
-export const PROPOSAL_TTL_ATTEMPTS = 3;
+const PROPOSAL_TTL_ATTEMPTS = 3;
 
 /**
  * Where a proposal sits in the gardener's work queue (B3) — the line the

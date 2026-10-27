@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = path.resolve(root, process.argv[2] ?? "docs/document-controls-visual-qa-2026-09-24");
+const output = path.resolve(root, process.argv[2] ?? path.join(tmpdir(), "redline-document-controls-visual-qa"));
 const temporary = await mkdtemp(path.join(tmpdir(), "redline-document-controls-qa-"));
 const service = path.join(root, "fixtures/browser-visual-qa/services.ts");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

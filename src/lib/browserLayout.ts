@@ -14,7 +14,7 @@ export interface BrowserLayout {
   maximized: string | null;
   focused: string | null;
 }
-export const PRESETS: { id: BrowserPreset; label: string; count: number }[] = [
+const PRESETS: { id: BrowserPreset; label: string; count: number }[] = [
   { id: "browse", label: "Browse", count: 1 },
   { id: "discuss", label: "Discuss", count: 1 },
   { id: "compare", label: "Compare", count: 2 },
@@ -24,7 +24,7 @@ export const PRESETS: { id: BrowserPreset; label: string; count: number }[] = [
 export const MAX_GRID_SIDE = 4;
 export const MAX_MOSAIC_TILES = MAX_GRID_SIDE * MAX_GRID_SIDE;
 /** Narrower than this per column, a mosaic projects to fewer columns. */
-export const MIN_MOSAIC_TILE_W = 320;
+const MIN_MOSAIC_TILE_W = 320;
 /** The freeform arrangements (no grid) hold at most four pages. */
 const FREEFORM_TILES = 4;
 export const DEFAULT_BROWSER_LAYOUT: BrowserLayout = {
@@ -55,7 +55,7 @@ export function normalizeGrid(raw: unknown): BrowserGrid | undefined {
   return { rows: side((raw as Partial<BrowserGrid>).rows), cols: side((raw as Partial<BrowserGrid>).cols) };
 }
 /** How many saved assignments a layout holds: its grid's cells, or the freeform four. */
-export function layoutCapacity(layout: Pick<BrowserLayout, "grid">): number {
+function layoutCapacity(layout: Pick<BrowserLayout, "grid">): number {
   return layout.grid ? layout.grid.rows * layout.grid.cols : FREEFORM_TILES;
 }
 export function normalizeBrowserLayout(raw: Partial<BrowserLayout> | null | undefined): BrowserLayout {

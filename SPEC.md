@@ -770,7 +770,7 @@ provider; `kokoro` and `system` keep it on-device.
 ## 13. Redline integration installation
 
 Redline integrates with Claude Code through an installed **hook** and the bundled
-**skills**. `HookSetupModal` ("Install Redline integration") drives both.
+**skills**. `IntegrationSetupDialog` ("Connect Claude Code to Redline") drives both.
 
 ### 13.1 The plan-intercept hook
 

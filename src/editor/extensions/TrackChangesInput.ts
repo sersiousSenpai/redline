@@ -13,7 +13,7 @@ import {
   USER_AUTHOR,
 } from "./TrackChanges";
 
-export const trackChangesInputKey = new PluginKey("trackChangesInput");
+const trackChangesInputKey = new PluginKey("trackChangesInput");
 
 export interface TrackChangesInputOptions {
   /** Called when a user edit was blocked because its block carries a pending

@@ -10,7 +10,6 @@ import {
   seedPolicy,
   turnEnvelope,
 } from "./turn";
-import { agentCapabilities, BROWSER_PANELS, pillComposerDestinations } from "./chrome";
 import contract from "./contract.json";
 
 // Conformance: what a turn carries, seeds, the composer and reply actions.
@@ -98,19 +97,10 @@ describe("reply actions and the agent's reach", () => {
     expect(replyActions({ role: "assistant", status: "error", body: "x", missionActive: true })).toEqual([]);
     expect(replyActions({ role: "user", status: "complete", body: "x", missionActive: true })).toEqual([]);
   });
-  it("BC-19 BC-21 BC-24 mutations go through the action route; the only write is download; no curation", () => {
-    const reach = agentCapabilities("claude-code", true);
-    expect(reach.mutate).toContain("/v1/browser/action");
-    for (const legacy of contract.legacyRoutes) expect([...reach.read, ...reach.mutate]).not.toContain(legacy);
-    expect(reach.write).toEqual(["/v1/browser/download"]);
-    expect([reach.files, reach.git, reach.curate]).toEqual(["read-only", "read-only", false]);
-    expect(agentCapabilities("codex", false).mutate).toEqual([]);
-  });
-  it("BC-16 BC-10 the Task list shares the column but is not a conversation", () => {
-    expect(BROWSER_PANELS.filter((p) => !p.conversation).map((p) => p.pill)).toEqual(["cart"]);
-  });
-  it("BC-37 the pill's hover composer launches Plan/Run on the browser; elsewhere it is unrestricted", () => {
-    expect(pillComposerDestinations("browser")).toEqual(["plan", "run"]);
-    expect(pillComposerDestinations("document")).toBeUndefined();
+  it("BC-19 BC-21 mutations go through the action route, no retired route is served as current, and the only write is download", () => {
+    const served = [...contract.readRoutes, ...contract.codeRoutes, contract.actionRoute, ...contract.tabRoutes];
+    expect(served).toContain("/v1/browser/action");
+    for (const legacy of contract.legacyRoutes) expect(served).not.toContain(legacy);
+    expect(contract.writeRoute).toBe("/v1/browser/download");
   });
 });

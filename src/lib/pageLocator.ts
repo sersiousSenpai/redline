@@ -244,7 +244,7 @@ function tidy(raw: string | undefined | null, max = MAX_LOCATOR_CHARS): string {
  *  a label. Only the first character is touched, which is what leaves a real
  *  product name or an acronym ("PLA job card") exactly as the page wrote it —
  *  title-casing here would rewrite the page's own words. */
-export function sentenceCase(s: string): string {
+function sentenceCase(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 

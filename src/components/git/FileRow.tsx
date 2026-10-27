@@ -19,7 +19,7 @@ const CODE_TITLE: Record<FileCode, string> = {
 const DIFF_CODE: Record<DiffFileStatus, FileCode> = { added: "A", modified: "M", deleted: "D", renamed: "R", binary: "M" };
 export const codeForDiffStatus = (status: DiffFileStatus): FileCode => DIFF_CODE[status];
 
-export function StatusBadge({ code }: { code: FileCode }) {
+function StatusBadge({ code }: { code: FileCode }) {
   return (
     <span className="rl-git-badge" data-code={code === "?" ? "untracked" : code} title={CODE_TITLE[code]}>
       {code === "?" ? "?" : code}

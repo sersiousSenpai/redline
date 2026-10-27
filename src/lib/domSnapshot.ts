@@ -38,7 +38,7 @@ export interface PageSnapshot {
  *  webview label (`browser-<id>`). Returns the raw JSON string the backend
  *  produced — passed straight to `browse_send` as the first-turn context, so
  *  the agent reads exactly what the kernel emitted (no lossy re-encoding). */
-export async function captureSnapshot(label: string): Promise<string> {
+async function captureSnapshot(label: string): Promise<string> {
   return invoke<string>("browser_snapshot", { label });
 }
 

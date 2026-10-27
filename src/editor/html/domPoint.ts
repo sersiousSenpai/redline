@@ -10,11 +10,9 @@ import { sidecarIdToString, type SubAxis } from "../markdown/sidecar";
 
 /**
  * Shared DOM-anchor geometry for the comment system. These helpers turn a DOM
- * selection/caret into block-relative character offsets (mirroring
- * `textContent`), so a selection captured here re-locates the same characters on
- * render. Extracted from `useTextSelection` so both the (range-only) selection
- * hook and the HTML redline surface (which also needs caret points) share one
- * implementation.
+ * selection into block-relative character offsets (mirroring `textContent`),
+ * so a selection captured here re-locates the same characters on render.
+ * Extracted from `useTextSelection`, which is their caller.
  */
 
 /** Walk up from `node` to the nearest element carrying `data-anchor-id`. */
@@ -186,86 +184,4 @@ export function subBlockIdForSelection(args: {
     charStart: args.charStart,
     charEnd: args.charEnd,
   });
-}
-
-/** A resolved DOM point — the current selection or caret, mapped to a block. */
-export interface DomPoint {
-  anchorEl: HTMLElement;
-  anchorId: string;
-  /** Stable block id (`data-block-id`), if the anchored element carries one. */
-  blockId: string | undefined;
-  /** Block-relative char offsets. Equal when the selection is a collapsed caret. */
-  charStart: number;
-  charEnd: number;
-  /** Raw selected text (empty for a caret). */
-  text: string;
-  /** Sub-block sidecar id when a non-empty selection lands on clean unit
-   *  boundaries — sentence axis for prose, line axis (`.lN`) for a list item /
-   *  table cell / code source line. */
-  subBlockId?: string;
-  /** Bounding rect of the range/caret (viewport coords). */
-  rect: DOMRect;
-  collapsed: boolean;
-}
-
-/**
- * Resolve the current window selection (or caret) to a {@link DomPoint} inside
- * `root`. Unlike `useTextSelection`, this accepts a collapsed caret — the HTML
- * redline surface needs the caret position to pin a floating note. Returns null
- * when there's no selection inside `root` or no anchored block.
- */
-export function pointFromDomSelection(root: HTMLElement | null): DomPoint | null {
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return null;
-  const range = sel.getRangeAt(0);
-  if (!root || !root.contains(range.commonAncestorContainer)) return null;
-  const anchorEl = findAnchoredAncestor(range.commonAncestorContainer);
-  if (!anchorEl) return null;
-  const start = offsetWithinAnchor(anchorEl, range.startContainer, range.startOffset);
-  const end = offsetWithinAnchor(anchorEl, range.endContainer, range.endOffset);
-  const charStart = Math.min(start, end);
-  const charEnd = Math.max(start, end);
-  const blockId = anchorEl.dataset.blockId;
-  let subBlockId: string | undefined;
-  if (blockId && charEnd > charStart) {
-    subBlockId = subBlockIdForSelection({
-      anchorEl,
-      blockId,
-      range,
-      charStart,
-      charEnd,
-    });
-  }
-  return {
-    anchorEl,
-    anchorId: anchorEl.dataset.anchorId ?? "",
-    blockId,
-    charStart,
-    charEnd,
-    text: sel.toString(),
-    subBlockId,
-    rect: rangeRect(range),
-    collapsed: sel.isCollapsed,
-  };
-}
-
-/** Range bounding rect, tolerant of environments (jsdom) where a selection's
- *  range doesn't implement layout. Real WebViews always have it. */
-function rangeRect(range: Range): DOMRect {
-  if (typeof range.getBoundingClientRect === "function") {
-    return range.getBoundingClientRect();
-  }
-  return typeof DOMRect !== "undefined"
-    ? new DOMRect()
-    : ({
-        x: 0,
-        y: 0,
-        width: 0,
-        height: 0,
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        toJSON: () => ({}),
-      } as DOMRect);
 }

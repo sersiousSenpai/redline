@@ -206,7 +206,7 @@ export interface ListSource {
 const oneLine = (body: string) => body.replace(/\s*\n+\s*/g, " ").trim();
 
 /** The location is a pointer; the note is the user's own text. */
-export function formatItemLine(item: Pick<BrowseListItem, "body" | "kind" | "done" | "locator">): string {
+function formatItemLine(item: Pick<BrowseListItem, "body" | "kind" | "done" | "locator">): string {
   const locator = normalizeLocator(item.locator);
   return `${locator ? `[${locator}] — ` : ""}${oneLine(item.body)}`;
 }

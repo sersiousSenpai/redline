@@ -440,8 +440,8 @@ describe("resolveRunProject", () => {
 
   it("refuses when the session is absent from both", () => {
     // The regression: this used to yield null and get passed straight to
-    // buildOrchestrateLaunchCommand, which emits no `cd` — an acceptEdits
-    // orchestrator spawning in $HOME.
+    // the launch builder, which emits no `cd` — an acceptEdits orchestrator
+    // spawning in $HOME.
     expect(resolveRunProject("gone", null, summaries)).toBeNull();
   });
 

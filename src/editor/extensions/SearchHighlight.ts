@@ -35,7 +35,7 @@ declare module "@tiptap/core" {
   }
 }
 
-export const searchHighlightKey = new PluginKey("searchHighlight");
+const searchHighlightKey = new PluginKey("searchHighlight");
 
 /** Scan the document for case-insensitive occurrences of `query`, returning
  *  their absolute positions. Matches are found within a single text node, so a

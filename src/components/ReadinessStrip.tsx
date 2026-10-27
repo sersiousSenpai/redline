@@ -33,7 +33,7 @@ export function ReadinessStrip({
 /** One item, rendered INSIDE the island when ⏎ was refused — the fix belongs
  *  where the user's attention already is, not only in a strip they may have
  *  stopped seeing. */
-export function ReadinessBlock({
+function ReadinessBlock({
   item,
   onFix,
   onDismiss,

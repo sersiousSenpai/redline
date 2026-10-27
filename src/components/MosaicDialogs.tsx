@@ -19,7 +19,7 @@ function usedAgo(at: number, now = Date.now()): string {
   const days = Math.round(hours / 24);
   return days < 30 ? `Used ${days} d ago` : `Used ${new Date(at).toLocaleDateString()}`;
 }
-export const gridLabel = (grid: BrowserGrid) => `${grid.rows} × ${grid.cols}`;
+const gridLabel = (grid: BrowserGrid) => `${grid.rows} × ${grid.cols}`;
 
 export function MosaicManagerDialog({ mosaics, error, activeId, activeName, startupId, canSaveCurrent, onOpen, onEdit, onNew, onSaveCurrent, onDelete, onStartup, onLeave, onClose }: {
   mosaics: MosaicSummary[] | null; error: string | null; activeId: string | null; activeName: string | null; startupId: string | null; canSaveCurrent: boolean;

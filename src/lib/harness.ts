@@ -25,9 +25,7 @@
 // header with no stock-header flash (the same pre-paint trick as the theme
 // cache in index.html).
 
-import type { MainSurface } from "./mainSurface";
 import {
-  MAIN_SURFACE_DESCRIPTORS,
   headerSurfaces,
   type SurfaceDescriptor,
   type Workspace,
@@ -212,23 +210,6 @@ export function harnessHeaderSurfaces(
   });
 }
 
-/** The descriptor a relabeled surface would show even when absent from the
- *  header (tooltips, panels). Falls back to the stock descriptor set. */
-export function harnessDescriptor(
-  manifest: HarnessManifest | null,
-  id: MainSurface,
-): SurfaceDescriptor | undefined {
-  const base = MAIN_SURFACE_DESCRIPTORS.find((d) => d.id === id);
-  if (!base || !manifest) return base;
-  const over = manifest.labels?.[id];
-  if (!over) return base;
-  return {
-    ...base,
-    label: typeof over.label === "string" && over.label ? over.label : base.label,
-    title: typeof over.title === "string" && over.title ? over.title : base.title,
-  };
-}
-
 // ---- Persistence (localStorage — flavor-split, synchronous) -----------------
 
 /** The active harness, manifest included: the first render composes from
@@ -236,7 +217,7 @@ export function harnessDescriptor(
  *  The boot effect then re-resolves the manifest from its source and
  *  refreshes (or clears) the cache — the file/fixture stays the truth, the
  *  cache is a paint hint, exactly the theme-cache contract. */
-export const ACTIVE_HARNESS_KEY = "redline.harness.active";
+const ACTIVE_HARNESS_KEY = "redline.harness.active";
 /** Per-harness user arrangement, keyed by harness id. */
 const ARRANGEMENT_PREFIX = "redline.harness.ws.";
 

@@ -64,7 +64,7 @@ export interface RevertReceipt {
   revertRunId: number;
 }
 
-export const MODE_LABEL: Record<string, string> = {
+const MODE_LABEL: Record<string, string> = {
   organize: "Organize",
   compaction: "Compaction",
   observations: "Observations",
@@ -76,7 +76,7 @@ export function modeLabel(run: Pick<RunRow, "mode">): string {
   return run.mode ? (MODE_LABEL[run.mode] ?? run.mode) : "Run";
 }
 
-export const RUN_OP_LABEL: Record<string, string> = {
+const RUN_OP_LABEL: Record<string, string> = {
   file: "File",
   create: "Create",
   promote: "Promote",

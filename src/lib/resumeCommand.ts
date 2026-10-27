@@ -21,13 +21,11 @@ export const CODEX_PLAN_PROFILE = "redline-plan";
 export const codexPlanLauncher = (bin: string) =>
   '/bin/sh "${CODEX_HOME:-$HOME/.codex}/redline-codex-launch.sh" ' + shq(bin);
 
-/** Bare marker the resumed session writes into its plan file on restore. Redline
- *  already holds the authoritative plan, so it re-presents that on restore and
- *  ignores the submitted body — Claude need not fetch or retype the plan. */
-export const REDLINE_RESTORE_SENTINEL = "<!-- REDLINE_RESTORE -->";
-
-/** The marker the resume command actually has Claude write: the bare sentinel
- *  with the *held plan's* session id appended. The daemon rebinds the restore to
+/** The marker the resume command has Claude write into its plan file on
+ *  restore: the restore sentinel with the *held plan's* session id appended.
+ *  Redline already holds the authoritative plan, so it re-presents that on
+ *  restore and ignores the submitted body — Claude need not fetch or retype
+ *  the plan. The daemon rebinds the restore to
  *  this id, so it works even when the ExitPlanMode handshake lands under a
  *  different session — `claude --resume` forks a new id, and a resume command
  *  pasted into an already-running Claude REPL runs under that REPL's own id.
@@ -258,7 +256,7 @@ export const CODEX_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox";
 /** The trigger typed into the resumed planning session when its approved plan
  *  is built. It voids the build-later stand-down the same way a rescinded
  *  restore voids its stand-down, and names the version that was approved. */
-export function buildTrigger(version: number, stamp: string): string {
+function buildTrigger(version: number, stamp: string): string {
   return (
     `Redline build · ${stamp} — the approved plan v${version} is now cleared to implement. ` +
     "The earlier Redline stand-down in your context (do not implement) is void. " +

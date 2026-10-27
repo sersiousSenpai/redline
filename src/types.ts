@@ -1316,13 +1316,6 @@ export interface CombineBrief {
   record: string;
 }
 
-/** Mirrors Rust's `hook::AllowCandidate` — an inferred build/test rule the
- *  Orchestrate modal offers, and whether the user already has it. */
-export interface AllowCandidate {
-  rule: string;
-  present: boolean;
-}
-
 export interface GitStatus {
   /** Current branch; null = detached HEAD. */
   branch: string | null;

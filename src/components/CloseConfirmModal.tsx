@@ -10,7 +10,7 @@ interface CloseConfirmModalProps {
 
 // Shown when the user tries to close Redline while a terminal has navigated
 // away from the directory it opened in — closing would silently kill that
-// session. Mirrors HookSetupModal's overlay/elevated-card styling so it reads
+// session. Mirrors IntegrationSetupDialog's overlay/elevated-card styling so it reads
 // as native Redline chrome, not an OS dialog.
 export function CloseConfirmModal({
   onConfirm,

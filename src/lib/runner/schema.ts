@@ -27,7 +27,6 @@ export interface RunGraph {
 }
 export interface RunClaim { path: string; nodeId: string; claimedAt: number; releasedAt?: number | null }
 export const isLiveNode = (status: string) => status === "running" || status === "verifying";
-export const isSatisfied = (status: string) => status === "passed" || status === "skipped";
 export const editableGraph = (doc: RunGraph) => ["draft", "ready", "paused"].includes(doc.status) && !doc.nodes.some((n) => isLiveNode(n.status));
 export function newNode(id: string, kind: NodeKind = "task"): RunNode {
   return { id, kind, title: kind === "check" ? "Verify changes" : kind === "gate" ? "Review before continuing" : "New task",

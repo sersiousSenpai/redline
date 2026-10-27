@@ -301,7 +301,7 @@ const SOUNDS: Record<string, string> = {
 /** How a word sounds, roughly: its consonant classes in order, a repeat
  *  merged even across a vowel, vowels and h, w, y dropped but for a leading
  *  vowel. "Kokoro", "Coro" and "Cocoro" all sound KR; "coral" sounds KRL. */
-export function soundKey(word: string): string {
+function soundKey(word: string): string {
   const w = word
     .toLowerCase()
     .replace(/[^a-z]/g, "")

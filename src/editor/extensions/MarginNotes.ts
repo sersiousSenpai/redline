@@ -4,7 +4,7 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-export const marginNotesKey = new PluginKey("marginNotes");
+const marginNotesKey = new PluginKey("marginNotes");
 
 /** One comment, drawn as a note under the block it marks. */
 export interface MarginNote {

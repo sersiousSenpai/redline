@@ -232,7 +232,7 @@ function seatOptions(): SeatOption[] {
 
 /** Case-insensitive token match against "model effort" (e.g. "op ma" hits
  *  "opus · max"). Exported shape kept pure for unit testing. */
-export function matchesSeatQuery(
+function matchesSeatQuery(
   opt: SeatOption,
   defaultLabel: string,
   query: string,

@@ -3626,7 +3626,7 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
 }
 
-.rl-frontdoor > *:not(.rl-fd-paper) {
+.rl-frontdoor > * {
   position: relative;
   z-index: 1;
 }

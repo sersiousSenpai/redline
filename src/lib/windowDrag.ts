@@ -19,7 +19,7 @@ const INTERACTIVE_TAGS = new Set(["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"])
 /** Did this event land on a control rather than on bare bar? Walks up to the
  *  enclosing <header> and stops there — the bar element itself is draggable,
  *  anything above it in the tree is not this bar's business. */
-export function isInteractive(target: EventTarget | null): boolean {
+function isInteractive(target: EventTarget | null): boolean {
   let el = target as HTMLElement | null;
   while (el) {
     if (INTERACTIVE_TAGS.has(el.tagName)) return true;

@@ -26,7 +26,7 @@ The separate [hook-conflict modal repair](hook-conflict-modal-repair-2026-09-13.
 
 The final executable SHA-256 is `3c9d7191e39bc0dc37f3ef17f7e59ae3a5818795b85fa9946bb3c51c437ddcd5`. [Structured build results](browser-refresh-build-results-2026-09-14.json) record the exact measurements. Logs are `/tmp/redline-browser-refresh-vitest.log`, `/tmp/redline-browser-refresh-final-app-build.log` and `/tmp/redline-browser-refresh-size.log`.
 
-The [component visual report](browser-refresh-visual-qa-2026-09-13.md) records **102 passing checks**, zero browser errors and 33 screenshots at 900×640, 1200×800 and 1600×900, including a light theme. It uses the production components and theme CSS with synthetic page images and transport. It verifies composer/message bounds, menus/dialogs, focus containment, exact portal/draft identity, divider dragging and responsive arrangement restoration.
+The component visual report (its screenshots and results were removed from the repo with the dated QA folders) records **102 passing checks**, zero browser errors and 33 screenshots at 900×640, 1200×800 and 1600×900, including a light theme. It uses the production components and theme CSS with synthetic page images and transport. It verifies composer/message bounds, menus/dialogs, focus containment, exact portal/draft identity, divider dragging and responsive arrangement restoration.
 
 The native Computer Use service failed to start. Native WKWebView rendering, gesture behavior and latency still require an interactive walkthrough; the component screenshots and controller tests do not claim that verification. The local app is rebuilt but is not installed or launched, preserving the user's running sessions.
 

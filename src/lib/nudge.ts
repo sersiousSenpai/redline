@@ -36,7 +36,7 @@ export interface NudgeState {
 export const NUDGE_WINDOW_MS = 90_000;
 export const NUDGE_HISTORY = 5;
 /** How many of the recent launches must agree before the app speaks up. */
-export const NUDGE_THRESHOLD = 4;
+const NUDGE_THRESHOLD = 4;
 
 export function emptyNudgeState(): NudgeState {
   return { launches: [], dismissed: [] };

@@ -71,7 +71,7 @@ export const STUDIO_TONES: Record<string, { label: string; instruct: string }> =
 };
 
 /** The instruction for a tone ("calm, upbeat"): its first word with one. */
-export function toneInstruction(tone: string | null | undefined): string | undefined {
+function toneInstruction(tone: string | null | undefined): string | undefined {
   for (const word of (tone ?? "").split(/[\s,]+/)) {
     const hit = STUDIO_TONES[word]?.instruct;
     if (typeof hit === "string") return hit;
@@ -91,7 +91,7 @@ export const JITTER_S = 0.1;
 export const SYNTH_LIMIT_MS = 8000;
 /** After an unload under memory pressure, how long `status` must say
  *  "normal" before the studio voice speaks again, and how often it is asked. */
-export const CALM_MS = 60_000;
+const CALM_MS = 60_000;
 const CALM_POLL_MS = 10_000;
 const SAMPLE_RATE = 24000;
 /** The reply's first piece streams in smaller chunks: first audio sooner. */
@@ -153,7 +153,7 @@ function readStatus(): Promise<StudioStatus | null> {
 }
 
 /** Start following the sidecar (once). */
-export function watchStudio(): void {
+function watchStudio(): void {
   if (watching) return;
   watching = true;
   void listen<{ state: string; reason: string | null }>("studio-status", (e) =>

@@ -19,7 +19,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 /** How close to the bottom still counts as "parked there". Wide enough to
  *  survive sub-pixel rounding. */
-export const STICK_THRESHOLD_PX = 40;
+const STICK_THRESHOLD_PX = 40;
 
 export interface StickToBottom<E extends HTMLElement> {
   /** Attach to the scrolling container. */

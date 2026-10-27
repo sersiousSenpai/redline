@@ -27,7 +27,7 @@ export function integrationVerified(backend: Backend, health: PreflightStatus): 
 }
 
 export interface InstallStep { command: string; label: string; args?: Record<string, unknown> }
-export function integrationInstallSteps(backend: Backend): InstallStep[] {
+function integrationInstallSteps(backend: Backend): InstallStep[] {
   if (backend === "codex") return [
     { command: "install_codex_hook", label: "Installing plan and prompt hooks" },
     { command: "install_codex_profile", label: "Updating planning instructions and launcher" },

@@ -121,7 +121,7 @@ export interface PanelMask {
   pane: boolean;
 }
 
-export const NO_MASK: PanelMask = { sidebar: false, pane: false };
+const NO_MASK: PanelMask = { sidebar: false, pane: false };
 
 /** Which panels a surface hides, ignoring the gates. */
 export function panelMaskFor(s: MainSurface): PanelMask {

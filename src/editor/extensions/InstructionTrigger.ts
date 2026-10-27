@@ -25,7 +25,7 @@ interface GeneratingState {
   decos: DecorationSet;
 }
 
-export const instructionTriggerKey = new PluginKey<GeneratingState>(
+const instructionTriggerKey = new PluginKey<GeneratingState>(
   "instructionTrigger",
 );
 

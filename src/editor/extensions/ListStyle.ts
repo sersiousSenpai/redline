@@ -69,7 +69,7 @@ const CUSTOM_COUNTERS = new Set([
   "dash",
 ]);
 
-export function listStyleTypeCss(key: string): string {
+function listStyleTypeCss(key: string): string {
   return CUSTOM_COUNTERS.has(key) ? `rl-${key}` : key;
 }
 

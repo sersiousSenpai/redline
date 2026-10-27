@@ -246,9 +246,6 @@
   background: var(--color-mode-build-bg);
   color: var(--color-mode-build-fg);
 }
-.rl-fb-action.is-danger {
-  color: var(--color-mode-danger-fg);
-}
 .rl-fb-action.is-discuss {
   margin-left: auto;
   padding: 0;

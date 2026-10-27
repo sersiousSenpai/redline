@@ -13,7 +13,7 @@ import type { GitRepository } from "./useGitRepository";
 import type { useContextMenu } from "./ui";
 import { commitMenu } from "./menus";
 
-export const ROW_HEIGHT = 24;
+const ROW_HEIGHT = 24;
 const LANE_WIDTH = 12;
 const MAX_LANES = 16;
 const OVERSCAN = 12;
@@ -302,7 +302,7 @@ function GraphCell({ row, lanes, width, merge, head }: { row: GraphRow; lanes: n
 
 /** Ref chips: the checked-out branch first and emphasized, then local branches,
  *  remotes and tags, each styled by kind. */
-export function RefChips({ refs }: { refs: GitRefDecoration[] }) {
+function RefChips({ refs }: { refs: GitRefDecoration[] }) {
   if (refs.length === 0) return null;
   const head = refs.find((r) => r.kind === "head");
   const order = { head: 0, local: 1, remote: 2, tag: 3 } as const;

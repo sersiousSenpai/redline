@@ -22,7 +22,7 @@ import type { GitActions } from "./actions";
 import type { GitRepository } from "./useGitRepository";
 import type { MenuItem, useContextMenu } from "./ui";
 
-export const BRANCH_PAGE = 500;
+const BRANCH_PAGE = 500;
 const GUTTER = 196;
 const AXIS_H = 26;
 const ROW_H = 34;
@@ -38,7 +38,7 @@ const FALLBACK_SIZE = { w: 1200, h: 640 };
  *  (tip chips), the smallest clickable spacing, and the largest fitted zoom. */
 const FIT_LEAD = 18;
 const FIT_TAIL = 170;
-export const MIN_SPACING = 8;
+const MIN_SPACING = 8;
 const MAX_FIT_ZOOM = 1;
 
 interface Viewport {
