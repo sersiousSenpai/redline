@@ -124,7 +124,6 @@ mod git_human;
 #[cfg(test)]
 mod git_test_support;
 mod query;
-mod queue;
 mod renderer_memory;
 mod repoicon;
 mod resolutions;
@@ -1233,9 +1232,8 @@ fn orch_review_link_key(review_id: &str) -> String {
 /// The map above is this boot's fast path and dies with the process, which is
 /// exactly the failure this fixes: a LIVE (held) orchestrated review that
 /// outlives a restart loses its plan link, so the human's verdict lands on
-/// nothing and the run's chip is stranded mid-flight. The parked path already
-/// had durability through `queue::note_parked`; this gives the held path the
-/// same, using the settings table already open in front of us.
+/// nothing and the run's chip is stranded mid-flight. The durable mirror uses
+/// the settings table already open in front of us.
 fn register_orchestration_review_link(db: &Database, review_id: &str, plan_sid: &str) {
     orchestration_review_links()
         .lock()
@@ -1247,15 +1245,14 @@ fn register_orchestration_review_link(db: &Database, review_id: &str, plan_sid: 
 }
 
 /// Resolve a review back to its plan session: this boot's map first (always
-/// current), then the overnight queue's parked entry, then the durable mirror.
-/// `None` means the review isn't orchestrated at all.
+/// current), then the durable mirror. `None` means the review isn't
+/// orchestrated at all.
 fn orchestration_review_link(db: &Database, review_id: &str) -> Option<String> {
     orchestration_review_links()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(review_id)
         .cloned()
-        .or_else(|| queue::parked_plan_for_review(db, review_id))
         .or_else(|| db.get_setting(&orch_review_link_key(review_id)))
 }
 
@@ -5231,10 +5228,8 @@ async fn handle_review_start(
         );
         if let Some(plan_sid) = q.plan.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             // Both links: the in-memory map (this boot's verdict path) plus a
-            // durable mirror, and the queue entry (which the overnight runner
-            // reads on its own).
+            // durable mirror.
             register_orchestration_review_link(&db, &session.review_id, plan_sid);
-            queue::note_parked(&db, plan_sid, &session.review_id);
             advance_run_state(
                 &app_state.app_handle,
                 &app_state.store,
@@ -12947,11 +12942,6 @@ pub fn run() {
             record_handoff_event,
             get_plan_run,
             resolve_plan_run,
-            queue::queue_start,
-            queue::queue_stop,
-            queue::queue_status,
-            queue::queue_get_config,
-            queue::queue_set_config,
             self_develop::self_develop_available,
             self_develop::self_develop_start,
             self_develop::self_develop_list,
@@ -13602,11 +13592,6 @@ pub fn run() {
             // store. Plain DB handle — no agent process of its own.
             app.manage(review::ReviewState::new(db.clone()));
             app.manage(ai_review::AiReviewState::new(db.clone()));
-            // Overnight queue (P0): runtime flag only — never armed at
-            // boot; it starts on an explicit `queue_start` or the keeper's
-            // ready-depth nudge over opted-in repos (both go through the
-            // same `queue_start` ignition).
-            app.manage(queue::QueueRuntime::new());
 
             // Voice agent (spoken plan discussion). One persistent `claude`
             // session per plan; same lazy-`claude` reasoning as the fork state.
@@ -13741,7 +13726,7 @@ pub fn run() {
             // compact / observe: no buttons, no configs, one quiet pill) and
             // the watch bus that re-homes the app's background timers (mirror
             // sync, ledger backup, orchestrate-stall sweep, review-staleness
-            // sweep, the ready-depth queue nudge) plus the scheduled one-shots
+            // sweep) plus the scheduled one-shots
             // (`keeper::schedule_once`, which the revise watchdog rides).
             // Spawned HERE, after the store, the held-POST map, and EVERY
             // managed state a bus act can reach — the staleness act calls

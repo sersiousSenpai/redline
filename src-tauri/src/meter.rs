@@ -1097,13 +1097,10 @@ mod tests {
         }
     }
 
-    /// The overnight queue no longer owns a child/pipe. Native task and
-    /// structured-model readers share cancellation-safe booking in the runner.
+    /// Native task and structured-model readers share cancellation-safe
+    /// booking in the runner.
     #[test]
-    fn native_queue_delegates_and_runner_books_on_drop() {
-        let queue=include_str!("queue.rs");
-        assert!(queue.contains("runner.start("));
-        assert!(!queue.contains("collect_turn("));
+    fn runner_books_on_drop() {
         let runner=include_str!("runner.rs");
         assert!(runner.contains("crate::turn::push_meta("));
         assert!(runner.contains(".meter.observe(&v)"));

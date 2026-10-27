@@ -594,7 +594,6 @@ mod tests {
         for (file, src) in [
             ("runner.rs", runner),
             ("lib.rs", include_str!("lib.rs")),
-            ("queue.rs", include_str!("queue.rs")),
             ("self_develop.rs", include_str!("self_develop.rs")),
         ] {
             for event in ["\"run-graph\"", "\"runner-changed\""] {

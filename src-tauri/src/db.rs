@@ -8499,24 +8499,6 @@ impl Database {
         rows.collect()
     }
 
-    // --- overnight queue (P0) -------------------------------------------------
-
-    /// The ready plan queue IS this query: sessions the human approved that
-    /// were never run — `status = 'approved' AND run_state IS NULL` (a plain
-    /// Approve leaves `run_state` NULL; every launch beacon sets it, and a
-    /// queued run that parks lands in `awaiting_review`, so nothing re-queues).
-    /// Oldest first (FIFO); returns `(session_id, project_path, project_name)`.
-    pub fn list_queue_ready_sessions(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(
-            "SELECT session_id, project_path, project_name FROM sessions
-             WHERE status = 'approved' AND run_state IS NULL
-             ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        rows.collect()
-    }
-
     // =======================================================================
     // PRODUCER FILING SEAM (unique anchor: producers-wave-work-filing)
     //
@@ -16698,51 +16680,6 @@ body.
     /// other combination — in review, aborted, or any `run_state` at all
     /// (including the parked `awaiting_review`) — stays out, so a queued run
     /// can never re-queue itself.
-    #[test]
-    fn queue_ready_sessions_are_approved_and_unrun_fifo() {
-        use crate::state::{AttachState, ReviewSession, SessionStatus};
-        let db = Database::open_in_memory().unwrap();
-        let mk = |sid: &str, status: SessionStatus, at: i64| ReviewSession {
-            session_id: sid.to_string(),
-            project_path: format!("/repo/{sid}"),
-            project_name: sid.to_string(),
-            created_at: at,
-            revisions: Vec::new(),
-            status,
-            attach_state: AttachState::Idle,
-            updated_at: at,
-            run_state: None,
-            backend: None,
-            model: None,
-        effort: None,
-        };
-        // Approved + unrun (the queue's targets), out of insertion order.
-        db.upsert_session(&mk("b-approved", SessionStatus::Approved, 200)).unwrap();
-        db.upsert_session(&mk("a-approved", SessionStatus::Approved, 100)).unwrap();
-        // Approved but already run (any run_state value excludes).
-        db.upsert_session(&mk("ran", SessionStatus::Approved, 50)).unwrap();
-        db.set_run_state("ran", "landed").unwrap();
-        // Approved but parked overnight — must NOT re-queue.
-        db.upsert_session(&mk("parked", SessionStatus::Approved, 60)).unwrap();
-        db.set_run_state("parked", "awaiting_review").unwrap();
-        // Approved and being built by a single agent ("Approve & build", or
-        // Build from "approved · not built") — must NOT queue a second build.
-        db.upsert_session(&mk("building", SessionStatus::Approved, 70)).unwrap();
-        db.set_run_state("building", "building").unwrap();
-        // Not approved at all.
-        db.upsert_session(&mk("reviewing", SessionStatus::InReview, 10)).unwrap();
-        db.upsert_session(&mk("dead", SessionStatus::Aborted, 20)).unwrap();
-
-        let ready = db.list_queue_ready_sessions().unwrap();
-        assert_eq!(
-            ready.iter().map(|(sid, _, _)| sid.as_str()).collect::<Vec<_>>(),
-            vec!["a-approved", "b-approved"],
-            "approved+unrun only, oldest first"
-        );
-        assert_eq!(ready[0].1, "/repo/a-approved", "repo path rides along");
-        assert_eq!(ready[0].2, "a-approved", "project name rides along");
-    }
-
     // --- T0.1: the friction metric measures OPEN comments -------------------
 
     /// A shared fixture for the friction metric: one `in_review` session

@@ -688,21 +688,10 @@ pub async fn restart_to_apply(
     }
 
     // 2. Stop admitting new work. From here nothing new starts: no agent
-    //    turns, no queue entries, no background jobs, and every mutating
+    //    turns, no background jobs, and every mutating
     //    request through the daemon is refused with a reason.
     gate("Redline is saving your work and restarting into the version you just prepared.");
     let un_gate = || ungate();
-
-    if let (Some(store), Some(rt)) = (
-        app.try_state::<crate::state::SessionStore>(),
-        app.try_state::<crate::queue::QueueRuntime>(),
-    ) {
-        crate::queue::stop_dequeuing(
-            &store.database(),
-            &rt,
-            "restarting into a new version",
-        );
-    }
 
     // 3. Ask the frontend to flush: editors, comments, drafts, collaboration
     //    state, pane layout. It answers with the state it wants back.

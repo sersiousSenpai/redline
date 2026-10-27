@@ -27,9 +27,7 @@
 //! actor or spawn site — the bus itself spawns no agents and lands no work.
 //! The ad hoc timers that used to run as their own threads/tasks are re-homed
 //! here (mirror sync, ledger backup, the orchestrate-stall sweep, the revise
-//! watchdog's scheduling, the review-staleness sweep), and the ready-depth
-//! watch nudges the overnight queue's existing ignition when opted-in work
-//! piles up while the machine is idle. New background behavior becomes a bus
+//! watchdog's scheduling, the review-staleness sweep). New background behavior becomes a bus
 //! entry, not a new thread — **the bus is the one scheduling vocabulary going
 //! forward**. The memory passes (organize / compaction / observations) remain
 //! the loop's own body, running beside the bus under their idle / growth /
@@ -136,19 +134,13 @@ const MIRROR_SYNC_EVERY: Duration = Duration::from_secs(120);
 /// The immediate startup snapshot stays at the setup site.
 const BACKUP_EVERY: Duration = Duration::from_secs(6 * 3600);
 /// Orchestrate-stall sweep cadence. The stall *window* itself stays
-/// `crate::ORCHESTRATE_STALL_WINDOW` (queue.rs consumes it from lib.rs);
-/// sweeping every minute detects a stall at most a minute late.
+/// `crate::ORCHESTRATE_STALL_WINDOW` in lib.rs; sweeping every minute
+/// detects a stall at most a minute late.
 const STALL_SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// Review-staleness sweep cadence — deliberately conservative. With the
 /// seen-twice rule a session reconciles 5–10 minutes after its held POST
 /// silently died, never on a single racy observation.
 const STALENESS_SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
-/// Ready-depth cadence: how often the hub even considers nudging the queue.
-const READY_DEPTH_SWEEP_EVERY: Duration = Duration::from_secs(5 * 60);
-/// The documented ready-depth threshold: the unfiltered ready-work frontier
-/// (`db::list_ready_work_items`, no project filter) must hold at least this
-/// many items before the overnight queue is nudged.
-pub(crate) const READY_DEPTH_THRESHOLD: usize = 3;
 /// Friction-filer cadence — deliberately conservative: recurring friction is
 /// a slow signal, so the bus considers filing at most every 6 hours.
 const FRICTION_FILE_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -547,67 +539,6 @@ fn staleness_act(ctx: &WatchCtx, _now: i64) {
     });
 }
 
-// --- ready-depth (the hub becomes continuous) -------------------------------
-
-/// The ready-depth gate (pure half): the overnight queue config is ENABLED
-/// (explicit user opt-in — repos allow-listed) AND the machine is idle. If
-/// the queue is not enabled this watch NEVER fires.
-pub fn queue_gate_open(queue_enabled: bool, idle: bool) -> bool {
-    queue_enabled && idle
-}
-
-/// The ready-depth predicate (pure half): frontier depth at-or-over the
-/// documented threshold.
-pub fn ready_over_threshold(count: usize, threshold: usize) -> bool {
-    count >= threshold
-}
-
-/// The composed ready-depth decision — exactly what the bus evaluates as
-/// gate && predicate, kept whole and pure for the tests.
-pub fn ready_depth_should_fire(
-    queue_enabled: bool,
-    idle: bool,
-    ready_count: usize,
-    threshold: usize,
-) -> bool {
-    queue_gate_open(queue_enabled, idle) && ready_over_threshold(ready_count, threshold)
-}
-
-/// The gate halves, read fresh: (queue enabled by explicit opt-in, machine
-/// idle by the keeper's own idle rule).
-fn ready_gate_halves(ctx: &WatchCtx, now: i64) -> (bool, bool) {
-    let enabled = !crate::queue::load_config(&ctx.db).repos.is_empty();
-    let lake_newest = ctx.db.lake_envelope().map(|e| e.newest).unwrap_or(0);
-    let idle = is_idle(crate::pty::last_pty_output_ms(), lake_newest, now, IDLE_WINDOW_MS);
-    (enabled, idle)
-}
-
-/// Cheap veto: skips the frontier query entirely while gated off.
-fn ready_watch_gate(ctx: &WatchCtx, now: i64) -> bool {
-    let (enabled, idle) = ready_gate_halves(ctx, now);
-    queue_gate_open(enabled, idle)
-}
-
-/// Evaluates the WHOLE composed decision (`ready_depth_should_fire`), gate
-/// halves re-read included — belt and braces, and the pure seam the tests
-/// pin stays the one place the semantics live.
-fn ready_watch_predicate(ctx: &WatchCtx, now: i64) -> bool {
-    let (enabled, idle) = ready_gate_halves(ctx, now);
-    let depth = ctx
-        .db
-        .list_ready_work_items(None, now, READY_DEPTH_THRESHOLD as i64)
-        .map(|v| v.len())
-        .unwrap_or(0);
-    ready_depth_should_fire(enabled, idle, depth, READY_DEPTH_THRESHOLD)
-}
-
-/// The watch wakes an existing spawn site (the queue's own ignition, via its
-/// nudge seam); it spawns nothing itself.
-fn ready_watch_act(ctx: &WatchCtx, _now: i64) {
-    tracing::info!("ready-depth watch: frontier at threshold — nudging the overnight queue");
-    crate::queue::nudge(&ctx.app);
-}
-
 // --- friction filer (producers wave) ----------------------------------------
 
 fn friction_mark_key(kind: &str) -> String {
@@ -809,14 +740,6 @@ pub(crate) static WATCHES: &[Watch] = &[
         gate: always,
         predicate: staleness_predicate,
         act: staleness_act,
-    },
-    Watch {
-        name: "ready-depth",
-        target_role: "orchestrator",
-        cadence: READY_DEPTH_SWEEP_EVERY,
-        gate: ready_watch_gate,
-        predicate: ready_watch_predicate,
-        act: ready_watch_act,
     },
     Watch {
         name: "friction-filer",
@@ -1022,7 +945,6 @@ mod tests {
         // The sweeps and the hub watch are registered, conservatively paced.
         assert_eq!(find("orchestrate-stall-sweep").cadence, Duration::from_secs(60));
         assert_eq!(find("review-staleness-sweep").cadence, Duration::from_secs(300));
-        assert_eq!(find("ready-depth").cadence, Duration::from_secs(300));
         // The friction filer: conservative cadence, the keeper as its actor.
         assert_eq!(find("friction-filer").cadence, Duration::from_secs(6 * 3600));
         assert_eq!(find("friction-filer").target_role, "keeper");
@@ -1065,20 +987,6 @@ mod tests {
         // A suspect that resolved in between is simply forgotten.
         let (detach, carried) = staleness_step(&one, &HashSet::new());
         assert!(detach.is_empty() && carried.is_empty());
-    }
-
-    #[test]
-    fn ready_depth_gate_and_threshold() {
-        let t = READY_DEPTH_THRESHOLD;
-        // Disabled queue → NEVER fires, even far over threshold.
-        assert!(!ready_depth_should_fire(false, true, t * 10, t));
-        // Enabled but not idle → no fire.
-        assert!(!ready_depth_should_fire(true, false, t * 10, t));
-        // Enabled + idle but under threshold → no fire.
-        assert!(!ready_depth_should_fire(true, true, t - 1, t));
-        // Enabled + idle + at-or-over threshold → nudges.
-        assert!(ready_depth_should_fire(true, true, t, t));
-        assert!(ready_depth_should_fire(true, true, t + 5, t));
     }
 
     // --- the friction filer (producers wave) --------------------------------
