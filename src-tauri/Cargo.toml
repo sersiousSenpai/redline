@@ -75,7 +75,6 @@ redline-activation = { path = "crates/redline-activation" }
 # SHA-256 for the append-only prompt/decision ledger's hash chain
 # (entry_hash = sha256(prev_hash ‖ canonical-json(event))). Not previously a dep.
 sha2 = "0.10"
-similar = "2"
 portable-pty = "0.8"
 base64 = "0.22"
 notify-debouncer-mini = "0.4"
@@ -203,17 +202,6 @@ block2 = "0.6"
 # directives, so no `build.rs` linker lines are needed. Same objc2 0.6 family
 # already in the tree via wry/tauri.
 objc2-speech = "0.3.2"     # SFSpeechRecognizer + recognition request/result/task
-# On-device text embeddings for memory's semantic arm (`embed.rs`). An OS
-# SERVICE, not a bundled model: zero model bytes in the binary, assets managed
-# by macOS, inference on the Neural Engine. That is what retires the old "no
-# embedding model enters the product" law — its real concerns were binary size
-# and auditability, and both are met directly (measure with
-# `node scripts/check-size.mjs`; every hit is labelled with the arm that found
-# it). Default features off: we need the two embedding APIs and nothing else
-# from the Natural Language framework.
-objc2-natural-language = { version = "0.3.2", default-features = false, features = [
-    "std", "NLEmbedding", "NLContextualEmbedding", "NLLanguage", "block2",
-] }
 objc2-avf-audio = "0.3.2"  # AVAudioEngine mic tap + PCM buffers
 objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
 # Typed WKWebView + AppKit classes for the embedded browser's new-window
