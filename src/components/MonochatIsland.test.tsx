@@ -797,12 +797,13 @@ describe("the pill", () => {
   it("wears the mark and its label, and nothing else: no bars, no dot, no count", async () => {
     await render();
     const skin = host.querySelector<HTMLElement>(".rl-portal-membrane")!;
-    const marks = skin.querySelectorAll("svg");
+    // The mark is a static svg blob under an HTML strike-line (PulseLogo).
+    const marks = skin.querySelectorAll(".rl-pulse");
     expect(marks).toHaveLength(1);
     expect(marks[0].getAttribute("aria-hidden")).toBe("true");
     expect(marks[0].hasAttribute("role")).toBe(false);
     expect(marks[0].querySelector(".rl-pulse-blades")?.getAttribute("data-state")).toBe("idle");
-    expect(Array.from(skin.children).map(child => child.tagName.toLowerCase() + (child.className && typeof child.className === "string" ? `.${child.className}` : ""))).toEqual(["svg", "span.rl-pill-label"]);
+    expect(Array.from(skin.children).map(child => child.tagName.toLowerCase() + (child.className && typeof child.className === "string" ? `.${child.className}` : ""))).toEqual(["span.rl-pulse", "span.rl-pill-label"]);
     await act(async () => writeSharedDraft(FRONT_DOOR_TEXT_KEY, "Half a thought"));
     expect(skin.querySelector(".rl-monochat-signal, .rl-monochat-draft, .rl-monochat-news")).toBeNull();
   });

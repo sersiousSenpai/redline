@@ -258,11 +258,8 @@
 }
 .rl-convo-working-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rl-convo-spinner {
-  flex: none;
   color: var(--color-mode-plan-fg);
-  animation: rl-convo-spin 1.1s linear infinite;
 }
-@keyframes rl-convo-spin { to { transform: rotate(360deg); } }
 .rl-convo-needs {
   flex: none;
   width: 7px;

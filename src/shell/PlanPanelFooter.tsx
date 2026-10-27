@@ -26,13 +26,14 @@
 //! what shows, never what happens.
 
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { ChevronDown, Hammer, LoaderCircle } from "lucide-react";
+import { ChevronDown, Hammer } from "lucide-react";
 
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "../lib/teamBuildItems";
 import { ridesSubmit } from "../lib/planSearch";
 import type { Comment } from "../types";
 import type { ManualPlanState, PlanStateTarget } from "../components/PlanStateMenu";
 import { MenuSurface } from "../components/ui/MenuSurface";
+import { Spinner as Ring } from "../components/Spinner";
 import { ContextHint } from "./ContextHint";
 
 const PlanStateMenu = lazy(() =>
@@ -127,7 +128,7 @@ export function PlanPanelFooter(p: PlanPanelFooterProps) {
 }
 
 function Spinner({ tone }: { tone: "plan" | "build" }) {
-  return <LoaderCircle aria-hidden size={13} strokeWidth={2} className="rl-stage-spin" data-tone={tone} />;
+  return <Ring size={12} className="rl-stage-spin" tone={tone} />;
 }
 
 function Status(p: PlanPanelFooterProps) {

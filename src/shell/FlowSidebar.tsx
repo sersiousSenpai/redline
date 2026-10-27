@@ -18,11 +18,12 @@
 
 import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  ChevronDown, CircleCheck, CircleCheckBig, Download, Eye, FilePenLine, FileText, FolderInput, Hammer, LoaderCircle,
+  ChevronDown, CircleCheck, CircleCheckBig, Download, Eye, FilePenLine, FileText, FolderInput, Hammer,
   MessageSquare, Play, Plus, TriangleAlert, X,
 } from "lucide-react";
 import type { SessionSidebarProps } from "../components/SessionSidebar";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "../components/RowMenu";
+import { Spinner } from "../components/Spinner";
 import type { ManualPlanState } from "../components/PlanStateMenu";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
 import {
@@ -48,8 +49,7 @@ const TONE: Record<StatusTone, string> = {
   quiet: "var(--color-ink-4)",
 };
 
-const ICON: Record<Exclude<StatusIcon, "dot">, typeof FileText> = {
-  spin: LoaderCircle,
+const ICON: Record<Exclude<StatusIcon, "dot" | "spin">, typeof FileText> = {
   alert: TriangleAlert,
   pen: FilePenLine,
   hammer: Hammer,
@@ -248,8 +248,11 @@ function Section({ section, open, onToggle, onAdd, children }: {
 function StatusGlyph({ icon, tone }: { icon: StatusIcon; tone: StatusTone }) {
   // Needs you trades the icon for a dot in its colour (5a).
   if (icon === "dot") return <i className="rl-sb-dot" aria-hidden style={{ background: TONE[tone] }} />;
+  // Working turns the shared ring: an HTML element the compositor spins. A
+  // rotating <svg> is repainted on the main thread every frame.
+  if (icon === "spin") return <Spinner size={12} className="rl-sb-spin" style={{ color: TONE[tone] }} />;
   const Icon = ICON[icon];
-  return <Icon size={14} aria-hidden className={icon === "spin" ? "rl-sb-spin" : undefined} style={{ color: TONE[tone] }} />;
+  return <Icon size={14} aria-hidden style={{ color: TONE[tone] }} />;
 }
 
 /** A live room this window is a guest in: its own green dot, who shares it,

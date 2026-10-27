@@ -1993,15 +1993,38 @@ p.rl-block-modified {
 /* ── Conversation-mode pulse (PulseLogo) ─────────────────────────────────
    The Redline strike-line simply spins, at a speed that tracks the fork's
    state: idle → still (the plain mark), listening → a slow receptive spin,
-   thinking/waiting and streaming → a steady working spin. */
-@keyframes rl-blades-spin {
-  to {
-    transform: rotate(360deg);
-  }
+   thinking/waiting and streaming → a steady working spin. The line is an
+   HTML bar over the static blob, not a <g> inside the svg: WebKit's legacy
+   SVG engine cannot composite a transform inside an svg, so the old <g>
+   repainted the mark — and the glass behind it — on every frame, for as long
+   as anything said "thinking" (docs/perf-budget.md "Idle heat"). */
+.rl-pulse {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  line-height: 0;
+  vertical-align: middle;
 }
+/* icon.svg's stroke, (355,355)→(669,669) at width 82 in a 1024 box: 51.4%
+   long with its round caps, 8% thick, centred, resting at 45°. */
 .rl-pulse-blades {
-  transform-box: fill-box;
-  transform-origin: center;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 51.4%;
+  height: 8%;
+  margin: -4% 0 0 -25.7%;
+  border-radius: 999px;
+  background: #0a0a0a;
+  transform: rotate(45deg);
+}
+@keyframes rl-blades-spin {
+  from {
+    transform: rotate(45deg);
+  }
+  to {
+    transform: rotate(405deg);
+  }
 }
 /* Listening (mic open): a slow, receptive spin. */
 .rl-pulse-blades[data-state="listening"] {
@@ -2241,6 +2264,23 @@ p.rl-block-modified {
 @keyframes rl-term-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+/* The shared working spinner (Spinner.tsx): a currentColor ring with a
+   transparent top, sized inline, turned by the compositor. An HTML element,
+   never an <svg>: WebKit repaints a rotating SVG every frame. */
+.rl-spinner {
+  display: inline-block;
+  flex: none;
+  box-sizing: border-box;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: rl-term-spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-spinner {
+    animation: none;
   }
 }
 

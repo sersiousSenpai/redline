@@ -340,10 +340,9 @@
   font-size: var(--rl-text-label);
 }
 
-/* A spinner turns; nothing else about it animates. */
+/* The shared ring (Spinner.tsx) in the stage's two tones. */
 .rl-stage-spin {
   flex: none;
-  animation: rl-stage-spin 1.2s linear infinite;
 }
 .rl-stage-spin[data-tone="build"] {
   color: var(--color-mode-build-fg);
@@ -351,17 +350,6 @@
 .rl-stage-spin[data-tone="plan"] {
   color: var(--color-mode-plan-fg);
 }
-@keyframes rl-stage-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .rl-stage-spin {
-    animation: none;
-  }
-}
-
 /* The comment composer, while a mark is being written beside the chat: a
    glass sheet over the plan's foot, the plan scrolling beneath it. */
 .rl-flow-compose-sheet {

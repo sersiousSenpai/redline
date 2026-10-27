@@ -5,7 +5,11 @@
 // to track the fork's state — still when idle, a slow receptive spin while
 // listening, a steady working spin while thinking or streaming. Animation is
 // CSS-keyframe driven (see `.rl-pulse-blades` in styles.css) and honors
-// `prefers-reduced-motion`.
+// `prefers-reduced-motion`. The strike-line is an HTML bar laid over a static
+// svg blob, so the spin is the compositor's alone: a transform on an element
+// INSIDE an svg is repainted by WebKit's legacy SVG engine on every frame,
+// which kept the renderer and the GPU process busy whenever anything said
+// "thinking".
 
 /** The red rounded-square blob of the Redline mark (verbatim from `icon.svg`). */
 const BLOB =
@@ -15,9 +19,9 @@ export type PulseState = "idle" | "listening" | "thinking" | "streaming";
 
 /** The animated Redline mark. `state` drives the spin (idle → still,
  *  listening → slow spin, thinking/streaming → steady working spin). The
- *  strike-line coords `(355,355)→(669,669)` are pixel-identical to the
- *  diagonal line in `icon.svg`, so the resting mark matches the app icon
- *  exactly. Sized in px; defaults to a small inline indicator. */
+ *  strike-line is drawn in CSS at `icon.svg`'s own geometry — the stroke from
+ *  (355,355) to (669,669), 82 wide, in a 1024 box — so the resting mark
+ *  matches the app icon. Sized in px; defaults to a small inline indicator. */
 export function PulseLogo({
   state,
   size = 18,
@@ -41,29 +45,16 @@ export function PulseLogo({
           ? "Claude is replying"
           : "Conversation mode");
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 1024 1024"
+    <span
+      className="rl-pulse"
+      data-state={state}
       {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": label })}
-      style={{ flexShrink: 0, overflow: "visible" }}
+      style={{ width: size, height: size }}
     >
-      <path d={BLOB} fill="#E5342B" />
-      <g
-        className="rl-pulse-blades"
-        data-state={state}
-        style={{ transformBox: "fill-box", transformOrigin: "center" }}
-      >
-        <line
-          x1={355}
-          y1={355}
-          x2={669}
-          y2={669}
-          stroke="#0A0A0A"
-          strokeWidth={82}
-          strokeLinecap="round"
-        />
-      </g>
-    </svg>
+      <svg width={size} height={size} viewBox="0 0 1024 1024" aria-hidden style={{ display: "block", overflow: "visible" }}>
+        <path d={BLOB} fill="#E5342B" />
+      </svg>
+      <span className="rl-pulse-blades" data-state={state} />
+    </span>
   );
 }

@@ -528,3 +528,156 @@ describe("paint guard (perf rule 6)", () => {
     }
   });
 });
+
+// ── SVG stays still ───────────────────────────────────────────────────────
+//
+// A transform animation is compositor-only on an HTML element. Inside an
+// <svg> it is not: WebKit's legacy SVG engine lays out and repaints a
+// transformed <g>, <path> or <line> on the main thread every frame, and the
+// repaint takes the layer it sits in — a glass pill, a sidebar row — with it.
+// Measured 2026-10-27: six marks spinning an inner <g> held the GPU process at
+// 7% and 250 MB; the same six as HTML rings cost 0.1%. The svg root itself is
+// banned with its children, for one rule that needs no engine knowledge: a
+// spinner is an HTML element (components/Spinner.tsx), never an svg.
+
+const SVG_TAGS = new Set([
+  "svg", "g", "path", "circle", "ellipse", "line", "polyline", "polygon", "rect", "use", "text", "tspan",
+  "image", "symbol", "defs", "clipPath", "mask", "marker", "pattern", "linearGradient", "radialGradient", "stop",
+  "foreignObject",
+]);
+
+/** The class names any stylesheet rule animates (`animation` or
+ *  `animation-name`, other than `none`), each with where it is declared, and
+ *  the selectors that animate an SVG element by tag. Innermost blocks only,
+ *  so a rule under @media keeps its own selector. */
+function animatedSelectors(sources: Source[]): { classes: Map<string, string>; tagged: string[] } {
+  const classes = new Map<string, string>();
+  const tagged: string[] = [];
+  const tag = new RegExp(`(^|[\\s>+~,])(${[...SVG_TAGS].join("|")})(?=$|[\\s>+~,.:#[])`);
+  for (const { rel, text } of sources) {
+    if (!rel.endsWith(".css")) continue;
+    const css = stripComments(text);
+    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/(^|[\s;])animation(-name)?\s*:(?!\s*none\b)/.test(m[2])) continue;
+      const selector = m[1].trim();
+      if (/^(from|to|\d+%)/.test(selector) || selector.startsWith("@")) continue;
+      const where = `${rel}:${lineOf(css, m.index! + m[1].search(/\S/))}`;
+      for (const cls of selector.matchAll(/\.([\w-]+)/g)) if (!classes.has(cls[1])) classes.set(cls[1], where);
+      for (const part of selector.split(",")) if (tag.test(part.trim())) tagged.push(`${where}: \`${part.trim()}\` animates an SVG element`);
+    }
+  }
+  return { classes, tagged };
+}
+
+/** The attribute text of the JSX tag opening at `from` (just past its name),
+ *  up to its `>` — braces and strings skipped, so an arrow in a handler
+ *  doesn't end it early. */
+function tagAttrs(code: string, from: number): string | null {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = from; i < code.length; i++) {
+    const c = code[i];
+    if (quote) {
+      if (c === "\\") i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "{") depth++;
+    else if (c === "}") depth--;
+    else if (c === ">" && depth === 0) return code.slice(from, i);
+  }
+  return null;
+}
+
+/** Every class a tag's `className` can carry: a string literal, or each
+ *  string literal inside an expression (`cond ? "a" : "b"`, a template). */
+function classesOf(attrs: string): string[] {
+  const m = /\bclassName\s*=\s*/.exec(attrs);
+  if (!m) return [];
+  const rest = attrs.slice(m.index + m[0].length);
+  if (rest[0] === '"' || rest[0] === "'") return rest.slice(1, rest.indexOf(rest[0], 1)).split(/\s+/).filter(Boolean);
+  if (rest[0] !== "{") return [];
+  const expr = rest.slice(1, closeOf(rest, 0) - 1);
+  const out: string[] = [];
+  for (const lit of expr.matchAll(/["'`]((?:[^"'`\\]|\\.)*)["'`]/g)) {
+    out.push(...lit[1].replace(/\$\{[^}]*\}/g, " ").split(/\s+/).filter(Boolean));
+  }
+  return out;
+}
+
+/** The icon components a file imports from lucide-react: each renders an
+ *  <svg>, so a class on one is a class on an svg. */
+function lucideNames(code: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of code.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']lucide-react["']/g)) {
+    for (const name of m[1].split(",")) {
+      const local = name.trim().split(/\s+as\s+/).pop()?.trim();
+      if (local) out.add(local);
+    }
+  }
+  return out;
+}
+
+function svgAnimationViolations(sources: Source[]): string[] {
+  const { classes, tagged } = animatedSelectors(sources);
+  const out = [...tagged];
+  for (const { rel, text } of sources) {
+    if (!/\.tsx?$/.test(rel)) continue;
+    const code = stripScriptComments(text);
+    const icons = lucideNames(code);
+    for (const m of code.matchAll(/<([A-Za-z][\w.]*)(?=[\s/>])/g)) {
+      const name = m[1];
+      if (!SVG_TAGS.has(name) && !icons.has(name)) continue;
+      const attrs = tagAttrs(code, m.index! + m[0].length);
+      if (attrs === null) continue;
+      const at = `${rel}:${lineOf(code, m.index!)} <${name}>`;
+      if (/\banimation(Name)?\s*:/.test(attrs)) out.push(`${at}: animated inline — an SVG element repaints every frame it moves; animate an HTML element instead`);
+      for (const cls of classesOf(attrs)) {
+        const where = classes.get(cls);
+        if (where) out.push(`${at}: wears .${cls}, which ${where} animates — an SVG element repaints every frame it moves; spin an HTML element (Spinner) instead`);
+      }
+    }
+  }
+  return out;
+}
+
+describe("paint guard: SVG stays still", () => {
+  it("never animates an <svg>, anything inside one, or an icon component", () => {
+    expect(svgAnimationViolations(sources)).toEqual([]);
+  });
+
+  it("would have caught the old spinners: a lucide icon wearing a spin class, and the mark's inner <g>", () => {
+    const css = {
+      rel: "a.css",
+      text: `@keyframes turn { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: no-preference) { .rl-sb-spin { animation: turn 1.1s linear infinite; } }
+        .rl-pulse-blades[data-state="thinking"] { animation: turn 1.2s linear infinite; }
+        .still { animation: none; }
+        .rl-fold svg[data-open] { transform: rotate(180deg); }`,
+    };
+    const tsx = {
+      rel: "a.tsx",
+      text: `import { LoaderCircle as Loader, Hammer } from "lucide-react";
+        const a = <Loader size={14} className={busy ? "rl-sb-spin" : undefined} onClick={() => x > 1} />;
+        const b = <svg><g className="rl-pulse-blades" data-state={s}><line x1={1} /></g></svg>;
+        const c = <span className="rl-sb-spin" />;
+        const d = <Hammer className="still" />;
+        const e = <svg className={\`icon \${tone}\`} />;`,
+    };
+    expect(svgAnimationViolations([css, tsx])).toEqual([
+      expect.stringContaining("a.tsx:2 <Loader>: wears .rl-sb-spin, which a.css:2 animates"),
+      expect.stringContaining("a.tsx:3 <g>: wears .rl-pulse-blades, which a.css:3 animates"),
+    ]);
+  });
+
+  it("flags a stylesheet that animates an svg by tag, and an inline animation on one", () => {
+    const css = { rel: "b.css", text: `.row svg { animation: turn 1s linear infinite; }\n.row path, .ok { animation-name: turn; }` };
+    const tsx = { rel: "b.tsx", text: `const a = <circle style={{ animation: "turn 1s linear infinite" }} />;` };
+    expect(svgAnimationViolations([css, tsx])).toEqual([
+      expect.stringContaining("b.css:1: `.row svg` animates an SVG element"),
+      expect.stringContaining("b.css:2: `.row path` animates an SVG element"),
+      expect.stringContaining("b.tsx:1 <circle>: animated inline"),
+    ]);
+  });
+});

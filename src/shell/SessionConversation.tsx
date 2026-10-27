@@ -34,9 +34,10 @@
 //! 520px, so it is drawn here too.
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
-import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, LoaderCircle, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
 import { MarkdownView } from "../components/MarkdownView";
 import { QueueTray } from "../components/QueueTray";
+import { Spinner } from "../components/Spinner";
 import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "../lib/convo/api";
 import { questionsToRelease } from "../lib/askRelease";
 import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "../lib/convo/types";
@@ -849,7 +850,7 @@ function WorkingRow({ status, onStop }: { status: WorkingStatus; onStop: (() => 
       {status.kind === "needs-you" ? (
         <span className="rl-convo-needs" aria-hidden />
       ) : (
-        <LoaderCircle size={13} aria-hidden className="rl-convo-spinner" />
+        <Spinner size={12} className="rl-convo-spinner" />
       )}
       <span className="rl-convo-working-label">{status.label}</span>
       {status.since !== null && <Elapsed since={status.since} />}
