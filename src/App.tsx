@@ -9337,8 +9337,7 @@ function App() {
       }, (e) => setToast(String(e), 6000));
     },
   });
-  // What only the flow sidebar reads. The classic sidebar gets none of it,
-  // so a chats refresh or the door opening never re-renders it.
+  // What the sidebar reads beyond the sessions: both shells now (W1).
   // Launches are the stage's registry (lib/flowSessions): every launch until
   // its plan arrives or its terminal closes, the one on the stage active.
   const flowSidebarData = useMemo(
@@ -9347,13 +9346,11 @@ function App() {
       activeLaunchId,
       working: flowWorking,
       needs: flowNeeds,
-      ...(isFlowShell()
-        ? {
-            startActive: flowStartOnStage && !roomChat,
-            chats,
-            activeChatId: roomChat ? chatId : null,
-          }
-        : {}),
+      // Chats are rows in both shells (the frame's "○ Billing chat"): the
+      // open one reads selected while the door's room holds it.
+      chats,
+      activeChatId: roomChat ? chatId : null,
+      ...(isFlowShell() ? { startActive: flowStartOnStage && !roomChat } : {}),
     }),
     [flowStartOnStage, roomChat, chats, chatId, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
