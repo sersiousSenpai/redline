@@ -81,7 +81,7 @@ import {
   writeQueuedSends,
 } from "./convo/readiness";
 import type { TermState } from "../../lib/termState";
-import { AskCard, TerminalAskCard } from "./AskCard";
+import { AskCard, StoppedCard, TerminalAskCard } from "./AskCard";
 import { setTerminalAsking } from "../../lib/openAsks";
 import { SessionComposer } from "./SessionComposer";
 import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
@@ -137,6 +137,10 @@ export interface SessionConversationProps {
   /** This terminal's derived state (`deriveTermState`), when the stage has
    *  it: its needs-you and working count before any event does. */
   termState?: TermState | null;
+  /** Resume the same conversation to carry on its approved plan's build
+   *  (App's `buildApproved("same")`): the Stopped card's Retry when the
+   *  agent died mid-build. */
+  onRetryBuild?: (() => void) | null;
   /** The voice panel is open on this conversation. */
   talking?: boolean;
   /** Open or close the voice panel; without it, Talk raises
@@ -537,13 +541,25 @@ function SessionConversation(props: SessionConversationProps) {
   const showWorking = !!status && status.kind !== "plan-ready" && (working || status.kind === "needs-you");
   // The CLI holds a dialog of its own with no card behind it.
   const terminalAsk = view.openAsks.length === 0 && view.readiness?.ready === false && view.readiness.blocker === "native_dialog";
+  // The agent's CLI is gone (its terminal reads exited): the Detached notice,
+  // with Retry for a session building its approved plan.
+  const stopped = props.termState === "exited" && view.openAsks.length === 0;
+  const building = props.planState?.kind === "build";
   const tail =
-    view.openAsks.length > 0 || terminalAsk || showWorking ? (
+    view.openAsks.length > 0 || terminalAsk || showWorking || stopped ? (
       <>
+        {stopped && (
+          <StoppedCard
+            harness={props.harness === "codex" ? "Codex" : "Claude"}
+            building={building}
+            onRetry={building ? props.onRetryBuild ?? null : null}
+            onShowTerminal={onShowTerminal}
+          />
+        )}
         {view.openAsks.map((ask) => (
           <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
         ))}
-        {terminalAsk && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
         {showWorking && <WorkingRow status={status!} onStop={terminalId ? stop : null} />}
       </>
     ) : null;

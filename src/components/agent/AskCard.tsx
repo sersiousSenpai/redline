@@ -11,7 +11,7 @@
 //! the focus rim, because it is the one thing waiting on you.
 
 import { useState } from "react";
-import { CircleHelp, ShieldQuestion } from "lucide-react";
+import { CircleHelp, CirclePause, ShieldQuestion } from "lucide-react";
 import { answerAsk } from "./convo/api";
 import type { AskAnswer, AskQuestion, ConvoAsk } from "./convo/types";
 
@@ -237,5 +237,47 @@ function Questions({
         {terminal}
       </div>
     </>
+  );
+}
+
+/** The agent's CLI is gone from its terminal (killed, crashed, exited) — the
+ *  Detached notice of a session past its review. A plan in review gets the
+ *  plan's own Restore; one approved and building gets Retry, which resumes
+ *  the same conversation to carry on the build (App's `buildApproved`). Never
+ *  a bare "Needs you": a dead agent needs nothing it can say. */
+export function StoppedCard({ harness, building, onRetry, onShowTerminal }: {
+  harness: string;
+  building: boolean;
+  onRetry: (() => void) | null;
+  onShowTerminal: () => void;
+}) {
+  const [retrying, setRetrying] = useState(false);
+  return (
+    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label={`${harness} stopped`} data-ask="stopped">
+      <div className="rl-ask-head">
+        <CirclePause size={14} aria-hidden className="rl-ask-icon" />
+        <span>{building ? `${harness} stopped before the build finished` : `${harness} stopped`}</span>
+      </div>
+      <div className="rl-ask-actions">
+        {onRetry && (
+          <button
+            type="button"
+            className="rl-ask-btn"
+            data-primary
+            disabled={retrying}
+            onClick={() => {
+              setRetrying(true);
+              onRetry();
+            }}
+          >
+            {retrying ? "Resuming…" : "Retry"}
+          </button>
+        )}
+        <span className="rl-ask-spacer" />
+        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
+          Open Terminal
+        </button>
+      </div>
+    </section>
   );
 }

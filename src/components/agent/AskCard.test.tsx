@@ -7,7 +7,7 @@ import type { AskQuestion, ConvoAsk } from "./convo/types";
 
 const { answers } = vi.hoisted(() => ({ answers: [] as unknown[] }));
 vi.mock("./convo/api", () => ({ answerAsk: vi.fn(async (askId: string, answer: unknown) => void answers.push({ askId, answer })) }));
-import { AskCard, answerFor } from "./AskCard";
+import { AskCard, StoppedCard, answerFor } from "./AskCard";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root, host: HTMLDivElement;
@@ -82,5 +82,25 @@ describe("AskCard", () => {
     expect(answer().disabled).toBe(false);
     await act(async () => answer().click());
     expect(answers).toEqual([{ askId: "q1", answer: { kind: "answers", answers: { "Which?": "A", "Also?": "Y" } } }]);
+  });
+});
+
+describe("StoppedCard: an agent that died is never a bare needs-you", () => {
+  it("offers Retry mid-build, and the terminal", async () => {
+    const onRetry = vi.fn(), onShowTerminal = vi.fn();
+    await act(async () => root.render(<StoppedCard harness="Claude" building onRetry={onRetry} onShowTerminal={onShowTerminal} />));
+    expect(host.textContent).toContain("Claude stopped before the build finished");
+    const retry = [...host.querySelectorAll("button")].find((b) => b.textContent === "Retry")!;
+    await act(async () => retry.click());
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(retry.textContent).toBe("Resuming…");
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Open Terminal")!.click());
+    expect(onShowTerminal).toHaveBeenCalledOnce();
+  });
+
+  it("outside a build there is no Retry (a plan in review has its own Restore)", async () => {
+    await act(async () => root.render(<StoppedCard harness="Claude" building={false} onRetry={null} onShowTerminal={() => {}} />));
+    expect(host.textContent).toContain("Claude stopped");
+    expect([...host.querySelectorAll("button")].some((b) => b.textContent === "Retry")).toBe(false);
   });
 });

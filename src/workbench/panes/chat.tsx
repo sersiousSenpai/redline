@@ -54,7 +54,7 @@ export interface AgentPaneViewProps {
   planOpen: boolean;
   talking: boolean;
   onCliView: AgentPaneProps["onCliView"];
-  handlers: { onFork: NonNullable<AgentPaneProps["onFork"]>; onOpenPlan: AgentPaneProps["onOpenPlan"]; onTalk: AgentPaneProps["onTalk"] };
+  handlers: { onFork: NonNullable<AgentPaneProps["onFork"]>; onOpenPlan: AgentPaneProps["onOpenPlan"]; onTalk: AgentPaneProps["onTalk"]; onRetryBuild?: () => void };
 }
 
 export function AgentPaneView({ data, ctx, facts, launches, liveTermIds, termState, planOpen, talking, onCliView, handlers }: AgentPaneViewProps) {
@@ -88,6 +88,7 @@ export function AgentPaneView({ data, ctx, facts, launches, liveTermIds, termSta
         talking={talking}
         onTalk={handlers.onTalk}
         planState={own ? facts.planState : null}
+        onRetryBuild={own ? handlers.onRetryBuild ?? null : null}
         fallbackModel={own ? facts.fallbackModel : null}
         fallbackMode={ownSummary?.status === "in_review" ? "plan" : null}
       />

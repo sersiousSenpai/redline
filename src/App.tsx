@@ -9158,6 +9158,9 @@ function App() {
     onTalk: flowTalk,
     onOpenPlan: () => wb.dispatch({ type: "openSurface", kind: "plan" }),
     onFork: (cliSessionId: string, projectPath: string | null) => void forkCliSession(cliSessionId, projectPath),
+    // The Stopped card's Retry on an agent that died mid-build: resume the
+    // same conversation to carry on the approved plan.
+    onRetryBuild: () => void buildApproved("same"),
   });
   const activeAgentSummary = activeId ? summaries.find((s) => s.sessionId === activeId) ?? null : null;
   const activeAgentMode = activeAgentSummary
@@ -9378,6 +9381,11 @@ function App() {
       case "chat": {
         if (pane.data.source === "companion") return <CompanionPane host={chatHost} ctx={ctx} />;
         const kind = terminalKinds.get(pane.data.terminalId);
+        // The wall's own derivation when it has one (a dead agent reads
+        // exited there, never its last hook's needs-you); a PTY gone from the
+        // live list exited; else the hooks.
+        const derived = termStatuses.get(pane.data.terminalId)?.state ?? null;
+        const ptyGone = !!liveTermIds && !liveTermIds.includes(pane.data.terminalId);
         return (
           <AgentPaneView
             data={pane.data}
@@ -9385,7 +9393,7 @@ function App() {
             facts={agentFacts}
             launches={flowLaunches}
             liveTermIds={liveTermIds}
-            termState={kind === "needs-you" ? "needs-you" : kind === "working" ? "working" : null}
+            termState={ptyGone ? "exited" : derived ?? (kind === "needs-you" ? "needs-you" : kind === "working" ? "working" : null)}
             planOpen={view.visibleKinds.includes("plan")}
             talking={voiceDocked}
             onCliView={setCliView}

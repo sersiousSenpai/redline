@@ -337,6 +337,9 @@ export function workingStatus(
 ): WorkingStatus | null {
   const turn = view.activeTurn;
   const since = turn?.startedAt ?? null;
+  // The agent is gone from its terminal: nothing is working and nothing
+  // can need you — the turn it left open is over (the Stopped card says so).
+  if (options.term === "exited") return null;
   if (view.openAsks.length > 0 || options.term === "needs-you") return { kind: "needs-you", label: "Needs you", since };
   if (options.planHeld) return { kind: "plan-ready", label: PLAN_HELD_LABEL, since: null };
   const held = waitingPlan(view.lastTurn);
