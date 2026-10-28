@@ -22,6 +22,11 @@ import {
   isUsableTermSize,
   type ResizeScheduler,
 } from "../lib/termSize";
+import {
+  cancelTerminalWork,
+  deferTerminalWork,
+  terminalSwapSettling,
+} from "../lib/terminalSwap";
 
 interface TerminalViewProps {
   /** Stable per-tab id; keys the backend PTY and filters its events. */
@@ -83,15 +88,20 @@ const COL_FIT_DUTY = 6;
  *  reflows a few times during a drag rather than appearing frozen. */
 const COL_FIT_MIN_GAP_MS = 120;
 
-/** Ceiling on simultaneously live WebGL renderers. WebKit caps live WebGL
- *  contexts per process (~16), and at the cap it loses the OLDEST context
- *  rather than refusing the new one — so an unbounded "one context per mounted
- *  terminal" degrades the longest-lived terminals silently, exactly as a long
- *  session starts tiling many at once. Contexts are therefore tied to
- *  *visibility* (created on show, disposed on hide), which bounds them to the
- *  tile count, and this ceiling backstops even that: a terminal past it keeps
- *  xterm's DOM renderer — a deliberate fallback instead of a context loss that
- *  never comes back. */
+/** WebGL renderers, and why a hidden terminal keeps its own. WebKit caps live
+ *  WebGL contexts per process (~16) and at the cap loses the OLDEST context
+ *  rather than refusing the new one, so contexts come from the shared
+ *  graphics allocator (lib/graphicsAllocation), whose ceiling a terminal past
+ *  it answers with xterm's DOM renderer — a deliberate fallback instead of a
+ *  context loss that never comes back.
+ *
+ *  A context is acquired when a terminal is first shown and kept across
+ *  hides. Giving it back on every hide (the old rule) cost ~80 ms a tile:
+ *  xterm builds a DOM renderer in the WebGL one's place, so hiding seven
+ *  tiles of a wall swap cost over half a second (spike W0.3). It is given
+ *  back when the terminal goes, on a context loss, or when a SHOWN terminal
+ *  finds the allocator full: then the terminal hidden longest yields its
+ *  context, after the swap has painted (`hiddenGraphics` below). */
 // The shared graphics allocator also reserves the Memory Cosmos context.
 
 // The fence lives in src/lib/ptyFence.ts (pure, unit-tested); re-exported
@@ -104,6 +114,22 @@ export { enqueuePtyOp };
 const termFocusers = new Map<string, () => void>();
 export function focusTerminalView(id: string): void {
   termFocusers.get(id)?.();
+}
+
+// Hidden terminals still holding a WebGL context, longest hidden first: the
+// ones a shown terminal may ask to yield when the allocator is full. Each
+// value gives that terminal's context back.
+const hiddenGraphics = new Map<string, () => void>();
+
+/** Give back the context of the terminal hidden longest. False when no
+ *  hidden terminal holds one. */
+function reclaimHiddenGraphics(): boolean {
+  const first = hiddenGraphics.entries().next();
+  if (first.done) return false;
+  const [hiddenId, give] = first.value;
+  hiddenGraphics.delete(hiddenId);
+  give();
+  return true;
 }
 
 // xterm.js's built-in defaults (the Tango palette), spelled out so the dark
@@ -556,6 +582,14 @@ export const TerminalView = memo(function TerminalView({
       // a column change waits for the drag to end (see applyFit). The PTY
       // resize is debounced either way, so the shell is told once, at rest.
       if (!visibleRef.current) return;
+      // A wall swap reshapes the grid under every kept tile at once: their
+      // column reflows wait for the new wall to paint, one fit each.
+      if (terminalSwapSettling()) {
+        deferTerminalWork(`fit:${id}`, () => {
+          if (visibleRef.current) applyFit({ immediate: true });
+        });
+        return;
+      }
       applyFit({ immediate: false, live: isResizing() });
     });
     ro.observe(host);
@@ -596,6 +630,7 @@ export const TerminalView = memo(function TerminalView({
       disposed = true;
       if (termFocusers.get(id) === focusThis) termFocusers.delete(id);
       ro.disconnect();
+      cancelTerminalWork(`fit:${id}`);
       schedulerRef.current?.cancel();
       dataSub.dispose();
       keySub.dispose();
@@ -620,49 +655,89 @@ export const TerminalView = memo(function TerminalView({
   }, [xt]);
 
   // GPU renderer: offloads cell rendering to WebGL so a fast stream doesn't
-  // peg the main thread compositing the DOM. Scoped to VISIBILITY, not mount —
-  // a hidden terminal paints nothing, and holding a context for it is what
-  // walks the app into WebKit's process-wide cap (see MAX_WEBGL). The show
-  // transition already pays for a full repaint (the [visible] effect's
-  // `term.refresh`), so the renderer swap costs nothing extra. WebGL can also
-  // fail to init or lose its context at runtime — every path falls back to
-  // xterm's default renderer rather than breaking the terminal, and the next
-  // show transition tries again.
-  useEffect(() => {
-    if (!visible || !xt) return;
+  // peg the main thread compositing the DOM. Acquired on the first show and
+  // KEPT across hides (see the note on `hiddenGraphics`): a hidden terminal
+  // paints nothing, so its context only waits, and keeping it is what spares
+  // a wall swap the renderer rebuild per hidden tile. WebGL can fail to init
+  // or lose its context at runtime — every path falls back to xterm's
+  // default renderer rather than breaking the terminal, and the next show
+  // tries again.
+  const xtRef = useRef(xt);
+  xtRef.current = xt;
+  const giveGraphicsRef = useRef<(() => void) | null>(null);
+  /** Load a WebGL renderer into this terminal. True when there is nothing
+   *  more to do (loaded, already held, or no WebGL here at all); false when
+   *  the allocator is full. */
+  const loadGraphics = useCallback((): boolean => {
     const term = termRef.current;
-    if (!term) return;
+    const mods = xtRef.current;
+    if (!term || !mods) return true;
+    if (giveGraphicsRef.current) return true;
     const releaseGraphics = acquireGraphics("terminal");
-    if (!releaseGraphics) return;
+    if (!releaseGraphics) return false;
     let addon: WebglAddon;
     try {
-      addon = new xt.WebglAddon();
+      addon = new mods.WebglAddon();
     } catch {
       releaseGraphics();
-      return; /* no WebGL here — xterm's default renderer stays active */
+      return true; /* no WebGL here — xterm's default renderer stays active */
     }
-    // Shared by context loss and the hide/unmount cleanup, which can both fire
-    // for one addon — the counter must move exactly once either way.
-    let dropped = false;
-    const drop = () => {
-      if (dropped) return;
-      dropped = true;
+    // Shared by context loss, a reclaim and the terminal going, which can
+    // all fire for one addon — the counter must move exactly once.
+    let given = false;
+    const give = () => {
+      if (given) return;
+      given = true;
       releaseGraphics();
+      if (hiddenGraphics.get(id) === give) hiddenGraphics.delete(id);
+      if (giveGraphicsRef.current === give) giveGraphicsRef.current = null;
       try {
         addon.dispose();
       } catch {
         /* already torn down with the terminal */
       }
     };
-    addon.onContextLoss(drop);
+    addon.onContextLoss(give);
     try {
       term.loadAddon(addon);
     } catch {
-      drop();
+      give();
+      return true;
+    }
+    giveGraphicsRef.current = give;
+    return true;
+  }, [id]);
+
+  // The terminal going (its tab closed, or a StrictMode/HMR remount) is the
+  // one planned moment a context is given back.
+  useEffect(() => {
+    if (!xt) return;
+    return () => giveGraphicsRef.current?.();
+  }, [xt, id]);
+
+  useEffect(() => {
+    if (!xt) return;
+    const give = giveGraphicsRef.current;
+    if (!visible) {
+      // Hidden, holding a context: last in the line to yield one.
+      if (give) {
+        hiddenGraphics.delete(id);
+        hiddenGraphics.set(id, give);
+      }
       return;
     }
-    return drop;
-  }, [visible, xt]);
+    hiddenGraphics.delete(id);
+    if (loadGraphics()) return;
+    // The allocator is full of terminals, some hidden: the one hidden
+    // longest yields — after the swap paints, because its renderer rebuild
+    // is exactly the cost the swap must not pay.
+    const key = `gl:${id}`;
+    deferTerminalWork(key, () => {
+      if (!visibleRef.current || giveGraphicsRef.current) return;
+      if (reclaimHiddenGraphics()) loadGraphics();
+    });
+    return () => cancelTerminalWork(key);
+  }, [visible, xt, id, loadGraphics]);
 
   // Settings → Terminal applies live: a new size re-fits the grid.
   useEffect(() => {
@@ -708,10 +783,16 @@ export const TerminalView = memo(function TerminalView({
   }, [applyFit]);
 
   // Becoming visible: the host had no usable geometry while hidden, so re-fit
-  // on the next frame and tell the PTY its real size.
+  // and tell the PTY its real size — on a later frame, through the deferred
+  // terminal work, so a wall showing seven tiles at once spreads their drains,
+  // fits and repaints across frames instead of stacking them in one, and so a
+  // swap's own frame paints first (lib/terminalSwap).
   useEffect(() => {
     if (!visible) return;
-    const raf = requestAnimationFrame(() => {
+    const key = `show:${id}`;
+    deferTerminalWork(key, () => {
+      // This fit is the one the swap's resizes were waiting for.
+      cancelTerminalWork(`fit:${id}`);
       const term = termRef.current;
       // Flush whatever streamed in while hidden, in one write, before re-fitting
       // and repainting — so the tab shows fully caught up the instant it opens.
@@ -722,13 +803,13 @@ export const TerminalView = memo(function TerminalView({
         // can come back with a stale xterm render surface.
         term.refresh(0, term.rows - 1);
       }
-      // Explicit user opens (caret, footer, ⇧↓, tab switch) focus the
+      // Explicit user opens (caret, a sidebar row, a tab switch) focus the
       // terminal; programmatic reveals arm the suppress window and don't,
       // and nothing takes the caret from where the user is writing.
       const host = hostRef.current;
       if (host && revealMayFocus(host)) term?.focus();
     });
-    return () => cancelAnimationFrame(raf);
+    return () => cancelTerminalWork(key);
   }, [visible, id, drainPending, applyFit]);
 
   return (

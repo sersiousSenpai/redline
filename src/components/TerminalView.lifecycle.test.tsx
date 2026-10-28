@@ -21,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   drops: new Set<(event: { payload: unknown }) => void>(),
   events: new Map<string, Set<(event: { payload: unknown }) => void>>(),
   nextPid: 100,
+  // The renderer and geometry seams the swap-cost tests read.
+  webgl: { created: 0, disposed: 0 },
+  fits: 0,
+  dims: { cols: 80, rows: 24 },
+  resizeObservers: [] as (() => void)[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke, Channel: class { onmessage = (_bytes: ArrayBuffer) => {}; } }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async (name: string, fn: (event: { payload: unknown }) => void) => {
@@ -61,8 +66,8 @@ vi.mock("../lib/xtermLoader", () => {
     focus() { this.focused++; }
     dispose() { this.disposed = true; }
   }
-  class FitAddon { fit() {} proposeDimensions() { return { cols: 80, rows: 24 }; } }
-  class WebglAddon { onContextLoss() {} dispose() {} }
+  class FitAddon { fit() { mocks.fits++; const t = mocks.terminals[mocks.terminals.length - 1] as unknown as { cols: number; rows: number }; t.cols = mocks.dims.cols; t.rows = mocks.dims.rows; } proposeDimensions() { return { ...mocks.dims }; } }
+  class WebglAddon { constructor() { mocks.webgl.created++; } onContextLoss() {} dispose() { mocks.webgl.disposed++; } }
   class Unicode11Addon {}
   const mods = { Terminal, FitAddon, WebglAddon, Unicode11Addon };
   return { xtermMods: () => mods, loadXterm: async () => mods };
@@ -72,6 +77,7 @@ import { TerminalView } from "./TerminalView";
 import { __resetRevealFocus, suppressTerminalRevealFocus, tauriHandoffDeps, whenPtySpawned } from "../lib/terminalSeams";
 import { enqueuePtyOp } from "../lib/ptyFence";
 import { PROMISED_DROP_EVENT } from "../lib/nativeFileDrop";
+import { __resetTerminalSwapForTest, beginTerminalSwap, pendingTerminalWork } from "../lib/terminalSwap";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement;
@@ -105,6 +111,12 @@ beforeEach(() => {
   mocks.drops.clear();
   mocks.events.clear();
   layersAtPointer([]);
+  mocks.webgl.created = 0;
+  mocks.webgl.disposed = 0;
+  mocks.fits = 0;
+  mocks.dims = { cols: 80, rows: 24 };
+  mocks.resizeObservers.length = 0;
+  __resetTerminalSwapForTest();
   mocks.invoke.mockReset().mockImplementation(async (command, args) => {
     const pty = mocks.shells.get(args.id);
     switch (command) {
@@ -123,7 +135,7 @@ beforeEach(() => {
       case "pty_kill": mocks.shells.delete(args.id); break;
     }
   });
-  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  vi.stubGlobal("ResizeObserver", class { constructor(fn: () => void) { mocks.resizeObservers.push(fn); } observe() {} disconnect() {} });
   vi.spyOn(console, "debug").mockImplementation(() => {});
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 500, bottom: 300, width: 500, height: 300, toJSON: () => ({}) });
   host = document.createElement("div");
@@ -345,5 +357,62 @@ describe("a revealed terminal takes the caret only when nothing else holds it", 
     press();
     suppressTerminalRevealFocus();
     expect(await reveal()).toBe(0);
+  });
+});
+
+// Spike W0.3's attribution: a wall swap's cost was each tile's reaction to
+// being hidden, shown or resized, all in the swap's frame. These pin the
+// three fixes (decision D7).
+describe("a wall swap's per-tile costs stay off the swap's frame", () => {
+  const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+  async function shown() {
+    await mount(true);
+    // The mount's own show work (drain, fit, repaint) runs on the next frame.
+    await frame();
+  }
+
+  it("keeps the WebGL renderer across a hide and gives it back only when the terminal goes", async () => {
+    await shown();
+    expect(mocks.webgl.created).toBe(1);
+    await mount(false);
+    await frame();
+    expect(mocks.webgl.disposed).toBe(0);
+    await mount(true);
+    await frame();
+    // Shown again: the same renderer, never a second one.
+    expect(mocks.webgl.created).toBe(1);
+    await act(async () => root.render(null));
+    expect(mocks.webgl.disposed).toBe(1);
+  });
+
+  it("defers a swap's column reflows to one fit per tile after the new wall paints", async () => {
+    await shown();
+    const before = mocks.fits;
+    mocks.dims = { cols: 120, rows: 24 };
+    act(() => beginTerminalSwap());
+    // The grid reshaped under the tile: resize notifications arrive while
+    // the swap's frame is being laid out.
+    const resized = mocks.resizeObservers[mocks.resizeObservers.length - 1];
+    act(() => { resized(); resized(); resized(); });
+    expect(mocks.fits).toBe(before);
+    await frame(); // the swap's frame
+    expect(mocks.fits).toBe(before);
+    await frame(); // painted: the deferred work drains
+    expect(mocks.fits).toBe(before + 1);
+    await frame();
+    expect(mocks.fits).toBe(before + 1);
+    expect(pendingTerminalWork()).toBe(0);
+  });
+
+  it("drains and repaints a shown terminal on a later frame, never inside the commit that shows it", async () => {
+    await mount(false);
+    act(() => emit("streamed while hidden"));
+    expect(currentTerm().output).toBe("");
+    await mount(true);
+    // Committed as visible, but the drain waits for the deferred work.
+    expect(currentTerm().output).toBe("");
+    expect(pendingTerminalWork()).toBeGreaterThan(0);
+    await frame();
+    expect(currentTerm().output).toBe("streamed while hidden");
   });
 });

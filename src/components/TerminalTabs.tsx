@@ -174,8 +174,8 @@ interface TerminalTabsProps {
  *  At 14 the tiles are small, which is the point: a wall of agents you can see
  *  at a glance beats seven you have to cycle. Two neighbouring caps are
  *  deliberately left alone because both degrade gracefully rather than
- *  failing — `MAX_WEBGL` (TerminalView) now binds, so tiles past the eighth
- *  keep xterm's DOM renderer, and `MAX_STORED_SHAPES` still covers the wider
+ *  failing — the shared graphics allocator (TerminalView) now binds, so
+ *  tiles past its ceiling keep xterm's DOM renderer, and `MAX_STORED_SHAPES` still covers the wider
  *  spread of `n@rowsxcols` keys. */
 const MAX_TILES = 14;
 
