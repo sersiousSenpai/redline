@@ -23,6 +23,16 @@ pub(crate) fn hide_browser_tabs(app: &tauri::AppHandle) {
 fn page_url(url: &str) -> bool {
     url.len() <= 8192 && (url == "about:blank" || tauri::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some()))
 }
+/// The `shortcut` values a page may send (browser_signals.js and
+/// browser_frontdoor_shortcut.js); BrowserPane answers each. The page's own
+/// ⌃Tab / ⌃⇧Tab (`next-page` / `previous-page`) were sent but refused here,
+/// so cycling the browser's pages from inside one did nothing; the app's
+/// globals no menu item carries (⌘K, ⌘⇧J, ⌘⇧N, ⌘⇧0) arrive the same way.
+pub const PAGE_SHORTCUTS: [&str; 17] = [
+    "location", "new-tab", "close-tab", "next-tab", "previous-tab", "next-page", "previous-page",
+    "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door", "toggle-sidebar",
+    "toggle-plan-panel", "palette", "needs-you", "new-plan", "snap-back",
+];
 pub fn parse_signal(raw: &str) -> Option<Value> {
     if raw.len() > 24_000 { return None; }
     let value: Value = serde_json::from_str(raw).ok()?;
@@ -48,7 +58,7 @@ pub fn parse_signal(raw: &str) -> Option<Value> {
             let selectors = payload.get("selectors")?.as_array()?;
             if selectors.len() > 8 || selectors.iter().any(|selector| selector.as_str().is_none_or(|s| s.len() > 4096)) { return None; }
         }
-        "shortcut" => { if !["location", "new-tab", "close-tab", "next-tab", "previous-tab", "exit-focus", "toggle-video-screen", "toggle-monochat", "open-front-door", "toggle-sidebar", "toggle-plan-panel"].contains(&value.get("value")?.as_str()?) { return None; } }
+        "shortcut" => { if !PAGE_SHORTCUTS.contains(&value.get("value")?.as_str()?) { return None; } }
         // The hold-to-dictate key, pressed in the page (browser_frontdoor_shortcut.js).
         "voice" => {
             let v = value.get("value")?.as_str()?;
@@ -222,6 +232,16 @@ mod tests {
         // The flow shell's ⌘B and ⌘⌥B, told from the page.
         assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-sidebar"}"#).is_some());
         assert!(parse_signal(r#"{"kind":"shortcut","value":"toggle-plan-panel"}"#).is_some());
+        // The page's ⌃Tab cycles the browser's pages, and the app's globals
+        // with no menu item come through too.
+        for value in ["next-page", "previous-page", "palette", "needs-you", "new-plan", "snap-back"] {
+            assert!(parse_signal(&format!(r#"{{"kind":"shortcut","value":"{value}"}}"#)).is_some(), "{value}");
+        }
+        // Only those: a page cannot name another.
+        assert!(parse_signal(r#"{"kind":"shortcut","value":"quit"}"#).is_none());
+        // And never from a sub-frame: only the main frame's keys are the page's.
+        assert!(signal_for_frame(r#"{"kind":"shortcut","value":"palette"}"#, false).is_none());
+        assert!(signal_for_frame(r#"{"kind":"shortcut","value":"palette"}"#, true).is_some());
         assert!(!browser_label("main")); assert!(!browser_label("browser-"));
     }
 

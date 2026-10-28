@@ -1435,8 +1435,11 @@ pub(crate) fn foreground_snapshot(state: &PtyState) -> Vec<(String, Option<u32>,
 }
 
 /// The program's name as a person would say it: `/usr/local/bin/node` →
-/// `node`, a login shell's `-zsh` → `zsh`. `comm` rather than the process
-/// title, because claude retitles itself to its version number.
+/// `node`, a login shell's `-zsh` → `zsh`. This is the kernel's `comm`: the
+/// name of the file exec resolved, so Claude Code's native build — `claude`
+/// linked to `…/claude/versions/2.1.312` — reads as `2.1.312` (`ps -o
+/// ucomm` agrees). The frontend counts that as an agent (`isAgentComm`), so
+/// one idle at its prompt is not a running job.
 fn comm_name(comm: &str) -> Option<String> {
     let name = comm.rsplit('/').next()?.trim_start_matches('-').trim();
     (!name.is_empty()).then(|| name.to_string())

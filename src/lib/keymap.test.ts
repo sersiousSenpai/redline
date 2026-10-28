@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { saveHoldKey } from "../audio/holdKey";
 import {
   CLASSIC_KEYMAP,
   GLOBAL_KEYMAP,
   PAGE_KEEPS,
+  PAGE_ONLY_SIGNALS,
   PAGE_ROUTES,
   REVIEW_KEYMAP,
   WORKBENCH_KEYMAP,
@@ -404,5 +406,22 @@ describe("with a web page focused", () => {
     // ⌘K is the palette there too, never the page's own ⌘K.
     expect(PAGE_ROUTES.palette).toEqual([{ signal: "palette" }]);
     expect(Object.keys(PAGE_ROUTES).every((id) => CLASSIC_KEYMAP.some((b) => b.id === id))).toBe(true);
+  });
+});
+
+describe("the page-focused matrix, against the files that carry it", () => {
+  const signals = readFileSync("src-tauri/src/browser_signals.js", "utf8") + readFileSync("src-tauri/src/browser_frontdoor_shortcut.js", "utf8");
+  const events = readFileSync("src-tauri/src/browser_events.rs", "utf8");
+  const pane = readFileSync("src/components/BrowserPane.tsx", "utf8");
+  const menus = readFileSync("src-tauri/src/workbench_menu.rs", "utf8") + readFileSync("src-tauri/src/lib.rs", "utf8");
+  const allowed = events.slice(events.indexOf("pub const PAGE_SHORTCUTS"), events.indexOf("pub fn parse_signal"));
+  const forwarded = [...Object.values(PAGE_ROUTES).flat().flatMap((r) => ("signal" in r ? [r.signal] : [])), ...PAGE_ONLY_SIGNALS];
+  it.each(forwarded)("the page sends %s, the backend lets it through and the pane answers it", (signal) => {
+    expect(signals).toContain(`"${signal}"`);
+    expect(allowed).toContain(`"${signal}"`);
+    expect(pane).toContain(`"${signal}"`);
+  });
+  it.each(Object.values(PAGE_ROUTES).flat().flatMap((r) => ("menu" in r ? [r.menu] : [])))("menu item %s exists", (id) => {
+    expect(menus).toMatch(new RegExp(`"${id}"|\\b${id.toUpperCase()}_ID\\b|with_id\\("${id}"`));
   });
 });

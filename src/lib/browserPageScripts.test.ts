@@ -128,6 +128,38 @@ describe("page signals and inspector", () => {
     press({ isTrusted: true });
     expect(events.filter((event) => event.kind === "interaction").map((event) => event.value)).toEqual(["pointerdown"]);
   });
+  it("forwards the app's globals and the browser's own ⌃Tab from a focused page, and leaves the rest to the page", () => {
+    const page = window as unknown as Record<string, any>;
+    const events: Record<string, any>[] = [];
+    page.webkit = { messageHandlers: { redlineBrowser: { postMessage: (raw: string) => events.push(JSON.parse(raw)) } } };
+    page.__redline_signals_installed = false;
+    const listen = vi.spyOn(document, "addEventListener");
+    window.eval(signals);
+    const keydown = listen.mock.calls.find(([name, , capture]) => name === "keydown" && capture === true)![1] as (event: unknown) => void;
+    listen.mockRestore();
+    const press = (init: Record<string, unknown>) => {
+      const event = { isTrusted: true, target: document.body, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, key: "", code: "", preventDefault: vi.fn(), stopImmediatePropagation: vi.fn(), ...init };
+      keydown(event);
+      return event;
+    };
+    const shortcuts = () => events.filter((e) => e.kind === "shortcut").map((e) => e.value);
+    // ⌘K is the palette everywhere, over the page's own ⌘K.
+    const k = press({ metaKey: true, key: "k", code: "KeyK" });
+    expect(k.preventDefault).toHaveBeenCalled();
+    press({ metaKey: true, shiftKey: true, key: "J", code: "KeyJ" });
+    press({ metaKey: true, shiftKey: true, key: "N", code: "KeyN" });
+    press({ metaKey: true, shiftKey: true, key: ")", code: "Digit0" });
+    press({ ctrlKey: true, key: "Tab", code: "Tab" });
+    press({ ctrlKey: true, shiftKey: true, key: "Tab", code: "Tab" });
+    expect(shortcuts()).toEqual(["palette", "needs-you", "new-plan", "snap-back", "next-page", "previous-page"]);
+    // The page keeps what is not the app's: Ctrl+K (a field's kill-line),
+    // ⌘⇧K, ⌘D and plain typing.
+    events.length = 0;
+    for (const init of [{ ctrlKey: true, key: "k", code: "KeyK" }, { metaKey: true, shiftKey: true, key: "K", code: "KeyK" }, { metaKey: true, key: "d", code: "KeyD" }, { key: "k", code: "KeyK" }]) {
+      expect(press(init).preventDefault).not.toHaveBeenCalled();
+    }
+    expect(shortcuts()).toEqual([]);
+  });
   it("emits bounded new-tab actions without host polling and refuses page activation during inspection", () => {
     const page = window as unknown as Record<string, any>;
     const events: Record<string, any>[] = [];

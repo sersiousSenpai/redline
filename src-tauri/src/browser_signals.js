@@ -62,6 +62,16 @@
       // menu's ⌘⇧[ / ⌘⇧] (a menu item carries one accelerator). On the
       // physical key: ⌥ rewrites event.key.
       if (event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && (event.code === "ArrowLeft" || event.code === "ArrowRight")) value = event.code === "ArrowRight" ? "next-tab" : "previous-tab";
+      // The app's globals, which no menu item carries: ⌘K the palette (over
+      // the page's own ⌘K: the palette is ⌘K everywhere), ⌘⇧J the agent that
+      // needs you, ⌘⇧N plan a build, ⌘⇧0 snap the layout back. ⌘ only, on
+      // the physical key (⇧ rewrites event.key).
+      if (event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (event.code === "KeyK" && !event.shiftKey) value = "palette";
+        else if (event.code === "KeyJ" && event.shiftKey) value = "needs-you";
+        else if (event.code === "KeyN" && event.shiftKey) value = "new-plan";
+        else if (event.code === "Digit0" && event.shiftKey) value = "snap-back";
+      }
     }
     if (value) { event.preventDefault(); event.stopImmediatePropagation(); post({ kind: "shortcut", value }); }
   }, true);
