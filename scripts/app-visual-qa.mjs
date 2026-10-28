@@ -118,18 +118,21 @@ const OPEN_AGENT = [
   { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-convo')", timeout: 15000, why: "the session's conversation in the Agent pane" },
 ];
 // The right rail (W4): a tab of the rail, by its data attribute.
+// Below 1100 px the rail is folded (D18): its edge icon opens it on the tab.
 const RAIL_TAB = (tab) => [
-  { do: "click", css: [`.rl-rail-tab[data-rail-tab=${tab}]`], why: `the rail's ${tab} tab` },
+  { do: "click", css: [`.rl-rail-tab[data-rail-tab=${tab}]`, `.rl-rail-edge-btn[data-rail-tab=${tab}]`], why: `the rail's ${tab} tab` },
   { do: "waitFor", expr: `!!document.querySelector('.rl-rail[data-rail-tab=${tab}]')`, timeout: 8000, why: `the rail shows ${tab}` },
 ];
 const OPEN_BROWSER = [
   ...AT_HOME,
   { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+  { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
   { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
   { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
   { do: "type", text: "https://example.com", why: "type an address" },
   { do: "key", key: "Enter", why: "⏎: the door tab becomes the browser" },
-  { do: "waitFor", expr: "!!document.querySelector('.rl-rail[data-rail-tab=talk]')", timeout: 15000, why: "the browser's rail leads with Talk" },
+  { do: "waitFor", expr: "[...document.querySelectorAll('.rl-wb-strip [role=tab][aria-selected=true]')].some(t => /Browser/.test(t.textContent))", timeout: 15000, why: "the active tab is the browser" },
+  ...RAIL_TAB("talk"),
 ];
 const PLAN_FILES = [
   ...SELECT_PLAN,
@@ -139,7 +142,7 @@ const PLAN_FILES = [
   { do: "click", within: ".rl-rail", text: "jobs", up: ".rl-file-row", why: "open src/jobs" },
 ];
 const DRIVES = {
-  "rail-plan-discussion": [...SELECT_PLAN, { do: "waitFor", expr: "!!document.querySelector('.rl-rail[data-rail-tab=discussion] .rl-fb-pile')", timeout: 8000, why: "the Discussion piles" }],
+  "rail-plan-discussion": [...SELECT_PLAN, ...RAIL_TAB("discussion"), { do: "waitFor", expr: "!!document.querySelector('.rl-rail[data-rail-tab=discussion] .rl-fb-pile')", timeout: 8000, why: "the Discussion piles" }],
   "rail-plan-talk": [...SELECT_PLAN, ...RAIL_TAB("talk")],
   "rail-plan-files": PLAN_FILES,
   "rail-plan-changes": [...SELECT_PLAN, ...RAIL_TAB("changes")],
@@ -148,6 +151,7 @@ const DRIVES = {
   "rail-browser-changes": [...OPEN_BROWSER, ...RAIL_TAB("changes")],
   "rail-folded": [
     ...SELECT_PLAN,
+    ...RAIL_TAB("discussion"),
     { do: "click", css: [".rl-rail-strip button[aria-label='Hide the rail']"], why: "◨ folds the rail" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-rail-edge')", timeout: 8000, why: "the edge strip" },
   ],
@@ -178,6 +182,7 @@ const DRIVES = {
   browser: [
     ...AT_HOME,
     { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
     { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
     { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
     { do: "type", text: "https://example.com", why: "type an address" },
@@ -580,6 +585,13 @@ async function drive(scene) {
   for (const step of DRIVES[scene] ?? []) {
     const rec = { do: step.do, why: step.why, ok: false };
     run.steps.push(rec);
+    // `when`: a step that only runs while its condition holds (a narrow
+    // pose's extra click, say).
+    if (step.when && !(await cdp.evaluate(step.when).catch(() => false))) {
+      rec.note = "skipped (condition false)";
+      rec.ok = true;
+      continue;
+    }
     if (step.do === "click" || step.do === "rightClick") {
       const at = await tools(`window.__qaTools.centre(${JSON.stringify(step)})`);
       if (!at) {

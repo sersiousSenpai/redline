@@ -15,6 +15,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   FolderTree,
+  Globe,
+  House,
+  PanelLeftOpen,
   GitCompare,
   Maximize2,
   MessagesSquare,
@@ -75,7 +78,7 @@ function useTalkAway(talkKey: string | null | undefined): AwayState | null {
 
 function AwayMark({ state }: { state: AwayState | null }) {
   if (state === "thinking") return <Spinner size={10} />;
-  if (state === "waiting") return <span className="rl-rail-away" aria-label="a reply is waiting" />;
+  if (state === "waiting") return <span className="rl-rail-away rl-rail-pulse" aria-label="a reply is waiting" />;
   return null;
 }
 
@@ -210,3 +213,45 @@ function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention, talkKey }: Ra
 }
 
 export const RailEdge = memo(RailEdgeBase);
+
+export type EdgeSessionTone = "needs" | "review" | "done" | "idle";
+
+export interface SidebarEdgeProps {
+  /** Which Place is current, if one is. */
+  place: "home" | "servers" | null;
+  sessions: readonly { id: string; title: string; tone: EdgeSessionTone; active: boolean }[];
+  onPlace: (place: "home" | "servers") => void;
+  onSession: (id: string) => void;
+  /** ◧: the full sidebar (⌘B). */
+  onExpand: () => void;
+}
+
+/** The collapsed sidebar's icon pose (D18): Home and Localhost, then each
+ *  session as a status dot — amber pulsing when it needs you, amber in
+ *  review, green when approved — and the way back open at the foot. */
+function SidebarEdgeBase({ place, sessions, onPlace, onSession, onExpand }: SidebarEdgeProps) {
+  return (
+    <nav className="rl-side-edge" aria-label="Sidebar">
+      <button type="button" className="rl-rail-edge-btn" data-current={place === "home" ? "" : undefined} title="Home" aria-label="Home" onClick={() => onPlace("home")}>
+        <House size={16} aria-hidden />
+      </button>
+      <button type="button" className="rl-rail-edge-btn" data-current={place === "servers" ? "" : undefined} title="Localhost" aria-label="Localhost" onClick={() => onPlace("servers")}>
+        <Globe size={16} aria-hidden />
+      </button>
+      {sessions.length > 0 && <span className="rl-side-edge-rule" aria-hidden />}
+      <div className="rl-side-edge-list">
+        {sessions.map((x) => (
+          <button key={x.id} type="button" className="rl-rail-edge-btn" data-current={x.active ? "" : undefined} title={x.title} aria-label={x.title} onClick={() => onSession(x.id)}>
+            <span className="rl-side-edge-dot" data-tone={x.tone} />
+          </button>
+        ))}
+      </div>
+      <span className="rl-rail-spacer" />
+      <button type="button" className="rl-rail-edge-btn" title="Show the sidebar (⌘B)" aria-label="Show the sidebar" onClick={onExpand}>
+        <PanelLeftOpen size={16} aria-hidden />
+      </button>
+    </nav>
+  );
+}
+
+export const SidebarEdge = memo(SidebarEdgeBase);

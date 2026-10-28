@@ -47,6 +47,12 @@ describe("computePaneLayout", () => {
     expect(folded.paneFlowW).toBe(0);
     expect(folded.docFlowW).toBe(1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE - 240 - 40);
     expect(computePaneLayout({ ...base, paneEdgeW: 40 }).docFlowW).toBe(computePaneLayout(base).docFlowW);
+    const icons = computePaneLayout({ ...base, sidebarCollapsed: true, sidebarEdgeW: 44, paneCollapsed: true, paneEdgeW: 40 });
+    expect(icons.docFlowW).toBe(1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE - 44 - 40);
+    // A narrow window's floor turns a hand-opened rail into a curtain (D18).
+    const narrow = computePaneLayout({ ...base, winWidth: 900, docMin: 560 });
+    expect(narrow.docFlowW).toBe(560);
+    expect(narrow.curtainActive).toBe(true);
     const full = computePaneLayout({ ...base, paneCollapsed: true, paneFullscreen: true, paneEdgeW: 40 });
     expect(full.docFlowW).toBe(1440 - DIVIDER_W - 2 * SHELL_EDGE - 240);
   });

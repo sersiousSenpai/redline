@@ -7,7 +7,7 @@ describe("panel mask wiring", () => {
   it("no surface masks the side columns: the panel breaks and the narrow masks are gone (W4)", () => {
     for (const gone of ["setPanelBreaks", "panelMask(", "platePaneMask(", "paneCollapseOnMask(", "maskPanels(", "panelsMasked(", "immersiveHintSeen"]) expect(app).not.toContain(gone);
     // The shape on screen is the user's, straight from the persisted flags.
-    expect(app).toMatch(/docPinned,\s*\} = baseShape;/);
+    expect(app).toContain("const docPinned = baseShape.docPinned;");
   });
   it("a plan arrival never opens the discussion", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
@@ -70,5 +70,20 @@ describe("panel mask wiring", () => {
     const launch = app.slice(app.indexOf('const launchPlan ='), app.indexOf('// "Run" on a Localhost'));
     expect(launch.indexOf('launchedPlansRef.current.set(launchId, pending)')).toBeLessThan(launch.indexOf('await deliverToTerminal'));
     expect(launch).toContain('if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending)');
+  });
+  it("responsive poses fold the side columns on a narrow window, and every fold gesture goes through them (D18)", () => {
+    expect(app).toContain("const pose = responsivePose({ winWidth, sidebarCollapsed: baseShape.sidebarCollapsed, paneCollapsed: baseShape.paneCollapsed, narrowOpen });");
+    expect(app).toContain("const { sidebarCollapsed, paneCollapsed } = pose;");
+    // Gestures edit the narrow opening while narrow, the preference otherwise.
+    for (const name of ["revealSidebar", "revealPane", "toggleSidebar", "togglePane"]) {
+      const body = app.slice(app.indexOf(`const ${name} = useCallback(`)).split("}, [")[0];
+      expect(body).toMatch(/set(Rail|Sidebar)Folded\(/);
+      expect(body).not.toMatch(/set(Pane|Sidebar)Collapsed\(/);
+    }
+    // The folded sidebar's icon pose and the folded rail's edge are in flow.
+    expect(app).toContain("sidebarEdgeW: SIDEBAR_EDGE_W,");
+    expect(app).toContain("paneEdgeW: RAIL_EDGE_W,");
+    // A fullscreen rail hides the native webview under it.
+    expect(app.slice(app.indexOf("const browserVisible ="), app.indexOf("openMenuCount === 0;"))).toContain("!paneFullscreen &&");
   });
 });

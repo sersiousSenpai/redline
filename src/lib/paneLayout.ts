@@ -160,6 +160,12 @@ export interface PaneLayoutInput {
   /** What a collapsed right pane still reserves in flow: the rail's edge
    *  strip of tab icons (W4). Absent, a collapsed pane takes nothing. */
   paneEdgeW?: number;
+  /** The same for a collapsed sidebar: its icon pose (D18). */
+  sidebarEdgeW?: number;
+  /** A floor for the document above `docMinFor`'s: a narrow window keeps a
+   *  readable plan, and a side column opened over it there curtains rather
+   *  than squeezing it (D18). */
+  docMin?: number;
 }
 
 export interface PaneLayout {
@@ -187,10 +193,10 @@ export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
   // The sidebar divider always renders; the discussion divider is absent in
   // fullscreen (the pane's top-edge divider replaces it).
   const dividers = DIVIDER_W + (i.paneFullscreen ? 0 : DIVIDER_W);
-  const edge = i.paneCollapsed && !i.paneFullscreen ? (i.paneEdgeW ?? 0) : 0;
+  const edge = (i.paneCollapsed && !i.paneFullscreen ? (i.paneEdgeW ?? 0) : 0) + (i.sidebarCollapsed ? (i.sidebarEdgeW ?? 0) : 0);
   const available = Math.max(0, i.winWidth - dividers - 2 * SHELL_EDGE - edge);
   // Degrade gracefully below tiny window widths.
-  const docTarget = Math.min(docMinFor(i.winWidth), available);
+  const docTarget = Math.min(Math.max(docMinFor(i.winWidth), i.docMin ?? 0), available);
   const deficit = Math.max(0, s + p + docTarget - available);
   // Attribute the deficit proportionally to pane width, each side capped at
   // its own width. Both panes' visual rectangles are fixed by their widths

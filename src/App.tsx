@@ -188,6 +188,7 @@ import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
 // The right rail's chrome and its collapsed edge strip (W4): one lazy chunk.
 const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RightRail })));
 const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
+const SidebarEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.SidebarEdge })));
 // The rail's Discussion piles (W4): the plan's threads grouped by who owes what.
 const FeedbackPanel = lazy(() => import("./components/plan/FeedbackPanel"));
 // The rail's Files tab and ⌘P quick open (W4).
@@ -488,8 +489,10 @@ import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy"
 import { paneStatusOf, wallStatus } from "./workbench/status";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
+import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
-import { RAIL_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
+import { NARROW_DOC_MIN, NO_NARROW_OPEN, responsivePose, settleNarrowOpen, type NarrowOpen } from "./workbench/poses";
+import { RAIL_EDGE_W, SIDEBAR_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
 import type { OpenFileDetail } from "./lib/fileLinks";
 import type { PaneContext } from "./workbench/WorkbenchStage";
@@ -3019,6 +3022,12 @@ function App() {
   // useResizablePane wiring) reads the effective value with no diff at all.
   // A read that sits ABOVE this block is a TypeScript error, never a silently
   // wrong value.
+  // The window's width, committed once a resize settles (`onResizeSession`
+  // below). Each side pane's max is "up to the other pane", and it decides
+  // the responsive poses (D18).
+  const [winWidth, setWinWidth] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth : 1440,
+  );
   const immersive = isImmersive({
     surface: mainSurface,
     broken: immersiveBroken,
@@ -3045,12 +3054,29 @@ function App() {
   const surfaceInFront = mainSurface !== "document" && mainSurface !== "review" && !baseShape.docPinned && workspaceImmersive(workspace);
   const paneMaskedRef = useRef(surfaceInFront);
   paneMaskedRef.current = surfaceInFront;
-  const {
-    sidebarCollapsed,
-    paneCollapsed,
-    paneFullscreen,
-    docPinned,
-  } = baseShape;
+  // Responsive poses (D18, workbench/poses.ts): below 1100 px the rail folds
+  // to its edge, below 900 px the sidebar to its icon pose. Opening one while
+  // narrow is kept for the narrow spell; past the breakpoint the stored
+  // preference applies again. A resize never writes the preference.
+  const [narrowOpen, setNarrowOpen] = useState<NarrowOpen>(NO_NARROW_OPEN);
+  useEffect(() => setNarrowOpen((open) => settleNarrowOpen(open, winWidth)), [winWidth]);
+  const pose = responsivePose({ winWidth, sidebarCollapsed: baseShape.sidebarCollapsed, paneCollapsed: baseShape.paneCollapsed, narrowOpen });
+  const poseRef = useRef(pose);
+  poseRef.current = pose;
+  const { sidebarCollapsed, paneCollapsed } = pose;
+  // A folded rail is never fullscreen underneath.
+  const paneFullscreen = baseShape.paneFullscreen && !paneCollapsed;
+  const docPinned = baseShape.docPinned;
+  /** Fold or open a side column: the narrow opening while narrow, else the
+   *  user's preference. Every gesture goes through these two. */
+  const setRailFolded = useCallback((folded: boolean) => {
+    if (poseRef.current.railNarrow) setNarrowOpen((o) => (o.rail === !folded ? o : { ...o, rail: !folded }));
+    else setPaneCollapsed(folded);
+  }, [setPaneCollapsed]);
+  const setSidebarFolded = useCallback((folded: boolean) => {
+    if (poseRef.current.sidebarNarrow) setNarrowOpen((o) => (o.sidebar === !folded ? o : { ...o, sidebar: !folded }));
+    else setSidebarCollapsed(folded);
+  }, [setSidebarCollapsed]);
   const docVisible = mainSurface === "document" || docPinned;
 
   // Breaking out. While immersive a persisted flag is masked, so a bare
@@ -3059,11 +3085,11 @@ function App() {
   // unhides, and the user wins for the rest of that visit. Nothing here writes
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
-    setSidebarCollapsed(false);
-  }, [setSidebarCollapsed]);
+    setSidebarFolded(false);
+  }, [setSidebarFolded]);
   const revealPane = useCallback(() => {
-    setPaneCollapsed(false);
-  }, [setPaneCollapsed]);
+    setRailFolded(false);
+  }, [setRailFolded]);
   // "Show me the terminals": this set's wall comes forward, or — with none —
   // a terminal opens in the session's project, on a wall of its own. The
   // intent to use them mounts the layer now rather than at the next idle
@@ -3084,14 +3110,14 @@ function App() {
   // masked, the pane reads as closed, so the gesture means "open" — which is
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed(!sidebarCollapsed);
-  }, [sidebarCollapsed, setSidebarCollapsed]);
+    setSidebarFolded(!sidebarCollapsed);
+  }, [sidebarCollapsed, setSidebarFolded]);
   const togglePane = useCallback(() => {
     // Folding a fullscreen rail lands on the edge strip, not on a hidden
     // fullscreen the next ◨ would resurrect.
     if (!paneCollapsed) setPaneFullscreen(false);
-    setPaneCollapsed(!paneCollapsed);
-  }, [paneCollapsed, setPaneCollapsed, setPaneFullscreen]);
+    setRailFolded(!paneCollapsed);
+  }, [paneCollapsed, setRailFolded, setPaneFullscreen]);
   // ---- The right rail (W4) ----------------------------------------------------
   // The Discussion pane became the rail: one column whose tabs follow the
   // FOCUSED pane's kind (`workbench/rail.ts`), on the pane's own geometry —
@@ -3364,10 +3390,10 @@ function App() {
         };
       } else if (anchor === "sessions" && sidebarCollapsed) {
         revealSidebar();
-        tourRevealRestore.current = () => setSidebarCollapsed(true);
+        tourRevealRestore.current = () => setSidebarFolded(true);
       } else if (anchor === "discussion" && paneCollapsed) {
         revealPane();
-        tourRevealRestore.current = () => setPaneCollapsed(true);
+        tourRevealRestore.current = () => setRailFolded(true);
       } else if (anchor === "landing" && !doorVisible) {
         // The composer is only measurable while the door is up — resting on
         // the empty plate, or open anywhere else.
@@ -3792,9 +3818,7 @@ function App() {
   // pane" — letting EITHER pane be dragged until the document clamps fully
   // shut, symmetrically. (A fixed 320px reserve made this lopsided: one pane
   // could clamp the doc shut and the other couldn't.)
-  const [winWidth, setWinWidth] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth : 1440,
-  );
+  // `winWidth` is declared with the responsive poses, above (D18).
   const sidebarWidth = sidebarWidthPref;
 
   // The row's space model: the doc column floors at DOC_MIN and any pane
@@ -3891,6 +3915,10 @@ function App() {
         paneFullscreen: f.paneFullscreen,
         // A collapsed rail keeps its edge strip of tab icons in flow.
         paneEdgeW: RAIL_EDGE_W,
+        // A collapsed sidebar keeps its icon pose (D18).
+        sidebarEdgeW: SIDEBAR_EDGE_W,
+        // Narrow, a column opened by hand curtains over a readable document.
+        docMin: poseRef.current.railNarrow ? NARROW_DOC_MIN : undefined,
       });
       liveLayoutRef.current = l;
 
@@ -4320,7 +4348,7 @@ function App() {
   // The rail's own ceiling (600 px) under the room the sidebar leaves.
   const paneMaxW = Math.min(
     RAIL_MAX_W,
-    Math.max(RAIL_MIN_W, winWidth - (sidebarCollapsed ? 0 : sidebarWidth) - 12),
+    Math.max(RAIL_MIN_W, winWidth - (sidebarCollapsed ? SIDEBAR_EDGE_W : sidebarWidth) - 12),
   );
 
   const {
@@ -4335,7 +4363,7 @@ function App() {
     min: 180,
     max: sidebarMaxW,
     // Drag the document over the sidebar past its hard stop → snap it shut.
-    onCollapse: () => setSidebarCollapsed(true),
+    onCollapse: () => setSidebarFolded(true),
     // Drag the divider of a collapsed sidebar to re-open it as a drawer —
     // including a sidebar that is only collapsed because immersive says so.
     collapsed: sidebarCollapsed,
@@ -4354,7 +4382,7 @@ function App() {
     max: paneMaxW,
     // Same for the comment pane on the right edge. Its drag-from-edge expand
     // is the escape hatch that keeps Code Review workable while immersive.
-    onCollapse: () => setPaneCollapsed(true),
+    onCollapse: () => setRailFolded(true),
     collapsed: paneCollapsed,
     onExpand: revealPane,
   });
@@ -7853,6 +7881,9 @@ function App() {
     !isDragging &&
     !splitDragging &&
     !liveFlags.curtain &&
+    // A fullscreen rail covers the stage; the native webview paints above
+    // React DOM and would show through it.
+    !paneFullscreen &&
     openMenuCount === 0;
 
   // Close the terminal a launch is running in and the launch is over: the PTY
@@ -9284,6 +9315,16 @@ function App() {
   // The memoized sidebar and browser pane get identity-stable handlers (see
   // `commentCallbacks`), so they render when their data changes and not on
   // every shell render.
+  // The sidebar's icon pose (D18): each session a status dot.
+  const sidebarEdgeSessions = useMemo(
+    () =>
+      summaries.slice(0, 24).map((x) => {
+        const term = sessionTerminals.get(x.sessionId);
+        const tone: EdgeSessionTone = (term && terminalKinds.get(term) === "needs-you") || unseenPlanIds.has(x.sessionId) ? "needs" : x.status === "in_review" ? "review" : x.status === "approved" ? "done" : "idle";
+        return { id: x.sessionId, title: x.planTitle?.trim() || x.projectName, tone, active: x.sessionId === activeId };
+      }),
+    [summaries, sessionTerminals, terminalKinds, unseenPlanIds, activeId],
+  );
   const sidebarHandlers = useStableHandlers({
     onSelect: (id: string) => {
       // `wb:session-switch`: the click to the stage showing the session
@@ -9765,6 +9806,19 @@ function App() {
         )}
         </div>
         )}
+        {/* The folded sidebar: its icon pose (D18), reserved in flow by
+            `computePaneLayout`'s sidebar edge. */}
+        {sidebarCollapsed && (
+          <Suspense fallback={<div className="shrink-0" style={{ width: `${SIDEBAR_EDGE_W}px` }} />}>
+            <SidebarEdge
+              place={sidebarPlace === "home" || sidebarPlace === "servers" ? sidebarPlace : null}
+              sessions={sidebarEdgeSessions}
+              onPlace={sidebarHandlers.onSelectPlace}
+              onSession={sidebarHandlers.onSelect}
+              onExpand={revealSidebar}
+            />
+          </Suspense>
+        )}
         {/* Always in flow (its 6px is part of the space model); when the
             sidebar curtains it is painted over, and the absolute copy above
             carries the affordance at the curtain's visible edge. */}
@@ -9776,7 +9830,8 @@ function App() {
           dragging={sidebarDragging}
           onToggle={toggleSidebar}
           onPointerDown={startSidebarDrag}
-          hideChevron={latchActive || liveFlags.curtainL}
+          // Folded, the icon pose carries the way back open (D18).
+          hideChevron={latchActive || liveFlags.curtainL || sidebarCollapsed}
           // The front door's affordance, on the one piece of the sidebar that
           // never goes away. Its only other visible entry is a row INSIDE the
           // sessions list, and that list is now closed on every non-document
@@ -10908,7 +10963,7 @@ function App() {
             }}
             onCollapse={() => {
               setPaneFullscreen(false);
-              setPaneCollapsed(true);
+              setRailFolded(true);
             }}
           >
           {railTab !== "discussion" ? railOtherBody : discussionContext === "plan" && session && planDiscussable ? (

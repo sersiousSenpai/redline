@@ -78,6 +78,9 @@ export const RAIL_MAX_W = 600;
 /** The collapsed rail: an edge strip of the tabs' icons, so every tab — the
  *  mic included — stays one click away. */
 export const RAIL_EDGE_W = 40;
+/** The collapsed sidebar's icon pose: the Places and each session as a
+ *  status dot (D18). */
+export const SIDEBAR_EDGE_W = 44;
 
 /** A stored or dragged width inside the rail's bounds. Garbage reads as the
  *  floor rather than throwing the layout. */

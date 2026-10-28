@@ -401,8 +401,9 @@
   cursor: default;
 }
 
-/* A voice turn left running when Talk was put away: a reply waiting is an
-   amber dot (static), a turn still working the shared HTML spinner. */
+/* A voice turn left running when Talk was put away: a reply waiting is the
+   amber needs-you pulse (opacity only, on an HTML element), a turn still
+   working the shared HTML spinner. */
 .rl-rail-away {
   width: 6px;
   height: 6px;
@@ -416,4 +417,82 @@
   bottom: 2px;
   display: grid;
   place-items: center;
+}
+
+/* The one needs-you pulse: opacity only. */
+.rl-rail-pulse {
+  animation: rl-rail-pulse 2s ease-in-out infinite;
+}
+@keyframes rl-rail-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-rail-pulse {
+    animation: none;
+  }
+}
+
+.rl-rail-edge-btn[data-current] {
+  color: var(--color-ink);
+  background: var(--color-bg-elevated);
+}
+
+/* ── The collapsed sidebar: its icon pose (D18) ─────────────────────────── */
+
+.rl-side-edge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  width: 44px;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 8px 0;
+  color: var(--color-ink-muted);
+}
+.rl-side-edge-rule {
+  width: 20px;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--color-rule);
+}
+.rl-side-edge-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.rl-side-edge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-ink-muted);
+  opacity: 0.6;
+}
+.rl-side-edge-dot[data-tone="review"],
+.rl-side-edge-dot[data-tone="needs"] {
+  background: var(--color-warning);
+  opacity: 1;
+}
+.rl-side-edge-dot[data-tone="needs"] {
+  animation: rl-rail-pulse 2s ease-in-out infinite;
+}
+.rl-side-edge-dot[data-tone="done"] {
+  background: var(--color-success);
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-side-edge-dot[data-tone="needs"] {
+    animation: none;
+  }
 }
