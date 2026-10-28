@@ -325,13 +325,20 @@ function waitingPlan(turn: Turn | null): PlanItem | null {
   return null;
 }
 
+/** D25: the session says its plan is held for your review. The CLI is
+ *  blocked in the review hook — its turn open, its transcript still (the
+ *  plan may not even be in it yet) — so the stage reads the hold, never the
+ *  "Writing the plan" an open turn in plan mode would otherwise say. */
+export const PLAN_HELD_LABEL = "Plan ready · waiting for you";
+
 export function workingStatus(
   view: Pick<ConvoView, "openAsks" | "activeTurn" | "lastTurn" | "mode">,
-  options: { term?: TermState | null; projectPath?: string | null } = {},
+  options: { term?: TermState | null; projectPath?: string | null; planHeld?: boolean } = {},
 ): WorkingStatus | null {
   const turn = view.activeTurn;
   const since = turn?.startedAt ?? null;
   if (view.openAsks.length > 0 || options.term === "needs-you") return { kind: "needs-you", label: "Needs you", since };
+  if (options.planHeld) return { kind: "plan-ready", label: PLAN_HELD_LABEL, since: null };
   const held = waitingPlan(view.lastTurn);
   if (turn && !held) {
     const tool = runningTool(turn);

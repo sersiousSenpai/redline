@@ -127,6 +127,7 @@ function AgentHeader({ harness, facts, view, cliAvailable, onView, onEarlier, on
           </span>
         </>
       )}
+      {facts.held && <span className="rl-agent-head-status" role="status">{facts.held}</span>}
       <span className="rl-agent-head-spacer" />
       <span className="rl-agent-head-seg" role="radiogroup" aria-label="Show the conversation or its terminal">
         <button type="button" role="radio" aria-checked={view === "chat"} onClick={() => onView("chat")}>Chat</button>

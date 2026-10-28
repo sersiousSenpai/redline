@@ -838,6 +838,17 @@ export const TerminalView = memo(function TerminalView({
   // terminal work, so a wall showing seven tiles at once spreads their drains,
   // fits and repaints across frames instead of stacking them in one, and so a
   // swap's own frame paints first (lib/terminalSwap).
+  // Hidden (a tab switched away, the wall off screen, a tile zoomed over or
+  // re-pointed), the terminal lets go of the caret. `display:none` does not
+  // blur, so its helper textarea stayed focused where the cursor last was —
+  // and macOS kept drawing its input-source bubble at that caret, a glyph
+  // floating over whatever pane was shown there now.
+  useEffect(() => {
+    if (visible) return;
+    const held = document.activeElement;
+    if (held instanceof HTMLElement && hostRef.current?.contains(held)) held.blur();
+  }, [visible]);
+
   useEffect(() => {
     if (!visible) return;
     const key = `show:${id}`;

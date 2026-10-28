@@ -28,6 +28,10 @@ export interface DrawerAgent {
 export interface WorkDrawerProps {
   queued: readonly DrawerQueued[];
   agents: readonly DrawerAgent[];
+  /** The plan is held for review (D25): the CLI can take nothing until it
+   *  is released, so the rows wait — "Waiting for your review" — and Steer
+   *  is off; the release delivers them. */
+  held?: boolean;
   /** Deliver it now, ahead of the rest. Null while the PTY can't take it. */
   onSteer: ((id: string) => void) | null;
   /** Out of the queue, its text back in the composer. */
@@ -35,7 +39,7 @@ export interface WorkDrawerProps {
   onRemove: (id: string) => void;
 }
 
-export function WorkDrawer({ queued, agents, onSteer, onEdit, onRemove }: WorkDrawerProps) {
+export function WorkDrawer({ queued, agents, held = false, onSteer, onEdit, onRemove }: WorkDrawerProps) {
   if (queued.length === 0 && agents.length === 0) return null;
   return (
     <div className="rl-work-drawer" role="group" aria-label="Queued and running work">
@@ -44,6 +48,9 @@ export function WorkDrawer({ queued, agents, onSteer, onEdit, onRemove }: WorkDr
         <span className="rl-work-drawer-count">
           {queued.length > 0 ? `Queued · ${queued.length}` : "Running"}
         </span>
+        {held && queued.length > 0 && (
+          <span className="rl-work-drawer-held" role="status">Waiting for your review</span>
+        )}
         {agents.map((agent) => (
           <span key={agent.id} className="rl-work-drawer-agent" title={agent.label}>
             <Spinner size={10} className="rl-work-drawer-spin" />
@@ -57,7 +64,13 @@ export function WorkDrawer({ queued, agents, onSteer, onEdit, onRemove }: WorkDr
           <span className="rl-work-drawer-n" aria-hidden>{i + 1}</span>
           <span className="rl-work-drawer-text" title={row.text}>{row.text}</span>
           {onSteer && (
-            <button type="button" className="rl-work-drawer-steer" title="Send it now, ahead of the rest" onClick={() => onSteer(row.id)}>
+            <button
+              type="button"
+              className="rl-work-drawer-steer"
+              disabled={held}
+              title={held ? "Goes when you approve, revise or discuss the plan" : "Send it now, ahead of the rest"}
+              onClick={() => onSteer(row.id)}
+            >
               Steer
             </button>
           )}

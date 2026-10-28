@@ -724,6 +724,10 @@ button.rl-convo-chip:hover,
   color: var(--color-mode-plan-fg);
 }
 .rl-agent-head-spacer { flex: 1; }
+/* D25: the plan held for review, said where the agent's state is read. In
+   the "needs you" ink (the one status vocabulary), no pulse: a fact, not
+   an alarm. */
+.rl-agent-head-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-warning); }
 .rl-agent-head-seg {
   display: inline-flex;
   padding: 2px;
@@ -782,6 +786,7 @@ button.rl-convo-chip:hover,
   white-space: nowrap;
 }
 .rl-work-drawer-count { flex: 1; }
+.rl-work-drawer-held { color: var(--color-warning); }
 .rl-work-drawer-agent { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
 .rl-work-drawer-agent code { font-family: var(--font-mono); font-size: 11.5px; color: var(--color-ink-3); }
 .rl-work-drawer-spin { color: var(--color-info); }
@@ -814,7 +819,8 @@ button.rl-convo-chip:hover,
   cursor: pointer;
 }
 .rl-work-drawer-steer { padding: 0 6px; }
-.rl-work-drawer-steer:hover,
+.rl-work-drawer-steer:disabled { cursor: default; opacity: .5; }
+.rl-work-drawer-steer:hover:not(:disabled),
 .rl-work-drawer-icon:hover { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-work-drawer-steer:focus-visible,
 .rl-work-drawer-icon:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }

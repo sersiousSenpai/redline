@@ -95,6 +95,9 @@ export interface ConvoFacts {
   needsYou: boolean;
   hasOlder: boolean;
   boundSessionId: string | null;
+  /** The plan is held for your review (D25): the header's status says so
+   *  ("Plan ready · waiting for you"); null otherwise. */
+  held: string | null;
 }
 
 export interface ConvoActions {
@@ -284,6 +287,16 @@ function SessionConversation(props: SessionConversationProps) {
     harness: props.harness,
   });
   const [queue, setQueue] = useState<QueuedSend[]>([]);
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  // D25: the plan is held for review — the CLI is blocked in the review
+  // hook, so nothing typed now would reach it. Sends wait here (and in the
+  // terminal's outbox), Steer is off, and the hold's release delivers them.
+  const reviewHeld = !!props.planState?.held;
+  const wasHeld = useRef(reviewHeld);
+  // The render a hold is released in belongs to the release (its effect
+  // below delivers what waited); the flush must not race it for the head.
+  const releasing = wasHeld.current && !reviewHeld;
   const [restore, setRestore] = useState<{ text: string; nonce: number } | null>(null);
   // A send the PTY refused holds the queue until the host says something new
   // about readiness, or HELD_RETRY_MS passes (`nextFlush`).
@@ -352,6 +365,10 @@ function SessionConversation(props: SessionConversationProps) {
 
   const onSend = (text: string) => {
     const nonce = newNonce();
+    if (reviewHeld) {
+      setQueue((q) => enqueueSend(q, { id: nonce, text, at: Date.now() }));
+      return;
+    }
     const route = routeSend(readiness, queue);
     if (route === "send") inFlight.current = true;
     void hold(nonce, text).then((held) => {
@@ -378,7 +395,7 @@ function SessionConversation(props: SessionConversationProps) {
 
   // The flush: one at a time, in order, whenever the composer can type —
   // into the outbox instead while a turn runs.
-  const next = nextFlush(queue, readiness, { inFlight: inFlight.current, held: isHeld });
+  const next = nextFlush(queue, readiness, { inFlight: inFlight.current, held: isHeld || reviewHeld || releasing });
   useEffect(() => {
     if (!next || inFlight.current) return;
     inFlight.current = true;
@@ -394,6 +411,33 @@ function SessionConversation(props: SessionConversationProps) {
     // `next` is null while one is typing or the queue is held, so its id
     // moving is exactly "the head can go now".
   }, [next?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The hold released (Approve, Revise, Discuss): the CLI's turn runs on,
+  // so what waited goes into it now, oldest first — the outbox's rows by
+  // Steer, then the ones held here typed straight in. A Codex turn's steer
+  // would interrupt it, so those wait for the turn's end instead.
+  useEffect(() => {
+    const was = wasHeld.current;
+    wasHeld.current = reviewHeld;
+    if (!was || reviewHeld || !terminalId) return;
+    const id = terminalId;
+    const outbox = view.outbox.map((item) => item.id);
+    const local = queueRef.current;
+    if (outbox.length === 0 && local.length === 0) return;
+    inFlight.current = true;
+    void (async () => {
+      for (const row of outbox) await convoSteer(id, row).catch(() => null);
+      for (const item of local) {
+        const sent = await deliver(item.text, item.id);
+        if (!sent) break;
+        setQueue((q) => q.filter((x) => x.id !== item.id));
+      }
+      inFlight.current = false;
+      kick();
+    })();
+    // Only the release itself matters; the rest is read as it stands then.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewHeld]);
 
   /** Stop: Esc into the PTY, and the attention daemon told (one path with
    *  the dock's Esc, `interruptTerminal`). */
@@ -434,9 +478,11 @@ function SessionConversation(props: SessionConversationProps) {
   const drawerRows = useMemo(() => (view.outbox.length === 0 ? queue : [...view.outbox, ...queue]), [view.outbox, queue]);
 
   // ── What it says ──
-  const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath });
+  const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath, planHeld: reviewHeld });
   const stats = useMemo(() => planStatsLabel(planStats(props.planMarkdown)), [props.planMarkdown]);
-  const working = view.activeTurn !== null || props.termState === "working";
+  // Held, the turn is open but nothing is working: no Stop (an Esc into a
+  // CLI blocked in the review hook would cancel the plan), no timer.
+  const working = !reviewHeld && (view.activeTurn !== null || props.termState === "working");
   const planMode = view.mode === "plan";
   const placeholder =
     layout === "stage"
@@ -497,7 +543,7 @@ function SessionConversation(props: SessionConversationProps) {
   return (
     <div className="rl-convo" data-layout={layout} onKeyDown={onKeyDown}>
       {props.header?.(
-        { model: view.model ?? props.fallbackModel ?? null, mode: view.mode ?? props.fallbackMode ?? null, working, needsYou, hasOlder: view.hasOlder, boundSessionId: view.bound?.sessionId ?? null },
+        { model: view.model ?? props.fallbackModel ?? null, mode: view.mode ?? props.fallbackMode ?? null, working, needsYou, hasOlder: view.hasOlder, boundSessionId: view.bound?.sessionId ?? null, held: reviewHeld && status?.kind === "plan-ready" ? status.label : null },
         { earlier, stop },
       )}
       <div ref={scroller} className="rl-convo-scroll rl-thin-scroll-y" onScroll={onScroll}>
@@ -588,6 +634,7 @@ function SessionConversation(props: SessionConversationProps) {
           <WorkDrawer
             queued={drawerRows}
             agents={agents}
+            held={reviewHeld}
             onSteer={terminalId ? steer : null}
             onEdit={(id) => takeBack(id, true)}
             onRemove={(id) => takeBack(id, false)}

@@ -374,6 +374,40 @@ describe("the work drawer and the pane's keys (W2)", () => {
     expect(all(".rl-convo-bubble").map((e) => e.textContent)).toContain("later");
   });
 
+  it("D25: while the plan is held, sends wait (Steer off, 'Waiting for your review'), the header reads the hold, and the release delivers them", async () => {
+    api.snapshot = [BOUND, PROMPT, READ, ev("p1", 25, { kind: "assistant_text", text: "Writing it up." })];
+    const outbox = ev("o1", 26, { kind: "outbox", items: [{ id: "n1", text: "keep it brief", at: 1 }] });
+    api.snapshot.push(outbox);
+    const held = { label: "Plan", kind: "plan" as const, held: true, toReview: 0 };
+    const header = vi.fn((facts: { held: string | null }) => <div data-held>{facts.held}</div>);
+    await render(props({ planState: held, mode: undefined, header } as Partial<SessionConversationProps>));
+    // Never "Writing the plan" over a CLI blocked in the review hook.
+    expect(host.textContent).not.toContain("Writing the plan");
+    expect(q("[data-held]")?.textContent).toBe("Plan ready · waiting for you");
+    expect(q(".rl-work-drawer-held")?.textContent).toBe("Waiting for your review");
+    expect((q(".rl-work-drawer-steer") as HTMLButtonElement).disabled).toBe(true);
+    // A send now waits here too: nothing is typed into the blocked CLI.
+    await typeAndSend("and the tests");
+    expect(log.filter((l) => /^(submit|queue|expect|steer)/.test(l))).toEqual([]);
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["keep it brief", "and the tests"]);
+    // Approve / Revise / Discuss releases the hold: the outbox's row is
+    // steered into the resumed turn, then the one held here is typed in.
+    await render(props({ planState: { ...held, held: false }, header } as Partial<SessionConversationProps>));
+    for (let i = 0; i < 4; i++) await flush();
+    expect(log.filter((l) => /^(submit|steer)/.test(l))).toEqual(["steer term-1 n1", "submit term-1 and the tests"]);
+  });
+
+  it("D25: in a genuine mid-turn (no plan held) Steer delivers now", async () => {
+    api.snapshot = [BOUND, PROMPT, READ, ev("o1", 26, { kind: "outbox", items: [{ id: "n1", text: "now please", at: 1 }] })];
+    await render(props({ planState: { label: "Plan", kind: "plan", held: false, toReview: 0 } }));
+    expect(q(".rl-work-drawer-held")).toBeNull();
+    const steer = q(".rl-work-drawer-steer") as HTMLButtonElement;
+    expect(steer.disabled).toBe(false);
+    await act(async () => steer.click());
+    await flush();
+    expect(log).toContain("steer term-1 n1");
+  });
+
   it("a running subagent shows in the drawer's head with the shared spinner", async () => {
     api.snapshot = [BOUND, PROMPT, ev("t2", 20, { kind: "tool_use", toolUseId: "tu2", name: "Task", summary: "explore-fixtures" })];
     await render(props());

@@ -75,6 +75,10 @@ describe("the working row: first match wins", () => {
     ["building after approval: the verb again", view(turn([plan("p", 5, "approved"), tool("e", "Edit", `${ROOT}/src/a.ts`, "running")])), { projectPath: ROOT }, "tool", "Editing src/a.ts"],
     ["nothing running", view(null), {}, null, null],
     ["the terminal working before any event", view(null, { mode: null }), { term: "working" }, "working", "Working"],
+    // D25: a held plan is the CLI blocked in the review hook, whatever the
+    // open turn and its hook's `working` say.
+    ["a plan held for review while the turn reads as writing", view(turn([tool("t", "Read", "/x/a.md"), prose("p")])), { planHeld: true, term: "working" }, "plan-ready", "Plan ready · waiting for you"],
+    ["a held plan the transcript has not shown yet", view(null), { planHeld: true }, "plan-ready", "Plan ready · waiting for you"],
   ])("%s", (_label, input, options, kind, label) => {
     const status = workingStatus(input, options);
     expect(status?.kind ?? null).toBe(kind);
