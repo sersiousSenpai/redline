@@ -14,6 +14,7 @@ vi.mock("./SessionConversation", () => ({
       <div data-convo data-hidden={p.hidden ? "" : undefined}>
         {p.header?.({ model: { model: "claude-opus-4-5", effort: "high" }, mode: "plan", working: true, needsYou: false, hasOlder: true, boundSessionId: "cli-1" }, { earlier: () => hidden.push(true), stop: () => {} }) as never}
         <button type="button" data-open-terminal onClick={p.onShowTerminal}>Open Terminal</button>
+        <textarea className="rl-convo-field" />
       </div>
     );
   },
@@ -151,5 +152,19 @@ describe("AgentPane", () => {
     expect(facts).toContain("fallbackModel: activeAgentModel,");
     expect(app).toContain("handlers={agentPaneHandlers}");
     expect(app).toContain("const agentPaneHandlers = useStableHandlers({");
+  });
+
+  it("CLI → Chat hands the caret to the Chat view's composer, never leaving it on a hidden field (the last walk's glyph)", async () => {
+    await render(props());
+    const radio = (label: string) => [...host.querySelectorAll("[role=radio]")].find((b) => b.textContent === label) as HTMLButtonElement;
+    await act(async () => radio("CLI").click());
+    // The person was typing in the terminal: its helper textarea had the caret.
+    const helper = document.createElement("textarea");
+    document.body.append(helper);
+    helper.focus();
+    await act(async () => radio("Chat").click());
+    await act(async () => { await new Promise((r) => requestAnimationFrame(() => r(null))); });
+    expect(document.activeElement).toBe(q(".rl-convo-field"));
+    helper.remove();
   });
 });

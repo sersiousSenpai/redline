@@ -208,6 +208,21 @@ it("lets a floating hover preview appear without taking focus from the document"
   } finally { documentFocus.remove(); }
 });
 
+it("a door leaving the screen with the caret hands it to the shown pane, never keeping a hidden field focused (the last walk's glyph)", async () => {
+  const pane = document.createElement("div");
+  pane.innerHTML = '<div class="rl-wb-tab-body"><div class="rl-wb-pane" data-focused="" tabindex="-1" id="shown"></div></div>';
+  document.body.append(pane);
+  try {
+    await mount({ floating: true, visible: true, autoFocusOnShow: false, text: "build a thing" });
+    composer()!.focus();
+    expect(document.activeElement).toBe(composer());
+    await act(async () => root.render(<Harness floating visible={false} autoFocusOnShow={false}/>));
+    await flush();
+    expect(document.activeElement?.id).toBe("shown");
+    expect(document.querySelector("textarea:focus")).toBeNull();
+  } finally { pane.remove(); }
+});
+
 it("returns the caret to the floating input when submitting with the send button", async () => {
   const onLaunch = vi.fn();
   await mount({ floating: true, autoFocusOnShow: false, text: "Build this", onLaunch });

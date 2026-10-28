@@ -16,6 +16,10 @@
 .rl-frontdoor-focus[data-open="true"]::before { opacity: 1; pointer-events: auto; transition: opacity 240ms ease-out; }
 .rl-monochat { position: relative; width: min(800px, calc(100vw - 48px)); height: min(760px, calc(100dvh - 100px)); color: var(--color-ink); pointer-events: auto; }
 .rl-frontdoor-focus[data-visible="false"] .rl-monochat { pointer-events: none; }
+/* Hidden (and done closing), its text fields leave the window too, so none
+   can anchor macOS's input-source bubble — the terminal layer's rule
+   (workbench/caret.ts); FrontDoor also hands the caret to the shown pane. */
+.rl-frontdoor-focus[data-visible="false"]:not([data-closing]) textarea { position: fixed !important; left: -9999px !important; top: 0 !important; }
 /* Entry and focused chat share geometry so a click cannot move the caret. */
 .rl-monochat-content, .rl-monochat-conversation { height: 100%; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .rl-monochat-content { outline: none; }

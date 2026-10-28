@@ -18,7 +18,7 @@
 //! with it. App hands it identity-stable props (`useStableHandlers`,
 //! `useStableValue`); the header and Open Terminal callbacks here keep theirs.
 
-import { lazy, memo, Suspense, useCallback, useLayoutEffect, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { FilePenLine, GitFork, History } from "lucide-react";
 
 import { modeLabel, modelChipLabel } from "./convo/status";
@@ -55,6 +55,24 @@ function AgentPane(p: AgentPaneProps) {
   const [view, setView] = useState<AgentView>("chat");
   const [cliBox, setCliBox] = useState<HTMLDivElement | null>(null);
   const showingCli = view === "cli" && cliAvailable && !!terminalId;
+  // CLI → Chat hands the caret to the field now shown, the Chat view's
+  // composer: left where it was, it stays in xterm's helper textarea as
+  // the terminal leaves (or on the pane root, a box macOS draws no caret
+  // in), and macOS's input-source bubble keeps marking the spot the hidden
+  // field sat (the last walk's glyph over the browser rail). The terminal
+  // layer parks its helper textareas off screen as it goes (caret.ts).
+  const paneRef = useRef<HTMLDivElement | null>(null);
+  const wasCli = useRef(showingCli);
+  useLayoutEffect(() => {
+    const leftCli = wasCli.current && !showingCli;
+    wasCli.current = showingCli;
+    if (!leftCli || !visible) return;
+    const raf = requestAnimationFrame(() => {
+      const field = paneRef.current?.querySelector<HTMLTextAreaElement>(".rl-convo-field");
+      field?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [showingCli, visible]);
   // The dock comes to this box while it is on screen; a hidden kept tab
   // hands it back, and so does toggling to Chat or losing the PTY.
   useLayoutEffect(() => {
@@ -78,7 +96,7 @@ function AgentPane(p: AgentPaneProps) {
   // "Open Terminal" anywhere in the thread is this pane's CLI view.
   const showCli = useCallback(() => setView("cli"), []);
   return (
-    <div className="rl-agent-pane" data-view={showingCli ? "cli" : "chat"}>
+    <div ref={paneRef} className="rl-agent-pane" data-view={showingCli ? "cli" : "chat"}>
       <Suspense fallback={null}>
         <SessionConversation
           {...convo}

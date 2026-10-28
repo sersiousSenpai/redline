@@ -22,6 +22,7 @@ import type { ModelCatalogStatus } from "../hooks/useModelCatalogs";
 import { Panel, useClickPopover } from "./popover";
 import { useDictationComposer } from "../lib/dictationComposer";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
+import { releaseHiddenCaret } from "../workbench/caret";
 import { useSharedDraft } from "../hooks/useSharedDraft";
 import {
   FRONT_DOOR_TEXT_KEY,
@@ -313,6 +314,15 @@ function FrontDoorView(props: FrontDoorProps) {
 
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // A door that leaves the screen holding the caret (converted into the
+  // pane it launched, closed, a recent picked) hands it to the pane now
+  // shown: a hidden text field left focused is where macOS keeps drawing
+  // its input-source bubble (the last walk, after typing in the door). The
+  // same rule the terminal layer follows (`workbench/caret`).
+  useLayoutEffect(() => {
+    if (visible) return;
+    releaseHiddenCaret(rootRef.current);
+  }, [visible]);
   const islandRef = useRef<HTMLDivElement | null>(null);
   const [dropHot, setDropHot] = useState(false);
   const attachmentDropRef = useRef({ attachments, onAttachmentsChange });
