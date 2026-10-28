@@ -8,7 +8,10 @@
 //! - **The plan's CLI session ended** (classic's detached banner): the
 //!   restore with its progress, its failure and Retry, the harness a legacy
 //!   plan was "Written in", what would stop the restore (with its fix), Copy
-//!   resume command, and Dismiss.
+//!   resume command, and Dismiss. When the agent died under a plan in review
+//!   the restore starts on its own (lib/autoResume) and the notice says so —
+//!   "Resuming… attempt 2 of 3" — keeping Retry and Copy resume command; when
+//!   the automatic tries run out it is the failure with Retry again.
 //! - **Plan modified during Ask**: Claude revised when only asked.
 //! - **Resolution block issue**: the revision's resolutions didn't parse or
 //!   didn't match the comments sent.
@@ -24,6 +27,7 @@ import "./plan.css";
 import { FixControl } from "../ReadinessStrip";
 import type { ReadinessItem } from "../../lib/readiness";
 import type { RestoreHarness } from "../../lib/restoreHarness";
+import type { AutoNotice } from "../../lib/autoResume";
 
 const HARNESSES: [RestoreHarness, string][] = [
   ["claude-code", "Claude Code"],
@@ -56,6 +60,10 @@ export interface PlanNoticesProps {
     onRestore: () => void;
     onCopyResume: () => void;
     onDismiss: () => void;
+    /** The automatic resume, while it runs, waits or has given up. */
+    auto?: AutoNotice | null;
+    /** Stop the automatic resume (the reviewer is taking over). */
+    onStopAuto?: () => void;
   } | null;
   /** The latest version is a clean slate and these comments live on an
    *  earlier one: its number, or null. */
@@ -132,6 +140,56 @@ function Notice({
 
 function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTerminal: (() => void) | null }) {
   const blocked = d.blockers.length > 0;
+  const tried = d.auto?.phase === "stopped" ? d.auto.attempts : 0;
+  // Coming back on its own. Running: the progress, like a click's. Waiting
+  // out the backoff: why, when, and Retry now / Copy resume command — either
+  // of which (and Dismiss) takes it out of the timer's hands.
+  if (d.auto && d.auto.phase !== "stopped") {
+    const a = d.auto;
+    const stop = () => d.onStopAuto?.();
+    return (
+      <Notice
+        title={`Resuming… attempt ${a.attempt} of ${a.of}`}
+        onDismiss={a.phase === "scheduled" ? () => { stop(); d.onDismiss(); } : undefined}
+      >
+        {a.phase === "resuming" ? (
+          <>
+            <span className="rl-plan-notice-line">
+              The {d.decision.label} session behind this plan stopped, so Redline is reopening it.
+            </span>
+            {d.restoring && d.status && <span className="rl-plan-notice-line">{d.status}</span>}
+          </>
+        ) : (
+          <>
+            {d.failure && <span className="rl-plan-notice-line">The last try didn't take: {d.failure}</span>}
+            <span className="rl-plan-notice-line">
+              Trying again in {a.inSeconds} seconds.
+            </span>
+          </>
+        )}
+        <span className="rl-plan-notice-line rl-plan-notice-faint">
+          The conversation and your comments are kept — this re-presents the plan it was holding.
+        </span>
+        <span className="rl-plan-notice-actions">
+          {a.phase === "scheduled" && (
+            <>
+              <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore} disabled={blocked}>
+                Retry now
+              </button>
+              <button type="button" className="rl-plan-notice-btn" onClick={() => { stop(); d.onCopyResume(); }} disabled={blocked}>
+                Copy resume command
+              </button>
+            </>
+          )}
+          {d.onShowTerminal && (
+            <button type="button" className="rl-plan-notice-btn" onClick={d.onShowTerminal}>
+              Show the terminal
+            </button>
+          )}
+        </span>
+      </Notice>
+    );
+  }
   if (d.restoring)
     return (
       <Notice title="Reopening this plan…">
@@ -153,6 +211,11 @@ function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTermina
     return (
       <Notice title="Couldn't reopen this plan." onDismiss={d.onDismiss}>
         <span className="rl-plan-notice-line">{d.failure}</span>
+        {tried > 0 && (
+          <span className="rl-plan-notice-line rl-plan-notice-faint">
+            Redline tried {tried === 1 ? "once" : `${tried} times`} on its own and stopped there.
+          </span>
+        )}
         <span className="rl-plan-notice-actions">
           <button type="button" className="rl-plan-notice-btn" data-primary="" onClick={d.onRestore}>
             Retry
@@ -171,6 +234,11 @@ function Detached(d: NonNullable<PlanNoticesProps["detached"]> & { onShowTermina
   return (
     <Notice title={d.copy.lede} onDismiss={d.onDismiss}>
       <span className="rl-plan-notice-line">{d.copy.body}</span>
+      {tried > 0 && (
+        <span className="rl-plan-notice-line rl-plan-notice-faint">
+          Redline tried to reopen it on its own and stopped — fix what's below, then restore.
+        </span>
+      )}
       <span className="rl-plan-notice-line rl-plan-notice-faint">
         Restore plan session reopens the same conversation and re-presents the plan for review, in the background —
         nothing is retyped and nothing is lost.

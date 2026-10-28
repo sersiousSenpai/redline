@@ -19,6 +19,7 @@ import { ChevronDown, FileText, Globe, House, MessageSquare, Plus, Terminal } fr
 import { PlanStateMenu, type ManualPlanState } from "./PlanStateMenu";
 import { chatRowActions, planRowActions, RowMenu, RowRename, type RowAction } from "./RowMenu";
 import { Spinner } from "./Spinner";
+import { ResumePill } from "./ResumePill";
 import { NESTED_CONTROL_STYLE, nestedControl } from "./ui/nestedControl";
 
 import type { RevisionSummary, SessionSummary } from "../types";
@@ -1023,6 +1024,7 @@ function SessionRowBase({
           )}
           {needWord && !combining && <span className="rl-sb-needword">{needWord}</span>}
           {working && !combining && <Spinner size={10} className="rl-sb-spin" />}
+          {!combining && <ResumePill sessionId={session.sessionId} className="rl-sb-resume" />}
           <span
             style={{
               color: STATUS_COLORS[session.status],

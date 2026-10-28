@@ -2264,6 +2264,34 @@ p.rl-block-modified {
   }
 }
 
+/* "Resuming…" (ResumePill): a plan session coming back on its own, in the
+   same vocabulary — the shared spinner while it runs or is about to, the
+   amber dot breathing by opacity (an HTML element) once it failed and needs
+   you. Never red. */
+.rl-resume {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.rl-resume[data-tone="working"] { color: var(--color-mode-plan-fg); }
+.rl-resume[data-tone="needs"] { color: var(--color-warning); }
+.rl-resume-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: rl-term-needs 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-resume-dot { animation: none; }
+}
+
 /* A tile whose agent is blocked on you is framed in amber. ::before, because
    ::after is the hail's (above) — both are overlays on the positioned
    wrapper for the same reason: the terminal paints an opaque background over

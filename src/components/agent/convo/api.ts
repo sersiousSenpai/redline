@@ -17,6 +17,7 @@ import type {
   SubmitResult,
   SwitchResult,
 } from "./types";
+import { noteTerminalInterrupted } from "../../../lib/userStops";
 
 /** Start mirroring a terminal's conversation: the recent tail now, then
  *  coalesced batches through `onBatch` until `convoUnsubscribe`. A hook only
@@ -80,6 +81,9 @@ export function ptyInterrupt(terminalId: string): Promise<void> {
  *  would otherwise outlive the turn in every row and dot that reads it.
  *  One path for both, never a second. */
 export async function interruptTerminal(terminalId: string): Promise<void> {
+  // The reviewer stopped it: a detach that follows is never resumed on its
+  // own (lib/autoResume).
+  noteTerminalInterrupted(terminalId);
   await ptyInterrupt(terminalId);
   await invoke("term_attention_interrupted", { terminalId }).catch(() => {});
 }

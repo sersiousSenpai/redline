@@ -151,17 +151,23 @@ describe("one launch pipeline", () => {
     expect(sites).toHaveLength(2);
     for (const site of sites) {
       const args = site.slice(0, 800);
-      expect(args).toContain("backend: restoreDecision.harness");
+      // The embedded path restores any session (the automatic resume's may
+      // not be on screen), so it reads the same derivation per session.
+      expect(args).toMatch(/backend: (restoreDecision|decision)\.harness/);
       expect(args).not.toContain("backend: session.backend");
+      expect(args).not.toContain("backend: t.backend");
     }
+    expect(app).toContain("const decision = restoreDecisionFor(t);");
+    expect(app).toContain("      ? restoreDecision\n      : resolveRestoreHarness({ backend: s.backend, choice: harnessChoices[s.sessionId] });");
   });
 
   it("fresh provider readiness gates BOTH restore paths", () => {
     // Two guards, one per path. A gate on only the embedded terminal is worse
     // than none: "Copy resume command" then becomes the way to route around it,
     // and it fails in a shell where nothing is watching for the answer.
-    expect(countIn("src", "await checkRestoreHealth()")).toBe(2);
-    expect(app).toContain("integrationHealth.refresh({ backend: restoreDecision.harness");
+    expect(countIn("src", "await checkRestoreHealth(")).toBe(2);
+    expect(app).toContain("const checkRestoreHealth = async (harness: RestoreHarness = restoreDecision.harness)");
+    expect(app).toContain("integrationHealth.refresh({ backend: harness, extension: false })");
   });
 
   it("restore preparation always names the harness", () => {

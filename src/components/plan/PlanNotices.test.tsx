@@ -126,3 +126,38 @@ describe("footerTally: what classic's footer read off the comments", () => {
     expect(footerTally([], false).allHandled).toBe(false);
   });
 });
+
+describe("PlanNotices: an interrupted plan resuming on its own", () => {
+  it("running: Resuming… attempt N of 3, the progress, and no Retry (one at a time)", async () => {
+    await render({ ...none, onShowTerminal: vi.fn(), detached: detached({ restoring: true, status: "Reopening in the background…", auto: { phase: "resuming", attempt: 2, of: 3 } }) });
+    expect(host.textContent).toContain("Resuming… attempt 2 of 3");
+    expect(host.textContent).toContain("Reopening in the background…");
+    expect(buttons()).toEqual(["Show the terminal"]);
+  });
+
+  it("between tries: why, when, and Retry now / Copy resume command, each taking over", async () => {
+    const onStopAuto = vi.fn();
+    const d = detached({ failure: "The reopened session hasn't answered.", auto: { phase: "scheduled", attempt: 3, of: 3, inSeconds: 30 }, onStopAuto });
+    await render({ ...none, detached: d });
+    expect(host.textContent).toContain("Resuming… attempt 3 of 3");
+    expect(host.textContent).toContain("The reopened session hasn't answered.");
+    expect(host.textContent).toContain("Trying again in 30 seconds.");
+    await press("Retry now");
+    expect(d.onRestore).toHaveBeenCalledTimes(1);
+    await press("Copy resume command");
+    expect(d.onCopyResume).toHaveBeenCalledTimes(1);
+    await press("Dismiss: Resuming… attempt 3 of 3");
+    expect(d.onDismiss).toHaveBeenCalledTimes(1);
+    // Copying and dismissing both stop the timer; Retry now is a click,
+    // which the restore machine itself reports.
+    expect(onStopAuto).toHaveBeenCalledTimes(2);
+  });
+
+  it("given up: the failure with Retry and Copy, saying it tried", async () => {
+    await render({ ...none, detached: detached({ failure: "boom", auto: { phase: "stopped", attempts: 3 } }) });
+    expect(host.textContent).toContain("Couldn't reopen this plan.");
+    expect(host.textContent).toContain("tried 3 times on its own");
+    expect(buttons()).toContain("Retry");
+    expect(buttons()).toContain("Copy resume command");
+  });
+});

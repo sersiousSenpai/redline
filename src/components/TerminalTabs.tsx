@@ -99,6 +99,7 @@ import {
   type LivePty,
   type TerminalWorkspace,
 } from "../lib/terminalWorkspace";
+import { noteTerminalClosed, noteTerminalInterrupted } from "../lib/userStops";
 
 interface Tab {
   id: string;
@@ -809,6 +810,9 @@ export const TerminalTabs = memo(
   const handleInterrupt = useCallback(
     (id: string) => {
       ackInput(id, true);
+      // An Esc on a held plan cancels it: the detach that follows is a
+      // decision, not a crash (lib/autoResume).
+      noteTerminalInterrupted(id);
       // No hook reports an interrupt. The dock has cleared its own badge
       // above; the daemon clears it for everything else that reads
       // `term-attention` — the sidebar's rows, the conversation's turn.
@@ -1283,6 +1287,9 @@ export const TerminalTabs = memo(
   };
 
   const forgetTab = useCallback((id: string) => {
+    // Closed on purpose: a plan session that detaches because of it is the
+    // reviewer's doing, never resumed on its own (lib/autoResume).
+    noteTerminalClosed(id);
     // Through the lifecycle fence: closing a terminal the instant it opened
     // must not let the kill overtake the still-queued spawn (orphan shell).
     void enqueuePtyOp(id, () => invoke("pty_kill", { id }));

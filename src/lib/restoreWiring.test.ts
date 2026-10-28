@@ -134,3 +134,36 @@ describe("a failed restore stays actionable", () => {
     expect(running).not.toContain("onDismiss");
   });
 });
+
+describe("the automatic resume rides the same restore", () => {
+  const hook = read("lib/useAutoResume.ts");
+  const ctl = read("lib/autoResumeController.ts");
+  const api = read("components/agent/convo/api.ts");
+
+  it("starts through the click's own function, never a second path", () => {
+    // One body, so one-at-a-time and every step above hold for both.
+    expect(app).toContain("return target ? restorePlanSessionWith({ target }) : Promise.resolve(\"blocked\" as const);");
+    for (const src of [hook, ctl]) {
+      expect(src).not.toContain("arm_restore");
+      expect(src).not.toContain("openTerminal");
+    }
+  });
+
+  it("a PTY's exit asks the daemon to reconcile; only its detach triggers", () => {
+    // A restore started off the exit would close on the first summary that
+    // says the session is not detached.
+    const exit = hook.slice(hook.indexOf('listen<{ id: string }>("pty-exit"'), hook.indexOf("return () => {", hook.indexOf('"pty-exit"')));
+    expect(exit).toContain('invoke("report_agent_exit", { sessionId })');
+    expect(exit).not.toContain("dispatch(");
+    expect(exit).not.toContain("start(");
+  });
+
+  it("the reviewer's own closes and interrupts are recorded where they happen", () => {
+    const forget = tabs.slice(tabs.indexOf("const forgetTab = useCallback("), tabs.indexOf('invoke("pty_kill", { id })'));
+    expect(forget).toContain("noteTerminalClosed(id);");
+    const interrupt = tabs.slice(tabs.indexOf("const handleInterrupt = useCallback("), tabs.indexOf("term_attention_interrupted"));
+    expect(interrupt).toContain("noteTerminalInterrupted(id);");
+    const stop = api.slice(api.indexOf("export async function interruptTerminal("), api.indexOf("await ptyInterrupt(terminalId);"));
+    expect(stop).toContain("noteTerminalInterrupted(terminalId);");
+  });
+});

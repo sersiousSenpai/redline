@@ -85,6 +85,8 @@ import {
   type RestoreAttempt,
   type RestoreEvent,
 } from "./lib/restoreAttempt";
+import { useAutoResume, type AutoStart } from "./lib/useAutoResume";
+import { useAutoNotice, useResumePills } from "./components/ResumePill";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 // The OS notifications and the Dock badge: renders nothing, and nothing in
 // it is on the boot path.
@@ -2696,6 +2698,8 @@ function App() {
   // The launch on screen: the active `launch:` set's terminal (its Agent tab).
   const wbLaunchId = launchIdOf(wbActiveKey);
   const activeLaunchId = wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null;
+  // Each session's "Resuming…" (lib/autoResumeController publishes it).
+  const resumePillsNow = useResumePills();
   // What the tab strip says about a pane beyond its kind: a plan's own
   // title and version, and its status in the shared vocabulary (the
   // session's terminal needs you / is working, from `sidebarActivity`).
@@ -2715,12 +2719,15 @@ function App() {
     const summary = summaries.find((x) => x.sessionId === pane.data.sessionId);
     const key = `plan:${pane.data.sessionId}`;
     const version = summary?.revisions.length ? latestDisplayVersion(summary.revisions, summary.latestVersion) : null;
+    // A resume running reads as work and a failed one as needing you, ahead
+    // of what the dead terminal last said (lib/autoResume's `resumePill`).
+    const resume = resumePillsNow.get(pane.data.sessionId);
     return {
       // A title the user gave the tab wins (`paneTitle` reads it).
       title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
-      status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
+      status: resume ? (resume.tone === "working" ? ("working" as const) : ("needs" as const)) : flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
-  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds]);
+  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses, heldTermIds, resumePillsNow]);
   // The strip's right-hand cluster: the tile as a contextual entry — the
   // session's plan beside the surface in this tab, or the surface alone.
   const stageTile = (() => {
@@ -5709,6 +5716,12 @@ function App() {
       }),
     [session?.backend, activeId, harnessChoices],
   );
+  // The same derivation for any session: the automatic resume restores one
+  // that may not be on screen. The one on screen reads the memo above.
+  const restoreDecisionFor = (s: { sessionId: string; backend?: string | null }) =>
+    s.sessionId === activeId
+      ? restoreDecision
+      : resolveRestoreHarness({ backend: s.backend, choice: harnessChoices[s.sessionId] });
 
   // What stands between this review and its plan coming back. Derived, never
   // stored: `applyReadinessFix` re-probes, the answer lands in `preflight`, and
@@ -6287,11 +6300,11 @@ function App() {
   // Refuse a restore that cannot return the plan, and say what's in the way.
   // The banner already renders these rows with their fix buttons; this is the
   // click-time backstop for the gap between a stale probe and the button state.
-  const checkRestoreHealth = async (): Promise<PreflightStatus | null> => {
+  const checkRestoreHealth = async (harness: RestoreHarness = restoreDecision.harness): Promise<PreflightStatus | null> => {
     try {
-      const health = await integrationHealth.refresh({ backend: restoreDecision.harness, extension: false });
-      setRestoreHealth({ backend: restoreDecision.harness, preflight: health.preflight, codexHook: health.codexHook?.installed ?? false });
-      const [first] = providerRestoreBlockers(restoreDecision.harness, health.preflight, health.codexHook?.installed);
+      const health = await integrationHealth.refresh({ backend: harness, extension: false });
+      setRestoreHealth({ backend: harness, preflight: health.preflight, codexHook: health.codexHook?.installed ?? false });
+      const [first] = providerRestoreBlockers(harness, health.preflight, health.codexHook?.installed);
       if (first) { setToast(`${first.label} — restore can't bring the plan back until that's fixed.`); return null; }
       return health.preflight;
     } catch (error) { setToast(`Could not check the planning provider: ${error}`); return null; }
@@ -6323,24 +6336,43 @@ function App() {
   // "Show raw terminal" is there for when they want the machinery.
   // `rescinded` is passed by Reopen, which rescinds and restores in one
   // gesture — before `rescindedIds` has re-rendered into this closure.
+  //
+  // `target` is the automatic resume's (lib/useAutoResume): a session that is
+  // not necessarily the one on screen, read off its summary. A click restores
+  // the session on screen. Either way the same body runs, so the one-at-a-time
+  // rule and every step below hold for both. Says whether it started.
   const restorePlanSession = () => restorePlanSessionWith({});
-  const restorePlanSessionWith = async (opts: { rescinded?: boolean }) => {
-    if (!session) return;
+  // The ref covers the awaits before the attempt is recorded: a click and the
+  // automatic timer landing together must not both get past the check below.
+  const restoreBusyRef = useRef(false);
+  const restorePlanSessionWith = async (opts: { rescinded?: boolean; target?: SessionSummary }): Promise<AutoStart> => {
+    if (restoreBusyRef.current) return "busy";
+    restoreBusyRef.current = true;
+    try {
+      return await restoreOnce(opts);
+    } finally {
+      restoreBusyRef.current = false;
+    }
+  };
+  const restoreOnce = async (opts: { rescinded?: boolean; target?: SessionSummary }): Promise<AutoStart> => {
+    const t = opts.target ?? session;
+    if (!t) return "blocked";
     // One at a time. See `RestoreAttempt`. A failed attempt is not in flight —
     // its Retry comes back through here.
-    if (!canStartRestore(restoreAttempt)) return;
+    if (!canStartRestore(restoreAttempt)) return "busy";
+    const decision = restoreDecisionFor(t);
     // Nothing spent until the round trip can actually complete: a Codex restore
     // missing its binary, sign-in, plan profile or Stop hook opens a terminal
     // that runs, looks healthy, and never gives the plan back. The blocker's
     // own fix is already on screen.
-    const restoreProbe = await checkRestoreHealth();
-    if (!restoreProbe) return;
-    const sessionId = session.sessionId;
-    const projectPath = session.projectPath || null;
+    const restoreProbe = await checkRestoreHealth(decision.harness);
+    if (!restoreProbe) return "blocked";
+    const sessionId = t.sessionId;
+    const projectPath = t.projectPath || null;
     onRestore({ type: "start", sessionId, at: Date.now() });
     // The banner is the status surface now, so it must NOT be dismissed — the
     // old path hid it and left the reviewer with a terminal and no narrator.
-    setDetachDismissed(false);
+    if (sessionId === activeId) setDetachDismissed(false);
     const fail = (error: string) =>
       onRestore({ type: "fail", sessionId, error });
 
@@ -6352,7 +6384,7 @@ function App() {
     const target = await resolveResumeCwd(
       sessionId,
       projectPath,
-      restoreDecision.harness,
+      decision.harness,
     );
     const cmd = `${buildResumeCommand(
       sessionId,
@@ -6365,13 +6397,13 @@ function App() {
       // an id Redline never held. For a legacy row with no stored provenance
       // this is the reviewer's own pick, defaulting to Claude.
       {
-        backend: restoreDecision.harness,
+        backend: decision.harness,
         claudeBin: restoreProbe.claude.path,
         codexBin: restoreProbe.codex?.path ?? null,
         cursorBin: restoreProbe.providers?.cursor?.path ?? null,
         antigravityBin: restoreProbe.providers?.antigravity?.path ?? null,
-        model: session.model,
-        effort: session.effort,
+        model: t.model,
+        effort: t.effort,
       },
     )}\r`;
 
@@ -6386,7 +6418,7 @@ function App() {
       await invoke("arm_restore", { sessionId });
     } catch (e) {
       fail(`Couldn't arm the restore: ${String(e)}`);
-      return;
+      return "started";
     }
 
     // The terminal opens in the PLAN's directory — the one the reviewer thinks
@@ -6394,7 +6426,7 @@ function App() {
     const id = await openTerminal(projectPath, true);
     if (!id) {
       fail("Couldn't open a terminal to resume in.");
-      return;
+      return "started";
     }
     // The plan's conversation is this terminal's from now on — bound before
     // the resumed CLI's SessionStart, so it binds the moment it does. In
@@ -6416,7 +6448,27 @@ function App() {
       (stage, reason) =>
         fail(`Couldn't type the resume command (${stage}): ${reason}`),
     );
+    return "started";
   };
+
+  // An interrupted plan session comes back on its own: the agent behind a
+  // plan in review died (or its PTY exited) and the reviewer didn't stop it.
+  // The rules, the backoff and the loop guard are `lib/autoResume`; the
+  // restore is the one above, so a click and the timer share one slot.
+  const autoNoticeHere = useAutoNotice(activeId);
+  const autoResume = useAutoResume({
+    summaries,
+    restoreAttempt,
+    sessionTerminals,
+    isLegacy: (s) => {
+      const d = restoreDecisionFor(s);
+      return d.legacy && !d.chosen;
+    },
+    start: (sessionId) => {
+      const target = summaries.find((s) => s.sessionId === sessionId);
+      return target ? restorePlanSessionWith({ target }) : Promise.resolve("blocked" as const);
+    },
+  });
 
   // Candidate project directories for the drafter's launch picker: every review
   // session's project, each open folder workspace, and every folder registered
@@ -9093,6 +9145,11 @@ function App() {
           restoring,
           status: restoreStatus,
           failure: restoreFailure?.error ?? null,
+          // The automatic resume's own state (lib/autoResume), and the way
+          // to stop it: Dismiss and Copy resume command both mean "I'll
+          // take it from here".
+          auto: autoNoticeHere,
+          onStopAuto: () => { if (activeId) autoResume.cancel(activeId); },
           copy: detachedCopy,
           decision: restoreDecision,
           onHarness: (h: RestoreHarness) => activeId && setHarnessChoices((prev) => ({ ...prev, [activeId]: h })),

@@ -22,6 +22,7 @@ import { lazy, memo, Suspense, useCallback, useLayoutEffect, useState, type Reac
 import { FilePenLine, GitFork, History } from "lucide-react";
 
 import { modeLabel, modelChipLabel } from "./convo/status";
+import { ResumePill } from "../ResumePill";
 import type { ConvoActions, ConvoFacts } from "./SessionConversation";
 import type { SessionConversationProps } from "./SessionConversation";
 
@@ -50,7 +51,7 @@ export interface AgentPaneProps extends Omit<SessionConversationProps, "layout" 
 
 function AgentPane(p: AgentPaneProps) {
   const { terminalId, visible, cliAvailable, onCliView, onFork, ...convo } = p;
-  const { harness, projectPath = null } = p;
+  const { harness, projectPath = null, sessionId = null } = p;
   const [view, setView] = useState<AgentView>("chat");
   const [cliBox, setCliBox] = useState<HTMLDivElement | null>(null);
   const showingCli = view === "cli" && cliAvailable && !!terminalId;
@@ -65,6 +66,7 @@ function AgentPane(p: AgentPaneProps) {
   const header = useCallback((facts: ConvoFacts, actions: ConvoActions): ReactNode => (
     <AgentHeader
       harness={harness}
+      sessionId={sessionId}
       facts={facts}
       view={showingCli ? "cli" : "chat"}
       cliAvailable={cliReady}
@@ -72,7 +74,7 @@ function AgentPane(p: AgentPaneProps) {
       onEarlier={facts.hasOlder ? actions.earlier : null}
       onFork={onFork && facts.boundSessionId ? () => onFork(facts.boundSessionId!, projectPath) : null}
     />
-  ), [harness, showingCli, cliReady, onFork, projectPath]);
+  ), [harness, sessionId, showingCli, cliReady, onFork, projectPath]);
   // "Open Terminal" anywhere in the thread is this pane's CLI view.
   const showCli = useCallback(() => setView("cli"), []);
   return (
@@ -94,8 +96,10 @@ function AgentPane(p: AgentPaneProps) {
 
 export default memo(AgentPane);
 
-function AgentHeader({ harness, facts, view, cliAvailable, onView, onEarlier, onFork }: {
+function AgentHeader({ harness, sessionId, facts, view, cliAvailable, onView, onEarlier, onFork }: {
   harness: "claude" | "codex";
+  /** The plan session, whose "Resuming…" the header wears. */
+  sessionId: string | null;
   facts: ConvoFacts;
   view: AgentView;
   cliAvailable: boolean;
@@ -128,6 +132,7 @@ function AgentHeader({ harness, facts, view, cliAvailable, onView, onEarlier, on
         </>
       )}
       {facts.held && <span className="rl-agent-head-status" role="status">{facts.held}</span>}
+      <ResumePill sessionId={sessionId} className="rl-agent-head-resume" />
       <span className="rl-agent-head-spacer" />
       <span className="rl-agent-head-seg" role="radiogroup" aria-label="Show the conversation or its terminal">
         <button type="button" role="radio" aria-checked={view === "chat"} onClick={() => onView("chat")}>Chat</button>
