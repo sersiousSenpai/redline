@@ -12,6 +12,8 @@ import type {
   ConvoMode,
   ConvoPage,
   ConvoSnapshot,
+  QueueResult,
+  SteerResult,
   SubmitResult,
   SwitchResult,
 } from "./types";
@@ -41,6 +43,23 @@ export function convoPage(terminalId: string, epoch: number, beforeOffset: numbe
  *  once and reconcile it with the transcript (`delivered` / `undelivered`). */
 export function convoExpect(terminalId: string, nonce: string, text: string): Promise<void> {
   return invoke("convo_expect", { terminalId, nonce, text });
+}
+
+/** A send while the agent is in a turn: held in the terminal's outbox (the
+ *  work drawer) and typed in when the turn ends. `idle`: nothing holds it,
+ *  so the caller sends it itself. */
+export function convoQueue(terminalId: string, id: string, text: string): Promise<QueueResult> {
+  return invoke<QueueResult>("convo_queue", { terminalId, id, text });
+}
+
+/** Edit / Remove: out of the outbox, its text back (null: it already went). */
+export function convoUnqueue(terminalId: string, id: string): Promise<string | null> {
+  return invoke<string | null>("convo_unqueue", { terminalId, id });
+}
+
+/** Steer: the held send goes now (see `SteerResult`). */
+export function convoSteer(terminalId: string, id: string): Promise<SteerResult> {
+  return invoke<SteerResult>("convo_steer", { terminalId, id });
 }
 
 /** Type `text` into the PTY and press Return: bracketed paste for long or

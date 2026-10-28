@@ -55,6 +55,24 @@ pub enum Body {
     Delivered { nonce: String, prompt_id: Option<String> },
     Undelivered { nonce: String },
     Readiness { ready: bool, blocker: Option<Blocker> },
+    /// The sends held for the running turn to end, oldest first: the work
+    /// drawer's rows. Host-only, rebuilt for each snapshot like readiness.
+    Outbox { items: Vec<OutboxItem> },
+    /// A held send went to the CLI (the turn ended, or Steer): the stage
+    /// draws its optimistic bubble as it does a composer send's, and
+    /// `delivered` / `undelivered` settle it by `nonce`.
+    Sending { nonce: String, text: String },
+}
+
+/// One send the outbox holds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboxItem {
+    /// The composer's nonce: the send's id from the drawer to the bubble.
+    pub id: String,
+    pub text: String,
+    /// When it was queued, epoch ms.
+    pub at: i64,
 }
 
 impl Body {
@@ -68,6 +86,8 @@ impl Body {
             Body::Queued { text, .. } => text.as_ref().map_or(0, String::len),
             Body::PlanOutcome { feedback, .. } => feedback.as_ref().map_or(0, String::len),
             Body::AskOpened { ask } => ask.summary.len() + ask.input.as_ref().map_or(0, |v| v.to_string().len()),
+            Body::Outbox { items } => items.iter().map(|i| i.text.len()).sum(),
+            Body::Sending { text, .. } => text.len(),
             _ => 0,
         }
     }
@@ -155,6 +175,30 @@ pub struct ConvoPage {
 pub enum SubmitResult {
     Sent,
     Blocked { blocker: Blocker },
+}
+
+/// `convo_queue`'s answer: held for the turn to end, or the CLI is idle and
+/// the composer sends it itself.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum QueueResult {
+    Queued,
+    Idle,
+}
+
+/// `convo_steer`'s answer. `Sent`: typed into the running turn now (Claude
+/// takes type-ahead mid-turn and folds it in). `Interrupt`: the harness has
+/// no mid-turn path, so the send is at the head of the outbox and the
+/// caller stops the turn (the one interrupt path); it goes as the turn
+/// ends. `Blocked`: the CLI can't take it yet; it heads the outbox.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SteerResult {
+    Sent,
+    Interrupt,
+    Blocked { blocker: Blocker },
+    /// No such send: already gone (delivered, or removed).
+    Gone,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -249,5 +293,22 @@ mod tests {
             AskAnswer::Answers { answers: HashMap::from([("Which?".to_string(), "Blue".to_string())]) }
         );
         assert_eq!(parse(json!({"kind": "terminal"})), AskAnswer::Terminal);
+    }
+
+    #[test]
+    fn the_outbox_wire_matches_the_contract() {
+        let outbox = event(Body::Outbox { items: vec![OutboxItem { id: "n".into(), text: "t".into(), at: 3 }] });
+        assert_eq!(outbox["kind"], "outbox");
+        assert_eq!(outbox["items"], json!([{"id": "n", "text": "t", "at": 3}]));
+        let sending = event(Body::Sending { nonce: "n".into(), text: "t".into() });
+        assert_eq!((sending["kind"].as_str(), sending["nonce"].as_str(), sending["text"].as_str()), (Some("sending"), Some("n"), Some("t")));
+        assert_eq!(serde_json::to_value(QueueResult::Queued).unwrap(), json!({"status": "queued"}));
+        assert_eq!(serde_json::to_value(QueueResult::Idle).unwrap(), json!({"status": "idle"}));
+        assert_eq!(serde_json::to_value(SteerResult::Interrupt).unwrap(), json!({"status": "interrupt"}));
+        assert_eq!(
+            serde_json::to_value(SteerResult::Blocked { blocker: Blocker::NativeDialog }).unwrap(),
+            json!({"status": "blocked", "blocker": "native_dialog"})
+        );
+        assert_eq!(serde_json::to_value(SteerResult::Gone).unwrap(), json!({"status": "gone"}));
     }
 }

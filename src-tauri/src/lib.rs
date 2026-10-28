@@ -12346,12 +12346,13 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "pty_spawn",
     // The conversation mirror: the first read of a transcript (subscribe),
     // a page of it, a transcript lookup (prebind), and the paced typing of
-    // a composer send or a mid-session switch. `pty_interrupt` and the
-    // answers stay on the main thread: one byte, one oneshot.
+    // a composer send, a steered one or a mid-session switch. `pty_interrupt`
+    // and the answers stay on the main thread: one byte, one oneshot.
     "convo_page",
     "convo_prebind",
     "convo_set_mode",
     "convo_set_model",
+    "convo_steer",
     "convo_subscribe",
     "pty_submit",
     // The agent harnesses: the agents table in SQLite, and an installed
@@ -12737,6 +12738,9 @@ pub fn run() {
             convo::convo_unsubscribe,
             convo::convo_page,
             convo::convo_expect,
+            convo::convo_queue,
+            convo::convo_unqueue,
+            convo::convo_steer,
             convo::convo_prebind,
             convo::convo_set_mode,
             convo::convo_set_model,

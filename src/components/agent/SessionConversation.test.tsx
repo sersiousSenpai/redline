@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConvoBatch, ConvoEvent, SubmitResult } from "./convo/types";
+import type { ConvoBatch, ConvoEvent, QueueResult, SteerResult, SubmitResult } from "./convo/types";
 
 const { api, log } = vi.hoisted(() => {
   const log: string[] = [];
@@ -11,6 +11,9 @@ const { api, log } = vi.hoisted(() => {
     batches: new Map<string, (batch: ConvoBatch) => void>(),
     snapshot: [] as ConvoEvent[],
     submit: { status: "sent" } as SubmitResult,
+    /** What `convo_queue` answers: idle unless a test holds sends. */
+    queue: { status: "idle" } as QueueResult,
+    steer: { status: "sent" } as SteerResult,
     /** Holds `convo_subscribe`'s reply until released. */
     hold: null as null | (() => void),
   };
@@ -26,6 +29,18 @@ vi.mock("./convo/api", () => ({
   convoUnsubscribe: vi.fn(async (terminalId: string, id: string) => void log.push(`unsubscribe ${terminalId} ${id}`)),
   convoPage: vi.fn(async () => ({ events: [], hasOlder: false })),
   convoExpect: vi.fn(async (terminalId: string, nonce: string, text: string) => void log.push(`expect ${terminalId} ${text} ${nonce.length > 0}`)),
+  convoQueue: vi.fn(async (terminalId: string, _id: string, text: string) => {
+    log.push(`queue ${terminalId} ${text}`);
+    return api.queue;
+  }),
+  convoUnqueue: vi.fn(async (terminalId: string, id: string) => {
+    log.push(`unqueue ${terminalId} ${id}`);
+    return `text of ${id}`;
+  }),
+  convoSteer: vi.fn(async (terminalId: string, id: string) => {
+    log.push(`steer ${terminalId} ${id}`);
+    return api.steer;
+  }),
   ptySubmit: vi.fn(async (terminalId: string, text: string) => {
     log.push(`submit ${terminalId} ${text}`);
     return api.submit;
@@ -86,6 +101,8 @@ beforeEach(() => {
   api.batches.clear();
   api.snapshot = [BOUND, PROMPT, READ, DONE];
   api.submit = { status: "sent" };
+  api.queue = { status: "idle" };
+  api.steer = { status: "sent" };
   api.hold = null;
   host = document.createElement("div");
   document.body.appendChild(host);
@@ -124,10 +141,10 @@ describe("SessionConversation", () => {
     expect(q(".rl-convo-bubble")?.textContent).toBe("Plan the roadmap");
   });
 
-  it("Enter announces the send, types it, and shows the bubble at once", async () => {
+  it("Enter asks the outbox first, then announces the send, types it, and shows the bubble at once", async () => {
     await render(props());
     await typeAndSend("Also check D3");
-    expect(log.slice(1)).toEqual(["expect term-1 Also check D3 true", "submit term-1 Also check D3"]);
+    expect(log.slice(1)).toEqual(["queue term-1 Also check D3", "expect term-1 Also check D3 true", "submit term-1 Also check D3"]);
     expect(all(".rl-convo-bubble").map((e) => e.textContent)).toContain("Also check D3");
   });
 
@@ -284,6 +301,8 @@ describe("the work drawer and the pane's keys (W2)", () => {
     api.batches.clear();
     api.snapshot = [];
     api.submit = { status: "sent" };
+    api.queue = { status: "idle" };
+    api.steer = { status: "sent" };
     api.hold = null;
     host = document.createElement("div");
     document.body.append(host);
@@ -294,28 +313,65 @@ describe("the work drawer and the pane's keys (W2)", () => {
     host.remove();
   });
 
-  it("Steer types a queued send now; Edit hands its text back to the composer; Remove drops it", async () => {
+  it("a send the CLI can't take yet waits here: Steer puts it first in line, never last; Edit hands its text back; Remove drops it", async () => {
     api.snapshot = [BOUND, PROMPT, ev("h1", 15, { kind: "readiness", ready: false, blocker: "dirty_input" })];
     await render(props());
     await typeAndSend("one");
     await typeAndSend("two");
     await typeAndSend("three");
     expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["one", "two", "three"]);
-    // Steer the second: it goes to the PTY ahead of the first.
+    // Steer the second: blocked, so it heads the queue instead of failing to the back.
     await act(async () => (all(".rl-work-drawer-steer")[1] as HTMLButtonElement).click());
     for (let i = 0; i < 4; i++) await flush();
-    expect(log.filter((l) => l.startsWith("submit"))).toEqual(["submit term-1 two"]);
-    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["one", "three"]);
-    // Edit the first: back in the box.
+    expect(log.filter((l) => l.startsWith("submit"))).toEqual([]);
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["two", "one", "three"]);
+    // Edit the second row: back in the box.
     await act(async () => (q('[aria-label="Edit: one"]') as HTMLButtonElement).click());
     await flush();
     expect((q(".rl-convo-field") as HTMLTextAreaElement).value).toBe("one");
-    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["three"]);
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["two", "three"]);
     // Remove the last: gone, the box untouched.
     await act(async () => (q('[aria-label="Remove: three"]') as HTMLButtonElement).click());
     await flush();
-    expect(q(".rl-work-drawer")).toBeNull();
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["two"]);
     expect((q(".rl-convo-field") as HTMLTextAreaElement).value).toBe("one");
+    // The CLI can take input again, the agent idle: it goes.
+    await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 16, { kind: "readiness", ready: true, blocker: null })] }));
+    for (let i = 0; i < 4; i++) await flush();
+    expect(log.filter((l) => l.startsWith("submit"))).toEqual(["submit term-1 two"]);
+    expect(q(".rl-work-drawer")).toBeNull();
+  });
+
+  it("mid-turn, a send is held in the terminal's outbox as a drawer row, not typed into the CLI", async () => {
+    api.snapshot = [BOUND, PROMPT, READ];
+    api.queue = { status: "queued" };
+    await render(props());
+    await typeAndSend("and also this");
+    expect(log).toContain("queue term-1 and also this");
+    expect(log.filter((l) => l.startsWith("submit") || l.startsWith("expect"))).toEqual([]);
+    expect(all(".rl-convo-bubble").map((e) => e.textContent)).toEqual(["Plan the roadmap"]);
+    // The backend's outbox is the drawer.
+    const outbox = (items: { id: string; text: string }[], id: string, offset: number) =>
+      ev(id, offset, { kind: "outbox", items: items.map((item) => ({ ...item, at: 1 })) });
+    await act(async () => api.batches.get("term-1")!({ events: [outbox([{ id: "n1", text: "and also this" }, { id: "n2", text: "later" }], "o1", 21)] }));
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["and also this", "later"]);
+    // Steer: the backend types it now (or asks for the interrupt).
+    api.steer = { status: "interrupt" };
+    await act(async () => (all(".rl-work-drawer-steer")[1] as HTMLButtonElement).click());
+    await flush();
+    expect(log).toContain("steer term-1 n2");
+    expect(log).toContain("interrupt term-1");
+    // Edit: out of the outbox, into the composer.
+    await act(async () => (q('[aria-label="Edit: and also this"]') as HTMLButtonElement).click());
+    await flush();
+    expect(log).toContain("unqueue term-1 n1");
+    expect((q(".rl-convo-field") as HTMLTextAreaElement).value).toBe("text of n1");
+    // The turn ended and the outbox handed one on: its bubble, then the drawer empties.
+    await act(async () =>
+      api.batches.get("term-1")!({ events: [outbox([], "o2", 40), ev("s1", 40, { kind: "sending", nonce: "n2", text: "later" })] }),
+    );
+    expect(q(".rl-work-drawer")).toBeNull();
+    expect(all(".rl-convo-bubble").map((e) => e.textContent)).toContain("later");
   });
 
   it("a running subagent shows in the drawer's head with the shared spinner", async () => {

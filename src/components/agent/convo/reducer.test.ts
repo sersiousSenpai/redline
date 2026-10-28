@@ -403,3 +403,19 @@ describe("the fixture loader", () => {
     expect(convoView(initialConvoState())).toMatchObject({ blocks: [], pending: [], activeTurn: null, plan: null, hasOlder: false, oldest: null });
   });
 });
+
+describe("the outbox (W2's work drawer)", () => {
+  it("the latest outbox is the drawer; a send it hands on is an optimistic bubble until the prompt absorbs it", () => {
+    const items = (...texts: string[]) => texts.map((text, i) => ({ id: `n${i}`, text, at: 0 }));
+    let state = run(batch(ev("o1", 10, { kind: "outbox", items: items("first", "second") })));
+    expect(convoView(state).outbox.map((i) => i.text)).toEqual(["first", "second"]);
+    state = convoReducer(state, batch(ev("o2", 10, { kind: "outbox", items: items("second") }), ev("s", 10, { kind: "sending", nonce: "n0", text: "first" }, 0, 100)));
+    expect(convoView(state).outbox.map((i) => i.text)).toEqual(["second"]);
+    expect(convoView(state).pending.map((b) => [b.text, b.delivery])).toEqual([["first", "pending"]]);
+    state = convoReducer(state, batch(ev("d", 10, { kind: "delivered", nonce: "n0" }), ev("u", 20, { kind: "user_text", text: "first" }, 0, 101)));
+    expect(convoView(state).pending).toEqual([]);
+    // An older outbox never rolls the drawer back.
+    state = convoReducer(state, { type: "page", page: { events: [ev("o0", 5, { kind: "outbox", items: items("stale") })], hasOlder: false } });
+    expect(convoView(state).outbox.map((i) => i.text)).toEqual(["second"]);
+  });
+});

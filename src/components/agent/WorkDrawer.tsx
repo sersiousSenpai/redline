@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! The Agent pane's work drawer: what waits and what runs, in the rows
-//! above the composer. Queued sends are numbered in the order they will go,
-//! each with Steer (type it into the PTY now — the CLI takes type-ahead
-//! mid-turn), Edit (back into the composer) and Remove; a running subagent
+//! above the composer. Queued sends — held while the agent is in a turn
+//! (the terminal's outbox) or while the CLI can't take input — are numbered
+//! in the order they will go, each with Steer (it goes now: into the
+//! running turn, or first in line), Edit (back into the composer) and
+//! Remove; a running subagent
 //! (a `Task` tool call that has not returned) shows beside the count with
 //! the shared spinner. Nothing here decides anything: the conversation
 //! owns the queue and the delivery, this draws them.
@@ -55,7 +57,7 @@ export function WorkDrawer({ queued, agents, onSteer, onEdit, onRemove }: WorkDr
           <span className="rl-work-drawer-n" aria-hidden>{i + 1}</span>
           <span className="rl-work-drawer-text" title={row.text}>{row.text}</span>
           {onSteer && (
-            <button type="button" className="rl-work-drawer-steer" title="Type it into the session now, ahead of the rest" onClick={() => onSteer(row.id)}>
+            <button type="button" className="rl-work-drawer-steer" title="Send it now, ahead of the rest" onClick={() => onSteer(row.id)}>
               Steer
             </button>
           )}

@@ -38,7 +38,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, use
 import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
 import { MarkdownView } from "../MarkdownView";
 import { Spinner } from "../Spinner";
-import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, interruptTerminal, ptySubmit } from "./convo/api";
+import { answerAsk, convoExpect, convoPage, convoQueue, convoSteer, convoSubscribe, convoUnqueue, convoUnsubscribe, interruptTerminal, ptySubmit } from "./convo/api";
 import { questionsToRelease } from "./askRelease";
 import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "./convo/types";
 import {
@@ -72,6 +72,7 @@ import {
   composerReadiness,
   enqueueSend,
   nextFlush,
+  promoteSend,
   routeSend,
   unqueueSend,
   type QueuedSend,
@@ -332,10 +333,36 @@ function SessionConversation(props: SessionConversationProps) {
     [terminalId],
   );
 
+  /** While the agent is in a turn, a send waits in the terminal's outbox —
+   *  a drawer row — and is typed in when the turn ends, rather than going
+   *  into the CLI's own type-ahead. True when the outbox took it; false
+   *  when nothing holds it (no turn running), so it is sent from here. */
+  const hold = useCallback(
+    async (id: string, text: string): Promise<boolean> => {
+      if (!terminalId) return false;
+      try {
+        return (await convoQueue(terminalId, id, text)).status === "queued";
+      } catch {
+        return false;
+      }
+    },
+    [terminalId],
+  );
+
   const onSend = (text: string) => {
     const nonce = newNonce();
-    if (routeSend(readiness, queue) === "send") {
-      inFlight.current = true;
+    const route = routeSend(readiness, queue);
+    if (route === "send") inFlight.current = true;
+    void hold(nonce, text).then((held) => {
+      if (held) {
+        if (route === "send") inFlight.current = false;
+        kick();
+        return;
+      }
+      if (route !== "send") {
+        setQueue((q) => enqueueSend(q, { id: nonce, text, at: Date.now() }));
+        return;
+      }
       const seen = view.readiness;
       void deliver(text, nonce).then((sent) => {
         inFlight.current = false;
@@ -345,21 +372,24 @@ function SessionConversation(props: SessionConversationProps) {
         }
         kick();
       });
-    } else setQueue((q) => enqueueSend(q, { id: nonce, text, at: Date.now() }));
+    });
   };
 
-  // The flush: one at a time, in order, whenever the composer can type.
+  // The flush: one at a time, in order, whenever the composer can type —
+  // into the outbox instead while a turn runs.
   const next = nextFlush(queue, readiness, { inFlight: inFlight.current, held: isHeld });
   useEffect(() => {
     if (!next || inFlight.current) return;
     inFlight.current = true;
     const seen = view.readiness;
-    void deliver(next.text, next.id).then((sent) => {
-      inFlight.current = false;
-      if (sent) setQueue((q) => q.filter((item) => item.id !== next.id));
-      else setHeld({ at: seen });
-      kick();
-    });
+    void hold(next.id, next.text)
+      .then((held) => (held ? true : deliver(next.text, next.id)))
+      .then((sent) => {
+        inFlight.current = false;
+        if (sent) setQueue((q) => q.filter((item) => item.id !== next.id));
+        else setHeld({ at: seen });
+        kick();
+      });
     // `next` is null while one is typing or the queue is held, so its id
     // moving is exactly "the head can go now".
   }, [next?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -369,17 +399,38 @@ function SessionConversation(props: SessionConversationProps) {
   const stop = useCallback(() => {
     if (terminalId) void interruptTerminal(terminalId).catch(() => {});
   }, [terminalId]);
-  /** Steer: a queued send goes now, ahead of the rest — the CLI takes
-   *  type-ahead mid-turn and queues it itself. */
+  /** Steer: a held send goes NOW. One the outbox holds is typed into the
+   *  running turn (Claude folds type-ahead into it), or, for a harness with
+   *  no such path, heads the outbox while the turn is stopped through the
+   *  one interrupt path, its end delivering it. One held here waits for a
+   *  CLI that can't take input yet, so it goes first once it can — never
+   *  to the back. */
   const steer = (id: string) => {
-    const item = queue.find((q) => q.id === id);
-    if (!item) return;
-    setQueue((q) => q.filter((row) => row.id !== id));
-    void deliver(item.text, item.id).then((sent) => {
-      if (!sent) setQueue((q) => enqueueSend(q, item));
-      kick();
-    });
+    if (terminalId && view.outbox.some((item) => item.id === id)) {
+      void convoSteer(terminalId, id)
+        .then((result) => {
+          if (result.status === "interrupt") return interruptTerminal(terminalId);
+        })
+        .catch(() => {});
+      return;
+    }
+    setQueue((q) => promoteSend(q, id));
   };
+  /** Edit and Remove, wherever the send is held. */
+  const takeBack = (id: string, edit: boolean) => {
+    if (terminalId && view.outbox.some((item) => item.id === id)) {
+      void convoUnqueue(terminalId, id)
+        .then((text) => {
+          if (edit && text) setRestore({ text, nonce: Date.now() });
+        })
+        .catch(() => {});
+      return;
+    }
+    const { queue: rest, text } = unqueueSend(queue, id);
+    setQueue(rest);
+    if (edit && text) setRestore({ text, nonce: Date.now() });
+  };
+  const drawerRows = useMemo(() => (view.outbox.length === 0 ? queue : [...view.outbox, ...queue]), [view.outbox, queue]);
 
   // ── What it says ──
   const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath });
@@ -534,15 +585,11 @@ function SessionConversation(props: SessionConversationProps) {
       {!terminalOnly && (
         <div className="rl-convo-dock">
           <WorkDrawer
-            queued={queue}
+            queued={drawerRows}
             agents={agents}
             onSteer={terminalId ? steer : null}
-            onEdit={(id) => {
-              const { queue: rest, text } = unqueueSend(queue, id);
-              setQueue(rest);
-              if (text) setRestore({ text, nonce: Date.now() });
-            }}
-            onRemove={(id) => setQueue((q) => unqueueSend(q, id).queue)}
+            onEdit={(id) => takeBack(id, true)}
+            onRemove={(id) => takeBack(id, false)}
           />
           {readiness.message && (
             <p className="rl-convo-readiness" role="status">

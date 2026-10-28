@@ -35,6 +35,7 @@ import type {
   ConvoMode,
   ConvoPage,
   ConvoSnapshot,
+  OutboxItem,
 } from "./types";
 
 /** Rows kept while following the live end (the plan's "~400 rows"). */
@@ -123,6 +124,8 @@ export interface ConvoFacts {
   closed: Readonly<Record<string, ConvoAskOutcome>>;
   /** Plans proposed, by the ExitPlanMode `toolUseId`. */
   plans: Readonly<Record<string, Stamped<PlanFact>>>;
+  /** The sends the terminal's outbox holds for the turn to end. */
+  outbox: Stamped<readonly OutboxItem[]> | null;
 }
 
 export interface ConvoState {
@@ -162,6 +165,7 @@ const EMPTY_FACTS: ConvoFacts = {
   asks: {},
   closed: {},
   plans: {},
+  outbox: null,
 };
 
 export function initialConvoState(): ConvoState {
@@ -302,6 +306,9 @@ function applyFacts(
         if (newer(next.readiness, key))
           next = { ...next, readiness: { key, value: { ready: event.ready, blocker: event.blocker } } };
         break;
+      case "outbox":
+        if (newer(next.outbox, key)) next = { ...next, outbox: { key, value: event.items } };
+        break;
       case "ask_opened":
         if (newer(next.asks[event.ask.askId], key))
           next = { ...next, asks: { ...next.asks, [event.ask.askId]: { key, value: event.ask } } };
@@ -363,10 +370,17 @@ function applyFacts(
 // ── Sends ─────────────────────────────────────────────────────────────────
 
 /** `delivered` / `undelivered` move their send. Delivered wins over a late
- *  undelivered: the transcript has the prompt, whatever the timer said. */
+ *  undelivered: the transcript has the prompt, whatever the timer said. A
+ *  held send the outbox handed to the CLI (`sending`) is a send like the
+ *  composer's own, from then on. */
 function settleSends(sends: readonly PendingSend[], changed: readonly ConvoEvent[]): readonly PendingSend[] {
   let next = sends;
   for (const event of changed) {
+    if (event.kind === "sending") {
+      if (!next.some((send) => send.nonce === event.nonce))
+        next = [...next, { nonce: event.nonce, text: event.text, at: event.ts, status: "pending", promptId: null, absorbedBy: null }];
+      continue;
+    }
     if (event.kind !== "delivered" && event.kind !== "undelivered") continue;
     const i = next.findIndex((send) => send.nonce === event.nonce);
     if (i < 0) continue;
@@ -541,6 +555,9 @@ export interface ConvoView {
   openAsks: ConvoAsk[];
   /** The CLI's own type-ahead queue (`queued`), oldest first. */
   queue: string[];
+  /** Sends the terminal's outbox holds for the turn to end, oldest first:
+   *  the work drawer's rows. */
+  outbox: readonly OutboxItem[];
   /** The latest plan proposed, with its outcome once it has one. */
   plan: PlanFact | null;
   hasOlder: boolean;
@@ -739,11 +756,14 @@ export function convoView(state: ConvoState): ConvoView {
     bound: facts.bound?.value ?? null,
     openAsks,
     queue,
+    outbox: facts.outbox?.value ?? NO_OUTBOX,
     plan: latestPlan(facts)?.value ?? null,
     hasOlder: state.hasOlder,
     oldest: first ? { epoch: first.epoch, offset: first.offset } : null,
   };
 }
+
+const NO_OUTBOX: readonly OutboxItem[] = [];
 
 /** A draft's working maps stay behind; the same draft always yields the
  *  same turn object, so a block and `activeTurn` are one value. */

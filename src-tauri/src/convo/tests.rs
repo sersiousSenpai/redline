@@ -633,3 +633,86 @@ fn the_turn_end_hook_reports_the_effort_and_mid_turn_switches_wait() {
     term.hook(&json!({"hook_event_name": "UserPromptSubmit", "session_id": "nested", "prompt": "go"}));
     assert!(!term.working);
 }
+
+/// W2's work drawer: a send while the agent is in a turn is held in the
+/// outbox, not typed into the CLI's own type-ahead; it goes when the turn
+/// ends, one at a time; Steer sends it now (Claude) or heads the queue and
+/// asks for the interrupt (Codex); Edit and Remove take it back out.
+#[test]
+fn a_send_mid_turn_waits_in_the_outbox_for_the_turn_to_end() {
+    let mut term = Term::default();
+    term.apply_fire(fire("startup", "s", Path::new("/nope/s.jsonl")));
+    let (channel, batches) = recorder();
+    term.subscribe(channel, ready());
+    let now = Instant::now();
+    assert!(!term.enqueue("idle".into(), "hello".into()), "nothing running: the composer sends it itself");
+    assert!(term.outbox.is_empty());
+
+    term.hook(&json!({"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "go"}));
+    assert!(term.enqueue("n1".into(), "first".into()));
+    assert!(term.enqueue("n2".into(), "second".into()));
+    assert!(term.enqueue("n1".into(), "first".into()), "the same send twice is one row");
+    assert_eq!(term.outbox.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["n1", "n2"]);
+    assert_eq!(term.take_due(ready(), now), None, "mid-turn: held");
+    let snapshot = term.snapshot(ready()).0;
+    assert!(snapshot.iter().any(|e| matches!(&e.body, Body::Outbox { items } if items.len() == 2)), "a late subscriber sees the drawer");
+
+    term.hook(&json!({"hook_event_name": "Stop", "session_id": "s"}));
+    assert_eq!(term.take_due(None, now), None, "a CLI that can't take input keeps it");
+    let first = term.take_due(ready(), now).expect("the turn ended: the head goes");
+    assert_eq!(first.id, "n1");
+    assert_eq!(term.take_due(ready(), now), None, "the next waits for this one to reach the prompt");
+    assert!(term.enqueue("n3".into(), "third".into()), "a send in flight holds new ones too");
+    term.hook(&json!({"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "first", "prompt_id": "p1"}));
+    assert!(term.expects.is_empty(), "delivered");
+    term.hook(&json!({"hook_event_name": "Stop", "session_id": "s"}));
+    assert_eq!(term.take_due(ready(), now).map(|i| i.id), Some("n2".into()));
+
+    // Edit / Remove.
+    assert_eq!(term.unqueue("n3"), Some("third".into()));
+    assert_eq!(term.unqueue("n3"), None);
+    flush_all(&mut term);
+    let events: Vec<Value> = lock(&batches).iter().flat_map(|b| b["events"].as_array().unwrap().clone()).collect();
+    let sent: Vec<_> = events.iter().filter(|e| e["kind"] == "sending").map(|e| e["nonce"].as_str().unwrap().to_string()).collect();
+    assert_eq!(sent, ["n1", "n2"]);
+    assert!(events.iter().any(|e| e["kind"] == "delivered" && e["nonce"] == "n1"));
+    assert_eq!(events.iter().rev().find(|e| e["kind"] == "outbox").unwrap()["items"], json!([]));
+    assert!(term.ring.iter().all(|e| !matches!(e.body, Body::Outbox { .. } | Body::Sending { .. })), "host-only, never replayed");
+
+    // A refused hand-off says so.
+    term.handoff_failed("n2");
+    assert!(term.expects.is_empty());
+}
+
+#[test]
+fn steer_types_it_now_or_heads_the_queue() {
+    let mut term = Term::default();
+    term.apply_fire(fire("startup", "s", Path::new("/nope/s.jsonl")));
+    let now = Instant::now();
+    term.hook(&json!({"hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "go"}));
+    for (id, text) in [("a", "one"), ("b", "two"), ("c", "three")] {
+        term.enqueue(id.into(), text.into());
+    }
+    // Claude, mid-turn: typed now, ahead of the rest, as a composer send.
+    let (result, item) = term.steer("b", ready(), now);
+    assert_eq!(result, SteerResult::Sent);
+    assert_eq!(item.map(|i| i.text), Some("two".into()));
+    assert_eq!(term.expects.iter().map(|e| e.nonce.as_str()).collect::<Vec<_>>(), ["b"]);
+    assert_eq!(term.outbox.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+    // The CLI can't take input: it moves to the head, never to the tail.
+    let dialog = Some(InputState { paste_mode: true, dirty: true, cli_foreground: true });
+    assert_eq!(term.steer("c", dialog, now), (SteerResult::Blocked { blocker: Blocker::DirtyInput }, None));
+    assert_eq!(term.outbox.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["c", "a"]);
+    assert_eq!(term.steer("gone", ready(), now), (SteerResult::Gone, None));
+
+    // Codex has no mid-turn path: the head of the queue, and an interrupt.
+    let mut codex = Term::default();
+    codex.apply_fire(bind::Fire { source: "startup".into(), session_id: "t".into(), transcript: PathBuf::new(), starts: true, harness: bind::Harness::Codex });
+    codex.working = true;
+    codex.enqueue("x".into(), "first".into());
+    codex.enqueue("y".into(), "steered".into());
+    assert_eq!(codex.steer("y", ready(), now), (SteerResult::Interrupt, None));
+    assert_eq!(codex.outbox.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["y", "x"]);
+    codex.working = false;
+    assert_eq!(codex.take_due(ready(), now).map(|i| i.id), Some("y".into()), "the interrupted turn's end delivers it");
+}

@@ -201,6 +201,9 @@ struct Term {
     subs: Vec<Sub>,
     unwatched_since: Option<Instant>,
     expects: Vec<Expect>,
+    /// Composer sends held while a turn runs (the work drawer's rows),
+    /// typed in one at a time once it ends ([`Term::take_due`]).
+    outbox: Vec<OutboxItem>,
     asks: Vec<PendingAsk>,
     /// The TUI is showing a dialog of its own: an ask released to it, one
     /// that was never armed, or one its Notification reported.
@@ -239,7 +242,9 @@ impl Term {
     }
 
     fn tailing(&self) -> bool {
-        let watched = !self.subs.is_empty() || !self.expects.is_empty() || !self.asks.is_empty();
+        // Held sends wait on the turn's end, which the tail is how this
+        // terminal learns of when no hook says so.
+        let watched = !self.subs.is_empty() || !self.expects.is_empty() || !self.asks.is_empty() || !self.outbox.is_empty();
         // A joined Codex connection is read whatever the stage does: the
         // server streams every joined client the thread's deltas, and one
         // left unread would back up into the TUI's own server.
@@ -259,7 +264,10 @@ impl Term {
     /// needs. Readiness and open asks are rebuilt for each snapshot instead.
     fn emit(&mut self, events: Vec<ConvoEvent>) {
         for event in &events {
-            if !matches!(event.body, Body::Readiness { .. } | Body::AskOpened { .. } | Body::AskClosed { .. }) {
+            if !matches!(
+                event.body,
+                Body::Readiness { .. } | Body::AskOpened { .. } | Body::AskClosed { .. } | Body::Outbox { .. } | Body::Sending { .. }
+            ) {
                 self.ring.push(event.clone());
             }
             if matches!(
@@ -595,7 +603,7 @@ impl Term {
         }
         if self.subs.is_empty() {
             let since = *self.unwatched_since.get_or_insert(now);
-            if now.duration_since(since) > UNWATCHED_GRACE && self.expects.is_empty() && self.asks.is_empty() {
+            if now.duration_since(since) > UNWATCHED_GRACE && self.expects.is_empty() && self.asks.is_empty() && self.outbox.is_empty() {
                 self.source = None;
                 self.ring.clear();
             }
@@ -679,6 +687,95 @@ impl Term {
         let Some(i) = self.expects.iter().position(|e| e.key == key) else { return Vec::new() };
         let nonce = self.expects.remove(i).nonce;
         vec![self.host(format!("delivered:{nonce}"), Body::Delivered { nonce, prompt_id })]
+    }
+
+    // --- the outbox ---------------------------------------------------------------
+
+    /// A send can't go straight to the CLI: a turn is running, a send is
+    /// still on its way to the prompt, or others already wait their turn.
+    fn holds_sends(&self) -> bool {
+        self.working || !self.outbox.is_empty() || !self.expects.is_empty()
+    }
+
+    fn outbox_event(&self) -> ConvoEvent {
+        self.host(host_id(), Body::Outbox { items: self.outbox.clone() })
+    }
+
+    fn emit_outbox(&mut self) {
+        let event = self.outbox_event();
+        self.emit(vec![event]);
+    }
+
+    /// Hold a composer send until the running turn ends. False when
+    /// nothing holds it: the composer types it itself, as before.
+    fn enqueue(&mut self, id: String, text: String) -> bool {
+        if !self.holds_sends() {
+            return false;
+        }
+        if !self.outbox.iter().any(|item| item.id == id) {
+            self.outbox.push(OutboxItem { id, text, at: now_ms() });
+            self.emit_outbox();
+        }
+        true
+    }
+
+    /// Edit or Remove: out of the outbox, its text back.
+    fn unqueue(&mut self, id: &str) -> Option<String> {
+        let at = self.outbox.iter().position(|item| item.id == id)?;
+        let item = self.outbox.remove(at);
+        self.emit_outbox();
+        Some(item.text)
+    }
+
+    /// `item` is about to be typed: expected like a composer send (the
+    /// bubble, then `delivered` / `undelivered`), and off the drawer.
+    fn hand_off(&mut self, item: &OutboxItem, now: Instant) {
+        let key = match_key(&crate::pty::sanitize(&item.text));
+        self.expects.push(Expect { nonce: item.id.clone(), key, at: now, queued: false });
+        let outbox = self.outbox_event();
+        let sending = self.host(format!("sending:{}", item.id), Body::Sending { nonce: item.id.clone(), text: item.text.clone() });
+        self.emit(vec![outbox, sending]);
+    }
+
+    /// The outbox's head, once the turn is over and the CLI can take it:
+    /// one at a time, the next only after the last reached the prompt (its
+    /// expect settled) and its own turn ended.
+    fn take_due(&mut self, input: Option<InputState>, now: Instant) -> Option<OutboxItem> {
+        if self.outbox.is_empty() || self.working || !self.expects.is_empty() || self.blocker(input).is_some() {
+            return None;
+        }
+        let item = self.outbox.remove(0);
+        self.hand_off(&item, now);
+        Some(item)
+    }
+
+    /// Steer: a held send goes NOW. Claude takes type-ahead mid-turn and
+    /// folds it into the running turn, so it is typed at once (the item
+    /// comes back for the caller to type). Codex has no such path: the send
+    /// heads the outbox and the caller stops the turn, whose end delivers
+    /// it. A CLI that can't take input keeps it at the head, not the tail.
+    fn steer(&mut self, id: &str, input: Option<InputState>, now: Instant) -> (SteerResult, Option<OutboxItem>) {
+        let Some(at) = self.outbox.iter().position(|item| item.id == id) else { return (SteerResult::Gone, None) };
+        let item = self.outbox.remove(at);
+        let ahead = |t: &mut Self, item: OutboxItem, result: SteerResult| {
+            t.outbox.insert(0, item);
+            t.emit_outbox();
+            (result, None)
+        };
+        if let Some(blocker) = self.blocker(input) {
+            return ahead(self, item, SteerResult::Blocked { blocker });
+        }
+        if self.working && self.harness() == Some(bind::Harness::Codex) {
+            return ahead(self, item, SteerResult::Interrupt);
+        }
+        self.hand_off(&item, now);
+        (SteerResult::Sent, Some(item))
+    }
+
+    /// A handed-off send the PTY refused: never sent, and said so.
+    fn handoff_failed(&mut self, id: &str) {
+        let gone = self.recall(|e| e.nonce == id);
+        self.emit(gone);
     }
 
     // --- asks -------------------------------------------------------------------
@@ -801,6 +898,9 @@ impl Term {
             .collect();
         all.sort_by_key(|e| (e.epoch, e.offset));
         all.extend(self.asks.iter().map(|a| self.host(format!("ask:{}", a.ask.ask_id), Body::AskOpened { ask: a.ask.clone() })));
+        if !self.outbox.is_empty() {
+            all.push(self.outbox_event());
+        }
         let blocker = self.blocker(input);
         self.readiness = Some((blocker.is_none(), blocker));
         all.push(self.host(host_id(), Body::Readiness { ready: blocker.is_none(), blocker }));
@@ -948,9 +1048,13 @@ fn tail_loop(app: AppHandle, state: ConvoState) {
                 let _ = app.emit(TITLE_EVENT, TitleNotice { terminal_id: id.clone(), session_id: b.session_id.clone(), title });
             }
             let capped = t.retire_if_quiet(now).then(|| t.binding.as_ref().map(|b| b.session_id.clone()));
+            let due = if t.outbox.is_empty() { None } else { t.take_due(input(&app, &id), now) };
             drop(t);
             if let Some(bound) = bound {
                 announce(&app, &id, bound);
+            }
+            if let Some(item) = due {
+                submit_held(&app, &id, item);
             }
             if let Some(session_id) = capped {
                 crate::term_attention::retire(&app, &id, session_id.as_deref());
@@ -969,6 +1073,35 @@ fn tail_loop(app: AppHandle, state: ConvoState) {
             };
         }
         *kicked = false;
+    }
+}
+
+/// Type a held send into the PTY, off the tail thread: the paste is paced,
+/// and the tail must keep reading meanwhile.
+fn submit_held(app: &AppHandle, terminal_id: &str, item: OutboxItem) {
+    let (app, id) = (app.clone(), terminal_id.to_string());
+    let nonce = item.id.clone();
+    let failed = |app: &AppHandle, id: &str, nonce: &str| {
+        let Some(state) = app.try_state::<ConvoState>() else { return };
+        if let Some(term) = state.term(id) {
+            lock(&term).handoff_failed(nonce);
+            state.kick();
+        }
+    };
+    let (app2, id2) = (app.clone(), id.clone());
+    let spawned = std::thread::Builder::new().name("convo-outbox".into()).spawn(move || {
+        let Some(ptys) = app.try_state::<crate::pty::PtyState>() else { return failed(&app, &id, &item.id) };
+        match crate::pty::submit_text(&ptys, &id, &item.text) {
+            Ok(()) => input_changed(&app, &id),
+            Err(e) => {
+                tracing::warn!(error = %e, "a held send could not be typed");
+                failed(&app, &id, &item.id);
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "failed to spawn the outbox send");
+        failed(&app2, &id2, &nonce);
     }
 }
 
@@ -1186,6 +1319,50 @@ pub fn convo_expect(app: AppHandle, state: tauri::State<'_, ConvoState>, termina
     let key = match_key(&crate::pty::sanitize(&text));
     lock(&term).expects.push(Expect { nonce, key, at: Instant::now(), queued: false });
     state.wake(&app);
+}
+
+/// A composer send while the agent is in a turn: held in the terminal's
+/// outbox (the work drawer) and typed in when the turn ends, instead of
+/// going into the CLI's own type-ahead. `idle`: nothing holds it, so the
+/// composer sends it itself.
+#[tauri::command]
+pub fn convo_queue(app: AppHandle, state: tauri::State<'_, ConvoState>, terminal_id: String, id: String, text: String) -> QueueResult {
+    if crate::pty::sanitize(&text).trim().is_empty() {
+        return QueueResult::Idle;
+    }
+    let term = state.term_or_new(&terminal_id);
+    let queued = lock(&term).enqueue(id, text);
+    state.wake(&app);
+    if queued { QueueResult::Queued } else { QueueResult::Idle }
+}
+
+/// The drawer's Edit and Remove: the held send leaves the outbox, its text
+/// back for the composer. None when it already went.
+#[tauri::command]
+pub fn convo_unqueue(state: tauri::State<'_, ConvoState>, terminal_id: String, id: String) -> Option<String> {
+    let term = state.term(&terminal_id)?;
+    let text = lock(&term).unqueue(&id);
+    state.kick();
+    text
+}
+
+/// The drawer's Steer ([`Term::steer`]). Off the main thread
+/// (`OFF_MAIN_COMMANDS`): a send typed now is paced like `pty_submit`.
+#[tauri::command]
+pub fn convo_steer(app: AppHandle, state: tauri::State<'_, ConvoState>, terminal_id: String, id: String) -> Result<SteerResult, String> {
+    let Some(term) = state.term(&terminal_id) else { return Ok(SteerResult::Gone) };
+    let (result, item) = lock(&term).steer(&id, input(&app, &terminal_id), Instant::now());
+    state.wake(&app);
+    if let Some(item) = item {
+        let ptys = app.state::<crate::pty::PtyState>();
+        if let Err(e) = crate::pty::submit_text(&ptys, &terminal_id, &item.text) {
+            lock(&term).handoff_failed(&item.id);
+            state.kick();
+            return Err(e);
+        }
+        input_changed(&app, &terminal_id);
+    }
+    Ok(result)
 }
 
 /// Bind a terminal to a session before its CLI says so: Restore resumes a

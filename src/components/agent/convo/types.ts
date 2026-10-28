@@ -146,7 +146,22 @@ export type ConvoEvent = Base &
     | { kind: "undelivered"; nonce: string }
     /** The composer's readiness changed (host). */
     | { kind: "readiness"; ready: boolean; blocker: ConvoBlocker | null }
+    /** The sends held for the running turn to end, oldest first: the work
+     *  drawer (host; rebuilt per snapshot, never replayed). */
+    | { kind: "outbox"; items: OutboxItem[] }
+    /** A held send went to the CLI (its turn came, or Steer): an
+     *  optimistic bubble like a composer send's, settled by `nonce`. */
+    | { kind: "sending"; nonce: string; text: string }
   );
+
+/** One send the terminal's outbox holds (`convo_queue`). */
+export interface OutboxItem {
+  /** The composer's nonce. */
+  id: string;
+  text: string;
+  /** Queued at, epoch ms. */
+  at: number;
+}
 
 export type ConvoEventKind = ConvoEvent["kind"];
 
@@ -177,6 +192,20 @@ export interface ConvoPage {
 export type SubmitResult =
   | { status: "sent" }
   | { status: "blocked"; blocker: ConvoBlocker };
+
+/** `convo_queue`: held for the turn to end, or nothing holds it and the
+ *  composer sends it itself. */
+export type QueueResult = { status: "queued" } | { status: "idle" };
+
+/** `convo_steer`: typed now (Claude folds type-ahead into the running
+ *  turn); `interrupt` — at the head of the queue, and the turn is to be
+ *  stopped so it goes (Codex); `blocked` — at the head, the CLI can't take
+ *  it yet; `gone` — it already went. */
+export type SteerResult =
+  | { status: "sent" }
+  | { status: "interrupt" }
+  | { status: "blocked"; blocker: ConvoBlocker }
+  | { status: "gone" };
 
 /** What a mid-session mode/model switch did. `terminal` = it can't be done
  *  from here right now (a turn is running, or no slash command exists);
