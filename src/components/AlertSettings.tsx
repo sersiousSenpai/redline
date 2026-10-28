@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SoundConfig } from "../audio/beep";
+import { getNotifyPrefs, setNotifyPref, subscribeNotifyPrefs } from "../lib/notifyPrefs";
 import { SoundPicker } from "./SoundPicker";
 import { useMenuOverlay } from "./menuOverlay";
 
@@ -35,6 +36,9 @@ export function AlertSettings({
   onTest,
 }: AlertSettingsProps) {
   const [open, setOpen] = useState(false);
+  // The OS notifications' two kinds (lib/notifyPrefs): its own store, read by
+  // useAttentionAlerts at the moment it would notify.
+  const notifyPrefs = useSyncExternalStore(subscribeNotifyPrefs, getNotifyPrefs);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
@@ -146,6 +150,31 @@ export function AlertSettings({
               onPreview={onSoundPreview}
             />
           )}
+
+          <div
+            className="flex flex-col gap-1.5 pt-2"
+            style={{ borderTop: "1px solid var(--color-rule)" }}
+            role="group"
+            aria-label="Notify me when an agent"
+          >
+            <span style={{ color: "var(--color-ink-muted)" }}>Notify me when an agent</span>
+            <label className="rl-hover-wash rounded-sm px-1 -mx-1 flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={notifyPrefs.waiting}
+                onChange={(e) => setNotifyPref("waiting", e.target.checked)}
+              />
+              <span>Is waiting on me</span>
+            </label>
+            <label className="rl-hover-wash rounded-sm px-1 -mx-1 flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={notifyPrefs.finished}
+                onChange={(e) => setNotifyPref("finished", e.target.checked)}
+              />
+              <span>Finishes its turn</span>
+            </label>
+          </div>
 
           <button
             type="button"

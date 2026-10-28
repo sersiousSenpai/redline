@@ -96,6 +96,10 @@ import {
   type RestoreEvent,
 } from "./lib/restoreAttempt";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
+// The OS notifications and the Dock badge: renders nothing, and nothing in
+// it is on the boot path.
+const AttentionAlerts = lazy(() => import("./components/AttentionAlerts").then(m => ({ default: m.AttentionAlerts })));
+import type { AlertTarget } from "./lib/attentionAlerts";
 import { Header } from "./components/Header";
 import { planBuildState, sessionMode } from "./lib/sessionMode";
 import { Button } from "./components/ui/Button";
@@ -8363,6 +8367,37 @@ function App() {
     // set's pane for it comes forward, or opens.
     if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });
   };
+  // A notification answered (useAttentionAlerts): what it was about comes
+  // forward through the workbench's own routes — a terminal as its Agent tab
+  // or on its wall, a plan as its session's Plan tab, a chat as its room
+  // wherever that pane lives.
+  const revealAlertRef = useRef<(target: AlertTarget) => void>(() => {});
+  revealAlertRef.current = (target) => {
+    setFrontDoorOpen(false);
+    setDoorCompact(false);
+    if (target.type === "terminal") {
+      showTerminal(target.terminalId, true);
+      return;
+    }
+    if (target.type === "plan") {
+      setActiveId(target.sessionId);
+      wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(target.sessionId) });
+      return;
+    }
+    const state = wb.getState();
+    const data = { source: "companion" as const, companionId: target.companionId };
+    const key = (Object.keys(state.sets) as SessionKey[]).find((k) =>
+      Object.values(state.sets[k]?.panes ?? {}).some((p) => p.kind === "chat" && p.data.source === "companion" && p.data.companionId === target.companionId));
+    if (!key) {
+      openChat(target.companionId);
+      return;
+    }
+    const sid = sessionIdOf(key);
+    if (sid) setActiveId(sid);
+    else wb.dispatch({ type: "selectSession", key });
+    wb.dispatch({ type: "openSurface", key, kind: "chat", data });
+  };
+  const revealAlert = useCallback((target: AlertTarget) => revealAlertRef.current(target), []);
   // The first conversation, from the dock's empty state. No seed and no
   // spring: the sentence-shaped way in is the Front Door's.
   const startChat = useCallback(() => {
@@ -11041,6 +11076,21 @@ function App() {
           {/* Mounted once and never unmounted: the terminals' PTYs and their
               scrollback die with it, so a tab or surface change must never
               take it away. */}
+          {shellReady && (
+            <Suspense fallback={null}>
+              <AttentionAlerts
+                store={wb}
+                summaries={summaries}
+                termStatuses={termStatuses}
+                terminalAttention={terminalAttention}
+                liveTermIds={liveTermIds}
+                sessionTerminals={sessionTerminals}
+                sessionLabels={sessionLabels}
+                chats={chats}
+                onReveal={revealAlert}
+              />
+            </Suspense>
+          )}
           {terminalMounted && (
           <Suspense fallback={null}>
           <TerminalLayer

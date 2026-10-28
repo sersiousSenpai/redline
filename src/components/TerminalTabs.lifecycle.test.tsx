@@ -620,21 +620,16 @@ describe("the fleet poll", () => {
   });
 });
 
-describe("reach and notify", () => {
-  const tick = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
+describe("reach", () => {
   const emit = async (payload: Record<string, unknown>) => {
     await act(async () => mocks.listeners.get("term-attention")!({ payload }));
   };
   const needsYou = (terminalId: string, at: number) => ({ terminalId, sessionId: "s", at, kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission" });
   const yourTurn = (terminalId: string, at: number, excerpt: string | null) => ({ terminalId, sessionId: "s", at, kind: "your-turn", excerpt });
-  const badges = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "set_attention_badge").map(([, args]) => args.count);
-  // The plugin import and the permission check settle over a few microtasks.
-  const flush = () => act(async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
 
-  it("counts what needs you for the footer and the Dock badge, oldest first", async () => {
+  // The Dock badge and the OS notifications are App's now, across every kind
+  // of agent (hooks/useAttentionAlerts.test.tsx); the wall reports the count.
+  it("counts what needs you for the footer, oldest first", async () => {
     const counts: number[] = [];
     await mount({ onNeedsYouChange: (n) => counts.push(n) });
     const a = await open();
@@ -643,10 +638,8 @@ describe("reach and notify", () => {
     await emit(yourTurn(a, 6, "Done."));
     const last = <T,>(xs: T[]) => xs[xs.length - 1];
     expect(last(counts)).toBe(2);
-    expect(last(badges())).toBe(2);
     await click(`[data-type="${b}"]`);
     expect(last(counts)).toBe(1);
-    expect(last(badges())).toBe(1);
   });
 
   it("⌘⇧J names the terminals that need you, oldest first, walking on from the focused tile; the host shows each", async () => {
@@ -684,81 +677,6 @@ describe("reach and notify", () => {
     expect(presses).toEqual([a, b, a, b]);
   });
 
-  it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {
-    mocks.windowFocused = false;
-    mocks.attention = [];
-    await mount();
-    const a = await open();
-    await flush();
-    await emit(needsYou(a, 10));
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    expect(mocks.notify).toHaveBeenLastCalledWith({ title: "repo 1 · needs you", body: "Claude needs your permission" });
-    // The same transition again (a re-sent event) is not news.
-    await emit(needsYou(a, 10));
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    // A new card is.
-    await emit(needsYou(a, 11));
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(2);
-    // A reload: the daemon's snapshot holds that same card — no repeat.
-    await act(async () => root.render(null));
-    mocks.attention = [needsYou(a, 11)];
-    await mount();
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(2);
-  });
-
-  it("stays quiet while you're looking, and speaks up when the dock is collapsed", async () => {
-    await mount();
-    const a = await open();
-    await flush();
-    await emit(needsYou(a, 10));
-    await flush();
-    expect(mocks.notify).not.toHaveBeenCalled();
-    await mount({ collapsed: true });
-    await emit(needsYou(a, 12));
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-  });
-
-  it("counts a caret in one of Redline's own browser pages as looking, and another app in front as away", async () => {
-    // The page's native webview has the caret: the main webview has no focus,
-    // but Redline's window is still the one in front.
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
-    await mount();
-    const a = await open();
-    await flush();
-    await emit(needsYou(a, 10));
-    await flush();
-    expect(mocks.notify).not.toHaveBeenCalled();
-    await act(async () => mocks.focusChanged!({ payload: false }));
-    await emit(needsYou(a, 11));
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-  });
-
-  it("a your-turn notifies after a beat, with the excerpt that filled in — or not at all once read", async () => {
-    vi.useFakeTimers();
-    mocks.windowFocused = false;
-    await mount();
-    const a = await open();
-    const b = await open();
-    await flush();
-    await emit(yourTurn(a, 20, null));
-    await emit(yourTurn(a, 20, "Which API key should I use?"));
-    await emit(yourTurn(b, 21, "All done."));
-    // b's turn is answered (typed into) before the beat is up.
-    await click(`[data-type="${b}"]`);
-    await tick(2499);
-    await flush();
-    expect(mocks.notify).not.toHaveBeenCalled();
-    await tick(1);
-    await flush();
-    expect(mocks.notify).toHaveBeenCalledTimes(1);
-    expect(mocks.notify).toHaveBeenLastCalledWith({ title: "repo 1 · your turn", body: "Which API key should I use?" });
-  });
 });
 
 describe("solo: an Agent pane's CLI view", () => {

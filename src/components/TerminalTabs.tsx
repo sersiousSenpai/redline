@@ -72,7 +72,6 @@ import {
 import type { TermAttention, TermProc } from "../types";
 import { iconFor } from "../lib/repoIcon";
 import { useRepoIcons } from "../hooks/useRepoIcons";
-import { useAttentionAlerts } from "../hooks/useAttentionAlerts";
 import type { LoudTerminal } from "../lib/attentionAlerts";
 import type { ProjectOption } from "./ProjectPicker";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -738,8 +737,8 @@ export const TerminalTabs = memo(
         }
       })
       .catch(() => {})
-      // Alerts wait for the snapshot: what it holds happened before this
-      // dock existed and was never news here (useAttentionAlerts).
+      // The states it reports wait for the snapshot: until then a reload
+      // would paint every agent that needs you as idle.
       .finally(() => {
         if (!gone) setAttentionReady(true);
       });
@@ -1090,7 +1089,8 @@ export const TerminalTabs = memo(
   const servingPort = (id: string) => procs.get(id)?.ports[0] ?? null;
 
   // Every terminal that needs you, oldest transition first: the footer's
-  // count, ⌘⇧J's walk, the Dock badge and the OS notifications.
+  // count and ⌘⇧J's walk. The Dock badge and the OS notifications are App's
+  // (`useAttentionAlerts`), across every kind of agent.
   const loudTerminals = useMemo<LoudTerminal[]>(
     () =>
       loudOldestFirst(
@@ -1111,7 +1111,6 @@ export const TerminalTabs = memo(
   useEffect(() => {
     onNeedsYouChange?.(loudTerminals.length);
   }, [loudTerminals.length, onNeedsYouChange]);
-  useAttentionAlerts(loudTerminals, collapsed, attentionReady);
 
   // A your-turn is READ once its tile has been on screen and focused, in a
   // focused window, for SEEN_AFTER_MS. Keyed on the transition's `at`, so the
