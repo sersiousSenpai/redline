@@ -33,6 +33,9 @@ export type ConvoMode = "default" | "plan" | "acceptEdits" | "bypassPermissions"
 export type ConvoBlocker =
   /** No transcript bound yet (the CLI hasn't reported SessionStart). */
   | "unbound"
+  /** The CLI ran here and is gone: the shell is back in front of a session
+   *  that was live (killed or crashed, so no SessionEnd said so). */
+  | "exited"
   /** The TUI hasn't turned bracketed paste on: it is still starting, or it
    *  is not a Claude/Codex TUI at all. */
   | "no_paste_mode"

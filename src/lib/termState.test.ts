@@ -18,6 +18,8 @@ import {
   putAck,
   staleAcks,
   agentGone,
+  agentLeft,
+  agentPresence,
   type AttentionAck,
   type TermSignals,
   type TermState,
@@ -268,5 +270,40 @@ describe("⌘⇧J order", () => {
     loud.push("e");
     expect(press()).toBe("e");
     expect(nextNeedsYou([], visits)).toBeNull();
+  });
+});
+
+describe("an agent the samples saw leave (the last walk's killed build)", () => {
+  const idle = (id: string, at: number): TermAttention => ({ terminalId: id, sessionId: "s", at, kind: "idle" } as TermAttention);
+
+  it("marks a terminal with an agent in front, and the shell's return as it leaving", () => {
+    const none = new Map();
+    const one = agentPresence(none, [proc("t", { fgComm: "2.1.312", fgIsShell: false })], new Map(), 100);
+    expect(one.get("t")).toEqual({ agent: true, leftAt: null });
+    // An unchanged sample is no new map.
+    expect(agentPresence(one, [proc("t", { fgComm: "2.1.312", fgIsShell: false })], new Map(), 110)).toBe(one);
+    const gone = agentPresence(one, [proc("t")], new Map(), 200);
+    expect(gone.get("t")).toEqual({ agent: false, leftAt: 200 });
+    // A shell nobody ran an agent in is never "left".
+    expect(agentPresence(none, [proc("u")], new Map(), 200).get("u")).toBeUndefined();
+    // Another program in front of a terminal an agent left keeps the record.
+    expect(agentPresence(gone, [proc("t", { fgComm: "git", fgIsShell: false })], new Map(), 300)).toBe(gone);
+  });
+
+  it("reads exited whatever the last hook was, until a new agent speaks", () => {
+    const left = { agent: false, leftAt: 200 };
+    // The killed build's last hook was the CLI's idle reminder: before, idle.
+    expect(agentLeft(left, idle("t", 150))).toBe(true);
+    expect(derive({ attention: null, fgComm: "zsh", fgIsShell: true, agentLeft: true })).toBe("exited");
+    expect(derive({ attention: "working", fgComm: "zsh", fgIsShell: true, agentLeft: true })).toBe("exited");
+    // A hook after the sample is a new agent.
+    expect(agentLeft(left, working("t", 250))).toBe(false);
+    // A one-shot's answer still unread stays the answer.
+    expect(derive({ attention: "your-turn", seen: false, fgComm: "zsh", fgIsShell: true, agentLeft: true })).toBe("your-turn");
+    // Serving, or the PTY itself gone, read as before.
+    expect(derive({ fgComm: "zsh", fgIsShell: true, ports: [3000], agentLeft: true })).toBe("serving");
+    expect(derive({ exited: true, agentLeft: true })).toBe("exited");
+    expect(agentLeft(undefined, undefined)).toBe(false);
+    expect(agentLeft({ agent: true, leftAt: null }, undefined)).toBe(false);
   });
 });

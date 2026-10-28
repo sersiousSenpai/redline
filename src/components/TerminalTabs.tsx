@@ -72,6 +72,9 @@ import {
   SEEN_AFTER_MS,
   staleAcks,
   agentGone,
+  agentLeft,
+  agentPresence,
+  type AgentPresence,
   type AttentionAck,
   type TermState,
 } from "../lib/termState";
@@ -767,11 +770,16 @@ export const TerminalTabs = memo(
   const [procs, setProcs] = useState<ReadonlyMap<string, TermProc>>(
     () => new Map(),
   );
+  // Which terminals the samples have seen an agent in front of, and which
+  // have since seen it leave (`agentPresence`): a killed agent's terminal
+  // reads exited whatever its last hook was.
+  const [presence, setPresence] = useState<ReadonlyMap<string, AgentPresence>>(() => new Map());
   const sampleProcs = async (): Promise<TermProc[] | null> => {
     const sampledAt = Date.now();
     const rows = await invoke<TermProc[]>("pty_procs");
     if (!Array.isArray(rows)) return null;
     setProcs((prev) => mergeProcs(prev, rows));
+    setPresence((prev) => agentPresence(prev, rows, attentionRef.current, sampledAt));
     const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
     if (stale.length) {
       setAcks((prev) =>
@@ -816,6 +824,15 @@ export const TerminalTabs = memo(
   const handleUserData = useCallback((id: string, data: string) => {
     // `exit` / Ctrl-D end the session on purpose (lib/userStops).
     noteTerminalInput(id, data);
+    // Typing into a shell an agent left is the reviewer using it: no
+    // longer an agent that stopped.
+    setPresence((prev) => {
+      const cur = prev.get(id);
+      if (!cur || cur.leftAt === null) return prev;
+      const next = new Map(prev);
+      next.set(id, { agent: false, leftAt: null });
+      return next;
+    });
     if (isAnswerInput(data)) ackInput(id, false);
   }, [ackInput]);
 
@@ -995,12 +1012,16 @@ export const TerminalTabs = memo(
   // one is retired (`staleAcks`) and reads exited.
   const sampleProcsRef = useRef(sampleProcs);
   sampleProcsRef.current = sampleProcs;
+  // An agent in front counts too, whatever it last said: its death must
+  // read exited (and stop its Agent pane) even when its last hook was the
+  // CLI's idle reminder.
   const claimsActivity = useMemo(
     () => tabs.some((t) => {
+      if (presence.get(t.id)?.agent) return true;
       const { kind } = effectiveAttention(attention.get(t.id), acks.get(t.id));
       return kind === "working" || kind === "needs-you";
     }),
-    [tabs, attention, acks],
+    [tabs, attention, acks, presence],
   );
   usePoll(
     async () => {
@@ -1102,11 +1123,12 @@ export const TerminalTabs = memo(
           placeholder: !!t.placeholder,
           asking: asking.has(t.id),
           agentGone: agentGone(attention.get(t.id), acks.get(t.id)),
+          agentLeft: agentLeft(presence.get(t.id), attention.get(t.id)),
         }),
       );
     }
     return out;
-  }, [tabs, attention, acks, procs, heldTerminalIds, exited, asking]);
+  }, [tabs, attention, acks, procs, heldTerminalIds, exited, asking, presence]);
   const statesRef = useRef(termStates);
   statesRef.current = termStates;
   // Keyed on what the host reads, so an OSC title or a cwd tick that moved

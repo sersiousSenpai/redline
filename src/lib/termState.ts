@@ -79,6 +79,13 @@ export interface TermSignals {
    *  shell back in front after its working / needs-you (`staleAcks`). The
    *  terminal reads exited until something new happens in it. */
   agentGone?: boolean;
+  /** A process sample saw an agent in front of this terminal and a later
+   *  one saw the shell back, with nothing heard from the agent since
+   *  (`agentPresence`): killed, crashed or quit. Unlike `agentGone` it does
+   *  not need a working or needs-you to retire — a killed build's last hook
+   *  can be the CLI's idle reminder, which left the row idle and its Agent
+   *  pane spinning. */
+  agentLeft?: boolean;
 }
 
 /** Programs that are an AGENT in the foreground rather than a job: an agent at
@@ -112,6 +119,9 @@ export function deriveTermState(s: TermSignals): TermState {
   // The agent died with the shell back in front: a dead agent needs nothing
   // and works on nothing, so its row reads exited, never a stale needs-you.
   if (s.agentGone && s.fgIsShell && s.ports.length === 0) return "exited";
+  // The same for any agent the samples saw leave, short of an answer still
+  // unread (a one-shot `claude -p` exits right after its Stop).
+  if (s.agentLeft && s.fgIsShell && s.ports.length === 0 && !(s.attention === "your-turn" && !s.seen)) return "exited";
   if (s.attention === "needs-you") return "needs-you";
   if (s.attention === "your-turn" && !s.seen) return "your-turn";
   if (s.held) return "held";
@@ -209,6 +219,47 @@ export function staleAcks(
     out.push([proc.id, { at: entry.at, as: "gone" }]);
   }
   return out;
+}
+
+/** Whether an agent is in front of a terminal, as the process samples
+ *  have seen it: `agent` while one is, `leftAt` the sample that found the
+ *  shell back after one (null until then, and again once one returns). */
+export interface AgentPresence {
+  agent: boolean;
+  leftAt: number | null;
+}
+
+/** Fold a `pty_procs` sample taken at `sampledAt` into the presence map,
+ *  returning `prev` itself when nothing moved. An agent in front (`isAgentComm`,
+ *  a `node` counting once it has spoken through the hooks) marks the
+ *  terminal; the shell back in front of a marked one is the agent leaving.
+ *  Any other program in front leaves the record as it was. */
+export function agentPresence(
+  prev: ReadonlyMap<string, AgentPresence>,
+  rows: readonly TermProc[],
+  attention: ReadonlyMap<string, TermAttention>,
+  sampledAt: number,
+): ReadonlyMap<string, AgentPresence> {
+  let next: Map<string, AgentPresence> | null = null;
+  const put = (id: string, value: AgentPresence) => {
+    const cur = (next ?? prev).get(id);
+    if (cur && cur.agent === value.agent && cur.leftAt === value.leftAt) return;
+    if (!next) next = new Map(prev);
+    next.set(id, value);
+  };
+  for (const row of rows) {
+    if (!row || typeof row.id !== "string") continue;
+    if (!row.fgIsShell && isAgentComm(row.fgComm, attention.has(row.id))) put(row.id, { agent: true, leftAt: null });
+    else if (row.fgIsShell && prev.get(row.id)?.agent) put(row.id, { agent: false, leftAt: sampledAt });
+  }
+  return next ?? prev;
+}
+
+/** The agent the samples saw in front of this terminal has left it, and
+ *  no hook has spoken since (a new transition is a new agent). */
+export function agentLeft(presence: AgentPresence | undefined, entry: TermAttention | undefined): boolean {
+  if (!presence || presence.leftAt === null) return false;
+  return !entry || entry.at < presence.leftAt;
 }
 
 /** The agent that reported `entry` has exited (its stale-sample ack). */

@@ -534,4 +534,45 @@ describe("the work drawer and the pane's keys (W2)", () => {
     expect(q("[data-head]")?.textContent).toBe("working");
     expect((seen[seen.length - 1] as { boundSessionId: string }).boundSessionId).toBe("s1");
   });
+
+  describe("the agent dies while its terminal lives (the last walk's 20-minute spinner)", () => {
+    const BUILDING = { label: "Building v1", kind: "build" as const, held: false, toReview: 0 };
+
+    it("the daemon's exited readiness ends the spinning turn and puts the Stopped card up with Retry", async () => {
+      // A build mid-turn: the tool is still running when the CLI is killed.
+      api.snapshot = [BOUND, PROMPT, READ, ev("h1", 25, { kind: "readiness", ready: true, blocker: null })];
+      const onRetryBuild = vi.fn();
+      await render(props({ planState: BUILDING, onRetryBuild }));
+      expect(q(".rl-convo-working")).not.toBeNull();
+      expect(q("[data-ask='stopped']")).toBeNull();
+      // The shell is back in front of a session that was live: no SessionEnd,
+      // no PTY exit, only the foreground check.
+      await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: false, blocker: "exited" })] }));
+      await flush();
+      expect(q(".rl-convo-working")).toBeNull();
+      const card = q("[data-ask='stopped']");
+      expect(card?.textContent).toMatch(/Claude stopped before the build finished/);
+      const retry = [...card!.querySelectorAll("button")].find((b) => b.textContent === "Retry") as HTMLButtonElement;
+      expect(retry).toBeTruthy();
+      await act(async () => retry.click());
+      expect(onRetryBuild).toHaveBeenCalledTimes(1);
+      expect(q(".rl-convo-readiness")?.textContent).toMatch(/Claude stopped/);
+      expect(q(".rl-convo-readiness")?.textContent).not.toMatch(/Waiting for Claude to start/);
+    });
+
+    it("the wall's exited state does the same over a daemon that still says unbound", async () => {
+      api.snapshot = [BOUND, PROMPT, READ, ev("h1", 25, { kind: "readiness", ready: false, blocker: "unbound" })];
+      await render(props({ planState: BUILDING, onRetryBuild: vi.fn(), termState: "exited" }));
+      expect(q(".rl-convo-working")).toBeNull();
+      expect(q("[data-ask='stopped']")).not.toBeNull();
+      expect(q(".rl-convo-readiness")?.textContent).toMatch(/Claude stopped/);
+    });
+
+    it("a CLI still starting (unbound, never live) is not a stop", async () => {
+      api.snapshot = [BOUND, ev("h1", 5, { kind: "readiness", ready: false, blocker: "unbound" })];
+      await render(props({ planState: BUILDING, onRetryBuild: vi.fn() }));
+      expect(q("[data-ask='stopped']")).toBeNull();
+      expect(q(".rl-convo-readiness")?.textContent).toMatch(/Waiting for Claude to start/);
+    });
+  });
 });

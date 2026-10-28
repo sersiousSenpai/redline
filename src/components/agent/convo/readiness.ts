@@ -55,6 +55,8 @@ export function blockerMessage(blocker: ComposerBlocker, harness: "claude" | "co
       return "Not running in a terminal: restore the session to send. Messages wait here.";
     case "unbound":
       return `Waiting for ${cli} to start. Messages wait here.`;
+    case "exited":
+      return `${cli} stopped. Retry it, or open the terminal; messages wait here.`;
     case "no_paste_mode":
       return `Waiting for ${cli}'s prompt. Messages wait here.`;
     case "native_dialog":

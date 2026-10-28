@@ -291,7 +291,9 @@ function SessionConversation(props: SessionConversationProps) {
   const readiness = composerReadiness({
     terminalId,
     bound: view.bound !== null,
-    host: view.readiness,
+    // The wall saw the agent leave while the host still says "unbound" (an
+    // older daemon): the composer says it stopped, not that it is starting.
+    host: props.termState === "exited" && view.readiness && !view.readiness.ready && view.readiness.blocker === "unbound" ? { ...view.readiness, blocker: "exited" } : view.readiness,
     harness: props.harness,
   });
   const [queue, setQueue] = useState<QueuedSend[]>(() => readQueuedSends(terminalId));
@@ -546,11 +548,19 @@ function SessionConversation(props: SessionConversationProps) {
   }, [terminalId]);
 
   // ── What it says ──
-  const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath, planHeld: reviewHeld, building: props.planState?.kind === "build" });
+  // The agent's CLI is gone from its terminal: the wall's derivation reads
+  // it exited (a process sample found the shell back in front), or the
+  // daemon's own foreground check says so first (`exited` readiness: a CLI
+  // that was live, with the shell in front again and no SessionEnd). The
+  // PTY lives on either way, so nothing else would end the turn it left
+  // open — a killed build spun "Waiting for Claude to start" for 20 min.
+  const agentExited = props.termState === "exited" || (view.readiness?.ready === false && view.readiness.blocker === "exited");
+  const term: TermState | null | undefined = agentExited ? "exited" : props.termState;
+  const status = workingStatus(view, { term, projectPath: props.projectPath, planHeld: reviewHeld, building: props.planState?.kind === "build" });
   const stats = useMemo(() => planStatsLabel(planStats(props.planMarkdown)), [props.planMarkdown]);
   // Held, the turn is open but nothing is working: no Stop (an Esc into a
   // CLI blocked in the review hook would cancel the plan), no timer.
-  const working = !reviewHeld && (view.activeTurn !== null || props.termState === "working");
+  const working = !reviewHeld && !agentExited && (view.activeTurn !== null || props.termState === "working");
   const planMode = view.mode === "plan";
   const placeholder =
     layout === "stage"
@@ -609,7 +619,7 @@ function SessionConversation(props: SessionConversationProps) {
   );
   // The agent's CLI is gone (its terminal reads exited): the Detached notice,
   // with Retry for a session building its approved plan.
-  const stopped = props.termState === "exited" && view.openAsks.length === 0;
+  const stopped = agentExited && view.openAsks.length === 0;
   const building = props.planState?.kind === "build";
   const tail =
     view.openAsks.length > 0 || terminalAsk || showWorking || stopped ? (
