@@ -11,7 +11,7 @@ import {
 } from "react";
 
 import {
-  HELD_RED,
+  HELD_COLOR,
   matchesTerminalQuery,
   type AttributedTerminal,
   type RepoChoice,
@@ -528,7 +528,7 @@ function OpenRow({
                 {chip}
               </span>
             ) : row.held && !state ? (
-              <span style={{ color: HELD_RED, fontSize: "10px" }}>
+              <span style={{ color: HELD_COLOR, fontSize: "10px" }}>
                 plan held
               </span>
             ) : null}
@@ -561,7 +561,7 @@ function OpenRow({
             className="flex items-center gap-1.5"
             style={{
               fontSize: "11px",
-              color: row.held ? HELD_RED : "var(--color-ink)",
+              color: row.held ? HELD_COLOR : "var(--color-ink)",
               marginTop: "2px",
             }}
           >
@@ -572,7 +572,7 @@ function OpenRow({
                 width: "4px",
                 height: "4px",
                 borderRadius: "50%",
-                background: row.held ? HELD_RED : "var(--color-ink-muted)",
+                background: row.held ? HELD_COLOR : "var(--color-ink-muted)",
               }}
             />
             <span className="truncate">{row.work}</span>

@@ -60,10 +60,10 @@ export interface RepoChoice extends RepoSource {
   count: number;
 }
 
-/** The held/intercept red, shared by the in-pane strip, the menu's "plan
- *  held" chip and the state badges — one export instead of the three copies
- *  the strip era grew. */
-export const HELD_RED = "#e8553d";
+/** A held plan's ink, shared by the in-pane strip, the menu's "plan held"
+ *  chip and the tile header: amber, because a held plan is the agent
+ *  waiting on you (the one status vocabulary), and the palette has no red. */
+export const HELD_COLOR = "var(--color-warning)";
 
 /** Trailing-slash-insensitive compare key (mirrors TerminalTabs' normPath). */
 export function normPath(p: string): string {

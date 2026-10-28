@@ -98,8 +98,8 @@ const emit = (text: string) => {
 async function settle() {
   await act(async () => { await enqueuePtyOp(id, async () => {}); });
 }
-async function mount(visible = true, strict = false, onUserInput = vi.fn()) {
-  const view = <TerminalView id={id} cwd="/repo" theme="light" visible={visible} onActivity={() => {}} onExit={() => {}} onUserInput={onUserInput} />;
+async function mount(visible = true, strict = false, onUserInput = vi.fn(), focusOnShow = true) {
+  const view = <TerminalView id={id} cwd="/repo" theme="light" visible={visible} focusOnShow={focusOnShow} onActivity={() => {}} onExit={() => {}} onUserInput={onUserInput} />;
   await act(async () => root.render(strict ? <StrictMode>{view}</StrictMode> : view));
   await settle();
   return onUserInput;
@@ -351,6 +351,14 @@ describe("a revealed terminal takes the caret only when nothing else holds it", 
     // the property to itself).
     host.setAttribute("inert", "");
     expect(await reveal()).toBe(0);
+  });
+
+  it("only the wall's focused tile: a tile shown beside it never takes the caret", async () => {
+    press();
+    await mount(false, false, vi.fn(), false);
+    await mount(true, false, vi.fn(), false);
+    await frame();
+    expect(currentTerm().focused).toBe(0);
   });
 
   it("never inside a programmatic reveal's window", async () => {

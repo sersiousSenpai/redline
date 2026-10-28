@@ -37,6 +37,10 @@ interface TerminalViewProps {
   theme: string;
   /** True when this is the active, non-collapsed tab (drives fit/resize). */
   visible: boolean;
+  /** Whether showing this view may hand it the caret: only the wall's
+   *  focused tile (or a terminal shown alone). A wall showing seven tiles at
+   *  once must not leave the caret in whichever drained last. Default true. */
+  focusOnShow?: boolean;
   /** Called when a hidden tab produces output (drives the unseen badge). */
   onActivity: (id: string) => void;
   /** Called when this tab's shell exits. */
@@ -243,6 +247,7 @@ export const TerminalView = memo(function TerminalView({
   cwd,
   theme,
   visible,
+  focusOnShow = true,
   onActivity,
   onExit,
   onTitle,
@@ -341,6 +346,8 @@ export const TerminalView = memo(function TerminalView({
   // The mount effect runs once ([]-deps, "spawn once"), so anything it closes
   // over goes stale. Mirror the live values into refs it can read each tick.
   const visibleRef = useRef(visible);
+  const focusOnShowRef = useRef(focusOnShow);
+  focusOnShowRef.current = focusOnShow;
   const onActivityRef = useRef(onActivity);
   const onExitRef = useRef(onExit);
   const onTitleRef = useRef(onTitle);
@@ -807,7 +814,7 @@ export const TerminalView = memo(function TerminalView({
       // terminal; programmatic reveals arm the suppress window and don't,
       // and nothing takes the caret from where the user is writing.
       const host = hostRef.current;
-      if (host && revealMayFocus(host)) term?.focus();
+      if (host && focusOnShowRef.current && revealMayFocus(host)) term?.focus();
     });
     return () => cancelTerminalWork(key);
   }, [visible, id, drainPending, applyFit]);

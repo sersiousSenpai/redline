@@ -267,7 +267,7 @@ export function Footer({
             >
               <span
                 aria-hidden
-                className="rl-term-badge rl-term-badge--pulse"
+                className="rl-term-badge rl-term-badge--needs"
                 style={{
                   width: 6,
                   height: 6,

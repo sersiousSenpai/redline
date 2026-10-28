@@ -3,7 +3,7 @@
 import { memo, useRef, useState } from "react";
 import { Pin } from "lucide-react";
 
-import { HELD_RED } from "../lib/terminalMenu";
+import { HELD_COLOR } from "../lib/terminalMenu";
 import { TILE_HEADER_H } from "../lib/tileGrid";
 import { isLoud, type TermState } from "../lib/termState";
 import type { TabIcon } from "../lib/repoIcon";
@@ -218,10 +218,10 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
         </span>
       )}
       {/* What it is working on, in the space the spacer used to hold, behind
-          the terminal's state badge: amber and pulsing when its agent is
-          blocked on you, blue for your turn, a quiet spinner while it works,
-          green for a server, HELD_RED for a held plan — an idle terminal
-          keeps the old 4px muted dot. Muted ink unless the state is loud:
+          the terminal's state badge, in the one status vocabulary: an amber
+          pulse when its agent waits on you (a question, your turn, a held
+          plan), the shared spinner while it works, nothing when idle, a
+          muted ring once exited. Muted ink unless the state is loud:
           the label beside it is the primary identity and this is the gloss.
 
           Native `title=`, never `.rl-tipwrap`: the header is `overflow:
@@ -237,21 +237,18 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
             fontSize: "11px",
             fontWeight: loud ? 500 : undefined,
             color: workHeld
-              ? HELD_RED
+              ? HELD_COLOR
               : loud
                 ? "var(--color-ink)"
                 : "var(--color-ink-muted)",
           }}
         >
-          <TermStateBadge
-            state={workHeld && state === "idle" ? "held" : state}
-            size={state === "idle" && !workHeld ? 4 : 6}
-          />
+          <TermStateBadge state={workHeld && state === "idle" ? "held" : state} />
           <span className="truncate">{lineText}</span>
           {state === "serving" && port !== null && workText && (
             <span
               className="shrink-0"
-              style={{ color: "var(--color-success)", fontVariantNumeric: "tabular-nums" }}
+              style={{ color: "var(--color-ink-muted)", fontVariantNumeric: "tabular-nums" }}
             >
               :{port}
             </span>

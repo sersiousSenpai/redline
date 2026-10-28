@@ -2223,39 +2223,19 @@ p.rl-block-modified {
   }
 }
 
-/* Terminal state badges (TermStateBadge): a dot per state, coloured from one
-   table. needs-you pulses — on a wall of fourteen it is the one state that
-   has to pull the eye — and working turns a quiet spinner. The pulse is a
-   halo disc in the dot's own colour that grows to twice the dot while fading
-   out, like the live dot's: a spreading ring drawn with transform + opacity
-   (perf rule 6). At rest it sits invisibly over the dot. */
+/* Terminal state badges (TermStateBadge), in the one status vocabulary:
+   needs you is an amber dot whose opacity breathes — opacity only, on an
+   HTML element (perf rule 6) — working is the shared spinner below, idle
+   draws nothing, exited is a muted ring. */
 .rl-term-badge {
   display: inline-block;
 }
-.rl-term-badge--pulse {
-  position: relative;
+.rl-term-badge--needs {
+  animation: rl-term-needs 1.6s ease-in-out infinite;
 }
-.rl-term-badge--pulse::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: inherit;
-  opacity: 0;
-  pointer-events: none;
-  animation: rl-term-pulse 1.6s ease-in-out infinite;
-}
-@keyframes rl-term-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(2); opacity: 0; }
-}
-.rl-term-badge--spin {
-  animation: rl-term-spin 1.1s linear infinite;
-}
-@keyframes rl-term-spin {
-  to {
-    transform: rotate(360deg);
-  }
+@keyframes rl-term-needs {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 /* The shared working spinner (Spinner.tsx): a currentColor ring with a
    transparent top, sized inline, turned by the compositor. An HTML element,
@@ -2268,6 +2248,11 @@ p.rl-block-modified {
   border-top-color: transparent;
   border-radius: 50%;
   animation: rl-term-spin 0.9s linear infinite;
+}
+@keyframes rl-term-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-spinner {
@@ -2311,9 +2296,7 @@ html[data-rl-tile-drag] * {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rl-term-badge--pulse::after,
-  .rl-term-badge--spin,
-  .rl-shelf-chip[data-term-state="needs-you"]::after {
+  .rl-term-badge--needs {
     animation: none;
   }
 }

@@ -240,7 +240,7 @@ function InterceptStrip() {
         fontSize: 13,
         lineHeight: "18px",
         padding: "2px 8px",
-        color: "#e8553d",
+        color: "var(--color-warning)",
         whiteSpace: "pre",
         overflow: "hidden",
       }}
@@ -1831,6 +1831,9 @@ export const TerminalTabs = memo(
                   cwd={t.cwd}
                   theme={theme}
                   visible={visible}
+                  // The caret goes only to the wall's focused tile (or the
+                  // one shown alone), never to every tile a swap shows.
+                  focusOnShow={isSolo || tileIndex === focusIdx}
                   onActivity={handleActivity}
                   onExit={handleExit}
                   onTitle={handleTitle}

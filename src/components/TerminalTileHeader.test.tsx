@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 // jsdom has no canvas; the Julia-mark rasterizer is not what's under test.
 vi.mock("../lib/repoMarkImage", () => ({ markImage: () => null }));
 
-import { HELD_RED } from "../lib/terminalMenu";
+import { HELD_COLOR } from "../lib/terminalMenu";
 import { TILE_HEADER_H } from "../lib/tileGrid";
 import type { TileActions } from "./TerminalTileMenu";
 import { TerminalTileHeader, type TerminalIdentity } from "./TerminalTileHeader";
@@ -88,13 +88,6 @@ function mount(
 
 const head = (c: HTMLElement) => c.querySelector(".rl-tile-head") as HTMLElement;
 
-/** jsdom normalises an inline colour to `rgb(r, g, b)`; derive the expected
- *  string from the constant so a palette change can't silently pass. */
-const hexToRgb = (hex: string): string => {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
-};
-
 describe("terminal tile header", () => {
   it("keeps TILE_HEADER_H and a 2px border in BOTH focus states — no reflow on focus change", () => {
     const blurred = mount({ focused: false });
@@ -142,7 +135,7 @@ describe("terminal tile header", () => {
     ).toBeNull();
   });
 
-  it("renders what the terminal is working on, in HELD_RED when a plan is held", () => {
+  it("renders what the terminal is working on, in the held amber when a plan is held", () => {
     const plain = mount({ workText: "npm test", workHeld: false });
     expect(plain.container.textContent).toContain("npm test");
     const line = plain.container.querySelector(
@@ -155,9 +148,10 @@ describe("terminal tile header", () => {
     const heldLine = held.container.querySelector(
       "span[title='Rework the dock']",
     ) as HTMLElement;
-    // The menu row's grammar: a held plan is the one claim Redline can make
-    // outright, so it takes the intercept red.
-    expect(heldLine.style.color).toBe(hexToRgb(HELD_RED));
+    // The menu row's grammar: a held plan is the agent waiting on you, so
+    // it takes the needs-you amber — never a red.
+    expect(heldLine.style.color).toBe(HELD_COLOR);
+    expect(heldLine.querySelector(".rl-term-badge--needs")).not.toBeNull();
   });
 
   it("puts the terminal's state in front of its work line", () => {
@@ -167,15 +161,20 @@ describe("terminal tile header", () => {
     // Loud: the agent is speaking to you, so the line is in full ink, and the
     // badge pulses (styles.css stops it under reduced motion).
     expect(line.style.color).toBe("var(--color-ink)");
-    expect(line.querySelector(".rl-term-badge--pulse")).not.toBeNull();
+    expect(line.querySelector(".rl-term-badge--needs")).not.toBeNull();
     expect(line.title).toBe("needs you — Claude needs your permission");
 
     // No words from the agent: the state names itself.
     const turn = mount({ state: "your-turn" });
     expect(turn.container.querySelector("[data-term-state='your-turn']")?.textContent).toBe("your turn");
 
+    // Working is the shared Spinner; idle draws nothing at all.
     const busy = mount({ state: "working" });
-    expect(busy.container.querySelector(".rl-term-badge--spin")).not.toBeNull();
+    expect(busy.container.querySelector(".rl-spinner")).not.toBeNull();
+    const idle = mount({ state: "idle", workText: "zsh" });
+    expect(idle.container.querySelector(".rl-term-badge, .rl-spinner")).toBeNull();
+    const done = mount({ state: "exited", workText: "npm test" });
+    expect(done.container.querySelector(".rl-term-badge[data-status='exited']")).not.toBeNull();
 
     // A server is named by its port — beside its title when it has one.
     const bare = mount({ state: "serving", port: 5173 });
