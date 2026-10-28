@@ -1641,7 +1641,7 @@ impl Inner {
         let ram = sysctl_int("hw.memsize").unwrap_or(0);
         // The share of memory macOS counts as available, as `memory_pressure` reports it.
         let free_memory = ram / 100 * sysctl_int("kern.memorystatus_level").unwrap_or(100);
-        let free_disk = crate::activation::free_bytes(&self.data_dir).unwrap_or(u64::MAX);
+        let free_disk = free_bytes(&self.data_dir).unwrap_or(u64::MAX);
         let models = self.dir.join("models");
         let mut have = 0;
         for (dir, files) in [("shared", shared_of(v)), (v.id, v.own)] {
@@ -1991,6 +1991,16 @@ pub fn tts_studio(
         other => return Err(format!("the studio voice has no '{other}'")),
     }
     Ok(Value::Null)
+}
+
+
+/// The filesystem `path` lives on has this much room.
+fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    let probe = if path.exists() { path } else { path.parent()? };
+    let c = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut stat) } == 0)
+        .then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
 }
 
 #[cfg(test)]

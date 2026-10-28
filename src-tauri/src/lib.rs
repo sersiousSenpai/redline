@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-mod activation;
 mod agent;
 mod ai_commit;
 mod ai_review;
@@ -34,7 +33,6 @@ mod codex_conversation;
 mod monochat;
 mod codex_hook;
 mod codex_profile;
-mod confine;
 mod combine;
 mod companion;
 mod companion_build;
@@ -127,14 +125,12 @@ mod renderer_memory;
 mod repoicon;
 mod resolutions;
 mod restore_context;
-mod release_manifest;
 mod review;
 mod review_feedback;
 mod transcript;
 #[cfg(target_os = "macos")]
 mod scroller_guard;
 mod seat;
-mod self_develop;
 mod shipwright;
 mod shots;
 mod skill;
@@ -456,20 +452,6 @@ impl PendingResponses {
         self.notify.notify_waiters();
         Some((rx, token))
     }
-    /// The plan reviews whose hook POST is still being held open.
-    ///
-    /// Read before a restart. A held connection is a socket, not saved state:
-    /// exiting drops it, the waiting `claude` session sees its hook fail, and
-    /// the way back is the existing Restore flow — which is exactly what the
-    /// restart summary has to say instead of listing it as something that will
-    /// "resume".
-    fn held_sessions(&self) -> Vec<String> {
-        self.map
-            .lock()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
         self.map.lock().unwrap().remove(session_id).map(|e| e.tx)
     }
@@ -3324,10 +3306,6 @@ async fn run_server(state: AppState) {
         Ok(listener) => {
             daemon_status.set_bound(true);
             boot_trace::mark(boot_trace::DAEMON_BIND);
-            activation::report_stage(
-                redline_activation::Stage::Daemon,
-                format!("daemon bound {addr}"),
-            );
             probe::record(probe::Milestone::Daemon, format!("bound {addr}"));
             tracing::info!(%addr, "Redline daemon listening");
             // with_connect_info: handle_plan reads the peer's port to bind a
@@ -3345,7 +3323,6 @@ async fn run_server(state: AppState) {
             daemon_status.set_bound(false);
             boot_trace::mark(boot_trace::DAEMON_BIND);
             tracing::error!(error = %e, %addr, "failed to bind the daemon");
-            activation::report_failure(format!("the daemon could not bind {addr}: {e}"));
             probe::record_failure(format!("the daemon could not bind {addr}: {e}"));
             // Tell the (now daemon-less) window so it shows a blocking banner.
             // Emit even though the webview may not have mounted its listener yet
@@ -8594,21 +8571,14 @@ fn show_main_window(app: AppHandle) {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    // This call IS the evidence the startup handshake needs for two separate
-    // claims: the frontend rendered (it only calls this once themed) and it
-    // completed a round trip to the backend (it is a command). Neither can be
-    // observed from the backend alone, which is why a running pid and a
-    // visible window are not enough to accept a release.
-    activation::report_stage(
-        redline_activation::Stage::Frontend,
-        "frontend rendered and completed an IPC round trip",
-    );
+    // The candidate probe's evidence for two claims: the frontend rendered
+    // (it only calls this once themed) and it completed a round trip to the
+    // backend (it is a command).
     crate::probe::record(
         crate::probe::Milestone::Frontend,
         "rendered and completed an IPC round trip",
     );
     crate::probe::finish_if_probing(app.clone());
-    activation::restore_workspace_and_verify(app.clone());
     // THE boundary. Everything the old `setup` closure did that nobody was
     // waiting for — the database snapshot, the hook repairs, the grammar set —
     // starts here, behind the first frame the user can act on. Once per
@@ -11407,10 +11377,6 @@ const OFF_MAIN_COMMANDS: &[&str] = &[
     "mission_add_finding",
     "remove_hook_conflicts",
     "scan_hook_conflicts",
-    "self_develop_patch",
-    "self_develop_preflight",
-    // Copies the source checkout into a candidate workspace.
-    "self_develop_start",
     "unwatch_hook_conflicts",
     "watch_hook_conflicts",
     "work_ready_count",
@@ -11493,19 +11459,6 @@ pub fn run() {
         eprintln!("Redline starting as a candidate probe: {}", profile.describe());
     }
     probe::record(probe::Milestone::Started, profile.describe());
-    activation::report_stage(
-        redline_activation::Stage::Started,
-        format!("pid {}", std::process::id()),
-    );
-    if activation::activating() {
-        // Nothing the user does, and nothing that reaches outside this
-        // process, may land until this release has proved it works — a
-        // rollback would take it with it.
-        activation::gate(
-            "Redline is checking the version it just installed. Your changes will be \
-             accepted again in a moment.",
-        );
-    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -11623,16 +11576,6 @@ pub fn run() {
             set_plan_state,
             set_session_project,
             record_handoff_event,
-            self_develop::self_develop_available,
-            self_develop::self_develop_start,
-            self_develop::self_develop_list,
-            self_develop::self_develop_prepare,
-            self_develop::self_develop_patch,
-            self_develop::self_develop_preflight,
-            self_develop::self_develop_restart,
-            self_develop::activation_live_work,
-            self_develop::activation_flush_complete,
-            self_develop::activation_status,
             accept_resolution,
             reopen_resolution,
             attach_discussion,
@@ -12113,20 +12056,10 @@ pub fn run() {
                     tracing::error!("{message}");
                     let _ = std::fs::write(data_dir.join("boot-error.txt"), &message);
                     eprintln!("\n{message}");
-                    // Tell the helper why, before dying. Otherwise it waits out
-                    // its launch timeout and reports "did not finish starting",
-                    // which is true and useless.
-                    activation::report_failure(format!(
-                        "the database could not be opened: {e}"
-                    ));
                     crate::probe::record_failure(format!("database: {e}"));
                     std::process::exit(1);
                 })
             }));
-            activation::report_stage(
-                redline_activation::Stage::Database,
-                "database opened and migrated",
-            );
             crate::probe::record(crate::probe::Milestone::Database, "opened and migrated");
 
             // Polis backup: the once-per-boot snapshot moved to `postboot`.
@@ -12180,7 +12113,6 @@ pub fn run() {
             }
             app.manage(convo::ConvoState::default());
             app.manage(seatassign::SeatAssignState::new());
-            app.manage(self_develop::SelfDevelopState::new());
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));
 
@@ -12699,39 +12631,9 @@ pub fn run() {
             // prompt hands-free instead of only when they remember to look.
             //
             // Not from a probe (it would reach the network and could offer to
-            // rebuild the user's real checkout), and not while a just-installed
-            // release is still being verified (a second update offer during an
-            // activation is the start of a loop).
-            if activation::background_effects_allowed() {
+            // rebuild the user's real checkout).
+            if runtime_profile::current().external_effects() {
                 update::check_for_updates_in_background(app.handle().clone());
-            }
-
-            // Settle any activation that never reached a terminal step. Reads
-            // the installed bundle to decide what an interrupted exchange
-            // actually did; never relaunches anything.
-            if runtime_profile::current().is_production() {
-                let handle = app.handle().clone();
-                let dir = data_dir.clone();
-                tauri::async_runtime::spawn(async move {
-                    let reports = tokio::task::spawn_blocking(move || {
-                        let installed = activation::own_bundle()
-                            .unwrap_or_else(|| std::path::PathBuf::from("/Applications/Redline.app"));
-                        let reports = activation::reconcile_on_boot(&dir, &installed);
-                        activation::prune_settled(&dir, 3);
-                        reports
-                    })
-                    .await
-                    .unwrap_or_default();
-                    if let Some(last) = reports.last() {
-                        if let Some(store) = handle.try_state::<SessionStore>() {
-                            let _ = store.database().set_setting(
-                                activation::REPORT_KEY,
-                                &serde_json::to_string(last).unwrap_or_default(),
-                            );
-                        }
-                        let _ = handle.emit("activation-report", last);
-                    }
-                });
             }
 
             boot_trace::mark(boot_trace::SETUP_DONE);
@@ -12761,14 +12663,7 @@ pub fn run() {
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {
                 // Polis: a final crown-jewels snapshot of the ledger DB on quit.
-                //
-                // Unless the restart path already took one. It quiesces writes
-                // and then snapshots, so a second `VACUUM INTO` of the same
-                // bytes moments later is pure downtime — and downtime after
-                // the user has clicked Restart is the one kind that shows.
-                if activation::snapshot_already_taken() {
-                    tracing::info!("skipping the quit snapshot: the restart already took one");
-                } else if let Some(store) = app_handle.try_state::<SessionStore>() {
+                if let Some(store) = app_handle.try_state::<SessionStore>() {
                     if let Ok(dir) = app_handle.path().app_data_dir() {
                         let _ = snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
                     }

@@ -72,50 +72,6 @@ pub struct ProbeReport {
     pub interactive_ms: u64,
 }
 
-impl ProbeReport {
-    pub fn reached(&self, milestone: Milestone) -> bool {
-        self.steps.iter().any(|s| s.milestone == milestone)
-    }
-
-    /// The milestones a candidate must reach before it may be offered as a
-    /// restart.
-    pub const REQUIRED: [Milestone; 5] = [
-        Milestone::Started,
-        Milestone::Database,
-        Milestone::Daemon,
-        Milestone::Frontend,
-        Milestone::Reads,
-    ];
-
-    /// Judge a report. Separate from producing one, so the preparer's decision
-    /// is testable without launching anything.
-    pub fn verdict(&self) -> Result<(), String> {
-        if !self.failure.is_empty() {
-            return Err(self.failure.clone());
-        }
-        for milestone in Self::REQUIRED {
-            if !self.reached(milestone) {
-                return Err(format!(
-                    "the candidate started but never reached {milestone:?}"
-                ));
-            }
-        }
-        if !self.reached(Milestone::Shutdown) {
-            return Err("the candidate did not shut down cleanly".into());
-        }
-        // The isolation is part of the verdict. A candidate that bound the
-        // production daemon did not prove it works — it proved the probe
-        // leaked, and accepting that report would mean the user's running
-        // Redline was answering for it.
-        if self.daemon_addr == runtime_profile::PRODUCTION_ADDR {
-            return Err(
-                "the candidate bound the production daemon's port, so the probe was not isolated"
-                    .into(),
-            );
-        }
-        Ok(())
-    }
-}
 
 struct State {
     started: Instant,
@@ -275,52 +231,6 @@ mod tests {
         Milestone::Reads,
         Milestone::Shutdown,
     ];
-
-    #[test]
-    fn a_complete_probe_passes() {
-        assert!(report(&ALL, "127.0.0.1:51234").verdict().is_ok());
-    }
-
-    #[test]
-    fn every_missing_milestone_is_named() {
-        for skip in ProbeReport::REQUIRED {
-            let steps: Vec<Milestone> = ALL.into_iter().filter(|m| *m != skip).collect();
-            let err = report(&steps, "127.0.0.1:51234").verdict().unwrap_err();
-            assert!(err.contains(&format!("{skip:?}")), "{skip:?}: {err}");
-        }
-    }
-
-    #[test]
-    fn a_candidate_that_never_shut_down_cleanly_fails() {
-        let steps: Vec<Milestone> = ALL
-            .into_iter()
-            .filter(|m| *m != Milestone::Shutdown)
-            .collect();
-        assert!(report(&steps, "127.0.0.1:51234")
-            .verdict()
-            .unwrap_err()
-            .contains("shut down cleanly"));
-    }
-
-    #[test]
-    fn a_probe_that_bound_the_production_port_is_a_failure_not_a_pass() {
-        // The dangerous shape: everything green, because the running Redline
-        // was the one answering.
-        let err = report(&ALL, runtime_profile::PRODUCTION_ADDR)
-            .verdict()
-            .unwrap_err();
-        assert!(err.contains("not isolated"), "{err}");
-    }
-
-    #[test]
-    fn a_recorded_failure_beats_a_full_set_of_milestones() {
-        let mut r = report(&ALL, "127.0.0.1:51234");
-        r.failure = "database: disk image is malformed".into();
-        assert_eq!(
-            r.verdict().unwrap_err(),
-            "database: disk image is malformed"
-        );
-    }
 
     #[test]
     fn the_report_round_trips_through_json() {

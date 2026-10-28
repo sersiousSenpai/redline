@@ -49,11 +49,6 @@ pub enum DiffSource {
     LastCommit,
     VsBase,
     CommitSha,
-    /// A queued (overnight) run's parked branch: `base` names the run branch
-    /// (`redline/run/<plan8>`); the diff is `HEAD...branch` — merge-base to
-    /// branch tip — so it re-resolves identically in the morning even though
-    /// the working tree kept moving overnight. The VsBase shape, flipped.
-    RunBranch,
 }
 
 impl DiffSource {
@@ -65,7 +60,6 @@ impl DiffSource {
             DiffSource::LastCommit => "lastCommit",
             DiffSource::VsBase => "vsBase",
             DiffSource::CommitSha => "commitSha",
-            DiffSource::RunBranch => "runBranch",
         }
     }
 }
@@ -239,12 +233,6 @@ async fn resolve_diff_text(
             // Against the first parent: `git show` of a merge prints a combined
             // diff the parser can't read, so a merge commit used to look empty.
             run(diff(&[&first_parent(dir, s).await?, s])).await?
-        }
-        DiffSource::RunBranch => {
-            let b = code::safe_token(base.ok_or("runBranch requires the run branch as base")?)?;
-            // Three-dot from HEAD = merge-base(HEAD, branch) → branch tip:
-            // exactly the run's committed work, wherever HEAD is by morning.
-            run(diff(&[&format!("HEAD...{b}")])).await?
         }
     };
     // Untracked files exist only in the working tree, so only working-tree
@@ -1111,17 +1099,6 @@ async fn file_contents_for(
                 spec_content(dir, &format!("{s}:{path}")).await,
             )
         }
-        DiffSource::RunBranch => {
-            let b = code::safe_token(base.ok_or("runBranch requires the run branch as base")?)?;
-            let mb = git_raw(dir, &["merge-base", "HEAD", b], &[])
-                .await?
-                .trim()
-                .to_string();
-            (
-                spec_content(dir, &format!("{mb}:{old_p}")).await,
-                spec_content(dir, &format!("{b}:{path}")).await,
-            )
-        }
     };
     Ok(ReviewFileContents {
         old_lines,
@@ -1594,7 +1571,6 @@ diff --git a/x b/x
             (DiffSource::LastCommit, "lastCommit"),
             (DiffSource::VsBase, "vsBase"),
             (DiffSource::CommitSha, "commitSha"),
-            (DiffSource::RunBranch, "runBranch"),
         ] {
             assert_eq!(src.as_str(), tag);
             assert_eq!(
@@ -1604,40 +1580,10 @@ diff --git a/x b/x
         }
     }
 
-    /// The parked (deferred / overnight) review's row shape: an ordinary
-    /// `review_sessions` row whose source is the run-branch reader — the
-    /// branch name rides in `base_ref`, so the morning pane re-resolves the
-    /// same diff through the same machinery as any other review.
     #[test]
-    fn parked_run_branch_review_row_shape() {
-        let db = Database::open_in_memory().unwrap();
-        let s = open_or_continue_review(
-            &db,
-            "/tmp/repo",
-            DiffSource::RunBranch,
-            Some("redline/run/abcd1234"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(s.source, "runBranch");
-        assert_eq!(s.base_ref.as_deref(), Some("redline/run/abcd1234"));
-        assert_eq!(s.round, 1);
-        assert!(s.commit_sha.is_none());
-        // Durable: the stored row round-trips the same shape.
-        let got = db.get_code_review(&s.review_id).unwrap();
-        assert_eq!(got.source, "runBranch");
-        assert_eq!(got.base_ref.as_deref(), Some("redline/run/abcd1234"));
-        assert_eq!(got.repo_path, "/tmp/repo");
-        // A re-park continues the SAME review session (round model intact).
-        let again = open_or_continue_review(
-            &db,
-            "/tmp/repo",
-            DiffSource::RunBranch,
-            Some("redline/run/abcd1234"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(again.review_id, s.review_id);
+    fn the_run_branch_source_is_gone() {
+        // The queued run's branch reader left with the run feature (D16).
+        assert!(parse_source_tag("runBranch").is_err());
     }
 
     #[test]

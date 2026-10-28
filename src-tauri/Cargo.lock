@@ -3916,7 +3916,6 @@ dependencies = [
  "polis-store",
  "portable-pty",
  "pulldown-cmark",
- "redline-activation",
  "redline-extension-abi",
  "regex-lite",
  "reqwest",

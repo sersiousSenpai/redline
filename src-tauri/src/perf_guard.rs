@@ -69,16 +69,6 @@ mod tests {
         assert_off_main_command(include_str!("browser_events.rs"), "browser_events.rs", "browser_set_appearance");
     }
 
-    /// Build Redline's patch view and restart preflight run git against the
-    /// candidate and check the bundle on disk; a discard deletes a workspace.
-    #[test]
-    fn build_redline_reads_stay_off_the_main_thread() {
-        let src = include_str!("self_develop.rs");
-        for func in ["self_develop_patch", "self_develop_preflight"] {
-            assert_off_main_command(src, "self_develop.rs", func);
-        }
-    }
-
     #[test]
     fn capture_recovery_stays_after_the_first_actionable_frame() {
         let startup = include_str!("lib.rs");

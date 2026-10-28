@@ -983,23 +983,6 @@ pub async fn require_daemon_auth(req: Request, next: Next) -> Response {
     };
     let path = matched.as_str().to_string();
     let method = req.method().as_str().to_string();
-    // A version change in progress closes every write. Two windows need it:
-    // while the restart is saving and draining, and while a freshly installed
-    // release is still proving it works. Anything written in either would be
-    // taken away by a recovery the caller never asked for, so the honest
-    // answer is "not yet", with a reason and a retry.
-    //
-    // Reads stay open throughout: an agent can still look things up, and the
-    // window a caller is being asked to wait out is seconds long.
-    if crate::activation::mutations_gated() && !matches!(method.as_str(), "GET" | "HEAD" | "OPTIONS")
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("retry-after", "5")],
-            axum::Json(json!({ "error": crate::activation::gated_message() })),
-        )
-            .into_response();
-    }
     let bearer = bearer_of(&req);
     match authorize(&path, &method, bearer.as_deref()) {
         Ok(()) => next.run(req).await,
@@ -1042,10 +1025,6 @@ pub fn render_api_doc() -> String {
     out.push_str("  Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.\n\n");
     out.push_str("- **token: master only** — requires the per-boot master token itself; extension tokens never qualify, whatever their scopes. Reserved for control-plane verbs (instance retirement). The token is also persisted to `<app_data_dir>/daemon.token` (0600) so a booting sibling's preflight — same user, no inherited env — can authenticate against a headless incumbent.\n\n");
     out.push_str("Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.\n\n");
-    out.push_str("## While a version change is in progress\n\n");
-    out.push_str("Redline can build and install a replacement of itself (see `docs/self-develop.md`). During the two short windows around that — while it is saving and draining before the restart, and while a freshly installed release is proving it works — **every mutating request is refused with `503` and a `Retry-After: 5` header**, whatever its auth class, including the hook contract. Reads are unaffected.\n\n");
-    out.push_str("This is not a failure to report: anything written in either window could be taken away by a recovery the caller never asked for. The body carries a sentence explaining it. Retry.\n\n");
-
     out.push_str("## Routes\n\n");
     out.push_str("| Method | Path | Auth | Purpose | Request | Response |\n");
     out.push_str("|---|---|---|---|---|---|\n");

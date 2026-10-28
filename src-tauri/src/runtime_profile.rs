@@ -2,10 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 //! Which *instance* of Redline this process is.
 //!
-//! Redline can now build and launch a copy of itself (see `self_develop.rs`).
 //! A candidate build has to be started for real — a bundle that links, but
-//! panics before its first window, is not a release anyone should restart
-//! into. So the preparer launches the packaged candidate and watches it boot.
+//! panics before its first window, is not one anyone should install. So a
+//! preparer launches the packaged candidate as a probe and watches it boot.
 //!
 //! That is only safe if the second instance touches nothing the first one
 //! owns. Changing the database path alone would not do it: the single-instance
@@ -35,16 +34,10 @@ pub const ENV_PORT: &str = "REDLINE_PROFILE_PORT";
 /// Probe only: where to write the boot report. Defaults to
 /// `<data dir>/probe-report.json`.
 pub const ENV_PROBE_REPORT: &str = "REDLINE_PROBE_REPORT";
-/// Activation only: the transaction directory the helper created. Its presence
-/// is what turns an ordinary production boot into a *verified* one.
-pub const ENV_ACTIVATION_TXN: &str = "REDLINE_ACTIVATION_TXN";
 
 /// The production daemon's address. Loopback-only by invariant; a probe never
 /// uses it (that is the point).
 pub const PRODUCTION_ADDR: &str = "127.0.0.1:7676";
-/// The production daemon's port, as a number, for the confinement policies
-/// that have to deny reaching it.
-pub const PRODUCTION_PORT: u16 = 7676;
 
 /// Ports a probe may be asked to bind. Deliberately excludes the production
 /// daemon and the dev server: a typo must not let a probe take the port the
@@ -59,32 +52,12 @@ pub enum ProfileKind {
     Probe,
 }
 
-/// A production boot that a helper is watching, because it just swapped the
-/// bundle. The handshake is written into this directory; the helper polls it
-/// and rolls back if it never turns healthy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivationContext {
-    /// The transaction directory (`<data dir>/activation/<txn>`).
-    pub dir: PathBuf,
-}
-
-impl ActivationContext {
-    /// The transaction id — the directory's own name.
-    pub fn txn_id(&self) -> String {
-        self.dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProfile {
     kind: ProfileKind,
     data_dir: Option<PathBuf>,
     addr: String,
     probe_report: Option<PathBuf>,
-    activation: Option<ActivationContext>,
 }
 
 impl RuntimeProfile {
@@ -95,7 +68,6 @@ impl RuntimeProfile {
             data_dir: None,
             addr: PRODUCTION_ADDR.to_string(),
             probe_report: None,
-            activation: None,
         }
     }
 
@@ -103,6 +75,7 @@ impl RuntimeProfile {
         self.kind == ProfileKind::Probe
     }
 
+    #[cfg(test)]
     pub fn is_production(&self) -> bool {
         self.kind == ProfileKind::Production
     }
@@ -146,19 +119,10 @@ impl RuntimeProfile {
         self.probe_report.as_deref()
     }
 
-    /// Set when a helper swapped the bundle and is waiting to see this boot
-    /// succeed.
-    pub fn activation(&self) -> Option<&ActivationContext> {
-        self.activation.as_ref()
-    }
-
     /// A one-line description for logs and the boot report.
     pub fn describe(&self) -> String {
         match self.kind {
-            ProfileKind::Production => match &self.activation {
-                Some(ctx) => format!("production (activating {})", ctx.txn_id()),
-                None => "production".to_string(),
-            },
+            ProfileKind::Production => "production".to_string(),
             ProfileKind::Probe => format!("probe on {}", self.addr),
         }
     }
@@ -168,21 +132,8 @@ impl RuntimeProfile {
 /// testable without touching the process environment.
 pub fn resolve(env: &HashMap<String, String>) -> Result<RuntimeProfile, String> {
     let get = |k: &str| env.get(k).map(|s| s.trim()).filter(|s| !s.is_empty());
-    let activation = match get(ENV_ACTIVATION_TXN) {
-        Some(dir) => {
-            let path = PathBuf::from(dir);
-            if !path.is_absolute() {
-                return Err(format!("{ENV_ACTIVATION_TXN} must be an absolute path"));
-            }
-            Some(ActivationContext { dir: path })
-        }
-        None => None,
-    };
     match get(ENV_PROFILE) {
-        None | Some("production") => Ok(RuntimeProfile {
-            activation,
-            ..RuntimeProfile::production()
-        }),
+        None | Some("production") => Ok(RuntimeProfile::production()),
         Some("probe") => {
             // Every probe input is required and validated. A probe that fell
             // back to a default would be a second production instance.
@@ -211,8 +162,6 @@ pub fn resolve(env: &HashMap<String, String>) -> Result<RuntimeProfile, String> 
                 data_dir: Some(data_dir),
                 addr: format!("127.0.0.1:{port}"),
                 probe_report: Some(probe_report),
-                // A probe is never an activation: nothing was swapped for it.
-                activation: None,
             })
         }
         Some(other) => Err(format!("unknown {ENV_PROFILE}: {other}")),
@@ -267,7 +216,6 @@ mod tests {
         assert!(p.persist_webview_storage());
         assert!(p.external_effects());
         assert!(p.data_dir_override().is_none());
-        assert!(p.activation().is_none());
     }
 
     #[test]
@@ -325,34 +273,10 @@ mod tests {
             (ENV_PORT, "51234"),
         ]))
         .is_err());
-        assert!(resolve(&env(&[(ENV_ACTIVATION_TXN, "relative/dir")])).is_err());
     }
 
     #[test]
     fn an_unknown_profile_is_an_error() {
         assert!(resolve(&env(&[(ENV_PROFILE, "staging")])).is_err());
-    }
-
-    #[test]
-    fn activation_marks_a_production_boot_a_helper_is_watching() {
-        let p = resolve(&env(&[(ENV_ACTIVATION_TXN, "/var/rl/activation/txn-7")])).unwrap();
-        assert!(p.is_production());
-        assert_eq!(p.activation().unwrap().txn_id(), "txn-7");
-        assert!(p.describe().contains("txn-7"));
-    }
-
-    #[test]
-    fn a_probe_is_never_an_activation() {
-        // Otherwise a probe could satisfy a helper's handshake and get a
-        // candidate accepted without the real bundle ever having booted.
-        let p = resolve(&env(&[
-            (ENV_PROFILE, "probe"),
-            (ENV_DATA_DIR, "/tmp/x"),
-            (ENV_PORT, "51234"),
-            (ENV_ACTIVATION_TXN, "/var/rl/activation/txn-7"),
-        ]))
-        .unwrap();
-        assert!(p.is_probe());
-        assert!(p.activation().is_none());
     }
 }

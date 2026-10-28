@@ -805,8 +805,8 @@ impl Database {
             })?;
             // One exception to "run NO steps": tables this build owns outright
             // and that a foreign lineage has never heard of. `releases` is not
-            // in `verify_schema`'s core set — Redline works perfectly well
-            // without it, it is just that Build Redline does not — so a
+            // in `verify_schema`'s core set (Build Redline, which wrote it,
+            // was cut in D16; the table stays as versioned schema) — so a
             // forward-stamped database from the cockpit lineage would
             // otherwise reach the feature and fail with "no such table". The
             // step is `CREATE TABLE IF NOT EXISTS` only: over a genuinely
@@ -973,7 +973,8 @@ impl Database {
         Ok(())
     }
 
-    /// v3 → v4: candidate releases.
+    /// v3 → v4: candidate releases. Unused since Build Redline was cut
+    /// (D16); kept because the step is part of the versioned schema.
     ///
     /// One row per prepared replacement application. Deliberately its own
     /// table rather than columns on `run_graphs`: a release can outlive the run
@@ -8319,99 +8320,3 @@ mod work_graph_tests;
 #[path = "db_tests.rs"]
 mod tests;
 
-impl Database {
-    // --- candidate releases (Build Redline) --------------------------------
-
-    /// Insert or replace a release row. The status transition is checked by
-    /// the caller (`self_develop`), which owns the lifecycle; this is storage.
-    pub fn release_put(&self, release: &crate::self_develop::Release) -> Result<(), String> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "INSERT INTO releases(release_id,run_id,repository,status,candidate_root,bundle_path,\
-             manifest_json,capture_json,probe_json,failure,step,created_at,updated_at) \
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
-             ON CONFLICT(release_id) DO UPDATE SET \
-             run_id=excluded.run_id, status=excluded.status, bundle_path=excluded.bundle_path, \
-             manifest_json=excluded.manifest_json, capture_json=excluded.capture_json, \
-             probe_json=excluded.probe_json, failure=excluded.failure, step=excluded.step, \
-             updated_at=excluded.updated_at",
-            params![
-                release.release_id,
-                release.run_id,
-                release.repository,
-                release.status,
-                release.candidate_root,
-                release.bundle_path,
-                release.manifest.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default()),
-                release.capture.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default()),
-                release.probe.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default()),
-                release.failure,
-                release.step,
-                release.created_at,
-                release.updated_at,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    fn release_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<crate::self_develop::Release> {
-        let manifest: Option<String> = row.get(6)?;
-        let capture: Option<String> = row.get(7)?;
-        let probe: Option<String> = row.get(8)?;
-        Ok(crate::self_develop::Release {
-            release_id: row.get(0)?,
-            run_id: row.get(1)?,
-            repository: row.get(2)?,
-            status: row.get(3)?,
-            candidate_root: row.get(4)?,
-            bundle_path: row.get(5)?,
-            manifest: manifest.and_then(|s| serde_json::from_str(&s).ok()),
-            capture: capture.and_then(|s| serde_json::from_str(&s).ok()),
-            probe: probe.and_then(|s| serde_json::from_str(&s).ok()),
-            failure: row.get(9)?,
-            step: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
-        })
-    }
-
-    const RELEASE_COLUMNS: &'static str = "release_id,run_id,repository,status,candidate_root,\
-         bundle_path,manifest_json,capture_json,probe_json,failure,step,created_at,updated_at";
-
-    pub fn release_get(&self, release_id: &str) -> Result<Option<crate::self_develop::Release>, String> {
-        let conn = self.read_conn();
-        let sql = format!("SELECT {} FROM releases WHERE release_id=?1", Self::RELEASE_COLUMNS);
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let mut rows = stmt.query_map([release_id], Self::release_row).map_err(|e| e.to_string())?;
-        match rows.next() {
-            Some(row) => Ok(Some(row.map_err(|e| e.to_string())?)),
-            None => Ok(None),
-        }
-    }
-
-    pub fn release_list(&self, limit: usize) -> Result<Vec<crate::self_develop::Release>, String> {
-        let conn = self.read_conn();
-        let sql = format!(
-            "SELECT {} FROM releases ORDER BY updated_at DESC LIMIT ?1",
-            Self::RELEASE_COLUMNS
-        );
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([limit as i64], Self::release_row)
-            .map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
-    }
-
-    /// The release currently holding the activation, if any.
-    ///
-    /// One at a time is an invariant, not a convention: two exchanges racing
-    /// for `/Applications/Redline.app` is how one release silently loses the
-    /// other's features.
-    pub fn release_holding_activation(&self) -> Result<Option<crate::self_develop::Release>, String> {
-        Ok(self
-            .release_list(200)?
-            .into_iter()
-            .find(|r| r.status().holds_activation()))
-    }
-}

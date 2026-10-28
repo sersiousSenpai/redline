@@ -77,10 +77,6 @@ pub mod scopes {
     pub const MEMORY_ORGANIZE: &str = "memory.organize";
     pub const DRAFTER_SUGGEST: &str = "drafter.suggest";
     pub const REVIEW_ANNOTATE: &str = "review.annotate";
-    /// File an orchestrated run's structured exit report. No route takes it
-    /// since native runs were removed; it stays in the vocabulary so a
-    /// manifest that declares it still validates.
-    pub const ORCH_REPORT: &str = "orchestration.report";
     /// Write the extension's sanctioned UI slot: a host-sanitized markdown
     /// panel in Redline's Extensions view. The only UI surface v1 grants.
     pub const UI_PANEL: &str = "ui.panel";
@@ -101,7 +97,6 @@ pub mod scopes {
         MEMORY_ORGANIZE,
         DRAFTER_SUGGEST,
         REVIEW_ANNOTATE,
-        ORCH_REPORT,
         UI_PANEL,
         WORK_FILE,
         WORK_CLAIM,
@@ -123,7 +118,6 @@ pub mod scopes {
             MEMORY_ORGANIZE => "run the memory organizer or semantic indexer on demand",
             DRAFTER_SUGGEST => "write tracked suggestions into a live draft",
             REVIEW_ANNOTATE => "post and clear findings in a live code review",
-            ORCH_REPORT => "file an orchestrated run's structured exit report",
             UI_PANEL => "render a sanitized markdown panel in the Extensions view",
             WORK_FILE => "file new items into the work graph",
             WORK_CLAIM => "claim and close work-graph items",

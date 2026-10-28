@@ -104,15 +104,11 @@ pub fn run(app: AppHandle) {
         });
 
         // Hook + skill repairs. All three read and rewrite JSON under
-        // `~/.claude` — they change things OUTSIDE this process, which is
-        // exactly what must not happen while a freshly installed release is
-        // still proving it works, or ever in a candidate probe. So they are
-        // conditional here and re-entered by `run_deferred_external` once the
-        // release is accepted.
-        let repairs = if crate::activation::background_effects_allowed() {
+        // `~/.claude` — they change things OUTSIDE this process, which must
+        // never happen in a candidate probe.
+        let repairs = if crate::runtime_profile::current().external_effects() {
             Some(tokio::task::spawn_blocking(external_repairs))
         } else {
-            tracing::info!("deferring hook maintenance until this version is accepted");
             None
         };
 
@@ -123,10 +119,7 @@ pub fn run(app: AppHandle) {
         if let Some(repairs) = repairs {
             let _ = repairs.await;
         }
-        // The crown-jewels snapshot walks the whole database. During the
-        // health interval that competes with the very responsiveness the
-        // interval is measuring, so it waits too.
-        if crate::activation::background_effects_allowed() {
+        if crate::runtime_profile::current().external_effects() {
             if let (Some(store), Ok(dir)) = (
                 app.try_state::<SessionStore>().map(|s| s.database()),
                 app.path().app_data_dir(),
@@ -146,7 +139,7 @@ pub fn run(app: AppHandle) {
         boot_trace::report();
         // OCR recovery is optional background work. It must not compete with
         // the first actionable frame or delay launch-readiness maintenance.
-        if crate::activation::background_effects_allowed() {
+        if crate::runtime_profile::current().external_effects() {
             if let Some(store) = app.try_state::<SessionStore>() {
                 crate::mission_capture::resume(app.clone(), store.database());
                 // Chat screenshots no message names any more, bounded per
@@ -163,10 +156,6 @@ pub fn run(app: AppHandle) {
 /// The duties that reach outside this process: rewriting the user's hook
 /// configuration under `~/.claude`, and the crown-jewels database snapshot.
 ///
-/// Extracted so there is exactly one copy of them, run either inline during an
-/// ordinary boot or, after an activation, only once the release has been
-/// accepted. A release that gets rolled back must not have edited the user's
-/// global configuration on its way past.
 fn external_repairs() {
     // Silently bring an existing install's hook timeout up to date, so
     // a user who installed under the old 10-minute timeout gets the
@@ -213,27 +202,6 @@ fn external_repairs() {
         }
     }
     boot_trace::mark(boot_trace::HOOK_MAINTENANCE);
-}
-
-/// Run the deferred external duties now. Called once, when an activation is
-/// accepted; a second call is a no-op.
-pub fn run_deferred_external(app: AppHandle) {
-    static RAN: AtomicBool = AtomicBool::new(false);
-    if RAN.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    tauri::async_runtime::spawn(async move {
-        let _ = tokio::task::spawn_blocking(external_repairs).await;
-        if let (Some(store), Ok(dir)) = (
-            app.try_state::<SessionStore>().map(|s| s.database()),
-            app.path().app_data_dir(),
-        ) {
-            let _ = tokio::task::spawn_blocking(move || snapshot_once_per_boot(&store, dir)).await;
-        }
-        if let Some(store) = app.try_state::<SessionStore>() {
-            crate::mission_capture::resume(app.clone(), store.database());
-        }
-    });
 }
 
 /// The startup snapshot, and only the startup one — the six-hour cadence and

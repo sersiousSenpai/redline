@@ -359,17 +359,6 @@ impl PtyState {
 
     /// The terminals that are live right now.
     ///
-    /// Read when Redline is about to restart into a new version. A terminal is
-    /// a process with a shell in it: its scrollback, its child, its working
-    /// directory and whatever was half-typed do not survive the application
-    /// exiting, and the restart summary says so rather than implying they do.
-    pub fn live_ids(&self) -> Vec<String> {
-        self.entries()
-            .into_iter()
-            .filter(|entry| entry.alive)
-            .map(|entry| entry.id)
-            .collect()
-    }
 
     /// Whether `id` names a terminal whose shell is still running.
     pub fn is_live(&self, id: &str) -> bool {
@@ -1832,7 +1821,6 @@ mod tests {
         terminal.child.wait().unwrap();
         terminal.output.close();
         assert!(!terminal.state.entries()[0].alive);
-        assert!(terminal.state.live_ids().is_empty());
         assert!(attach_session(
             &terminal.state,
             "real-pty",

@@ -22,12 +22,6 @@ The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API.
 
 Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.
 
-## While a version change is in progress
-
-Redline can build and install a replacement of itself (see `docs/self-develop.md`). During the two short windows around that — while it is saving and draining before the restart, and while a freshly installed release is proving it works — **every mutating request is refused with `503` and a `Retry-After: 5` header**, whatever its auth class, including the hook contract. Reads are unaffected.
-
-This is not a failure to report: anything written in either window could be taken away by a recovery the caller never asked for. The body carries a sentence explaining it. Retry.
-
 ## Routes
 
 | Method | Path | Auth | Purpose | Request | Response |
@@ -145,7 +139,6 @@ This is not a failure to report: anything written in either window could be take
 - `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`, `POST /v1/memory/runs/:id/revert`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`
 - `review.annotate` — `POST /v1/reviews/annotations`, `DELETE /v1/reviews/annotations`
-- `orchestration.report` — 
 - `ui.panel` — `POST /v1/extensions/:name/panel`
 - `work.file` — `POST /v1/work`
 - `work.claim` — `POST /v1/work/:id/claim`, `POST /v1/work/:id/close`

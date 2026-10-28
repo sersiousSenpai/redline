@@ -110,7 +110,6 @@ Delivery is sequential per extension from a bounded queue (overflow drops the ol
 - `memory.organize` — run the memory organizer or semantic indexer on demand
 - `drafter.suggest` — write tracked suggestions into a live draft
 - `review.annotate` — post and clear findings in a live code review
-- `orchestration.report` — file an orchestrated run's structured exit report
 - `ui.panel` — render a sanitized markdown panel in the Extensions view
 - `work.file` — file new items into the work graph
 - `work.claim` — claim and close work-graph items

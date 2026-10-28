@@ -31,7 +31,6 @@ const KNOWN_SCOPES = [
   "memory.organize",
   "drafter.suggest",
   "review.annotate",
-  "orchestration.report",
   "ui.panel",
   "work.file",
   "work.claim",
