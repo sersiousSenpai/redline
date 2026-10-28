@@ -11,6 +11,7 @@
 
 import {
   AGENTS_FILLED_CAP,
+  RECENT_TABS_CAP,
   CLOSED_CAP,
   DEFAULT_DOOR_DRAFT_KEY,
   HOME_KEY,
@@ -192,7 +193,12 @@ function parseSet(raw: unknown): TabSet | null {
   const activeTabId = str(raw.activeTabId) && tabs[raw.activeTabId] ? raw.activeTabId : (order[0] ?? null);
   const closed = (Array.isArray(raw.closed) ? raw.closed : []).map(parseClosed).filter((c): c is ClosedTab => c !== null).slice(-CLOSED_CAP);
   const agentsFilled = strings(raw.agentsFilled).filter((id, i, all) => id && all.indexOf(id) === i).slice(-AGENTS_FILLED_CAP);
-  return agentsFilled.length ? { order, activeTabId, tabs, panes, closed, agentsFilled } : { order, activeTabId, tabs, panes, closed };
+  const recent = strings(raw.recent).filter((id, i, all) => tabs[id] && id !== activeTabId && all.indexOf(id) === i).slice(0, RECENT_TABS_CAP);
+  return {
+    order, activeTabId, tabs, panes, closed,
+    ...(agentsFilled.length ? { agentsFilled } : {}),
+    ...(recent.length ? { recent } : {}),
+  };
 }
 
 /** The state a stored value describes, or null when it is not a workbench

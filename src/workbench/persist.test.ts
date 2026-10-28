@@ -68,6 +68,15 @@ describe("the stored shape", () => {
     expect(parseWorkbench(raw)!.sets["plan:s1"]!.agentsFilled).toBeUndefined();
   });
 
+  it("keeps a set's tab history, open tabs only and never the active one", () => {
+    const s = sample();
+    const raw = JSON.parse(JSON.stringify(s));
+    const home = raw.sets.home;
+    const open = Object.keys(home.tabs).filter((id) => id !== home.activeTabId);
+    home.recent = [home.activeTabId, "gone", 3, ...open, ...open];
+    expect(parseWorkbench(raw)!.sets.home!.recent ?? []).toEqual(open);
+  });
+
   it("round-trips through JSON unchanged", () => {
     const storage = new MemoryStorage();
     const s = sample();

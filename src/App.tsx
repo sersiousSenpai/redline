@@ -677,7 +677,22 @@ migrateToWorkbenchOnce(localStorage);
 // W1's workbench-or-legacy-centre switch. The flow shell is gone (W2), so
 // the workbench is the one centre; W6 deletes the adapter and this with it.
 const classicWb = true;
-const wb = createWorkbenchStore(classicWb ? bootToHome(readWorkbench(localStorage)) : readWorkbench(localStorage), () => import("./workbench/reducer").then((m) => m.reduce));
+// A cold launch lands on Home's door; a RELOAD (⌘R, HMR, the WebContent-
+// crash reload) comes back where it was — the stored active set and its
+// tab, over Home and over the manifest's landing. sessionStorage tells the
+// two apart: it survives a reload of this webview and dies with the process
+// (the rule `terminalWorkspace.ts` and the boot animation already use).
+const WB_RELOAD_KEY = "redline.workbench.booted";
+const wbReload = (() => {
+  try {
+    const again = sessionStorage.getItem(WB_RELOAD_KEY) === "1";
+    sessionStorage.setItem(WB_RELOAD_KEY, "1");
+    return again;
+  } catch {
+    return false;
+  }
+})();
+const wb = createWorkbenchStore(classicWb && !wbReload ? bootToHome(readWorkbench(localStorage)) : readWorkbench(localStorage), () => import("./workbench/reducer").then((m) => m.reduce));
 if (classicWb) {
   persistWorkbench(wb, localStorage);
   void loadWorkbenchStage().catch(() => {});
@@ -914,7 +929,11 @@ function App() {
       return;
     }
     const value = typeof next === "function" ? next(activeIdRef.current) : next;
-    if (value === activeIdRef.current) return;
+    // A re-selection is no switch — but "no session" is Home only on Home:
+    // a launch's set has no session id either, and Home pressed there
+    // must still go Home (the sidebar reads the workbench's active set, so
+    // a no-op here left the stage on the launch with nothing selected).
+    if (value === activeIdRef.current && (value !== null || wb.getState().activeKey === HOME_KEY)) return;
     if (value && isJoinedSessionId(value)) {
       // `joined:<sid>:<threadStart>`: the room shows in the plan set of the
       // session it mirrors, its Plan tab in front.
@@ -4566,8 +4585,10 @@ function App() {
       // plan still claims the plate. The backend picks it from the same list
       // it returned, so the routing target is always in the list it routes
       // within.
-      const held = boot?.heldSessionId ?? null;
-      setActiveId(held);
+      // A reload keeps the set it was on (`wbReload`): no held plan and no
+      // landing moves it; its own session loads.
+      const held = wbReload && classicWb ? sessionIdOf(wb.getState().activeKey) : boot?.heldSessionId ?? null;
+      if (!(wbReload && classicWb)) setActiveId(held);
       await loadSession(held);
       if (held) markOnce("rl:session-ready");
       // Landing: "last" (default) keeps the persisted surface — today's
@@ -4590,7 +4611,7 @@ function App() {
       // resting tab). Dynamic imports — the size budget never sees them.
       prefetchSurfaceChunk(target);
       void loadSessionSidebar().catch(() => {});
-      if (target !== mainSurfaceRef.current) {
+      if (target !== mainSurfaceRef.current && !(wbReload && classicWb)) {
         selectSurfaceRef.current(target);
       }
       // Boot has settled — the next surface switch (if soon) is this
@@ -8452,8 +8473,12 @@ function App() {
   // Eligible only where nothing else owns keys — a modal up, a focused input,
   // or the terminal (isEditableTarget catches xterm's hidden textarea) must
   // never have its typing hijacked.
+  // Under the workbench "the empty plate" is a door pane with the focus:
+  // a wall, a file or a hidden tab's door must never turn typing meant for
+  // them (a tile's ▾ filter, a terminal) into a door.
   const landingTypeEligible =
     mainSurface === "document" &&
+    (!classicWb || wbView.focusedKind === "door") &&
     !loading &&
     !activeId &&
     !joinedActive &&

@@ -12,6 +12,10 @@
 .rl-monochat-float { position:absolute; bottom:44px; left:50%; width:min(640px,calc(100vw - 40px)); margin-left:calc(min(640px,calc(100vw - 40px)) / -2); max-height:min(420px,calc(100dvh - 96px)); overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; padding:14px; border:1px solid transparent; border-radius:14px; background:var(--color-glass-3); color:var(--color-ink); transform-origin:top left; pointer-events:auto; }
 /* On its way back into the pill: it already let go. */
 .rl-monochat-float[data-leaving] { pointer-events:none; }
+/* Springing out of the pill the card starts on the pill's own box: until it
+   has settled, a click there is the pill's (the door tab), never the card's
+   mic or field under the pointer. */
+.rl-monochat-float[data-moving] { pointer-events:none; }
 /* Out of flow, ⌄ centred on the composer's first line (14 + 4 + 3 + 11 down);
    the field keeps its text clear of it. */
 .rl-float-heading { position:absolute; top:20px; right:10px; z-index:1; color:var(--color-ink-muted); font-size:11px; }

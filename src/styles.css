@@ -3363,6 +3363,8 @@ html[data-rl-tile-drag] * {
 .rl-wb-tab-body { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .rl-wb-tab-body[data-hidden] { content-visibility: hidden; visibility: hidden; pointer-events: none; }
 .rl-wb-pane { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+/* A pane takes the caret when its tab is shown (WorkbenchStage): a landmark, never a ring. */
+.rl-wb-pane:focus { outline: none; }
 .rl-wb-door-plate { flex: 1; min-height: 0; background: var(--color-paper); }
 /* The plate's floating controls, seated for the workbench (W2): the
    contents rail starts under the strip; in the Plan pane the header carries

@@ -536,6 +536,23 @@ describe("terminals", () => {
     expect(reduce(s, { type: "closeWall", paneId: "p1", keep: true })).toBe(s);
   });
 
+  it("closing the active tab returns to the tab shown before it, not its neighbour (an untouched door's Esc)", () => {
+    let s = home(door(1), file("/a.ts"), file("/b.ts"));
+    s = reduce(s, { type: "selectTab", tabId: "t1" });
+    s = reduce(s, { type: "openTab", pane: door(2), tabId: "t4", paneId: "p4" });
+    expect(set(s).activeTabId).toBe("t4");
+    s = reduce(s, { type: "closeTab", tabId: "t4" });
+    expect(set(s).activeTabId).toBe("t1");
+    // The history follows the tabs: a closed one is forgotten, the next back is next.
+    s = reduce(s, { type: "selectTab", tabId: "t3" });
+    s = reduce(s, { type: "selectTab", tabId: "t2" });
+    expect(set(s).recent).toEqual(["t3", "t1"]);
+    s = reduce(s, { type: "closeTab", tabId: "t3" });
+    s = reduce(s, { type: "closeTab", tabId: "t2" });
+    expect(set(s).activeTabId).toBe("t1");
+    expect(set(s).recent ?? []).toEqual([]);
+  });
+
   it("⌘⇧T reopens a wall closed with Keep running, with the terminals it kept that still are", () => {
     let s = home(door(1), wall(["a", "b", "c"]));
     s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY, c: HOME_KEY } };

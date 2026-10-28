@@ -225,7 +225,7 @@ export default function MonochatCard({ pill, open, growing = false, hovered, onC
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  return <div ref={shell} id="rl-monochat-card" className="rl-monochat-float rl-glass rl-glass-sheet" role="region" aria-labelledby={heading} data-drop-cover data-leaving={!open || undefined}>
+  return <div ref={shell} id="rl-monochat-card" className="rl-monochat-float rl-glass rl-glass-sheet" role="region" aria-labelledby={heading} data-drop-cover data-leaving={!open || undefined} data-moving={(open && moving) || undefined}>
     <div ref={content}>
       <div className="rl-float-heading">
         {/* Named as the pill is, for a screen reader: on screen the pill just

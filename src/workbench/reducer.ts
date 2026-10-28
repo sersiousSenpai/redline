@@ -18,6 +18,7 @@ import {
   DEFAULT_DOOR_DRAFT_KEY,
   HOME_KEY,
   MAX_WALL_TILES,
+  RECENT_TABS_CAP,
   activeTabOf,
   doorDraftKey,
   emptyTabSet,
@@ -151,7 +152,22 @@ function setOf(state: WorkbenchState, key: SessionKey): TabSet | null {
 }
 
 function putSet(state: WorkbenchState, key: SessionKey, set: TabSet): WorkbenchState {
-  return { ...state, sets: { ...state.sets, [key]: set } };
+  return { ...state, sets: { ...state.sets, [key]: withRecent(state.sets[key], set) } };
+}
+
+/** `next` with the tab it stops showing remembered as the most recent one
+ *  (`TabSet.recent`), every tab it no longer has forgotten. */
+function withRecent(prev: TabSet | undefined, next: TabSet): TabSet {
+  const left = prev?.activeTabId && prev.activeTabId !== next.activeTabId && next.tabs[prev.activeTabId] ? prev.activeTabId : null;
+  const before = next.recent ?? [];
+  const recent = [...(left ? [left] : []), ...before.filter((id) => id !== left && id !== next.activeTabId && next.tabs[id])].slice(0, RECENT_TABS_CAP);
+  if (recent.length === before.length && recent.every((id, i) => id === before[i])) return next;
+  if (recent.length === 0) {
+    const rest = { ...next };
+    delete rest.recent;
+    return rest;
+  }
+  return { ...next, recent };
 }
 
 function mruFront(mru: readonly SessionKey[], key: SessionKey): SessionKey[] {
@@ -362,7 +378,9 @@ function removeTab(set: TabSet, tabId: string, remember: boolean): TabSet {
   }
   let activeTabId = set.activeTabId;
   if (activeTabId === tabId) {
-    activeTabId = order[Math.min(index, order.length - 1)] ?? null;
+    // Back to the tab shown before this one, when it is still open; the
+    // neighbour only when nothing was.
+    activeTabId = (set.recent ?? []).find((id) => id !== tabId && order.includes(id)) ?? order[Math.min(index, order.length - 1)] ?? null;
   }
   return {
     ...set,

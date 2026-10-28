@@ -211,7 +211,15 @@ export interface TabSet {
    *  `selectSession`, so an Agent tab the user closed stays closed until
    *  they reopen it (the sidebar row, `openSurface`). Absent = none yet. */
   agentsFilled?: string[];
+  /** The tabs shown before the active one, most recent first (cap
+   *  `RECENT_TABS_CAP`): closing the active tab returns to the one you came
+   *  from — an untouched door's Esc lands back where ⌘T was pressed — not
+   *  to its neighbour in the strip. Absent = none yet. */
+  recent?: string[];
 }
+
+/** How many previously shown tabs a set remembers. */
+export const RECENT_TABS_CAP = 10;
 
 export interface WorkbenchState {
   v: 1;

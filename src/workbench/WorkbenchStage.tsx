@@ -181,8 +181,39 @@ const TabBody = memo(function TabBody({ tab, panes, active, visible, renderPane,
     const frame = requestAnimationFrame(() => endMeasure("wb:tab-switch"));
     return () => cancelAnimationFrame(frame);
   }, [active]);
+  // Focus follows the tab. `inert` keeps a hidden tab from TAKING focus but
+  // does not move a focus it already holds, so a door left focused in a tab
+  // just hidden went on swallowing typing meant elsewhere (a tile's ▾ menu):
+  // hiding blurs whatever inside had it. Shown, the tab's focused pane
+  // takes the caret — unless something live already has it (a terminal the
+  // wall just focused, a field the user is in), so this never steals.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const shownOnce = useRef(false);
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    if (!active) {
+      const held = document.activeElement;
+      if (held instanceof HTMLElement && body.contains(held)) held.blur();
+      return;
+    }
+    // The first show is boot or a new tab, whose bodies place their own
+    // caret (the door's box on ⌘T).
+    if (!shownOnce.current) {
+      shownOnce.current = true;
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      const held = document.activeElement;
+      const stray = !held || held === document.body || !!held.closest("[inert], [data-hidden]");
+      if (!stray) return;
+      body.querySelector<HTMLElement>(".rl-wb-pane[data-focused]")?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active]);
   return (
     <div
+      ref={bodyRef}
       className="rl-wb-tab-body"
       data-hidden={active ? undefined : ""}
       // `inert` keeps a hidden kept tab out of focus and the accessibility
@@ -217,6 +248,9 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
         className="rl-wb-pane"
         data-pane-kind={pane.kind}
         data-focused={focused ? "" : undefined}
+        // Focusable by script only (the stage hands it the caret when its
+        // tab is shown), never a Tab stop.
+        tabIndex={-1}
         // Focus follows the pointer into a pane (capture, so a click a child
         // swallows still counts); a focused document beside a surface keeps
         // the surface on screen (`legacyView`: the surface never follows
