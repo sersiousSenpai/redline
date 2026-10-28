@@ -302,6 +302,48 @@ export function singletonHolder(state: WorkbenchState, kind: PaneKind, asked: st
   return [asked, tab?.focusedPaneId, ids[0]].find((id) => ids.includes(id)) as string | undefined;
 }
 
+/** The plan session a pane is about: a plan's, or a session's own Agent
+ *  pane's once its plan has arrived; null for everything else. */
+export function sessionOfPane(pane: AnyPane): string | null {
+  if (pane.kind === "plan") return pane.data.sessionId;
+  if (pane.kind === "chat" && pane.data.source === "agent") return pane.data.sessionId;
+  return null;
+}
+
+/** The first session a tab is about: its focused pane's, else its first. */
+function tabSession(set: TabSet, tab: Tab): string | null {
+  const focused = set.panes[tab.focusedPaneId];
+  const fromFocus = focused ? sessionOfPane(focused) : null;
+  if (fromFocus) return fromFocus;
+  for (const id of paneIdsOf(tab.root)) {
+    const pane = set.panes[id];
+    const sid = pane ? sessionOfPane(pane) : null;
+    if (sid) return sid;
+  }
+  return null;
+}
+
+/** The session the stage is showing (D29): the tab in front's, else the one
+ *  of the tab shown most recently before it that has one — a set keeps the
+ *  session it was last about, as a session's own set always did — else the
+ *  set's own. A plan opened as a tab in Home's set (a sidebar click) is the
+ *  selected session from then on; a fresh Home is none. */
+export function activeSessionOf(state: WorkbenchState): string | null {
+  const key = state.activeKey;
+  const set = state.sets[key];
+  const own = key.startsWith("plan:") ? key.slice(5) : null;
+  if (!set) return own;
+  const tab = activeTabOf(set);
+  const here = tab ? tabSession(set, tab) : null;
+  if (here) return here;
+  for (const id of set.recent ?? []) {
+    const before = set.tabs[id];
+    const sid = before ? tabSession(set, before) : null;
+    if (sid) return sid;
+  }
+  return own;
+}
+
 /** A short, display-worthy title for a pane when it has no override. The
  *  tab strip refines this with session titles it knows; this is the floor. */
 export function paneTitle(pane: AnyPane): string {

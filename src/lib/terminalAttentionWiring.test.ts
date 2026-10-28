@@ -29,12 +29,15 @@ describe("terminal attention wiring", () => {
     expect(jump).toContain("showTerminal(target, true)");
   });
 
-  it("showing a terminal selects its session, wall and tile, then hails it and hands it the caret", () => {
+  it("showing a terminal brings its wall and tile into the set on screen, then hails it and hands it the caret", () => {
     const start = app.indexOf("const showTerminal = useCallback(");
     const show = app.slice(start, app.indexOf("}, []);", start));
-    expect(show).toContain('wb.dispatch({ type: "revealTerminal", ptyId: id })');
-    // A session's agent terminal is its Agent tab, where its questions are.
-    expect(show).toContain('wb.dispatch({ type: "openSurface", key: owner, kind: "chat", data: agent.data })');
+    // D29: never a switch of the strip — the wall is in the set on screen.
+    expect(show).toContain('wb.dispatch({ type: "revealTerminal", ptyId: id, key: state.activeKey })');
+    // A session's agent terminal is its Agent tab, where its questions are,
+    // opened as a tab of the set on screen.
+    expect(show).toContain('openSessionPane({ kind: "chat", data: agent.data })');
+    expect(show).not.toContain("selectSession");
     expect(show).toContain("terminalsRef.current?.hailTerminal(id)");
     expect(show).toContain("if (focus) terminalsRef.current?.focusTerminal(id)");
     // Every "show me that terminal" route goes this one way.

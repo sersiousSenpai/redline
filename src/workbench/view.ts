@@ -11,6 +11,7 @@
 
 import type { Surface } from "../config/workspace";
 import {
+  activeSessionOf,
   activeTabOf,
   isDocumentKind,
   paneIdsOf,
@@ -25,7 +26,9 @@ import {
 } from "./model";
 
 export interface StageView {
-  /** The selected plan session; null on Home and during a launch. */
+  /** The selected plan session: the focused pane's (a Plan tab, a session's
+   *  Agent tab), else the active set's own; null on Home's door and during a
+   *  launch (D29). */
   activeId: string | null;
   /** The focused file pane's path, else the tab's first file, else null. */
   activeFile: string | null;
@@ -84,9 +87,11 @@ export function surfaceOfPane(pane: AnyPane): Surface | null {
 }
 
 /** The pane kind `selectSurface(surface)` means in `key`: "document" is the
- *  session's plan, or the door when there is no session. */
-export function kindForSurface(surface: Surface, key: SessionKey): PaneKind {
-  if (surface === "document") return sessionIdOf(key) ? "plan" : "door";
+ *  session's plan, or the door when there is no session. `session` is the
+ *  session on screen (D29: a plan opened as a tab in Home is one), which
+ *  defaults to the set's own. */
+export function kindForSurface(surface: Surface, key: SessionKey, session: string | null = sessionIdOf(key)): PaneKind {
+  if (surface === "document") return session ? "plan" : "door";
   return surface;
 }
 
@@ -108,7 +113,9 @@ export function stageView(state: WorkbenchState): StageView {
   return {
     // Never the collab joined key (`joined:<sid>:<threadStart>`): a joined
     // room has no session key here, and App keeps it beside this.
-    activeId: sessionIdOf(state.activeKey),
+    // D29: the focused pane's session, so a plan opened as a tab in the
+    // current set is the selected session while it is in front.
+    activeId: activeSessionOf(state),
     activeFile: focusedFile?.data.path ?? null,
     focusedKind: focused?.kind ?? null,
     visibleKinds,

@@ -369,7 +369,7 @@ import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench, retireLegacyKeys } from "./workbench/persist";
 import { activePanes, findPane, focusedDoorDraftKey, kindForSurface, plateFace, selectFocusedDoorDestination, selectLayoutKey, selectStageView, selectVisibleCompanion, tileOf } from "./workbench/view";
 import { terminalStatus, wallStatus } from "./workbench/status";
-import { HOME_KEY, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeSessionOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import type { EdgeSessionTone } from "./workbench/RightRail";
 import { doorDraftKey } from "./workbench/model";
@@ -725,17 +725,16 @@ function App() {
   const activeId: string | null = joinedId ?? view.activeId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
-  // The one writer, in both forms (`leaveJoined` passes an updater). A
-  // re-selection of the open session is not a switch: the load effect
-  // below keys on `activeId`, and dispatching nothing keeps it from
-  // loading twice.
+  // The one writer, in both forms (`leaveJoined` passes an updater). D29: a
+  // session is OPENED, never switched to — its Plan tab opens in the set on
+  // screen, or comes forward if that set has it (`openInActive`); the strip
+  // stays. "No session" is Home's set. The per-session sets stay behind the
+  // strip: "Open as workspace" (`openWorkspace`) is the old switch.
   const setActiveId = useCallback((next: string | null | ((prev: string | null) => string | null)) => {
     const value = typeof next === "function" ? next(activeIdRef.current) : next;
-    // A re-selection is no switch — but "no session" is Home only on Home:
-    // a launch's set has no session id either, and Home pressed there
-    // must still go Home (the sidebar reads the workbench's active set, so
-    // a no-op here left the stage on the launch with nothing selected).
-    if (value === activeIdRef.current && (value !== null || wb.getState().activeKey === HOME_KEY)) return;
+    // "No session" is Home only on Home: a launch's set has no session id
+    // either, and Home pressed there must still go Home.
+    if (value === null && activeIdRef.current === null && wb.getState().activeKey === HOME_KEY) return;
     if (value && isJoinedSessionId(value)) {
       // `joined:<sid>:<threadStart>`: the room shows in the plan set of the
       // session it mirrors, its Plan tab in front.
@@ -745,9 +744,25 @@ function App() {
       return;
     }
     setJoinedId(null);
-    // The session's agent terminal, when known, so its set opens with an
-    // Agent tab beside the plan (the reducer's defaults).
-    wb.dispatch({ type: "selectSession", key: value ? planKey(value) : HOME_KEY, defaults: value ? { agentTerminalId: sessionTerminalsRef.current.get(value) ?? null } : undefined });
+    if (!value) {
+      wb.dispatch({ type: "selectSession", key: HOME_KEY });
+      return;
+    }
+    // A no-op when it is the tab in front: the load effect below keys on
+    // `activeId`, so nothing loads twice.
+    wb.dispatch({ type: "openInActive", pane: { kind: "plan", data: { sessionId: value, version: null } } });
+  }, []);
+  /** A session's own pane (its Agent tab, a launch's), opened as a tab in
+   *  the set on screen (D29). */
+  const openSessionPane = useCallback((pane: PaneInit) => {
+    setJoinedId(null);
+    wb.dispatch({ type: "openInActive", pane });
+  }, []);
+  /** "Open as workspace" (D29): the session's own set, its Plan, Agent and
+   *  Terminals tabs — the switch a row click used to be. */
+  const openWorkspace = useCallback((sessionId: string) => {
+    setJoinedId(null);
+    wb.dispatch({ type: "selectSession", key: planKey(sessionId), defaults: { agentTerminalId: sessionTerminalsRef.current.get(sessionId) ?? null } });
   }, []);
   const sessionTerminalsRef = useRef<ReadonlyMap<string, string>>(new Map());
   // Count of open header dropdowns (theme, mode, alerts, download). Folded into
@@ -2113,12 +2128,14 @@ function App() {
     const { key, set, tab } = activePanes(state);
     if (next === "chat") return;
     if (next === "document") {
-      // Never closes a pane (a surface's own ✕ does that): the set's Plan
-      // tab comes forward — the plan half of a tile keeps its neighbour —
-      // or Home's door. Reads the set selected NOW, so a caller that also
-      // switches session switches first.
-      if (kindForSurface("document", key) === "plan") {
-        wb.dispatch({ type: "openSurface", kind: "plan" });
+      // Never closes a pane (a surface's own ✕ does that): the session on
+      // screen's Plan tab comes forward — the plan half of a tile keeps its
+      // neighbour — or Home's door. Reads the state NOW, so a caller that
+      // also opens a session (`setActiveId`) opens it first (D29: its Plan
+      // tab in this set is the session on screen).
+      const session = activeSessionOf(state);
+      if (kindForSurface("document", key, session) === "plan" && session) {
+        wb.dispatch({ type: "openInActive", pane: { kind: "plan", data: { sessionId: session, version: null } } });
         return;
       }
       const door = findPane(state, "door");
@@ -3127,8 +3144,9 @@ function App() {
           tourRevealRestore.current = backToTab;
         }
       } else if ((anchor === "editor" || anchor === "plan-verbs") && activeId && findPane(before, "plan")) {
-        // The plan and its verbs are the Plan tab's.
-        wb.dispatch({ type: "openSurface", kind: "plan" });
+        // The plan and its verbs are the Plan tab's: the session on
+        // screen's, in this set (D29).
+        wb.dispatch({ type: "openInActive", pane: { kind: "plan", data: { sessionId: activeId, version: null } } });
         tourRevealRestore.current = backToTab;
       } else if ((anchor === "sessions" || anchor === "new-tab") && sidebarCollapsed) {
         revealSidebar();
@@ -3247,10 +3265,11 @@ function App() {
     },
     [],
   );
-  /** Show a terminal: its session, its wall and its tile (the workbench's
-   *  `revealTerminal`), hailed once that has painted. A session's agent
-   *  terminal is its Agent tab (where its questions are), unless the raw
-   *  PTY is what was asked for. */
+  /** Show a terminal in the set on screen (D29: never a switch of the
+   *  strip), hailed once that has painted. A session's agent terminal is its
+   *  Agent tab (where its questions are), opened as a tab here, unless the
+   *  raw PTY is what was asked for; any other terminal comes onto a wall of
+   *  this set (one wall per PTY: it leaves the one it was on). */
   const showTerminal = useCallback((id: string, focus = false, raw = false) => {
     setTerminalMounted(true);
     const state = wb.getState();
@@ -3259,13 +3278,10 @@ function App() {
       ? Object.values(state.sets[owner]?.panes ?? {}).find((p): p is Extract<AnyPane, { kind: "chat" }> => p.kind === "chat" && p.data.source === "agent" && p.data.terminalId === id)
       : undefined;
     if (owner && agent) {
-      const sid = sessionIdOf(owner);
-      if (sid) setActiveId(sid);
-      else wb.dispatch({ type: "selectSession", key: owner });
-      wb.dispatch({ type: "openSurface", key: owner, kind: "chat", data: agent.data });
+      openSessionPane({ kind: "chat", data: agent.data });
       return;
     }
-    wb.dispatch({ type: "revealTerminal", ptyId: id });
+    wb.dispatch({ type: "revealTerminal", ptyId: id, key: state.activeKey });
     requestAnimationFrame(() => {
       terminalsRef.current?.hailTerminal(id);
       if (focus) terminalsRef.current?.focusTerminal(id);
@@ -4183,7 +4199,10 @@ function App() {
           const sid = sessionIdOf(key);
           if (sid && (key === state.activeKey || !setsBefore.has(key))) live.push(sid);
         }
-        wb.dispatch({ type: "prune", liveSessions: live, livePtys: liveTermIdsRef.current ?? Object.keys(state.owners) });
+        // Every session that exists, for the Plan tabs opened in other sets
+        // (D29): one for a session that went closes with it.
+        const known = [...live, ...list.map((s) => s.sessionId)];
+        wb.dispatch({ type: "prune", liveSessions: live, livePtys: liveTermIdsRef.current ?? Object.keys(state.owners), knownSessions: known });
       }
       return list;
     } catch (err) {
@@ -4218,7 +4237,10 @@ function App() {
     try {
       await invoke("archive_session", { sessionId: id, archived });
       await refreshSummaries();
-      if (archived && id === activeId) { setActiveId(null); setSession(null); }
+      // Archived, it leaves the strip it was a tab of (D29); its own set
+      // goes the way it always went.
+      if (archived) wb.dispatch({ type: "dropSessionPanes", sessionIds: [id] });
+      if (archived && id === activeId && wb.getState().activeKey === planKey(id)) { setActiveId(null); setSession(null); }
     } catch (error) { setToast(String(error), 6000); }
   }
 
@@ -4233,10 +4255,14 @@ function App() {
       return;
     }
     const list = await refreshSummaries();
-    if (id === activeId) {
+    // Its tabs in other sets close (D29). Standing in its own set, the
+    // stage goes Home and the next session opens there, as a tab.
+    wb.dispatch({ type: "dropSessionPanes", sessionIds: [id] });
+    if (id === activeId && wb.getState().activeKey === planKey(id)) {
       const next = list[0]?.sessionId ?? null;
-      setActiveId(next);
-      if (next === null) setSession(null);
+      setActiveId(null);
+      if (next) setActiveId(next);
+      else setSession(null);
     }
     // Sweep the session's crash-recovery Y.Docs from IndexedDB. Dynamic
     // import: the yjs graph stays in the lazy PlanEditor chunk. Runs after
@@ -4577,19 +4603,19 @@ function App() {
             const from = boxOf(".rl-frontdoor-focus .rl-fd-island");
             if (from) setPlanSwap({ launchId: payload.launchId!, from });
           }
+          // The plan itself, as a tab of the set on screen (D29): its Plan
+          // tab comes forward, beside the launch's Agent tab when that is
+          // here (rekeySession put it there).
           focusIntercepted();
-          // Someone elsewhere comes to the plan itself, not the Agent tab
-          // the set was showing (D1 selects the Plan tab only for the user
-          // already on the set).
-          if (!ownLaunch) wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(payload.sessionId) });
           announceDoor(arrivalMessage(title, revision));
           return;
         }
         if (focus === "focus") {
-          // A masked surface (browser, memory, runs): the plan becomes what
-          // you come back to, but the surface you chose is not yanked away.
-          selectSessions();
-          setActiveId(payload.sessionId);
+          // A masked surface (browser, memory): the plan becomes what you
+          // come back to — a Plan tab in this set, behind the surface you
+          // chose, which is not yanked away (D29); the notice's Review
+          // brings it forward.
+          wb.dispatch({ type: "openInActive", pane: { kind: "plan", data: { sessionId: payload.sessionId, version: null } }, activate: false });
           setViewedVersionNumber(null);
           void loadSession(payload.sessionId);
           notice(arrivalMessage(title, revision), "Review");
@@ -4779,9 +4805,21 @@ function App() {
   // session object up front so the next paint doesn't flash the previous
   // session's plan/comments while get_session is in flight — otherwise the
   // memoised threadRevisions/allComments still point at the old session.
+  // The last few sessions shown, by id (D29): Plan tabs of several sessions
+  // share one set now, and a tab switch between them — or out to a door and
+  // back — shows the one it had at once while the read refreshes it,
+  // instead of a blank plate for the round trip.
+  const sessionCacheRef = useRef(new Map<string, ReviewSession>());
+  useEffect(() => {
+    if (!session) return;
+    const cache = sessionCacheRef.current;
+    cache.delete(session.sessionId);
+    cache.set(session.sessionId, session);
+    while (cache.size > 6) cache.delete(cache.keys().next().value!);
+  }, [session]);
   useEffect(() => {
     if (activeId) {
-      setSession((prev) => (prev?.sessionId === activeId ? prev : null));
+      setSession((prev) => (prev?.sessionId === activeId ? prev : sessionCacheRef.current.get(activeId) ?? null));
       void loadSession(activeId);
       setWarning(null);
       setAskModeViolation(false);
@@ -6809,21 +6847,22 @@ function App() {
       launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
     });
     // The workbench: the launch is a session from here — a `launch:` set
-    // holding its Agent tab, rekeyed to the plan when it arrives. Asked
-    // for in the foreground it is selected, and the door tab it came
-    // through follows it (it becomes the Plan tab on arrival); a
+    // holding its Agent tab, behind the strip, rekeyed to the plan when it
+    // arrives. Asked for in the foreground it is a tab of the set on screen
+    // (D29: the strip never switches): the door it came through becomes its
+    // Agent tab in place, and the plan lands beside it (rekeySession). A
     // background launch gets its set without moving anyone.
     {
       const key = launchKey(launchId);
-      if (req.background) wb.dispatch({ type: "ensureDefaults", key, defaults: { agentTerminalId: terminalId } });
-      else {
-        const { key: fromKey, set, tab } = activePanes(wb.getState());
-        const door = tab && set && set.panes[tab.focusedPaneId]?.kind === "door" ? { key: fromKey, tabId: tab.id } : null;
-        wb.dispatch({ type: "selectSession", key, defaults: { agentTerminalId: terminalId } });
+      wb.dispatch({ type: "ensureDefaults", key, defaults: { agentTerminalId: terminalId } });
+      if (!req.background) {
+        const agent: PaneInit = { kind: "chat", data: { source: "agent", terminalId, sessionId: null } };
+        const { set, tab, panes } = activePanes(wb.getState());
+        const door = tab && set && panes.length === 1 && panes[0].kind === "door" && tab.focusedPaneId === panes[0].id ? panes[0] : null;
         if (door) {
-          wb.dispatch({ type: "moveTab", from: door.key, to: key, tabId: door.tabId, at: 0, activate: false });
-          doorLaunchTabRef.current = { launchId, key, tabId: door.tabId };
-        }
+          untouchedDoors.current.delete(door.id);
+          wb.dispatch({ type: "replacePane", paneId: door.id, pane: agent });
+        } else openSessionPane(agent);
       }
     }
     if (run) {
@@ -8122,21 +8161,24 @@ function App() {
   // Open an existing conversation (a recent-chat pill, or the room's own
   // `Chats ▾`). The dock comes forward wherever the user happens to be — a
   // conversation is not a place you navigate to any more.
-  const openChat = (id: string) => {
+  const openChat = (id: string, opts: { inPlace?: boolean } = {}) => {
     doorLaunchRef.current = null;
     setFrontDoorDest("chat");
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
     setFrontDoorOpen(false);
-    // Its pane: the door tab it was picked in becomes it; otherwise the
-    // set's pane for it comes forward, or opens.
-    if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });
+    // Its pane: picked in a door, the door tab becomes it; from a sidebar
+    // row (`inPlace: false`, D29) it is a tab of its own in the set on
+    // screen, or the one that set has comes forward.
+    const pane = { kind: "chat" as const, data: { source: "companion" as const, companionId: id } };
+    if (opts.inPlace === false) wb.dispatch({ type: "openInActive", pane });
+    else if (!convertDoorPane(pane)) wb.dispatch({ type: "openSurface", kind: "chat", data: pane.data });
   };
   // A notification answered (useAttentionAlerts): what it was about comes
-  // forward through the workbench's own routes — a terminal as its Agent tab
-  // or on its wall, a plan as its session's Plan tab, a chat as its room
-  // wherever that pane lives.
+  // forward through the workbench's own routes, as a tab of the set on
+  // screen (D29) — a terminal as its Agent tab or on a wall, a plan as its
+  // Plan tab, a chat as its room.
   const revealAlertRef = useRef<(target: AlertTarget) => void>(() => {});
   revealAlertRef.current = (target) => {
     setFrontDoorOpen(false);
@@ -8146,21 +8188,10 @@ function App() {
     }
     if (target.type === "plan") {
       setActiveId(target.sessionId);
-      wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(target.sessionId) });
       return;
     }
-    const state = wb.getState();
-    const data = { source: "companion" as const, companionId: target.companionId };
-    const key = (Object.keys(state.sets) as SessionKey[]).find((k) =>
-      Object.values(state.sets[k]?.panes ?? {}).some((p) => p.kind === "chat" && p.data.source === "companion" && p.data.companionId === target.companionId));
-    if (!key) {
-      openChat(target.companionId);
-      return;
-    }
-    const sid = sessionIdOf(key);
-    if (sid) setActiveId(sid);
-    else wb.dispatch({ type: "selectSession", key });
-    wb.dispatch({ type: "openSurface", key, kind: "chat", data });
+    // A chat: its room, as a tab of the set on screen (D29).
+    openChat(target.companionId, { inPlace: false });
   };
   const revealAlert = useCallback((target: AlertTarget) => revealAlertRef.current(target), []);
   // The first conversation, from the dock's empty state. No seed and no
@@ -8871,7 +8902,9 @@ function App() {
       setFrontDoorProject({ path });
       openDoorTab();
     },
-    onSelectChat: openChat,
+    // A chat row (D29): its room as a tab of the set on screen, never in
+    // place of the door that was in front.
+    onSelectChat: (id: string) => openChat(id, { inPlace: false }),
     onRenameChat: (id: string, title: string) => {
       invoke("companion_rename", { companionId: id, title, byUser: true })
         .then(refreshChats, (e) => setToast(String(e), 6000));
@@ -9010,21 +9043,24 @@ function App() {
     // kept terminal (no wall) back onto one.
     onSelectTerminal: (sessionId: string, terminalId: string) => {
       if (sessionTerminals.get(sessionId) === terminalId) {
-        setActiveId(sessionId);
-        wb.dispatch({ type: "openSurface", kind: "chat", key: planKey(sessionId), data: { source: "agent", terminalId, sessionId } });
+        openSessionPane({ kind: "chat", data: { source: "agent", terminalId, sessionId } });
         return;
       }
       showTerminal(terminalId);
     },
-    // A pending launch's row: its own set, the Agent tab.
+    // A pending launch's row: its Agent tab, opened in the set on screen
+    // (D29); its own set waits behind the strip for the plan to arrive.
     onSelectLaunch: (terminalId: string) => {
       const launch = flowLaunches.find((l) => l.terminalId === terminalId);
       if (launch) {
-        wb.dispatch({ type: "selectSession", key: launchKey(launch.launchId), defaults: { agentTerminalId: terminalId } });
+        wb.dispatch({ type: "ensureDefaults", key: launchKey(launch.launchId), defaults: { agentTerminalId: terminalId } });
+        openSessionPane({ kind: "chat", data: { source: "agent", terminalId, sessionId: null } });
         return;
       }
       showTerminal(terminalId);
     },
+    // A row's "Open as workspace" (D29): the session's own set, the switch.
+    onOpenWorkspace: (sessionId: string) => openWorkspace(sessionId),
     onNewTab: openDoorTab,
     onCombine: (ids: string[]) => void beginCombine(ids),
     onDelete: deleteSession,
@@ -9104,7 +9140,12 @@ function App() {
   // and recorded model are values kept equal across unrelated renders.
   const agentPaneHandlers = useStableHandlers({
     onTalk: flowTalk,
-    onOpenPlan: () => wb.dispatch({ type: "openSurface", kind: "plan" }),
+    // Its session's Plan tab, in the set on screen (D29): an Agent tab
+    // opened in Home brings its plan there too.
+    onOpenPlan: () => {
+      const sid = activeSessionOf(wb.getState());
+      if (sid) wb.dispatch({ type: "openInActive", pane: { kind: "plan", data: { sessionId: sid, version: null } } });
+    },
     onFork: (cliSessionId: string, projectPath: string | null) => void forkCliSession(cliSessionId, projectPath),
     // The Stopped card's Retry on an agent that died mid-build: resume the
     // same conversation to carry on the approved plan.

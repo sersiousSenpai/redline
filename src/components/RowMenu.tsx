@@ -9,7 +9,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Archive, ArchiveRestore, Ellipsis, FileText, MessageSquare, Pencil, Trash2 } from "lucide-react";
+import { AppWindow, Archive, ArchiveRestore, Ellipsis, FileText, MessageSquare, Pencil, Trash2 } from "lucide-react";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 
@@ -33,6 +33,9 @@ const glyph = (Icon: typeof FileText) => <Icon size={14} aria-hidden />;
  *  offered only when the host can do it. */
 export interface RowActs {
   open: () => void;
+  /** The session's own set, its Plan, Agent and Terminals tabs (D29): a row
+   *  click opens the plan as a tab of the set on screen instead. */
+  workspace?: () => void;
   rename?: () => void;
   archive?: () => void;
   remove?: () => void;
@@ -43,6 +46,7 @@ export interface RowActs {
 export function planRowActions(session: { archivedAt?: number | null; held: boolean }, act: RowActs): RowAction[] {
   return [
     { label: "Open plan", icon: glyph(FileText), onSelect: act.open },
+    ...(act.workspace ? [{ label: "Open as workspace", icon: glyph(AppWindow), onSelect: act.workspace }] : []),
     ...(act.rename ? [{ label: "Rename", icon: glyph(Pencil), onSelect: act.rename }] : []),
     ...(act.archive ? [{ label: session.archivedAt ? "Unarchive" : "Archive", icon: glyph(session.archivedAt ? ArchiveRestore : Archive), disabled: session.held, onSelect: act.archive }] : []),
     ...(act.remove ? [{ label: "Delete plan", icon: glyph(Trash2), shortcut: "⌫", danger: true, divided: true, onSelect: act.remove }] : []),

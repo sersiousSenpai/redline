@@ -71,7 +71,10 @@ export interface SessionSidebarProps {
   joined?: JoinedSessionInfo | null;
   onSelectJoined?: () => void;
   onLeaveJoined?: () => void;
+  /** A row click: the plan opens as a tab of the set on screen (D29). */
   onSelect: (id: string) => void;
+  /** A row menu's "Open as workspace": the session's own set. */
+  onOpenWorkspace?: (id: string) => void;
   /** Delete a session. Held sessions are deleted with force=true, which
    *  drains the orphaned hook response so Claude Code's terminal unblocks
    *  before the row disappears. */
@@ -212,7 +215,7 @@ const PLACE_TITLES: Record<SidebarPlace, string> = {
 function SessionSidebarBase(props: SessionSidebarProps) {
   const {
     sessions, activeId, pendingCounts, joined, onSelectJoined, onLeaveJoined,
-    onSelect, onDelete, onRename, onArchive, onSetPlanState, onMoveProject, onExport,
+    onSelect, onOpenWorkspace, onDelete, onRename, onArchive, onSetPlanState, onMoveProject, onExport,
     onSelectRevision, viewedVersionNumber, unseenIds, arrivalGlow,
     onCombine, onNewPlan, onNewSession, onNewSessionIn, chats, activeChatId,
     onSelectChat, onRenameChat, onArchiveChat, onDeleteChat, launches, activeLaunchId,
@@ -383,6 +386,7 @@ function SessionSidebarBase(props: SessionSidebarProps) {
           terminals={terminals?.[s.sessionId]}
           port={sessionPorts?.[s.sessionId]}
           onOpenPort={onOpenPort}
+          onOpenWorkspace={onOpenWorkspace}
           onClick={clickRow}
           onToggleExpand={toggleExpand}
           onDelete={onDelete}
@@ -740,6 +744,7 @@ function SessionRowBase({
   port,
   onOpenPort,
   onClick,
+  onOpenWorkspace,
   onToggleExpand,
   onDelete,
   onRename, onArchive,
@@ -775,6 +780,8 @@ function SessionRowBase({
   port?: PortChip;
   onOpenPort?: (url: string) => void;
   onClick: (sessionId: string) => void;
+  /** "Open as workspace": the session's own set (D29). */
+  onOpenWorkspace?: (sessionId: string) => void;
   onToggleExpand: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
   onRename?: (id: string, title: string) => void;
@@ -914,6 +921,7 @@ function SessionRowBase({
         <RowMenu open={menuOpen} onOpenChange={open => { setMenuOpen(open); if (!open) setMenuAt(null); }} at={menuAt} label={rowName}
           actions={planRowActions(session, {
             open: () => onClick(session.sessionId),
+            workspace: onOpenWorkspace ? () => onOpenWorkspace(session.sessionId) : undefined,
             rename: onRename ? () => setRenaming(true) : undefined,
             archive: onArchive ? () => onArchive(session.sessionId, !session.archivedAt) : undefined,
             remove: () => setConfirming(true),

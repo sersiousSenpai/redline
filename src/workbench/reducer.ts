@@ -27,6 +27,7 @@ import {
   normalizeWeights,
   paneIdsOf,
   sessionIdOf,
+  sessionOfPane,
   type AnyPane,
   type ClosedTab,
   type LayoutNode,
@@ -133,7 +134,20 @@ export type WorkbenchAction =
    *  ones still kept) or terminated (the host kills them; they leave
    *  `owners`, and nothing is remembered: a wall is its terminals). */
   | { type: "closeWall"; key?: SessionKey; paneId: string; keep: boolean }
-  | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[] };
+  /** Open a session's pane as a tab in the ACTIVE set, or bring it forward
+   *  if that set already has it (D29: a sidebar row, a palette pick, an
+   *  arrival, ⌘⇧J). Never switches the strip. A plan matches by session
+   *  (any version), an Agent pane by terminal, a companion chat by room;
+   *  a new Plan tab sits just before its own session's Agent tab when the
+   *  set has one, else after the tab in front. `activate: false` lands it
+   *  without bringing it forward (a plan arriving behind a surface). */
+  | { type: "openInActive"; pane: PaneInit; tabId?: string; paneId?: string; activate?: boolean }
+  /** A session left (deleted, archived): its Plan and Agent panes leave
+   *  every set but its own (whose fate `prune` decides). */
+  | { type: "dropSessionPanes"; sessionIds: readonly string[] }
+  /** `knownSessions`, when given, is every session that still exists: a
+   *  Plan pane opened in another set for one that does not closes too. */
+  | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[]; knownSessions?: readonly string[] };
 
 let counter = 0;
 function newId(prefix: string): string {
@@ -627,6 +641,49 @@ function isSurfacePane(pane: AnyPane, key: SessionKey): boolean {
   return true;
 }
 
+/** The pane in `set` that `init` means for `openInActive`, with its tab. */
+function matchingPane(set: TabSet, init: PaneInit): { tab: Tab; pane: AnyPane } | null {
+  const same = (pane: AnyPane): boolean => {
+    if (pane.kind !== init.kind) return false;
+    if (pane.kind === "plan" && init.kind === "plan") return pane.data.sessionId === init.data.sessionId;
+    if (pane.kind === "chat" && init.kind === "chat") {
+      if (pane.data.source === "agent" && init.data.source === "agent") return pane.data.terminalId === init.data.terminalId;
+      if (pane.data.source === "companion" && init.data.source === "companion") return pane.data.companionId === init.data.companionId;
+      return false;
+    }
+    return sameData(pane.data, init.data);
+  };
+  const order = set.activeTabId ? [set.activeTabId, ...set.order.filter((id) => id !== set.activeTabId)] : set.order;
+  for (const tabId of order) {
+    const tab = set.tabs[tabId];
+    if (!tab) continue;
+    for (const id of paneIdsOf(tab.root)) {
+      const pane = set.panes[id];
+      if (pane && same(pane)) return { tab, pane };
+    }
+  }
+  return null;
+}
+
+/** The index of the tab holding `sessionId`'s Agent pane in `set`, or -1. */
+function agentTabIndex(set: TabSet, sessionId: string): number {
+  return set.order.findIndex((tabId) => {
+    const tab = set.tabs[tabId];
+    return !!tab && paneIdsOf(tab.root).some((id) => {
+      const pane = set.panes[id];
+      return pane?.kind === "chat" && pane.data.source === "agent" && pane.data.sessionId === sessionId;
+    });
+  });
+}
+
+/** `set` without the panes `drop` names (their tabs close when emptied,
+ *  remembered for ⌘⇧T like any closed tab). */
+function dropPanesWhere(set: TabSet, drop: (pane: AnyPane) => boolean): TabSet {
+  let next = set;
+  for (const pane of Object.values(set.panes)) if (drop(pane)) next = dropPane(next, pane.id, true);
+  return next;
+}
+
 // ── The reducer ────────────────────────────────────────────────────────────
 
 export function reduce(state: WorkbenchState, action: WorkbenchAction): WorkbenchState {
@@ -691,6 +748,35 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       if (planTabId && state.activeKey === from) merged = { ...merged, activeTabId: planTabId };
       const sets: WorkbenchState["sets"] = { ...state.sets, [to]: merged };
       delete sets[from];
+      // D29: the launch's Agent pane may also be a tab in another set (a
+      // sidebar row opened it there). It learns its session too, and in the
+      // set on screen the plan arrives beside it: a Plan tab just before
+      // the Agent tab, in front only when the Agent tab was (D1's rule, for
+      // the tab the user is looking at).
+      const agents = new Set(Object.values(moving.panes).flatMap((pane) => (pane.kind === "chat" && pane.data.source === "agent" && pane.data.sessionId === null ? [pane.data.terminalId] : [])));
+      if (sessionId && agents.size) {
+        for (const k of Object.keys(sets) as SessionKey[]) {
+          if (k === to) continue;
+          const other = sets[k];
+          if (!other) continue;
+          let changed = false;
+          const panes: Record<string, AnyPane> = {};
+          for (const [id, pane] of Object.entries(other.panes)) {
+            if (pane.kind === "chat" && pane.data.source === "agent" && pane.data.sessionId === null && agents.has(pane.data.terminalId)) {
+              panes[id] = { ...pane, data: { ...pane.data, sessionId } };
+              changed = true;
+            } else panes[id] = pane;
+          }
+          if (!changed) continue;
+          let updated: TabSet = { ...other, panes };
+          if (k === state.activeKey && !Object.values(updated.panes).some((pane) => pane.kind === "plan" && pane.data.sessionId === sessionId)) {
+            const at = agentTabIndex(updated, sessionId);
+            const looking = at >= 0 && updated.order[at] === updated.activeTabId;
+            updated = addTab(updated, { kind: "plan", data: { sessionId, version: null } }, {}, at >= 0 ? at : undefined, looking).set;
+          }
+          sets[k] = withRecent(other, updated);
+        }
+      }
       const owners: Record<string, SessionKey> = {};
       for (const [pty, owner] of Object.entries(state.owners)) owners[pty] = owner === from ? to : owner;
       const mru = state.mru.map((k) => (k === from ? to : k)).filter((k, i, all) => all.indexOf(k) === i);
@@ -1017,6 +1103,40 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       return putSet(state, key, next);
     }
 
+    case "openInActive": {
+      const key = state.activeKey;
+      const set = setOf(state, key) ?? emptyTabSet();
+      const open = matchingPane(set, action.pane);
+      if (open) {
+        const { tab, pane } = open;
+        if (action.activate === false || (set.activeTabId === tab.id && tab.focusedPaneId === pane.id)) return state;
+        return putSet(state, key, { ...set, activeTabId: tab.id, tabs: { ...set.tabs, [tab.id]: { ...tab, focusedPaneId: pane.id } } });
+      }
+      const sid = action.pane.kind === "plan" ? action.pane.data.sessionId : null;
+      const beside = sid ? agentTabIndex(set, sid) : -1;
+      const front = set.activeTabId ? set.order.indexOf(set.activeTabId) : -1;
+      const at = beside >= 0 ? beside : front >= 0 ? front + 1 : undefined;
+      const { set: next } = addTab(set, action.pane, { tabId: action.tabId, paneId: action.paneId }, at, action.activate ?? true);
+      return putSet(state, key, next);
+    }
+
+    case "dropSessionPanes": {
+      const gone = new Set(action.sessionIds);
+      if (gone.size === 0) return state;
+      let next = state;
+      for (const k of Object.keys(state.sets) as SessionKey[]) {
+        const set = next.sets[k];
+        const own = sessionIdOf(k);
+        if (!set) continue;
+        const dropped = dropPanesWhere(set, (pane) => {
+          const sid = sessionOfPane(pane);
+          return !!sid && gone.has(sid) && sid !== own;
+        });
+        if (dropped !== set) next = putSet(next, k, dropped);
+      }
+      return next === state ? state : refillEmpty(next);
+    }
+
     case "revealTerminal": {
       // Shown where it is owned; an explicit other key is an adoption (the
       // tile leaves its old wall), so a PTY is never on two walls.
@@ -1103,7 +1223,13 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
           changed = true;
           continue;
         }
-        const stripped = stripSetTiles(set, dead);
+        let stripped = stripSetTiles(set, dead);
+        if (action.knownSessions) {
+          // A Plan pane opened here for a session that no longer exists.
+          const known = new Set(action.knownSessions);
+          const own = sessionIdOf(k);
+          stripped = dropPanesWhere(stripped, (pane) => pane.kind === "plan" && pane.data.sessionId !== own && !known.has(pane.data.sessionId));
+        }
         if (stripped !== set) changed = true;
         sets[k] = stripped;
       }
