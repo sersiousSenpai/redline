@@ -52,10 +52,12 @@ describe("terminal attention wiring", () => {
     expect(body).toContain('invoke("term_attention_interrupted", { terminalId: id })');
   });
 
-  it("the dock's count reaches the footer, whose chip runs the same jump", () => {
+  it("the dock's count reaches the top bar, whose \"need you\" runs the same jump", () => {
     expect(app).toContain("onNeedsYouChange={setTermNeedYou}");
-    expect(app).toContain("termNeedYou={termNeedYou}");
-    expect(app).toContain("onJumpToNeedsYou={jumpToNeedsYou}");
+    // D26: the count left the status bar for the top bar's "N need you".
+    const header = app.slice(app.indexOf("      <Header\n"), app.indexOf("      <HookConflictWarning"));
+    expect(header).toContain("needsYou={termNeedYou}");
+    expect(header).toContain("onJumpToNeedsYou={jumpToNeedsYou}");
     expect(app).not.toContain("termHasUnseen");
   });
 

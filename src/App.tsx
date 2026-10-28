@@ -123,7 +123,6 @@ import type {
 import { DockContextStrip } from "./components/DockContextStrip";
 // A live session's presence bar shows only while sharing or joined; its
 // chunk loads then (about 5 kB of boot JS, W1).
-const PresenceBar = lazy(() => import("./components/PresenceBar").then((m) => ({ default: m.PresenceBar })));
 import {
   collabRoomBase,
   encodeJoinCode,
@@ -8402,6 +8401,12 @@ function App() {
             openRailTab("talk");
           },
           openChat,
+          // Home, by name: the ⌂ left the top bar (D26) — it is the
+          // sidebar's first Place, and this.
+          goHome: () => {
+            tripDoor();
+            setActiveId(null);
+          },
           snapBack,
           toggleSidebar,
           toggleDiscussion: togglePane,
@@ -9164,6 +9169,34 @@ function App() {
       : null,
     onViewPrior: setViewedVersionNumber,
   };
+  // The top bar's "what is open · where" (D26): a plan by its name and its
+  // project, a joined room by its title, Home as Home, a launch by its
+  // project while its first plan is on the way.
+  const topBarTitle: { title: string; project: string | null } = (() => {
+    if (joinedActive && joinedInfo) return { title: joinedInfo.title || "Live session", project: null };
+    if (activeSummary) return { title: activeSummary.titleOverride || activeSummary.planTitle || activeSummary.projectName || "Plan", project: activeSummary.projectName || null };
+    if (wbLaunchId) {
+      const launch = flowLaunches.find((l) => l.launchId === wbLaunchId);
+      const project = launch?.projectPath?.split("/").filter(Boolean).pop() ?? null;
+      return { title: "New plan", project };
+    }
+    return { title: "Home", project: null };
+  })();
+  // The status bar's two chips that came down from the top bar (D26).
+  const footerMemory = { onOpenMemory: () => selectSurface("memory"), onOpenInspector: () => setMemoryInspectorOpen(true) };
+  const footerLive = {
+    canInvite: sessionReady && !!latest,
+    collabActive: !!collabShare || !!joinedRoom,
+    onInvite: () => setInviteOpen(true),
+    onJoinSession: () => setJoinOpen(true),
+    // The room on screen — what the strip under the header used to list.
+    presence:
+      joinedActive && joinedPresence && joinedRoom && !joinedRoom.revoked
+        ? { handle: joinedPresence, role: "collaborator" as const, onEnd: leaveJoined }
+        : !joinedActive && sharePresence && collabShare && activeId === collabShare.sessionId
+          ? { handle: sharePresence, role: "owner" as const, onEnd: stopShare, onRevokePeer: (inviteHash: string) => revokeByHash(inviteHash) }
+          : null,
+  };
   // Classic's Download and Live Session menus, as the plan's ⋯.
   const planMenu = {
     onExport: exportRevision,
@@ -9385,8 +9418,22 @@ function App() {
         </div>
       )}
       <Header
+        // The top bar (D26, RLTopBar): what is open and where, the two
+        // toggles, the command field, the sessions waiting on you, the gear.
+        title={topBarTitle.title}
+        project={topBarTitle.project}
+        // The harness chip's successor: the harness's name in the project's
+        // place, its exit the palette's "Exit …" (none for a boot entry: a
+        // flavored build IS its harness, so its name is where you are).
+        harnessName={activeHarness ? activeHarness.manifest.name : null}
+        sidebarOpen={!sidebarCollapsed}
+        onToggleSidebar={toggleSidebar}
+        railOpen={!paneCollapsed}
+        onToggleRail={togglePane}
+        onOpenPalette={() => setPaletteOpen(true)}
+        needsYou={termNeedYou}
+        onJumpToNeedsYou={jumpToNeedsYou}
         onOpenIntegrationHooks={hookConflicts.openDialog}
-        session={session}
         theme={theme}
         onThemeChange={onThemeChange}
         font={font}
@@ -9395,11 +9442,6 @@ function App() {
         onLintChange={onLintChange}
         mode={mode}
         onModeChange={changeMode}
-        onExport={exportRevision}
-        onExportDocx={exportRevisionDocx}
-        onSaveObsidian={saveRevisionToObsidian}
-        viewedVersionNumber={viewedVersionNumber}
-        downloadDisabled={false}
         flashEnabled={flashEnabled}
         onFlashEnabledChange={setFlashEnabled}
         flashColor={flashColor}
@@ -9413,8 +9455,6 @@ function App() {
           setFlashSeq((n) => n + 1);
           if (flashSound) playInterceptBeep(flashSoundConfig);
         }}
-        collabEnabled={surfaceEnabled(effectiveWorkspace, "collab")}
-        memoryEnabled={surfaceEnabled(effectiveWorkspace, "memory")}
         // In harness mode the panel is a lens on the HARNESS's arrangement
         // (updateWorkspace already routes writes there) — the stock manifest
         // stays untouched until exit.
@@ -9425,24 +9465,6 @@ function App() {
             harnessName={activeHarness ? activeHarness.manifest.name : null}
           />
         }
-        // The harness chip — the one piece of header branding A5 swaps: the
-        // harness's name where stock Redline shows none, doubling as the
-        // exit. Hidden for a boot entry (a flavored build IS its harness;
-        // there is no Redline underneath to exit to).
-        harnessName={activeHarness ? activeHarness.manifest.name : null}
-        onExitHarness={
-          activeHarness && activeHarness.entry !== "boot" ? exitHarness : null
-        }
-        onOpenMemory={() => selectSurface("memory")}
-        onOpenMemoryInspector={() => setMemoryInspectorOpen(true)}
-        collabActive={!!collabShare || !!joinedRoom}
-        canInvite={sessionReady && !!latest}
-        onInvite={() => setInviteOpen(true)}
-        onJoinSession={() => setJoinOpen(true)}
-        canShare={sessionReady && !!latest}
-        onShareSnapshot={() => setShareOpen(true)}
-        onSnapBack={snapBack}
-        onOpenPalette={() => setPaletteOpen(true)}
       />
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
@@ -9456,28 +9478,6 @@ function App() {
           />
         </Suspense>
       )}
-      {joinedActive && joinedPresence && joinedRoom && !joinedRoom.revoked ? (
-        <Suspense fallback={null}>
-        <PresenceBar
-          handle={joinedPresence}
-          role="collaborator"
-          onEnd={leaveJoined}
-        />
-        </Suspense>
-      ) : !joinedActive &&
-        sharePresence &&
-        collabShare &&
-        activeId === collabShare.sessionId ? (
-        <Suspense fallback={null}>
-        <PresenceBar
-          handle={sharePresence}
-          role="owner"
-          onInvite={() => setInviteOpen(true)}
-          onEnd={stopShare}
-          onRevokePeer={(inviteHash) => revokeByHash(inviteHash)}
-        />
-        </Suspense>
-      ) : null}
       </ErrorBoundary>
       {/* The window-edge hull ring: constant padding, never part of drag math
           (`computePaneLayout` subtracts it from the row's available width).
@@ -10207,8 +10207,8 @@ function App() {
               }
             : null
         }
-        termNeedYou={termNeedYou}
-        onJumpToNeedsYou={jumpToNeedsYou}
+        memory={surfaceEnabled(effectiveWorkspace, "memory") ? footerMemory : null}
+        live={surfaceEnabled(effectiveWorkspace, "collab") ? footerLive : null}
         reviewNews={reviewNews === "review" ? "Review ready" : null}
         onOpenReviewNews={() => selectSurface("review")}
         onShowTerminal={showSessionTerminal}

@@ -3403,9 +3403,32 @@ html[data-rl-tile-drag] * {
 .rl-statusbar-chip { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; border-radius: 9999px; border: 1px solid var(--color-rule); background: none; color: var(--color-ink); font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; }
 .rl-statusbar-chip[data-tone="needs"] { border-color: color-mix(in srgb, var(--color-warning) 60%, var(--color-rule)); }
 .rl-statusbar-chip[data-tone="info"] { border-color: color-mix(in srgb, var(--color-info) 60%, var(--color-rule)); }
-/* The header's lazy memory pill: its slot keeps the cluster's width while
-   the chunk arrives. */
-.rl-mem-pill-slot { display: inline-block; min-width: 190px; height: 26px; }
+/* The status bar's chips (D26): Memory on the left — a dot and the word,
+   its detail in the tooltip — and the live session on the right, where an
+   editor puts presence. Both are 20 px inside the 28 px row. */
+.rl-statusbar-quiet { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 6px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.rl-statusbar-quiet:hover, .rl-statusbar-quiet[aria-expanded="true"] { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-statusbar-quiet:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--color-focus-rim); }
+/* The top bar (D26, RLTopBar): 38 px, the traffic lights' 84 px, 13 px text
+   and 16 px icons; six elements and nothing else. */
+.rl-topbar { position: relative; flex: none; height: 38px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 84px; background: var(--color-canvas); border-bottom: 1px solid var(--color-rule); color: var(--color-ink); font-family: var(--font-sans); font-size: 13px; line-height: 1; white-space: nowrap; user-select: none; }
+.rl-topbar-btn { flex: none; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--color-ink-4, var(--color-ink-muted)); cursor: pointer; }
+.rl-topbar-btn:hover, .rl-topbar-btn[aria-expanded="true"] { background: var(--color-fill-2); color: var(--color-ink-2, var(--color-ink)); }
+.rl-topbar-btn:focus-visible, .rl-topbar-field:focus-visible, .rl-topbar-needs:focus-visible { outline: none; box-shadow: inset 0 0 0 1px var(--color-focus-rim); }
+.rl-topbar-title { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto; }
+.rl-topbar-name { font-weight: 600; color: var(--color-ink); overflow: hidden; text-overflow: ellipsis; }
+.rl-topbar-dot { flex: none; color: var(--color-ink-5, var(--color-ink-muted)); }
+.rl-topbar-project { flex: none; color: var(--color-ink-4, var(--color-ink-muted)); font-size: 12px; }
+.rl-topbar-centre { flex: 1; display: flex; justify-content: center; min-width: 0; }
+.rl-topbar-field { display: flex; align-items: center; gap: 8px; width: min(420px, 100%); min-width: 0; height: 26px; box-sizing: border-box; padding: 0 10px; border: 1px solid var(--color-rule-strong, var(--color-rule)); border-radius: 7px; background: var(--color-paper); color: var(--color-ink-5, var(--color-ink-muted)); font: inherit; font-size: 12px; text-align: left; cursor: text; }
+.rl-topbar-field:hover { border-color: color-mix(in srgb, var(--color-ink) 28%, var(--color-rule)); }
+.rl-topbar-field > svg { flex: none; }
+.rl-topbar-field-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rl-topbar-kbd { flex: none; font: 11px var(--font-sans); color: var(--color-ink-5, var(--color-ink-muted)); }
+.rl-topbar-needs { flex: none; display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--color-ink-4, var(--color-ink-muted)); font: 600 12px var(--font-sans); cursor: default; }
+.rl-topbar-needs[data-needs] { background: var(--color-mode-redline-bg, color-mix(in srgb, var(--color-warning) 14%, transparent)); color: var(--color-mode-redline-fg, var(--color-warning-text)); cursor: pointer; }
+.rl-topbar-needs-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; box-sizing: border-box; border: 1.5px solid var(--color-rule-strong, var(--color-rule)); }
+.rl-topbar-needs[data-needs] .rl-topbar-needs-dot { border: 0; background: var(--color-warning); }
 .rl-wb-tabs { position: relative; flex: 1; min-height: 0; min-width: 0; }
 .rl-wb-tab-body { position: absolute; inset: 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .rl-wb-tab-body[data-hidden] { content-visibility: hidden; visibility: hidden; pointer-events: none; }

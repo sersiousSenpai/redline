@@ -143,6 +143,8 @@ export interface CommandDeps {
     toggleDoor?: () => void;
     /** Come back to a chat by id (it opens in the dock). */
     openChat?: (id: string) => void;
+    /** Home: the workbench's Home set, the sidebar's first Place. */
+    goHome?: () => void;
     snapBack: () => void;
     toggleSidebar: () => void;
     toggleDiscussion: () => void;
@@ -186,6 +188,16 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       group: "Plans",
       detail: s.project,
       run: () => actions.openSession(s.id),
+    });
+  }
+
+  if (actions.goHome) {
+    commands.push({
+      id: "home",
+      title: "Go to Home",
+      detail: "The sidebar's first place",
+      group: "Surfaces",
+      run: actions.goHome,
     });
   }
 

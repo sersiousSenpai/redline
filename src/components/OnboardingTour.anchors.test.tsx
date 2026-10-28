@@ -48,7 +48,7 @@ function sources(dir = join(process.cwd(), "src")): { rel: string; text: string 
 
 describe("the tour's anchors", () => {
   it("walk the new frame, in order", () => {
-    expect(TOUR_ANCHORS).toEqual(["landing", "tabs", "sessions", "agent-tab", "terminals-tab", "editor", "rail", "plan-verbs", "pill", "snapback", "settings"]);
+    expect(TOUR_ANCHORS).toEqual(["landing", "tabs", "sessions", "agent-tab", "terminals-tab", "editor", "rail", "plan-verbs", "pill", "command", "settings"]);
   });
 
   it("the tab strip, the Agent tab and the terminals tab are drawn by the stage", async () => {
@@ -98,10 +98,13 @@ describe("the tour's anchors", () => {
     expect(carriers("editor")).toEqual(["src/workbench/panes/plan.tsx"]);
     expect(readFileSync("src/workbench/panes/plan.tsx", "utf8")).toMatch(/<article\s+ref=\{documentRef\}\s+data-tour="editor"/);
     expect(carriers("plan-verbs")).toEqual(["src/components/plan/PlanPanelFooter.tsx"]);
-    expect(carriers("snapback")).toEqual(["src/components/Header.tsx"]);
+    // The shortcuts step lights the top bar's ⌘K field (D26: the ⌂ it
+    // pointed at left the bar; ⌘⇧0 is the palette's and the keyboard's).
+    expect(carriers("command")).toEqual(["src/components/Header.tsx"]);
+    expect(readFileSync("src/components/Header.tsx", "utf8")).toMatch(/className="rl-topbar-field"\s+data-tour="command"/);
     expect(carriers("settings")).toEqual(["src/components/SettingsMenu.tsx"]);
     // No step points at a region nothing carries, and no region the old
     // frame had is still marked for a step that is gone.
-    for (const gone of ["footer", "discussion", "terminal"]) expect(carriers(gone), gone).toEqual([]);
+    for (const gone of ["footer", "discussion", "terminal", "snapback"]) expect(carriers(gone), gone).toEqual([]);
   });
 });

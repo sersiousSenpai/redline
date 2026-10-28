@@ -7,12 +7,14 @@ import { usePoll } from "../hooks/usePoll";
 
 import { useMenuOverlay } from "./menuOverlay";
 
-// The quiet ambient pill, now in header chrome (it was two clicks deep in the
-// Settings dropdown before Memory became a main surface). Click opens a small
-// status popover — chain state, last organize, compaction — with "Open
-// Memory →" into the full surface and a quick-inspector escape hatch. It
-// listens for `memory-changed` (emitted by the background keeper and the
-// manual commands) and re-reads.
+// Memory's quiet chip on the status bar's left (D26: it left the top bar,
+// where it was a pill): a dot and the word "Memory", with the line the pill
+// used to wear — "organized 8m ago · 1236 ready" — in its tooltip. A click
+// opens the same small status popover, now rising from the bar — chain
+// state, last organize, compaction — with "Open Memory →" into the full
+// surface and a quick-inspector escape hatch. It listens for
+// `memory-changed` (emitted by the background keeper and the manual
+// commands) and re-reads.
 
 export interface MemoryStatus {
   live: boolean;
@@ -55,7 +57,7 @@ export interface MemoryStatus {
   };
 }
 
-/** How often the pill's relative time may move on its own while idle. */
+/** How often the chip's relative time may move on its own while idle. */
 export const LABEL_TICK_MS = 5 * 60_000;
 
 /** Coarse "N ago" for the pill. Pure, so it's unit-tested. */
@@ -89,6 +91,14 @@ export function pillLabel(
   return readyWork > 0 ? `${base} · ${readyWork} ready` : base;
 }
 
+/** The chip's tooltip: the line the pill wore ("Memory · organized 8m ago ·
+ *  1236 ready"), then the counts behind it. Pure. */
+export function chipTitle(status: MemoryStatus | null, now: number, readyWork = 0): string {
+  const line = pillLabel(status, now, readyWork);
+  if (!status) return line === "Memory" ? "Open memory" : line;
+  return `${line}\n${status.itemCount} events · ${status.backlog} awaiting organize · ${status.compactedCount} compacted · chain ${status.chainOk ? "OK" : "BROKEN"}`;
+}
+
 export function MemoryStatusPill({
   onOpenMemory,
   onOpenInspector,
@@ -103,17 +113,17 @@ export function MemoryStatusPill({
   // ready" segment. Display-only, like the pill's other segments.
   const [readyWork, setReadyWork] = useState(0);
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, right: 0 });
+  const [pos, setPos] = useState({ bottom: 0, left: 0 });
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
 
-  // The clock the relative times read. Idle, the header must not repaint
-  // on a tick: it moves when the status does, when the pointer comes to
-  // the pill or its popover opens, and otherwise at most every five
-  // minutes (a 60 s poll used to hand over a fresh object every minute, and
-  // with it "30m ago" → "31m ago" re-rendering and repainting the header).
+  // The clock the relative times read. Idle, the bar must not repaint on a
+  // tick: it moves when the status does, when the pointer comes to the chip
+  // or its popover opens, and otherwise at most every five minutes (a 60 s
+  // poll used to hand over a fresh object every minute, and with it "30m
+  // ago" → "31m ago" re-rendering and repainting the header it lived in).
   const [now, setNow] = useState(() => Date.now());
   const statusKeyRef = useRef("");
   usePoll(() => setNow(Date.now()), LABEL_TICK_MS, { pauseWhenHidden: true, leading: false });
@@ -185,9 +195,10 @@ export function MemoryStatusPill({
   const toggle = () => {
     setNow(Date.now());
     const r = btnRef.current?.getBoundingClientRect();
-    // Fixed positioning so the popover escapes any clipping ancestor (the
-    // header pill sits at the top, so it always drops down).
-    if (r) setPos({ top: r.bottom + 6, right: window.innerWidth - r.right });
+    // Fixed positioning so the popover escapes the bar's clipping half (each
+    // side of the status bar scrolls on its own); the chip sits on the
+    // window's bottom row, so it always rises.
+    if (r) setPos({ bottom: window.innerHeight - r.top + 6, left: Math.max(8, r.left - 6) });
     setOpen((v) => !v);
   };
 
@@ -208,42 +219,18 @@ export function MemoryStatusPill({
         ref={btnRef}
         type="button"
         onClick={toggle}
-        title={
-          status
-            ? `${status.itemCount} events · ${status.backlog} awaiting organize · ${
-                status.compactedCount
-              } compacted · chain ${status.chainOk ? "OK" : "BROKEN"}`
-            : "Open memory"
-        }
+        className="rl-statusbar-quiet rl-mem-chip"
+        title={chipTitle(status, now, readyWork)}
         aria-label="Memory status"
         aria-expanded={open}
         onPointerEnter={() => setNow(Date.now())}
-        className="flex items-center gap-1.5 rounded-full"
-        style={{
-          fontSize: "12px",
-          lineHeight: 1,
-          border: "1px solid var(--color-rule)",
-          background: "var(--color-bg-elevated)",
-          color: "var(--color-ink)",
-          padding: "3px 9px",
-          cursor: "pointer",
-        }}
       >
-        <span
-          aria-hidden
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: 999,
-            flex: "0 0 auto",
-            // Red (broken chain) outranks green. The gardener's queue no
-            // longer colours the dot (B3): a queued proposal is a fact about
-            // the next run, not an op waiting on a person.
-            background: chainBad ? "#d64545" : "#2fae66",
-            boxShadow: chainBad ? "none" : "0 0 4px rgba(47,174,102,0.8)",
-          }}
-        />
-        <span style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{pillLabel(status, now, readyWork)}</span>
+        {/* A broken chain outranks the quiet green, in amber: nothing on the
+            frame is red. The gardener's queue never colours it (B3): a
+            queued proposal is a fact about the next run, not an op waiting
+            on a person. */}
+        <span aria-hidden className="rl-statusbar-dot" style={{ background: chainBad ? "var(--color-warning)" : "var(--color-success)" }} />
+        <span>Memory</span>
       </button>
       {open && (
         <div
@@ -251,8 +238,8 @@ export function MemoryStatusPill({
           className="font-sans"
           style={{
             position: "fixed",
-            top: pos.top,
-            right: pos.right,
+            bottom: pos.bottom,
+            left: pos.left,
             zIndex: 60,
             width: "250px",
             display: "flex",

@@ -9,6 +9,14 @@
 // tab, an outside tap dismisses, the caret never moves on a hover) sits over
 // it, centred on this row. Right, the bridge the hooks reach (:7676).
 //
+// Two chips came down from the top bar when it became the design's (D26):
+// Memory, first on the left — a dot and the word, its "organized N ago · N
+// ready" in the tooltip, a click its status popover — and the live session
+// on the right, where an editor puts presence (idle, live, joined). Each is
+// 20 px inside the row and present only when App hands it in; neither moves
+// the pill, whose place is the row's fixed centre. The sessions waiting on
+// you went up instead: the top bar's "N need you" is ⌘⇧J's.
+//
 // It holds NO plan verbs (D13): Send, Approve & build, Build and Reopen live
 // in the Plan pane's own footer, where the plan is. A status bar that also
 // approved would offer "Approve & build" over Home's door.
@@ -16,6 +24,8 @@
 import type { Comment, DaemonState } from "../types";
 import { agentLabelFor } from "../lib/backendChoice";
 import { ridesSubmit } from "../lib/planSearch";
+import { LiveSessionMenu, type LiveSessionMenuProps } from "./LiveSessionMenu";
+import { MemoryStatusPill } from "./MemoryStatusPill";
 import { Spinner } from "./Spinner";
 
 /** The open plan, once approved. `runState` NULL is "approved · not built". */
@@ -39,10 +49,10 @@ export interface FooterProps {
   approval?: FooterApproval | null;
   /** The working line's press: show the terminal the agent works in. */
   onShowTerminal?: () => void;
-  /** Terminals that need you (lib/termState's loud states). */
-  termNeedYou?: number;
-  /** ⌘⇧J's action: show the next terminal that needs you, in its session. */
-  onJumpToNeedsYou?: () => void;
+  /** Memory's chip (left), when the manifest has Memory. */
+  memory?: { onOpenMemory: () => void; onOpenInspector: () => void } | null;
+  /** The live session's control (right), when the manifest has collab. */
+  live?: LiveSessionMenuProps | null;
   /** An agent's review request, waiting for you ("Review ready"), or null. */
   reviewNews?: string | null;
   onOpenReviewNews?: () => void;
@@ -80,8 +90,8 @@ export function Footer({
   waitingAsk,
   approval = null,
   onShowTerminal,
-  termNeedYou = 0,
-  onJumpToNeedsYou,
+  memory = null,
+  live = null,
   reviewNews = null,
   onOpenReviewNews,
   backend,
@@ -92,9 +102,16 @@ export function Footer({
   return (
     <footer className="rl-app-footer rl-statusbar" aria-label="Status">
       <span className="rl-footer-status">
+        {memory && (
+          <>
+            <MemoryStatusPill onOpenMemory={memory.onOpenMemory} onOpenInspector={memory.onOpenInspector} />
+            <span className="rl-statusbar-sep" aria-hidden>·</span>
+          </>
+        )}
         {/* The way to a review an agent asked for, instead of being taken
-            there: present only while it waits. First, because a long status
-            is cut off short of the pill, and this must never be out of sight. */}
+            there: present only while it waits. Ahead of the status (only
+            Memory's short chip comes before it), because a long status is
+            cut off short of the pill, and this must never be out of sight. */}
         {reviewNews && onOpenReviewNews && (
           <>
             <button type="button" className="rl-statusbar-chip" data-tone="info" onClick={onOpenReviewNews} title="Open the review surface">
@@ -114,21 +131,11 @@ export function Footer({
             <span>{status.text}</span>
           </span>
         )}
-        {/* The way to a blocked agent wherever you are — and a standing hint
-            at ⌘⇧J. Present only while something needs you. */}
-        {termNeedYou > 0 && onJumpToNeedsYou && (
-          <>
-            <span className="rl-statusbar-sep" aria-hidden>·</span>
-            <button type="button" className="rl-statusbar-chip" data-tone="needs" onClick={onJumpToNeedsYou} title="Jump to the terminal that needs you (⌘⇧J)">
-              <span aria-hidden className="rl-term-badge rl-term-badge--needs rl-statusbar-dot" style={{ background: "var(--color-warning)" }} />
-              {termNeedYou} {termNeedYou === 1 ? "needs" : "need"} you
-            </button>
-          </>
-        )}
       </span>
       {/* The pill's place: MonochatIsland centres its pill on this row. */}
       <span className="rl-statusbar-pill" data-tour="pill" aria-hidden />
       <span className="rl-footer-meta">
+        {live && <LiveSessionMenu {...live} />}
         <span className="rl-statusbar-item" title={bridge === "failed" ? `Another process holds port ${BRIDGE_PORT}: this window receives no plans` : `Plans reach Redline on port ${BRIDGE_PORT}`}>
           <span aria-hidden className="rl-statusbar-dot" style={{ background: bridge === "ready" ? "var(--color-success)" : bridge === "failed" ? "var(--color-warning)" : "var(--color-ink-muted)" }} />
           <span>{bridge === "failed" ? "Bridge offline" : `Bridge ${BRIDGE_PORT}`}</span>

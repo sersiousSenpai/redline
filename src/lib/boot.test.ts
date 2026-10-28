@@ -218,10 +218,10 @@ describe("boot-path JS contract", () => {
     "ChatRoom",
     // W1: the workbench's store, adapter and stored state joined the boot
     // path (about 18 kB), paid for by these — each rendered only on a
-    // gesture: the drafter's documents menu, a live session's presence bar
-    // and the plan's table-of-contents rail.
+    // gesture: the drafter's documents menu and the plan's
+    // table-of-contents rail. (A live session's presence bar went into the
+    // status bar's live menu, D26, which rides the lazy Footer.)
     "DocumentsMenu",
-    "PresenceBar",
     "PlanToc",
   ];
 
@@ -348,10 +348,17 @@ describe("boot-path JS contract", () => {
     expect(store.match(/^import (?!type\b)[^;]*from "\.\/reducer"/m)).toBe(null);
     const persist = readFileSync(join(process.cwd(), "src/workbench/persist.ts"), "utf8");
     expect(persist.match(/^import (?!type\b)[^;]*from "\.\/reducer"/m)).toBe(null);
-    // The memory pill is the header's, lazy there for the same reason.
+    // The Memory chip and the live session are the status bar's (D26), off
+    // the boot path with it: the Footer is a lazy chunk, and the static
+    // header names neither (the pill was 9 kB of its own chunk there).
     const header = readFileSync(join(process.cwd(), "src/components/Header.tsx"), "utf8");
-    expect(header.match(/^import (?!type\b)[^;]*from "\.\/MemoryStatusPill"/m)).toBe(null);
-    expect(header).toContain('import("./MemoryStatusPill")');
+    for (const name of ["MemoryStatusPill", "LiveSessionMenu"]) {
+      expect(header.match(new RegExp(`^import (?!type\\b)[^;]*from "\\./${name}"`, "m")), `Header imports ${name}`).toBe(null);
+      expect(header).not.toContain(`import("./${name}")`);
+      expect(app.match(new RegExp(`^import (?!type\\b)[^;]*from "\\./components/${name}"`, "m")), `App imports ${name}`).toBe(null);
+    }
+    expect(app.match(/^import (?!type\b)[^;]*from "\.\/components\/Footer"/m)).toBe(null);
+    expect(app).toContain('import("./components/Footer")');
   });
 
   // The raw-wire inspector is devtools: most turns never open it, and it is

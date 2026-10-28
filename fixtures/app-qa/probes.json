@@ -9,7 +9,16 @@
   ],
   "all": [
     { "name": "tab strip", "css": [".rl-wb-strip"], "expect": { "height": 34, "fontSize": 13 } },
-    { "name": "active tab", "css": [".rl-wb-strip [role=tab][aria-selected=true]"], "expect": { "height": 34 } }
+    { "name": "active tab", "css": [".rl-wb-strip [role=tab][aria-selected=true]"], "expect": { "height": 34 } },
+    { "name": "top bar (RLTopBar: six elements, D26)", "css": ["header.rl-topbar"], "expect": { "height": 38, "fontSize": 13, "paddingLeft": 84 } },
+    { "name": "top bar sidebar toggle", "css": [".rl-topbar > .rl-topbar-btn:first-child"], "expect": { "width": 26, "height": 26 } },
+    { "name": "top bar title", "css": [".rl-topbar-title .rl-topbar-name"], "expect": { "fontSize": 13, "fontWeight": 600 } },
+    { "name": "top bar command field", "css": [".rl-topbar-field[data-tour=command]"], "expect": { "height": 26, "maxWidth": 420, "fontSize": 12, "borderRadius": 7 } },
+    { "name": "top bar need you", "css": [".rl-topbar-needs"], "expect": { "height": 24, "fontSize": 12, "fontWeight": 600 } },
+    { "name": "top bar gear", "css": [".rl-topbar [data-tour=settings] > button"], "expect": { "width": 26, "height": 26 } },
+    { "name": "status bar", "css": [".rl-statusbar"], "expect": { "height": 28 } },
+    { "name": "status bar Memory chip", "css": [".rl-footer-status .rl-mem-chip"], "expect": { "height": 20 } },
+    { "name": "status bar live session", "css": [".rl-footer-meta .rl-live-chip"], "expect": { "height": 20 } }
   ],
   "home": {
     "copy": ["Home", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps"],

@@ -287,14 +287,14 @@ const STEPS: TourStep[] = [
   },
   {
     id: "shortcuts",
-    anchor: "snapback",
+    anchor: "command",
     placement: "bottom",
     title: "Keyboard shortcuts",
     lead: (
       <>
-        <strong>⌘K</strong> runs anything — surfaces, plans, themes. And when
-        the layout gets away from you, <strong>⌘⇧0</strong> (or this ⌂) snaps
-        every pane back to its resting shape.
+        <strong>⌘K</strong> (or this field) runs anything — surfaces, plans,
+        themes. And when the layout gets away from you, <strong>⌘⇧0</strong>{" "}
+        snaps every pane back to its resting shape.
       </>
     ),
     shortcuts: tourShortcuts,
