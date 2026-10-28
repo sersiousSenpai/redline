@@ -745,3 +745,27 @@ describe("openFile (W4: the Files rail, ⌘P, file:line links)", () => {
     expect(focused(s).data).toEqual({ path: "/a.ts", line: 3 });
   });
 });
+
+describe("followAgent: a restored agent's Agent tabs follow it, in every set (last walk)", () => {
+  const agent = (terminalId: string, sessionId: string | null): PaneInit => ({ kind: "chat", data: { source: "agent", terminalId, sessionId } });
+  const agentsIn = (s: WorkbenchState, key: SessionKey) =>
+    Object.values(s.sets[key]!.panes).flatMap((p) => (p.kind === "chat" && p.data.source === "agent" ? [`${p.data.terminalId}:${p.data.sessionId}`] : []));
+
+  it("retargets the session's Agent pane in a set that is not its own (D29's sidebar tab)", () => {
+    const s = home(door(), agent("old", "s1"), agent("other", "s2"));
+    const next = reduce(s, { type: "followAgent", sessionId: "s1", terminalId: "new" });
+    expect(agentsIn(next, HOME_KEY)).toEqual(["new:s1", "other:s2"]);
+    // The same tab, now on the new terminal: nothing moves under the user.
+    expect(next.sets[HOME_KEY]!.order).toEqual(s.sets[HOME_KEY]!.order);
+    expect(next.sets[HOME_KEY]!.agentsFilled).toContain("new");
+    // Already following: no change.
+    expect(reduce(next, { type: "followAgent", sessionId: "s1", terminalId: "new" })).toBe(next);
+  });
+
+  it("drops a stale pane when its set already shows the new terminal, and leaves other sessions alone", () => {
+    const s = home(agent("old", "s1"), agent("new", "s1"));
+    const next = reduce(s, { type: "followAgent", sessionId: "s1", terminalId: "new" });
+    expect(agentsIn(next, HOME_KEY)).toEqual(["new:s1"]);
+    expect(reduce(s, { type: "followAgent", sessionId: "s9", terminalId: "new" })).toBe(s);
+  });
+});

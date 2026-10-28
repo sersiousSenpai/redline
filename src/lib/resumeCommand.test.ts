@@ -340,3 +340,33 @@ describe("buildResumeBuildCommand — building an approved plan with the same ag
     );
   });
 });
+
+describe("a resumed CLI is wired to Redline exactly as a fresh launch is (the last walk's restored write)", () => {
+  // The hooks that put a permission or a question on the Agent pane are the
+  // user's own settings hooks, and they name their terminal from the
+  // PTY's `REDLINE_TERMINAL_ID`, which the resumed `claude` inherits from
+  // the shell it is typed into. So the command must run IN that shell's
+  // environment, interactively, with the user's settings — nothing that
+  // would drop the env, the hooks or the TUI.
+  const forbidden = [/\benv\s+-i\b/, /--settings\b/, /--setting-sources\b/, /(^|\s)-p(\s|$)/, /--print\b/, /--bare\b/, /REDLINE_TERMINAL_ID=/, /\bunset\b/, /\bexec\b/];
+  const commands = {
+    restore: buildResumeCommand("abc-123", NOW, "/p/din", false, true, { backend: "claude-code", claudeBin: "/usr/local/bin/claude" }),
+    rescinded: buildResumeCommand("abc-123", NOW, "/p/din", true, false),
+    build: buildResumeBuildCommand("abc-123", NOW, "/p/din", 2, { backend: "claude-code" }),
+  };
+
+  it.each(Object.entries(commands))("%s: runs in the terminal's own shell environment, with the user's settings", (_name, cmd) => {
+    for (const rule of forbidden) expect(cmd).not.toMatch(rule);
+    // One process, resumed by id, in the plan's folder.
+    expect(cmd).toMatch(/^cd '\/p\/din' && /);
+    expect(cmd).toMatch(/--resume 'abc-123' --permission-mode (plan|auto) /);
+  });
+
+  it("the restore's own variables bind to the claude process alone, never the shell", () => {
+    const cmd = commands.restore;
+    expect(cmd).not.toMatch(/\bexport\b/);
+    const prefix = cmd.slice(cmd.indexOf("&& ") + 3, cmd.indexOf("'/usr/local/bin/claude'"));
+    expect(prefix.trim().split(/\s+/).every((word) => /^REDLINE_[A-Z_]+=/.test(word))).toBe(true);
+    expect(prefix).toContain(`${RESTORE_ENV.target}='abc-123'`);
+  });
+});

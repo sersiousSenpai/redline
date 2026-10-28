@@ -197,6 +197,24 @@ describe("SessionConversation", () => {
     api.screen = "";
   });
 
+  it("a tool permission the CLI asks itself (no hook armed a card) is a card too, answered with a person's keys", async () => {
+    api.screen = " Do you want to create notes.txt?\n ❯ 1. Yes\n   2. Yes, allow all edits during this session (shift+tab)\n   3. No, and tell Claude what to do differently (esc)\n";
+    api.snapshot = [BOUND, PROMPT, ev("h1", 15, { kind: "readiness", ready: false, blocker: "native_dialog" })];
+    const onShowTerminal = vi.fn();
+    await render(props({ onShowTerminal }));
+    await flush();
+    const card = q('[data-ask="permission-prompt"]');
+    expect(card?.textContent).toContain("Do you want to create notes.txt?");
+    expect(q('[data-ask="terminal"]')).toBeNull();
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>('[data-ask="permission-prompt"] .rl-ask-btn')];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Yes", "Yes, allow all edits during this session", "No, and tell Claude what to do differently"]);
+    await act(async () => buttons[1].click());
+    await flush();
+    expect(log.filter((l) => l.startsWith("keys"))).toEqual(['keys term-1 "\\u001b[B\\r"']);
+    expect(onShowTerminal).not.toHaveBeenCalled();
+    api.screen = "";
+  });
+
   it("a release while the CLI shows its own prompt delivers only after it is answered", async () => {
     api.snapshot = [BOUND, PROMPT, READ];
     const held = { label: "Plan", kind: "plan" as const, held: true, toReview: 0 };

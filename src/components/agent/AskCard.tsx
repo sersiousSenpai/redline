@@ -14,7 +14,7 @@ import { useState } from "react";
 import { CircleHelp, CirclePause, ShieldQuestion } from "lucide-react";
 import { answerAsk } from "./convo/api";
 import type { AskAnswer, AskQuestion, ConvoAsk } from "./convo/types";
-import type { ProceedPrompt } from "./convo/proceedPrompt";
+import type { PermissionPrompt, ProceedPrompt } from "./convo/proceedPrompt";
 
 export interface AskCardProps {
   ask: ConvoAsk;
@@ -326,6 +326,66 @@ export function ProceedCard({ prompt, onChoose, onShowTerminal }: {
             {other.label}
           </button>
         )}
+        <span className="rl-ask-spacer" />
+        <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
+          Answer in terminal
+        </button>
+      </div>
+      {failed && (
+        <p className="rl-ask-note" role="alert">
+          That answer didn't reach the terminal. Try again, or answer there.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** A tool permission the CLI asks in its own terminal (`convo/proceedPrompt`'s
+ *  `parsePermissionPrompt`): no hook carried it here, so it is the card the
+ *  PermissionRequest hook would have armed, answered with the keys a person
+ *  would press there. The refusing choice sends you to the terminal to say
+ *  what to do instead. */
+export function PermissionPromptCard({ prompt, harness, onChoose, onShowTerminal }: {
+  prompt: PermissionPrompt;
+  harness: string;
+  onChoose: (n: number) => Promise<void>;
+  onShowTerminal: () => void;
+}) {
+  const [sending, setSending] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
+  const choose = (n: number, thenTerminal: boolean) => {
+    setSending(n);
+    setFailed(false);
+    onChoose(n)
+      .then(() => {
+        if (thenTerminal) onShowTerminal();
+      })
+      .catch(() => {
+        setSending(null);
+        setFailed(true);
+      });
+  };
+  const title = prompt.question ?? `${harness} asks to use a tool`;
+  return (
+    <section className="rl-ask-card rl-glass rl-glass-sheet" role="group" aria-label={title} data-ask="permission-prompt">
+      <div className="rl-ask-head">
+        <ShieldQuestion size={14} aria-hidden className="rl-ask-icon" />
+        <span>{title}</span>
+      </div>
+      <div className="rl-ask-actions">
+        {prompt.options.map((o, i) => (
+          <button
+            key={o.n}
+            type="button"
+            className="rl-ask-btn"
+            data-primary={(o.approves && i === 0) || undefined}
+            data-danger={!o.approves || undefined}
+            disabled={sending !== null}
+            onClick={() => choose(o.n, !o.approves)}
+          >
+            {sending === o.n ? "Sending…" : o.label}
+          </button>
+        ))}
         <span className="rl-ask-spacer" />
         <button type="button" className="rl-ask-terminal" onClick={onShowTerminal}>
           Answer in terminal

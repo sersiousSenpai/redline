@@ -40,7 +40,7 @@ import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-r
 import { MarkdownView } from "../MarkdownView";
 import { Spinner } from "../Spinner";
 import { answerAsk, convoExpect, convoPage, convoQueue, convoSteer, convoSubscribe, convoUnqueue, convoUnsubscribe, interruptTerminal, ptyKeys, ptyScreenTail, ptySubmit } from "./convo/api";
-import { keysFor, parseProceedPrompt, type ProceedPrompt } from "./convo/proceedPrompt";
+import { keysFor, parsePermissionPrompt, parseProceedPrompt, type PermissionPrompt, type ProceedPrompt } from "./convo/proceedPrompt";
 import { questionsToRelease } from "./askRelease";
 import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "./convo/types";
 import {
@@ -82,7 +82,7 @@ import {
   writeQueuedSends,
 } from "./convo/readiness";
 import type { TermState } from "../../lib/termState";
-import { AskCard, ProceedCard, StoppedCard, TerminalAskCard } from "./AskCard";
+import { AskCard, PermissionPromptCard, ProceedCard, StoppedCard, TerminalAskCard } from "./AskCard";
 import { setTerminalAsking } from "../../lib/openAsks";
 import { SessionComposer } from "./SessionComposer";
 import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
@@ -591,16 +591,25 @@ function SessionConversation(props: SessionConversationProps) {
   // output while it waits, and put the "Ready to build this plan?" card up
   // for that exact prompt, answered with the keys a person would press.
   const [proceed, setProceed] = useState<ProceedPrompt | null>(null);
+  // …or a tool's permission the CLI asks itself ("Do you want to create
+  // notes.txt?"), when no hook armed a card for it.
+  const [permission, setPermission] = useState<PermissionPrompt | null>(null);
   useEffect(() => {
     if (!terminalAsk || !terminalId) {
       setProceed(null);
+      setPermission(null);
       return;
     }
     let alive = true;
     const read = () =>
       void ptyScreenTail(terminalId)
         .then((tail) => {
-          if (alive) setProceed((prev) => sameProceed(prev, parseProceedPrompt(tail)));
+          if (!alive) return;
+          setProceed((prev) => sameProceed(prev, parseProceedPrompt(tail)));
+          setPermission((prev) => {
+            const next = parsePermissionPrompt(tail);
+            return next && prev && prev.question === next.question && sameProceed(prev, next) === prev ? prev : next;
+          });
         })
         .catch(() => {});
     read();
@@ -616,6 +625,13 @@ function SessionConversation(props: SessionConversationProps) {
       await ptyKeys(terminalId, keysFor(proceed, n));
     },
     [terminalId, proceed],
+  );
+  const choosePermission = useCallback(
+    async (n: number) => {
+      if (!terminalId || !permission) return;
+      await ptyKeys(terminalId, keysFor(permission, n));
+    },
+    [terminalId, permission],
   );
   // The agent's CLI is gone (its terminal reads exited): the Detached notice,
   // with Retry for a session building its approved plan.
@@ -636,7 +652,8 @@ function SessionConversation(props: SessionConversationProps) {
           <AskCard key={ask.askId} ask={ask} onShowTerminal={onShowTerminal} />
         ))}
         {terminalAsk && !stopped && proceed && <ProceedCard prompt={proceed} onChoose={chooseProceed} onShowTerminal={onShowTerminal} />}
-        {terminalAsk && !stopped && !proceed && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && !proceed && permission && <PermissionPromptCard prompt={permission} harness={props.harness === "codex" ? "Codex" : "Claude"} onChoose={choosePermission} onShowTerminal={onShowTerminal} />}
+        {terminalAsk && !stopped && !proceed && !permission && <TerminalAskCard harness={props.harness === "codex" ? "Codex" : "Claude"} onShowTerminal={onShowTerminal} />}
         {showWorking && <WorkingRow status={status!} onStop={terminalId ? stop : null} />}
       </>
     ) : null;

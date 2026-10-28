@@ -145,6 +145,11 @@ export type WorkbenchAction =
   /** A session left (deleted, archived): its Plan and Agent panes leave
    *  every set but its own (whose fate `prune` decides). */
   | { type: "dropSessionPanes"; sessionIds: readonly string[] }
+  /** A session's agent now runs in `terminalId` (a restore, an automatic
+   *  resume, a build's Retry): every Agent pane of that session, in every
+   *  set, follows it there — or leaves, when its set already shows that
+   *  terminal. */
+  | { type: "followAgent"; sessionId: string; terminalId: string }
   /** `knownSessions`, when given, is every session that still exists: a
    *  Plan pane opened in another set for one that does not closes too. */
   | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[]; knownSessions?: readonly string[] };
@@ -1133,6 +1138,30 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
           return !!sid && gone.has(sid) && sid !== own;
         });
         if (dropped !== set) next = putSet(next, k, dropped);
+      }
+      return next === state ? state : refillEmpty(next);
+    }
+
+    case "followAgent": {
+      // D29 put a session's Agent tab in whatever set was on screen; the
+      // restore's follow (`fillDefaults`) only ever looked in the session's
+      // own set, so a restored agent's permission went to a terminal no
+      // pane watched — no card, the pane spinning on the dead one.
+      let next = state;
+      for (const k of Object.keys(state.sets) as SessionKey[]) {
+        let set = next.sets[k];
+        if (!set) continue;
+        const stale = panesOfKind(set, "chat").filter(({ pane }) => pane.data.source === "agent" && pane.data.sessionId === action.sessionId && pane.data.terminalId !== action.terminalId);
+        if (stale.length === 0) continue;
+        const shown = panesOfKind(set, "chat").some(({ pane }) => pane.data.source === "agent" && pane.data.terminalId === action.terminalId);
+        for (const { pane } of stale) {
+          if (pane.data.source !== "agent") continue;
+          set = shown || pane !== stale[0].pane
+            ? dropPane(set, pane.id)
+            : { ...set, panes: { ...set.panes, [pane.id]: { ...pane, data: { ...pane.data, terminalId: action.terminalId } } } };
+        }
+        set = markAgentFilled(set, action.terminalId);
+        next = putSet(next, k, set);
       }
       return next === state ? state : refillEmpty(next);
     }

@@ -3021,8 +3021,12 @@ function App() {
   // loses one for a terminal that is gone and no longer the session's (a
   // restore into a fresh PTY).
   useEffect(() => {
-    const state = wb.getState();
     for (const [sessionId, terminalId] of sessionTerminals) {
+      // Every set's Agent pane of this session follows its agent to the
+      // terminal it runs in now — a sidebar row put it in the set that was
+      // on screen (D29), not only the session's own.
+      wb.dispatch({ type: "followAgent", sessionId, terminalId });
+      const state = wb.getState();
       const key = planKey(sessionId);
       const set = state.sets[key];
       if (!set) continue;

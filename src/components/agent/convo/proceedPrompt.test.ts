@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { keysFor, parseProceedPrompt, stripAnsi } from "./proceedPrompt";
+import { keysFor, parsePermissionPrompt, parseProceedPrompt, stripAnsi } from "./proceedPrompt";
 
 /** The prompt the re-walk captured after Approve on a restored session
  *  (FAIL-approve-after-restore-cli-native-proceed-prompt.png), as the
@@ -68,5 +68,46 @@ describe("the CLI's own proceed prompt, read off its terminal", () => {
     expect(keysFor(p, 1)).toBe("\r");
     expect(keysFor(p, 2)).toBe("\x1b[B\r");
     expect(keysFor({ ...p, selected: 3 }, 1)).toBe("\x1b[A\x1b[A\r");
+  });
+});
+
+describe("the CLI's own permission prompt, read off its terminal (the last walk's restored write)", () => {
+  const WRITE = `● Write(notes.txt)
+
+ ╭──────────────────────────────────────────────╮
+ │ Create file                                  │
+ │ notes.txt                                    │
+ │ 1 restored                                   │
+ ╰──────────────────────────────────────────────╯
+ Do you want to create notes.txt?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No, and tell Claude what to do differently (esc)
+`;
+
+  it("recognises the write prompt, its question and its three choices", () => {
+    expect(parsePermissionPrompt(WRITE)).toEqual({
+      question: "Do you want to create notes.txt?",
+      selected: 1,
+      options: [
+        { n: 1, label: "Yes", approves: true },
+        { n: 2, label: "Yes, allow all edits during this session", approves: true },
+        { n: 3, label: "No, and tell Claude what to do differently", approves: false },
+      ],
+    });
+  });
+
+  it("reads a Bash prompt whose spaces were cursor moves, without its question", () => {
+    const raw = "Do\x1b[1Cyou\x1b[1Cwant\x1b[1Cto\x1b[1Cproceed?\r\n\x1b[38;5;153m❯\x1b[1C1.\x1b[1CYes\x1b[39m\r\n\x1b[3C2.\x1b[1CYes,\x1b[1Cand\x1b[1Cdon't\x1b[1Cask\x1b[1Cagain\x1b[1Cfor\x1b[1Csleep\x1b[1Ccommands\r\n\x1b[3C3.\x1b[1CNo,\x1b[1Cand\x1b[1Ctell\x1b[1CClaude\x1b[1Cwhat\x1b[1Cto\x1b[1Cdo\x1b[1Cdifferently\x1b[1C(esc)\r\n";
+    const p = parsePermissionPrompt(raw);
+    expect(p?.question).toBeNull();
+    expect(p?.options.map((o) => o.label)).toEqual(["Yes", "Yes, and don't ask again", "No, and tell Claude what to do differently"]);
+    expect(keysFor(p!, 3)).toBe("\x1b[B\x1b[B\r");
+  });
+
+  it("is gone once answered, and leaves a plan's proceed prompt to its own reader", () => {
+    expect(parsePermissionPrompt(WRITE + "\n⏺ Wrote 1 lines to notes.txt\n")).toBeNull();
+    expect(parsePermissionPrompt(WRITE + "\n" + CAPTURED)).toBeNull();
+    expect(parsePermissionPrompt("Do you want to create notes.txt?")).toBeNull();
   });
 });
