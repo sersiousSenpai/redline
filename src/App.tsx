@@ -2722,8 +2722,10 @@ function App() {
     if (close.tabId && wb.getState().sets[close.key]?.tabs[close.tabId]) wb.dispatch({ type: "closeTab", key: close.key, tabId: close.tabId });
   }, []);
   /** Close a tab (its strip ×) or a pane (⌘W inside a split), asking first
-   *  when a wall in it still has something running. */
-  const requestClose = useCallback((target: { tabId: string } | { paneId: string }) => {
+   *  when a wall in it still has something running — decided on a sample
+   *  taken now, never on what the fleet poll last happened to see, and with
+   *  anything unsampled counted as running. */
+  const requestClose = useCallback(async (target: { tabId: string } | { paneId: string }) => {
     const state = wb.getState();
     const key = state.activeKey;
     const set = state.sets[key];
@@ -2736,15 +2738,18 @@ function App() {
       return;
     }
     const tiles = walls.flatMap((w) => w.data.tiles);
-    const running = tiles.filter((id) => {
-      const state = termStatusesRef.current.get(id)?.state;
-      return state !== undefined && state !== "idle" && state !== "exited";
-    });
+    const handle = terminalsRef.current;
+    let running: string[] = tiles;
+    try {
+      if (handle) running = await handle.runningNow(tiles);
+    } catch {
+      /* unread: ask */
+    }
     const close = { key, tabId: "tabId" in target ? target.tabId : null, walls: walls.map((w) => w.id), tiles };
     if (running.length === 0) finishWallClose(close, false);
     else setWallClose({ ...close, running: running.map((id) => termStatusesRef.current.get(id)?.label ?? "terminal") });
   }, [finishWallClose]);
-  const closeTabRequest = useCallback((tabId: string) => requestClose({ tabId }), [requestClose]);
+  const closeTabRequest = useCallback((tabId: string) => void requestClose({ tabId }), [requestClose]);
   const closeFromInside = useCallback(() => {
     // The flow shell (until W2) has pages but no tabs: a browser page, or
     // nothing — never the window.
@@ -2759,7 +2764,7 @@ function App() {
       window.dispatchEvent(new CustomEvent("redline:browser-close-page"));
       return;
     }
-    requestClose(isSplit(tab.root) ? { paneId: tab.focusedPaneId } : { tabId: tab.id });
+    void requestClose(isSplit(tab.root) ? { paneId: tab.focusedPaneId } : { tabId: tab.id });
   }, [requestClose]);
   /** Close the active tab's pane of `kind` (a surface's own ✕ or Exit). */
   const closeSurfacePane = useCallback((kind: PaneKind) => {

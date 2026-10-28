@@ -261,6 +261,28 @@ describe("walls: one fleet, many views", () => {
     expect(host.querySelector(`[data-label="${a}"]`)?.textContent).toBe("api server");
   });
 
+  it("closing asks what is running NOW: one fresh sample, and a terminal it has no sample for counts as running", async () => {
+    await mount({ collapsed: true });
+    const shell = await open(true);
+    const server = await open(true);
+    const unsampled = await open(true);
+    // The fleet poll never ran (no wall on screen): only a fresh read can tell.
+    mocks.procs = [
+      { id: shell, fgComm: "zsh", fgIsShell: true, ports: [] },
+      { id: server, fgComm: "node", fgIsShell: false, ports: [5173] },
+    ];
+    const before = mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_procs").length;
+    let running: string[] = [];
+    await act(async () => { running = await handle.current!.runningNow([shell, server, unsampled]); });
+    expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_procs").length).toBe(before + 1);
+    expect(running).toEqual([server, unsampled]);
+    // A read that fails asks about everything.
+    const ordinary = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command, args) => command === "pty_procs" ? Promise.reject(new Error("lsof hung")) : ordinary(command, args));
+    await act(async () => { running = await handle.current!.runningNow([shell]); });
+    expect(running).toEqual([shell]);
+  });
+
   it("a menu row's New terminal goes to the host's placement, never into a tile it takes from someone", async () => {
     await mount();
     const a = await open();

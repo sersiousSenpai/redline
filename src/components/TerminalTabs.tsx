@@ -276,6 +276,12 @@ export interface TerminalTabsHandle {
   /** Terminate terminals (a closed wall's, when the user says so): each
    *  shell is killed and its tile, wherever it is on screen, collapses. */
   closeTerminals: (ids: readonly string[]) => void;
+  /** Which of `ids` are still running anything, sampled NOW (one
+   *  `pty_procs` read, whatever the fleet poll last saw): a shell's
+   *  foreground is only known once sampled, and closing a wall must never
+   *  end a process it merely had not looked at. A terminal with no sample
+   *  counts as running; only an idle shell or an exited process does not. */
+  runningNow: (ids: readonly string[]) => Promise<string[]>;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -744,10 +750,10 @@ export const TerminalTabs = memo(
   const [procs, setProcs] = useState<ReadonlyMap<string, TermProc>>(
     () => new Map(),
   );
-  const sampleProcs = async () => {
+  const sampleProcs = async (): Promise<TermProc[] | null> => {
     const sampledAt = Date.now();
     const rows = await invoke<TermProc[]>("pty_procs");
-    if (!Array.isArray(rows)) return;
+    if (!Array.isArray(rows)) return null;
     setProcs((prev) => mergeProcs(prev, rows));
     const stale = staleAcks(attentionRef.current, acksRef.current, rows, sampledAt);
     if (stale.length) {
@@ -755,11 +761,14 @@ export const TerminalTabs = memo(
         stale.reduce((next, [id, ack]) => putAck(next, id, ack), prev),
       );
     }
+    return rows;
   };
 
   // Terminals whose process has exited. They stay on the wall showing
   // "[process exited]" until closed.
   const [exited, setExited] = useState<ReadonlySet<string>>(() => new Set());
+  const exitedRef = useRef(exited);
+  exitedRef.current = exited;
   const handleExit = useCallback((id: string) => {
     // Keep the terminal around so the user sees "[process exited]"; they
     // close it from its tile or the menu.
@@ -1546,6 +1555,34 @@ export const TerminalTabs = memo(
   hailTileRef.current = hailTile;
   const closeRef = useRef(closeTab);
   closeRef.current = closeTab;
+  const runningNow = async (ids: readonly string[]): Promise<string[]> => {
+    let rows: TermProc[] | null = null;
+    try {
+      rows = await sampleProcs();
+    } catch {
+      /* unread: every terminal counts as running */
+    }
+    const byId = new Map((rows ?? []).map((r) => [r.id, r]));
+    return ids.filter((id) => {
+      if (exitedRef.current.has(id)) return false;
+      const proc = byId.get(id);
+      if (!proc) return true;
+      const { kind, seen } = effectiveAttention(attentionRef.current.get(id), acksRef.current.get(id));
+      const state = deriveTermState({
+        attention: kind,
+        seen,
+        held: heldTerminalIds?.has(id) ?? false,
+        exited: false,
+        fgComm: proc.fgComm ?? null,
+        fgIsShell: proc.fgIsShell ?? false,
+        ports: proc.ports ?? [],
+        placeholder: false,
+      });
+      return state !== "idle" && state !== "exited";
+    });
+  };
+  const runningNowRef = useRef(runningNow);
+  runningNowRef.current = runningNow;
   const recoverDetached = async () => {
     if (recovering) return;
     setRecovering(true);
@@ -1582,6 +1619,7 @@ export const TerminalTabs = memo(
       closeTerminals: (ids: readonly string[]) => {
         for (const id of ids) closeRef.current(id);
       },
+      runningNow: (ids: readonly string[]) => runningNowRef.current(ids),
     }),
     [setTabs],
   );

@@ -54,4 +54,11 @@ describe("every way a wall closes goes through the one prompt", () => {
     expect(finish).toContain('wb.dispatch({ type: "closeWall", key: close.key, paneId, keep })');
     expect(finish).toContain("if (!keep) terminalsRef.current?.closeTerminals(close.tiles)");
   });
+
+  it("decides on a sample taken at close time, never on the poll's last word, and asks when it cannot tell", () => {
+    const request = app.slice(app.indexOf("const requestClose = useCallback("), app.indexOf("const closeTabRequest = useCallback("));
+    expect(request).toContain("running = await handle.runningNow(tiles)");
+    expect(request).toContain("let running: string[] = tiles;");
+    expect(request).not.toMatch(/termStatusesRef\.current\.get\(id\)\?\.state/);
+  });
 });
