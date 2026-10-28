@@ -565,6 +565,14 @@ function FrontDoorView(props: FrontDoorProps) {
       // One refusal left, and it explains itself: an empty box. "A plan is
       // already launching" used to live here too — it no longer can, because
       // a launch in flight no longer blocks ⏎.
+      // An empty box bound for the browser is not a refusal: it opens the
+      // browser's new tab, whose omnibox takes the caret.
+      if (to === "browser" && !canSubmit && !workbench && onOpenTarget) {
+        setBlocked(null);
+        setRefusedWhy(null);
+        onOpenTarget("browser", "");
+        return;
+      }
       if (!canSubmit) {
         refuse();
         return;
@@ -1044,7 +1052,7 @@ function FrontDoorView(props: FrontDoorProps) {
             <button
               type="button"
               onClick={() => { taRef.current?.focus(); if (stopping) workbench?.onStop(); else send(liveDestination); }}
-              disabled={!stopping && (!canSubmit || (liveDestination === "chat" && chatPending))}
+              disabled={!stopping && ((!canSubmit && !(liveDestination === "browser" && !workbench && onOpenTarget)) || (liveDestination === "chat" && chatPending))}
               data-state={workbench ? (stopping ? "stop" : workbench.streaming ? "queue" : "send") : undefined}
               aria-label={stopping ? "Stop" : undefined}
               title={

@@ -1086,3 +1086,24 @@ describe("FrontDoor — growing with the text", () => {
     expect(ta.style.height).toBe("");
   });
 });
+
+describe("FrontDoor — the browser destination", () => {
+  it("opens the browser's new tab on an empty ⏎, and the sentence as an address or search otherwise", async () => {
+    const onOpenTarget = vi.fn(), onLaunch = vi.fn();
+    const openTargets = [{ id: "browser", label: "Browser" }];
+    await mount({ destination: "browser", openTargets, onOpenTarget, onLaunch });
+    await pressEnter();
+    expect(onOpenTarget).toHaveBeenLastCalledWith("browser", "");
+    expect(onLaunch).not.toHaveBeenCalled();
+    await mount({ destination: "browser", openTargets, onOpenTarget, onLaunch, text: "tauri.app" });
+    await pressEnter();
+    expect(onOpenTarget).toHaveBeenLastCalledWith("browser", "tauri.app");
+  });
+  it("still refuses an empty ⏎ bound for a plan", async () => {
+    const onOpenTarget = vi.fn(), onLaunch = vi.fn();
+    await mount({ destination: "plan", openTargets: [{ id: "browser", label: "Browser" }], onOpenTarget, onLaunch });
+    await pressEnter();
+    expect(onOpenTarget).not.toHaveBeenCalled();
+    expect(onLaunch).not.toHaveBeenCalled();
+  });
+});

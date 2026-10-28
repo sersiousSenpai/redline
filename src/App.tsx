@@ -52,6 +52,7 @@ import { FRONT_DOOR_TEXT_KEY, type LaunchDestination } from "./lib/frontDoor";
 import { readSharedDraft, writeSharedDraft } from "./hooks/useSharedDraft";
 import { arrivalFocus, arrivalMessage, isWritingKey, ownDoorLaunch, writingNow } from "./lib/planArrival";
 import { browserTarget, researchQuery, researchSearchUrl, researchSeed, ridesSubmit } from "./lib/planSearch";
+import { NEWTAB as NEWTAB_URL } from "./lib/browserTitle";
 import { withOptimisticComment } from "./lib/optimisticComment";
 import { warmableChunk } from "./lib/warmableChunk";
 import {
@@ -8851,7 +8852,8 @@ function App() {
   // or a search; the others open at once with the sentence kept.
   const openDoorTarget = (id: string, text: string) => {
     if (id === "browser") {
-      const url = browserTarget(text);
+      // An empty sentence opens the browser's new tab (its omnibox focused).
+      const url = text.trim() ? browserTarget(text) : NEWTAB_URL;
       if (!convertDoorPane({ kind: "browser", data: { workspace: "regular" } })) selectSurface("browser");
       setBrowserOpenRequest({ url, nonce: Date.now() });
       return;
