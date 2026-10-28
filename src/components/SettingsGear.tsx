@@ -9,7 +9,7 @@ import type { LintName } from "../theme/lint";
 import type { SoundConfig } from "../audio/beep";
 import { SettingsMenu, settingsRow } from "./SettingsMenu";
 
-// The gear and everything behind it, mounted the same way by both shells'
+// The gear and everything behind it, mounted by the header: the classic Header
 // top bars: the classic Header and the flow top bar each render this one
 // component, so a Settings row added here shows in both.
 //
@@ -25,14 +25,13 @@ const AgentSeats = lazy(() =>
 const ExtensionsPanel = lazy(() =>
   import("./ExtensionsPanel").then((m) => ({ default: m.ExtensionsPanel })),
 );
-// The lighter rows (mode, theme, font, linting, notifications, shell) share
+// The lighter rows (mode, theme, font, linting, notifications) share
 // one chunk, warmed as the pointer reaches the gear.
 const ModeToggle = settingsRow("ModeToggle");
 const ThemePicker = settingsRow("ThemePicker");
 const FontPicker = settingsRow("FontPicker");
 const TerminalSettings = settingsRow("TerminalSettings");
 const TransparencySettings = settingsRow("TransparencySettings");
-const ShellSettings = settingsRow("ShellSettings");
 const LintPicker = settingsRow("LintPicker");
 const AlertSettings = settingsRow("AlertSettings");
 
@@ -97,7 +96,6 @@ export function SettingsGear({
       icon={icon}
       terminal={<TerminalSettings />}
       transparency={<TransparencySettings />}
-      shell={<ShellSettings />}
       onOpenIntegrationHooks={onOpenIntegrationHooks}
       mode={<ModeToggle mode={mode} onChange={onModeChange} />}
       theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}

@@ -209,46 +209,18 @@ const CHAT: Pair[] = [
   { what: "the warning accent as text", color: "var(--color-warning-text)", on: BOTH },
 ];
 
-const START = "shell/start.css", STRIP_CSS = "shell/FlowStrip.css", HINT = "components/plan/ContextHint.css";
-/** The flow shell's start screen (board 4a): the door at rest on the stage,
- *  which is the window's colour or the paper, and the composer's glass sheet
- *  over it. The headline and strip are read on the stage; everything in the
- *  box on the sheet; the checklist on its chip fill. */
-const SHEET: Rule = [ISLAND, ".rl-monochat .rl-floating-composer.rl-frontdoor .rl-fd-island"];
-const START_TEXTS: Pair[] = [
-  { what: "the start screen's headline", color: [START, ".rl-fs-title"], on: RESTING },
-  { what: "the mode hint", color: [START, ".rl-fs-hint"], background: SHEET, on: RESTING },
-  { what: "a mode not chosen, on its track", color: [START, ".rl-fs-modes button"], under: [SHEET], background: [START, ".rl-fs-modes"], on: RESTING },
-  { what: "Chat, chosen", color: [START, '.rl-fs-modes button[aria-checked="true"]'], under: [SHEET, [START, ".rl-fs-modes"]], background: [START, '.rl-fs-modes button[aria-checked="true"]'], on: RESTING },
-  { what: "Plan, chosen", color: [START, '.rl-fs-modes button[aria-checked="true"]'], under: [SHEET, [START, ".rl-fs-modes"]], background: [START, '.rl-fs-modes button[data-mode="plan"][aria-checked="true"]'], on: RESTING },
-  { what: "Plan's blue icon", color: [START, '.rl-fs-modes button[data-mode="plan"][aria-checked="true"] svg'], under: [SHEET, [START, ".rl-fs-modes"]], background: [START, '.rl-fs-modes button[data-mode="plan"][aria-checked="true"]'], on: RESTING, min: 3 },
-  { what: "the start screen's sentence", color: [START, ".rl-monochat .rl-floating-composer.rl-frontdoor.is-flow .rl-fd-input"], background: SHEET, on: RESTING },
-  { what: "the start screen's placeholder", color: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-input::placeholder"], background: SHEET, on: RESTING },
-  { what: "a chip: the folder, the model", color: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip"], under: [SHEET], background: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip"], on: RESTING },
-  { what: "a chip's icon", color: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip > svg"], under: [SHEET], background: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip"], on: RESTING, min: 3 },
-  { what: "the model chip's \"last used\"", color: [START, ".rl-fs-lastused"], under: [SHEET], background: [START, ".rl-monochat .rl-frontdoor.is-flow .rl-fd-tools .rl-composer-chip"], on: RESTING },
-  { what: "📎 and the mic", color: [START, ".rl-fs-icon"], background: SHEET, on: RESTING, min: 3 },
-  { what: "Talk", color: [START, ".rl-fs-talk"], background: SHEET, on: RESTING },
-  { what: "Talk, on", color: [START, '.rl-fs-talk[aria-pressed="true"]'], under: [SHEET], background: [START, '.rl-fs-talk[aria-pressed="true"]'], on: RESTING },
-  { what: "Start plan", color: [START, ".rl-fs-go"], under: [SHEET], background: [START, ".rl-fs-go"], on: RESTING },
-  { what: "a step of the strip", color: [STRIP_CSS, ".rl-flow-strip"], on: RESTING },
-  { what: "a step's number", color: [STRIP_CSS, ".rl-flow-strip"], background: [STRIP_CSS, ".rl-flow-strip-n"], on: RESTING },
-  { what: "the current step's number", color: [STRIP_CSS, '.rl-flow-strip [aria-current="step"] .rl-flow-strip-n'], background: [STRIP_CSS, '.rl-flow-strip [aria-current="step"] .rl-flow-strip-n'], on: RESTING },
-  { what: "the checklist's head", color: [START, ".rl-fs-checklist-head"], background: [START, ".rl-fs-checklist"], on: RESTING },
-  { what: "a checklist fault", color: [START, ".rl-fs-check-label"], background: [START, ".rl-fs-checklist"], on: RESTING },
-  { what: "a checklist fault's detail", color: [START, ".rl-fs-check-detail"], background: [START, ".rl-fs-checklist"], on: RESTING },
-  { what: "a Continue link", color: [START, ".rl-fs-continue button"], on: RESTING },
-  { what: "a Continue link's title", color: [START, ".rl-fs-continue-title"], on: RESTING },
+const HINT = "components/plan/ContextHint.css";
+const HINT_TEXTS: Pair[] = [
   // ContextHint: the plan panel's footer is on the paper; elsewhere a hint
   // may sit on the window or a raised card.
   { what: "a context hint", color: [HINT, ".rl-context-hint"], on: ["color-paper", "color-canvas", "color-bg-elevated"] },
 ];
 
-describe("the flow start screen is legible in every theme", () => {
-  it("reads every rule it checks", () => readsEveryRule(START_TEXTS));
+describe("the context hint is legible in every theme", () => {
+  it("reads every rule it checks", () => readsEveryRule(HINT_TEXTS));
 
   it.each(THEMES.map((theme) => [theme.name, theme] as const))("%s: every text reaches 4.5:1, every icon 3:1", (_name, theme) => {
-    expect(shortfalls(START_TEXTS, tokensOf(theme))).toEqual([]);
+    expect(shortfalls(HINT_TEXTS, tokensOf(theme))).toEqual([]);
   });
 });
 

@@ -69,7 +69,6 @@ import {
 } from "../../lib/feedbackThreads";
 import { shortModel } from "../../lib/modelInfo";
 import { researchStatus } from "../../lib/planSearch";
-import type { PanelTab } from "../../shell/flowState";
 import type { Comment, NewCommentRequest, ReviewSession, UpdateCommentRequest } from "../../types";
 
 /** The comment actions a thread offers. By default each is the Tauri command
@@ -237,7 +236,7 @@ export default function FeedbackPanel({
     );
 
   return (
-    <div className="rl-fb-panel" data-flow-feedback>
+    <div className="rl-fb-panel" data-feedback-panel>
       <div ref={listRef} className="rl-fb-list rl-thin-scroll-y">
         {open.length === 0 && settled.length === 0 && (
           <p className="rl-fb-empty">
@@ -643,6 +642,9 @@ function Note({ comment: c }: { comment: Comment }) {
 }
 
 // ── The header row ──────────────────────────────────────────────────────────
+
+/** The panel's two tabs: the conversation, or the review. */
+export type PanelTab = "chat" | "feedback";
 
 export interface FeedbackTabsProps {
   tab: PanelTab;

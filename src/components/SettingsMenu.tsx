@@ -3,7 +3,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { warmableChunk } from "../lib/warmableChunk";
-import { useStageDim } from "../shell/stageDim";
 import { useMenuOverlay } from "./menuOverlay";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Button } from "./ui/Button";
@@ -39,8 +38,6 @@ interface SettingsMenuProps {
   font: ReactNode;
   terminal?: ReactNode;
   transparency?: ReactNode;
-  /** Shell — classic or flow (beta); switching reloads the window. */
-  shell?: ReactNode;
   lint: ReactNode;
   /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
   agents: ReactNode;
@@ -87,7 +84,6 @@ export function SettingsMenu({
   font,
   terminal,
   transparency,
-  shell,
   lint,
   agents,
   surfaces,
@@ -103,9 +99,6 @@ export function SettingsMenu({
 
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
-  // The flow stage steps back behind it, like every top-bar menu (board 4d);
-  // nothing in the classic shell.
-  useStageDim(open);
 
   useEffect(() => {
     if (!open) return;
@@ -195,7 +188,6 @@ export function SettingsMenu({
             <Row label="Font">{font}</Row>
             {terminal && <Row label="Terminal">{terminal}</Row>}
             {transparency && <Row label="Transparency">{transparency}</Row>}
-            {shell && <Row label="Shell">{shell}</Row>}
             <Row label="Linting">{lint}</Row>
             <Row label="Agent Seats">{agents}</Row>
             <Row label="Surfaces">{surfaces}</Row>

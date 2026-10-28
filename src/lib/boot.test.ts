@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
 import {
@@ -241,23 +241,13 @@ describe("boot-path JS contract", () => {
     }
   });
 
-  // The flow shell's top bar and its store (W1). They were the last static
-  // flow imports in App — about 16.7 kB of boot JS the classic shell never
-  // painted — and the workbench needed that headroom. App reads the store
-  // through shell/flowStateLazy (a 1 kB shim that answers with defaults
-  // until the flow shell has fetched the module) and mounts the top bar
-  // through lazy(); a value import of either is the regression. Both go
-  // when W2 deletes the flow shell.
-  it("the flow top bar and the flow store never return to App's static import list", () => {
-    for (const name of ["FlowTopBar", "flowState"]) {
-      const staticImport = new RegExp(`^import (?!type\\b)[^;]*from "\\./shell/${name}"`, "m");
-      expect(app.match(staticImport), `shell/${name} is statically imported`).toBe(null);
-    }
-    expect(app).toContain('import("./shell/FlowTopBar")');
-    expect(app).toContain('from "./shell/flowStateLazy"');
-    const shim = readFileSync(join(process.cwd(), "src/shell/flowStateLazy.ts"), "utf8");
-    expect(shim).toContain('import("./flowState")');
-    expect(shim.match(/^import (?!type\b)[^;]*from "\.\/flowState"/m)).toBe(null);
+  // W2 deleted the flow shell: nothing under src/shell is left to import,
+  // and the shell flag that chose between two shells is gone with it.
+  it("no flow shell remains: no src/shell import, no shell flag", () => {
+    expect(app.match(/from "\.\/shell\//)).toBe(null);
+    expect(app).not.toContain("shellFlag");
+    expect(app).not.toContain("isFlowShell");
+    expect(existsSync(join(process.cwd(), "src/shell"))).toBe(false);
   });
 
   // The workbench (W1): the store and the persisted state are read on the

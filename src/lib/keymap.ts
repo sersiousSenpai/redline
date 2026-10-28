@@ -9,8 +9,7 @@
 // Honest scope: only the wired globals (⌘K palette, ⌘⇧N new plan, ⇧⏎ front
 // door, ⌘⇧0 snap-back, ⌘J front-door toggle, ⌘⇧J needs-you jump), the
 // workbench's tab chords (WORKBENCH_KEYMAP: ⌘T / ⌘⇧T / ⌘W / ⌘⇧W, ⌘1–9,
-// ⌘⌥←→ and ⌘⇧[]) and the flow shell's own (FLOW_KEYMAP) use the matchers
-// below; every other entry documents an existing listener that still owns its
+// ⌘⌥←→ and ⌘⇧[]) use the matchers below; every other entry documents an existing listener that still owns its
 // own keydown handling (`wired: false`). The workbench chords are native menu
 // items too (src-tauri workbench_menu.rs), the only mechanism that fires
 // while an embedded web page has focus; the matchers here are the same chords
@@ -21,7 +20,6 @@
 // what exists, not a new event system.
 
 import { HOLD_KEYS, loadHoldKey } from "../audio/holdKey";
-import { shellFlag, type Shell } from "./shellFlag";
 
 /** A cheat-sheet section: what `ShortcutHelp` renders. `keys` is
  *  space-separated caps ("⇧ ⌘ P" → three keycaps). Lives here — with the
@@ -80,38 +78,6 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "zoom-reset", keys: ["⌘", "0"], label: "Reset the zoom", group: "Document", wired: false },
 ];
 
-// ---- The flow shell's shortcuts (deviation 5) ---------------------------------
-// The session-first shell takes the chords people already know from other
-// desktop agents: ⌘N a new session, ⌘B the sidebar, ⌘J the conversation or
-// the terminal, ⌘⌥B the plan, ⌘1–⌘4 the Tools. ⌘N and ⌘1–4 are native menu
-// accelerators (src-tauri `workbench_menu.rs`), so they work while a browser page has
-// focus; ⌘B, ⌘⌥B and ⌘J are App's listeners, forwarded from the browser by
-// browser_signals.js. ⌘⇧N still opens the start screen for one release, but
-// is no longer shown anywhere.
-
-const FLOW_ONLY: KeyBinding[] = [
-  { id: "new-session", keys: ["⌘", "N"], label: "New session", group: "Global", wired: true },
-  { id: "stage", keys: ["⌘", "J"], label: "Switch between the conversation and the terminal", group: "Global", wired: true },
-  { id: "tools", keys: ["⌘", "1–4"], label: "Browser, Prompt drafter, Code review, Localhost", group: "Global", wired: true },
-  { id: "sidebar", keys: ["⌘", "B"], label: "Show / hide the sidebar", group: "Layout", wired: true },
-  { id: "plan-panel", keys: ["⌘", "⌥", "B"], label: "Show / hide the plan", group: "Layout", wired: true },
-];
-
-/** Classic bindings the flow shell replaces: the door toggle (⌘J is the
- *  stage's now), the old new-plan chord (an unadvertised alias), and ⇧← for
- *  a sidebar that ⌘B owns. */
-const FLOW_REPLACES = new Set(["dock", "new-plan", "pane-sidebar"]);
-
-/** The flow shell's registry, in reading order: the new globals lead, the
- *  rest of the classic registry follows minus what they replace. */
-export const FLOW_KEYMAP: KeyBinding[] = [
-  GLOBAL_KEYMAP[0],
-  ...FLOW_ONLY.filter((b) => b.group === "Global"),
-  ...GLOBAL_KEYMAP.slice(1).filter((b) => !FLOW_REPLACES.has(b.id) && b.group === "Global"),
-  ...FLOW_ONLY.filter((b) => b.group === "Layout"),
-  ...GLOBAL_KEYMAP.filter((b) => !FLOW_REPLACES.has(b.id) && b.group !== "Global"),
-];
-
 // ---- The workbench's shortcuts (W1) -------------------------------------------
 // Per-session tabs with a door tab: the chords every tabbed desktop app has.
 // All native menu items (workbench_menu.rs) except the ⌘⌥←→ cycle aliases,
@@ -139,16 +105,14 @@ export const CLASSIC_KEYMAP: KeyBinding[] = [
   ...GLOBAL_KEYMAP.filter((b) => b.group !== "Global"),
 ];
 
-/** The registry of the shell this page paints. */
-export function shellKeymap(shell: Shell = shellFlag()): KeyBinding[] {
-  return shell === "flow" ? FLOW_KEYMAP : CLASSIC_KEYMAP;
+/** The app's registry: the classic registry with the workbench's chords. */
+export function shellKeymap(): KeyBinding[] {
+  return CLASSIC_KEYMAP;
 }
 
-/** Hint keycaps for a binding id — the palette's hint column. Only the
- *  painted shell's bindings answer, so a hint never names a chord that
- *  shell does not have. */
-export function bindingKeys(id: string, shell: Shell = shellFlag()): string[] | undefined {
-  return shellKeymap(shell).find((b) => b.id === id)?.keys;
+/** Hint keycaps for a binding id — the palette's hint column. */
+export function bindingKeys(id: string): string[] | undefined {
+  return shellKeymap().find((b) => b.id === id)?.keys;
 }
 
 // ---- The two wired matchers -------------------------------------------------
@@ -204,42 +168,7 @@ export function isNeedsYouKey(e: KeyComboInfo): boolean {
   return e.shiftKey && e.code === "KeyJ";
 }
 
-// ---- The flow shell's matchers ------------------------------------------------
-// ⌘ only, never Ctrl: ⌘J and ⌘B run in the capture phase, ahead of xterm, and
-// in a terminal Ctrl+J is a newline and Ctrl+B is readline's back-a-char and
-// tmux's prefix. Taking either would break the shell under the user's hands.
-
 const commandOnly = (e: KeyComboInfo) => e.metaKey && !e.ctrlKey;
-
-/** ⌘J in the flow shell — the stage's Conversation | Terminal. */
-export function isStageKey(e: KeyComboInfo): boolean {
-  return commandOnly(e) && !e.shiftKey && !e.altKey && (e.key === "j" || e.key === "J");
-}
-
-/** ⌘B — the flow sidebar. */
-export function isSidebarKey(e: KeyComboInfo): boolean {
-  return commandOnly(e) && !e.shiftKey && !e.altKey && (e.key === "b" || e.key === "B");
-}
-
-/** ⌘⌥B — the plan panel. On e.code: ⌥ rewrites e.key ("b" → "∫") on a Mac. */
-export function isPlanPanelKey(e: KeyComboInfo): boolean {
-  return commandOnly(e) && e.altKey && !e.shiftKey && e.code === "KeyB";
-}
-
-/** ⌘N — a new session. The native menu item normally takes it first; this
- *  is the same chord for a page that has no native menu (and for a menu
- *  that failed to install). */
-export function isNewSessionKey(e: KeyComboInfo): boolean {
-  return commandOnly(e) && !e.shiftKey && !e.altKey && (e.key === "n" || e.key === "N");
-}
-
-/** ⌘1–⌘4 — which Tools row, or null. The native menu's accelerators normally
- *  take these first, as with ⌘N. */
-export function toolKeyOf(e: KeyComboInfo): 1 | 2 | 3 | 4 | null {
-  if (!commandOnly(e) || e.shiftKey || e.altKey) return null;
-  const n = Number(e.key);
-  return n === 1 || n === 2 || n === 3 || n === 4 ? n : null;
-}
 
 // ---- The workbench's matchers ----------------------------------------------------
 // ⌘ only, never Ctrl, and on e.code: in a terminal Ctrl+T, Ctrl+W and Ctrl+[

@@ -98,22 +98,7 @@ import {
 import { isLiveRunState } from "./lib/orchestration";
 const Footer = lazy(() => import("./components/Footer").then(m => ({ default: m.Footer })));
 import { Header } from "./components/Header";
-// The flow shell's top bar and its store ride their own chunks: about
-// 16.7 kB of boot JS the classic shell never painted (the workbench's
-// headroom, W1). Flow fetches both at mount; until W2 deletes the shell its
-// top bar lands a beat after the first frame.
-const loadFlowTopBar = () => import("./shell/FlowTopBar");
-const FlowTopBar = lazy(() => loadFlowTopBar().then((m) => ({ default: m.FlowTopBar })));
-const togglePlanPanel = (sessionId: string) => void loadFlowTopBar().then((m) => m.togglePlanPanel(sessionId)).catch(() => {});
-import { flowStateNow, loadFlowState, useFlowLazy as useFlow, withFlowState } from "./shell/flowStateLazy";
-const toggleStage = () => withFlowState((m) => m.toggleStage());
-const setPlanPose = (sessionId: string, pose: PlanPose) => withFlowState((m) => m.setPlanPose(sessionId, pose));
-const setStage = (view: StageView) => withFlowState((m) => m.setStage(view));
-const setFlowSidebar = (open: boolean) => withFlowState((m) => m.setSidebar(open));
-const getFlowState = flowStateNow;
-import { launchTitle, needsYou, sessionMode, sessionTitle, type ModeTarget } from "./lib/sessionMode";
-import { isNewSessionKey, isPlanPanelKey, isSidebarKey, isStageKey, toolKeyOf } from "./lib/keymap";
-import { TOOL_DESCRIPTORS, toolForKey, toolSurfaces, type ToolId } from "./config/workspace";
+import { sessionMode } from "./lib/sessionMode";
 import { Button } from "./components/ui/Button";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
 // only mounts when the share dialog opens.
@@ -366,8 +351,6 @@ import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
-import { isFlowShell } from "./lib/shellFlag";
-import { anyApproved, continueLinks, NEW_SESSION_EVENT } from "./lib/flowStart";
 import { SurfaceChips } from "./components/SurfaceChips";
 import {
   forgetSent,
@@ -394,32 +377,26 @@ const TerminalTabs = lazy(() =>
   })),
 );
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
-// The flow shell's session stage: what it shows (lib/flowSessions), the plan
-// panel's pose rules (lib/flowPose) and its body, a lazy chunk the classic
-// shell never fetches.
-import type { PlanPose, StageView } from "./shell/flowState";
+// Which terminal a session runs in, and what its CLI is doing
+// (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
+// spinners read it. The dock pins itself over an Agent pane's CLI view
+// (lib/stageDock).
 import { useStageDock } from "./lib/stageDock";
-import type { ConversationLayout } from "./shell/FlowStage";
-import { attentionKinds, deriveStageTarget, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/flowSessions";
-import { FLOW_ARTICLE } from "./lib/flowPose";
+import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/sessionTerminals";
 // The comment composer opens on a gesture — a selection's menu — so it rides
-// its own chunk (about 9.5 kB off the boot path, which pays for the flow
-// stage's wiring), warmed the moment a selection shows that menu.
+// its own chunk (about 9.5 kB off the boot path), warmed the moment a
+// selection shows that menu.
 const loadCommentComposer = () => import("./components/CommentComposer");
 const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
-const loadFlowStage = () => import("./shell/FlowStage");
-const loadSessionConversation = () => import("./components/agent/SessionConversation");
 // The Agent pane: the session's conversation as a centre tab (W2), with
 // its header and the Chat | CLI toggle. Rides the conversation's chunk.
 const AgentPane = lazy(() => import("./components/agent/AgentPane"));
 // The Plan tab's chrome (header, notices, footer) around the one plan body.
 const loadPlanPane = () => import("./components/plan/PlanPane");
 const PlanPane = lazy(loadPlanPane);
-const FlowStage = lazy(loadFlowStage);
-const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
 // ⌘K's palette paints nothing until it opens, so it rides its own chunk,
-// loaded on the first ⌘K (the flow shell's way back paid for its bytes).
+// loaded on the first ⌘K.
 const CommandPalette = lazy(() => import("./components/CommandPalette").then((m) => ({ default: m.CommandPalette })));
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
@@ -474,7 +451,6 @@ import {
   maskPanels,
   panelMask,
   platePaneMask,
-  flowStageShape,
   panelsMasked,
 } from "./lib/immersive";
 import { boxOf, type SwapRect } from "./lib/springSwap";
@@ -743,7 +719,9 @@ bootOnFrontDoor(localStorage);
 // read (the paint-cache rule), and — in the classic shell, which it drives —
 // boot on Home's door, with every change written back on a debounce.
 migrateToWorkbenchOnce(localStorage);
-const classicWb = !isFlowShell();
+// W1's workbench-or-legacy-centre switch. The flow shell is gone (W2), so
+// the workbench is the one centre; W6 deletes the adapter and this with it.
+const classicWb = true;
 const wb = createWorkbenchStore(classicWb ? bootToHome(readWorkbench(localStorage)) : readWorkbench(localStorage), () => import("./workbench/reducer").then((m) => m.reduce));
 if (classicWb) {
   persistWorkbench(wb, localStorage);
@@ -1114,7 +1092,7 @@ function App() {
   // reader's preference sticks across sessions.
   // Flow keeps its own, closed until asked for: the plan panel opens as the
   // boards draw it, and "☰ Contents" in its header is one click away.
-  const [tocOpen, setTocOpen] = usePersistedState(isFlowShell() ? "redline.flow.tocOpen" : "redline.tocOpen", !isFlowShell());
+  const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
   // Rail width: two snap points (230 / 340). `tocWide` is the persisted snap;
   // the transient width during a drag is written straight onto the rail and the
   // scroller, and release snaps to whichever point is nearer (see snapTocWide).
@@ -2417,9 +2395,6 @@ function App() {
     setFrontDoorOpen(value => !value);
   }, []);
   useEffect(() => {
-    // The flow shell's ⌘J is the stage's Conversation | Terminal instead
-    // (the flow keys below), the browser's forwarded ⌘J included.
-    if (isFlowShell()) return;
     const onKey = (e: KeyboardEvent) => {
       if (!isDockKey(e)) return;
       e.preventDefault();
@@ -2876,7 +2851,6 @@ function App() {
   // Flow's wall (Tools ▸ Terminals) is a place you visit, never where the
   // app opens.
   useLayoutEffect(() => {
-    if (isFlowShell()) setTermFullscreen(false);
   }, [setTermFullscreen]);
 
   // Project-folder explorer: open folders (sidebar tabs), the active tab, the
@@ -2930,39 +2904,17 @@ function App() {
       alive = false;
     };
   }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
-  // ── The flow shell's session stage ────────────────────────────────────────
+  // ── Sessions and their terminals ──────────────────────────────────────────
   //
-  // In flow a session exists from the moment it launches (BRIEF, "Session
-  // identity in flow"): the stage shows a launch until its plan arrives and
-  // then that plan, keyed by the terminal its CLI runs in, so the handoff
-  // never changes which conversation is on screen. `launchPlan` records the
-  // launches; the terminal map is fed by the hooks (`term-attention`), the
-  // engine (`convo-bound`), held plans and arrivals. On the classic shell the
-  // hook stays inert, the list empty and the target is never read.
-  const flowShell = isFlowShell();
+  // A session exists from the moment it launches: `flowLaunches` records the
+  // launches whose plan has not arrived (the sidebar's pending rows, the
+  // launch sets' Agent tabs); the terminal map is fed by the hooks
+  // (`term-attention`), the engine (`convo-bound`), held plans and arrivals.
   // An Agent pane showing its PTY (its CLI view): the terminal dock is
   // pinned over that pane's box and shows that one terminal alone — the
   // same attachment the dock already holds, never a second one.
   const [cliView, setCliView] = useState<CliView | null>(null);
   const cliBoxRef = useMemo<RefObject<HTMLElement | null>>(() => ({ current: cliView?.el ?? null }), [cliView]);
-  // The stage's two chunks are what a session opens onto: warmed once the
-  // shell is up, so the first plan or launch doesn't wait on a fetch.
-  useEffect(() => {
-    if (!flowShell) return;
-    // The store first: the top bar, the sidebar and the stage read it.
-    void loadFlowState().catch(() => {});
-    void loadFlowTopBar().catch(() => {});
-    const warm = () => {
-      void loadFlowStage().catch(() => {});
-      void loadSessionConversation().catch(() => {});
-    };
-    const idle = window.requestIdleCallback?.(warm, { timeout: 2000 });
-    if (idle === undefined) {
-      const t = setTimeout(warm, 500);
-      return () => clearTimeout(t);
-    }
-    return () => window.cancelIdleCallback?.(idle);
-  }, [flowShell]);
   const [flowLaunches, setFlowLaunches] = useState<readonly FlowLaunch[]>([]);
   const flowLaunchesRef = useRef(flowLaunches);
   flowLaunchesRef.current = flowLaunches;
@@ -2970,15 +2922,6 @@ function App() {
     (event: LaunchEvent) => setFlowLaunches((prev) => reduceLaunches(prev, event)),
     [],
   );
-  // The launch the stage is showing, by terminal. A launch puts the stage on
-  // it (and takes the selection off whatever plan was open); selecting any
-  // session takes the stage off it.
-  const [focusedLaunch, setFocusedLaunch] = useState<string | null>(null);
-  const focusedLaunchRef = useRef(focusedLaunch);
-  focusedLaunchRef.current = focusedLaunch;
-  useEffect(() => {
-    if (activeId) setFocusedLaunch(null);
-  }, [activeId]);
   const {
     terminals: sessionTerminals,
     attention: terminalAttention,
@@ -2996,9 +2939,9 @@ function App() {
     );
   }, [summaries, bindSessionTerminals]);
   // The handoff: a launch's plan arriving binds its session to the launch's
-  // terminal and, when the stage is on that launch, flips it to the plan —
-  // the same conversation, now with a plan. The general arrival rule (the
-  // `plan-received` listener below) still decides everything else.
+  // terminal and retires the launch row — the same conversation, now with a
+  // plan. The general arrival rule (the `plan-received` listener below)
+  // decides everything else, the launch set's rekey included.
   useEffect(() => {
     const unlisten = listen<PlanReceivedEvent>("plan-received", (e) => {
       const { launchId, sessionId } = e.payload;
@@ -3008,29 +2951,12 @@ function App() {
       if (!launch) return;
       bindSessionTerminals([{ sessionId, terminalId: launch.terminalId }]);
       noteFlowLaunch({ type: "arrived", launchId: launch.launchId });
-      // Both shells keep the launch registry (the sidebar's pending rows);
-      // only flow's stage follows a launch onto its plan.
-      if (!flowShell || focusedLaunchRef.current !== launch.terminalId) return;
-      selectSessions();
-      setActiveId(sessionId);
-      setViewedVersionNumber(null);
-      void loadSession(sessionId);
     });
     return () => {
       void unlisten.then((u) => u());
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flowShell, bindSessionTerminals, noteFlowLaunch, selectSessions]);
-  const stageTarget = deriveStageTarget({
-    activeId,
-    focusedLaunch,
-    launches: flowLaunches,
-    pendingLaunch,
-    runFlight,
-    terminals: sessionTerminals,
-  });
-  // The sidebar's launch rows (its flow layout): `launches`, with
-  // `activeLaunchId` and `selectFlowLaunch`.
+  }, [bindSessionTerminals, noteFlowLaunch]);
+  // The sidebar's launch rows: `launches`, with `activeLaunchId`.
   const flowSidebarLaunches = useMemo(
     () => sidebarLaunches(flowLaunches, terminalKinds, terminalTitles),
     [flowLaunches, terminalKinds, terminalTitles],
@@ -3040,12 +2966,9 @@ function App() {
     () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
     [sessionTerminals, terminalAttention, flowLaunches],
   );
-  // The launch on screen: under the workbench the active `launch:` set's
-  // terminal (its Agent tab), in flow the stage's.
-  const wbLaunchId = classicWb ? launchIdOf(wbActiveKey) : null;
-  const activeLaunchId = classicWb
-    ? (wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null)
-    : stageTarget.kind === "launch" ? stageTarget.terminalId : null;
+  // The launch on screen: the active `launch:` set's terminal (its Agent tab).
+  const wbLaunchId = launchIdOf(wbActiveKey);
+  const activeLaunchId = wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null;
   // What the tab strip says about a pane beyond its kind: a plan's own
   // title and version, and its status in the shared vocabulary (the
   // session's terminal needs you / is working, from `sidebarActivity`).
@@ -3097,88 +3020,12 @@ function App() {
       <Columns2 size={16} aria-hidden />
     </button>
   ) : null;
-  // Set where the stage's way back is defined (`flowRowToStage`), below.
-  const flowRowToStageRef = useRef<() => void>(() => {});
-  const flowShowTerminalRef = useRef<(terminalId: string, view: StageView) => void>(() => {});
-  const flowJumpRef = useRef<() => void>(() => {});
-  const selectFlowLaunch = useCallback((terminalId: string) => {
-    flowRowToStageRef.current();
-    setFocusedLaunch(terminalId);
-    setActiveId(null);
-  }, []);
-  // The stage owns the plate: a launch or a plan on the session surface —
-  // not the New-session screen and not the folder's file viewer.
-  const flowStageOwns =
-    flowShell && mainSurface === "document" && stageTarget.kind !== "start" && plateMode !== "file";
-  // ⌘J's Conversation | Terminal, and the pose the stage last painted (its
-  // narrow rule needs its own width, so it reports the result up).
-  const flowView = useFlow((s) => s.stage);
-  const [flowPainted, setFlowPainted] = useState<{ pose: PlanPose; layout: ConversationLayout }>(
-    { pose: "closed", layout: "stage" },
-  );
-  const onFlowPose = useCallback(
-    (pose: PlanPose, layout: ConversationLayout) =>
-      setFlowPainted((prev) => (prev.pose === pose && prev.layout === layout ? prev : { pose, layout })),
-    [],
-  );
-  // 4c: the split pose takes the sidebar's width for the plan when the
-  // window has none to spare (the sidebar, the 440px column and a readable
-  // plan need about 1300px), and gives it back on the way out — unless ⌘B
-  // moved it in between, which is the user's say. On a wider window the
-  // sidebar stays: it is how you get anywhere else.
-  const splitFoldedSidebar = useRef(false);
-  const flowSplit = flowStageOwns && flowPainted.pose === "split";
-  const [roomForSidebar, setRoomForSidebar] = useState(() => window.innerWidth >= 1300);
-  useEffect(() => {
-    if (!flowShell) return;
-    const query = window.matchMedia("(min-width: 1300px)");
-    const update = () => setRoomForSidebar(query.matches);
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, [flowShell]);
-  useEffect(() => {
-    if (!flowShell) return;
-    if (flowSplit && !roomForSidebar) {
-      if (getFlowState().sidebar) {
-        splitFoldedSidebar.current = true;
-        setFlowSidebar(false);
-      }
-    } else if (splitFoldedSidebar.current) {
-      splitFoldedSidebar.current = false;
-      if (!getFlowState().sidebar) setFlowSidebar(true);
-    }
-  }, [flowShell, flowSplit, roomForSidebar]);
-  // The conversation is ONE mounted component in three places — the stage,
-  // the split column, the full pose's Chat tab — like the chat room's host
-  // below: the stage moves this node between them and the conversation in it
-  // never remounts, so its subscription and its place survive every pose.
-  const [flowConvoHost] = useState(() => (flowShell ? createBoundedPortalHost("session-conversation") : null));
-  // The session's terminal at full stage (deviation 6): the dock, positioned
-  // over the stage and showing that one PTY. Off the stage the dock is the
-  // wall when fullscreen and hidden otherwise — flow never docks a terminal
-  // under the conversation.
-  const stageTerminalId = stageTarget.kind === "start" ? null : stageTarget.terminalId;
-  const flowTermStage = flowStageOwns && flowView === "terminal" && stageTerminalId !== null;
-  // Whether the conversation can be seen: on the stage, not under ⌘J's
-  // terminal, and not behind the companion column's Feedback tab.
-  const flowPanelTab = useFlow((s) => s.panelTab);
-  const flowConvoOnScreen =
-    flowStageOwns && flowView === "conversation" && !(flowPainted.pose !== "closed" && flowPanelTab === "feedback");
-  // On every surface, Tools included: flow never docks a terminal under
-  // anything. The wall (⌘J's big sibling, Tools ▸ Terminals) is the one way
-  // the dock shows off the stage.
-  // …and the same off the stage: an Agent pane's CLI view takes the dock
+  // An Agent pane's CLI view takes the dock off the bottom of the window
   // (W3 moves terminals into the centre for good).
   const paneCli = cliView && !termFullscreenPref ? cliView : null;
-  const flowDockHidden = (flowShell && !termFullscreenPref && !flowTermStage) || !!paneCli;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
-  // In the flow shell that same empty plate is the start screen — the
-  // New-session screen, the door at rest on the stage — but only while the
-  // stage's target is: a launch whose plan hasn't arrived leaves the plate
-  // empty too, and the stage is showing its conversation.
-  const flowStartOnStage = isFlowShell() && plateAtRest && stageTarget.kind === "start";
 
 
   // ---- Immersive surfaces ---------------------------------------------------
@@ -3196,13 +3043,9 @@ function App() {
     broken: immersiveBroken,
     enabled: workspaceImmersive(workspace),
   });
-  // Flow keeps its own sidebar switch (⌘B, shell/flowState), so the layout
-  // reads that instead of the classic shell's persisted collapse.
-  const flowSidebarOpen = useFlow((s) => s.sidebar);
-  const baseShape = flowStageShape(
-    effectiveShape(
+  const baseShape = effectiveShape(
       {
-        sidebarCollapsed: isFlowShell() ? !flowSidebarOpen : sidebarCollapsedPref,
+        sidebarCollapsed: sidebarCollapsedPref,
         paneCollapsed: paneCollapsedPref,
         paneFullscreen: paneFullscreenPref,
         termCollapsed: termCollapsedPref,
@@ -3213,9 +3056,7 @@ function App() {
         docPinned: classicWb ? wbView.docPinned : docPinnedPref,
       },
       immersive,
-    ),
-    flowDockHidden,
-  );
+    );
   // The second, NARROWER overlay: just the two side panels, leaving the header,
   // the footer and the terminal dock exactly where they are. The sessions list
   // is a document index and the discussion pane is a plan's margin, so on a
@@ -3229,17 +3070,12 @@ function App() {
     enabled: workspaceImmersive(workspace),
     docPinned: baseShape.docPinned,
   });
-  // Flow's sidebar is the app's navigation, not a document index: it stays
-  // on every surface, so a Tool is somewhere you visit with the way back in
-  // view.
-  const pMask = flowShell ? { ...surfaceMask, sidebar: false } : surfaceMask;
-  // A plate with no plan on it hides the pane too — and in flow, the plate
-  // never has one beside it: the stage's plan panel is the plan's margin.
+  const pMask = surfaceMask;
+  // A plate with no plan on it hides the pane too.
   const noPlanPane = platePaneMask({
     surface: mainSurface,
     plateMode,
     brokenPane: panelBreaks.pane,
-    flowPaneOpen: flowShell ? false : undefined,
   });
   const combinedPaneMask = pMask.pane || noPlanPane;
   const previousPaneMask = useRef(false);
@@ -3271,8 +3107,7 @@ function App() {
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    if (isFlowShell()) setFlowSidebar(true);
-    else setSidebarCollapsed(false);
+    setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
   const revealPane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -3290,8 +3125,7 @@ function App() {
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
     setPanelBreaks(state => ({ ...state, sidebar: true }));
-    if (isFlowShell()) setFlowSidebar(sidebarCollapsed);
-    else setSidebarCollapsed(!sidebarCollapsed);
+    setSidebarCollapsed(!sidebarCollapsed);
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
@@ -3448,8 +3282,7 @@ function App() {
     docPinnedPref,
     mainSurface,
   ]);
-  // Flow's layout has nothing to snap: ⌘⇧0 is "back to the session".
-  snapBackRef.current = isFlowShell() ? () => flowRowToStageRef.current() : snapBack;
+  snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
   // The dock's GRID, distinct from the tab count — 9 tabs / 2 tiles is
   // normal. Drives dock growth and the browser-pane resync key.
@@ -3514,10 +3347,6 @@ function App() {
   const [termNeedYou, setTermNeedYou] = useState(0);
   const termNeedYouRef = useRef(termNeedYou);
   termNeedYouRef.current = termNeedYou;
-  // The flow top bar's share: only terminals in needs-you proper (an agent
-  // blocked on a question or a permission), by id so the bar can leave out
-  // the session on screen.
-  const [flowNeedsYouTerms, setFlowNeedsYouTerms] = useState<string[]>([]);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
   // Onboarding tour reveal/restore: the spotlight needs its target on-screen, so
@@ -3714,8 +3543,6 @@ function App() {
   // front door, like any "show me the terminal") and let it land on the next
   // terminal that needs you. Nothing happens when nothing does.
   const jumpToNeedsYou = useCallback(() => {
-    // Flow has no dock: the top bar's own jump, which goes to the session.
-    if (isFlowShell()) return flowJumpRef.current();
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
     setDoorCompact(false);
@@ -3771,8 +3598,6 @@ function App() {
   // Shift+Arrow text selection; the xterm helper textarea is exempted so the
   // hotkeys still fire there.
   useEffect(() => {
-    // Classic's panels; flow has none of them (⌘B is its sidebar).
-    if (isFlowShell()) return;
     const onKey = (e: KeyboardEvent) => {
       if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
       if (
@@ -3863,7 +3688,7 @@ function App() {
       // anywhere in that folder.
       // Flow has no folder tabs and no file viewer on the stage: following
       // the terminal there would swap the plan for "Browsing files".
-      if (linkNavRef.current && !isFlowShell()) {
+      if (linkNavRef.current) {
         selectFolder(dir);
         setActiveFile(file ?? folderFileRef.current.get(dir) ?? null);
       }
@@ -3950,12 +3775,7 @@ function App() {
   const [winWidth, setWinWidth] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
-  // The flow sidebar is the boards' fixed column, not a dragged width: 232px
-  // of content plus 10px padding each side and its 1px rule at 1280, growing
-  // to 260px of content at 1600 (FlowSidebar.css). Classic keeps the drag.
-  const sidebarWidth = isFlowShell()
-    ? Math.min(281, Math.max(253, Math.round(winWidth * 0.1625) + 21))
-    : sidebarWidthPref;
+  const sidebarWidth = sidebarWidthPref;
 
   // The row's space model: the doc column floors at DOC_MIN and any pane
   // width past that becomes curtain overlay instead of flow. Stateless — it
@@ -4014,8 +3834,6 @@ function App() {
   const termDockRef = useRef<HTMLDivElement | null>(null);
   // The dock over the Agent pane's CLI box while one shows its PTY.
   useStageDock(termDockRef, cliBoxRef, !!paneCli);
-  // Flow's wall (Tools ▸ Terminals) covers the plate, not the sidebar.
-  useStageDock(termDockRef, docColumnRef, flowShell && termFullscreen);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
   // inside the document column — but it follows the same rule: its width is
   // written straight to the element, never rendered from JSX.
@@ -4886,11 +4704,7 @@ function App() {
     const feedbackUnlisten = listen("menu-open-feedback", () =>
       setShowFeedback(true),
     );
-    // Getting Started: the tour, or in the flow shell the start screen,
-    // which carries the four steps and the first-run checklist itself.
-    const tutorialUnlisten = listen("menu-open-tutorial", () =>
-      isFlowShell() ? window.dispatchEvent(new CustomEvent(NEW_SESSION_EVENT, { detail: { via: "pointer" } })) : setTourOpen(true),
-    );
+    const tutorialUnlisten = listen("menu-open-tutorial", () => setTourOpen(true));
     return () => {
       void readmeUnlisten.then((u) => u());
       void feedbackUnlisten.then((u) => u());
@@ -6616,17 +6430,15 @@ function App() {
         }, projectPath)}\r`;
         suppressTerminalRevealFocus();
         setTermFullscreen(false);
-        // Flow has no dock: the build is this session's conversation from
-        // now on, bound before the resumed CLI starts (as a restore is).
-        if (!flowShell) revealTerm();
-        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath, flowShell ? { background: true } : undefined) ?? null;
+        revealTerm();
+        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
         if (!id) {
           setToast("Couldn't open a terminal to build in", 6000);
           return;
         }
-        // The build is this session's conversation from now on, in either
-        // shell: bound before the resumed CLI starts (as a restore is), so
-        // the workbench's Agent tab finds its terminal the moment it exists.
+        // The build is this session's conversation from now on: bound before
+        // the resumed CLI starts (as a restore is), so the Agent tab finds its
+        // terminal the moment it exists.
         bindSessionTerminals([{ sessionId, terminalId: id }]);
         void import("./components/agent/convo/api").then((api) => api.convoPrebind(id, sessionId)).catch(() => {});
         const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: cmd }]);
@@ -6635,7 +6447,7 @@ function App() {
           return;
         }
         await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
-        setToast(flowShell ? `Building with ${agentLabelFor(planHarness)}. Follow it here, or in its terminal (⌘J).` : `Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
+        setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
       } else {
         const path = await invoke<string>("write_plan_handoff", { sessionId });
         const r = await launchPlan({
@@ -6732,7 +6544,7 @@ function App() {
     const result = await orchestrateHandoff(deps, id, sessionId, launchCmd, prompt);
     if (result.ok) {
       setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      setToast(flowShell ? "Team build started. Redline shows you its workflow (Tools ▸ Runs) before any agent starts." : "Team build started below ↓ Redline shows you its workflow before any agent starts.");
+      setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
     } else await fail(result.stage, result.reason);
   };
   // A pre-flight or a pause is waiting on the user: mount the cards (lazy).
@@ -6982,10 +6794,6 @@ function App() {
    *  attempt record carries its id. Focus is deliberately not suppressed here
    *  (unlike an automatic reveal): the reviewer asked to go there. */
   const showRawTerminal = async (terminalId: string | null) => {
-    if (isFlowShell()) {
-      if (terminalId) flowShowTerminalRef.current(terminalId, "terminal");
-      return;
-    }
     setTermFullscreen(false);
     revealTerm();
     if (!terminalId) return;
@@ -7346,9 +7154,7 @@ function App() {
         ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
         : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
     }\r`;
-    // In flow the launch lands on the stage, as its conversation; the dock
-    // stays out of sight (⌘J shows the PTY).
-    if (!req.background && !flowShell) {
+    if (!req.background) {
       suppressTerminalRevealFocus();
       setTermFullscreen(false);
       revealTerm();
@@ -7400,15 +7206,12 @@ function App() {
       launchedPlansRef.current.delete(launchId);
       return { ok: false, reason: `Couldn't type the ${run ? "run" : "plan launch"} (${delivery.stage}): ${delivery.reason}`, retryable: delivery.stage === "spawn" };
     }
-    // Flow: the session exists from here, before any plan row does. A launch
-    // the user asked to see puts the stage on it.
-    // The launch registry feeds the sidebar's pending rows in both shells;
-    // flow's stage also goes to the launch.
+    // The session exists from here, before any plan row does: the launch
+    // registry feeds the sidebar's pending rows.
     noteFlowLaunch({
       type: "launched",
       launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
     });
-    if (flowShell && !req.background) selectFlowLaunch(terminalId);
     // The workbench: the launch is a session from here — a `launch:` set
     // holding its Agent tab, rekeyed to the plan when it arrives. Asked
     // for in the foreground it is selected, and the door tab it came
@@ -7431,7 +7234,7 @@ function App() {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
       setLastLaunchProject(req.projectPath!);
-      if (req.background || !flowShell) setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
+      setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
       return { ok: true, terminalId, launchId };
     }
 
@@ -7443,7 +7246,7 @@ function App() {
     setReadinessNow(startedAt);
     if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
-    if (req.background || !flowShell) setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
+    setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
     return { ok: true, terminalId, launchId };
   };
 
@@ -7462,7 +7265,7 @@ function App() {
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
-    setToast(flowShell ? "Starting the dev server (Tools ▸ Terminals)" : "Starting the dev server in the terminal below ↓");
+    setToast("Starting the dev server in the terminal below ↓");
   };
 
   // "Open" on a Localhost card: bring the browser surface forward with a tab on
@@ -8094,8 +7897,7 @@ function App() {
   // that is still travelling points at nothing. This is the one legitimate
   // reason to read the choreography: it is about where things ARE, not about
   // when the user may act.
-  // The flow shell has no tour: its start screen is the introduction.
-  const tourActive = !isFlowShell() &&
+  const tourActive =
     (tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating));
   // The open door hides the page. The compact card does not: it is cut out
   // of the webview (useNativeOverlayRegion), never laid over it.
@@ -8632,10 +8434,6 @@ function App() {
       // hands off into the plan when it lands (`doorLaunchRef`).
       if (mode === "plan" && frontDoorOpenRef.current) doorLaunchRef.current = r.launchId;
       if (mode === "plan") noteDoorLaunchTab(r.launchId);
-      // In the flow shell the launch IS the next stage — its conversation,
-      // before any plan exists — so the zoomed door steps aside for it at
-      // once instead of holding the window until the plan lands.
-      if (isFlowShell()) { doorLaunchRef.current = null; setFrontDoorOpen(false); }
       // Handed off: the compact card shrinks back into the pill, which shows
       // the work. The open door shows it in place.
       setDoorCompact(false);
@@ -8996,14 +8794,7 @@ function App() {
   const paletteCommands = useMemo(
     () =>
       buildCommands({
-        shell: isFlowShell() ? "flow" : "classic",
-        // The flow shell hints each Tool's ⌘ number beside its entry.
-        surfaces: isFlowShell()
-          ? headerSurfaceList.map((s) => {
-              const key = TOOL_DESCRIPTORS.find((t) => t.id === s.id)?.key;
-              return key ? { ...s, keys: ["⌘", String(key)] } : s;
-            })
-          : headerSurfaceList,
+        surfaces: headerSurfaceList,
         currentSurface: mainSurface,
         sessions: summaries.map((s) => ({
           id: s.sessionId,
@@ -9079,7 +8870,7 @@ function App() {
             if (isFontName(name)) onFontChange(name);
           },
           zoomReset: () => setDocZoom(1),
-          replayTour: () => (isFlowShell() ? openStartScreen("pointer") : setTourOpen(true)),
+          replayTour: () => setTourOpen(true),
           togglePerfProbe: () => {
             void setPerfProbe(!perfProbe);
             setPerfProbeShown(!perfProbe);
@@ -9089,18 +8880,6 @@ function App() {
             if (manifest) enterHarness(manifest);
           },
           exitHarness,
-          // Flow: ⌘J is the stage's Conversation | Terminal, ⌘B its sidebar
-          // and ⌘⌥B the active plan's panel.
-          ...(isFlowShell()
-            ? {
-                // The palette is a keyboard: the start screen arrives zoomed.
-                draftNewPlan: () => openStartScreen("key"),
-                toggleDock: toggleStage,
-                // The effective toggle: on a Tool too (flowKeysRef, below).
-                toggleSidebar: () => flowKeysRef.current.toggleSidebar(),
-                togglePlanPanel: activeId ? () => togglePlanPanel(activeId) : undefined,
-              }
-            : {}),
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9234,42 +9013,6 @@ function App() {
     () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
     [summaries, chats, doorTabs],
   );
-  // The flow shell's New session (⌘N, "+ New session", Getting Started): the
-  // start screen as the stage. Navigation the user asked for, so whatever
-  // the door had open closes behind it, and the plate goes back to rest — no
-  // plan selected, the sidebar on its sessions. A keyboard summons arrives
-  // with the caret in the box, which is the focus zoom; a pointer arrives
-  // quiet, the caret left where it was (never stolen between tasks).
-  const openStartScreen = useCallback((via: "key" | "pointer" = "pointer") => {
-    tripDoor();
-    setFrontDoorOpen(false);
-    setDoorCompact(false);
-    selectSessions();
-    setActiveId(null);
-    // Off any launch the stage was showing: New session is the start screen.
-    setFocusedLaunch(null);
-    selectSurface("document");
-    // Once the resting door has landed on the stage it engages like any
-    // keyboard summons.
-    if (via === "key") requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new Event("redline:open-front-door"))));
-  }, [tripDoor, selectSessions, setActiveId, selectSurface]);
-  useEffect(() => {
-    if (!isFlowShell()) return;
-    const onNew = (event: Event) => openStartScreen((event as CustomEvent<{ via?: "key" | "pointer" }>).detail?.via === "key" ? "key" : "pointer");
-    window.addEventListener(NEW_SESSION_EVENT, onNew);
-    return () => window.removeEventListener(NEW_SESSION_EVENT, onNew);
-  }, [openStartScreen]);
-  // The four-step strip retires for good at the first approval: remembered,
-  // so deleting that session never brings it back.
-  const [flowStripRetired, setFlowStripRetired] = usePersistedState("redline.flow.stripRetired", false);
-  const approvedOnce = anyApproved(summaries);
-  useEffect(() => {
-    if (approvedOnce && !flowStripRetired) setFlowStripRetired(true);
-  }, [approvedOnce, flowStripRetired, setFlowStripRetired]);
-  // How many harnesses this machine has: past one, the start screen's model
-  // chip says which will do the work.
-  const harnessCount = (preflight?.claude.found ? 1 : 0) + (preflight?.codex?.found ? 1 : 0)
-    + Object.entries(preflight?.providers ?? {}).filter(([id, probe]) => id !== "claude-code" && id !== "codex" && probe?.found).length;
   const openDoorRecent = (r: DoorRecent) => {
     if (r.kind === "chat") return openChat(r.id);
     tripDoor();
@@ -9415,32 +9158,18 @@ function App() {
                   .slice(0, 4)
                   .map((c) => ({ id: c.companionId, title: c.title })) : undefined}
                 onOpenChat={where === "door" ? openChat : undefined}
-                // The flow shell's start screen is this door, and only it.
-                flow={where === "door" && isFlowShell() ? {
-                  manyHarnesses: harnessCount > 1,
-                  strip: !flowStripRetired && !approvedOnce,
-                  continues: continueLinks(summaries),
-                  onContinue: (id) => openDoorRecent({ kind: "plan", id, label: "", detail: "" }),
-                } : undefined}
               />
     );
   };
 
-  // The flow sidebar's own rows: chats beside the plans, a project's "+",
-  // and the launch in flight until its plan arrives. The classic sidebar
-  // ignores all of these.
+  // The sidebar's chat rows and a project group's "+".
   const flowSidebarHandlers = useStableHandlers({
-    // A click is a pointer summons: the start screen arrives quiet, the
-    // caret left where it was.
-    onNewSession: () => openStartScreen("pointer"),
+    // A project's "+": a door tab pointed at that folder.
     onNewSessionIn: (path: string) => {
       setFrontDoorProject({ path });
-      openStartScreen("pointer");
+      openDoorTab();
     },
-    onSelectChat: (id: string) => {
-      flowRowToStage();
-      openChat(id);
-    },
+    onSelectChat: openChat,
     onRenameChat: (id: string, title: string) => {
       invoke("companion_rename", { companionId: id, title, byUser: true })
         .then(refreshChats, (e) => setToast(String(e), 6000));
@@ -9458,9 +9187,9 @@ function App() {
       }, (e) => setToast(String(e), 6000));
     },
   });
-  // What the sidebar reads beyond the sessions: both shells now (W1).
-  // Launches are the stage's registry (lib/flowSessions): every launch until
-  // its plan arrives or its terminal closes, the one on the stage active.
+  // What the sidebar reads beyond the sessions: the launches (every launch
+  // until its plan arrives or its terminal closes, the one on screen active),
+  // their spinners and needs, and the chats.
   const flowSidebarData = useMemo(
     () => ({
       launches: flowSidebarLaunches,
@@ -9471,9 +9200,8 @@ function App() {
       // open one reads selected while the door's room holds it.
       chats,
       activeChatId: chatPane,
-      ...(isFlowShell() ? { startActive: flowStartOnStage } : {}),
     }),
-    [flowStartOnStage, chatPane, chats, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
+    [chatPane, chats, flowSidebarLaunches, activeLaunchId, flowWorking, flowNeeds],
   );
   // The workbench sidebar's own data (W1): which Place reads selected, the
   // live runs and Localhost ports beside them, and each session's terminals
@@ -9502,13 +9230,7 @@ function App() {
   // `commentCallbacks`), so they render when their data changes and not on
   // every shell render.
   const sidebarHandlers = useStableHandlers({
-    // Flow: a row puts its session on the stage, so the start screen gives
-    // way (as a door recent does) and a Tool steps back.
     onSelect: (id: string) => {
-      if (isFlowShell()) {
-        setFrontDoorOpen(false);
-        flowRowToStage();
-      }
       // `wb:session-switch`: the click to the stage showing the session
       // (ended once `sessionReady` flips, below). A re-click of the open
       // session is not a switch.
@@ -9529,10 +9251,6 @@ function App() {
     // A session's terminal row: the dock's tile, hailed. (Terminal panes in
     // the centre are W3's.)
     onSelectTerminal: (sessionId: string, terminalId: string) => {
-      if (isFlowShell()) {
-        flowShowTerminalRef.current(terminalId, "terminal");
-        return;
-      }
       // The session's agent terminal is its Agent tab: one pane per
       // terminal, opened again it comes forward.
       if (sessionTerminals.get(sessionId) === terminalId) {
@@ -9544,13 +9262,8 @@ function App() {
       terminalsRef.current?.selectTab(terminalId);
       terminalsRef.current?.hailTerminal(terminalId);
     },
-    // A pending launch's row: its own set (the Agent tab) under the
-    // workbench, the stage in flow.
+    // A pending launch's row: its own set, the Agent tab.
     onSelectLaunch: (terminalId: string) => {
-      if (isFlowShell()) {
-        selectFlowLaunch(terminalId);
-        return;
-      }
       const launch = flowLaunches.find((l) => l.terminalId === terminalId);
       if (launch) {
         wb.dispatch({ type: "selectSession", key: launchKey(launch.launchId), defaults: { agentTerminalId: terminalId } });
@@ -9572,7 +9285,6 @@ function App() {
       // The sidebar fires this for the row click. The session it points at
       // might not be the active one yet — flip activeId first so the pane
       // mounts the right session before the viewed-version applies.
-      if (isFlowShell()) flowRowToStage();
       if (sessionId !== activeId) {
         beginMeasure("wb:session-switch");
         setActiveId(sessionId);
@@ -9638,44 +9350,19 @@ function App() {
     </Suspense>
   ) : null;
 
-  // ── The flow stage's props ───────────────────────────────────────────────
-  const stageHarness: "claude" | "codex" =
-    stageTarget.kind === "launch"
-      ? (flowLaunches.find((l) => l.terminalId === stageTarget.terminalId)?.harness ?? "claude")
-      : session?.backend === "codex"
-        ? "codex"
-        : "claude";
-  // A live room's plan is on the plate too: its document is the mesh's.
-  const stageHasPlan = stageTarget.kind === "plan" && (joinedActive || (sessionReady && !!latest));
-  // The Feedback tab's verbs: the comment cards' own handlers.
-  const feedbackActions = useMemo(
-    () => ({
-      accept: commentCallbacks.onAccept,
-      reopen: commentCallbacks.onReopen,
-      promote: commentCallbacks.onPromote,
-      remove: commentCallbacks.onDelete,
-      update: commentCallbacks.onUpdate,
-      acceptSuggestion: commentCallbacks.onAcceptSuggestion,
-    }),
-    [commentCallbacks],
-  );
-  const stagePlanTitle = stageHasPlan
-    ? (summaries.find((s) => s.sessionId === activeId)?.planTitle ?? null)
-    : null;
-  // The conversation's Talk: the dock's conversation beside the stage — the
-  // plan's voice panel once there is a plan. A launch with no plan yet has no
-  // voice of its own, so Talk says when it will.
+  // The Agent pane's Talk: the dock's conversation — the plan's voice panel
+  // once there is a plan. A launch with no plan yet has no voice of its own,
+  // so Talk says when it will.
   const flowTalk = () => {
     if (voiceDocked) closeDock();
     else if (dockReachable) openDiscussion();
     else setToast({ message: "Talk opens on the plan as soon as it arrives.", tone: "info" });
   };
-  // ── The plan's chrome: one set of bundles for the flow stage and the
-  // workbench's Plan pane (components/plan) — the footer's verbs, classic's
-  // notices, the ⋯ menu, the version pill and the contents toggle. The
-  // terminal they point at is the stage's in flow and the session's agent
-  // terminal under the workbench.
-  const planChromeTerminalId = flowShell ? stageTerminalId : activeId ? sessionTerminals.get(activeId) ?? null : null;
+  // ── The plan's chrome: the bundles the Plan pane (components/plan) reads
+  // — the footer's verbs, classic's notices, the ⋯ menu, the version pill
+  // and the contents toggle. The terminal they point at is the session's
+  // agent terminal.
+  const planChromeTerminalId = activeId ? sessionTerminals.get(activeId) ?? null : null;
   const planChromeAuthor = agentLabelFor(session?.backend ?? null);
   const planViewing =
     isViewingHistorical && viewedRevision && latest
@@ -9692,9 +9379,7 @@ function App() {
   // failed notice, as classic's banner did.
   const restoreTerminalId = attemptHere?.terminalId ?? restoreFailure?.terminalId ?? null;
   const planShowTerminal = planChromeTerminalId || restoreTerminalId
-    ? flowShell
-      ? () => setStage("terminal")
-      : () => { void showRawTerminal(restoreTerminalId ?? planChromeTerminalId); }
+    ? () => { void showRawTerminal(restoreTerminalId ?? planChromeTerminalId); }
     : null;
   const planFooter = {
     author: planChromeAuthor,
@@ -9761,268 +9446,13 @@ function App() {
     onInvite: surfaceEnabled(effectiveWorkspace, "collab") ? () => setInviteOpen(true) : null,
     onMove: openMovePlan,
   };
-  const renderFlowStage = (planBody: ReactNode) => {
-    if (stageTarget.kind === "start" || !flowConvoHost) return planBody;
-    return (
-      <Suspense fallback={null}>
-        <ErrorBoundary region="session stage" fallback={surfaceFallback("session stage")}>
-          <FlowStage
-            target={stageTarget}
-            harness={stageHarness}
-            conversationHost={flowConvoHost}
-            onPose={onFlowPose}
-            hasPlan={stageHasPlan}
-            planBody={planBody}
-            latestVersion={latest?.versionNumber ?? null}
-            comments={threadComments}
-            viewing={planViewing}
-            contents={planContents}
-            width={{ wide: docWide, measure: docMeasure }}
-            footer={planFooter}
-            notices={planNotices}
-            planMenu={planMenu}
-            feedback={
-              session
-                ? {
-                    session,
-                    viewingVersion: isViewingHistorical && viewedRevision ? viewedRevision.versionNumber : (latest?.versionNumber ?? 1),
-                    // A thread's anchor takes you to its comment (scrolled to,
-                    // flashed, the block when it has no highlight).
-                    onJumpToAnchor: (anchorId, commentId) => {
-                      if (commentId) focusComment(commentId);
-                      else documentRef.current?.querySelector(`[data-anchor-id="${cssEscape(anchorId)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
-                    },
-                    focusedCommentId,
-                    submitInFlight: busy,
-                    actions: feedbackActions,
-                    onViewResearch: viewResearch,
-                    composer: {
-                      // A historical view's anchors point into another revision.
-                      selection: isViewingHistorical ? null : selection,
-                      onClearSelection: clearSelection,
-                      onSubmit: (req) => submitComment(req),
-                    },
-                    onOpenVersion: (version) => setViewedVersionNumber(version === latest?.versionNumber ? null : version),
-                    autoDiscussId: autoDiscussCommentId,
-                    onAutoDiscussConsumed: clearAutoDiscuss,
-                    autoOpenId: autoOpenCommentId,
-                    onAutoOpenConsumed: clearAutoOpen,
-                  }
-                : null
-            }
-            composer={commentComposer}
-            discussionZoom={{ value: discussionZoom, adjust: adjustDiscussionZoom }}
-            terminalView={flowView === "terminal"}
-            terminalDock={termDockRef}
-          />
-        </ErrorBoundary>
-      </Suspense>
-    );
-  };
-
-  // ── The flow shell's top bar and keys (C1) ──────────────────────────────
-  // What the bar names: the session on the stage (its StageTarget), its mode,
-  // its plan and its terminal — or the chat the door is holding, or the
-  // start screen while the door is open.
-  const flowSummary = stageTarget.kind === "plan" ? summaries.find((s) => s.sessionId === stageTarget.sessionId) ?? null : null;
-  const flowChat = null as Companion | null;
-  const flowTarget: ModeTarget = flowChat ? "chat" : frontDoorOpen ? "start" : stageTarget.kind;
-  const flowPlanId = flowTarget === "plan" && stageTarget.kind === "plan" ? stageTarget.sessionId : null;
-  const flowTerminalId = flowTarget === "launch" || flowTarget === "plan" ? stageTerminalId : null;
-  // The CLI's own name for the session (`convo-title`) stands in until the
-  // plan brings a title of its own.
-  const flowCliTitle = stageTerminalId ? terminalTitles.get(stageTerminalId) ?? null : null;
-  const flowTitle =
-    flowTarget === "chat" ? flowChat?.title || "Chat"
-      : flowTarget === "plan" && flowSummary ? (flowSummary.titleOverride || flowSummary.planTitle ? sessionTitle(flowSummary) : flowCliTitle ?? sessionTitle(flowSummary))
-        : flowTarget === "launch" && stageTarget.kind === "launch" ? flowCliTitle ?? launchTitle(stageTarget.prompt)
-          : null;
-  const flowMode = sessionMode({
-    target: flowTarget,
-    status: flowSummary?.status,
-    held: flowSummary?.held,
-    revising: waiting,
-    revisions: flowSummary?.revisions,
-    runState: flowSummary?.runState,
-  });
-  const flowTools = useMemo(() => toolSurfaces(effectiveWorkspace), [effectiveWorkspace]);
-  // The Tool on screen instead of the stage: the wall counts, so the top bar
-  // offers the way back from it like any other.
-  const flowToolSurface: ToolId | null = termFullscreen ? "terminals" : flowTools.find((t) => t.id === mainSurface)?.id ?? null;
-  // "● N needs you" (lib/sessionMode `needsYou`): what waits on you anywhere
-  // but the session on screen.
-  const flowWaiting = needsYou({
-    summaries,
-    needsYouTerminals: flowNeedsYouTerms,
-    // A review an agent asked for, or a run's report: classic's footer chip.
-    reviewHold: codeReview.holdActive || !!reviewNews,
-    // The session on screen is left out; on a Tool, nothing is on screen.
-    activeSessionId: flowStageOwns ? flowPlanId : null,
-    activeTerminalId: flowStageOwns ? flowTerminalId : null,
-  });
-  // Flow has no dock, so a terminal is shown as its session's stage (or its
-  // launch's), in the view asked for; one no session owns, on the wall.
-  const flowShowTerminal = (terminalId: string, view: StageView) => {
-    const sessionId = [...sessionTerminals].find(([, t]) => t === terminalId)?.[0] ?? null;
-    const launch = flowLaunches.some((l) => l.terminalId === terminalId);
-    if (sessionId || launch) {
-      setFrontDoorOpen(false);
-      flowRowToStage();
-      if (sessionId) setActiveId(sessionId);
-      else selectFlowLaunch(terminalId);
-      setStage(view);
-      return;
-    }
-    enterTermFullscreen();
-    void ensureTerminalReady().then((dock) => {
-      dock?.selectTab(terminalId);
-      dock?.hailTerminal(terminalId);
-    });
-  };
-  flowShowTerminalRef.current = flowShowTerminal;
-  flowJumpRef.current = () => flowJumpToNeedsYou();
-  // A gesture, so a trip like any other: the door steps aside for it.
-  const flowJumpToNeedsYou = () => {
-    const plan = flowWaiting.plans[0];
-    if (plan) {
-      tripDoor();
-      selectSessions();
-      setActiveId(plan);
-      selectSurface("document");
-      setPlanPose(plan, "split");
-    } else if (flowWaiting.terminals.length > 0) {
-      // Its question or permission card is in the conversation.
-      flowShowTerminal(flowWaiting.terminals[0], "conversation");
-    } else if (flowWaiting.review) {
-      tripDoor();
-      selectSurface("review");
-    }
-  };
-  // The Tool on screen, picked again (its row or its ⌘ key), is the way
-  // back, like a tab you click a second time.
-  const openFlowTool = (id: ToolId) => {
-    if (id === flowToolSurface) return showFlowStage();
-    tripDoor();
-    if (id === "terminals") return enterTermFullscreen();
-    setTermFullscreen(false);
-    selectSurface(id);
-  };
-  const showFlowStage = () => {
-    setTermFullscreen(false);
-    if (mainSurface === "document") return;
-    tripDoor();
-    selectSurface("document");
-  };
-  // A sidebar row is the way back from anywhere: its session takes the stage,
-  // and the sidebar is about sessions again (the terminal's folder follow
-  // can have left it on a folder, which flow never shows).
-  const flowRowToStage = () => {
-    showFlowStage();
-    selectSessions();
-  };
-  flowRowToStageRef.current = flowRowToStage;
-  // Mount-once listeners read the latest of these.
-  // ⌘N, File ▸ New Session and the ⌘⇧N alias are all keyboard summons of
-  // the start screen (the start lane's openStartScreen): it arrives with the
-  // caret in the box.
-  const flowNewSession = () => openStartScreen("key");
-  const flowKeys = { openTool: openFlowTool, newSession: flowNewSession, showStage: showFlowStage, planId: flowPlanId, workspace: effectiveWorkspace, surface: mainSurface, tool: flowToolSurface, toggleSidebar };
-  const flowKeysRef = useRef(flowKeys);
-  flowKeysRef.current = flowKeys;
-  useEffect(() => {
-    if (!isFlowShell()) return;
-    const keys = () => flowKeysRef.current;
-    // From a Tool, ⌘J and ⌘⌥B first bring the session back; ⌘J then stops
-    // there rather than also flipping to the terminal.
-    const stage = () => {
-      if (keys().tool) keys().showStage();
-      else toggleStage();
-    };
-    const planPanel = () => {
-      const id = keys().planId;
-      if (!id) return;
-      keys().showStage();
-      togglePlanPanel(id);
-    };
-    const tool = (n: number) => {
-      const id = toolForKey(keys().workspace, n);
-      if (id) keys().openTool(id);
-      return !!id;
-    };
-    // Capture phase, ahead of xterm's helper textarea (like ⌘⇧J): the shell
-    // never sees these. ⌘N and ⌘1–4 normally never get here — the native
-    // menu takes them first, browser page focused or not — but a page with
-    // no native menu still has them.
-    const onKey = (e: KeyboardEvent) => {
-      const claim = () => {
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      if (isStageKey(e)) {
-        claim();
-        stage();
-      } else if (isPlanPanelKey(e)) {
-        claim();
-        planPanel();
-      } else if (isSidebarKey(e)) {
-        // ⌘B is bold in a text editor, and the file tree on Code review.
-        if ((e.target as HTMLElement | null)?.isContentEditable || keys().surface === "review") return;
-        claim();
-        keys().toggleSidebar();
-      } else if (isNewSessionKey(e) || (e.metaKey && isNewPlanKey(e))) {
-        // ⌘⇧N too, the old chord, for one release — taken here, ahead of
-        // the classic listener, so it lands on the start screen rather than
-        // the door. (⌘ only: Ctrl+⇧N stays the terminal's.)
-        claim();
-        keys().newSession();
-      } else {
-        const n = toolKeyOf(e);
-        if (n && toolForKey(keys().workspace, n)) {
-          claim();
-          tool(n);
-        }
-      }
-    };
-    // Esc leaves a Tool for the session, when nothing nearer claimed it: a
-    // field, the terminal, a menu, the browser's own tile restore.
-    const onEscape = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented || !keys().tool) return;
-      const target = e.target as HTMLElement | null;
-      if (target?.closest("input, textarea, select, [contenteditable=true], .xterm, [role=menu], [role=dialog]")) return;
-      e.preventDefault();
-      keys().showStage();
-    };
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("keydown", onEscape);
-    // The same chords from inside a browser page (browser_signals.js →
-    // BrowserPane), where none of our listeners can hear the keyboard.
-    const fromPage: [string, () => void][] = [
-      ["redline:toggle-monochat", stage],
-      ["redline:toggle-sidebar", () => keys().toggleSidebar()],
-      ["redline:toggle-plan-panel", planPanel],
-    ];
-    for (const [name, run] of fromPage) window.addEventListener(name, run);
-    // The native menu's accelerators (workbench_menu.rs's flow set), installed now and
-    // taken out again by the Settings switch before it reloads to classic.
-    const onNew = listen("menu-new-session", () => keys().newSession());
-    const onSurface = listen<number>("menu-surface", (e) => void tool(e.payload));
-    void invoke("set_flow_menu", { enabled: true }).catch(() => {});
-    return () => {
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("keydown", onEscape);
-      for (const [name, run] of fromPage) window.removeEventListener(name, run);
-      void onNew.then((un) => un());
-      void onSurface.then((un) => un());
-    };
-  }, []);
-
   // The plan body, built inside the centre's render below and mounted once
   // in `planHost` after it (siblings render in order).
   let planBodyNow: ReactNode = null;
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
-    <div className={`h-full min-h-0 min-w-0 flex flex-col overflow-hidden${flowShell ? " rl-ambient" : ""}`}>
+    <div className="h-full min-h-0 min-w-0 flex flex-col overflow-hidden">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
           a render throw stays inside it. The terminal dock is deliberately a
@@ -10070,63 +9500,6 @@ function App() {
           a native webview composites above all React DOM, so an overlaid
           header on the browser surface would simply be invisible. */}
       <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
-      {isFlowShell() ? (
-        <Suspense fallback={<div className="rl-app-header" style={{ height: 38 }} />}>
-        <FlowTopBar
-          title={flowTitle}
-          mode={flowMode}
-          planSessionId={flowPlanId}
-          terminalId={flowTerminalId}
-          toolSurface={flowToolSurface}
-          sidebarOpen={!sidebarCollapsed}
-          onToggleSidebar={toggleSidebar}
-          onShowStage={showFlowStage}
-          needsYou={flowWaiting.count}
-          onJumpToNeedsYou={flowJumpToNeedsYou}
-          tools={flowTools}
-          liveRuns={summaries.filter((s) => isLiveRunState(s.runState)).length}
-          onOpenTool={openFlowTool}
-          // What classic's header carried and no other flow control does.
-          toolExtras={[
-            { id: "palette", label: "Command palette", hint: "⌘K", onPick: () => setPaletteOpen(true) },
-            ...(surfaceEnabled(effectiveWorkspace, "collab") ? [{ id: "join", label: "Join a live session…", onPick: () => setJoinOpen(true) }] : []),
-            ...(surfaceEnabled(effectiveWorkspace, "memory") ? [{ id: "inspector", label: "Memory inspector", onPick: () => setMemoryInspectorOpen(true) }] : []),
-            ...(activeHarness && activeHarness.entry !== "boot" ? [{ id: "harness", label: `Exit ${activeHarness.manifest.name}`, onPick: exitHarness }] : []),
-          ]}
-          settings={{
-            onOpenIntegrationHooks: hookConflicts.openDialog,
-            theme,
-            onThemeChange,
-            font,
-            onFontChange,
-            lint,
-            onLintChange,
-            mode,
-            onModeChange: changeMode,
-            flashEnabled,
-            onFlashEnabledChange: setFlashEnabled,
-            flashColor,
-            onFlashColorChange: setFlashColor,
-            flashSound,
-            onFlashSoundChange: setFlashSound,
-            flashSoundConfig,
-            onFlashSoundConfigChange: setFlashSoundConfig,
-            onFlashSoundPreview: (cfg) => playInterceptBeep(cfg),
-            onFlashTest: () => {
-              setFlashSeq((n) => n + 1);
-              if (flashSound) playInterceptBeep(flashSoundConfig);
-            },
-            surfacesPanel: (
-              <SurfacesPanel
-                workspace={effectiveWorkspace}
-                onUpdate={updateWorkspace}
-                harnessName={activeHarness ? activeHarness.manifest.name : null}
-              />
-            ),
-          }}
-        />
-        </Suspense>
-      ) : (
       <Header
         onOpenIntegrationHooks={hookConflicts.openDialog}
         session={session}
@@ -10187,7 +9560,6 @@ function App() {
         onSnapBack={snapBack}
         onOpenPalette={() => setPaletteOpen(true)}
       />
-      )}
       </ChromeSlot>
       <HookConflictWarning health={hookConflicts} />
       {decisionWindow && (
@@ -10230,7 +9602,7 @@ function App() {
           against this element, so they cover the ring — plates only. */}
       <main
         className="relative min-h-0 min-w-0 flex-1 overflow-hidden flex flex-col"
-        style={{ padding: `${flowShell ? 0 : SHELL_EDGE}px` }}
+        style={{ padding: `${SHELL_EDGE}px` }}
       >
         <ErrorBoundary
           region="content area"
@@ -10251,9 +9623,7 @@ function App() {
         // aside spill right OVER the doc, painted above it.
         <div
           ref={sidebarClipRef}
-          // Flow's sidebar sits flush on the window with its own rule; the
-          // plate is classic's.
-          className={`shrink-0 rl-sidebar-clip${isFlowShell() ? "" : " rl-plate"}`}
+          className="shrink-0 rl-sidebar-clip rl-plate"
           data-rl-pane
           // No `width` here on purpose: `applyLiveLayout` owns it, so a drag
           // frame never has to go through React and React never clobbers a
@@ -10269,8 +9639,7 @@ function App() {
           data-tour="sessions"
           className="flex flex-col shrink-0 rl-sidebar-aside"
         >
-          {/* Flow's sidebar is sessions only; folders open from the composer. */}
-          {!isFlowShell() && openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
+          {openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
             openFolders={openFolders}
             sidebarTab={sidebarTab}
             linkNav={linkNav}
@@ -10279,7 +9648,7 @@ function App() {
             onCloseFolder={closeFolder}
             onToggleLink={() => setLinkNav((v) => !v)}
           /></Suspense>}
-          {isFlowShell() || sidebarTab.kind === "sessions" ? (
+          {sidebarTab.kind === "sessions" ? (
             // Chunk warmed by the boot effect; null while it lands — the house
             // rule is a quietly blank plate, never a spinner.
             <Suspense fallback={null}>
@@ -10317,7 +9686,7 @@ function App() {
         </aside>
         {/* In curtain state the flow boundary sits under the spilled aside, so
             the divider rides the curtain's visible right edge instead. */}
-        {liveFlags.curtainL && !isFlowShell() && (
+        {liveFlags.curtainL && (
           <div
             ref={sidebarCurtainDivRef}
             style={{
@@ -10344,10 +9713,8 @@ function App() {
         )}
         {/* Always in flow (its 6px is part of the space model); when the
             sidebar curtains it is painted over, and the absolute copy above
-            carries the affordance at the curtain's visible edge. The flow
-            shell has none: its sidebar is a fixed column with its own rule,
-            shown and hidden with ⌘B, and "+ New session" is its way in. */}
-        {!isFlowShell() && <PaneDivider
+            carries the affordance at the curtain's visible edge. */}
+        {<PaneDivider
           orientation="vertical"
           side="leading"
           label="sidebar"
@@ -10947,8 +10314,8 @@ function App() {
                 // there (a loading or revoked notice) centres on its own, and a
                 // wide-view setting left over from a plan must not slide it
                 // sideways. Symmetric, slim gutters instead of the reading ones.
-                ...(flowStageOwns ? FLOW_ARTICLE : docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
-                ...(flowStageOwns ? null : { paddingLeft: docSurfaceActive ? undefined : "24px" }),
+                ...(docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
+                paddingLeft: docSurfaceActive ? undefined : "24px",
                 // `--rl-doc-zoom` moved UP one level, to the ancestor every
                 // surface body shares — it was inert in the Drafter from here.
               } as React.CSSProperties
@@ -11023,9 +10390,8 @@ function App() {
                   focusNonce={focusNonce}
                   onHighlightClick={handleHighlightClick}
                   onBackToLatest={() => setViewedVersionNumber(null)}
-                  // The plan header's version pill says it once, in flow
-                  // and in the workbench's Plan pane.
-                  banner={!flowStageOwns && !classicWb}
+                  // The Plan pane's header says it once, as the version pill.
+                  banner={false}
                 />
               ) : (
                 <Suspense fallback={null}>
@@ -11050,9 +10416,6 @@ function App() {
                       actionsRef={planActionsRef}
                       onLockedEdit={lockedEditToast}
                       collab={ownerCollab}
-                      // Flow's split pose has no comment pane: a mark's words
-                      // go under its block (board 4c).
-                      marginNotesBy={flowStageOwns && flowPainted.pose === "split" ? relayDefaults.displayName : undefined}
                     />
                   </ErrorBoundary>
                 </Suspense>
@@ -11263,11 +10626,6 @@ function App() {
                 />
               );
             if (secondaryBody) return secondaryBody;
-            // Flow: the session stage, holding the plan document in its panel
-            // — or, with no session on it, the start screen's plate: empty,
-            // the window's colour, and where the resting door lands.
-            if (flowStageOwns) return renderFlowStage(documentBody);
-            if (flowStartOnStage) return <div data-rl-door-plate className="rl-flow-start-plate" />;
             // No secondary pane open → the document is the default full view.
             return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{documentBody}</SpringSwap> : documentBody;
           })()}
@@ -11418,14 +10776,11 @@ function App() {
           )}
         </div>
 
-        {/* Flow has no classic margin; Code review keeps it for its diff's
-            threads, which have no flow home yet. */}
-        {!paneFullscreen && !(flowShell && mainSurface !== "review") && (
+        {!paneFullscreen && (
           // Always in flow (its 6px is part of the space model); when the
           // discussion pane curtains it is painted over, and the absolute
           // copy inside the pane wrapper carries the affordance at the
-          // curtain's visible edge. Not beside the flow stage, whose plan
-          // panel is the plan's margin (`platePaneMask`).
+          // curtain's visible edge.
           <PaneDivider
             collapsed={paneCollapsed}
             dragging={isDragging}
@@ -11892,7 +11247,7 @@ function App() {
         </div>
         </ErrorBoundary>
 
-        {!termFullscreen && !flowDockHidden && !flowTermStage && !paneCli && (
+        {!termFullscreen && !paneCli && (
           <PaneDivider
             orientation="horizontal"
             label="terminal"
@@ -11918,11 +11273,9 @@ function App() {
         <div
           ref={termDockRef}
           className={
-            // Flow's terminal view first: the dock over the stage, showing
-            // the session's PTY alone (`solo` below).
-            // Flow's wall too, over the plate beside the sidebar: the sidebar
-            // and the top bar's crumb are its way back.
-            flowTermStage || (flowShell && termFullscreen) || paneCli
+            // An Agent pane's CLI view: the dock over the pane, showing the
+            // session's PTY alone (`solo` below).
+            paneCli
               ? "rl-term-dock--stage"
               : termFullscreen
               ? "absolute inset-0 z-30"
@@ -11931,11 +11284,11 @@ function App() {
                 // a 2px rounded sliver across the hull.
                 `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
           }
-          data-rl-pane={termFullscreen || flowTermStage || paneCli ? undefined : ""}
+          data-rl-pane={termFullscreen || paneCli ? undefined : ""}
           // Folded, the dock's terminals are not rendered at all (styles.css
           // `.rl-term-dock[data-collapsed]`): their layers and layout would
           // otherwise be kept warm behind a 0px fold.
-          data-collapsed={!termFullscreen && !flowTermStage && !paneCli && termCollapsed ? "" : undefined}
+          data-collapsed={!termFullscreen && !paneCli && termCollapsed ? "" : undefined}
           // Height is owned by `applyLiveLayout` (it folds in the collapsed
           // state), so the dock tracks the divider without a render — and
           // without touching style for anything else on the page.
@@ -11944,7 +11297,7 @@ function App() {
           {/* In fullscreen, an overlay divider at the top of the terminal
               gives the user the same top-edge caret they use to collapse
               the docked terminal — except here it exits fullscreen. */}
-          {termFullscreen && !flowShell && (
+          {termFullscreen && (
             <div
               style={{
                 position: "absolute",
@@ -11982,9 +11335,8 @@ function App() {
             onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}
             onNeedsYouChange={setTermNeedYou}
-            onNeedsYouIdsChange={isFlowShell() ? setFlowNeedsYouTerms : undefined}
-            collapsed={termFullscreen || flowTermStage || paneCli ? false : termCollapsed}
-            solo={flowTermStage ? stageTerminalId : paneCli?.terminalId ?? null}
+            collapsed={termFullscreen || paneCli ? false : termCollapsed}
+            solo={paneCli?.terminalId ?? null}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}
@@ -12019,9 +11371,7 @@ function App() {
       >
       {/* Same swap at the bottom — no native constraint here, so the footer
           hides outright behind a SHELL_EDGE strip of hull. */}
-      {/* Not in flow: build status moved to the plan panel's footer, and
-          "needs you" to the top bar (PLAN, "Footer removed"). */}
-      {!flowShell && <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
+      <Suspense fallback={null}><ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
       <Footer
         planState={session ? { status:session.status, runState:activeRunState, held:activeHeld } : undefined}
         onSetPlanState={session ? state => { void setPlanState(session.sessionId, state); } : undefined}
@@ -12057,7 +11407,7 @@ function App() {
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
       />
-      </ChromeSlot></Suspense>}
+      </ChromeSlot></Suspense>
       </ErrorBoundary>
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}
@@ -12318,15 +11668,11 @@ function App() {
         </Suspense>
       )}
       <MonochatIsland
-        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${flowStartOnStage}:${bootAnimating}`}
-        // In the flow shell the door rests exactly where the start screen is
-        // the stage — whatever the sidebar holds: a folder there is where it
-        // would launch (A5), not a file viewer covering the plate. Flow has
-        // no floating pill: its sidebar, and New session at its head, stay on
-        // every surface.
-        landing={plateAtRest && shellReady && !joinedActive && (isFlowShell() ? flowStartOnStage : classicWb ? wbView.focusedKind === "door" : sidebarTab.kind !== "folder")}
+        clearanceKey={`${immersive}:${chromeRevealed}:${termCollapsed}:${termFullscreen}:${bootAnimating}`}
+        // The door rests on a door pane that is on screen and focused.
+        landing={plateAtRest && shellReady && !joinedActive && wbView.focusedKind === "door"}
         onPillClick={classicWb ? openDoorTab : undefined}
-        pill={!isFlowShell()}
+        pill
         surfaceKey={doorNavKey}
         onVisibilityChange={setDoorVisible}
         open={frontDoorOpen}
@@ -12398,46 +11744,6 @@ function App() {
               onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}
             />
 </ErrorBoundary></Suspense>, chatHost)}
-      {/* The flow stage's conversation, rendered here — at one place in the
-          tree for as long as the session is on the stage — and shown wherever
-          the stage puts its host. Keyed by the terminal, so a launch becoming
-          its plan keeps the conversation, and another session gets its own. */}
-      {flowConvoHost && stageTarget.kind !== "start" && createPortal(
-        <Suspense fallback={null}>
-          <ErrorBoundary region="session conversation" fallback={surfaceFallback("session conversation")}>
-            <SessionConversation
-              key={stageTerminalId ?? (stageTarget.kind === "plan" ? stageTarget.sessionId : "")}
-              terminalId={stageTerminalId}
-              sessionId={stageTarget.kind === "plan" ? stageTarget.sessionId : null}
-              harness={stageHarness}
-              layout={flowStageOwns ? flowPainted.layout : "stage"}
-              planTitle={stagePlanTitle}
-              planMarks={pendingComments.length}
-              planOpen={flowStageOwns && flowPainted.pose !== "closed"}
-              onOpenPlan={() => { if (stageTarget.kind === "plan") setPlanPose(stageTarget.sessionId, "split"); }}
-              onShowTerminal={() => setStage("terminal")}
-              projectPath={stageTarget.kind === "launch" ? stageTarget.projectPath : (session?.projectPath ?? null)}
-              planMarkdown={stageHasPlan ? (latest?.rawPlanMarkdown ?? null) : null}
-              // Talk is the voice panel, one click away (it IS the
-              // discussion surface): open beside the stage, or closed again.
-              talking={voiceDocked}
-              onTalk={flowTalk}
-              // Out of sight, its questions go to the terminal (components/agent/askRelease).
-              hidden={!flowConvoOnScreen}
-              // The plan card follows the session, not only the transcript.
-              planState={stageTarget.kind === "plan" && flowSummary ? {
-                label: flowMode?.label ?? "Plan",
-                kind: flowMode?.kind ?? "plan",
-                held: flowSummary.held,
-                toReview: threadComments.filter((c) => c.status === "resolved").length,
-              } : null}
-              fallbackModel={stageTarget.kind === "plan" && session?.model ? { model: session.model, effort: session.effort ?? null } : null}
-              fallbackMode={flowSummary?.status === "in_review" ? "plan" : null}
-            />
-          </ErrorBoundary>
-        </Suspense>,
-        flowConvoHost,
-      )}
       {classicWb && activeId && createPortal(
         planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBodyNow}</SpringSwap> : planBodyNow,
         planHost,
@@ -12523,9 +11829,8 @@ function App() {
       )}
       {/* Onboarding tour: replay from the menu always, or auto-run once on first
           launch — but only after the hook/skill setup modal is out of the way,
-          so the two never overlap. Never in the flow shell, whose start
-          screen is the introduction (Getting Started opens it). */}
-      {!isFlowShell() && (() => {
+          so the two never overlap. */}
+      {(() => {
         const setupActive = setupModalActive;
         const show =
           tourOpen || (!onboardingDone && !setupActive && !bootAnimating);
@@ -12546,7 +11851,7 @@ function App() {
           manifest, dismiss retires it; either way it never fires again.
           Suppressed inside a harness: the suggestion is about the STOCK
           landing, and accepting it there would edit the wrong manifest. */}
-      {nudgeSuggestion && !loading && !activeHarness && !flowShell && (
+      {nudgeSuggestion && !loading && !activeHarness && (
         <NudgeCard
           message={nudgeSuggestion.message}
           onAccept={() => {

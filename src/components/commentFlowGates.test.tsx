@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// The comment card and its discussion in the flow shell (C4): no c-0xx id
-// chip, no per-thread model chip, the anchor by its human label, and a
-// resolved card collapsed to two lines. The classic shell renders all of it
-// exactly as before.
+// The comment card, its discussion and the anchor pill: the id chip, the
+// per-thread model chip, the positional anchor (a human label when the host
+// hands one over), and a host that owns the way into a discussion.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -19,7 +18,6 @@ vi.mock("@tauri-apps/api/webview", () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 import type { Comment } from "../types";
-import { resetShellFlagForTests, SHELL_KEY } from "../lib/shellFlag";
 import { AnchorPill } from "./AnchorPill";
 import { CommentCard } from "./CommentCard";
 import { CommentThread } from "./CommentThread";
@@ -43,11 +41,6 @@ const accepted: Comment = {
   resolution: { body: "Done.", appearedInVersion: 2, acceptedAt: 1 },
 };
 const draft: Comment = { id: "c-008", type: "feedback", anchorId: "A.1", body: "Say why.", createdAt: 2, status: "draft" };
-
-function shell(name: "classic" | "flow") {
-  localStorage.setItem(SHELL_KEY, name);
-  resetShellFlagForTests();
-}
 
 async function card(comment: Comment, anchorLabel?: string) {
   await act(async () =>
@@ -87,21 +80,25 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   localStorage.clear();
-  resetShellFlagForTests();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });
 
-describe("classic is unchanged", () => {
-  beforeEach(() => shell("classic"));
+describe("the card, the discussion and the pill", () => {
 
-  it("the card shows its id, its positional anchor and a one-line collapse", async () => {
-    await card(accepted, "§4 · step 4");
+  it("the card shows its id, its anchor and a one-line collapse", async () => {
+    await card(accepted);
     expect(text()).toContain("c-007");
     expect(text()).toContain("§A.4.p1");
-    expect(text()).not.toContain("§4 · step 4");
     expect(host.querySelector(".truncate")).not.toBeNull();
     expect(host.querySelector(".rl-comment-preview-2")).toBeNull();
+  });
+
+  it("a host that knows the anchor's human label shows it in place of the id", async () => {
+    await card(accepted, "§4 · step 4");
+    expect(text()).toContain("c-007");
+    expect(text()).toContain("§4 · step 4");
+    expect(text()).not.toContain("§A.4.p1");
   });
 
   it("the discussion keeps its model chip", async () => {
@@ -109,43 +106,15 @@ describe("classic is unchanged", () => {
     expect(host.querySelector(".rl-fd-model-chip")).not.toBeNull();
   });
 
-  it("the pill names the id", async () => {
-    await act(async () => root.render(createElement(AnchorPill, { anchorId: "A.1.p3", label: "Context · ¶3" })));
-    expect(text()).toBe("§A.1.p3");
-  });
-});
-
-describe("flow", () => {
-  beforeEach(() => shell("flow"));
-
-  it("the card drops the c-0xx chip and names its anchor", async () => {
-    await card(accepted, "§4 · step 4");
-    expect(text()).not.toContain("c-007");
-    expect(text()).toContain("§4 · step 4");
-    expect(text()).not.toContain("§A.4.p1");
-  });
-
-  it("a resolved card collapses to two clamped lines of its whole note", async () => {
-    await card(accepted, "§4 · step 4");
-    const preview = host.querySelector(".rl-comment-preview-2");
-    expect(preview?.textContent).toBe(accepted.body);
-    expect(host.querySelector(".truncate")).toBeNull();
-  });
-
-  it("the discussion has no per-thread model chip", async () => {
-    await card(draft);
-    expect(text()).toContain("Discuss with Claude");
-    expect(host.querySelector(".rl-fd-model-chip")).toBeNull();
-  });
-
-  it("without a label the pill still names the id", async () => {
+  it("the pill names the id, or the label when the host hands one over", async () => {
     await act(async () => root.render(createElement(AnchorPill, { anchorId: "A.1.p3" })));
     expect(text()).toBe("§A.1.p3");
+    await act(async () => root.render(createElement(AnchorPill, { anchorId: "A.1.p3", label: "Context · ¶3" })));
+    expect(text()).toBe("Context · ¶3");
   });
 });
 
 describe("a thread whose host owns the way in", () => {
-  beforeEach(() => shell("flow"));
 
   const thread = (discussNonce: number) =>
     act(async () =>

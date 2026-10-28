@@ -6,7 +6,7 @@
 // The section tree is shaped the way parser.rs mints it, so the panel's
 // anchors ("Context · ¶3", "§4 · step 4", "§4 · releases", "§4") come out
 // of the real labeller, not of the fixture.
-import type { Comment, Paragraph, ReviewSession, Revision, Section } from "../../src/types";
+import type { Comment, Paragraph, ReviewSession, Revision, Section } from "../../../types";
 
 const p = (anchorId: string, blockId: string, markdown: string): Paragraph => ({ anchorId, blockId, markdown, text: markdown });
 const s = (anchorId: string, blockId: string, level: number, title: string, paragraphs: Paragraph[] = [], children: Section[] = []): Section => ({

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //
-// The flow Feedback tab against board 5a's own session: the threads it
+// The Feedback panel against the design board's own session: the threads it
 // shows, in the words the board uses, and every action wired to the command
 // the classic comment pane already sends — nothing new on the backend.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,8 +17,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-import { boardComments, boardSession } from "../../../fixtures/flow-feedback-qa/board";
-import { resetShellFlagForTests, SHELL_KEY } from "../../lib/shellFlag";
+import { boardComments, boardSession } from "./__fixtures__/feedbackBoard";
 import type { Comment, ReviewSession } from "../../types";
 import FeedbackPanel, { FeedbackComposer, FeedbackTabs, sessionModelLabel } from "./FeedbackPanel";
 
@@ -65,8 +64,6 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   vi.stubGlobal("IntersectionObserver", class { observe() {} disconnect() {} });
   localStorage.clear();
-  localStorage.setItem(SHELL_KEY, "flow");
-  resetShellFlagForTests();
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === "get_thread") return Promise.resolve([]);
     if (cmd === "fork_thread_status") return Promise.resolve({ streaming: false, startedAt: null, partial: null, seq: 0, queued: [] });
@@ -81,7 +78,6 @@ afterEach(async () => {
   await act(async () => root.unmount());
   host.remove();
   localStorage.clear();
-  resetShellFlagForTests();
   vi.clearAllMocks();
   vi.unstubAllGlobals();
 });

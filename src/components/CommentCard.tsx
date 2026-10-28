@@ -5,7 +5,6 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { Comment, CommentStatus, UpdateCommentRequest } from "../types";
 import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
 import { compactEditPreview } from "../editor/wordDiff";
-import { isFlowShell } from "../lib/shellFlag";
 import { AnchorPill } from "./AnchorPill";
 import { AttachmentChips } from "./AttachmentChips";
 import { CommentThread } from "./CommentThread";
@@ -129,10 +128,6 @@ export const CommentCard = memo(function CommentCard({
   submitInFlight = false,
   anchorLabel,
 }: CommentCardProps) {
-  // The flow shell's thread look (5a): no c-0xx id chip, and a collapsed
-  // card keeps two lines of its note rather than one. Read once per page
-  // load, so a card never changes shape under the reviewer.
-  const flow = isFlowShell();
   // M4: an agent-authored suggestion. While draft + undecided it shows
   // Accept/Reject; once accepted in place it carries the settled chip (the
   // comment stays draft and rides the next submit as a normal edit).
@@ -267,14 +262,6 @@ export const CommentCard = memo(function CommentCard({
     }
     return "";
   })();
-  // Two clamped lines hold more than the 90 characters one line does; the
-  // clamp, not a slice, decides where they end.
-  const collapsedText = (() => {
-    const text = (body ?? "").replace(/\s+/g, " ").trim();
-    if (text && text !== "(edit)") return text.slice(0, 400);
-    return edit ? `"${edit.original}" → "${edit.revised}"`.slice(0, 400) : "";
-  })();
-
   // A reopened follow-up rides back to Claude on Submit, which flips the comment
   // reopened→submitted — but the note is preserved. Keep showing it (pulsing)
   // through that wait so the continuation never vanishes the instant the
@@ -399,9 +386,8 @@ export const CommentCard = memo(function CommentCard({
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* The id is a resolution key, not something to read: the flow
-              shell names the comment by its anchor instead. */}
-          {!flow && (
+          {/* The id is a resolution key the agent's resolutions name. */}
+          {(
             <span
               className="font-mono"
               style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
@@ -445,10 +431,10 @@ export const CommentCard = memo(function CommentCard({
 
       {collapsed && bodyPreview && (
         <div
-          className={flow ? "rl-comment-preview-2" : "truncate"}
+          className="truncate"
           style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}
         >
-          {flow ? collapsedText : bodyPreview}
+          {bodyPreview}
         </div>
       )}
 

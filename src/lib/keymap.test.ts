@@ -15,20 +15,14 @@ import {
   isFrontDoorKey,
   isNeedsYouKey,
   isNewPlanKey,
-  isNewSessionKey,
   isNewTabKey,
   isPaletteKey,
-  isPlanPanelKey,
   isReopenTabKey,
-  isSidebarKey,
   isSnapBackKey,
-  isStageKey,
-  FLOW_KEYMAP,
   shellKeymap,
   shownKeymap,
   tabCycleKeyOf,
   tabIndexKeyOf,
-  toolKeyOf,
   tourShortcuts,
 } from "./keymap";
 
@@ -235,66 +229,17 @@ describe("renderings", () => {
   });
 });
 
-describe("the flow shell's keys (deviation 5)", () => {
-  it("⌘J, ⌘B, ⌘⌥B, ⌘N and ⌘1–4 match on ⌘ alone", () => {
-    expect(isStageKey(combo({ key: "j", code: "KeyJ", metaKey: true }))).toBe(true);
-    expect(isSidebarKey(combo({ key: "b", code: "KeyB", metaKey: true }))).toBe(true);
-    // ⌥ rewrites e.key on a Mac: the plan panel matches on the physical key.
-    expect(isPlanPanelKey(combo({ key: "∫", code: "KeyB", metaKey: true, altKey: true }))).toBe(true);
-    expect(isNewSessionKey(combo({ key: "n", code: "KeyN", metaKey: true }))).toBe(true);
-    expect([1, 2, 3, 4].map((n) => toolKeyOf(combo({ key: String(n), code: `Digit${n}`, metaKey: true })))).toEqual([1, 2, 3, 4]);
-  });
-
-  it("never takes a Ctrl chord — in a terminal Ctrl+J is a newline and Ctrl+B is back-a-char", () => {
-    expect(isStageKey(combo({ key: "j", ctrlKey: true }))).toBe(false);
-    expect(isSidebarKey(combo({ key: "b", ctrlKey: true }))).toBe(false);
-    expect(isPlanPanelKey(combo({ code: "KeyB", ctrlKey: true, altKey: true }))).toBe(false);
-    expect(isNewSessionKey(combo({ key: "n", ctrlKey: true }))).toBe(false);
-    expect(toolKeyOf(combo({ key: "1", ctrlKey: true }))).toBeNull();
-    // ⌘ and Ctrl together is neither.
-    expect(isStageKey(combo({ key: "j", metaKey: true, ctrlKey: true }))).toBe(false);
-  });
-
-  it("keeps the neighbouring chords apart", () => {
-    // ⌘⇧J is the needs-you jump; ⌘⇧N the old new-plan alias.
-    expect(isStageKey(combo({ key: "J", code: "KeyJ", metaKey: true, shiftKey: true }))).toBe(false);
-    expect(isNewSessionKey(combo({ key: "N", code: "KeyN", metaKey: true, shiftKey: true }))).toBe(false);
-    expect(isNewPlanKey(combo({ key: "N", code: "KeyN", metaKey: true, shiftKey: true }))).toBe(true);
-    // ⌘B and ⌘⌥B never both.
-    const plain = combo({ key: "b", code: "KeyB", metaKey: true });
-    const alt = combo({ key: "∫", code: "KeyB", metaKey: true, altKey: true });
-    expect([isSidebarKey(plain), isPlanPanelKey(plain)]).toEqual([true, false]);
-    expect([isSidebarKey(alt), isPlanPanelKey(alt)]).toEqual([false, true]);
-    expect(toolKeyOf(combo({ key: "5", metaKey: true }))).toBeNull();
-    expect(toolKeyOf(combo({ key: "1", metaKey: true, shiftKey: true }))).toBeNull();
-  });
-
-  it("the flow registry swaps the replaced chords for its own and loses nothing else", () => {
-    const ids = FLOW_KEYMAP.map((b) => b.id);
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const id of ["new-session", "stage", "tools", "sidebar", "plan-panel"]) expect(ids).toContain(id);
-    for (const id of ["dock", "new-plan", "pane-sidebar"]) expect(ids).not.toContain(id);
-    const kept = GLOBAL_KEYMAP.filter((b) => !["dock", "new-plan", "pane-sidebar"].includes(b.id)).map((b) => b.id);
-    expect(ids.filter((id) => kept.includes(id)).sort()).toEqual([...kept].sort());
-    expect(FLOW_KEYMAP.find((b) => b.id === "stage")?.keys).toEqual(["⌘", "J"]);
-    expect(FLOW_KEYMAP.find((b) => b.id === "plan-panel")?.keys).toEqual(["⌘", "⌥", "B"]);
-  });
-
-  it("the classic shell is the global registry merged with the workbench's, and the flow shell its own", () => {
-    expect(shellKeymap("classic")).toBe(CLASSIC_KEYMAP);
-    expect(shellKeymap("flow")).toBe(FLOW_KEYMAP);
+describe("the registry", () => {
+  it("the registry is the global one merged with the workbench's", () => {
+    expect(shellKeymap()).toBe(CLASSIC_KEYMAP);
     // Nothing of the classic registry is lost, and within a group nothing is
-    // reordered (the merge groups Global ahead of Layout, as FLOW_KEYMAP does).
+    // reordered (the merge groups Global ahead of Layout).
     for (const group of ["Global", "Layout", "Document"] as const) {
       const merged = CLASSIC_KEYMAP.filter((b) => b.group === group && GLOBAL_KEYMAP.includes(b)).map((b) => b.id);
       expect(merged).toEqual(GLOBAL_KEYMAP.filter((b) => b.group === group).map((b) => b.id));
     }
-    // Tests paint classic: nothing flow-only is shown or hinted.
-    expect(shownKeymap().map((b) => b.id)).not.toContain("stage");
     expect(bindingKeys("dock")).toEqual(["⌘", "J"]);
     expect(bindingKeys("stage")).toBeUndefined();
-    // The flow shell does not hint the workbench's chords either.
-    expect(FLOW_KEYMAP.map((b) => b.id)).not.toContain("new-tab");
   });
 });
 
@@ -373,11 +318,8 @@ describe("the workbench's keys (W1)", () => {
     expect(tabCycleKeyOf(cmd({ key: "“", code: "BracketLeft", altKey: true }))).toBeNull();
     // ⌘⌥↑ / ⌘⌥↓ belong to CodeMirror.
     expect(tabCycleKeyOf(cmd({ key: "ArrowUp", code: "ArrowUp", altKey: true }))).toBeNull();
-    // The flow shell's ⌘1–4 and the workbench's ⌘1–8 are the same chords:
-    // the native menu holds one set at a time (workbench_menu.rs), and the
-    // page listener asks only the matcher of the shell it paints.
     const one = cmd({ key: "1", code: "Digit1" });
-    expect([toolKeyOf(one), tabIndexKeyOf(one)]).toEqual([1, 0]);
+    expect(tabIndexKeyOf(one)).toBe(0);
   });
 
   it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
@@ -388,7 +330,7 @@ describe("the workbench's keys (W1)", () => {
     expect(ids.slice(0, 5)).toEqual(["palette", "new-tab", "reopen-tab", "close", "close-window"]);
     const layout = CLASSIC_KEYMAP.filter((b) => b.group === "Layout").map((b) => b.id);
     expect(layout.slice(0, 2)).toEqual(["tab-n", "tab-cycle"]);
-    expect(bindingKeys("close", "classic")).toEqual(["⌘", "W"]);
-    expect(bindingKeys("tab-cycle", "classic")).toEqual(["⌘", "⌥", "←/→"]);
+    expect(bindingKeys("close")).toEqual(["⌘", "W"]);
+    expect(bindingKeys("tab-cycle")).toEqual(["⌘", "⌥", "←/→"]);
   });
 });

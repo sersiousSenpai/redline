@@ -150,40 +150,6 @@ describe("buildCommands", () => {
   });
 });
 
-describe("buildCommands in the flow shell", () => {
-  const flow = (over: Partial<CommandDeps> = {}) =>
-    deps({
-      shell: "flow",
-      surfaces: [{ id: "browser", label: "Browser", title: "Browse the web", keys: ["⌘", "1"] }],
-      ...over,
-      actions: { ...deps().actions, toggleDock: vi.fn(), togglePlanPanel: vi.fn(), ...over.actions },
-    });
-
-  it("names its own chords and words", () => {
-    const byId = new Map(buildCommands(flow()).map((c) => [c.id, c]));
-    expect(byId.get("draft-new")).toMatchObject({ title: "New session", detail: "The start screen", keys: ["⌘", "N"] });
-    expect(byId.get("toggle-dock")).toMatchObject({ title: "Switch between the conversation and the terminal", keys: ["⌘", "J"] });
-    expect(byId.get("toggle-sidebar")?.keys).toEqual(["⌘", "B"]);
-    expect(byId.get("toggle-plan-panel")?.keys).toEqual(["⌘", "⌥", "B"]);
-    // A Tool carries its ⌘ number into the hint column.
-    expect(byId.get("surface:browser")?.keys).toEqual(["⌘", "1"]);
-  });
-
-  it("routes the plan panel to its own action", () => {
-    const d = flow();
-    buildCommands(d).find((c) => c.id === "toggle-plan-panel")!.run();
-    expect(d.actions.togglePlanPanel).toHaveBeenCalledOnce();
-  });
-
-  it("classic keeps its words, chords and commands", () => {
-    const byId = new Map(buildCommands(deps({ actions: { ...deps().actions, toggleDock: vi.fn(), togglePlanPanel: vi.fn() } })).map((c) => [c.id, c]));
-    expect(byId.get("draft-new")).toMatchObject({ title: "Plan a build", keys: ["⌘", "⇧", "N"] });
-    expect(byId.get("toggle-dock")).toMatchObject({ title: "Show / hide the conversation", keys: ["⌘", "J"] });
-    expect(byId.get("toggle-sidebar")?.keys).toEqual(["⇧", "←"]);
-    expect(byId.has("toggle-plan-panel")).toBe(false);
-  });
-});
-
 // Source invariants, landing.test.ts-style: the palette's load-bearing wiring
 // is greppable, so pin it here instead of trusting review to catch a drift.
 describe("palette wiring", () => {

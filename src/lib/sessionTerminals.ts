@@ -1,21 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! Session identity in the flow shell: what the session stage is showing.
+//! Which terminal a session runs in, and what its CLI is doing.
 //!
-//! In flow a session exists from the moment it launches. Board 4b already
-//! has a sidebar row, a title, a spinner and a conversation for it before any
-//! plan row exists in the database, so "the selected plan" (App's `activeId`)
-//! is not enough to say what is on the stage. Three things can be:
-//!
-//! - the New-session screen (`start`), the Front Door in flow mode;
-//! - a launch whose plan has not arrived (`launch`), keyed by its terminal;
-//! - a plan session (`plan`), with the terminal its CLI runs in when known.
-//!
-//! The handoff between the last two is the one that matters: when a launch's
-//! plan arrives (`plan-received` carries the same Claude session id the
-//! terminal's hooks report), the target flips from `launch` to `plan` with the
-//! SAME terminal id, so the conversation bound to that terminal keeps its
-//! identity and never remounts.
+//! A session exists from the moment it launches: the sidebar has a row and
+//! the workbench an Agent tab for it before any plan row exists, keyed by
+//! the terminal its CLI runs in. When the launch's plan arrives
+//! (`plan-received` carries the launch id) the set rekeys to the plan with
+//! the SAME terminal, so the conversation bound to it keeps its identity.
 //!
 //! Which terminal a plan session runs in comes from three places, folded into
 //! one `sessionId → terminalId` map: the terminal-attention hooks (every entry
@@ -39,20 +30,8 @@ import {
 } from "../components/agent/convo/types";
 import type { NeedReason } from "./sessionGroups";
 
-/** What the session stage shows. */
-export type StageTarget =
-  | { kind: "start" }
-  | {
-      kind: "launch";
-      terminalId: string;
-      prompt: string;
-      startedAt: number;
-      projectPath: string | null;
-    }
-  | { kind: "plan"; sessionId: string; terminalId: string | null };
-
-/** A session the stage can show before it has a plan: one `launchPlan`
- *  call, plan or run, recorded the moment its command reached a terminal. */
+/** A launched session whose plan has not arrived: one `launchPlan` call,
+ *  plan or run, recorded the moment its command reached a terminal. */
 export interface FlowLaunch {
   launchId: string;
   terminalId: string;
@@ -68,70 +47,6 @@ export interface FlowLaunch {
 }
 
 export type SessionTerminals = ReadonlyMap<string, string>;
-
-/** A launch's slot, as App's `pendingLaunch` / `runFlight` hold it. */
-export interface InFlight {
-  terminalId: string;
-  prompt: string;
-  startedAt: number;
-}
-
-export interface StageInput {
-  /** The plan session selected (App's `activeId`). */
-  activeId: string | null;
-  /** The launch the user is looking at, by terminal id; null follows
-   *  `activeId`. App clears it whenever a session is selected. */
-  focusedLaunch: string | null;
-  launches: readonly FlowLaunch[];
-  /** App's single pending plan launch and run flight. They stand in for a
-   *  launch the list does not hold yet (the record and the slot are set in
-   *  the same tick, but not the same render). */
-  pendingLaunch?: InFlight | null;
-  runFlight?: InFlight | null;
-  terminals: SessionTerminals;
-}
-
-/** What the stage shows. A focused launch wins while it is still a launch;
- *  then the selected plan; then the New-session screen. */
-export function deriveStageTarget(i: StageInput): StageTarget {
-  if (i.focusedLaunch) {
-    const id = i.focusedLaunch;
-    const launch = i.launches.find((l) => l.terminalId === id);
-    if (launch) {
-      return {
-        kind: "launch",
-        terminalId: launch.terminalId,
-        prompt: launch.prompt,
-        startedAt: launch.startedAt,
-        projectPath: launch.projectPath,
-      };
-    }
-    const slot = [i.pendingLaunch, i.runFlight].find((f) => f?.terminalId === id);
-    if (slot) {
-      return {
-        kind: "launch",
-        terminalId: slot.terminalId,
-        prompt: slot.prompt,
-        startedAt: slot.startedAt,
-        projectPath: null,
-      };
-    }
-  }
-  if (i.activeId) {
-    return {
-      kind: "plan",
-      sessionId: i.activeId,
-      terminalId: i.terminals.get(i.activeId) ?? null,
-    };
-  }
-  return { kind: "start" };
-}
-
-/** Two targets that show the same thing — the stage keys its conversation
- *  on this, so a launch becoming its plan is NOT a change of conversation. */
-export function stageTerminal(t: StageTarget): string | null {
-  return t.kind === "start" ? null : t.terminalId;
-}
 
 // ── The launch list ─────────────────────────────────────────────────────────
 
@@ -181,7 +96,7 @@ export function reduceLaunches(
   }
 }
 
-/** The sidebar's launch rows (BRIEF, "Session identity in flow"): titled by
+/** The sidebar's launch rows: titled by
  *  the prompt's first line until a plan brings a title of its own, and
  *  spinning until the CLI reports the turn over. */
 export interface SidebarLaunch {
@@ -297,9 +212,8 @@ export function sidebarActivity(
  *  snapshot, so a reload starts from the truth) and the engine's
  *  `convo-bound`. Listener first, snapshot second — `convo-bound` is never
  *  replayed to a late listener, so after a reload the snapshot is what knows
- *  an existing plan's terminal; `bind` adds what App
- *  learns itself (a launch's plan arriving, a held plan's terminal).
- *  Inert when `enabled` is false: the classic shell never subscribes. */
+ *  an existing plan's terminal; `bind` adds what App learns itself (a
+ *  launch's plan arriving, a held plan's terminal). */
 export function useSessionTerminals(enabled: boolean): {
   terminals: SessionTerminals;
   attention: ReadonlyMap<string, TermAttention>;

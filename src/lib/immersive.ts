@@ -90,17 +90,6 @@ export function effectiveShape(pref: ShapeFlags, immersive: boolean): ShapeFlags
   return immersive ? { ...HIDDEN } : pref;
 }
 
-/** The flow shell's session stage, as one more overlay of the same law: the
- *  stage never docks a terminal under the conversation — the session's PTY
- *  is the stage's own terminal view (⌘J) and the wall is the dock's
- *  fullscreen — so on the stage the dock folds away. Only hides, never
- *  writes, and returns `shape` itself when it doesn't apply — which is
- *  always, on the classic shell. */
-export function flowStageShape(shape: ShapeFlags, dockHidden: boolean): ShapeFlags {
-  if (!dockHidden || shape.termCollapsed) return shape;
-  return { ...shape, termCollapsed: true };
-}
-
 // ---- The narrow mask: the two side panels, and nothing else -----------------
 //
 // `isImmersiveSurface` takes the whole periphery — the chrome and the terminal
@@ -176,18 +165,11 @@ export interface PlatePaneInput {
   plateMode: "door" | "plan" | "file";
   /** The user reopened the pane on this visit (`PanelMask` breaks). */
   brokenPane: boolean;
-  /** The flow shell only — undefined on classic. Whether the session stage
-   *  leaves the discussion pane open beside it. The stage's plan panel is
-   *  the plan's margin there (its Feedback tab holds the threads), so App
-   *  passes false and the pane never opens beside the plate in flow: no
-   *  break reopens it, because the plan panel is where those threads are. */
-  flowPaneOpen?: boolean;
 }
 
 /** Whether the plate hides the discussion pane. Derived, never stored. */
 export function platePaneMask(i: PlatePaneInput): boolean {
   if (i.surface !== "document") return false;
-  if (i.flowPaneOpen !== undefined) return !i.flowPaneOpen;
   return i.plateMode !== "plan" && !i.brokenPane;
 }
 

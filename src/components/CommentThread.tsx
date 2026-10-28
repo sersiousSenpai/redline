@@ -24,7 +24,6 @@ import { useSidecarView, type SidecarView } from "../hooks/useSidecarView";
 import { useStickToBottom } from "../hooks/useStickToBottom";
 import { askedMode, isChatRow, reportItems } from "../lib/sidecarRows";
 import { useSharedDraft, writeSharedDraft } from "../hooks/useSharedDraft";
-import { isFlowShell } from "../lib/shellFlag";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -115,9 +114,6 @@ export const CommentThread = memo(function CommentThread({
   discussNonce = 0,
 }: CommentThreadProps) {
   const monochat = useMonochat();
-  // The flow shell drops the per-thread model chip (5a): the discussion runs
-  // on the plan's own harness, which the composer's chip already names.
-  const flow = isFlowShell();
   const commentId = comment.id;
   // Report (the structured answer) or Chat (quick turns with the same fork).
   // Persisted per comment; a remount or relaunch comes back to the same view.
@@ -515,7 +511,7 @@ export const CommentThread = memo(function CommentThread({
         {/* While the row only holds its place, a stand-in of the chip's
             first-render size: the real one reads its pick and the seats,
             which a thread with history would throw away. */}
-        {flow ? null : loaded ? (
+        {loaded ? (
           <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} />
         ) : (
           <span className="rl-fd-model-chip-wrap" style={{ display: "inline-flex", marginLeft: 6 }}>
@@ -620,9 +616,7 @@ export const CommentThread = memo(function CommentThread({
             >
               {view === "chat" ? "← Report" : "Chat"}
             </button>
-            {!flow && (
-              <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
-            )}
+            <DiscussModelChip key={`${sessionId}:${commentId}:${backend}`} sessionId={sessionId} commentId={commentId} backend={backend} disabled={status === "streaming"} />
             <button
               type="button"
               onClick={(e) => {

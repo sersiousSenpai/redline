@@ -39,7 +39,6 @@ html[data-rl-transparency="reduced"] .rl-glass {
   background: var(--color-bg-elevated) !important;
   backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
 }
-.rl-ambient { background: radial-gradient(ellipse at 15% 0%, var(--color-ambient-a), transparent 55%), radial-gradient(ellipse at 90% 100%, var(--color-ambient-b), transparent 55%), var(--color-canvas); }
 
 /* A session row's ⋯ menu (RowMenu, board 4d): 190px of rows inside 6px of
    padding and the glass tier's 1px rim, 32px rows with a 14px glyph, Delete
@@ -5401,22 +5400,6 @@ html[data-rl-resizing] [data-rl-pane] {
 .rl-thread-heading .rl-fd-model-chip { display: inline-flex; min-width: 0; white-space: nowrap; }
 .rl-thread-heading .rl-fd-model-chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* ── The flow shell's session stage (shell/FlowStage.tsx, PLAN C3) ─────────
-   App-side rules: the elements here are App's, rendered before the stage's
-   own (lazy) stylesheet arrives. All of it under html[data-rl-shell="flow"]
-   or a stage that only flow renders, so classic is untouched. */
-
-/* The boards run edge to edge: the stage's frame is flat, no plate ring. */
-html[data-rl-shell="flow"] .rl-doc-column.rl-plate {
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
-}
-html[data-rl-shell="flow"] .rl-doc-column.rl-plate::before,
-html[data-rl-shell="flow"] .rl-doc-column.rl-plate::after {
-  content: none;
-}
-
 /* The terminal dock over a pane, showing one PTY alone (lib/stageDock pins
    the insets; TerminalTabs' `solo`): flow's ⌘J stage view, and the Agent
    pane's CLI view in the workbench. The height `applyLiveLayout` writes is
@@ -5429,38 +5412,3 @@ html[data-rl-shell="flow"] .rl-doc-column.rl-plate::after {
   background: var(--color-paper);
 }
 
-/* The plate's floating controls, seated in the plan panel. "☰ Contents" is
-   the panel header's; the Discuss pill's job is the conversation beside it.
-   The contents rail docks under the header, over the plan's own left edge;
-   the zoom/width pill sits above the plan's footer, left of a right panel —
-   and while the plan is closed it waits, mounted and hidden. */
-.rl-surface-pane:has(> .rl-flow-stage) > .rl-toc-btn,
-.rl-surface-pane:has(> .rl-flow-stage) > .rl-discuss-pill {
-  display: none !important;
-}
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="split"]) > .rl-toc-rail {
-  left: 440px !important;
-  top: 48px !important;
-  bottom: 64px !important;
-}
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="full"]) > .rl-toc-rail {
-  top: 48px !important;
-  bottom: 60px !important;
-}
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="split"]) > .rl-doc-zoom {
-  bottom: 80px !important;
-}
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="full"]) > .rl-doc-zoom {
-  right: 416px !important;
-  bottom: 76px !important;
-}
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-toc-rail,
-.rl-surface-pane:has(> .rl-flow-stage[data-pose="closed"]) > .rl-doc-zoom {
-  display: none !important;
-}
-/* The start screen as the stage: an empty plate the resting door lands in. */
-html[data-rl-shell="flow"] .rl-flow-start-plate {
-  flex: 1;
-  min-height: 0;
-  background: var(--color-canvas);
-}

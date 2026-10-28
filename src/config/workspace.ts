@@ -242,54 +242,6 @@ export function headerSurfaces(ws: Workspace): SurfaceDescriptor[] {
     .filter(Boolean);
 }
 
-// ---- The flow shell's Tools menu --------------------------------------------
-// In the flow shell the surfaces stop being a header radio group: the session
-// is the stage, and everything else waits behind one Tools ▾ at the far right
-// (the no-header-sprawl rule, kept). headerSurfaces() above stays exactly as
-// it is — the classic shell still composes its header from it.
-
-/** One Tools row. `surface` rows open a main surface; `memory` and
- *  `terminals` are entries to things that are not a surface radio slot (the
- *  memory surface's ambient status, the dock's multi-tile wall). */
-export type ToolId = "browser" | "drafter" | "review" | "servers" | "runs" | "memory" | "terminals";
-
-export interface ToolDescriptor {
-  id: ToolId;
-  label: string;
-  /** ⌘1–⌘4. Bound to the tool, not its row: hiding the browser leaves ⌘2 on
-   *  the drafter. */
-  key?: 1 | 2 | 3 | 4;
-  /** Rows after the menu's divider: ambient status and the terminal wall. */
-  section: "surfaces" | "more";
-}
-
-/** The Tools menu in its fixed order (board 4d), before the manifest has its
- *  say. Labels are sentence case, the menu's own voice. */
-export const TOOL_DESCRIPTORS: readonly ToolDescriptor[] = [
-  { id: "browser", label: "Browser", key: 1, section: "surfaces" },
-  { id: "drafter", label: "Prompt drafter", key: 2, section: "surfaces" },
-  { id: "review", label: "Code review", key: 3, section: "surfaces" },
-  { id: "servers", label: "Localhost", key: 4, section: "surfaces" },
-  { id: "runs", label: "Runs", section: "surfaces" },
-  { id: "memory", label: "Memory", section: "more" },
-  { id: "terminals", label: "Terminals", section: "more" },
-];
-
-/** The Tools rows this manifest allows. Order is fixed rather than the
- *  header's manifest order: the ⌘ numbers belong to the tools, and a menu
- *  whose rows move would make them lie. A surface the manifest disables has
- *  no row; the terminal wall is not a surface and is always there. */
-export function toolSurfaces(ws: Workspace): ToolDescriptor[] {
-  return TOOL_DESCRIPTORS.filter(
-    (d) => d.id === "terminals" || surfaceEnabled(ws, d.id),
-  );
-}
-
-/** The tool ⌘N opens, or null when that tool is switched off here. */
-export function toolForKey(ws: Workspace, key: number): ToolId | null {
-  return toolSurfaces(ws).find((d) => d.key === key)?.id ?? null;
-}
-
 /** Where the app lands on launch. `persisted` is the last-used surface from
  *  storage — the `"last"` landing (the default) resolves to it, so an
  *  untouched manifest reproduces today's restore-where-you-were behavior. A

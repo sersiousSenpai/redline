@@ -148,9 +148,8 @@ describe("size guard", () => {
   it("the settings BODIES are lazy; the settings trigger is not", () => {
     // The gear is chrome and has to be in the static header. The seat chart
     // and the extension marketplace behind it are two of the heaviest
-    // components in the app, behind a click most launches never make. Both
-    // shells' top bars mount the gear through SettingsGear (C1 moved it out
-    // of the classic Header so the flow top bar shares it).
+    // components in the app, behind a click most launches never make. The
+    // Header mounts the gear through SettingsGear.
     const gear = files.find(({ rel }) => rel === "components/SettingsGear.tsx");
     expect(gear).toBeDefined();
     for (const name of ["AgentSeats", "ExtensionsPanel"]) {
@@ -163,12 +162,10 @@ describe("size guard", () => {
       );
     }
     // …and the trigger itself stays static, or the gear would suspend: in
-    // the gear module, and in both top bars that mount it.
+    // the gear module, and in the header that mounts it.
     expect(gear!.text).toMatch(/^import \{ SettingsMenu, settingsRow \} from "\.\/SettingsMenu";/m);
     const header = files.find(({ rel }) => rel === "components/Header.tsx")!.text;
     expect(header).toMatch(/^import \{ SettingsGear \} from "\.\/SettingsGear";/m);
-    const flowBar = files.find(({ rel }) => rel === "shell/FlowTopBar.tsx")!.text;
-    expect(flowBar).toMatch(/^import \{ SettingsGear, type SettingsGearProps \} from "\.\.\/components\/SettingsGear";/m);
   });
 
   it("the settings rows' controls ride one lazy chunk, warmed at the gear", () => {
@@ -176,13 +173,13 @@ describe("size guard", () => {
     // inside the open menu; static, they were 16 kB of boot JS (measured
     // 2026-10-10).
     const gear = files.find(({ rel }) => rel === "components/SettingsGear.tsx")!.text;
-    for (const name of ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings", "ShellSettings"]) {
+    for (const name of ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings"]) {
       expect(gear).toContain(`const ${name} = settingsRow("${name}");`);
     }
     const app = files.find(({ rel }) => rel === "App.tsx")!.text;
     expect(app).toContain('const SurfacesPanel = settingsRow("SurfacesPanel");');
     // Only the chunk's own barrel imports them.
-    const rows = ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings", "SurfacesPanel", "ShellSettings"];
+    const rows = ["ModeToggle", "ThemePicker", "FontPicker", "LintPicker", "AlertSettings", "SurfacesPanel"];
     const offenders = files
       .filter(({ rel }) => rel !== "components/settingsRows.ts" && !/\.test\.tsx?$/.test(rel))
       .filter(({ text }) => rows.some((name) => new RegExp(`^import (?!type\\b)[^;]*from "[./]*(?:components/)?${name}"`, "m").test(text)))
@@ -254,10 +251,10 @@ describe("size guard", () => {
     expect(sw).toMatch(/import\(["']\.\/perfProbe["']\)/);
   });
 
-  it("keeps the flow conversation behind its own lazy chunk", () => {
+  it("keeps the session conversation behind its own lazy chunk", () => {
     // The session conversation (and its composer, ask cards and CSS) loads
-    // with the flow stage, never on the boot path: outside src/shell only a
-    // `lazy(() => import(…))` may reach it, and its tests.
+    // with the Agent pane, never on the boot path: outside components/agent
+    // only a `lazy(() => import(…))` may reach it, and its tests.
     const offenders = files
       .filter(({ rel, text }) =>
         !rel.startsWith("components/agent/") &&

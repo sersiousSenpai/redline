@@ -10,7 +10,6 @@ import {
   panelMask,
   panelMaskFor,
   platePaneMask,
-  flowStageShape,
   panelsMasked,
   type ShapeFlags,
 } from "./immersive";
@@ -297,39 +296,8 @@ describe("platePaneMask: the plate's own pane rule", () => {
     ["classic: nor does a folder's file", { surface: "document", plateMode: "file", brokenPane: false }, true],
     ["classic: reopened on this visit, it stays", { surface: "document", plateMode: "door", brokenPane: true }, false],
     ["classic: another surface is the surface mask's business", { surface: "browser", plateMode: "door", brokenPane: false }, false],
-    // Flow: the plan panel is the margin, so nothing reopens the pane there.
-    ["flow: a plan's threads are in the plan panel", { surface: "document", plateMode: "plan", brokenPane: false, flowPaneOpen: false }, true],
-    ["flow: not even reopened", { surface: "document", plateMode: "plan", brokenPane: true, flowPaneOpen: false }, true],
-    ["flow: the door", { surface: "document", plateMode: "door", brokenPane: false, flowPaneOpen: false }, true],
-    ["flow: open when the stage leaves it open", { surface: "document", plateMode: "plan", brokenPane: false, flowPaneOpen: true }, false],
-    ["flow: Code Review keeps its diff's threads", { surface: "review", plateMode: "plan", brokenPane: false, flowPaneOpen: false }, false],
   ];
   it.each(table)("%s", (_name, input, masked) => {
     expect(platePaneMask(input)).toBe(masked);
-  });
-});
-
-describe("flowStageShape: the session stage's overlay", () => {
-  const shape = {
-    sidebarCollapsed: false,
-    paneCollapsed: false,
-    paneFullscreen: false,
-    termCollapsed: false,
-    termFullscreen: false,
-    docPinned: false,
-  };
-
-  it("is the shape itself when it doesn't apply — always, on the classic shell", () => {
-    expect(flowStageShape(shape, false)).toBe(shape);
-  });
-
-  it("folds the dock away on the stage, and touches nothing else", () => {
-    expect(flowStageShape(shape, true)).toEqual({ ...shape, termCollapsed: true });
-  });
-
-  it("only hides: a collapsed dock stays collapsed, by identity, and fullscreen is untouched", () => {
-    const wall = { ...shape, termCollapsed: true, termFullscreen: true };
-    expect(flowStageShape(wall, true)).toBe(wall);
-    expect(flowStageShape({ ...shape, termFullscreen: true }, true)).toEqual({ ...shape, termFullscreen: true, termCollapsed: true });
   });
 });

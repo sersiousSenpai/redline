@@ -9,14 +9,11 @@ import {
   latestAttention,
   needReason,
   sidebarActivity,
-  deriveStageTarget,
   launchTitle,
   reduceLaunches,
   sidebarLaunches,
-  stageTerminal,
   type FlowLaunch,
-  type StageInput,
-} from "./flowSessions";
+} from "./sessionTerminals";
 
 const launch = (terminalId: string, over: Partial<FlowLaunch> = {}): FlowLaunch => ({
   launchId: `L-${terminalId}`,
@@ -30,54 +27,6 @@ const launch = (terminalId: string, over: Partial<FlowLaunch> = {}): FlowLaunch 
   ...over,
 });
 
-const base: StageInput = {
-  activeId: null,
-  focusedLaunch: null,
-  launches: [],
-  terminals: new Map(),
-};
-
-describe("deriveStageTarget", () => {
-  // focusedLaunch × in launches × in a slot × activeId → kind
-  const table: [string, Partial<StageInput>, string][] = [
-    ["nothing selected is the New-session screen", {}, "start"],
-    ["a selected plan", { activeId: "S" }, "plan"],
-    ["a focused launch", { focusedLaunch: "T1", launches: [launch("T1")] }, "launch"],
-    ["a focused launch outranks a stale selection", { activeId: "S", focusedLaunch: "T1", launches: [launch("T1")] }, "launch"],
-    ["a focused launch only the pending slot holds yet", { focusedLaunch: "T1", pendingLaunch: { terminalId: "T1", prompt: "p", startedAt: 1 } }, "launch"],
-    ["a focused run only the flight slot holds", { focusedLaunch: "T1", runFlight: { terminalId: "T1", prompt: "p", startedAt: 1 } }, "launch"],
-    ["a focused launch that is gone falls back to the plan", { activeId: "S", focusedLaunch: "T9", launches: [launch("T1")] }, "plan"],
-    ["a focused launch that is gone, nothing selected", { focusedLaunch: "T9" }, "start"],
-  ];
-  it.each(table)("%s", (_name, over, kind) => {
-    expect(deriveStageTarget({ ...base, ...over }).kind).toBe(kind);
-  });
-
-  it("carries the launch's own prompt, start and folder", () => {
-    expect(deriveStageTarget({ ...base, focusedLaunch: "T1", launches: [launch("T1")] })).toEqual({
-      kind: "launch",
-      terminalId: "T1",
-      prompt: "Read the obsidian build log and plan the next roadmap steps",
-      startedAt: 100,
-      projectPath: "/p/din",
-    });
-  });
-
-  it("finds a plan session's terminal through the map, or says it doesn't know", () => {
-    const terminals = new Map([["S", "T1"]]);
-    expect(deriveStageTarget({ ...base, activeId: "S", terminals })).toEqual({ kind: "plan", sessionId: "S", terminalId: "T1" });
-    expect(deriveStageTarget({ ...base, activeId: "R", terminals })).toEqual({ kind: "plan", sessionId: "R", terminalId: null });
-  });
-
-  it("hands a launch off to its plan on the same terminal — one conversation", () => {
-    const before = deriveStageTarget({ ...base, focusedLaunch: "T1", launches: [launch("T1")] });
-    // The plan lands: App selects it, clears the focus, and the launch's
-    // terminal is bound to the session the plan carries.
-    const after = deriveStageTarget({ ...base, activeId: "S", terminals: new Map([["S", "T1"]]) });
-    expect(after.kind).toBe("plan");
-    expect(stageTerminal(after)).toBe(stageTerminal(before));
-  });
-});
 
 describe("reduceLaunches", () => {
   it("records a launch first, replacing an older record on the same terminal", () => {

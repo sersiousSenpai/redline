@@ -31,10 +31,8 @@ describe("panel mask wiring", () => {
     expect(app).not.toContain("openPanePref");
   });
   it("a plan-less plate hides the pane without deferring intercepts or showing a surface hint", () => {
-    // The rule itself is immersive.ts's `platePaneMask` (tested there); in
-    // flow it never lets the pane beside the stage, whose plan panel is the
-    // plan's margin.
-    expect(app).toMatch(/const noPlanPane = platePaneMask\(\{\s*surface: mainSurface,\s*plateMode,\s*brokenPane: panelBreaks\.pane,\s*flowPaneOpen: flowShell \? false : undefined,\s*\}\);/);
+    // The rule itself is immersive.ts's `platePaneMask` (tested there).
+    expect(app).toMatch(/const noPlanPane = platePaneMask\(\{\s*surface: mainSurface,\s*plateMode,\s*brokenPane: panelBreaks\.pane,\s*\}\);/);
     expect(app).toContain('const combinedPaneMask = pMask.pane || noPlanPane');
     expect(app).toContain('maskPanels(baseShape, { ...pMask, pane: combinedPaneMask })');
     expect(app).toContain('paneMaskedRef.current = pMask.pane');

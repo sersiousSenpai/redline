@@ -143,8 +143,7 @@ function ReadinessRow({
 // The palette carries no red (blue/yellow/green — see theme/themes.ts), so
 // severity reads as amber-vs-grey: a blocker is the theme's warning colour
 // with a soft halo, a warning is a quiet mark that doesn't compete with it.
-// Exported for the flow shell's first-run checklist (shell/FlowStart.tsx),
-// which lists the same items with the same marks and the same fixes.
+// Exported for other lists of the same items with the same marks.
 export function Dot({ state }: { state: ReadinessItem["state"] }) {
   return (
     <span

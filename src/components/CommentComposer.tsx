@@ -8,7 +8,6 @@ import type {
   Section,
 } from "../types";
 import { createAnchorDisplay } from "../lib/anchorDisplay";
-import { isFlowShell } from "../lib/shellFlag";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 import { useDictationComposer } from "../lib/dictationComposer";
@@ -89,7 +88,7 @@ export function CommentComposer({
 }: CommentComposerProps) {
   const anchorLabel = useMemo(
     () =>
-      sections && isFlowShell()
+      sections
         ? createAnchorDisplay(sections).label({ anchorId, selection: { quotedText: selectedText, subBlockId } })
         : null,
     [sections, anchorId, selectedText, subBlockId],
