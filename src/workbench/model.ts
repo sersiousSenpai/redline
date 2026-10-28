@@ -277,6 +277,17 @@ export function visiblePaneIds(set: TabSet): string[] {
   return tab ? paneIdsOf(tab.root) : [];
 }
 
+/** Which visible pane of `kind` holds a singleton body (the plan, the
+ *  browser): the pane "Bring here" asked for, while it is on screen; else
+ *  the focused one; else the first. Exactly one holds; the others show
+ *  where it went. */
+export function singletonHolder(state: WorkbenchState, kind: PaneKind, asked: string | null): string | undefined {
+  const set = state.sets[state.activeKey];
+  const tab = set && activeTabOf(set);
+  const ids: unknown[] = tab ? paneIdsOf(tab.root).filter((id) => set.panes[id]?.kind === kind) : [];
+  return [asked, tab?.focusedPaneId, ids[0]].find((id) => ids.includes(id)) as string | undefined;
+}
+
 /** A short, display-worthy title for a pane when it has no override. The
  *  tab strip refines this with session titles it knows; this is the floor. */
 export function paneTitle(pane: AnyPane): string {

@@ -514,7 +514,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
-import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, sessionIdOf, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import { doorDraftKey } from "./workbench/model";
 import type { WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
@@ -524,7 +524,7 @@ import type { PaneContext } from "./workbench/WorkbenchStage";
 const loadWorkbenchStage = () => import("./workbench/WorkbenchStage");
 const WorkbenchStage = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.WorkbenchStage })));
 const SingletonSlot = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.SingletonSlot })));
-const SingletonElsewhere = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.SingletonElsewhere })));
+const Singleton = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.Singleton })));
 import { Columns2 } from "lucide-react";
 import { latestDisplayVersion } from "./lib/revisionVersions";
 import { perfProbeOn, setPerfProbe } from "./lib/perfProbeSwitch";
@@ -1219,6 +1219,7 @@ function App() {
   // plan pane of the same session shows where it is and can bring it here.
   const [planHost] = useState(() => createBoundedPortalHost("plan"));
   const [planHolder, setPlanHolder] = useState<string | null>(null);
+  const [browserHolder, setBrowserHolder] = useState<string | null>(null);
   const [browserMounted, setBrowserMounted] = useState(browserOpen);
   useEffect(() => { if (browserOpen) setBrowserMounted(true); }, [browserOpen]);
   const drafterOpen = mainSurface === "drafter";
@@ -2472,7 +2473,11 @@ function App() {
     const init = paneInitFor(next);
     wb.dispatch({ type: "openSurface", kind: next, data: init.data });
   };
-  const wbLayoutKey = useWorkbench(wb, selectWbLayoutKey);
+  // The browser host's holder joins the key: moving the host between two
+  // panes is a pure reparent, which no ResizeObserver sees, so the key is
+  // the only thing that moves the native webview.
+  const browserHeld = useWorkbench(wb, (s) => singletonHolder(s, "browser", browserHolder));
+  const wbLayoutKey = `${useWorkbench(wb, selectWbLayoutKey)}|${browserHeld}`;
   // An agent asking for a code review (a `/redline-code-review` curl holding
   // for feedback), or a run filing its exit report, is news — never a move.
   // The review surface waits for you: a notice says so once, a footer chip
@@ -10991,8 +10996,6 @@ function App() {
             // portals; a pane shows only their slot.
             if (classicWb) {
               planBodyNow = planBody;
-              const { panes: activeVisiblePanes, tab: activeTabNow } = activePanes(wb.getState());
-              const activeFocusedPaneId = activeTabNow?.focusedPaneId ?? null;
               const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
                 swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
                   ? <SpringSwap from={swapFrom} onArrived={() => { convertedPaneRef.current = null; setSwapFrom(null); }}>{body}</SpringSwap>
@@ -11003,20 +11006,8 @@ function App() {
                     // The island lands on this plate while the pane is on
                     // screen and focused (MonochatIsland reads the attribute).
                     return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.visible && ctx.focused ? "" : undefined} />;
-                  case "plan": {
-                    // The holder: the pane asked for, while on screen; else
-                    // the focused plan pane; else the first visible one.
-                    const visiblePlans = activeVisiblePanes.filter((p) => p.kind === "plan").map((p) => p.id);
-                    const holder = planHolder && visiblePlans.includes(planHolder) ? planHolder : visiblePlans.includes(activeFocusedPaneId ?? "") ? activeFocusedPaneId : visiblePlans[0] ?? null;
-                    if (ctx.visible && holder !== pane.id) {
-                      return (
-                        <Suspense fallback={null}>
-                          <SingletonElsewhere what="the plan" onBringHere={() => setPlanHolder(pane.id)} />
-                        </Suspense>
-                      );
-                    }
-                    return <SingletonSlot host={planHost} name="plan" active={ctx.visible && holder === pane.id} />;
-                  }
+                  case "plan":
+                    return <Singleton host={planHost} pane={pane} ctx={ctx} holder={singletonHolder(wb.getState(), "plan", planHolder)} bring={setPlanHolder} />;
                   case "file":
                     return (
                       <Suspense fallback={null}>
@@ -11024,7 +11015,7 @@ function App() {
                       </Suspense>
                     );
                   case "browser":
-                    return <SingletonSlot host={browserHost} name="browser" active={ctx.visible} />;
+                    return <Singleton host={browserHost} pane={pane} ctx={ctx} holder={browserHeld} bring={setBrowserHolder} />;
                   case "chat":
                     return pane.data.source === "companion"
                       ? <SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />

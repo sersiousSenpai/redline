@@ -281,6 +281,15 @@ export function SingletonElsewhere({ what, onBringHere }: { what: string; onBrin
   );
 }
 
+/** A singleton's pane (the plan, the browser), named by its kind: the
+ *  holder (`singletonHolder`) shows the slot; another visible pane shows
+ *  where the body went, and "Bring here" makes it the holder. */
+export function Singleton({ host, pane, ctx, holder, bring }: { host: HTMLElement; pane: AnyPane; ctx: PaneContext; holder: string | undefined; bring: (paneId: string) => void }) {
+  return ctx.visible && holder !== pane.id
+    ? <SingletonElsewhere what={`the ${pane.kind}`} onBringHere={() => bring(pane.id)} />
+    : <SingletonSlot host={host} name={pane.kind} active={ctx.visible} />;
+}
+
 /** The focused visible pane of the active tab, for App's door/drafter rules. */
 export function focusedPaneOf(set: TabSet | null | undefined): AnyPane | null {
   const tab = set ? activeTabOf(set) : null;

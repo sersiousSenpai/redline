@@ -16,6 +16,7 @@ import {
   paneTitle,
   planKey,
   sessionIdOf,
+  singletonHolder,
   visiblePaneIds,
   type AnyPane,
   type LayoutNode,
@@ -72,6 +73,21 @@ describe("model", () => {
     };
     expect(paneIdsOf(tree)).toEqual(["a", "b", "c"]);
     expect(isSplit(tree)).toBe(true);
+  });
+
+  it("gives a singleton to one visible pane: the one asked for, else the focused, else the first", () => {
+    const browser: PaneInit = { kind: "browser", data: { workspace: "regular" } };
+    let s = home(browser);
+    s = reduce(s, { type: "splitPane", paneId: "p1", direction: "row", pane: browser, newPaneId: "b" });
+    expect(singletonHolder(s, "browser", null)).toBe("b");
+    expect(singletonHolder(s, "browser", "p1")).toBe("p1");
+    s = reduce(s, { type: "splitPane", paneId: "b", direction: "row", pane: file("/a"), newPaneId: "f" });
+    expect(singletonHolder(s, "browser", null)).toBe("p1");
+    expect(singletonHolder(s, "browser", "b")).toBe("b");
+    expect(singletonHolder(s, "browser", "gone")).toBe("p1");
+    expect(singletonHolder(s, "plan", null)).toBeUndefined();
+    s = reduce(s, { type: "openTab", pane: file("/b"), tabId: "t2", paneId: "x" });
+    expect(singletonHolder(s, "browser", "b")).toBeUndefined();
   });
 
   it("titles panes from their data unless overridden", () => {
