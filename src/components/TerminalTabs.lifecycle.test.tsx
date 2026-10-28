@@ -23,7 +23,10 @@ vi.mock("./TerminalTileHeader", () => ({ TerminalTileHeader: ({ identity, tile, 
 
 import { TerminalTabs, type TerminalTabsHandle } from "./TerminalTabs";
 import { TERMINAL_WORKSPACE_KEY } from "../lib/terminalWorkspace";
-import { enqueuePtyOp } from "../lib/ptyFence";
+import { __resetTerminalSwapForTest } from "../lib/terminalSwap";
+import { lastMeasure, resetMeasuresForTest } from "../workbench/perf";
+import type { WallData } from "../workbench/model";
+import { EMPTY_WALL, placeOnWall } from "../workbench/wall";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let host: HTMLDivElement;
@@ -38,17 +41,67 @@ const click = async (selector: string) => {
   expect(button).not.toBeNull();
   await act(async () => button!.click());
 };
-async function mount(props: { collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void } = {}) {
-  await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={props.collapsed ?? false} onNeedsYouChange={props.onNeedsYouChange} onFocusedCwd={props.onFocusedCwd} /></StrictMode>));
+
+// The host's side of the wall, as the workbench keeps it: walls by pane id,
+// the one on screen, and the placement the reducer's `revealTerminal` does
+// (this wall while it has room).
+let walls: Record<string, WallData> = {};
+let wallKey: string | null = "w1";
+let changes: [string, WallData][] = [];
+type MountProps = { collapsed?: boolean; onNeedsYouChange?: (count: number) => void; onFocusedCwd?: (id: string, cwd: string) => void; onActiveTabChange?: (id: string) => void; solo?: string | null };
+let props: MountProps = {};
+const order = () => (wallKey ? walls[wallKey]?.tiles ?? [] : []);
+function view() {
+  return (
+    <StrictMode>
+      <TerminalTabs
+        ref={handle}
+        theme="light"
+        wallKey={wallKey}
+        wall={wallKey ? (walls[wallKey] ?? EMPTY_WALL) : null}
+        onWallChange={(key, data) => { walls = { ...walls, [key]: data }; changes.push([key, data]); root.render(view()); }}
+        onPlaceTerminal={(id) => place(id)}
+        onTabsChange={() => {}}
+        collapsed={props.collapsed ?? false}
+        onNeedsYouChange={props.onNeedsYouChange}
+        onFocusedCwd={props.onFocusedCwd}
+        onActiveTabChange={props.onActiveTabChange}
+        solo={props.solo ?? null}
+      />
+    </StrictMode>
+  );
 }
+function place(id: string) {
+  if (!wallKey) return;
+  walls = { ...walls, [wallKey]: placeOnWall(walls[wallKey] ?? EMPTY_WALL, id) };
+  root.render(view());
+}
+async function mount(next: MountProps = {}) {
+  props = next;
+  await act(async () => root.render(view()));
+}
+async function rerender() {
+  await act(async () => root.render(view()));
+}
+/** A terminal the host opens and (unless `background`) shows, as App's
+ *  `openTerminal` does. */
 async function open(background = false) {
   let id = "";
-  await act(async () => { id = handle.current!.openSessionTerminal("/repo", { background }); });
+  await act(async () => {
+    id = handle.current!.openSessionTerminal("/repo");
+    if (!background) place(id);
+  });
   return id;
 }
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  walls = {};
+  wallKey = "w1";
+  changes = [];
+  props = {};
+  __resetTerminalSwapForTest();
+  resetMeasuresForTest();
   mocks.inventory = [];
   mocks.cwd = null;
   mocks.listeners.clear();
@@ -77,79 +130,139 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("convenience shell replacement", () => {
-  it.each([false, true])("a session (background=%s) inherits the sole pristine shell's tile", async (background) => {
+const ptyLifecycle = () => mocks.invoke.mock.calls.filter(([cmd]) => ["pty_spawn", "pty_attach", "pty_kill"].includes(cmd));
+
+describe("walls: one fleet, many views", () => {
+  const visible = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)?.dataset.visible;
+  const frame = () => act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+
+  it("opens a terminal without placing it; the host shows it, and nothing is ever spawned unasked", async () => {
     await mount();
-    const original = ids()[0];
-    const next = await open(background);
-    await enqueuePtyOp(original, async () => {});
-    expect(ids()).toEqual([next]);
-    expect(tiled()).toEqual([next]);
-    expect(focused()).toBe(next);
-    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: original });
-    expect(saved().tabs).toEqual([{ id: next, cwd: "/repo" }]);
+    expect(ids()).toEqual([]);
+    expect(host.textContent).toContain("No terminals on this wall");
+    let id = "";
+    await act(async () => { id = handle.current!.openSessionTerminal("/repo"); });
+    expect(ids()).toEqual([id]);
+    expect(tiled()).toEqual([]);
+    expect(visible(id)).toBe("false");
+    await act(async () => place(id));
+    expect(tiled()).toEqual([id]);
+    expect(visible(id)).toBe("true");
   });
 
-  it("typing makes the shell permanent and a background restore leaves its tile alone", async () => {
+  it("the empty wall's New terminal asks the host to place it", async () => {
     await mount();
-    const original = ids()[0];
-    await click(`[data-type="${original}"]`);
-    const next = await open(true);
-    expect(ids()).toEqual([original, next]);
-    expect(tiled()).toEqual([original]);
-    expect(focused()).toBe(original);
-    expect(saved().tabs[0].placeholder).not.toBe(true);
-    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
+    await click(".rl-wall-empty button");
+    expect(ids()).toHaveLength(1);
+    expect(order()).toEqual(ids());
   });
 
-  it("preserves a convenience shell that moved off its startup directory", async () => {
-    mocks.cwd = "/away";
+  it("swapping walls re-points the tiles in one render: the same views, no PTY attach or spawn, the swap measured to its painted frame", async () => {
     await mount();
-    const original = ids()[0];
-    const next = await open();
-    expect(ids()).toEqual([original, next]);
-    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
+    const a = await open();
+    const b = await open();
+    walls.w2 = { tiles: [], focus: 0, zoomed: null, pinned: [] };
+    wallKey = "w2";
+    await rerender();
+    const c = await open();
+    const nodes = ids().map((id) => host.querySelector(`[data-terminal-id="${id}"]`));
+    mocks.invoke.mockClear();
+    wallKey = "w1";
+    await rerender();
+    expect(tiled().sort()).toEqual([a, b].sort());
+    expect([visible(a), visible(b), visible(c)]).toEqual(["true", "true", "false"]);
+    expect(ids().map((id) => host.querySelector(`[data-terminal-id="${id}"]`))).toEqual(nodes);
+    expect(ptyLifecycle()).toEqual([]);
+    await frame();
+    await frame();
+    expect(lastMeasure("wb:terminal-swap")).not.toBeNull();
+    wallKey = "w2";
+    await rerender();
+    expect(tiled()).toEqual([c]);
+    expect(focused()).toBe(c);
+    expect(ptyLifecycle()).toEqual([]);
   });
 
-  it("explicit menu shells never replace the placeholder and a launch preserves both", async () => {
+  it("adopts the host's change to the wall, and sends back only its own", async () => {
     await mount();
-    const original = ids()[0];
-    await click(`[data-new="${original}"]`);
-    const existing = ids();
-    expect(existing).toHaveLength(2);
-    const next = await open();
-    expect(ids()).toEqual([...existing, next]);
-    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
+    const a = await open();
+    const b = await open(true);
+    changes = [];
+    // A reveal elsewhere put b on this wall: adopted, not echoed.
+    walls = { ...walls, w1: { tiles: [a, b], focus: 1, zoomed: null, pinned: [] } };
+    await rerender();
+    expect(tiled()).toEqual([a, b]);
+    expect(focused()).toBe(b);
+    expect(changes).toEqual([]);
+    await click(`[data-focus="${a}"]`);
+    await click(`[data-zoom="${a}"]`);
+    await click(`[data-pin="${a}"]`);
+    expect(walls.w1).toEqual({ tiles: [a, b], focus: 0, zoomed: a, pinned: [a] });
+    expect(changes.every(([key]) => key === "w1")).toBe(true);
   });
 
-  it("closing the last terminal creates a replaceable convenience shell", async () => {
+  it("closing a terminal kills it and collapses its tile, pulling nothing in; the last one leaves an empty wall", async () => {
+    await mount();
+    const a = await open();
+    const b = await open();
+    await open(true);
+    await click(`[data-close="${b}"]`);
+    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: b });
+    expect(order()).toEqual([a]);
+    await click(`[data-close="${a}"]`);
+    expect(order()).toEqual([]);
+    expect(changes[changes.length - 1][1].tiles).toEqual([]);
+  });
+
+  it("a menu row's New terminal goes to the host's placement, never into a tile it takes from someone", async () => {
+    await mount();
+    const a = await open();
+    await click(`[data-new="${a}"]`);
+    expect(order()).toHaveLength(2);
+    expect(order()[0]).toBe(a);
+  });
+
+  it("dragging header A onto tile B swaps them", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("rl-tile-wrap") && this.style.display !== "none" && this.style.left) {
+        const pct = (v: string) => parseFloat(v) / 100;
+        const left = pct(this.style.left) * 1440;
+        const width = pct(this.style.width) * 1440;
+        const top = pct(this.style.top) * 270;
+        const height = pct(this.style.height) * 270;
+        return { x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) } as DOMRect;
+      }
+      return { x: 0, y: 0, left: 0, top: 0, width: 1440, height: 270, right: 1440, bottom: 270, toJSON: () => ({}) } as DOMRect;
+    });
     await mount();
     const first = await open();
-    await click(`[data-close="${first}"]`);
-    const replacement = ids()[0];
-    expect(replacement).not.toBe(first);
-    expect(saved().tabs[0].placeholder).toBe(true);
-    const second = await open();
-    expect(ids()).toEqual([second]);
-    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: first });
-    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: replacement });
-  });
-
-  it("back-to-back launches replace the placeholder only once and keep both new tiles", async () => {
-    await mount();
-    let first = "", second = "";
-    await act(async () => {
-      first = handle.current!.openSessionTerminal("/one");
-      second = handle.current!.openSessionTerminal("/two");
-    });
-    expect(ids()).toEqual([first, second]);
-    expect(tiled()).toEqual([first, second]);
-    expect(mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_kill")).toHaveLength(1);
+    const a = await open();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
+    const clicked = vi.fn();
+    window.addEventListener("click", clicked);
+    const drag = async (target: Element, from: [number, number], to: [number, number]) => {
+      await act(async () => {
+        target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: from[0], clientY: from[1] }));
+        window.dispatchEvent(new MouseEvent("pointermove", { clientX: to[0], clientY: to[1] }));
+        window.dispatchEvent(new MouseEvent("pointerup", { clientX: to[0], clientY: to[1] }));
+        target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    };
+    await drag(host.querySelector(`[data-drag="${first}"]`)!, [10, 10], [1100, 100]);
+    expect(order()).toEqual([a, first]);
+    expect(focused()).toBe(first);
+    expect(clicked).not.toHaveBeenCalled();
+    expect(document.documentElement.dataset.rlTileDrag).toBeUndefined();
+    // A press that never travels is not a drag, and its click goes through.
+    await drag(host.querySelector(`[data-drag="${a}"]`)!, [10, 10], [11, 11]);
+    expect(order()).toEqual([a, first]);
+    expect(clicked).toHaveBeenCalledTimes(1);
+    window.removeEventListener("click", clicked);
   });
 });
 
 describe("terminal workspace recovery", () => {
-  it("restores ids, visible and background slots, focus and zoom across remount", async () => {
+  it("restores the terminals across a reload, and the wall shows the same tiles", async () => {
     await mount();
     const first = await open();
     const second = await open();
@@ -168,54 +281,37 @@ describe("terminal workspace recovery", () => {
     expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
   });
 
-  it("a relaunch opens one fresh convenience shell instead of respawning the dead fleet", async () => {
+  it("a relaunch starts with no terminals and spawns none: dead ids on a wall are not resurrected", async () => {
     await mount();
-    const before = [ids()[0], await open(), await open(), await open()];
+    const before = [await open(), await open()];
     await act(async () => root.render(null));
     // Process death: every PTY is gone and so is the launch's sessionStorage.
     sessionStorage.clear();
     mocks.invoke.mockClear();
     await mount();
-    expect(ids()).toHaveLength(1);
-    const [fresh] = ids();
-    expect(before).not.toContain(fresh);
-    expect(tiled()).toEqual([fresh]);
-    expect(saved().tabs).toEqual([{ id: fresh, cwd: null, placeholder: true }]);
+    expect(ids()).toEqual([]);
+    expect(tiled()).toEqual([]);
     const touched = mocks.invoke.mock.calls.flatMap(([, args]) => Object.values(args ?? {}).flat());
     expect(touched.some((value) => before.includes(value as string))).toBe(false);
   });
 
-  it("offers live orphaned PTYs and reattaches their original ids in place of a blank shell", async () => {
+  it("offers live orphaned PTYs and reattaches their original ids, placed by the host", async () => {
     mocks.inventory = [{ id: "orphan-one", cwd: "/one", pid: 10, alive: true }, { id: "orphan-two", cwd: null, pid: 20, alive: true }, { id: "ended", cwd: "/dead", pid: null, alive: false }];
     await mount();
-    const original = ids()[0];
     expect(host.textContent).toContain("Reattach 2 detached terminals");
-    await click('[role="status"] button');
+    await click('[data-recovery] button');
     expect(ids()).toEqual(["orphan-one", "orphan-two"]);
-    expect(tiled()).toEqual(["orphan-one", "orphan-two"]);
-    expect(host.querySelector('[role="status"]')).toBeNull();
-    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: original });
+    expect(order()).toEqual(["orphan-one", "orphan-two"]);
+    expect(host.querySelector("[data-recovery]")).toBeNull();
+    expect(mocks.invoke.mock.calls.some(([cmd]) => cmd === "pty_kill")).toBe(false);
   });
 
   it("rechecks recovery candidates so a terminal that exited after boot is not respawned", async () => {
     mocks.inventory = [{ id: "orphan", cwd: "/one", pid: 10, alive: true }];
     await mount();
-    const original = ids()[0];
     mocks.inventory = [{ id: "orphan", cwd: "/one", pid: 10, alive: false }];
-    await click('[role="status"] button');
-    expect(ids()).toEqual([original]);
-    expect(host.querySelector('[role="status"]')).toBeNull();
-  });
-
-  it("never recovers the placeholder it just replaced, even when it follows the orphan in the inventory", async () => {
-    mocks.inventory = [{ id: "a-orphan", cwd: "/one", pid: 10, alive: true }];
-    await mount();
-    const placeholder = ids()[0];
-    mocks.inventory.push({ id: placeholder, cwd: null, pid: 20, alive: true });
-    await click('[role="status"] button');
-    expect(ids()).toEqual(["a-orphan"]);
-    expect(tiled()).toEqual(["a-orphan"]);
-    expect(mocks.invoke).toHaveBeenCalledWith("pty_kill", { id: placeholder });
+    await click('[data-recovery] button');
+    expect(ids()).toEqual([]);
   });
 
   it("a slow inventory cannot overwrite a launch or present its own terminal as detached", async () => {
@@ -228,19 +324,18 @@ describe("terminal workspace recovery", () => {
     await act(async () => resolve([{ id: launched, cwd: "/repo", pid: 1, alive: true }, { id: "orphan", cwd: "/other", pid: 2, alive: true }]));
     expect(ids()).toEqual([launched]);
     expect(host.textContent).toContain("Reattach 1 detached terminals");
-    await click('[role="status"] button');
+    await click('[data-recovery] button');
     expect(ids()).toEqual([launched, "orphan"]);
   });
 
-  it("keeps the dock usable when inventory fails and offers retry", async () => {
+  it("keeps the wall usable when inventory fails and offers retry", async () => {
     const ordinary = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command, args) => command === "pty_list" ? Promise.reject(new Error("offline")) : ordinary(command, args));
     await mount();
-    expect(ids()).toHaveLength(1);
     expect(host.textContent).toContain("Retry terminal recovery");
     mocks.invoke.mockImplementation(ordinary);
-    await click('[role="status"] button');
-    expect(host.querySelector('[role="status"]')).toBeNull();
+    await click('[data-recovery] button');
+    expect(host.textContent).not.toContain("Retry terminal recovery");
   });
 });
 
@@ -257,7 +352,7 @@ describe("terminal state", () => {
 
   it("a needs-you lights the tile with the agent's words, and typing answers it", async () => {
     await mount();
-    const id = ids()[0];
+    const id = await open();
     await emit(needsYou(id, 10));
     expect(stateOf(id)).toBe("needs-you");
     expect(host.querySelector<HTMLElement>(`[data-header-id="${id}"]`)?.dataset.work).toBe("Claude needs your permission");
@@ -442,7 +537,8 @@ describe("the fleet poll", () => {
     const seen: [string, string][] = [];
     mocks.cwd = "/work/api";
     await mount({ onFocusedCwd: (id, cwd) => seen.push([id, cwd]) });
-    const id = focused()!;
+    const id = await open();
+    expect(focused()).toBe(id);
     expect(seen).toEqual([[id, "/work/api"]]);
     await tick(6000);
     expect(seen).toHaveLength(1);
@@ -452,185 +548,7 @@ describe("the fleet poll", () => {
   });
 });
 
-describe("the wall: shelf, placement and arrangement", () => {
-  const shelf = () => [...host.querySelectorAll<HTMLElement>("[data-shelf-id]")].map((chip) => chip.dataset.shelfId!);
-  const emit = async (payload: Record<string, unknown>) => {
-    await act(async () => mocks.listeners.get("term-attention")!({ payload }));
-  };
-  const needsYou = (terminalId: string, at: number) => ({ terminalId, sessionId: "s", at, kind: "needs-you", reason: "permission_prompt", message: "Claude needs your permission" });
-  // Tile ORDER, as the grid lays it out. (`tiled()` reads the headers in DOM
-  // order, which is creation order — the wrappers never move in the DOM.)
-  const order = () => saved().tiles as string[];
-  // jsdom lays nothing out. Give the dock a 1440×270 pane — wide enough for
-  // two 80-column tiles side by side, not three — and every tile wrapper the
-  // box its percentage style describes inside it.
-  const PANE = { width: 1440, height: 270 };
-  function layout() {
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains("rl-tile-wrap") && this.style.display !== "none" && this.style.left) {
-        const pct = (v: string) => parseFloat(v) / 100;
-        const left = pct(this.style.left) * PANE.width;
-        const top = pct(this.style.top) * PANE.height;
-        const width = pct(this.style.width) * PANE.width;
-        const height = pct(this.style.height) * PANE.height;
-        return { x: left, y: top, left, top, width, height, right: left + width, bottom: top + height, toJSON: () => ({}) } as DOMRect;
-      }
-      return { x: 0, y: 0, left: 0, top: 0, width: PANE.width, height: PANE.height, right: PANE.width, bottom: PANE.height, toJSON: () => ({}) } as DOMRect;
-    });
-  }
-  // The pane measures itself a frame after mount.
-  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); });
-  async function wall() {
-    layout();
-    await mount();
-    const first = await open();
-    const a = await open(true);
-    const b = await open(true);
-    await settle();
-    return { first, a, b };
-  }
-
-  it("shows every terminal off the wall on the shelf, loud first", async () => {
-    const { first, a, b } = await wall();
-    expect(order()).toEqual([first]);
-    expect(shelf()).toEqual([a, b]);
-    await emit(needsYou(b, 5));
-    expect(shelf()).toEqual([b, a]);
-    expect(host.querySelector<HTMLElement>(`[data-shelf-id="${b}"]`)?.dataset.termState).toBe("needs-you");
-    // A terminal that needs you is never pulled onto the wall on its own.
-    expect(order()).toEqual([first]);
-    // Every terminal is on the wall or on the shelf.
-    await click(`[data-new="${first}"]`);
-    expect(tiled()).toHaveLength(2);
-    expect(shelf()).toEqual([b, a]);
-  });
-
-  it("a shelf click adds a tile while one more fits at 80 columns, then takes the quietest unpinned, unfocused tile", async () => {
-    const { first, a, b } = await wall();
-    await click(`[data-shelf-id="${a}"]`);
-    expect(order()).toEqual([first, a]);
-    expect(focused()).toBe(a);
-    // A third tile would be 60 columns wide: b replaces the quietest tile
-    // that isn't focused — `first` — and `first` goes to the shelf.
-    await click(`[data-shelf-id="${b}"]`);
-    expect(order()).toEqual([b, a]);
-    expect(focused()).toBe(b);
-    expect(shelf()).toEqual([first]);
-  });
-
-  it("a pinned tile is never the one replaced; the focused one goes last", async () => {
-    const { first, a, b } = await wall();
-    await click(`[data-pin="${first}"]`);
-    expect(saved().pinned).toEqual([first]);
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([first, a]);
-    // first is pinned, a is focused: nothing else may give way, so a does.
-    await act(async () => handle.current!.selectTab(b));
-    expect(order()).toEqual([first, b]);
-    // With the focused tile pinned too, no tile may give way at all: the
-    // wall grows past the 80-column fit rather than break a pin.
-    await click(`[data-pin="${b}"]`);
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([first, b, a]);
-    await click(`[data-pin="${first}"]`);
-    await click(`[data-pin="${b}"]`);
-    expect(saved().pinned).toBeUndefined();
-  });
-
-  it("App's reveal into a collapsed dock never grows the wall — App would pop the dock open for a new tile", async () => {
-    const { first, a, b } = await wall();
-    const counts: number[] = [];
-    // Linked navigation (a folder-tab click) selects the folder's terminal
-    // without opening the dock.
-    await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed onTileCountChange={(n) => counts.push(n)} /></StrictMode>));
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([a]);
-    expect(Math.max(...counts)).toBe(1);
-    // Open, the same reveal adds a tile while one more still fits.
-    await mount();
-    await act(async () => handle.current!.selectTab(b));
-    expect(order()).toEqual([a, b]);
-    expect(shelf()).toEqual([first]);
-  });
-
-  it("App's reveal focuses a terminal already on the wall instead of moving it", async () => {
-    const { first, a } = await wall();
-    await act(async () => handle.current!.selectTab(a));
-    await click(`[data-focus="${first}"]`);
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([first, a]);
-    expect(focused()).toBe(a);
-  });
-
-  it("closing a tile pulls in only a terminal that needs you — otherwise the tile collapses", async () => {
-    const { first, a, b } = await wall();
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([first, a]);
-    await click(`[data-close="${a}"]`);
-    // b is quiet: nothing is resurrected.
-    expect(order()).toEqual([first]);
-    const c = await open(true);
-    await act(async () => handle.current!.selectTab(b));
-    await emit(needsYou(c, 9));
-    await click(`[data-close="${b}"]`);
-    expect(order()).toEqual([first, c]);
-  });
-
-  it("a new terminal at the tile cap takes the quietest tile, never the focused one", async () => {
-    layout();
-    await mount();
-    const opened = [await open()];
-    for (let i = 1; i < 14; i++) opened.push(await open());
-    expect(tiled()).toHaveLength(14);
-    await click(`[data-focus="${opened[0]}"]`);
-    // One terminal is busy, so it's not the quietest.
-    mocks.procs = [];
-    await emit({ terminalId: opened[13], sessionId: "s", at: 3, kind: "working" });
-    const next = await open();
-    expect(order()).toHaveLength(14);
-    // All but the focused and the busy one are equally idle: the later one
-    // gives way, in place.
-    expect(order()).toEqual([...opened.slice(0, 12), next, opened[13]]);
-  });
-
-  it("dragging header A onto tile B swaps them; a shelf chip dropped on a tile shelves its occupant", async () => {
-    const { first, a, b } = await wall();
-    await act(async () => handle.current!.selectTab(a));
-    expect(order()).toEqual([first, a]);
-    // The click a real release produces right after pointerup must reach
-    // nobody once it ended a drag (it would open the menu, or place by rule).
-    const clicked = vi.fn();
-    window.addEventListener("click", clicked);
-    const drag = async (target: Element, from: [number, number], to: [number, number]) => {
-      await act(async () => {
-        target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: from[0], clientY: from[1] }));
-        window.dispatchEvent(new MouseEvent("pointermove", { clientX: to[0], clientY: to[1] }));
-        window.dispatchEvent(new MouseEvent("pointerup", { clientX: to[0], clientY: to[1] }));
-        target.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      });
-    };
-    // Header of tile 0 dropped on tile 1 (the right half of the pane).
-    await drag(host.querySelector(`[data-drag="${first}"]`)!, [10, 10], [1100, 100]);
-    expect(order()).toEqual([a, first]);
-    expect(focused()).toBe(first);
-    expect(clicked).not.toHaveBeenCalled();
-    expect(document.documentElement.dataset.rlTileDrag).toBeUndefined();
-    expect(document.querySelector(".rl-tile-drag-ghost")).toBeNull();
-    // A press that never travels is not a drag, and its click goes through.
-    await drag(host.querySelector(`[data-drag="${a}"]`)!, [10, 10], [11, 11]);
-    expect(order()).toEqual([a, first]);
-    expect(clicked).toHaveBeenCalledTimes(1);
-    // The shelf chip (b) dropped on tile 0: b takes it, a goes to the shelf.
-    await drag(host.querySelector(`[data-shelf-id="${b}"]`)!, [5, 5], [300, 100]);
-    expect(order()).toEqual([b, first]);
-    expect(shelf()).toEqual([a]);
-    expect(clicked).toHaveBeenCalledTimes(1);
-    window.removeEventListener("click", clicked);
-  });
-});
-
 describe("reach and notify", () => {
-  const order = () => saved().tiles as string[];
   const tick = (ms: number) => act(async () => { vi.advanceTimersByTime(ms); });
   const emit = async (payload: Record<string, unknown>) => {
     await act(async () => mocks.listeners.get("term-attention")!({ payload }));
@@ -659,46 +577,28 @@ describe("reach and notify", () => {
     expect(last(badges())).toBe(1);
   });
 
-  it("⌘⇧J walks the terminals that need you, oldest first, placing each by the rule", async () => {
+  it("⌘⇧J names the terminals that need you, oldest first, walking on from the focused tile; the host shows each", async () => {
     await mount();
     const a = await open();
     const b = await open(true);
     const c = await open(true);
-    expect(handle.current!.jumpToNeedsYou()).toBe(false);
+    expect(handle.current!.nextNeedsYou()).toBeNull();
     await emit(needsYou(c, 5));
     await emit(needsYou(b, 7));
-    let jumped = false;
-    await act(async () => { jumped = handle.current!.jumpToNeedsYou(); });
-    expect(jumped).toBe(true);
+    const jump = async () => {
+      const target = handle.current!.nextNeedsYou();
+      // The host's reveal: its wall, its tile.
+      await act(async () => { if (target) place(target); });
+      return target;
+    };
+    expect(await jump()).toBe(c);
     expect(focused()).toBe(c);
-    await act(async () => { handle.current!.jumpToNeedsYou(); });
+    expect(await jump()).toBe(b);
     expect(focused()).toBe(b);
     // Never by replacing the tile you were on: a, b and c all hold tiles.
     expect(order()).toEqual([a, c, b]);
     // And round again.
-    await act(async () => { handle.current!.jumpToNeedsYou(); });
-    expect(focused()).toBe(c);
-  });
-
-  it("⌘⇧J and App's reveal end a zoom on another tile, so the terminal they land on is on screen", async () => {
-    await mount();
-    const a = await open();
-    const b = await open();
-    await click(`[data-zoom="${a}"]`);
-    const visible = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)?.dataset.visible;
-    expect(visible(b)).toBe("false");
-    await emit(needsYou(b, 5));
-    await act(async () => { handle.current!.jumpToNeedsYou(); });
-    expect(focused()).toBe(b);
-    expect(visible(b)).toBe("true");
-    expect(host.querySelector('[data-zoomed="true"]')).toBeNull();
-    // A zoom on the terminal itself stays: it is already what you see.
-    await click(`[data-zoom="${b}"]`);
-    await act(async () => handle.current!.selectTab(b));
-    expect(host.querySelector<HTMLElement>('[data-zoomed="true"]')?.dataset.headerId).toBe(b);
-    await click(`[data-zoom="${a}"]`);
-    await act(async () => handle.current!.selectTab(b));
-    expect(visible(b)).toBe("true");
+    expect(await jump()).toBe(c);
   });
 
   it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {
@@ -782,14 +682,14 @@ describe("solo: the flow shell's terminal view", () => {
   const view = (id: string) => host.querySelector<HTMLElement>(`[data-terminal-id="${id}"]`)!;
   const shown = () => [...host.querySelectorAll<HTMLElement>('[data-visible="true"]')].map((node) => node.dataset.terminalId!);
   async function render(solo: string | null, onActiveTabChange?: (id: string) => void) {
-    await act(async () => root.render(<StrictMode><TerminalTabs ref={handle} theme="light" onTabsChange={() => {}} collapsed={false} solo={solo} onActiveTabChange={onActiveTabChange} /></StrictMode>));
+    await mount({ solo, onActiveTabChange });
   }
 
   it("shows one terminal alone and gives the wall back untouched — no shell spawned, killed or remounted", async () => {
     await render(null);
     const a = await open();
     const b = await open();
-    const before = { ids: ids(), tiles: saved().tiles, nodes: [view(a), view(b)] };
+    const before = { ids: ids(), tiles: order(), nodes: [view(a), view(b)] };
     expect(before.tiles).toEqual([a, b]);
     const kills = () => mocks.invoke.mock.calls.filter(([cmd]) => cmd === "pty_kill").length;
     const killed = kills();
@@ -799,7 +699,7 @@ describe("solo: the flow shell's terminal view", () => {
     // No tile header and no gutters: the stage's own top bar is the chrome.
     expect(tiled()).toEqual([]);
     expect(ids()).toEqual(before.ids);
-    expect(saved().tiles).toEqual(before.tiles);
+    expect(order()).toEqual(before.tiles);
 
     await render(null);
     expect(shown().sort()).toEqual([a, b].sort());

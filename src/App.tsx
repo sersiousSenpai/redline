@@ -15,7 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode, RefObject } from "react";
+import type { ReactNode } from "react";
 import { ZoomButton } from "./components/ZoomButton";
 import { DocWidthToggle } from "./components/DocWidthToggle";
 import { invoke } from "@tauri-apps/api/core";
@@ -368,20 +368,17 @@ import {
 } from "./lib/surfaceContext";
 import { doorRecents, loadDoorTabs, type DoorRecent, type DoorTab } from "./lib/doorRecents";
 import { MonochatContext } from "./components/MonochatContext";
-// The dock's body is fetched with its mount, not with the shell — see
-// `terminalMounted` below. `import type` is erased, so the handle's type
-// costs nothing.
-const TerminalTabs = lazy(() =>
-  import("./components/TerminalTabs").then((m) => ({
-    default: m.TerminalTabs,
-  })),
-);
+// The terminal layer is fetched with its mount, not with the shell — see
+// `terminalMounted` below — and a terminals pane's slot rides the same chunk.
+// `import type` is erased, so the handle's type costs nothing.
+const loadTerminalLayer = () => import("./workbench/TerminalLayer");
+const TerminalLayer = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalLayer })));
+const TerminalWallSlot = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalWallSlot })));
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
 // Which terminal a session runs in, and what its CLI is doing
 // (lib/sessionTerminals): the Agent tab, the sidebar's launch rows and their
 // spinners read it. The dock pins itself over an Agent pane's CLI view
 // (lib/stageDock).
-import { useStageDock } from "./lib/stageDock";
 import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSessionTerminals, type FlowLaunch, type LaunchEvent } from "./lib/sessionTerminals";
 // The comment composer opens on a gesture — a selection's menu — so it rides
 // its own chunk (about 9.5 kB off the boot path), warmed the moment a
@@ -483,7 +480,6 @@ import {
   voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
-import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
 import { markOnce } from "./lib/bootMarks";
 import { beginMeasure, endMeasure } from "./workbench/perf";
@@ -2914,7 +2910,6 @@ function App() {
   // pinned over that pane's box and shows that one terminal alone — the
   // same attachment the dock already holds, never a second one.
   const [cliView, setCliView] = useState<CliView | null>(null);
-  const cliBoxRef = useMemo<RefObject<HTMLElement | null>>(() => ({ current: cliView?.el ?? null }), [cliView]);
   const [flowLaunches, setFlowLaunches] = useState<readonly FlowLaunch[]>([]);
   const flowLaunchesRef = useRef(flowLaunches);
   flowLaunchesRef.current = flowLaunches;
@@ -3284,9 +3279,6 @@ function App() {
   ]);
   snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
-  // The dock's GRID, distinct from the tab count — 9 tabs / 2 tiles is
-  // normal. Drives dock growth and the browser-pane resync key.
-  const [termTiles, setTermTiles] = useState({ count: 1, rows: 1 });
   // Live terminal ids. Null until the dock first reports — an absent report
   // must never read as "the terminal is gone".
   const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
@@ -3317,7 +3309,7 @@ function App() {
   // session here. Its conversation opens as an Agent tab beside this one.
   const forkCliSession = async (cliSessionId: string, projectPath: string | null) => {
     if (!/^[\w.-]+$/.test(cliSessionId)) return;
-    const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath, { background: true }) ?? null;
+    const id = await openTerminal(projectPath, true);
     if (!id) {
       setToast("Couldn't open a terminal to fork into", 6000);
       return;
@@ -3329,21 +3321,8 @@ function App() {
     }
     wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "agent", terminalId: id, sessionId: null } });
   };
-  // Baseline for tile-driven dock growth (see the effect below).
-  const prevTileCountRef = useRef(1);
-  const tilesReportedRef = useRef(false);
-  const handleTileCountChange = useCallback(
-    (count: number, rows: number) => {
-      if (!tilesReportedRef.current) {
-        tilesReportedRef.current = true;
-        prevTileCountRef.current = count;
-      }
-      setTermTiles((prev) =>
-        prev.count === count && prev.rows === rows ? prev : { count, rows },
-      );
-    },
-    [],
-  );
+  const liveTermIdsRef = useRef(liveTermIds);
+  liveTermIdsRef.current = liveTermIds;
   // How many dock terminals need you (TerminalTabs owns which): the footer
   // chip, and whether ⌘⇧J has anywhere to go.
   const [termNeedYou, setTermNeedYou] = useState(0);
@@ -3507,6 +3486,26 @@ function App() {
     },
     [],
   );
+  /** Show a terminal: its session, its wall and its tile (the workbench's
+   *  `revealTerminal`), hailed once that has painted. Flow shows it as its
+   *  session's stage. */
+  const showTerminal = useCallback((id: string, focus = false) => {
+    setImmersiveBroken(true);
+    setTerminalMounted(true);
+    wb.dispatch({ type: "revealTerminal", ptyId: id });
+    requestAnimationFrame(() => {
+      terminalsRef.current?.hailTerminal(id);
+      if (focus) terminalsRef.current?.focusTerminal(id);
+    });
+  }, []);
+  /** Open a terminal in `cwd` and, unless it is machinery (`background`: a
+   *  restore, a launch the door's pill tracks), show it. Null when no
+   *  terminal could be opened. */
+  const openTerminal = useCallback(async (cwd: string | null, background = false): Promise<string | null> => {
+    const id = (await ensureTerminalReady())?.openSessionTerminal(cwd) ?? null;
+    if (id && !background) showTerminal(id);
+    return id;
+  }, [ensureTerminalReady, showTerminal]);
 
   // Mount the terminal dock once the shell is actionable and the main thread
   // is free. Idle, not immediate: xterm's chunk plus a PTY spawn plus the cwd
@@ -3532,6 +3531,21 @@ function App() {
       ).cancelIdleCallback?.(id);
   }, [shellReady, terminalMounted]);
 
+  // A wall on screen needs its terminals now, not at the next idle beat.
+  const wallOnScreen = classicWb && wbView.visibleKinds.includes("terminals");
+  useEffect(() => {
+    if (wallOnScreen) setTerminalMounted(true);
+  }, [wallOnScreen]);
+  // Terminals that are gone leave every wall (a relaunch, a closed shell),
+  // so no wall points at a PTY that is not there; once the layer has said
+  // which are live, never before.
+  useEffect(() => {
+    if (!classicWb || !liveTermIds) return;
+    const state = wb.getState();
+    const sessions = (Object.keys(state.sets) as SessionKey[]).map(sessionIdOf).filter((sid): sid is string => sid !== null);
+    wb.dispatch({ type: "prune", liveSessions: sessions, livePtys: liveTermIds });
+  }, [liveTermIds]);
+
   // The dock is live: xterm is loaded and a PTY can be opened in it. The
   // hold-to-dictate key loads on the same idle beat — a chunk the first
   // paint never needs.
@@ -3548,9 +3562,13 @@ function App() {
     if (termNeedYouRef.current === 0) return;
     setFrontDoorOpen(false);
     setDoorCompact(false);
-    revealTerm();
-    void ensureTerminalReady().then((dock) => dock?.jumpToNeedsYou());
-  }, [revealTerm, ensureTerminalReady]);
+    // Across sessions: the one that needs you comes forward, its wall and
+    // its tile with it, then the tile is hailed and takes the caret.
+    void ensureTerminalReady().then((dock) => {
+      const target = dock?.nextNeedsYou();
+      if (target) showTerminal(target, true);
+    });
+  }, [ensureTerminalReady, showTerminal]);
   // Capture phase, like the Shift+arrow pane keys below: xterm's handler sits
   // on its helper textarea, so this runs first and the shell never sees it.
   useEffect(() => {
@@ -3585,10 +3603,13 @@ function App() {
       setFrontDoorProject({ path });
       activateFolder(path);
       if (!linkNavRef.current) return;
+      // Its terminal comes forward when it is this session's: a folder tab
+      // never carries you to another session.
       const termId = folderTermRef.current.get(path);
-      if (termId) terminalsRef.current?.selectTab(termId);
+      const state = wb.getState();
+      if (termId && state.owners[termId] === state.activeKey) showTerminal(termId);
     },
-    [activateFolder, setFrontDoorProject],
+    [activateFolder, setFrontDoorProject, showTerminal],
   );
 
   // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane,
@@ -3834,8 +3855,6 @@ function App() {
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
   const termDockRef = useRef<HTMLDivElement | null>(null);
-  // The dock over the Agent pane's CLI box while one shows its PTY.
-  useStageDock(termDockRef, cliBoxRef, !!paneCli);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
   // inside the document column — but it follows the same rule: its width is
   // written straight to the element, never rendered from JSX.
@@ -4434,34 +4453,6 @@ function App() {
       min: 120,
     });
 
-  // Tile-driven dock growth: ADDING a tile grows the dock to that tile
-  // count's floor (dockHeightForTiles only ever grows — a dock dragged
-  // taller keeps its height, and removing a tile never yanks it shorter;
-  // shrinking is the user's job via the divider or the collapse caret) and
-  // uncollapses it. It never touches termFullscreen. The divider's own max is
-  // looser than this cap, so growth can never exceed what a manual drag
-  // allows.
-  //
-  // The dock's FIRST report is its restored workspace, not tiles being added:
-  // relaunching with seven saved tiles must not reopen a dock the user left
-  // collapsed, nor grow it over the document.
-  // `handleTileCountChange` seeds the baseline from that first report.
-  useEffect(() => {
-    const prev = prevTileCountRef.current;
-    prevTileCountRef.current = termTiles.count;
-    if (termTiles.count <= prev) return;
-    const next = dockHeightForTiles(
-      termTiles.count,
-      { width: winWidth, height: window.innerHeight },
-      termHeight,
-    );
-    if (next !== termHeight) setTermHeight(next);
-    if (termCollapsed) revealTerm();
-    // Growth fires on the tile-count edge only — height/collapse are read
-    // fresh but must not re-trigger it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [termTiles.count]);
-
   const [selection, clearSelection] = useTextSelection(
     documentRef,
     composing === null,
@@ -4498,7 +4489,7 @@ function App() {
           const sid = sessionIdOf(key);
           if (sid && (key === state.activeKey || !setsBefore.has(key))) live.push(sid);
         }
-        wb.dispatch({ type: "prune", liveSessions: live, livePtys: Object.keys(state.owners) });
+        wb.dispatch({ type: "prune", liveSessions: live, livePtys: liveTermIdsRef.current ?? Object.keys(state.owners) });
       }
       return list;
     } catch (err) {
@@ -6432,8 +6423,7 @@ function App() {
         }, projectPath)}\r`;
         suppressTerminalRevealFocus();
         setTermFullscreen(false);
-        revealTerm();
-        const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
+        const id = await openTerminal(projectPath, true);
         if (!id) {
           setToast("Couldn't open a terminal to build in", 6000);
           return;
@@ -6518,8 +6508,7 @@ function App() {
     const prompt = buildScaledPrompt(sessionId, launch.runId);
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    revealTerm();
-    const id = (await ensureTerminalReady())?.openSessionTerminal(launch.projectPath) ?? null;
+    const id = await openTerminal(launch.projectPath);
     // Arm the lineage guards BEFORE the prompt can reach the hook: the ingest
     // claim links the lead under the plan and starts the Runs watcher.
     const rearm = () =>
@@ -6661,10 +6650,7 @@ function App() {
             label: "Show tab",
             onAction: () => {
               setToast(null);
-              revealTerm();
-              void ensureTerminalReady().then((dock) =>
-                dock?.selectTab(terminal),
-              );
+              showTerminal(terminal);
             },
           },
         });
@@ -6796,12 +6782,9 @@ function App() {
    *  attempt record carries its id. Focus is deliberately not suppressed here
    *  (unlike an automatic reveal): the reviewer asked to go there. */
   const showRawTerminal = async (terminalId: string | null) => {
-    setTermFullscreen(false);
-    revealTerm();
     if (!terminalId) return;
-    const dock = await ensureTerminalReady();
-    dock?.selectTab(terminalId);
-    dock?.hailTerminal(terminalId);
+    await ensureTerminalReady();
+    showTerminal(terminalId);
   };
 
   // One-click recovery for a detached plan: resume the exact conversation that
@@ -6886,10 +6869,7 @@ function App() {
 
     // The terminal opens in the PLAN's directory — the one the reviewer thinks
     // in — and the command's own `cd` takes it wherever the transcript lives.
-    const id =
-      (await ensureTerminalReady())?.openSessionTerminal(projectPath, {
-        background: true,
-      }) ?? null;
+    const id = await openTerminal(projectPath, true);
     if (!id) {
       fail("Couldn't open a terminal to resume in.");
       return;
@@ -7156,14 +7136,10 @@ function App() {
         ? buildRunLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
         : buildPlanLaunchCommand(trimmed, req.projectPath, addDirs, choice, bins, launchId)
     }\r`;
-    if (!req.background) {
-      suppressTerminalRevealFocus();
-      setTermFullscreen(false);
-      revealTerm();
-    }
-    const terminalId =
-      (await ensureTerminalReady())?.openSessionTerminal(req.projectPath, { background: req.background }) ??
-      null;
+    // The launch runs out of sight: its Agent tab, the door's flight pill
+    // and its sidebar row are the ways to it, so a launch never pulls the
+    // user off the tab they are on.
+    const terminalId = await openTerminal(req.projectPath, true);
     // No terminal means the command was never typed and nothing will ever
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
@@ -7261,13 +7237,11 @@ function App() {
     if (!cmd) return;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    revealTerm();
-    const id =
-      (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
+    const id = await openTerminal(projectPath);
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
-    setToast("Starting the dev server in the terminal below ↓");
+    setToast("Starting the dev server in a Terminals tab");
   };
 
   // "Open" on a Localhost card: bring the browser surface forward with a tab on
@@ -9140,9 +9114,7 @@ function App() {
                   if (!p) return;
                   setFrontDoorOpen(false);
                   setDoorCompact(false);
-                  revealTerm();
-                  terminalsRef.current?.selectTab(p.terminalId);
-                  terminalsRef.current?.hailTerminal(p.terminalId);
+                  showTerminal(p.terminalId);
                 }}
                 onCreateProject={createFrontDoorProject}
                 // The handoff is the door's alone: a card or a chat on the
@@ -9250,19 +9222,17 @@ function App() {
       }
       selectSurface(place);
     },
-    // A session's terminal row: the dock's tile, hailed. (Terminal panes in
-    // the centre are W3's.)
+    // A session's terminal row: its agent terminal is its Agent tab (one
+    // pane per terminal, opened again it comes forward); any other comes
+    // forward on its wall — its session, its wall, its tile, hailed — and a
+    // kept terminal (no wall) back onto one.
     onSelectTerminal: (sessionId: string, terminalId: string) => {
-      // The session's agent terminal is its Agent tab: one pane per
-      // terminal, opened again it comes forward.
       if (sessionTerminals.get(sessionId) === terminalId) {
         setActiveId(sessionId);
         wb.dispatch({ type: "openSurface", kind: "chat", key: planKey(sessionId), data: { source: "agent", terminalId, sessionId } });
         return;
       }
-      revealTerm();
-      terminalsRef.current?.selectTab(terminalId);
-      terminalsRef.current?.hailTerminal(terminalId);
+      showTerminal(terminalId);
     },
     // A pending launch's row: its own set, the Agent tab.
     onSelectLaunch: (terminalId: string) => {
@@ -9271,9 +9241,7 @@ function App() {
         wb.dispatch({ type: "selectSession", key: launchKey(launch.launchId), defaults: { agentTerminalId: terminalId } });
         return;
       }
-      revealTerm();
-      terminalsRef.current?.selectTab(terminalId);
-      terminalsRef.current?.hailTerminal(terminalId);
+      showTerminal(terminalId);
     },
     onNewTab: openDoorTab,
     onCombine: (ids: string[]) => void beginCombine(ids),
@@ -10241,9 +10209,8 @@ function App() {
                     review={codeReview}
                     projectOptions={projectOptions}
                     onOpenTerminal={(cwd, command) => {
-                      suppressTerminalRevealFocus(); setTermFullscreen(false); revealTerm();
-                      void ensureTerminalReady().then(async terminals => {
-                        const id = terminals?.openSessionTerminal(cwd);
+                      suppressTerminalRevealFocus(); setTermFullscreen(false);
+                      void openTerminal(cwd).then(async id => {
                         if (!id) { setToast("Couldn't open a terminal", 6000); return; }
                         if (command) {
                           const result = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: command }]);
@@ -10600,7 +10567,9 @@ function App() {
                     );
                   }
                   case "terminals":
-                    return <EmptyState title="Terminals" body="Terminal walls move into tabs in a later phase; the dock below still holds them." />;
+                    // An empty box the one terminal layer is pinned over
+                    // (workbench/TerminalLayer): xterm never moves.
+                    return <Suspense fallback={null}><TerminalWallSlot paneId={pane.id} active={ctx.active} /></Suspense>;
                   case "drafter":
                     return drafterSurface;
                   case "review":
@@ -11348,15 +11317,14 @@ function App() {
               tabs arrive. */}
           {terminalMounted && (
           <Suspense fallback={null}>
-          <TerminalTabs
+          <TerminalLayer
             ref={attachTerminals}
+            store={wb}
             theme={theme}
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
-            onTileCountChange={handleTileCountChange}
             onNeedsYouChange={setTermNeedYou}
-            collapsed={termFullscreen || paneCli ? false : termCollapsed}
-            solo={paneCli?.terminalId ?? null}
+            cli={paneCli}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}
@@ -11590,12 +11558,7 @@ function App() {
             </button>
             <button
               type="button"
-              onClick={() => {
-                revealTerm();
-                void ensureTerminalReady().then((dock) =>
-                  dock?.openSessionTerminal(handoffFailure.projectPath),
-                );
-              }}
+              onClick={() => void openTerminal(handoffFailure.projectPath)}
               className="rounded px-2 py-1"
               style={{
                 border: "1px solid var(--color-rule)",
@@ -11798,7 +11761,7 @@ function App() {
                   // Immersive entry and every chrome reveal move the slot as
                   // surely as a pane toggle does, and the native webview only
                   // re-reads its rect when this key changes.
-                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
+                  layoutKey={`${wbLayoutKey}|${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${immersive}|${chromeRevealed}`}
                   // The pane's four panels render into the app's one
                   // conversation column, through a portal — everything they
                   // need (tabs, missions, the linked thread) is the pane's own
@@ -11831,10 +11794,9 @@ function App() {
             onReviewHooks={() => { void (async () => {
               const binary = preflight?.codex?.path;
               if (!binary) return;
-              const dock = await ensureTerminalReady();
-              const id = dock?.openSessionTerminal(setupProject);
+              const id = await openTerminal(setupProject);
               if (!id) { setInstallError("Could not open the setup terminal. Retry, or open /hooks in your Codex terminal."); return; }
-              setSetupReviewInTerminal(true); setSetupBackend("codex"); setTermFullscreen(false); revealTerm();
+              setSetupReviewInTerminal(true); setSetupBackend("codex"); setTermFullscreen(false);
               const quoted = "'" + binary.replace(/'/g, "'\\''") + "'";
               typeIntoTerminal(id, `${quoted}\r`, "Could not start Codex for hook review", null, true);
             })(); }}

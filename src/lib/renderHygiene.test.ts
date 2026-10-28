@@ -20,7 +20,7 @@ const element = (name: string) => {
 };
 
 describe("the shell keeps its memoized children's props stable", () => {
-  it.each(["SessionSidebar", "BrowserPane", "TerminalTabs"])(
+  it.each(["SessionSidebar", "BrowserPane", "TerminalLayer"])(
     "%s gets no inline closure — its handlers go through useStableHandlers",
     (name) => {
       expect(element(name)).not.toMatch(/=>/);
@@ -71,7 +71,7 @@ describe("polling", () => {
 
   it("the shell runs no lsof of its own: it follows the fleet poll's report", () => {
     expect(app).not.toMatch(/"pty_cwds?"|"pty_procs"/);
-    expect(element("TerminalTabs")).toContain("onFocusedCwd={handleFocusedCwd}");
+    expect(element("TerminalLayer")).toContain("onFocusedCwd={handleFocusedCwd}");
   });
 
   it("the dock samples cwds and processes on one clock", () => {

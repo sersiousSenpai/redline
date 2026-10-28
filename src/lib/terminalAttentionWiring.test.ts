@@ -4,11 +4,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const app = readFileSync("src/App.tsx", "utf8");
+const tabs = readFileSync("src/components/TerminalTabs.tsx", "utf8");
 
-// The ⌘⇧J jump lives in App (it must reveal the dock) while TerminalTabs owns
-// which terminal it lands on. These pin the seams a refactor could cut
-// silently: the key must be caught in the CAPTURE phase or a focused xterm
-// eats it, and the footer's chip must run the same action.
+// The ⌘⇧J jump lives in App (it selects the session, the wall and the tile
+// through the workbench) while TerminalTabs owns which terminal it lands on.
+// These pin the seams a refactor could cut silently: the key must be caught
+// in the CAPTURE phase or a focused xterm eats it, the footer's chip must run
+// the same action, and an interrupt must reach the daemon.
 describe("terminal attention wiring", () => {
   it("catches ⌘⇧J in the capture phase, ahead of a focused terminal", () => {
     const listener = app.slice(app.indexOf("if (!isNeedsYouKey(e)) return;"));
@@ -18,12 +20,34 @@ describe("terminal attention wiring", () => {
     expect(body).toContain('window.addEventListener("keydown", onKey, true)');
   });
 
-  it("the jump reveals the dock from under the front door, then lets the dock pick the terminal", () => {
-    const jump = app.slice(app.indexOf("const jumpToNeedsYou = useCallback("), app.indexOf("}, [revealTerm, ensureTerminalReady]);"));
+  it("the jump steps out from under the front door, asks the fleet which terminal, then shows it across sessions", () => {
+    const start = app.indexOf("const jumpToNeedsYou = useCallback(");
+    const jump = app.slice(start, app.indexOf("}, [ensureTerminalReady, showTerminal]);", start));
     expect(jump).toContain("if (termNeedYouRef.current === 0) return;");
     expect(jump).toContain("setFrontDoorOpen(false)");
-    expect(jump).toContain("revealTerm()");
-    expect(jump).toContain("dock?.jumpToNeedsYou()");
+    expect(jump).toContain("dock?.nextNeedsYou()");
+    expect(jump).toContain("showTerminal(target, true)");
+  });
+
+  it("showing a terminal selects its session, wall and tile, then hails it and hands it the caret", () => {
+    const start = app.indexOf("const showTerminal = useCallback(");
+    const show = app.slice(start, app.indexOf("}, []);", start));
+    expect(show).toContain('wb.dispatch({ type: "revealTerminal", ptyId: id })');
+    expect(show).toContain("terminalsRef.current?.hailTerminal(id)");
+    expect(show).toContain("if (focus) terminalsRef.current?.focusTerminal(id)");
+    // Every "show me that terminal" route goes this one way.
+    for (const route of ["onRevealPending={() => {", "const showRawTerminal = async (", "onSelectTerminal: (sessionId: string, terminalId: string) =>"]) {
+      const at = app.indexOf(route);
+      expect(at, route).toBeGreaterThan(-1);
+      expect(app.slice(at, at + 400), route).toContain("showTerminal(");
+    }
+    expect(app).not.toContain(".selectTab(");
+  });
+
+  it("Esc reaches the daemon's interrupt, the one path that retires a working agent no hook reports", () => {
+    const start = tabs.indexOf("const handleInterrupt = useCallback(");
+    const body = tabs.slice(start, tabs.indexOf("[ackInput],", start));
+    expect(body).toContain('invoke("term_attention_interrupted", { terminalId: id })');
   });
 
   it("the dock's count reaches the footer, whose chip runs the same jump", () => {

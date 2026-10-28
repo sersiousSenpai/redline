@@ -37,6 +37,7 @@ import {
   type TabSet,
   type WorkbenchState,
 } from "./model";
+import { normalizeWall, sameWall } from "./wall";
 
 // The door draft keys live in model.ts (a leaf persist.ts can read without
 // this module); re-exported for the callers that learnt them here.
@@ -109,6 +110,11 @@ export type WorkbenchAction =
   | { type: "ensureDefaults"; key: SessionKey; defaults?: DefaultsContext; tabIds?: string[]; paneIds?: string[] }
   | { type: "revealTerminal"; ptyId: string; key?: SessionKey; tabId?: string; paneId?: string }
   | { type: "adoptTerminal"; ptyId: string; key: SessionKey; tabId?: string; paneId?: string }
+  /** A wall's tiles, focus, zoom and pins, as the one `TerminalTabs` holds
+   *  them for the wall on screen (`onWallChange`). A tile new to this wall
+   *  moves here: it leaves every other wall and this wall's set owns it. A
+   *  wall left with nothing closes. */
+  | { type: "setWall"; paneId: string; data: PaneDataByKind["terminals"] }
   | { type: "prune"; liveSessions: readonly string[]; livePtys: readonly string[] };
 
 let counter = 0;
@@ -908,6 +914,37 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       let next = takeTerminal(state, key, action.ptyId, { tabId: action.tabId, paneId: action.paneId });
       if (next.activeKey !== key) next = { ...next, activeKey: key, mru: mruFront(next.mru, key) };
       return next;
+    }
+
+    case "setWall": {
+      const key = (Object.keys(state.sets) as SessionKey[]).find((k) => state.sets[k]?.panes[action.paneId]);
+      const set = key ? state.sets[key] : undefined;
+      const pane = set?.panes[action.paneId];
+      if (!key || !set || !pane || pane.kind !== "terminals") return state;
+      const data = normalizeWall(action.data);
+      if (sameWall(pane.data, data)) return state;
+      if (data.tiles.length === 0) return refillEmpty(putSet(state, key, dropPane(set, pane.id, false)));
+      const added = data.tiles.filter((id) => !pane.data.tiles.includes(id));
+      let next: WorkbenchState = state;
+      if (added.length) {
+        // One attachment per PTY: a tile new here leaves every other wall,
+        // this set's included (the pane itself never held it).
+        const gone = (id: string) => added.includes(id);
+        let sets = state.sets;
+        for (const k of Object.keys(state.sets) as SessionKey[]) {
+          const other = state.sets[k];
+          if (!other) continue;
+          const stripped = stripSetTiles(other, gone);
+          if (stripped !== other) sets = { ...sets, [k]: stripped };
+        }
+        const owners = { ...state.owners };
+        for (const id of added) owners[id] = key;
+        next = { ...state, sets, owners, stowed: state.stowed.filter((p) => !gone(p)) };
+      }
+      const current = next.sets[key] ?? set;
+      const holder = current.panes[pane.id];
+      if (!holder || holder.kind !== "terminals") return refillEmpty(next);
+      return refillEmpty(putSet(next, key, { ...current, panes: { ...current.panes, [pane.id]: { ...holder, data } } }));
     }
 
     case "adoptTerminal":

@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { AttentionAck } from "./termState";
 
-/** The dock layout is worth restoring only while its shells live. A webview
+/** The terminals are worth restoring only while their shells live. A webview
  *  reload (Cmd+R, HMR, the WebContent-crash reload) keeps the PTYs in the Rust
  *  process and must reattach them; a quit kills every PTY, so restoring the
  *  layout would respawn a fleet of blank shells. sessionStorage is exactly that
@@ -16,14 +16,11 @@ export interface TerminalTabState {
   placeholder?: boolean;
 }
 
+/** The terminals that outlive a reload, and what was read in them. Which
+ *  wall shows which terminal is the workbench's (a terminals pane's data),
+ *  not this file's. */
 export interface TerminalWorkspace {
   tabs: TerminalTabState[];
-  tiles: readonly string[];
-  focusedTile: number;
-  zoomedId: string | null;
-  /** Terminals pinned to the wall: parking never takes their tile. Absent in
-   *  layouts saved before pins existed, and when nothing is pinned. */
-  pinned?: string[];
   /** Local acknowledgements of attention transitions (lib/termState), so a
    *  your-turn read before a reload doesn't light up again after it. */
   acks?: Record<string, AttentionAck>;
@@ -38,12 +35,10 @@ export interface LivePty {
   alive: boolean;
 }
 
-/** Treat persisted layout as untrusted: a stale tile must never strand a
- *  terminal behind an empty grid or send an undefined id to App. */
-export function parseTerminalWorkspace(
-  value: unknown,
-  maxTiles: number,
-): TerminalWorkspace | null {
+/** Treat persisted state as untrusted: a malformed tab must never send an
+ *  undefined id to App. A layout saved by an older build (tiles, focus,
+ *  zoom, pins) is read past: walls live in the workbench now. */
+export function parseTerminalWorkspace(value: unknown): TerminalWorkspace | null {
   if (!value || typeof value !== "object") return null;
   const saved = value as Partial<TerminalWorkspace>;
   if (!Array.isArray(saved.tabs)) return null;
@@ -56,16 +51,6 @@ export function parseTerminalWorkspace(
     tabs.push({ id: tab.id, cwd: tab.cwd, ...(tab.placeholder === true ? { placeholder: true } : {}) });
   }
   if (!tabs.length) return null;
-  const tiles = Array.isArray(saved.tiles)
-    ? [...new Set(saved.tiles.filter((id) => typeof id === "string" && ids.has(id)))].slice(0, maxTiles)
-    : [];
-  if (!tiles.length) tiles.push(tabs[0].id);
-  const focusedTile = typeof saved.focusedTile === "number" && Number.isInteger(saved.focusedTile)
-    ? Math.max(0, Math.min(saved.focusedTile, tiles.length - 1))
-    : 0;
-  const pinned = Array.isArray(saved.pinned)
-    ? [...new Set(saved.pinned.filter((id) => typeof id === "string" && ids.has(id)))]
-    : [];
   const acks: Record<string, AttentionAck> = {};
   if (saved.acks && typeof saved.acks === "object") {
     for (const [id, ack] of Object.entries(saved.acks as Record<string, unknown>)) {
@@ -77,15 +62,11 @@ export function parseTerminalWorkspace(
   }
   return {
     tabs,
-    tiles,
-    focusedTile,
-    zoomedId: typeof saved.zoomedId === "string" && tiles.includes(saved.zoomedId) ? saved.zoomedId : null,
-    ...(pinned.length ? { pinned } : {}),
     ...(Object.keys(acks).length ? { acks } : {}),
   };
 }
 
-export function readTerminalWorkspace(maxTiles: number): TerminalWorkspace | null {
+export function readTerminalWorkspace(): TerminalWorkspace | null {
   try {
     // Builds before the sessionStorage move left a layout here that outlives
     // its shells. Nothing reads it any more; drop it so it can't linger.
@@ -94,7 +75,7 @@ export function readTerminalWorkspace(maxTiles: number): TerminalWorkspace | nul
     // Storage unavailable: there is nothing stale to clear either.
   }
   try {
-    return parseTerminalWorkspace(JSON.parse(sessionStorage.getItem(TERMINAL_WORKSPACE_KEY) ?? "null"), maxTiles);
+    return parseTerminalWorkspace(JSON.parse(sessionStorage.getItem(TERMINAL_WORKSPACE_KEY) ?? "null"));
   } catch {
     return null;
   }

@@ -339,10 +339,9 @@ describe("boot-path JS contract", () => {
     // sentence. The dock's SHELL (plate, divider, geometry) is still first
     // paint; the tabs arrive on the first of an idle callback, the user
     // opening the dock, or a launch that needs one.
-    expect(app).not.toMatch(
-      /^import { TerminalTabs } from "\.\/components\/TerminalTabs";/m,
-    );
-    expect(app).toContain('import("./components/TerminalTabs")');
+    expect(app).not.toMatch(/^import { TerminalTabs } from "\.\/components\/TerminalTabs";/m);
+    expect(app).not.toMatch(/^import { TerminalLayer } from "\.\/workbench\/TerminalLayer";/m);
+    expect(app).toContain('import("./workbench/TerminalLayer")');
     // The whole reason deferral is safe: launch intent WAITS for the dock
     // instead of finding no handle and reporting "couldn't open a terminal".
     expect(app).toContain("const ensureTerminalReady = useCallback(");

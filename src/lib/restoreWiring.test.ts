@@ -30,27 +30,30 @@ const restoreBody = (() => {
 })();
 
 describe("a restore runs in the background", () => {
-  it("opens its terminal without taking a tile or the dock", () => {
+  it("opens its terminal without showing it or taking a tile", () => {
     // The reviewer must not be dropped in front of a resumed session replaying
     // its own control messages: that replay is valid history that reads as an
     // accidental double-send, which is the entire failure this rework removes.
-    expect(restoreBody).toContain("background: true");
+    expect(restoreBody).toContain("await openTerminal(projectPath, true)");
+    expect(restoreBody).not.toContain("showTerminal(");
     expect(restoreBody).not.toContain("revealTerm()");
     expect(restoreBody).not.toContain("setTermFullscreen(");
     expect(restoreBody).not.toContain("suppressTerminalRevealFocus()");
   });
 
-  it("the background option reaches the shared session placement policy", () => {
+  it("a background terminal still spawns: the fleet adds it, only the wall leaves it off", () => {
     // The tab still exists, so its <TerminalView> still mounts and its PTY
-    // still spawns — untiled wrappers are display:none, not unmounted. If this
-    // ever became "don't create the tab", the restore would silently never run.
-    const start = tabs.indexOf("openSessionTerminal: (cwd: string | null, opts)");
+    // still spawns — a terminal on no wall is display:none, not unmounted. If
+    // this ever became "don't create the tab", the restore would silently
+    // never run.
+    const open = app.slice(app.indexOf("const openTerminal = useCallback("), app.indexOf("}, [ensureTerminalReady, showTerminal]);"));
+    expect(open).toContain("(await ensureTerminalReady())?.openSessionTerminal(cwd)");
+    expect(open).toContain("if (id && !background) showTerminal(id);");
+    const start = tabs.indexOf("openSessionTerminal: (cwd: string | null) => {");
     expect(start).toBeGreaterThan(-1);
     const body = tabs.slice(start, tabs.indexOf("return id;", start));
-    // Placement is behaviorally covered by TerminalTabs.lifecycle.test.tsx:
-    // background restore preserves existing work, while a pristine sole
-    // convenience shell yields its otherwise-empty tile.
-    expect(body).toContain("addSessionTab({ id, cwd }, opts?.background);");
+    expect(body).toContain("setTabs((prev) => [...prev, { id, cwd }]);");
+    expect(body).not.toContain("onPlaceRef");
   });
 
   it("keeps the banner up, because the banner is now the only narrator", () => {
@@ -67,9 +70,11 @@ describe("Show raw terminal", () => {
     const start = app.indexOf("const showRawTerminal = async (");
     expect(start).toBeGreaterThan(-1);
     const body = app.slice(start, app.indexOf("\n  };", start));
-    expect(body).toContain("dock?.selectTab(terminalId)");
-    expect(body).toContain("revealTerm()");
+    // Its session, its wall and its tile: a kept terminal comes back onto a
+    // wall, one already on screen is hailed.
+    expect(body).toContain("showTerminal(terminalId)");
     expect(body).not.toContain("openSessionTerminal");
+    expect(body).not.toContain("openTerminal(");
   });
 
   it("is offered from both the running and the failed notice", () => {

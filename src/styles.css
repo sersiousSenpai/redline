@@ -5406,3 +5406,34 @@ html[data-rl-resizing] [data-rl-pane] {
   background: var(--color-paper);
 }
 
+/* ── The terminal wall in a centre tab (W3) ──────────────────────────────────
+   One layer holds every terminal; a terminals pane is an empty slot the
+   layer is pinned over (workbench/TerminalLayer), so xterm never moves. */
+.rl-wb-wall-slot { flex: 1; min-height: 0; min-width: 0; }
+.rl-wb-terminal-layer {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-paper);
+}
+.rl-wall-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-ink-muted);
+}
+.rl-wall-empty button {
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--color-rule);
+  color: var(--color-ink);
+}
+.rl-wall-empty button:hover { background: var(--color-rule); }

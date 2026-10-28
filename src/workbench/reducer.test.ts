@@ -494,6 +494,37 @@ describe("terminals", () => {
     expect(set(s, "plan:s1").panes.wp.data).toMatchObject({ tiles: ["b", "a"], focus: 1 });
   });
 
+  it("setWall stores the wall the component holds, normalized, and is a no-op for the same wall", () => {
+    let s = home(wall(["a", "b"]));
+    s = reduce(s, { type: "setWall", paneId: "p1", data: { tiles: ["b", "a", "a"], focus: 9, zoomed: "gone", pinned: ["a", "x"] } });
+    expect(set(s).panes.p1.data).toEqual({ tiles: ["b", "a"], focus: 1, zoomed: null, pinned: ["a"] });
+    expect(reduce(s, { type: "setWall", paneId: "p1", data: { tiles: ["b", "a"], focus: 1, zoomed: null, pinned: ["a"] } })).toBe(s);
+    expect(reduce(s, { type: "setWall", paneId: "nope", data: { tiles: ["z"], focus: 0, zoomed: null, pinned: [] } })).toBe(s);
+  });
+
+  it("a tile picked onto a wall leaves every other wall and belongs to this wall's set (one attachment per PTY)", () => {
+    let s = home(wall(["a", "b"]));
+    s = { ...s, owners: { a: HOME_KEY, b: HOME_KEY } };
+    s = reduce(s, { type: "selectSession", key: "plan:s1" });
+    s = reduce(s, { type: "openTab", pane: wall(["c"]), tabId: "w", paneId: "wp" });
+    s = { ...s, owners: { ...s.owners, c: "plan:s1" }, stowed: ["b"] };
+    s = reduce(s, { type: "setWall", paneId: "wp", data: { tiles: ["b", "c"], focus: 0, zoomed: null, pinned: [] } });
+    expect(s.owners.b).toBe("plan:s1");
+    expect(s.stowed).toEqual([]);
+    expect(set(s, HOME_KEY).panes.p1.data).toMatchObject({ tiles: ["a"] });
+    expect(set(s, "plan:s1").panes.wp.data).toMatchObject({ tiles: ["b", "c"] });
+    // A wall emptied by the move closes; the set refills its default.
+    s = reduce(s, { type: "setWall", paneId: "wp", data: { tiles: ["a", "b", "c"], focus: 0, zoomed: null, pinned: [] } });
+    expect(kinds(s, HOME_KEY)).toEqual(["door"]);
+  });
+
+  it("a wall the component empties closes without a closed entry", () => {
+    let s = home(door(1), wall(["a"]));
+    s = reduce(s, { type: "setWall", paneId: "p2", data: { tiles: [], focus: 0, zoomed: null, pinned: [] } });
+    expect(tabKinds(s)).toEqual(["door"]);
+    expect(set(s).closed).toHaveLength(0);
+  });
+
   it("prunes dead sessions, stale launches and dead ptys; live orphans go Home; an agent pane survives for the Restore notice", () => {
     let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:gone", defaults: { agentTerminalId: "ag-gone" } });
     s = reduce(s, { type: "selectSession", key: "plan:kept", defaults: { agentTerminalId: "ag-kept" } });
