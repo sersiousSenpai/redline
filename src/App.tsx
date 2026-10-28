@@ -9360,6 +9360,26 @@ function App() {
     else if (dockReachable) openDiscussion();
     else setToast({ message: "Talk opens on the plan as soon as it arrives.", tone: "info" });
   };
+  // The Agent pane's props, identity-stable: AgentPane and the conversation
+  // under it are memoized, and the shell re-renders on every focus flip and
+  // divider frame. Handlers go through refs; the active session's plan state
+  // and recorded model are values kept equal across unrelated renders.
+  const agentPaneHandlers = useStableHandlers({
+    onTalk: flowTalk,
+    onOpenPlan: () => wb.dispatch({ type: "openSurface", kind: "plan" }),
+    onFork: (cliSessionId: string, projectPath: string | null) => void forkCliSession(cliSessionId, projectPath),
+  });
+  const activeAgentSummary = activeId ? summaries.find((s) => s.sessionId === activeId) ?? null : null;
+  const activeAgentMode = activeAgentSummary
+    ? sessionMode({ target: "plan", status: activeAgentSummary.status, held: activeAgentSummary.held, revising: waiting, revisions: activeAgentSummary.revisions, runState: activeAgentSummary.runState })
+    : null;
+  const activeAgentPlanState = useStableValue(activeAgentSummary ? {
+    label: activeAgentMode?.label ?? "Plan",
+    kind: activeAgentMode?.kind ?? "plan",
+    held: activeAgentSummary.held,
+    toReview: threadComments.filter((c) => c.status === "resolved").length,
+  } : null);
+  const activeAgentModel = useStableValue(session?.model ? { model: session.model, effort: session.effort ?? null } : null);
   // ── The plan's chrome: the bundles the Plan pane (components/plan) reads
   // — the footer's verbs, classic's notices, the ⋯ menu, the version pill
   // and the contents toggle. The terminal they point at is the session's
@@ -10547,11 +10567,8 @@ function App() {
                     const agentSession = pane.data.sessionId;
                     const launch = flowLaunches.find((l) => l.terminalId === agentTerminal) ?? null;
                     const own = agentSession !== null && agentSession === activeId;
-                    const ownSummary = own ? summaries.find((s) => s.sessionId === agentSession) ?? null : null;
+                    const ownSummary = own ? activeAgentSummary : null;
                     const harness: "claude" | "codex" = launch?.harness ?? ((own ? session?.backend : ownSummary?.backend) === "codex" ? "codex" : "claude");
-                    const ownMode = ownSummary
-                      ? sessionMode({ target: "plan", status: ownSummary.status, held: ownSummary.held, revising: waiting, revisions: ownSummary.revisions, runState: ownSummary.runState })
-                      : null;
                     const projectPath = launch?.projectPath ?? (own ? session?.projectPath ?? null : null);
                     return (
                       <Suspense fallback={null}>
@@ -10563,25 +10580,20 @@ function App() {
                           visible={ctx.visible}
                           cliAvailable={!liveTermIds || liveTermIds.includes(agentTerminal)}
                           onCliView={setCliView}
-                          onFork={harness === "claude" ? (cliSessionId) => void forkCliSession(cliSessionId, projectPath) : null}
+                          onFork={harness === "claude" ? agentPaneHandlers.onFork : null}
                           planTitle={ownSummary?.planTitle ?? null}
                           planMarks={own ? pendingComments.length : 0}
                           // The plan is a tab of this set: open while it is on
                           // screen, and its card opens it.
                           planOpen={wbView.visibleKinds.includes("plan")}
-                          onOpenPlan={() => wb.dispatch({ type: "openSurface", kind: "plan" })}
+                          onOpenPlan={agentPaneHandlers.onOpenPlan}
                           projectPath={projectPath}
                           planMarkdown={own ? latest?.rawPlanMarkdown ?? null : null}
                           termState={terminalKinds.get(agentTerminal) === "needs-you" ? "needs-you" : terminalKinds.get(agentTerminal) === "working" ? "working" : null}
                           talking={voiceDocked}
-                          onTalk={flowTalk}
-                          planState={ownSummary ? {
-                            label: ownMode?.label ?? "Plan",
-                            kind: ownMode?.kind ?? "plan",
-                            held: ownSummary.held,
-                            toReview: threadComments.filter((c) => c.status === "resolved").length,
-                          } : null}
-                          fallbackModel={own && session?.model ? { model: session.model, effort: session.effort ?? null } : null}
+                          onTalk={agentPaneHandlers.onTalk}
+                          planState={own ? activeAgentPlanState : null}
+                          fallbackModel={own ? activeAgentModel : null}
                           fallbackMode={ownSummary?.status === "in_review" ? "plan" : null}
                         />
                       </Suspense>

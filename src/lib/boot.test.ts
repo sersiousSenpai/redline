@@ -241,6 +241,42 @@ describe("boot-path JS contract", () => {
     }
   });
 
+  // W2: the Agent and Plan panes are chunks of their own folders, which the
+  // name list above never matches (it reads `components/<Name>` only). A
+  // static value import of anything under components/agent or
+  // components/plan — from App or from any module App reaches statically —
+  // would fold the pane, its conversation and its stylesheet into the entry
+  // chunk. Type imports are free; `convo/types` is the one value module the
+  // boot path may read (two event-name constants).
+  it("the Agent and Plan pane folders never return to the boot path", () => {
+    const folder = /"(?:\.\.?\/)+(?:components\/)?(agent|plan)\/([^"]+)"/;
+    const statics = (src: string) =>
+      [...src.matchAll(/^import (?!type\b)(?:[^;"]*?from )?"[^"]+";?/gms)]
+        .map((m) => m[0].match(folder))
+        .filter((m): m is RegExpMatchArray => m !== null)
+        .map((m) => `${m[1]}/${m[2]}`);
+    expect(statics(app), "App statically imports a pane folder").toEqual([]);
+    expect(app).toContain('import("./components/agent/AgentPane")');
+    expect(app).toContain('import("./components/plan/PlanPane")');
+
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(join(process.cwd(), dir), { withFileTypes: true })) {
+        const rel = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (rel !== "src/components/agent" && rel !== "src/components/plan") walk(rel);
+          continue;
+        }
+        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) continue;
+        for (const hit of statics(readFileSync(join(process.cwd(), rel), "utf8"))) {
+          if (hit !== "agent/convo/types") offenders.push(`${rel} → ${hit}`);
+        }
+      }
+    };
+    walk("src");
+    expect(offenders).toEqual([]);
+  });
+
   // W2 deleted the flow shell: nothing under src/shell is left to import,
   // and the shell flag that chose between two shells is gone with it.
   it("no flow shell remains: no src/shell import, no shell flag", () => {

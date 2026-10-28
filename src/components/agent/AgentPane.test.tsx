@@ -2,12 +2,14 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { hidden } = vi.hoisted(() => ({ hidden: [] as boolean[] }));
+const { hidden, seen } = vi.hoisted(() => ({ hidden: [] as boolean[], seen: [] as Record<string, unknown>[] }));
 vi.mock("./SessionConversation", () => ({
   default: (p: { hidden?: boolean; header?: (facts: unknown, actions: unknown) => unknown; onShowTerminal: () => void }) => {
     hidden.push(!!p.hidden);
+    seen.push(p as unknown as Record<string, unknown>);
     return (
       <div data-convo data-hidden={p.hidden ? "" : undefined}>
         {p.header?.({ model: { model: "claude-opus-4-5", effort: "high" }, mode: "plan", working: true, needsYou: false, hasOlder: true, boundSessionId: "cli-1" }, { earlier: () => hidden.push(true), stop: () => {} }) as never}
@@ -44,6 +46,7 @@ async function render(p: AgentPaneProps) {
 describe("AgentPane", () => {
   beforeEach(() => {
     hidden.length = 0;
+    seen.length = 0;
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -112,6 +115,32 @@ describe("AgentPane", () => {
     const onFork = vi.fn();
     await render(props({ onFork }));
     await act(async () => (q('[aria-label="Fork this session"]') as HTMLButtonElement).click());
-    expect(onFork).toHaveBeenCalledWith("cli-1");
+    expect(onFork).toHaveBeenCalledWith("cli-1", null);
+  });
+
+  it("is memoized: equal props skip the render, and its own callbacks keep their identity", async () => {
+    const p = props({ onFork: vi.fn(), planState: { label: "Plan", kind: "plan", held: true, toReview: 0 } });
+    await render(p);
+    const first = seen.length;
+    expect(first).toBeGreaterThan(0);
+    await render({ ...p });
+    expect(seen.length).toBe(first);
+    // A prop the header doesn't read re-renders the conversation, but the
+    // header and Open Terminal it gets are the same functions.
+    await render({ ...p, talking: true });
+    expect(seen.length).toBeGreaterThan(first);
+    const [before, after] = [seen[first - 1], seen[seen.length - 1]];
+    expect(after.header).toBe(before.header);
+    expect(after.onShowTerminal).toBe(before.onShowTerminal);
+  });
+
+  it("App hands it no inline closure or object literal", () => {
+    const app = readFileSync("src/App.tsx", "utf8");
+    const start = app.indexOf("<AgentPane\n");
+    expect(start).toBeGreaterThan(-1);
+    const element = app.slice(start, app.indexOf("/>", start));
+    expect(element).not.toMatch(/=>|=\{\{|\? \{/);
+    expect(element).toContain("planState={own ? activeAgentPlanState : null}");
+    expect(element).toContain("fallbackModel={own ? activeAgentModel : null}");
   });
 });

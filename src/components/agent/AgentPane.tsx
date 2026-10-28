@@ -12,8 +12,13 @@
 //!
 //! One pane per terminal (the reducer dedupes `openSurface` on its data), so
 //! opening it again focuses the one that is open.
+//!
+//! Memoized, like the conversation under it: the shell re-renders on every
+//! focus flip and divider frame, and a streaming thread must not re-render
+//! with it. App hands it identity-stable props (`useStableHandlers`,
+//! `useStableValue`); the header and Open Terminal callbacks here keep theirs.
 
-import { lazy, Suspense, useLayoutEffect, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useCallback, useLayoutEffect, useState, type ReactNode } from "react";
 import { FilePenLine, GitFork, History } from "lucide-react";
 
 import { modeLabel, modelChipLabel } from "./convo/status";
@@ -37,13 +42,15 @@ export interface AgentPaneProps extends Omit<SessionConversationProps, "layout" 
   cliAvailable: boolean;
   /** The pane shows its PTY: App pins the dock over `el`. Null clears. */
   onCliView: (view: CliView | null) => void;
-  /** Fork the CLI session into a new terminal (Claude's `--fork-session`);
-   *  absent for a harness that cannot. */
-  onFork?: ((cliSessionId: string) => void) | null;
+  /** Fork the CLI session into a new terminal (Claude's `--fork-session`),
+   *  in the session's folder; absent for a harness that cannot. One handler
+   *  for every pane, so it keeps its identity. */
+  onFork?: ((cliSessionId: string, projectPath: string | null) => void) | null;
 }
 
-export default function AgentPane(p: AgentPaneProps) {
+function AgentPane(p: AgentPaneProps) {
   const { terminalId, visible, cliAvailable, onCliView, onFork, ...convo } = p;
+  const { harness, projectPath = null } = p;
   const [view, setView] = useState<AgentView>("chat");
   const [cliBox, setCliBox] = useState<HTMLDivElement | null>(null);
   const showingCli = view === "cli" && cliAvailable && !!terminalId;
@@ -54,17 +61,20 @@ export default function AgentPane(p: AgentPaneProps) {
     onCliView({ terminalId, el: cliBox });
     return () => onCliView(null);
   }, [showingCli, visible, cliBox, terminalId, onCliView]);
-  const header = (facts: ConvoFacts, actions: ConvoActions): ReactNode => (
+  const cliReady = cliAvailable && !!terminalId;
+  const header = useCallback((facts: ConvoFacts, actions: ConvoActions): ReactNode => (
     <AgentHeader
-      harness={p.harness}
+      harness={harness}
       facts={facts}
       view={showingCli ? "cli" : "chat"}
-      cliAvailable={cliAvailable && !!terminalId}
+      cliAvailable={cliReady}
       onView={setView}
       onEarlier={facts.hasOlder ? actions.earlier : null}
-      onFork={onFork && facts.boundSessionId ? () => onFork(facts.boundSessionId!) : null}
+      onFork={onFork && facts.boundSessionId ? () => onFork(facts.boundSessionId!, projectPath) : null}
     />
-  );
+  ), [harness, showingCli, cliReady, onFork, projectPath]);
+  // "Open Terminal" anywhere in the thread is this pane's CLI view.
+  const showCli = useCallback(() => setView("cli"), []);
   return (
     <div className="rl-agent-pane" data-view={showingCli ? "cli" : "chat"}>
       <Suspense fallback={null}>
@@ -74,14 +84,15 @@ export default function AgentPane(p: AgentPaneProps) {
           layout="stage"
           hidden={!visible || showingCli}
           header={header}
-          // "Open Terminal" anywhere in the thread is this pane's CLI view.
-          onShowTerminal={() => setView("cli")}
+          onShowTerminal={showCli}
         />
       </Suspense>
       {showingCli && <div ref={setCliBox} className="rl-agent-cli" aria-label="Terminal" />}
     </div>
   );
 }
+
+export default memo(AgentPane);
 
 function AgentHeader({ harness, facts, view, cliAvailable, onView, onEarlier, onFork }: {
   harness: "claude" | "codex";
