@@ -207,4 +207,14 @@ describe("the file pane (W4)", () => {
     act(() => editBtn(container).click());
     expect(onEdit).toHaveBeenCalledTimes(1);
   });
+  it("opens a markdown file asked at a line on its source, marked, with the rendered read one click away", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(createElement(FileViewer, { path: "/repo/README.md", onClose: () => {}, line: 2, lineAt: 1 }));
+    });
+    await until(() => !!container.querySelector("[data-marked]"));
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent === "Rendered")).toBe(true);
+  });
 });

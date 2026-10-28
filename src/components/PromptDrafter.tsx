@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { createPortal } from "react-dom";
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
 import type { JSONContent } from "@tiptap/react";
@@ -104,6 +105,15 @@ interface PromptDrafterProps {
    *  document from it — the host owns the mint. */
   templates?: BookshelfDraft[];
   onUseTemplate?: (draftId: string) => void;
+  /** The rail's Discussion tab (W4): the comment threads' body portals in
+   *  here, and the margin keeps only its anchors. Absent, the sidecar opens
+   *  beside the page as before. */
+  discussionSlot?: HTMLElement | null;
+  /** Whether the rail shows that tab: the toolbar's Comments toggle state. */
+  discussionShown?: boolean;
+  /** Bring the rail's Discussion forward (a new comment, the toolbar).
+   *  Given, the threads live in the rail and never beside the page. */
+  onShowDiscussion?: () => void;
   /** Show the shelf — the folder tree + document list this document sits in. */
   onOpenShelf?: () => void;
   /** Show the agent shelf — the user's own agents, run against this document
@@ -179,6 +189,9 @@ function PromptDrafterBase({
   onDismissPending,
   templates = EMPTY_TEMPLATES,
   onUseTemplate,
+  discussionSlot = null,
+  discussionShown = false,
+  onShowDiscussion,
   onOpenShelf,
   onOpenAgents,
   onExit = null,
@@ -930,14 +943,15 @@ function PromptDrafterBase({
       })
         .then((c) => {
           setComments((list) => [...list, c]);
-          setSidecarOpen(true);
+          if (onShowDiscussion) onShowDiscussion();
+          else setSidecarOpen(true);
           setFocusedCommentId(c.id);
         })
         .catch((e) => setSurfaceError(`Couldn't save that comment: ${e}`));
       setCommentDraft(null);
       setPendingSel(null);
     },
-    [pendingSel, draftId],
+    [pendingSel, draftId, onShowDiscussion],
   );
 
   const deleteComment = useCallback(
@@ -1199,8 +1213,8 @@ function PromptDrafterBase({
     <div className="rl-drafter-glass flex h-full min-h-0 flex-col">
       <DrafterToolbar
         editor={editor}
-        sidecarOpen={sidecarOpen}
-        onToggleSidecar={() => setSidecarOpen((v) => !v)}
+        sidecarOpen={onShowDiscussion ? discussionShown : sidecarOpen}
+        onToggleSidecar={onShowDiscussion ?? (() => setSidecarOpen((v) => !v))}
         commentCount={comments.length}
         suggesting={suggesting}
         onSetSuggesting={setSuggesting}
@@ -1583,7 +1597,20 @@ function PromptDrafterBase({
             />
           </div>
         )}
-        {sidecarOpen && (
+        {discussionSlot &&
+          createPortal(
+            <DrafterSidecar
+              embedded
+              draftId={draftId}
+              comments={comments}
+              focusedId={focusedCommentId}
+              onSelect={setFocusedCommentId}
+              onDelete={deleteComment}
+              onClose={() => {}}
+            />,
+            discussionSlot,
+          )}
+        {!onShowDiscussion && sidecarOpen && (
           <DrafterSidecar
             draftId={draftId}
             comments={comments}

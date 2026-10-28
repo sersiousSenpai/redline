@@ -86,4 +86,18 @@ describe("panel mask wiring", () => {
     // A fullscreen rail hides the native webview under it.
     expect(app.slice(app.indexOf("const browserVisible ="), app.indexOf("openMenuCount === 0;"))).toContain("!paneFullscreen &&");
   });
+  it("a drafter pane's Discussion is the draft's own threads, and a plan's piles show only for a plan or a review", () => {
+    expect(app).toContain('railTab !== "discussion" ? railOtherBody : railKind === "drafter" ? (');
+    expect(app).toContain("<div ref={setDrafterDiscussionSlot}");
+    expect(app).toContain('discussionContext === "plan" && (railKind === "plan" || railKind === "review") && session && planDiscussable');
+    expect(app).toContain("discussionSlot={drafterDiscussionSlot}");
+    expect(drafter).toMatch(/discussionSlot &&\s*createPortal\(/);
+    expect(drafter).toContain("{!onShowDiscussion && sidecarOpen && (");
+  });
+  it("a live voice conversation keeps the rail on Talk: a clicked mark goes into its composer instead", () => {
+    const rule = app.slice(app.indexOf("// Voice stays first-class: while a voice conversation is live in Talk"), app.indexOf("}, [focusedCommentId, focusNonce, selectRailTab]);"));
+    expect(rule).toContain("if (talkShownRef.current && discussionLiveRef.current) {");
+    expect(rule).toContain('new CustomEvent("redline:talk-context"');
+    expect(rule.indexOf('selectRailTab("discussion")')).toBeGreaterThan(rule.indexOf("return;"));
+  });
 });

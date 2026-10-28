@@ -731,6 +731,19 @@ function VoicePanelBase({
 
   // The composer's text.
   const [typed, setTyped] = useState("");
+  // A mark clicked in the plan while this conversation is live (W4): the
+  // rail stays on Talk, and the mark's words come into the composer as
+  // context instead of pulling the conversation off screen.
+  useEffect(() => {
+    const onContext = (e: Event) => {
+      const d = (e as CustomEvent<{ key: string; text: string }>).detail;
+      if (!d || d.key !== sessionId || !d.text.trim()) return;
+      const quote = `> ${d.text.trim().replace(/\s+/g, " ")}\n`;
+      setTyped((t) => (t.startsWith(quote) ? t : quote + t));
+    };
+    window.addEventListener("redline:talk-context", onContext);
+    return () => window.removeEventListener("redline:talk-context", onContext);
+  }, [sessionId]);
   // The last thing spoken aloud — what "▶ Replay" plays again.
   const [lastSpoken, setLastSpoken] = useState("");
   const [prefs, setPrefs] = useState<VoicePrefs>(() => loadVoicePrefs());

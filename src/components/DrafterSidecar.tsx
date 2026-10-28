@@ -20,6 +20,9 @@ interface DrafterSidecarProps {
   onSelect: (id: string | null) => void;
   onDelete: (id: string) => void;
   onClose: () => void;
+  /** In the rail's Discussion tab (W4): full width, no frame of its own and
+   *  no close — the rail's chrome is the frame. */
+  embedded?: boolean;
 }
 
 /** The Prompt Drafter's comment sidecar: selection-anchored comments, each
@@ -35,19 +38,21 @@ export function DrafterSidecar({
   onSelect,
   onDelete,
   onClose,
+  embedded = false,
 }: DrafterSidecarProps) {
   return (
     <div
       className="flex h-full min-h-0 flex-col"
       style={{
-        width: "300px",
+        width: embedded ? "100%" : "300px",
+        flex: embedded ? "1 1 auto" : undefined,
         flexShrink: 0,
         background: "var(--color-paper)",
-        borderLeft: "1px solid var(--color-rule)",
+        borderLeft: embedded ? undefined : "1px solid var(--color-rule)",
       }}
       data-drafter-sidecar="true"
     >
-      <div
+      {!embedded && <div
         className="flex shrink-0 items-center gap-1.5 px-3 py-2"
         style={{ borderBottom: "1px solid var(--color-rule)" }}
       >
@@ -67,7 +72,7 @@ export function DrafterSidecar({
         >
           ✕
         </button>
-      </div>
+      </div>}
       <div className="rl-thin-scroll-y flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2.5 py-2.5">
         {comments.length === 0 ? (
           <div

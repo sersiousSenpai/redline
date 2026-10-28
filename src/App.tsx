@@ -1536,6 +1536,9 @@ function App() {
   // The dock's DOM node for those panels. State, not a ref: the pane needs to
   // re-render once the node exists, and a ref would never tell it.
   const [dockSlotEl, setDockSlotEl] = useState<HTMLDivElement | null>(null);
+  // The rail's Discussion slot for a drafter pane (W4): the draft's comment
+  // threads portal in; the page's margin keeps only their anchors.
+  const [drafterDiscussionSlot, setDrafterDiscussionSlot] = useState<HTMLDivElement | null>(null);
   // A discussion is actually going on in the open voice panel (reported by it).
   // Refs, because the `plan-received` listener is mount-scoped on `activeId` and
   // must read both without re-subscribing on every keystroke of a conversation.
@@ -3138,6 +3141,8 @@ function App() {
   // The conversation is up when the rail shows Talk (W4: the dock's body
   // lives there now).
   const dockOpen = !paneCollapsed && railTab === "talk";
+  const talkShownRef = useRef(dockOpen);
+  talkShownRef.current = dockOpen;
   // Sections for the drafter voice walkthrough — parsed backend-side from
   // the mirrored markdown, only while Talk shows the draft's voice.
   useEffect(() => {
@@ -3152,6 +3157,12 @@ function App() {
       alive = false;
     };
   }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
+  /** The drafter's Comments toggle and a new comment: its threads in the
+   *  rail's Discussion. */
+  const showDrafterDiscussion = useCallback(() => {
+    selectRailTab("discussion");
+    revealPane();
+  }, [selectRailTab, revealPane]);
   /** Open the rail on `tab` (an edge-strip icon, ⌘J's Talk). */
   const openRailTab = useCallback(
     (tab: RailTab) => {
@@ -5128,6 +5139,8 @@ function App() {
     () => latest?.comments ?? [],
     [latest],
   );
+  const threadCommentsRef = useRef<Comment[]>([]);
+  threadCommentsRef.current = threadComments;
   const paneComments =
     isViewingHistorical && viewedRevision
       ? viewedRevision.comments
@@ -5598,6 +5611,8 @@ function App() {
     ],
   );
   const dockContext = activeConversation(dockContexts, conversationPin);
+  const dockContextKeyRef = useRef<string | null>(null);
+  dockContextKeyRef.current = dockContext?.key ?? null;
   // Two poses, one thread. The plate is "at rest" only on the Front Door —
   // nothing of its own to cover — which is exactly what makes the door a way
   // IN to a conversation rather than a place you navigate away from.
@@ -5639,8 +5654,7 @@ function App() {
   const openDock = useCallback(() => openRailTab("talk"), [openRailTab]);
   // ⌘J: the rail's Talk — open it there, or put it away when it is what
   // shows. A focused web page forwards ⌘J as its `toggle-monochat` signal.
-  const talkShownRef = useRef(dockOpen);
-  talkShownRef.current = dockOpen;
+
   const toggleTalk = useCallback(() => {
     if (talkShownRef.current) closeDock();
     else openDock();
@@ -6070,8 +6084,19 @@ function App() {
 
   // A highlight clicked in the plan brings its thread forward: the rail
   // turns to Discussion (it never opens a folded rail — the card waits there).
+  // Voice stays first-class: while a voice conversation is live in Talk the
+  // rail never leaves it — the mark's words go into Talk's composer as
+  // context instead (VoicePanel's `redline:talk-context`).
   useEffect(() => {
-    if (focusedCommentId && railKindRef.current === "plan") selectRailTab("discussion");
+    if (!focusedCommentId || railKindRef.current !== "plan") return;
+    if (talkShownRef.current && discussionLiveRef.current) {
+      const c = threadCommentsRef.current.find((x) => x.id === focusedCommentId);
+      const text = c?.selection?.quotedText || c?.body || "";
+      const key = dockContextKeyRef.current;
+      if (key && text) window.dispatchEvent(new CustomEvent("redline:talk-context", { detail: { key, text } }));
+      return;
+    }
+    selectRailTab("discussion");
   }, [focusedCommentId, focusNonce, selectRailTab]);
   // Bidirectional focus: when the editor (or anything else) sets a focused
   // comment id, scroll the matching sidebar card into view. The editor side
@@ -8928,11 +8953,14 @@ function App() {
   // (amber), else the marks riding the next Send. Nothing else is counted
   // here — a count for a tab that is not shown would mean polling for it.
   const railWaiting = threadComments.filter((c) => c.status === "resolved").length;
+  // A review pane's Discussion is its review threads, so it counts those;
+  // only a plan's counts the plan's marks.
+  const reviewThreadCount = codeReview.annotations.length + codeReview.questions.length;
   const railCounts = useMemo(
-    () => ({ discussion: railWaiting || pendingComments.length }),
-    [railWaiting, pendingComments.length],
+    () => ({ discussion: railKind === "review" ? reviewThreadCount : railKind === "plan" ? railWaiting || pendingComments.length : 0 }),
+    [railKind, reviewThreadCount, railWaiting, pendingComments.length],
   );
-  const railAttention = useMemo(() => ({ discussion: railWaiting > 0 }), [railWaiting]);
+  const railAttention = useMemo(() => ({ discussion: railKind === "plan" && railWaiting > 0 }), [railKind, railWaiting]);
   // The version the plan pane shows: the Discussion piles are read on it.
   const railShownVersion = isViewingHistorical && viewedRevision ? viewedRevision.versionNumber : (latest?.versionNumber ?? 1);
   // The rail's other tabs. Talk is still the conversation dock's column
@@ -10243,6 +10271,10 @@ function App() {
                     // Remount on the open document so TipTap picks up its content:
                     // `content` is captured once, at editor creation.
                     key={drafterDraftId ?? ""}
+                    // Its comment threads live in the rail's Discussion (W4).
+                    discussionSlot={drafterDiscussionSlot}
+                    discussionShown={!paneCollapsed && railTab === "discussion" && railKind === "drafter"}
+                    onShowDiscussion={showDrafterDiscussion}
                     draftId={drafterDraftId ?? ""}
                     doc={drafterMount.doc}
                     onPersist={drafterPersist}
@@ -10966,7 +10998,10 @@ function App() {
               setRailFolded(true);
             }}
           >
-          {railTab !== "discussion" ? railOtherBody : discussionContext === "plan" && session && planDiscussable ? (
+          {railTab !== "discussion" ? railOtherBody : railKind === "drafter" ? (
+            // The draft's threads: PromptDrafter portals its sidecar in.
+            <div ref={setDrafterDiscussionSlot} className="flex flex-1 min-h-0 min-w-0 flex-col overflow-hidden" data-rail-drafter-discussion />
+          ) : discussionContext === "plan" && (railKind === "plan" || railKind === "review") && session && planDiscussable ? (
             // "Refinement": the plan's threads in four piles — Waiting on you,
             // Your marks, With Claude, Resolved — each the classic comment
             // card with App's own handlers, under the composer, the revising
@@ -11193,7 +11228,7 @@ function App() {
               </Suspense>
             ) : (
               <div className="italic" style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
-                {railKind === "drafter" ? "The draft's comments live in its margin." : "A plan's discussion shows here once the plan arrives."}
+                A plan's discussion shows here once the plan arrives.
               </div>
             )}
           </div>

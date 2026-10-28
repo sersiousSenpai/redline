@@ -338,7 +338,27 @@ function TextBody({
   onEdit?: () => void;
   reveal: { line: number; at?: number } | null;
 }) {
-  if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} onEdit={onEdit} />;
+  // A line asked of a markdown file (`README.md:12`) is a line of its
+  // source: the file opens on its source, marked there, with the rendered
+  // read one click away. Every new ask comes back to the source.
+  const [source, setSource] = useState(!!reveal);
+  const revealAt = reveal ? `${reveal.line}:${reveal.at ?? ""}` : null;
+  useEffect(() => {
+    if (revealAt) setSource(true);
+  }, [revealAt, path]);
+  if (isMarkdown(path)) {
+    if (!source) return <MarkdownBody path={path} onSaved={onSaved} onEdit={onEdit} />;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 justify-end px-6 pt-2" style={{ fontSize: "12px" }}>
+          <EditBtn onClick={() => setSource(false)}>Rendered</EditBtn>
+        </div>
+        <div className="min-h-0 flex-1">
+          <CodeBody path={path} onSaved={onSaved} onEdit={onEdit} reveal={reveal} />
+        </div>
+      </div>
+    );
+  }
   return <CodeBody path={path} onSaved={onSaved} onEdit={onEdit} reveal={reveal} />;
 }
 
