@@ -6,11 +6,6 @@ import {
   effectiveShape,
   isImmersive,
   isImmersiveSurface,
-  maskPanels,
-  panelMask,
-  panelMaskFor,
-  platePaneMask,
-  panelsMasked,
   type ShapeFlags,
 } from "./immersive";
 import type { MainSurface } from "./mainSurface";
@@ -128,152 +123,13 @@ describe("effectiveShape", () => {
   });
 });
 
-describe("panelMaskFor", () => {
-  it("leaves the document alone — it is what both panels are about", () => {
-    expect(panelMaskFor("document")).toEqual({ sidebar: false, pane: false });
-  });
-
-  it("takes both panels on every surface with no document", () => {
-    for (const s of ["browser", "drafter", "servers", "memory", "runs"] as const) {
-      expect(panelMaskFor(s)).toEqual({ sidebar: true, pane: true });
-    }
-  });
-
-  it("keeps the discussion pane on Code Review", () => {
-    // Not a judgement call: entering review points the pane at the DIFF's
-    // annotation thread, so masking it would hide the very comments the
-    // surface exists to collect. The sessions list is still a list of plans.
-    expect(panelMaskFor("review")).toEqual({ sidebar: true, pane: false });
-  });
-
-  it("covers every surface — a new one must decide, not default silently", () => {
-    for (const s of ALL_SURFACES) {
-      const m = panelMaskFor(s);
-      expect(typeof m.sidebar).toBe("boolean");
-      expect(typeof m.pane).toBe("boolean");
-    }
-  });
-});
-
-describe("panelMask", () => {
-  const on = { surface: "browser" as const, broken: { sidebar: false, pane: false }, enabled: true, docPinned: false };
-
-  it("holds on a non-document surface", () => {
-    expect(panelMask(on)).toEqual({ sidebar: true, pane: true });
-    expect(panelsMasked(panelMask(on))).toBe(true);
-  });
-
-  it("each panel break leaves the other panel masked", () => {
-    expect(panelMask({ ...on, broken: { sidebar: true, pane: false } })).toEqual({ sidebar: false, pane: true });
-    expect(panelMask({ ...on, broken: { sidebar: false, pane: true } })).toEqual({ sidebar: true, pane: false });
-  });
-
-  it("breaking out wins for the rest of the visit", () => {
-    // The user reopened something by hand. The next selectSurface re-arms.
-    expect(panelMask({ ...on, broken: { sidebar: true, pane: true } })).toEqual({ sidebar: false, pane: false });
-  });
-
-  it("the manifest opt-out turns it off everywhere", () => {
-    for (const s of ALL_SURFACES) {
-      expect(panelMask({ ...on, surface: s, enabled: false })).toEqual({
-        sidebar: false,
-        pane: false,
-      });
-    }
-  });
-
-  it("a pinned document keeps its panels", () => {
-    // The panels are furniture only when there is no document beside the
-    // surface. Pin one and they are about something on screen again.
-    expect(panelMask({ ...on, docPinned: true })).toEqual({
-      sidebar: false,
-      pane: false,
-    });
-  });
-
-  it("never masks the document surface", () => {
-    expect(panelMask({ ...on, surface: "document" })).toEqual({
-      sidebar: false,
-      pane: false,
-    });
-  });
-});
-
-describe("maskPanels", () => {
-  it("passes the shape through by identity when nothing is masked", () => {
-    expect(maskPanels(open, { sidebar: false, pane: false })).toBe(open);
-  });
-
-  it("closes both panels and drops a fullscreen pane", () => {
-    const full: ShapeFlags = { ...open, paneFullscreen: true };
-    expect(maskPanels(full, { sidebar: true, pane: true })).toEqual({
-      ...open,
-      sidebarCollapsed: true,
-      paneCollapsed: true,
-      paneFullscreen: false,
-    });
-  });
-
-  it("leaves the doc tile completely alone", () => {
-    // This is the whole difference from `effectiveShape`: the header and the
-    // footer stay put. That is what was rejected as re-layout jank, and it
-    // must not come back through this door.
-    const eff = maskPanels(open, { sidebar: true, pane: true });
-    expect(eff.docPinned).toBe(true);
-  });
-
-  it("honours a half mask — Code Review keeps its pane open", () => {
-    const eff = maskPanels(open, { sidebar: true, pane: false });
-    expect(eff.sidebarCollapsed).toBe(true);
-    expect(eff.paneCollapsed).toBe(false);
-  });
-
-  // The same law `effectiveShape` rests on, one tier narrower: the overlay can
-  // only ever take things OFF the screen. If it could open something, entering
-  // a surface would change the user's layout rather than veil part of it.
-  it("only ever hides — no shape and no mask makes a hidden thing visible", () => {
-    for (const bits of Array.from({ length: 16 }, (_, n) => n)) {
-      const pref: ShapeFlags = {
-        sidebarCollapsed: !!(bits & 1),
-        paneCollapsed: !!(bits & 2),
-        paneFullscreen: !!(bits & 4),
-        docPinned: !!(bits & 8),
-      };
-      for (const mask of [
-        { sidebar: false, pane: false },
-        { sidebar: true, pane: false },
-        { sidebar: false, pane: true },
-        { sidebar: true, pane: true },
-      ]) {
-        const eff = maskPanels(pref, mask);
-        expect(eff.sidebarCollapsed || !pref.sidebarCollapsed).toBe(true);
-        expect(eff.paneCollapsed || !pref.paneCollapsed).toBe(true);
-        expect(eff.paneFullscreen && !pref.paneFullscreen).toBe(false);
-        // Untouched, always.
-        expect(eff.docPinned).toBe(pref.docPinned);
-      }
-    }
-  });
-
-  it("does not mutate the shape it is handed", () => {
-    const pref = { ...open };
-    maskPanels(pref, { sidebar: true, pane: true });
-    expect(pref).toEqual(open);
-  });
-});
-
-describe("platePaneMask: the plate's own pane rule", () => {
-  type Row = [string, Parameters<typeof platePaneMask>[0], boolean];
-  const table: Row[] = [
-    // Classic: the pane is a plan's margin, so it hides beside a plate with
-    // no plan on it — until the user reopens it on this visit.
-    ["classic: a plan keeps its margin", { surface: "document", plateMode: "plan", brokenPane: false }, false],
-    ["classic: the door has no plan to be the margin of", { surface: "document", plateMode: "door", brokenPane: false }, true],
-    ["classic: nor does a folder's file", { surface: "document", plateMode: "file", brokenPane: false }, true],
-    ["classic: reopened on this visit, it stays", { surface: "document", plateMode: "door", brokenPane: true }, false],
-    ["classic: another surface is the surface mask's business", { surface: "browser", plateMode: "door", brokenPane: false }, false],
-  ];
-  it.each(table)("%s", (_name, input, masked) => {
-    expect(platePaneMask(input)).toBe(masked);
+describe("the narrow masks are gone (W4)", () => {
+  it("leaves the side columns to the user: no surface hides the sidebar or the rail", async () => {
+    const mod = (await import("./immersive")) as Record<string, unknown>;
+    for (const gone of ["panelMask", "panelMaskFor", "platePaneMask", "maskPanels", "panelsMasked"]) expect(mod[gone]).toBeUndefined();
+    // The whole-window overlay stays inert on every surface, so nothing is
+    // taken off the screen on a visit.
+    for (const s of ALL_SURFACES) expect(isImmersive({ surface: s, broken: false, enabled: true })).toBe(false);
+    expect(effectiveShape(open, false)).toBe(open);
   });
 });

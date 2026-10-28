@@ -116,7 +116,7 @@ import {
   CONVERSATION_PIN_KEY,
   activeConversation,
   conversationContexts,
-  dockScope, withDockOpen, onScopeChange, type DockScope, type DockOpenBy,
+  dockScope, type DockScope,
   kindPill,
   migrateChatSurfaceOnce,
   pillKind,
@@ -185,7 +185,6 @@ import {
 } from "./lib/terminalHandoff";
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems";
 import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
-const SidebarTabStrip = lazy(() => import("./components/SidebarTabStrip").then((module) => ({ default: module.SidebarTabStrip })));
 // The right rail's chrome and its collapsed edge strip (W4): one lazy chunk.
 const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RightRail })));
 const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
@@ -197,8 +196,6 @@ const QuickOpen = lazy(() => import("./workbench/QuickOpen"));
 const ChangesRail = lazy(() => import("./workbench/ChangesRail"));
 // The table-of-contents rail renders only once opened (about 6 kB, W1).
 const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
-// Classic's folder tab only, so its own chunk.
-const FileTree = lazy(() => import("./components/FileTree").then((m) => ({ default: m.FileTree })));
 // Lazy: the read-only viewer only mounts once a folder tab opens a file.
 const FileViewer = lazy(() =>
   import("./components/FileViewer").then((m) => ({ default: m.FileViewer })),
@@ -357,7 +354,6 @@ import { useEdgeReveal } from "./hooks/useEdgeReveal";
 import { ChromeSlot } from "./components/HullRail";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
-import { DiscussPill } from "./components/DiscussPill";
 import { useFrontDoorConversation } from "./hooks/useFrontDoorConversation";
 import { hasChildOverlay, MonochatIsland } from "./components/MonochatIsland";
 import { SurfaceChips } from "./components/SurfaceChips";
@@ -455,9 +451,6 @@ import {
 import {
   effectiveShape,
   isImmersive,
-  maskPanels,
-  panelMask,
-  panelsMasked,
 } from "./lib/immersive";
 import { boxOf, type SwapRect } from "./lib/springSwap";
 import { SpringSwap } from "./components/SpringSwap";
@@ -476,15 +469,11 @@ import {
   type NudgeState,
 } from "./lib/nudge";
 import {
-  DIVIDER_W,
   SHELL_EDGE,
   SHELL_GUTTER,
-  VOICE_PANE_MIN,
-  VOICE_PANE_W,
   canonicalLayout,
   computePaneLayout,
   isLayoutAtRest,
-  voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
@@ -1166,14 +1155,6 @@ function App() {
     "redline.commentPane.fullscreen",
     false,
   );
-  // The voice panel ("Talk to the plan") is a docked column INSIDE the document
-  // column, not one of the app-row panes — so it has a width but no collapsed
-  // flag: its own ✕, the Discuss pill and ⌘J are the open/close affordances.
-  const [voiceWidth, setVoiceWidth] = usePersistedState(
-    "redline.voicePane.width",
-    VOICE_PANE_W,
-    { debounceMs: 250 },
-  );
   // Which artifact the Discussion sidecar pertains to (plan comments vs the
   // code review's annotations/questions). Only consulted in a true split —
   // see `effectiveDiscussionContext`.
@@ -1231,7 +1212,6 @@ function App() {
   // selectSurface — because entering a surface re-arms it. Never persisted:
   // "was immersive" is exactly the stale bit this design refuses to store.
   const [immersiveBroken, setImmersiveBroken] = useState(false);
-  const [panelBreaks, setPanelBreaks] = useState({ sidebar: false, pane: false });
   // Its orientation stays persisted for the tile the pin preference makes;
   // the button that flipped it left the header with the workbench (W1).
   const [splitVertical] = usePersistedState(
@@ -1257,7 +1237,6 @@ function App() {
       // not state-driven, exactly like useAutoExitFullscreen: the rule fires
       // on the move and never fights the user afterwards.
       setImmersiveBroken(false);
-      setPanelBreaks({ sidebar: false, pane: false });
       // Leaving the plate the conversation had taken. It does NOT close — it
       // collapses into the dock and comes with you, which is the whole point
       // of there being one column: you walk out of the room still talking.
@@ -1528,13 +1507,9 @@ function App() {
   // The Prompt Drafter — a Word-style authoring surface selected into the
   // center pane. Its draft (Tiptap JSON) and the project it launches into
   // persist across reloads.
-  // The conversation dock — ONE AI column beside whichever surface is
-  // selected. It began as the plan's voice drawer and then grew a second copy
-  // for the drafter; the two open bits could disagree, so crossing between the
-  // surfaces closed a conversation the user had deliberately left up. There is
-  // one bit now, and `conversationContext.ts` decides WHICH conversation the
-  // column is holding — the same shape `mainSurface` gave the center plate.
-  const [dockOpenBy, setDockOpenBy] = useState<DockOpenBy>({});
+  // The conversation's host is the rail's Talk tab (W4): it is "open" when
+  // the rail shows Talk, and `conversationContext.ts` still decides WHICH
+  // conversation it holds — the same shape `mainSurface` gave the center plate.
   const dockScopeRef = useRef<DockScope | null>(null);
   // The conversation the user asked to see as a ROOM rather than as the column
   // beside a surface — the kind, not a boolean, so the pose can be decided
@@ -2398,22 +2373,12 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // ⌘J toggles the front door; surface discussion controls stay local. An
-  // open compact card grows into the door, draft and all.
+  // The palette's front-door toggle. An open compact card grows into the
+  // door, draft and all. (⌘J is the rail's Talk now, W4.)
   const toggleDoor = useCallback(() => {
     setDoorCompact(false);
     setFrontDoorOpen(value => !value);
   }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!isDockKey(e)) return;
-      e.preventDefault();
-      toggleDoor();
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("redline:toggle-monochat", toggleDoor);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("redline:toggle-monochat", toggleDoor); };
-  }, [toggleDoor]);
   // Visibility from the active tab's panes (a review beside a browser is on
   // screen though it is not the tab's "surface"), the old value in flow.
   const codeReview = useReview(classicWb ? wbView.visibleKinds.includes("review") : reviewOpen);
@@ -2898,11 +2863,9 @@ function App() {
     linkNav,
     activeFile: folderActiveFile,
     openFolder,
-    closeFolder,
     selectSessions,
     selectFolder,
     setActiveFile,
-    setLinkNav,
   } = useFolderWorkspaces();
   // The document plate wears three faces — the Front Door, a plan, and the
   // folder explorer's file viewer — and every site below used to re-derive
@@ -2917,30 +2880,9 @@ function App() {
   const plateMode = classicWb ? wbPlateMode : documentPlateMode(sidebarTab, activeId, activeFile);
   const plateModeRef = useRef(plateMode);
   plateModeRef.current = plateMode;
-  useLayoutEffect(() => {
-    setPanelBreaks(state => state.pane ? { ...state, pane: false } : state);
-  }, [plateMode]);
   const currentDockScope = dockScope(mainSurface, plateMode);
   dockScopeRef.current = currentDockScope;
-  const dockOpen = currentDockScope !== null && !!dockOpenBy[currentDockScope];
-  const previousDockScope = useRef(currentDockScope);
-  useEffect(() => {
-    const previous = previousDockScope.current;
-    previousDockScope.current = currentDockScope;
-    setDockOpenBy(state => onScopeChange(state, previous, currentDockScope));
-  }, [currentDockScope]);
-  useEffect(() => {
-    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
-    let alive = true;
-    void invoke<Section[]>("parse_markdown_sections", {
-      markdown: drafterMarkdown,
-    })
-      .then((s) => alive && setDrafterSections(s))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
+
   // ── Sessions and their terminals ──────────────────────────────────────────
   //
   // A session exists from the moment it launches: `flowLaunches` records the
@@ -3094,35 +3036,21 @@ function App() {
     },
     immersive,
   );
-  // The second, NARROWER overlay: just the two side panels, leaving the header,
-  // the footer and the terminal dock exactly where they are. The sessions list
-  // is a document index and the discussion pane is a plan's margin, so on a
-  // surface with no document neither is about anything on screen. The overlay
-  // hides immediately; its rising edge also closes the discussion preference.
-  // `docPinned` is read from the UNMASKED shape (this never touches it), so
-  // there is no cycle.
-  const surfaceMask = panelMask({
-    surface: mainSurface,
-    broken: panelBreaks,
-    enabled: workspaceImmersive(workspace),
-    docPinned: baseShape.docPinned,
-  });
-  const pMask = surfaceMask;
-  // The right pane is the rail now (W4), and every pane kind has rail tabs:
-  // it is never masked, and a surface never folds it — it stays however the
-  // user left it. The surface mask still says "a surface with no document is
-  // in front", which is what defers an arriving plan to a notice.
-  // Only surface masking defers intercepts to a toast. A new plan arriving
-  // on the Front Door can select its plan in one batch; it never opens the pane.
-  const paneMaskedRef = useRef(pMask.pane);
-  paneMaskedRef.current = pMask.pane;
+  // W4: no surface masks the side columns any more. The sidebar and the rail
+  // stay however the user left them on every pane (⌘B / ⌘⌥B); what a surface
+  // with no document in front still changes is only the arrival rule — a plan
+  // arriving there waits in a notice instead of taking the screen. Review is
+  // not such a surface: its rail holds the review threads, and a plan there
+  // comes forward as on a document.
+  const surfaceInFront = mainSurface !== "document" && mainSurface !== "review" && !baseShape.docPinned && workspaceImmersive(workspace);
+  const paneMaskedRef = useRef(surfaceInFront);
+  paneMaskedRef.current = surfaceInFront;
   const {
     sidebarCollapsed,
     paneCollapsed,
     paneFullscreen,
     docPinned,
-  } = maskPanels(baseShape, { ...pMask, pane: false });
-  const panelsAreMasked = panelsMasked(pMask);
+  } = baseShape;
   const docVisible = mainSurface === "document" || docPinned;
 
   // Breaking out. While immersive a persisted flag is masked, so a bare
@@ -3131,11 +3059,9 @@ function App() {
   // unhides, and the user wins for the rest of that visit. Nothing here writes
   // a "was immersive" bit; the next selectSurface re-arms.
   const revealSidebar = useCallback(() => {
-    setPanelBreaks(state => ({ ...state, sidebar: true }));
     setSidebarCollapsed(false);
   }, [setSidebarCollapsed]);
   const revealPane = useCallback(() => {
-    setPanelBreaks(state => ({ ...state, pane: true }));
     setPaneCollapsed(false);
   }, [setPaneCollapsed]);
   // "Show me the terminals": this set's wall comes forward, or — with none —
@@ -3158,11 +3084,9 @@ function App() {
   // masked, the pane reads as closed, so the gesture means "open" — which is
   // what the user pressing ⇧← at a hidden sidebar is asking for.
   const toggleSidebar = useCallback(() => {
-    setPanelBreaks(state => ({ ...state, sidebar: true }));
     setSidebarCollapsed(!sidebarCollapsed);
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
-    setPanelBreaks(state => ({ ...state, pane: true }));
     // Folding a fullscreen rail lands on the edge strip, not on a hidden
     // fullscreen the next ◨ would resurrect.
     if (!paneCollapsed) setPaneFullscreen(false);
@@ -3185,6 +3109,23 @@ function App() {
     (tab: RailTab) => setRailMemory((stored) => rememberRailTab(parseRailMemory(stored), railKindRef.current, tab)),
     [setRailMemory],
   );
+  // The conversation is up when the rail shows Talk (W4: the dock's body
+  // lives there now).
+  const dockOpen = !paneCollapsed && railTab === "talk";
+  // Sections for the drafter voice walkthrough — parsed backend-side from
+  // the mirrored markdown, only while Talk shows the draft's voice.
+  useEffect(() => {
+    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
+    let alive = true;
+    void invoke<Section[]>("parse_markdown_sections", {
+      markdown: drafterMarkdown,
+    })
+      .then((s) => alive && setDrafterSections(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
   /** Open the rail on `tab` (an edge-strip icon, ⌘J's Talk). */
   const openRailTab = useCallback(
     (tab: RailTab) => {
@@ -3235,33 +3176,6 @@ function App() {
   });
   const chromeRevealed = chrome.revealed;
 
-  // First masked entry ever: say where the panels went. A mode with no visible
-  // exit reads as a trap. Gated on the PANEL mask, not `immersive` — the panel
-  // mask is the one that actually fires, and it is the one that takes something
-  // off the screen without being asked.
-  const [immersiveHintSeen, setImmersiveHintSeen] = usePersistedState(
-    "redline.immersiveHintSeen",
-    false,
-  );
-  // Read through a ref so the flag is NOT a dependency. It was, and the effect
-  // set it — so React ran this effect's cleanup (`clearTimeout`) before the
-  // re-run, cancelling the hint's own dismissal every single time. The banner
-  // then sat there forever. An 8-second notice that never leaves is not a
-  // notice, it is furniture.
-  const immersiveHintSeenRef = useRef(immersiveHintSeen);
-  immersiveHintSeenRef.current = immersiveHintSeen;
-  useEffect(() => {
-    if (!panelsAreMasked || immersiveHintSeenRef.current) return;
-    setImmersiveHintSeen(true);
-    setToast({
-      // `info`, not the default `success`: nothing succeeded. It rendered as a
-      // green success banner for an explanatory line about where the panels
-      // went, which is the wrong colour for the wrong kind of message.
-      tone: "info",
-      message:
-        "Panels hidden for this surface — ⇧← or ⇧→ brings one back, ⌘⇧0 snaps everything back.",
-    }, 8000);
-  }, [panelsAreMasked, setImmersiveHintSeen, setToast]);
   // A3 snap-back: one gesture returns the shell to its canonical resting
   // arrangement — the shape a fresh install's doors open onto — and a second
   // gesture from rest CLOSES the panes (full-bleed document). The cycle is
@@ -3290,7 +3204,6 @@ function App() {
     // immersive surface would read "already closed" and do the wrong half of
     // the cycle.
     setImmersiveBroken(true);
-    setPanelBreaks({ sidebar: true, pane: true });
     if (
       isLayoutAtRest(
         {
@@ -3726,8 +3639,7 @@ function App() {
       // ⇧↓ went with the bottom dock: in a terminal it is the shell's again.
       if (
         e.key !== "ArrowLeft" &&
-        e.key !== "ArrowRight" &&
-        e.key !== "ArrowUp"
+        e.key !== "ArrowRight"
       )
         return;
 
@@ -3750,18 +3662,6 @@ function App() {
         case "ArrowRight":
           togglePane();
           break;
-        case "ArrowUp": {
-          // Ordered tabs: index 0 = sessions, 1..n = open folders. Wrap forward.
-          const len = openFolders.length + 1;
-          const cur =
-            sidebarTab.kind === "sessions"
-              ? 0
-              : openFolders.findIndex((f) => f.id === sidebarTab.id) + 1;
-          const next = (cur + 1) % len;
-          if (next === 0) selectSessions();
-          else selectFolderTab(openFolders[next - 1].path);
-          break;
-        }
       }
     };
     window.addEventListener("keydown", onKey, true); // capture phase
@@ -3951,14 +3851,6 @@ function App() {
   const paneClipRef = useRef<HTMLDivElement | null>(null);
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
-  // The voice dock is not part of `applyLiveLayout` — it lives one level down,
-  // inside the document column — but it follows the same rule: its width is
-  // written straight to the element, never rendered from JSX.
-  const voiceDockRef = useRef<HTMLDivElement | null>(null);
-  // Live px the voice panel takes out of the document column (0 when closed).
-  // Kept in a ref, not state, so a drag frame stays render-free — `recomputeLatch`
-  // reads it the same way it reads the live app-row geometry.
-  const voiceFlowRef = useRef(0);
   const liveSizeRef = useRef({ sidebarWidth, paneWidth, winWidth });
   const layoutFlagsRef = useRef({
     sidebarCollapsed,
@@ -4213,12 +4105,9 @@ function App() {
     // window edge (one pane collapsed).
     const parent = el.offsetParent as HTMLElement | null;
     const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
-    // A docked voice panel eats the right end of the doc column, so the strip
-    // the curtains leave uncovered is not all document. `computePaneLayout`
-    // deliberately doesn't know about it (it models the app row, and the voice
-    // panel splits one cell of that row) — so discount it here, where "where is
-    // the document" is the actual question being asked.
-    const docStrip = Math.max(0, l.docVisibleW - voiceFlowRef.current);
+    // The conversation lives in the rail now (W4), which `computePaneLayout`
+    // already models: the uncovered strip is all document.
+    const docStrip = l.docVisibleW;
     const rawLeft = el.offsetLeft + l.sidebarOverlayPx + docStrip / 2;
     const next = {
       left: Math.min(maxLeft, Math.max(12, rawLeft)),
@@ -4470,60 +4359,12 @@ function App() {
     onExpand: revealPane,
   });
 
-  // The voice panel splits the *document column*, so its ceiling is what the
-  // two app-row panes leave behind (their two dividers, plus the voice
-  // panel's own). Unlike them it never curtains — `voicePaneMaxW` just stops
-  // it growing, so the plan always keeps a readable strip.
-  const docColW = Math.max(
-    0,
-    winWidth -
-      (sidebarCollapsed ? 0 : sidebarWidth) -
-      (paneFullscreen ? 0 : paneCollapsed ? RAIL_EDGE_W : paneWidth) -
-      12 -
-      DIVIDER_W,
-  );
-  const voiceMaxW = voicePaneMaxW(docColW);
-  const voiceRestW = Math.min(
-    Math.max(voiceWidth, VOICE_PANE_MIN),
-    voiceMaxW,
-  );
-
-  const { isDragging: voiceDragging, startDrag: startVoiceDrag } =
-    useResizablePane({
-      width: voiceWidth,
-      onWidthChange: setVoiceWidth,
-      // One element write per frame, no React render — the voice panel
-      // re-renders on every streamed `voice-delta`, and a commit landing
-      // mid-drag would otherwise fight the pointer for the width.
-      onLiveSize: (w) => {
-        const el = voiceDockRef.current;
-        if (el) el.style.width = `${w}px`;
-        voiceFlowRef.current = w + DIVIDER_W;
-      },
-      min: VOICE_PANE_MIN,
-      max: voiceMaxW,
-    });
-
-  // Adopt the resting width after every render — but never mid-drag, where the
-  // live value on the element is the truth (same contract as the app-row
-  // layout effect above). No dep array: any render can be the one that changes
-  // the ceiling (window resize, a sidecar drag) or mounts the dock.
-  useLayoutEffect(() => {
-    const el = voiceDockRef.current;
-    if (!el) {
-      voiceFlowRef.current = 0;
-      return;
-    }
-    if (isResizing()) return;
-    el.style.width = `${voiceRestW}px`;
-    voiceFlowRef.current = voiceRestW + DIVIDER_W;
-  });
 
   // The Discussion sidecar's context. Plan comments need the doc pane on a
   // sessions tab; the review context needs the Code Review pane open. In a
   // true split the header toggle (discussionPinned) decides.
   const planDiscussionAvailable =
-    docVisible && sidebarTab.kind === "sessions";
+    docVisible;
   const discussionContext = effectiveDiscussionContext(
     reviewOpen,
     planDiscussionAvailable,
@@ -5645,7 +5486,6 @@ function App() {
   // document scroller reserves `TOC_RAIL_W` on its left so the rail docks
   // beside the plan instead of floating over it.
   const tocEligible =
-    sidebarTab.kind === "sessions" &&
     !joinedActive &&
     sessionReady &&
     mainSurface === "document" &&
@@ -5760,11 +5600,36 @@ function App() {
   // A chat carried into the dock was pinned there; putting the dock away
   // gives the column back to the surface's own conversation (the Discuss
   // pill reopens the plan's voice, not the chat — it is still in the door).
+  // In the rail (W4) putting it away turns the rail to the pane's own first
+  // other tab — the rail stays where the user left it, open or folded.
+  const railTabsRef = useRef(railTabs);
+  railTabsRef.current = railTabs;
   const closeDock = useCallback(() => {
-    setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, false));
+    selectRailTab(railTabsRef.current.find((t) => t !== "talk") ?? "files");
     setConversationPin(pin => (pin === "companion" ? null : pin));
-  }, [setConversationPin]);
-  const openDock = useCallback(() => setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true)), []);
+  }, [setConversationPin, selectRailTab]);
+  const openDock = useCallback(() => openRailTab("talk"), [openRailTab]);
+  // ⌘J: the rail's Talk — open it there, or put it away when it is what
+  // shows. A focused web page forwards ⌘J as its `toggle-monochat` signal.
+  const talkShownRef = useRef(dockOpen);
+  talkShownRef.current = dockOpen;
+  const toggleTalk = useCallback(() => {
+    if (talkShownRef.current) closeDock();
+    else openDock();
+  }, [closeDock, openDock]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isDockKey(e)) return;
+      e.preventDefault();
+      toggleTalk();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("redline:toggle-monochat", toggleTalk);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("redline:toggle-monochat", toggleTalk);
+    };
+  }, [toggleTalk]);
   // The Discuss pill opens the plan's own discussion — its voice — never a
   // chat carried out of the door's room that rides along beside it. A pin
   // left by that carry (the home dock shut by walking to a plan) is dropped.
@@ -5781,9 +5646,9 @@ function App() {
       const kind = pillKind(pill);
       if (!kind) return;
       setConversationPin(kind);
-      setDockOpenBy(state => withDockOpen(state, "browser", true));
+      openRailTab("talk");
     },
-    [setConversationPin],
+    [setConversationPin, openRailTab],
   );
   // BrowserPane remains mounted with its durable pages. Keep its dock
   // description too; conversationContexts only exposes it on the browser.
@@ -7987,10 +7852,6 @@ function App() {
     !sidebarDragging &&
     !isDragging &&
     !splitDragging &&
-    // The conversation dock reflows the browser as it is dragged; the native
-    // webview paints above React DOM and would otherwise smear across the
-    // frames it is being resized through.
-    !voiceDragging &&
     !liveFlags.curtain &&
     openMenuCount === 0;
 
@@ -8573,7 +8434,6 @@ function App() {
     if (!prompt) return;
     frontDoorLaunchingRef.current = true;
     setChatOpening(true);
-    setPanelBreaks({ sidebar: false, pane: false });
     // The door GROWS into the chat in place — the composer you were typing in
     // is the bottom of the thread you are now inside — and `selectSurface` is
     // deliberately not called, because nothing is being navigated away from.
@@ -8627,7 +8487,6 @@ function App() {
     // Its pane: the door tab it was picked in becomes it; otherwise the
     // set's pane for it comes forward, or opens.
     if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });
-    setPanelBreaks({ sidebar: false, pane: false });
   };
   // The first conversation, from the dock's empty state. No seed and no
   // spring: the sentence-shaped way in is the Front Door's.
@@ -8771,7 +8630,6 @@ function App() {
     mainSurface === "document" &&
     !loading &&
     !activeId &&
-    sidebarTab.kind === "sessions" &&
     !joinedActive &&
     !frontDoorOpen &&
     !browserOverlayActive &&
@@ -8907,7 +8765,7 @@ function App() {
             const hit = dockContexts.find((c) => c.kind === kind);
             if (!hit) return;
             if (kindPill(hit.kind)) setConversationPin(hit.kind);
-            setDockOpenBy(state => withDockOpen(state, dockScopeRef.current, true));
+            openRailTab("talk");
           },
           openChat,
           snapBack,
@@ -8917,7 +8775,7 @@ function App() {
           // The palette's word for "give me the panels back on this surface"
           // (and, pressed again on the same visit, hide them again). It flips
           // the break-out bit only — the persisted layout is never touched.
-          toggleImmersive: () => { setImmersiveBroken(b => !b); setPanelBreaks(state => ({ sidebar: !state.sidebar, pane: !state.pane })); },
+          toggleImmersive: () => setImmersiveBroken(b => !b),
           setTheme: (name) => {
             if (isThemeName(name)) onThemeChange(name);
           },
@@ -9115,22 +8973,44 @@ function App() {
         <FilesRail
           root={railFilesRoot}
           roots={wbActiveKey === HOME_KEY ? railHomeRoots : undefined}
-          onPickRoot={setRailHomeRootPick}
+          onPickRoot={(path) => {
+            setRailHomeRootPick(path);
+            selectFolderTab(path);
+          }}
           activeFile={activeFile}
           onOpenFile={handleOpenFile}
           onQuickOpen={openQuickOpen}
         />
       </Suspense>
     ) : railTab === "talk" ? (
-      <div className="rl-rail-empty">
-        {dockReachable ? (
-          <button type="button" className="rl-menu-item text-left" onClick={openDock}>
-            Open the conversation beside this pane
-          </button>
-        ) : (
-          "Nothing to talk about on this pane yet."
-        )}
-      </div>
+      // Talk (W4): the conversation dock's body, moved into the rail — the
+      // plan's or the draft's voice, the browser's page chat, task list and
+      // mission (portalled in through `dockSlotEl`), Home's chat.
+      // `dockContext.key` is the identity: switching conversations remounts
+      // the body rather than mutating a warm session under it, and for the
+      // voice-capable kinds that same key is what `voice.rs` dispatches on.
+      dockContext ? (
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col overflow-hidden" data-rail-talk={dockContext.kind}>
+          {/* Only when the pane offers a genuine choice. Selecting sets the
+              PIN, a tie-break: it follows you to the next pane that has the
+              same kind and is ignored by every pane that hasn't. */}
+          <DockContextStrip
+            contexts={browserOpen ? dockContexts.map((context) => ({
+              ...context,
+              label: ({ browse: "Page chat", browselist: "Task list", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
+            })) : dockContexts}
+            activeKey={dockContext.key}
+            onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); else setConversationPin(d.kind); }}
+          />
+          <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
+          {dockBody}
+          </div>
+        </div>
+      ) : (
+        <div className="rl-rail-empty">
+          Talk follows what is on screen: a plan or a draft (by voice or typed), the browser's pages, or Home's chat. This pane has no conversation of its own.
+        </div>
+      )
     ) : (
       <Suspense fallback={null}>
         <ChangesRail repo={railFilesRoot} onOpenDiff={openRailDiff} onNotice={(message) => setToast({ message, tone: "warning" })} />
@@ -9498,7 +9378,7 @@ function App() {
     // Cleared once acted on — a request that lingers replays on every
     // remount (the pane's nonce guard resets with it).
     onOpenRequestConsumed: onBrowserOpenConsumed,
-    onCloseDock: () => setDockOpenBy((state) => withDockOpen(state, "browser", false)),
+    onCloseDock: () => closeDock(),
   });
 
   // The comment composer, while a mark is being written: the discussion
@@ -9706,7 +9586,7 @@ function App() {
         onExportDocx={exportRevisionDocx}
         onSaveObsidian={saveRevisionToObsidian}
         viewedVersionNumber={viewedVersionNumber}
-        downloadDisabled={sidebarTab.kind === "folder"}
+        downloadDisabled={false}
         flashEnabled={flashEnabled}
         onFlashEnabledChange={setFlashEnabled}
         flashColor={flashColor}
@@ -9830,16 +9710,9 @@ function App() {
           data-tour="sessions"
           className="flex flex-col shrink-0 rl-sidebar-aside"
         >
-          {openFolders.length > 0 && <Suspense fallback={null}><SidebarTabStrip
-            openFolders={openFolders}
-            sidebarTab={sidebarTab}
-            linkNav={linkNav}
-            onSelectSessions={selectSessions}
-            onSelectFolder={selectFolderTab}
-            onCloseFolder={closeFolder}
-            onToggleLink={() => setLinkNav((v) => !v)}
-          /></Suspense>}
-          {sidebarTab.kind === "sessions" ? (
+          {/* One sidebar: the folder tabs went with W4 — a folder's tree is
+              the rail's Files tab now. */}
+          {(
             // Chunk warmed by the boot effect; null while it lands — the house
             // rule is a quietly blank plate, never a spinner.
             <Suspense fallback={null}>
@@ -9863,17 +9736,6 @@ function App() {
               homeTerminals={sidebarTerminals[""]}
             />
             </Suspense>
-          ) : (
-            <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
-              <Suspense fallback={null}>
-              <FileTree
-                root={sidebarTab.id}
-                onPlanHere={(path) => { setFrontDoorProject({ path }); openFrontDoor(); }}
-                activeFile={activeFile}
-                onOpenFile={handleOpenFile}
-              />
-              </Suspense>
-            </div>
           )}
         </aside>
         {/* In curtain state the flow boundary sits under the spilled aside, so
@@ -10350,12 +10212,6 @@ function App() {
                     onRemoveSource={removeDrafterSource}
                     templates={drafterTemplates}
                     onUseTemplate={useDrafterTemplate}
-                    // The floating Discuss pill inside the drafter pane opens the
-                    // draft's voice panel — the one discussion surface (talk or
-                    // type). Hidden while the panel is up.
-                    onDiscuss={
-                      dockReachable && !dockOpen ? openDock : null
-                    }
                     onOpenShelf={() => setDrafterShelfOpen(true)}
                     onOpenAgents={() => setAgentShelfOpen(true)}
                     // Only when the drafter is living inside the Front Door's
@@ -10818,39 +10674,6 @@ function App() {
             // No secondary pane open → the document is the default full view.
             return planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{documentBody}</SpringSwap> : documentBody;
           })()}
-          {/* The Discuss pill — the discussion entry on the document pane.
-              Opens the plan's voice panel: the one discussion surface
-              (voice-first, typed composer inside). Hidden while the panel
-              is up. Stands up out of the article's way when the pane gets too
-              narrow to hold both; 64 is the article's pl-16. */}
-          {mainSurface === "document" &&
-            // Under the workbench, only over a Plan pane on screen: an Agent
-            // tab has its own composer and no document to discuss.
-            (!classicWb || wbView.visibleKinds.includes("plan")) &&
-            // Not on the Front Door. The door is one composed gesture — a
-            // sentence and three destinations, one of which IS a conversation
-            // — and a floating pill offering a fourth way to the same place
-            // would be the header-button sprawl this app refuses, one level
-            // down. Everywhere else on this surface the pill is the way in.
-            plateMode !== "door" &&
-            !dockOpen &&
-            dockReachable && (
-              <DiscussPill
-                onClick={openDiscussion}
-                // Only a plan has an article to stand clear of; the file
-                // viewer has none, and a stale ref would stow the pill against
-                // a column that isn't on screen.
-                textRef={
-                  plateMode === "plan" && planDiscussable
-                    ? documentRef
-                    : undefined
-                }
-                textInset={64}
-                measureKey={`${docWide}:${docMeasure}`}
-                voiceKey={dockContext?.key}
-                shift={tocDocked && plateMode === "plan" ? tocRailW : 0}
-              />
-            )}
           {/* Floating document zoom + line-width control — pinned to the pane
               (doesn't scroll with the plan). A document always has it; the only
               thing that goes without is the folder file viewer, which isn't one.
@@ -10916,57 +10739,6 @@ function App() {
             </div>
           )}
           </div>
-          {/* The conversation dock — the app's one AI column, opened by the
-              Discuss pill or ⌘J. A sibling of the whole surface pane rather
-              than a drawer painted over the document, so it SHRINKS whatever
-              is selected instead of covering it — which is also what keeps it
-              honest over the browser, whose native webview would ignore an
-              overlay and paint straight through it.
-
-              `dockContext.key` is the identity: switching conversations
-              remounts the body rather than mutating a warm session under it,
-              and for the voice-capable kinds that same key is what `voice.rs`
-              dispatches on. */}
-          {voiceDocked && dockContext && (
-            <>
-              <PaneDivider
-                label="voice"
-                collapsed={false}
-                dragging={voiceDragging}
-                // The chevron closes the panel; the pill and ⌘J reopen it (a
-                // collapsed voice column has no divider left to drag from).
-                onToggle={closeDock}
-                onPointerDown={startVoiceDrag}
-                hideChevron={latchActive}
-                // Runs inside the document plate — no hull to show through.
-                hairline
-              />
-              {/* Width is owned by the resize hook + the adopt effect, never
-                  rendered from here. `data-rl-pane` lets the app-wide resizing
-                  flag kill its transition mid-drag. */}
-              <div
-                ref={voiceDockRef}
-                data-rl-pane
-                className="min-h-0 min-w-0 shrink-0 flex flex-col overflow-hidden"
-              >
-                {/* Only when the surface offers a genuine choice — see the
-                    strip. Selecting sets the PIN, which is a tie-break: it
-                    follows you to the next surface that has the same kind and
-                    is ignored by every surface that hasn't. */}
-                <DockContextStrip
-                  contexts={browserOpen ? dockContexts.map((context) => ({
-                    ...context,
-                    label: ({ browse: "Page chat", browselist: "Task list", mission: "Mission", companion: "Chat" } as Partial<Record<ConversationKind, string>>)[context.kind] ?? context.label,
-                  })) : dockContexts}
-                  activeKey={dockContext.key}
-                  onSelect={(d) => { const pill = kindPill(d.kind); if (pill) openDockPill(pill); else setConversationPin(d.kind); }}
-                />
-                <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
-                {dockBody}
-                </div>
-              </div>
-            </>
-          )}
         </div>
 
         {!paneFullscreen && (
@@ -11126,12 +10898,12 @@ function App() {
             onSelect={selectRailTab}
             counts={railCounts}
             attention={railAttention}
+            talkKey={dockContext?.key ?? null}
             fullscreen={paneFullscreen}
             onToggleFullscreen={() => {
               // Effective-value toggle, same rule as the pane's collapse:
               // immersive masks fullscreen off, so ⤢ means "go fullscreen".
               setImmersiveBroken(true);
-              setPanelBreaks(state => ({ ...state, pane: true }));
               setPaneFullscreen(!paneFullscreen);
             }}
             onCollapse={() => {
@@ -11139,7 +10911,7 @@ function App() {
               setPaneCollapsed(true);
             }}
           >
-          {railTab !== "discussion" ? railOtherBody : discussionContext === "plan" && sidebarTab.kind === "sessions" && session && planDiscussable ? (
+          {railTab !== "discussion" ? railOtherBody : discussionContext === "plan" && session && planDiscussable ? (
             // "Refinement": the plan's threads in four piles — Waiting on you,
             // Your marks, With Claude, Resolved — each the classic comment
             // card with App's own handlers, under the composer, the revising
@@ -11364,19 +11136,6 @@ function App() {
               <Suspense fallback={null}>
                 <ReviewDiscussionPane review={codeReview} />
               </Suspense>
-            ) : sidebarTab.kind !== "sessions" ? (
-              <div
-                className="italic"
-                style={{
-                  fontSize: "12px",
-                  color: "var(--color-ink-muted)",
-                  lineHeight: 1.5,
-                }}
-              >
-                Comments belong to a plan session. Switch to{" "}
-                <strong style={{ color: "var(--color-ink)" }}>Sessions</strong>{" "}
-                to see a plan's discussion.
-              </div>
             ) : (
               <div className="italic" style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
                 {railKind === "drafter" ? "The draft's comments live in its margin." : "A plan's discussion shows here once the plan arrives."}
@@ -11394,7 +11153,7 @@ function App() {
             among them), reserved in flow by `computePaneLayout`'s edge. */}
         {paneCollapsed && (
           <Suspense fallback={<div className="shrink-0" style={{ width: `${RAIL_EDGE_W}px` }} />}>
-            <RailEdge tabs={railTabs} counts={railCounts} attention={railAttention} onOpen={openRailTab} onExpand={revealPane} />
+            <RailEdge tabs={railTabs} counts={railCounts} attention={railAttention} talkKey={dockContext?.key ?? null} onOpen={openRailTab} onExpand={revealPane} />
           </Suspense>
         )}
         </div>

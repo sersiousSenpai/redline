@@ -4,9 +4,10 @@ import { describe, expect, it } from "vitest";
 const app = readFileSync("src/App.tsx", "utf8");
 const drafter = readFileSync("src/components/PromptDrafter.tsx", "utf8");
 describe("panel mask wiring", () => {
-  it.each(["revealTerm", "toggleTerm", "enterTermFullscreen"])("%s cannot break either side panel mask", name => {
-    const body = app.slice(app.indexOf(`const ${name} =`)).split("}, [")[0];
-    expect(body).not.toContain("setPanelBreaks");
+  it("no surface masks the side columns: the panel breaks and the narrow masks are gone (W4)", () => {
+    for (const gone of ["setPanelBreaks", "panelMask(", "platePaneMask(", "paneCollapseOnMask(", "maskPanels(", "panelsMasked(", "immersiveHintSeen"]) expect(app).not.toContain(gone);
+    // The shape on screen is the user's, straight from the persisted flags.
+    expect(app).toMatch(/docPinned,\s*\} = baseShape;/);
   });
   it("a plan arrival never opens the discussion", () => {
     const arrival = app.slice(app.indexOf('const planUnlisten ='), app.indexOf('const bindFailedUnlisten ='));
@@ -14,7 +15,7 @@ describe("panel mask wiring", () => {
     // the user left them, on the arrival itself and on its Review/Open toasts.
     // Not opened, and not force-closed either, under any helper's name.
     expect(arrival).not.toMatch(/setPaneCollapsed|revealPane|openPane|togglePane|setPanelBreaks/);
-    expect(arrival).not.toMatch(/setDockOpenBy|openDock|closeDock|toggleDock/);
+    expect(arrival).not.toMatch(/setDockOpenBy|openDock|closeDock|toggleDock|openRailTab|selectRailTab|toggleTalk/);
     // The masked-surface branch of `arrivalFocus`'s "focus": selects, never
     // yanks the surface — its Review action does that, and it is the
     // notices' one way to the plan.
@@ -30,16 +31,21 @@ describe("panel mask wiring", () => {
     // The arrival-only opener is gone, so it cannot come back under its name.
     expect(app).not.toContain("openPanePref");
   });
-  it("the rail is never masked: no surface and no plate face folds it (W4)", () => {
-    // Every pane kind has rail tabs (workbench/rail.ts), so the right pane
-    // stays however the user left it — the surface mask keeps only the
-    // sidebar, and nothing writes the collapse on a surface's rising edge.
-    expect(app).toContain('maskPanels(baseShape, { ...pMask, pane: false })');
-    expect(app).not.toContain('platePaneMask(');
-    expect(app).not.toContain('paneCollapseOnMask(');
-    // The surface mask still defers an arriving plan to a notice.
-    expect(app).toContain('paneMaskedRef.current = pMask.pane');
-    expect(app).toContain('panelsMasked(pMask)');
+  it("an arriving plan waits in a notice only while a surface with no document is in front (W4)", () => {
+    // The arrival rule outlived the masks: the browser, Localhost, Memory,
+    // Runs and the drafter defer; the document, a pinned document and Review
+    // (whose rail holds its threads) do not.
+    expect(app).toContain('const surfaceInFront = mainSurface !== "document" && mainSurface !== "review" && !baseShape.docPinned && workspaceImmersive(workspace);');
+    expect(app).toContain("paneMaskedRef.current = surfaceInFront;");
+  });
+  it("the rail's Talk is the conversation's one host: the dock column and the Discuss pill are gone (W4)", () => {
+    expect(app).not.toContain("voiceDockRef");
+    expect(app).not.toContain("<DiscussPill");
+    expect(drafter).not.toContain("<DiscussPill");
+    expect(app).toContain('const dockOpen = !paneCollapsed && railTab === "talk";');
+    expect(app).toMatch(/railTab === "talk" \? \(/);
+    // ⌘J and the page's toggle-monochat signal reach Talk.
+    expect(app).toContain('window.addEventListener("redline:toggle-monochat", toggleTalk);');
   });
   it("voice comments expand their card without opening the pane or moving the plan", () => {
     const voice = app.slice(app.indexOf('// When a voice-authored comment'), app.indexOf('// Own-era diff'));

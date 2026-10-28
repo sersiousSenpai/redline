@@ -125,12 +125,6 @@ export interface RestingShapeInput {
   surface: string;
 }
 
-/** Entering a hidden context closes the discussion preference, including a
- *  boot straight onto a masked surface. Lifting or keeping the mask never
- *  changes the preference, so only a user gesture reopens it. */
-export function paneCollapseOnMask(previous: boolean, next: boolean): boolean {
-  return !previous && next;
-}
 
 /** Is the live layout already at the canonical resting shape? Drives the
  *  snap-back toggle: at rest, ⌘⇧0 closes the panes instead of re-snapping

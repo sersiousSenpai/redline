@@ -3386,7 +3386,6 @@ html[data-rl-tile-drag] * {
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-btn { display: none !important; }
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-toc-rail { top: 62px !important; bottom: 44px !important; }
 .rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-doc-zoom { bottom: 60px !important; }
-.rl-surface-pane:has(.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane) > .rl-discuss-pill { bottom: 60px !important; }
 .rl-wb-pane-fallback { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--color-ink-muted); font-size: 13px; }
 
 /* ── Doors-open boot (A2) ──────────────────────────────────────────────────
@@ -5043,63 +5042,6 @@ html[data-rl-resizing] [data-rl-pane] {
    values chasing a moving pointer, and these targets are binary — there is
    nothing for them to lag behind. */
 
-/* The Discuss pill yields down a three-stage ladder (useTextClearance writes
-   the stage NAME into data-rl-stowed): full → a thin vertical tab hinged 90°
-   against the pane edge (~110px of gutter given back for ~30px, icon on top,
-   the word reading downward) → a bare icon circle hugging the edge. The hinge
-   is a rigid rotation about a pivot DiscussPill computes from the pill's
-   measured size (see its onMeasure); the pivot sits outside the box, which is
-   what lets one rotation carry the flat pill onto the standing one without a
-   composed translate sweeping it outside the pane's `contain: paint` box. */
-.rl-discuss-pill {
-  left: 16px;
-  padding: 6px 12px;
-  transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
-}
-.rl-discuss-pill[data-rl-stowed="stowed"] {
-  transform: rotate(90deg);
-}
-/* The icon stage: a 26px circle at the pane edge, unrotated (a circle has no
-   orientation), holding just the glyph — right edge ~32px, so it stands on
-   the drafter's 40px desk gutter with room to spare. */
-.rl-discuss-pill[data-rl-stowed="icon"] {
-  left: 6px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  justify-content: center;
-  transform: none;
-}
-.rl-discuss-pill[data-rl-stowed="icon"] .rl-discuss-label {
-  display: none;
-}
-/* A voice turn left running when the panel closed (voiceAway.ts): a mark on
-   the pill's corner, in every stage — breathing while the agent works, a solid
-   dot once its reply is waiting. Opacity only, so the breath never repaints. */
-.rl-discuss-badge {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-info);
-  box-shadow: 0 0 0 2px var(--color-bg-elevated);
-  pointer-events: none;
-}
-.rl-discuss-badge[data-state="thinking"] {
-  background: var(--color-ink-muted);
-  animation: rl-discuss-breathe 1.6s ease-in-out infinite;
-}
-@keyframes rl-discuss-breathe {
-  50% { opacity: 0.3; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .rl-discuss-badge[data-state="thinking"] {
-    animation: none;
-  }
-}
-
 /* The plan section the voice agent is talking about (planPoint.ts): a soft
    outline while its sentence plays or its chip is hovered. Static — it comes
    and goes, nothing animates — and an outline, so the text never moves. */
@@ -5148,7 +5090,6 @@ html[data-rl-resizing] [data-rl-pane] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rl-discuss-pill,
   .rl-toc-btn,
   .rl-toc-btn-label {
     transition: none;

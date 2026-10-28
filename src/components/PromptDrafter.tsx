@@ -34,7 +34,6 @@ import {
 import { DrafterToolbar } from "./DrafterToolbar";
 import { DrafterFindBar } from "./DrafterFindBar";
 import { DrafterSidecar } from "./DrafterSidecar";
-import { DiscussPill } from "./DiscussPill";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
@@ -105,9 +104,6 @@ interface PromptDrafterProps {
    *  document from it — the host owns the mint. */
   templates?: BookshelfDraft[];
   onUseTemplate?: (draftId: string) => void;
-  /** Open the draft's discussion (the voice panel — talk or type). Null
-   *  hides the floating Discuss pill. */
-  onDiscuss?: (() => void) | null;
   /** Show the shelf — the folder tree + document list this document sits in. */
   onOpenShelf?: () => void;
   /** Show the agent shelf — the user's own agents, run against this document
@@ -183,7 +179,6 @@ function PromptDrafterBase({
   onDismissPending,
   templates = EMPTY_TEMPLATES,
   onUseTemplate,
-  onDiscuss = null,
   onOpenShelf,
   onOpenAgents,
   onExit = null,
@@ -1596,19 +1591,6 @@ function PromptDrafterBase({
             onSelect={setFocusedCommentId}
             onDelete={deleteComment}
             onClose={() => setSidecarOpen(false)}
-          />
-        )}
-        {onDiscuss && (
-          <DiscussPill
-            onClick={onDiscuss}
-            title="Discuss this draft — talk or type"
-            textRef={pageRef}
-            /* 0: clear the page SHEET's edge, not the text inside it — in a
-               Word-style surface the sheet is the document, and a pill on the
-               white paper reads as on the document however clear of the words
-               it is. */
-            textInset={0}
-            voiceKey={`drafter:${draftId}`}
           />
         )}
       </div>

@@ -400,3 +400,20 @@
   opacity: 0.55;
   cursor: default;
 }
+
+/* A voice turn left running when Talk was put away: a reply waiting is an
+   amber dot (static), a turn still working the shared HTML spinner. */
+.rl-rail-away {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  flex: none;
+}
+.rl-rail-edge-away {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  display: grid;
+  place-items: center;
+}

@@ -429,13 +429,13 @@ describe("a companion chat is a pane, and the one room follows it", () => {
     expect(close).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
   });
 
-  it("the Discuss pill opens the plan's own discussion, never a carried chat", () => {
-    // Voice stays first-class: the pill drops a companion pin before it
-    // opens the column.
+  it("opening the plan's discussion opens its own voice, never a carried chat", () => {
+    // Voice stays first-class: a companion pin is dropped before Talk opens
+    // (the Agent pane's Talk; the Discuss pill went with W4).
     const discuss = app.slice(app.indexOf("const openDiscussion = useCallback("), app.indexOf("}, [setConversationPin, openDock]);"));
     expect(discuss).toContain('setConversationPin(pin => (pin === "companion" ? null : pin));');
     expect(discuss).toContain("openDock();");
-    expect(app).toMatch(/<DiscussPill\s+onClick=\{openDiscussion\}/);
+    expect(app).not.toContain("<DiscussPill");
   });
 });
 

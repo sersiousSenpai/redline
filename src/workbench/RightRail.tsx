@@ -10,7 +10,9 @@
 //
 // Lazy, with its stylesheet: nothing here is on the boot path.
 
-import { memo, type ReactNode } from "react";
+import { memo, useEffect, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   FolderTree,
   GitCompare,
@@ -23,6 +25,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { Spinner } from "../components/Spinner";
+import { setVoiceAway, useVoiceAway, type AwayState } from "../audio/voiceAway";
 import { RAIL_TAB_LABEL, type RailTab } from "./rail";
 import "./rail.css";
 
@@ -33,11 +37,56 @@ const RAIL_ICON: Record<RailTab, LucideIcon> = {
   changes: GitCompare,
 };
 
+/** A voice turn left running when Talk was put away (`voiceAway`), for
+ *  this pane's conversation: working while it runs, then waiting once its
+ *  reply has landed. The Talk tab wears it — the Discuss pill's old job. */
+function useTalkAway(talkKey: string | null | undefined): AwayState | null {
+  const tracked = useVoiceAway();
+  const awayKey = tracked?.state === "thinking" ? tracked.key : null;
+  useEffect(() => {
+    if (!awayKey) return;
+    let alive = true;
+    const ended = () => {
+      if (alive) setVoiceAway({ key: awayKey, state: "waiting" });
+    };
+    // A failure persists nothing to come back to, so it clears the mark.
+    const gone = () => {
+      if (alive) setVoiceAway(null);
+    };
+    const subs = [
+      listen<{ sessionId: string }>("voice-done", (e) => e.payload.sessionId === awayKey && ended()),
+      listen<{ sessionId: string; text: string }>("voice-interrupted", (e) => e.payload.sessionId === awayKey && (e.payload.text ? ended() : gone())),
+      listen<{ sessionId: string }>("voice-error", (e) => e.payload.sessionId === awayKey && gone()),
+      listen<{ sessionId: string }>("voice-exit", (e) => e.payload.sessionId === awayKey && gone()),
+    ];
+    // One that ended while nothing was watching is caught by asking.
+    void invoke<{ inFlight: boolean }>("voice_session_status", { sessionId: awayKey })
+      .then((st) => {
+        if (!st.inFlight) ended();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+      for (const p of subs) void p.then((un) => un());
+    };
+  }, [awayKey]);
+  return tracked && talkKey && tracked.key === talkKey ? tracked.state : null;
+}
+
+function AwayMark({ state }: { state: AwayState | null }) {
+  if (state === "thinking") return <Spinner size={10} />;
+  if (state === "waiting") return <span className="rl-rail-away" aria-label="a reply is waiting" />;
+  return null;
+}
+
 export interface RailBadges {
   /** A number beside the tab's name. */
   counts?: Partial<Record<RailTab, number>>;
   /** Tabs with something waiting on the user: the count wears amber. */
   attention?: Partial<Record<RailTab, boolean>>;
+  /** The conversation Talk holds here (its voice key), so a turn left
+   *  running in it shows on the Talk tab. */
+  talkKey?: string | null;
 }
 
 export interface RightRailProps extends RailBadges {
@@ -62,7 +111,8 @@ function Count({ tab, counts, attention }: { tab: RailTab } & RailBadges) {
   );
 }
 
-function RightRailBase({ tabs, active, onSelect, counts, attention, fullscreen, onToggleFullscreen, onCollapse, children }: RightRailProps) {
+function RightRailBase({ tabs, active, onSelect, counts, attention, talkKey, fullscreen, onToggleFullscreen, onCollapse, children }: RightRailProps) {
+  const away = useTalkAway(active === "talk" ? null : talkKey);
   return (
     <div className="rl-rail" data-rail-tab={active}>
       <div className="rl-rail-strip" role="tablist" aria-label="Rail">
@@ -83,6 +133,7 @@ function RightRailBase({ tabs, active, onSelect, counts, attention, fullscreen, 
               <Icon size={16} aria-hidden />
               <span className="rl-rail-tab-label">{RAIL_TAB_LABEL[tab]}</span>
               <Count tab={tab} counts={counts} attention={attention} />
+              {tab === "talk" && <AwayMark state={away} />}
             </button>
           );
         })}
@@ -119,7 +170,8 @@ export interface RailEdgeProps extends RailBadges {
 
 /** The collapsed rail: the tabs as 16px icons down a 40px strip, the
  *  attention count riding the icon, and the way back open at the foot. */
-function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention }: RailEdgeProps) {
+function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention, talkKey }: RailEdgeProps) {
+  const away = useTalkAway(talkKey);
   return (
     <div className="rl-rail-edge" aria-label="Rail">
       {tabs.map((tab) => {
@@ -136,6 +188,11 @@ function RailEdgeBase({ tabs, onOpen, onExpand, counts, attention }: RailEdgePro
             onClick={() => onOpen(tab)}
           >
             <Icon size={16} aria-hidden />
+            {tab === "talk" && away && (
+              <span className="rl-rail-edge-away">
+                <AwayMark state={away} />
+              </span>
+            )}
             {!!n && (
               <span className="rl-rail-edge-count" data-attention={attention?.[tab] ? "" : undefined}>
                 {n > 9 ? "9+" : n}

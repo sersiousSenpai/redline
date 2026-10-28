@@ -7,7 +7,7 @@
 // binding can't drift between the surfaces that describe it.
 //
 // Honest scope: only the wired globals (⌘K palette, ⌘⇧N new plan, ⇧⏎ front
-// door, ⌘⇧0 snap-back, ⌘J front-door toggle, ⌘⇧J needs-you jump), the
+// door, ⌘⇧0 snap-back, ⌘J the rail's Talk, ⌘⇧J needs-you jump), the
 // workbench's tab chords (WORKBENCH_KEYMAP: ⌘T / ⌘⇧T / ⌘W / ⌘⇧W, ⌘1–9,
 // ⌘⌥←→ and ⌘⇧[]) use the matchers below; every other entry documents an existing listener that still owns its
 // own keydown handling (`wired: false`). The workbench chords are native menu
@@ -53,8 +53,8 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   // Tauri/macOS read it as "new window".
   { id: "new-plan", keys: ["⌘", "⇧", "N"], label: "Plan a build", group: "Global", wired: true },
   { id: "snap-back", keys: ["⌘", "⇧", "0"], label: "Snap the layout back", group: "Layout", wired: true },
-  // The existing alternate toggle for the front door.
-  { id: "dock", keys: ["⌘", "J"], label: "Show / hide the front door", group: "Global", wired: true },
+  // W4: the rail's Talk — the conversation, voice first — open or put away.
+  { id: "dock", keys: ["⌘", "J"], label: "Talk: open or put away the conversation", group: "Global", wired: true },
   // The way back to a blocked agent from anywhere — including from inside a
   // terminal, so App matches it in the capture phase, ahead of xterm.
   { id: "needs-you", keys: ["⌘", "⇧", "J"], label: "Jump to the terminal that needs you", group: "Global", wired: true },
@@ -65,7 +65,6 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar (as ⌘B)", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the rail (as ⌘⌥B)", group: "Layout", wired: false },
-  { id: "sidebar-tabs", keys: ["⇧", "↑"], label: "Switch sidebar tabs", group: "Layout", wired: false },
   // Not a chord: on an immersive surface the periphery is hidden and the way
   // back is the top-edge hull rail (or ⌘⇧0, which lands on the document).
   // Documented here because the cheat sheet is where a user goes looking for
@@ -155,7 +154,7 @@ export function isNewPlanKey(e: KeyComboInfo): boolean {
   return e.shiftKey && e.code === "KeyN";
 }
 
-/** ⌘J — toggle the front door. Shift and Alt excluded: ⌘⇧J is the
+/** ⌘J — the rail's Talk (W4). Shift and Alt excluded: ⌘⇧J is the
  *  needs-you jump below. */
 export function isDockKey(e: KeyComboInfo): boolean {
   if (!(e.metaKey || e.ctrlKey)) return false;
