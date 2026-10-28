@@ -140,6 +140,65 @@ describe("defaults", () => {
   });
 });
 
+describe("defaults are filled once per set", () => {
+  const agentTabs = (s: WorkbenchState, key: SessionKey) =>
+    Object.values(set(s, key).panes).filter((p) => p.kind === "chat" && p.data.source === "agent");
+  const agentTabId = (s: WorkbenchState, key: SessionKey) =>
+    set(s, key).order.find((id) => set(s, key).panes[set(s, key).tabs[id].focusedPaneId]?.kind === "chat")!;
+
+  it("an Agent tab the user closed stays closed through every later session switch and terminal-list change", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    expect(agentTabs(s, "plan:s1")).toHaveLength(1);
+    expect(set(s, "plan:s1").agentsFilled).toEqual(["t1"]);
+    s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: agentTabId(s, "plan:s1") });
+    expect(agentTabs(s, "plan:s1")).toHaveLength(0);
+    // App dispatches these on every terminal-list change and session switch.
+    const closed = s;
+    s = reduce(s, { type: "ensureDefaults", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    expect(s).toBe(closed);
+    s = reduce(s, { type: "selectSession", key: HOME_KEY });
+    s = reduce(s, { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    expect(agentTabs(s, "plan:s1")).toHaveLength(0);
+  });
+
+  it("reopening it is the user's: openSurface brings the Agent tab back, and it is not filled twice", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: agentTabId(s, "plan:s1") });
+    s = reduce(s, { type: "openSurface", kind: "chat", key: "plan:s1", data: { source: "agent", terminalId: "t1", sessionId: "s1" } });
+    expect(agentTabs(s, "plan:s1")).toHaveLength(1);
+    s = reduce(s, { type: "ensureDefaults", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    expect(agentTabs(s, "plan:s1")).toHaveLength(1);
+  });
+
+  it("a NEW agent terminal binding for the first time still gets its tab", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: agentTabId(s, "plan:s1") });
+    s = reduce(s, { type: "ensureDefaults", key: "plan:s1", defaults: { agentTerminalId: "t2" } });
+    expect(agentTabs(s, "plan:s1").map((p) => p.kind === "chat" && p.data.source === "agent" && p.data.terminalId)).toEqual(["t2"]);
+    expect(set(s, "plan:s1").agentsFilled).toEqual(["t1", "t2"]);
+  });
+
+  it("a set that empties refills its Plan without the closed agent; a launch refills with its Agent", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: agentTabId(s, "plan:s1") });
+    s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: set(s, "plan:s1").order[0] });
+    s = reduce(s, { type: "ensureDefaults", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    expect(kinds(s, "plan:s1")).toEqual(["plan"]);
+    expect(agentTabs(s, "plan:s1")).toHaveLength(0);
+
+    let l = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l1", defaults: { agentTerminalId: "t5" } });
+    l = reduce(l, { type: "closeTab", key: "launch:l1", tabId: set(l, "launch:l1").order[0] });
+    expect(agentTabs(l, "launch:l1")).toHaveLength(1);
+  });
+
+  it("the marker survives the launch becoming its plan", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "launch:l1", defaults: { agentTerminalId: "t5" } });
+    s = reduce(s, { type: "selectSession", key: "plan:s1" });
+    s = reduce(s, { type: "rekeySession", from: "launch:l1", to: "plan:s1" });
+    expect(set(s, "plan:s1").agentsFilled).toContain("t5");
+  });
+});
+
 describe("tabs", () => {
   it("opens, selects, cycles, reorders", () => {
     let s = home(door(1), file("/a"), file("/b"));

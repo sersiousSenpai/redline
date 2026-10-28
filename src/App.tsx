@@ -3291,8 +3291,10 @@ function App() {
   // must never read as "the terminal is gone".
   const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
   // A session's terminal, learnt: its set (when it has one) gets an Agent
-  // tab for it — quietly, beside the plan — and loses one for a terminal
-  // that is gone and no longer the session's (a restore into a fresh PTY).
+  // tab for it — quietly, beside the plan, and once: the set remembers the
+  // terminal (`agentsFilled`), so a tab the user closed stays closed — and
+  // loses one for a terminal that is gone and no longer the session's (a
+  // restore into a fresh PTY).
   useEffect(() => {
     if (!classicWb) return;
     const state = wb.getState();

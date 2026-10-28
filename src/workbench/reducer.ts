@@ -13,6 +13,7 @@
 //   can skip notifying.
 
 import {
+  AGENTS_FILLED_CAP,
   CLOSED_CAP,
   DEFAULT_DOOR_DRAFT_KEY,
   HOME_KEY,
@@ -453,6 +454,20 @@ function ownedPtys(state: WorkbenchState, key: SessionKey): string[] {
   return Object.keys(state.owners).filter((pty) => state.owners[pty] === key && !state.stowed.includes(pty));
 }
 
+/** `set`, remembering that `agent` has had its default Agent tab. */
+function markAgentFilled(set: TabSet, agent: string): TabSet {
+  const filled = set.agentsFilled ?? [];
+  if (filled.includes(agent)) return set;
+  return { ...set, agentsFilled: [...filled, agent].slice(-AGENTS_FILLED_CAP) };
+}
+
+/** A set's default tabs, filled ONCE: when the set is created, and when a
+ *  new agent terminal binds to it for the first time. Called on every
+ *  session switch and every terminal-list change, so it must not undo the
+ *  user: an agent the set has already given a tab (`agentsFilled`) gets no
+ *  second one after they close it with ⌘W. A set that empties still refills
+ *  (a set never shows nothing), and a launch, which IS its agent, refills
+ *  with its Agent tab. */
 function fillDefaults(
   state: WorkbenchState,
   key: SessionKey,
@@ -470,22 +485,25 @@ function fillDefaults(
   // set owns is it (a refill after its last tab closed).
   const agent = defaults?.agentTerminalId ?? (launchIdOf(key) ? (ownedPtys(state, key)[0] ?? null) : null);
   const sessionId = sessionIdOf(key);
+  const filledBefore = agent !== null && (set.agentsFilled ?? []).includes(agent);
   if (set.order.length === 0) {
     if (key === HOME_KEY) {
       set = addTab(set, { kind: "door", data: { draftKey: defaults?.draftKey ?? DEFAULT_DOOR_DRAFT_KEY } }, ids()).set;
     } else if (sessionId) {
       set = addTab(set, { kind: "plan", data: { sessionId, version: null } }, ids()).set;
-      if (agent) set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId } }, ids(), undefined, false).set;
+      if (agent && !filledBefore) set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId } }, ids(), undefined, false).set;
       const tiles = ownedPtys(state, key).filter((p) => p !== agent).slice(0, MAX_WALL_TILES);
       if (tiles.length) set = addTab(set, { kind: "terminals", data: { tiles, focus: 0, zoomed: null, pinned: [] } }, ids(), undefined, false).set;
     } else if (launchIdOf(key) && agent) {
       set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId: null } }, ids()).set;
     }
-  } else if (agent && (sessionId || launchIdOf(key))) {
-    // The session's terminal bound after its set existed: an Agent tab joins
-    // the strip (not activated: nothing moves under the user).
+    if (agent && (sessionId || launchIdOf(key))) set = markAgentFilled(set, agent);
+  } else if (agent && (sessionId || launchIdOf(key)) && !filledBefore) {
+    // A terminal binding to the set for the first time: an Agent tab joins
+    // the strip (not activated: nothing moves under the user). Once.
     const has = panesOfKind(set, "chat").some(({ pane }) => pane.data.source === "agent" && pane.data.terminalId === agent);
     if (!has) set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId } }, ids(), undefined, false).set;
+    set = markAgentFilled(set, agent);
   }
   if (!set.activeTabId && set.order.length) set = { ...set, activeTabId: set.order[0] };
   let next = state;
@@ -608,6 +626,8 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
           closed: [...existing.closed, ...merged.closed].slice(-CLOSED_CAP),
           activeTabId: existing.activeTabId ?? merged.activeTabId,
         };
+        // Both halves' filled agents: the launch's own agent is the plan's.
+        for (const agent of moving.agentsFilled ?? []) merged = markAgentFilled(merged, agent);
         hasPlan = hasPlan || panesOfKind(existing, "plan").length > 0;
       }
       if (!hasPlan && sessionId) {

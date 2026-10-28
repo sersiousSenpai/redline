@@ -200,12 +200,21 @@ export interface ClosedTab {
 
 export const CLOSED_CAP = 10;
 
+/** How many agent terminals a set remembers having given a default tab. */
+export const AGENTS_FILLED_CAP = 8;
+
 export interface TabSet {
   order: string[];
   activeTabId: string | null;
   tabs: Record<string, Tab>;
   panes: Record<string, AnyPane>;
   closed: ClosedTab[];
+  /** Agent terminals this set has already given their default Agent tab,
+   *  oldest first (cap `AGENTS_FILLED_CAP`). A default is filled once: a
+   *  terminal listed here never gets its tab back from `ensureDefaults` or
+   *  `selectSession`, so an Agent tab the user closed stays closed until
+   *  they reopen it (the sidebar row, `openSurface`). Absent = none yet. */
+  agentsFilled?: string[];
 }
 
 export interface WorkbenchState {

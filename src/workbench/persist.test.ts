@@ -54,6 +54,20 @@ describe("the stored shape", () => {
     expect(LEGACY_DOC_PINNED_KEY).toBe(DOC_PINNED_KEY);
   });
 
+  it("keeps a set's filled-agent marker, and reads a hostile one as strings only, deduped and capped", () => {
+    const s = sample();
+    expect(s.sets["plan:s1"]?.agentsFilled).toEqual(["ag"]);
+    const raw = JSON.parse(JSON.stringify(s));
+    raw.sets["plan:s1"].agentsFilled = ["a", 7, "a", null, "", ...Array.from({ length: 12 }, (_, i) => `t${i}`)];
+    const parsed = parseWorkbench(raw)!;
+    const filled = parsed.sets["plan:s1"]!.agentsFilled!;
+    expect(filled).toHaveLength(8);
+    expect(filled.every((id) => typeof id === "string" && id.length > 0)).toBe(true);
+    expect(new Set(filled).size).toBe(filled.length);
+    raw.sets["plan:s1"].agentsFilled = "t1";
+    expect(parseWorkbench(raw)!.sets["plan:s1"]!.agentsFilled).toBeUndefined();
+  });
+
   it("round-trips through JSON unchanged", () => {
     const storage = new MemoryStorage();
     const s = sample();
