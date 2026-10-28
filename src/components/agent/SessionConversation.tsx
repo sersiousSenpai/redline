@@ -1159,7 +1159,12 @@ function PlanOutcome({ plan }: { plan: PlanFact }) {
   );
 }
 
+/** The turn's one working row. A step is named ("Reading docs/x.md",
+ *  "Writing the plan", "Needs you"); a turn that is only working is the
+ *  quiet typing state — the shared Spinner, its word for a screen reader
+ *  alone (D28). */
 function WorkingRow({ status, onStop }: { status: WorkingStatus; onStop: (() => void) | null }) {
+  const quiet = status.kind === "working";
   return (
     <div className="rl-convo-working" role="status" data-kind={status.kind}>
       {status.kind === "needs-you" ? (
@@ -1167,7 +1172,7 @@ function WorkingRow({ status, onStop }: { status: WorkingStatus; onStop: (() => 
       ) : (
         <Spinner size={12} className="rl-convo-spinner" />
       )}
-      <span className="rl-convo-working-label">{status.label}</span>
+      <span className={quiet ? "rl-convo-working-label sr-only" : "rl-convo-working-label"}>{status.label}</span>
       {status.since !== null && <Elapsed since={status.since} />}
       <span className="rl-convo-spacer" />
       {onStop && (

@@ -194,18 +194,25 @@ describe("the tail row", () => {
     vi.setSystemTime(10_000);
     await render({ phase: "live", byline: "Claude", text: "", meter: null, activity: [], startedAt: 10_000 });
     const tail = () => host.querySelector("[data-reply-tail]")!;
-    expect(tail().querySelector("[role=status]")?.textContent).toBe("Preparing your reply");
+    const status = () => tail().querySelector<HTMLElement>("[role=status]")!;
+    // Waiting is the quiet typing state (D28): the shared Spinner, the word
+    // for a screen reader only.
+    const quiet = () => status().hasAttribute("data-typing") && !!status().querySelector(".rl-spinner") && status().textContent === "Replying";
+    expect(quiet()).toBe(true);
     await act(async () => vi.advanceTimersByTime(8_000));
     expect(tail().textContent).toContain("8s");
     expect(tail().querySelector("[role=status]")?.textContent).not.toContain("8s");
     await render({ phase: "live", byline: "Claude", text: "", meter: meter(), activity: [{ at: 15_000, kind: "tool", label: "Grep…" }], startedAt: 10_000 });
     expect(tail().querySelector("[role=status]")?.textContent).toBe("Searching source files");
     await render({ phase: "live", byline: "Claude", text: "Because", meter: meter(), activity: [{ at: 15_000, kind: "tool", label: "Grep…" }], startedAt: 10_000 });
-    expect(tail().querySelector("[role=status]")?.textContent).toBe("Writing the reply");
+    expect(quiet()).toBe(true);
+    // A retry, and a rate-limit warning on a request still going through, are
+    // the wait: never "retrying…" or "Rate limited" words mid-turn.
     await render({ phase: "live", byline: "Claude", text: "Because", meter: meter(), startedAt: 10_000, retrying: true });
-    expect(tail().querySelector("[role=status]")?.textContent).toBe("Temporary model error — retrying…");
-    await render({ phase: "live", byline: "Claude", text: "Because", meter: meter({ rateLimited: { status: "limited", resetsAt: null, kind: "five_hour" } }), startedAt: 10_000 });
-    expect(tail().querySelector("[role=status]")?.textContent).toBe("Rate limited — waiting for the provider");
+    expect(quiet()).toBe(true);
+    await render({ phase: "live", byline: "Claude", text: "Because", meter: meter({ rateLimited: { status: "allowed_warning", resetsAt: null, kind: "five_hour" } }), activity: [{ at: 16_000, kind: "rateLimit", label: "Rate limited (five_hour) · waiting" }], startedAt: 10_000 });
+    expect(quiet()).toBe(true);
+    expect(tail().textContent).not.toMatch(/Rate limited|waiting|quiet/i);
   });
 
   it("holds the surface's actions, the ⋯ to the raw stream and one meter line once settled", async () => {

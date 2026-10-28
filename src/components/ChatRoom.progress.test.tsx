@@ -37,11 +37,13 @@ describe("Chat room progress placement", () => {
     await render();
     expect(host.querySelector("[data-chat-progress]")).toBeNull();
     const tail = () => host.querySelector("[data-reply] [data-reply-tail]");
-    expect(tail()?.querySelector("[role=status]")?.textContent).toBe("Preparing your reply");
+    // The quiet typing state (D28): the Spinner, "Replying" for a reader.
+    expect(tail()?.querySelector("[role=status][data-typing] .rl-spinner")).not.toBeNull();
+    expect(tail()?.querySelector("[role=status]")?.textContent).toBe("Replying");
     turn.liveText = "I’m checking the stored session counts.";
     await render();
     expect(host.querySelector("[data-streaming]")?.textContent).toContain("stored session counts");
-    expect(tail()?.querySelector("[role=status]")?.textContent).toBe("Writing the reply");
+    expect(tail()?.querySelector("[role=status]")?.textContent).toBe("Replying");
     // An empty box while the reply runs: the one button is Stop.
     expect(primary().dataset.send).toBe("stop");
     expect(primary().disabled).toBe(false);

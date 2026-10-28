@@ -86,7 +86,8 @@
 }
 .rl-reply[data-room] .rl-reply-tail { height: 28px; font-size: 12px; }
 .rl-reply-status { min-width: 0; overflow: hidden; white-space: nowrap; }
-.rl-reply-status[data-stalled] { color: var(--color-warning-text); }
+/* The quiet typing state (D28): the shared Spinner alone, in the tail's ink. */
+.rl-reply-status[data-typing] { display: inline-flex; align-items: center; color: var(--color-ink-muted); }
 /* The meter takes only the room the actions leave: it ellipsizes away before
    an action is pushed out of reach. */
 .rl-reply-meter {

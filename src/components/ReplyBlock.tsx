@@ -26,7 +26,9 @@
 //! - **Text.** `StreamingText` live, `MarkdownView` settled — byte-identical
 //!   markup for a body with no diagram.
 //! - **Tail row.** One fixed height in both phases. Live it is the turn's one
-//!   status line (`chatProgress`, the shared shimmer, `role="status"`), and
+//!   status line (`chatProgress`): the step running, in the shared shimmer,
+//!   or — while the turn only waits or writes — the quiet typing state, the
+//!   shared Spinner and no words (D28), with `role="status"` either way; and
 //!   on a hover or focus the ⋯ to the raw stream; settled it is the surface's
 //!   actions (on hover, on focus, and always on the latest reply), the ⋯,
 //!   and one ellipsized meter line. A raw stream opened on a live reply stays
@@ -39,11 +41,12 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type Reac
 import { MoreHorizontal } from "lucide-react";
 
 import { MarkdownView } from "./MarkdownView";
+import { Spinner } from "./Spinner";
 import { StreamingText } from "./StreamingText";
 import { Panel, useClickPopover } from "./popover";
 import { costEnabled } from "./TurnFooter";
 import { UnsentNote } from "./TurnNotes";
-import { chatProgress, elapsedLabel, type ChatProgressStatus } from "../lib/chatProgress";
+import { chatProgress, type ChatProgressStatus } from "../lib/chatProgress";
 import { foldSteps, hasSteps, stepsLabel, toolSteps } from "../lib/replySteps";
 import { modelInfo } from "../lib/modelInfo";
 import {
@@ -80,9 +83,11 @@ export interface ReplyBlockProps {
   /** Live: when the turn started (the backend's clock, so a remount keeps it). */
   startedAt?: number | null;
   /** Live: the surface's own words for the current step (retrieval
-   *  narration). Never wins over a rate limit. */
+   *  narration). */
   status?: ChatProgressStatus | null;
-  /** Live: the backend is re-running the turn after a transient error. */
+  /** Live: the backend is re-running the turn after a transient error. A
+   *  retry is still the wait: the tail stays the quiet typing state (D28),
+   *  and a retry that fails says so as the turn's error row. */
   retrying?: boolean;
   /** Settled: the body is Redline's note that the turn failed. */
   error?: boolean;
@@ -120,7 +125,7 @@ export function ReplyBlock({
   activity,
   startedAt = null,
   status = null,
-  retrying = false,
+  retrying: _retrying = false,
   error = false,
   rich = true,
   room = false,
@@ -217,7 +222,6 @@ export function ReplyBlock({
             meter={meter}
             status={status}
             startedAt={startedAt}
-            retrying={retrying}
             lastOutputAt={output.current.at}
             more={inspect && (
               <div className="rl-reply-actions rl-hide-scroll-x">
@@ -259,13 +263,18 @@ function swapped(seat: string | null, model: string): boolean {
  *  right where the settled meter will sit, and `more` (the ⋯) between them.
  *  Its own component so the one-second clock re-renders a phrase, never the
  *  reply's text. The clock sits outside the live region, so a screen reader
- *  hears the phrase change and not every second. */
+ *  hears the phrase change and not every second.
+ *
+ *  A step that is work is named; a turn that is only waiting — before its
+ *  first token, between tokens, through a retry the CLI makes on its own or
+ *  a rate-limit warning it sends while the request still goes — is the quiet
+ *  typing state: the shared Spinner, no words on screen, "Replying" for a
+ *  screen reader (D28). */
 function LiveStatus({
   activity,
   meter,
   status,
   startedAt,
-  retrying,
   lastOutputAt,
   more,
 }: {
@@ -273,7 +282,6 @@ function LiveStatus({
   meter: TurnMeter | null;
   status: ChatProgressStatus | null;
   startedAt: number | null;
-  retrying: boolean;
   lastOutputAt: number;
   more?: ReactNode;
 }) {
@@ -284,24 +292,24 @@ function LiveStatus({
     return () => window.clearInterval(timer);
   }, []);
   const progress = chatProgress(activity, meter, status, startedAt ?? mountedAt, Math.max(now, lastOutputAt), lastOutputAt);
-  const quiet = progress.quietFor >= 30_000;
-  const label = retrying
-    ? "Temporary model error — retrying…"
-    : quiet && !meter?.rateLimited
-      ? "Still waiting for the agent"
-      : progress.label;
+  const label = progress.label;
   return (
     <>
-      <span role="status" className="rl-reply-status" data-stalled={meter?.rateLimited ? true : undefined}>
-        <span className="rl-working-label">
-          {label}
-          <span className="rl-working-glint" data-label={label} aria-hidden />
-        </span>
+      <span role="status" className="rl-reply-status" data-typing={label === null || undefined}>
+        {label === null ? (
+          <>
+            <Spinner size={11} />
+            <span className="sr-only">Replying</span>
+          </>
+        ) : (
+          <span className="rl-working-label">
+            {label}
+            <span className="rl-working-glint" data-label={label} aria-hidden />
+          </span>
+        )}
       </span>
       {more}
-      <span className="rl-reply-meter" aria-hidden>
-        {quiet ? `quiet ${elapsedLabel(progress.quietFor)} · ${progress.elapsed}` : progress.elapsed}
-      </span>
+      <span className="rl-reply-meter" aria-hidden>{progress.elapsed}</span>
     </>
   );
 }

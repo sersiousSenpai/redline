@@ -109,7 +109,10 @@ afterEach(async () => {
 const mount = (element: ReturnType<typeof createElement>) => act(async () => root.render(element));
 const statuses = () => Array.from(host.querySelectorAll("[role=status]")).map((el) => el.textContent?.trim());
 /** Every place the thread says it is working — announced or not. */
-const workingWords = () => host.textContent?.match(/working…|Thinking|Preparing your reply/g) ?? [];
+const workingWords = () => host.textContent?.match(/working…|Thinking|Preparing your reply|Replying/g) ?? [];
+/** The quiet typing state (D28): the shared Spinner, "Replying" for a screen
+ *  reader alone, no words on screen. */
+const typing = () => host.querySelectorAll('[data-reply="live"] [data-reply-tail] [role=status][data-typing] .rl-spinner');
 const field = () => Array.from(host.querySelectorAll("textarea")).pop()!;
 
 describe.each(SURFACES)("$name", ({ render, setup, queues, mic, mode }) => {
@@ -120,7 +123,10 @@ describe.each(SURFACES)("$name", ({ render, setup, queues, mic, mode }) => {
 
   it("shows one status line while the reply waits for its first token, and no progress strip", async () => {
     await mount(render());
-    expect(statuses()).toEqual(["Preparing your reply"]);
+    // The quiet typing state: no "Preparing your reply", no waiting words.
+    expect(statuses()).toEqual(["Replying"]);
+    expect(typing()).toHaveLength(1);
+    expect(host.querySelector('[role=status][data-typing] .sr-only')?.textContent).toBe("Replying");
     expect(workingWords()).toHaveLength(1);
     expect(host.querySelector("[data-chat-progress]")).toBeNull();
     // That line is the live reply's own tail.
@@ -132,7 +138,9 @@ describe.each(SURFACES)("$name", ({ render, setup, queues, mic, mode }) => {
     await mount(render());
     expect(host.querySelector('[data-reply="live"] .rl-reply-text')?.textContent).toContain("moves with");
     expect(host.textContent).not.toContain("▌");
-    expect(statuses()).toEqual(["Writing the reply"]);
+    // Text arriving is the typing state too: no "Writing the reply".
+    expect(statuses()).toEqual(["Replying"]);
+    expect(typing()).toHaveLength(1);
   });
 
   it("puts Stop in the composer's one button and never disables the field", async () => {

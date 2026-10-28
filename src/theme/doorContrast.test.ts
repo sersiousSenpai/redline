@@ -155,7 +155,8 @@ const CHAT: Pair[] = [
   { what: "the steps line", color: [REPLY, ".rl-reply-steps"], on: BOTH },
   { what: "the steps, opened", color: [REPLY, ".rl-reply-steplist"], on: BOTH },
   { what: "the tail row's status and meter", color: [REPLY, ".rl-reply-tail"], on: BOTH },
-  { what: "a stalled status", color: [REPLY, ".rl-reply-status[data-stalled]"], on: BOTH },
+  // The quiet typing state (D28): the Spinner in the tail's ink, a glyph alone.
+  { what: "the typing state's Spinner", color: [REPLY, ".rl-reply-status[data-typing]"], on: BOTH, min: 3 },
   { what: "a cut-off reply's mark", color: [REPLY, ".rl-reply-truncated"], on: BOTH },
   { what: "a reply's action", color: [REPLY, ".rl-reply-action"], on: BOTH },
   { what: "a reply's action in the accent", color: [REPLY, '.rl-reply-action[data-tone="info"]'], on: BOTH },
