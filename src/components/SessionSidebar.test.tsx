@@ -513,3 +513,23 @@ describe("the sidebar's class names", () => {
     expect(users).toEqual([]);
   });
 });
+
+describe("the ports chip", () => {
+  it("fits inside its status line, so a server starting or stopping never grows the row", async () => {
+    const { readFileSync } = await import("node:fs");
+    const css = readFileSync("src/components/SessionSidebar.css", "utf8");
+    const rule = css.slice(css.indexOf(".rl-sb-port {"), css.indexOf("}", css.indexOf(".rl-sb-port {")));
+    const px = (prop: string) => Number(new RegExp(`[\\s;{]${prop}:\\s*(\\d+)px`).exec(rule)?.[1]);
+    // The status line: 10px type at the inherited line-height of 1.5.
+    const line = 10 * 1.5;
+    expect(rule).toContain("box-sizing: border-box");
+    expect(px("height")).toBeLessThanOrEqual(line);
+    // Its text line plus the 1px borders fit the box, and so does the globe.
+    expect(px("line-height") + 2).toBeLessThanOrEqual(px("height"));
+    const tsx = readFileSync("src/components/SessionSidebar.tsx", "utf8");
+    const chip = tsx.slice(tsx.indexOf('className="rl-sb-port"'), tsx.indexOf("</span>", tsx.indexOf('className="rl-sb-port"')));
+    const globe = Number(/<Globe size=\{(\d+)\}/.exec(chip)?.[1]);
+    expect(globe).toBeLessThanOrEqual(px("line-height"));
+  });
+});
+

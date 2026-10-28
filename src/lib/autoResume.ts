@@ -24,9 +24,10 @@
 // What never resumes on its own:
 // - a plan the reviewer is done with (approved, closed, archived) — only
 //   `in_review` is interrupted work;
-// - a session the reviewer stopped themselves: they closed its terminal, or
-//   pressed Esc / Ctrl-C / Stop in it just before it detached (an Esc on a
-//   held plan cancels the plan — that is a decision, not a crash);
+// - a session the reviewer stopped themselves: they closed its terminal,
+//   pressed Esc / Ctrl-C / Stop in it, or ended it at the keyboard (`exit`,
+//   `/exit`, Ctrl-D) before it detached (an Esc on a held plan cancels the
+//   plan — that is a decision, not a crash; see `userStops`);
 // - a legacy row whose harness nobody has named (the banner asks; a guess
 //   would resume a Codex thread with `claude --resume`, which silently
 //   starts a fresh session);
@@ -50,10 +51,12 @@ import type { AttachState, SessionStatus } from "../types";
 export const AUTO_RESUME_DELAYS_MS = [0, 10_000, 30_000] as const;
 /** Automatic attempts per session per app run (the loop guard). */
 export const AUTO_RESUME_LIMIT = AUTO_RESUME_DELAYS_MS.length;
-/** An interrupt this recent, in the session's terminal, means the reviewer
- *  stopped it. Generous: a held hook's drop lands within a second of the Esc,
- *  but a busy machine can take longer to tell us. */
-export const USER_STOP_WINDOW_MS = 15_000;
+/** An interrupt or an exit this recent, in the session's terminal, means the
+ *  reviewer stopped it. A held hook's drop lands within a second of the Esc,
+ *  but a Ctrl-C mid-revision leaves no hook to drop: only the revise
+ *  watchdog notices, on its next probe — every 90 s, quantized up by the
+ *  keeper's 30 s tick. So two minutes and a half. */
+export const USER_STOP_WINDOW_MS = 150_000;
 
 export interface AutoResumeEntry {
   /** Automatic attempts made this app run. Never reset (the loop guard). */

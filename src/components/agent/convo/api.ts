@@ -17,7 +17,7 @@ import type {
   SubmitResult,
   SwitchResult,
 } from "./types";
-import { noteTerminalInterrupted } from "../../../lib/userStops";
+import { noteTerminalInput, noteTerminalInterrupted } from "../../../lib/userStops";
 
 /** Start mirroring a terminal's conversation: the recent tail now, then
  *  coalesced batches through `onBatch` until `convoUnsubscribe`. A hook only
@@ -66,6 +66,8 @@ export function convoSteer(terminalId: string, id: string): Promise<SteerResult>
 /** Type `text` into the PTY and press Return: bracketed paste for long or
  *  multi-line text, control characters stripped. */
 export function ptySubmit(terminalId: string, text: string): Promise<SubmitResult> {
+  // A `/exit` sent from the Agent pane ends the session on purpose.
+  noteTerminalInput(terminalId, `${text}\r`);
   return invoke<SubmitResult>("pty_submit", { terminalId, text });
 }
 

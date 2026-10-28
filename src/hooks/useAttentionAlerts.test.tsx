@@ -235,4 +235,21 @@ describe("useAttentionAlerts", () => {
     await back();
     expect(onReveal).toHaveBeenCalledTimes(1);
   });
+
+  it("a notification about something that has since finished pulls you nowhere on the way back", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    mocks.windowFocused = false;
+    await render();
+    await flush();
+    const at = Date.now() + 1;
+    await render({ summaries: [summary("s1", at, true)] });
+    await tick(1500);
+    await flush();
+    expect(notes()).toEqual([{ title: "Auth rework", body: "Plan v1 ready · waiting for you" }]);
+    // Approved elsewhere (the same transition, no longer held): it finished.
+    await render({ summaries: [summary("s1", at, false)] });
+    await back();
+    expect(onReveal).not.toHaveBeenCalled();
+  });
 });
+

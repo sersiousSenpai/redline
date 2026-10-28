@@ -11,6 +11,7 @@ import {
   onePerSession,
   planNews,
   PLAN_NOTIFY_DELAY_MS,
+  revealOnReturn,
   shouldNotify,
   takeNews,
   terminalNews,
@@ -195,5 +196,19 @@ describe("one batch end to end", () => {
     const out = onePerSession(takeNews(news, handled, 500)).filter((n) =>
       shouldNotify(n, { focused: true, visible: new Set(["term:t9"]), prefs: ALL_ON }));
     expect(out.map((n) => n.key)).toEqual(["plan:s1@1000"]);
+  });
+});
+
+describe("the way back after a notification", () => {
+  const waiting = terminalNews(loud("t1", 5), null);
+  const finished = terminalNews(loud("t1", 5, { state: "your-turn" }), null);
+  it("shows it only while it still waits on you and is not on screen", () => {
+    expect(revealOnReturn({ key: waiting.key }, [waiting], new Set())).toBe(true);
+    expect(revealOnReturn({ key: waiting.key }, [waiting], new Set([waiting.session]))).toBe(false);
+    expect(revealOnReturn(null, [waiting], new Set())).toBe(false);
+  });
+  it("never once it finished or is gone", () => {
+    expect(revealOnReturn({ key: finished.key }, [finished], new Set())).toBe(false);
+    expect(revealOnReturn({ key: waiting.key }, [], new Set())).toBe(false);
   });
 });

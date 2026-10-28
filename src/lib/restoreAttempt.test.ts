@@ -132,12 +132,22 @@ describe("completion", () => {
   });
 
   it("closes on the summary backstop when the session is held again", () => {
-    const a = run(started(), dispatched(), {
-      type: "attach-state",
-      sessionId: "s1",
-      state: "held",
-    });
+    const a = run(
+      started(),
+      { type: "attach-state", sessionId: "s1", state: "detached" },
+      dispatched(),
+      { type: "attach-state", sessionId: "s1", state: "held" },
+    );
     expect(a).toBeNull();
+  });
+
+  it("a summary that hasn't caught up with the detach never closes it", () => {
+    // The automatic resume starts on `session-detached` itself; the summary
+    // on hand may still say held (or idle, mid-revision) for a moment.
+    for (const state of ["held", "idle"]) {
+      const a = run(started(), dispatched(), { type: "attach-state", sessionId: "s1", state })!;
+      expect(a.phase).toBe("waiting");
+    }
   });
 
   it("keeps waiting while the session is still detached or unknown", () => {

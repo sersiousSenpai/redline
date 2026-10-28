@@ -41,6 +41,10 @@ export interface RestoreAttempt {
   /** What `prepare_restore` said about the transcript, so the banner can warn
    *  that this one comes back without the plan's history. */
   history?: RestorePrep["history"];
+  /** A summary has said `detached` since this attempt began. Until one has,
+   *  a summary saying anything else is the refresh that hadn't caught up
+   *  with the detach yet, not the restore landing. */
+  sawDetached?: boolean;
 }
 
 /** How long before an unanswered restore is declared dead.
@@ -118,9 +122,15 @@ export function reduceRestore(
       return null;
     case "attach-state":
       // The backstop for a summary refresh that beats the event: the session
-      // is held again, so whatever we were waiting for has happened.
+      // is held again, so whatever we were waiting for has happened. Only
+      // once a summary has shown it detached: an automatic resume starts the
+      // moment `session-detached` arrives, while the summary on hand still
+      // says `held` (or `idle`, mid-revision) — that stale read must not
+      // close the attempt it is about to run.
       if (!mine(state, ev.sessionId) || state!.phase === "failed") return state;
-      if (!ev.state || ev.state === "detached") return state;
+      if (!ev.state) return state;
+      if (ev.state === "detached") return state!.sawDetached ? state : { ...state!, sawDetached: true };
+      if (!state!.sawDetached) return state;
       return null;
     case "timeout":
       if (!state || state.phase === "failed") return state;

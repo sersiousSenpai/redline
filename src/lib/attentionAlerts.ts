@@ -193,6 +193,21 @@ export function isVisible(n: SessionNews, visible: ReadonlySet<string>): boolean
   return visible.has(n.session) || visible.has(targetKey(n.target));
 }
 
+/** Back in front after a notification: show what it was about only while it
+ *  still WAITS on you — the same transition (key), still needing you, and
+ *  not already on screen. A held plan approved meanwhile keeps its key but
+ *  has finished; a terminal that answered itself is gone. Neither pulls you
+ *  anywhere on the next ⌘Tab back. */
+export function revealOnReturn(
+  pending: { key: string } | null,
+  news: readonly SessionNews[],
+  visible: ReadonlySet<string>,
+): boolean {
+  if (!pending) return false;
+  const still = news.find((n) => n.key === pending.key);
+  return !!still && still.kind === "waiting" && !isVisible(still, visible);
+}
+
 /** Notify only what you'd otherwise miss: the window is not in front, or the
  *  session is not the one shown — and only the kinds you asked for. */
 export function shouldNotify(

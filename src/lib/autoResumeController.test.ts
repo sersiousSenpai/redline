@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SessionSummary } from "../types";
 import { reduceRestore, type RestoreAttempt } from "./restoreAttempt";
-import { createAutoResume, type AutoResumeDeps, type AutoStart } from "./autoResumeController";
-import { noteTerminalClosed, noteTerminalInterrupted } from "./userStops";
+import { createAutoResume, HEARD_WAIT_MS, type AutoResumeDeps, type AutoStart } from "./autoResumeController";
+import { noteTerminalClosed, noteTerminalInput, noteTerminalInterrupted } from "./userStops";
 
 // The controller against the real restore reducer and a fake clock: the
 // guards as the reviewer would live them — a death, a resume, a failure, the
@@ -166,5 +166,65 @@ describe("the automatic resume, end to end", () => {
     ctl.detached("s1");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(starts).toEqual(["s1"]);
+  });
+
+  it("the detach is a fact: the summary on hand, still held, doesn't settle it", async () => {
+    // The live order: the event arrives, App only starts its refresh, the
+    // summary still says held.
+    deps.current = { ...deps.current, summaries: [summary({ attachState: "held", held: true })] };
+    const ctl = createAutoResume(deps);
+    ctl.sync();
+    ctl.detached("s1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(starts).toEqual([]); // waiting for the refresh, not settled
+    deps.current = { ...deps.current, summaries: [summary()] };
+    ctl.sync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(starts).toEqual(["s1"]);
+  });
+
+  it("with no refresh at all, the event's word stands", async () => {
+    deps.current = { ...deps.current, summaries: [summary({ attachState: "idle" })] };
+    const ctl = createAutoResume(deps);
+    ctl.sync();
+    ctl.detached("s1");
+    await vi.advanceTimersByTimeAsync(HEARD_WAIT_MS - 1);
+    expect(starts).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(10); // the first try, due at once
+    expect(starts).toEqual(["s1"]);
+  });
+
+  it("a refresh since the event that says it is back wins", async () => {
+    deps.current = { ...deps.current, summaries: [summary({ attachState: "held" })] };
+    const ctl = createAutoResume(deps);
+    ctl.sync();
+    ctl.detached("s1");
+    deps.current = { ...deps.current, summaries: [summary({ attachState: "held" })] };
+    ctl.sync();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(starts).toEqual([]);
+  });
+
+  it("`/exit` then `exit`: never resumed", async () => {
+    deps.current = { ...deps.current, sessionTerminals: new Map([["s1", "t-ctl-exit"]]) };
+    noteTerminalInput("t-ctl-exit", "/exit\r", Date.now());
+    noteTerminalInput("t-ctl-exit", "exit\r", Date.now());
+    const ctl = createAutoResume(deps);
+    ctl.sync();
+    ctl.detached("s1");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(starts).toEqual([]);
+  });
+
+  it("Ctrl-C, then the watchdog's detach a minute and a half later: never resumed", async () => {
+    deps.current = { ...deps.current, sessionTerminals: new Map([["s1", "t-ctl-cc"]]) };
+    noteTerminalInterrupted("t-ctl-cc", Date.now());
+    await vi.advanceTimersByTimeAsync(110_000);
+    const ctl = createAutoResume(deps);
+    ctl.sync();
+    ctl.detached("s1");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(starts).toEqual([]);
   });
 });

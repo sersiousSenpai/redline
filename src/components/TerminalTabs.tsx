@@ -99,7 +99,7 @@ import {
   type LivePty,
   type TerminalWorkspace,
 } from "../lib/terminalWorkspace";
-import { noteTerminalClosed, noteTerminalInterrupted } from "../lib/userStops";
+import { noteTerminalClosed, noteTerminalInput, noteTerminalInterrupted } from "../lib/userStops";
 
 interface Tab {
   id: string;
@@ -804,6 +804,8 @@ export const TerminalTabs = memo(
   }, [setTabs]);
 
   const handleUserData = useCallback((id: string, data: string) => {
+    // `exit` / Ctrl-D end the session on purpose (lib/userStops).
+    noteTerminalInput(id, data);
     if (isAnswerInput(data)) ackInput(id, false);
   }, [ackInput]);
 

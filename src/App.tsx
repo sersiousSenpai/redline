@@ -5678,7 +5678,9 @@ function App() {
       state,
     });
     if (settled !== restoreAttempt) {
-      setRestoreAttempt(settled);
+      // Through the reducer, not the value read here: a step taken since
+      // this render (the terminal dispatched) must not be written over.
+      onRestore({ type: "attach-state", sessionId: restoreAttempt.sessionId, state });
       return;
     }
     const timer = window.setTimeout(

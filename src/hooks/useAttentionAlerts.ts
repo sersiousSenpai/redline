@@ -13,6 +13,7 @@ import {
   notifyDelay,
   onePerSession,
   planNews,
+  revealOnReturn,
   shouldNotify,
   takeNews,
   terminalNews,
@@ -155,11 +156,11 @@ export function useAttentionAlerts(src: AttentionAlertSources): void {
       if (!payload) return;
       // Back in front: a notification sent while away was most likely what
       // brought you here (its click does exactly this), so show it — once,
-      // and only while it still wants you and is not already on screen.
+      // and only while it still waits on you and is not already on screen
+      // (`revealOnReturn`: finished news never pulls you anywhere).
       const pending = pendingRef.current;
       pendingRef.current = null;
-      const still = pending && newsRef.current.find((n) => n.key === pending.key);
-      if (still && !isVisible(still, visibleRef.current)) onRevealRef.current(pending.target);
+      if (pending && revealOnReturn(pending, newsRef.current, visibleRef.current)) onRevealRef.current(pending.target);
     });
     return () => {
       live = false;

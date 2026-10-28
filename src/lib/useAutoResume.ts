@@ -28,7 +28,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import type { AutoResumeController, AutoResumeDeps } from "./autoResumeController";
-import { userStops } from "./userStops";
+import { noteTerminalExited } from "./userStops";
 
 export type { AutoStart } from "./autoResumeController";
 
@@ -62,7 +62,9 @@ export function useAutoResume(deps: AutoResumeDeps): {
       listen<{ id: string }>("pty-exit", (e) => {
         const { summaries, sessionTerminals } = ref.current;
         const id = e.payload.id;
-        if (userStops().closed.has(id)) return;
+        // Mostly the reviewer typing `exit` / Ctrl-D into the shell the
+        // agent ran in: theirs, never reported as a death.
+        if (noteTerminalExited(id)) return;
         for (const [sessionId, terminalId] of sessionTerminals) {
           if (terminalId !== id) continue;
           const s = summaries.find((x) => x.sessionId === sessionId);

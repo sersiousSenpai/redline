@@ -40,6 +40,9 @@ export interface AutoResumeDeps {
   start: (sessionId: string) => Promise<AutoStart>;
 }
 
+/** How long a heard detach waits for a summary that has caught up with it. */
+export const HEARD_WAIT_MS = 3_000;
+
 export interface AutoResumeController {
   /** The daemon detached a plan session. */
   detached(sessionId: string): void;
@@ -56,6 +59,55 @@ export function createAutoResume(deps: { readonly current: AutoResumeDeps }): Au
   let timer: number | null = null;
 
   const find = (sessionId: string) => deps.current.summaries.find((x) => x.sessionId === sessionId);
+
+  // A `session-detached` is a FACT: the daemon persisted Detached before it
+  // emitted. The summaries on hand when it arrives are older than it — App
+  // only starts their refresh — and still say `held` (or `idle`, mid-
+  // revision). So a heard detach is judged against the first summary that
+  // has caught up: one saying `detached`; or, once HEARD_WAIT_MS has passed,
+  // whatever a refresh since the event says (a reattach that fast is real);
+  // or, when no refresh has landed at all, the event itself.
+  const heard = new Map<string, { at: number; summaries: readonly SessionSummary[] }>();
+  /** Detaches taken on the event's word: no refresh had landed. Until one
+   *  does, the summary's stale attach state is not evidence. */
+  const onEventsWord = new Set<string>();
+  let summariesSeen = deps.current.summaries;
+
+  /** Is the session still interrupted, by the best evidence there is? */
+  const interruptedNow = (sessionId: string): boolean => {
+    const s = find(sessionId);
+    if (stillInterrupted(s)) return true;
+    return onEventsWord.has(sessionId) && !!s && s.status === "in_review" && !s.archivedAt;
+  };
+
+  const judge = (sessionId: string, deadline: boolean) => {
+    const h = heard.get(sessionId);
+    if (!h) return;
+    const s = find(sessionId);
+    const refreshed = deps.current.summaries !== h.summaries;
+    if (s?.attachState !== "detached") {
+      if (!deadline) return; // wait for the refresh to catch up
+      if (refreshed) {
+        heard.delete(sessionId); // a refresh since the event says it is back
+        return;
+      }
+      onEventsWord.add(sessionId);
+    }
+    heard.delete(sessionId);
+    const { sessionTerminals, isLegacy } = deps.current;
+    dispatch({
+      type: "interrupted",
+      sessionId,
+      at: Date.now(),
+      facts: {
+        status: s?.status ?? null,
+        archived: !!s?.archivedAt,
+        // Judged at the moment the detach happened, not when we caught up.
+        userStopped: stoppedByUser(userStops(), [sessionTerminals.get(sessionId), s?.heldTerminalId], h.at),
+        legacy: s ? isLegacy(s) : false,
+      },
+    });
+  };
 
   let pills: ReadonlyMap<string, ResumePill> = new Map();
   let notices: ReadonlyMap<string, AutoNotice> = new Map();
@@ -97,7 +149,7 @@ export function createAutoResume(deps: { readonly current: AutoResumeDeps }): Au
   };
 
   const fire = (sessionId: string) => {
-    if (!stillInterrupted(find(sessionId))) {
+    if (!interruptedNow(sessionId)) {
       dispatch({ type: "settled", sessionId });
       return;
     }
@@ -113,6 +165,12 @@ export function createAutoResume(deps: { readonly current: AutoResumeDeps }): Au
   };
 
   const sync = () => {
+    // A refresh landed: the summaries are the evidence again.
+    if (deps.current.summaries !== summariesSeen) {
+      summariesSeen = deps.current.summaries;
+      onEventsWord.clear();
+      for (const sessionId of [...heard.keys()]) judge(sessionId, false);
+    }
     const attempt = deps.current.restoreAttempt;
     const out = restoreOutcome(prevAttempt, attempt);
     const stepped = attempt !== prevAttempt;
@@ -126,7 +184,7 @@ export function createAutoResume(deps: { readonly current: AutoResumeDeps }): Au
     // A reattach or a decision ends a wait, whoever caused it.
     for (const [sessionId, e] of Object.entries(state)) {
       if (e.inFlight || (e.dueAt === null && !e.stopped)) continue;
-      if (!stillInterrupted(find(sessionId))) dispatch({ type: "settled", sessionId });
+      if (!interruptedNow(sessionId)) dispatch({ type: "settled", sessionId });
     }
     if (stepped) {
       // A click's restore has a pill too, and the slot may have freed.
@@ -137,20 +195,9 @@ export function createAutoResume(deps: { readonly current: AutoResumeDeps }): Au
 
   return {
     detached(sessionId) {
-      const { sessionTerminals, isLegacy } = deps.current;
-      const s = find(sessionId);
-      const at = Date.now();
-      dispatch({
-        type: "interrupted",
-        sessionId,
-        at,
-        facts: {
-          status: s?.status ?? null,
-          archived: !!s?.archivedAt,
-          userStopped: stoppedByUser(userStops(), [sessionTerminals.get(sessionId), s?.heldTerminalId], at),
-          legacy: s ? isLegacy(s) : false,
-        },
-      });
+      if (!heard.has(sessionId)) heard.set(sessionId, { at: Date.now(), summaries: deps.current.summaries });
+      judge(sessionId, false);
+      window.setTimeout(() => judge(sessionId, true), HEARD_WAIT_MS);
     },
     sync,
     cancel(sessionId) {
