@@ -55,6 +55,9 @@ export interface MemoryStatus {
   };
 }
 
+/** How often the pill's relative time may move on its own while idle. */
+export const LABEL_TICK_MS = 5 * 60_000;
+
 /** Coarse "N ago" for the pill. Pure, so it's unit-tested. */
 export function relativeTime(ts: number | null, now: number): string {
   if (!ts) return "not yet";
@@ -106,9 +109,23 @@ export function MemoryStatusPill({
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
 
+  // The clock the relative times read. Idle, the header must not repaint
+  // on a tick: it moves when the status does, when the pointer comes to
+  // the pill or its popover opens, and otherwise at most every five
+  // minutes (a 60 s poll used to hand over a fresh object every minute, and
+  // with it "30m ago" → "31m ago" re-rendering and repainting the header).
+  const [now, setNow] = useState(() => Date.now());
+  const statusKeyRef = useRef("");
+  usePoll(() => setNow(Date.now()), LABEL_TICK_MS, { pauseWhenHidden: true, leading: false });
   const load = useCallback(async () => {
     try {
-      setStatus(await invoke<MemoryStatus>("memory_status"));
+      const next = await invoke<MemoryStatus>("memory_status");
+      const key = JSON.stringify(next);
+      if (key !== statusKeyRef.current) {
+        statusKeyRef.current = key;
+        setStatus(next);
+        setNow(Date.now());
+      }
     } catch {
       /* best-effort: the pill is ambient, never an error surface */
     }
@@ -166,6 +183,7 @@ export function MemoryStatusPill({
   }, [open]);
 
   const toggle = () => {
+    setNow(Date.now());
     const r = btnRef.current?.getBoundingClientRect();
     // Fixed positioning so the popover escapes any clipping ancestor (the
     // header pill sits at the top, so it always drops down).
@@ -173,7 +191,6 @@ export function MemoryStatusPill({
     setOpen((v) => !v);
   };
 
-  const now = Date.now();
   const chainBad = status != null && !status.chainOk;
   const queued = status != null && status.queuedProposals > 0;
 
@@ -200,6 +217,7 @@ export function MemoryStatusPill({
         }
         aria-label="Memory status"
         aria-expanded={open}
+        onPointerEnter={() => setNow(Date.now())}
         className="flex items-center gap-1.5 rounded-full"
         style={{
           fontSize: "12px",
@@ -225,7 +243,7 @@ export function MemoryStatusPill({
             boxShadow: chainBad ? "none" : "0 0 4px rgba(47,174,102,0.8)",
           }}
         />
-        <span style={{ whiteSpace: "nowrap" }}>{pillLabel(status, now, readyWork)}</span>
+        <span style={{ whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{pillLabel(status, now, readyWork)}</span>
       </button>
       {open && (
         <div

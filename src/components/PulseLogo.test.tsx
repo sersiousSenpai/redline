@@ -7,6 +7,13 @@ import { describe, expect, it } from "vitest";
 import { PulseLogo } from "./PulseLogo";
 
 describe("PulseLogo", () => {
+  it("is still at idle: the breathing `.rl-pulse` it shares a class name with skips it", () => {
+    const css = readFileSync(join(process.cwd(), "src/styles.css"), "utf8");
+    expect(css).not.toMatch(/\.rl-pulse\s*\{[^}]*animation/);
+    expect(css).toMatch(/\.rl-pulse:not\(\[data-state\]\)\s*\{\s*animation: rl-pulse-fade/);
+    expect(renderToStaticMarkup(<PulseLogo state="idle" />)).toContain('data-state="idle"');
+  });
+
   it("draws the app icon's own blob", () => {
     // The two copies are one drawing: the icon's path, as a relative lineto
     // run (exact in hundredths, pixel-identical in headless Chrome to the

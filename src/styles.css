@@ -1953,11 +1953,15 @@ p.rl-block-modified {
   100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
-.rl-pulse {
+/* Never PulseLogo, which shares the class name and always carries a
+   `data-state`: its mark is still at idle (the strike-line spins only while
+   something works, below), and this breathing put the footer pill's mark —
+   and the glass behind it — in motion for as long as the app sat idle. */
+.rl-pulse:not([data-state]) {
   animation: rl-pulse-fade 1.6s ease-in-out infinite;
 }
 @media (prefers-reduced-motion: reduce) {
-  .rl-pulse {
+  .rl-pulse:not([data-state]) {
     animation: none;
   }
 }

@@ -9133,7 +9133,10 @@ function App() {
   const sidebarPlace = !classicWb ? null : wbView.focusedKind === "servers" ? "servers" as const : wbActiveKey === HOME_KEY ? "home" as const : null;
   // Read off the Localhost scan, which runs only while that pane is on
   // screen; a ports chip of its own comes with W7's discovery.
-  const sidebarPorts = useMemo(() => (devServers.scan?.running ?? []).map((r) => `:${r.port}`), [devServers.scan]);
+  // Sorted, deduped and kept by value: a scan that finds the same servers
+  // (each 15 s while Localhost is up, in whatever order lsof lists them)
+  // must not re-render or repaint the sidebar.
+  const sidebarPorts = useStableValue(useMemo(() => [...new Set((devServers.scan?.running ?? []).map((r) => r.port))].sort((a, b) => a - b).map((p) => `:${p}`), [devServers.scan]));
   // Every terminal a session owns sits under its row — its agent's, the
   // shells opened in its tabs, and the ones kept running after their wall
   // closed — and Home's under Home (key ""). One status vocabulary, from the
