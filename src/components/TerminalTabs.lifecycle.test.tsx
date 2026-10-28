@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { setTerminalAsking } from "../lib/openAsks";
 import { act, createRef, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -508,6 +509,17 @@ describe("terminal state", () => {
     expect(stateOf(id)).toBe("your-turn");
   });
 
+  it("a card the Agent pane holds open (a question, whose hook fires no Notification) needs you, as a permission does", async () => {
+    await mount();
+    const id = await open();
+    await emit({ terminalId: id, sessionId: "s", at: Date.now(), kind: "working" });
+    expect(stateOf(id)).toBe("working");
+    await act(async () => setTerminalAsking(id, true));
+    expect(stateOf(id)).toBe("needs-you");
+    await act(async () => setTerminalAsking(id, false));
+    expect(stateOf(id)).toBe("working");
+  });
+
   it("process samples: a server reads serving with its port; the shell back in front retires a working agent, never an unread turn", async () => {
     vi.useFakeTimers();
     mocks.windowFocused = false;
@@ -533,7 +545,9 @@ describe("terminal state", () => {
     // after its Stop): their shells hold the foreground in the next sample.
     mocks.procs = [mocks.procs[0], { id: agent, fgComm: "zsh", fgIsShell: true, ports: [] }, { id: oneShot, fgComm: "zsh", fgIsShell: true, ports: [] }];
     await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
-    expect(stateOf(agent)).toBe("idle");
+    // The killed agent's terminal reads exited (a dead agent, never a stale
+    // working or needs-you); the one-shot's answer still waits to be read.
+    expect(stateOf(agent)).toBe("exited");
     expect(stateOf(oneShot)).toBe("your-turn");
   });
 

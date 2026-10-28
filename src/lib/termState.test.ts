@@ -17,6 +17,7 @@ import {
   nextNeedsYou,
   putAck,
   staleAcks,
+  agentGone,
   type AttentionAck,
   type TermSignals,
   type TermState,
@@ -176,10 +177,28 @@ describe("clearing rules", () => {
       proc("unknown"),
     ];
     expect(staleAcks(attention, acks, rows, 200)).toEqual([
-      ["gone", { at: 100, as: "cleared" }],
-      ["blocked", { at: 100, as: "cleared" }],
-      ["answered", { at: 100, as: "cleared" }],
+      ["gone", { at: 100, as: "gone" }],
+      ["blocked", { at: 100, as: "gone" }],
+      ["answered", { at: 100, as: "gone" }],
     ]);
+  });
+
+  it("a dead agent's terminal reads exited, never a stale needs-you (the re-walk)", () => {
+    const entry = needs("t", 100);
+    const ack: AttentionAck = { at: 100, as: "gone" };
+    expect(agentGone(entry, ack)).toBe(true);
+    expect(agentGone(needs("t", 101), ack)).toBe(false);
+    const base = { seen: false, held: false, exited: false, fgComm: "zsh", fgIsShell: true, ports: [], placeholder: false };
+    expect(deriveTermState({ ...base, attention: effectiveAttention(entry, ack).kind, agentGone: true })).toBe("exited");
+    // An agent started in it again is a new life: the shell is no longer in front.
+    expect(deriveTermState({ ...base, attention: null, agentGone: true, fgComm: "claude", fgIsShell: false })).toBe("idle");
+  });
+
+  it("an open card (a held AskUserQuestion) needs you, as a permission does", () => {
+    const base = { seen: false, held: false, exited: false, fgComm: "claude", fgIsShell: false, ports: [], placeholder: false };
+    expect(deriveTermState({ ...base, attention: "working", asking: true })).toBe("needs-you");
+    expect(deriveTermState({ ...base, attention: "working" })).toBe("working");
+    expect(deriveTermState({ ...base, attention: "working", asking: true, exited: true })).toBe("exited");
   });
 });
 

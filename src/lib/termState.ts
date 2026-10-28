@@ -71,6 +71,14 @@ export interface TermSignals {
   ports: readonly number[];
   /** The dock's untouched convenience shell. */
   placeholder: boolean;
+  /** An Agent pane holds a card open for this terminal (a permission, or an
+   *  AskUserQuestion whose hook fires no Notification): it needs you, as a
+   *  permission prompt does (`lib/openAsks`). */
+  asking?: boolean;
+  /** The agent that last spoke here is gone — a process sample found the
+   *  shell back in front after its working / needs-you (`staleAcks`). The
+   *  terminal reads exited until something new happens in it. */
+  agentGone?: boolean;
 }
 
 /** Programs that are an AGENT in the foreground rather than a job: an agent at
@@ -100,6 +108,10 @@ export function isAgentComm(comm: string | null, hasAttention: boolean): boolean
  *  its rc files never flashes as "running". */
 export function deriveTermState(s: TermSignals): TermState {
   if (s.exited) return "exited";
+  if (s.asking) return "needs-you";
+  // The agent died with the shell back in front: a dead agent needs nothing
+  // and works on nothing, so its row reads exited, never a stale needs-you.
+  if (s.agentGone && s.fgIsShell && s.ports.length === 0) return "exited";
   if (s.attention === "needs-you") return "needs-you";
   if (s.attention === "your-turn" && !s.seen) return "your-turn";
   if (s.held) return "held";
@@ -134,8 +146,9 @@ export function isQuiet(s: TermState): boolean {
 export interface AttentionAck {
   at: number;
   /** "working": you answered a needs-you. "seen": you read a your-turn.
-   *  "cleared": the transition no longer describes the terminal. */
-  as: "working" | "seen" | "cleared";
+   *  "cleared": the transition no longer describes the terminal. "gone":
+   *  cleared because the agent that reported it exited (`staleAcks`). */
+  as: "working" | "seen" | "cleared" | "gone";
 }
 
 /** The attention a terminal's state should be derived from, after its
@@ -146,7 +159,7 @@ export function effectiveAttention(
 ): { kind: AttentionKind | null; seen: boolean } {
   if (!entry) return { kind: null, seen: false };
   if (!ack || ack.at !== entry.at) return { kind: entry.kind, seen: false };
-  if (ack.as === "cleared") return { kind: null, seen: false };
+  if (ack.as === "cleared" || ack.as === "gone") return { kind: null, seen: false };
   if (ack.as === "working") return { kind: "working", seen: false };
   return { kind: entry.kind, seen: entry.kind === "your-turn" };
 }
@@ -193,9 +206,14 @@ export function staleAcks(
     if (!entry || entry.at >= sampledAt) continue;
     const { kind } = effectiveAttention(entry, acks.get(proc.id));
     if (kind !== "working" && kind !== "needs-you") continue;
-    out.push([proc.id, { at: entry.at, as: "cleared" }]);
+    out.push([proc.id, { at: entry.at, as: "gone" }]);
   }
   return out;
+}
+
+/** The agent that reported `entry` has exited (its stale-sample ack). */
+export function agentGone(entry: TermAttention | undefined, ack: AttentionAck | undefined): boolean {
+  return !!entry && !!ack && ack.at === entry.at && ack.as === "gone";
 }
 
 // ── The event stream ──────────────────────────────────────────────────────

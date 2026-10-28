@@ -82,6 +82,7 @@ import {
 } from "./convo/readiness";
 import type { TermState } from "../../lib/termState";
 import { AskCard, TerminalAskCard } from "./AskCard";
+import { setTerminalAsking } from "../../lib/openAsks";
 import { SessionComposer } from "./SessionComposer";
 import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
 import "./conversation.css";
@@ -493,6 +494,17 @@ function SessionConversation(props: SessionConversationProps) {
     if (edit && text) setRestore({ text, nonce: Date.now() });
   };
   const drawerRows = useMemo(() => (view.outbox.length === 0 ? queue : [...view.outbox, ...queue]), [view.outbox, queue]);
+
+  // A card held open here is the terminal needing you — a held question
+  // fires no Notification hook, so without this its row, its tab dot, the
+  // top bar's count and ⌘⇧J all read "working" (`lib/openAsks`).
+  const asksOpen = view.openAsks.length > 0;
+  useEffect(() => {
+    if (terminalId) setTerminalAsking(terminalId, asksOpen);
+  }, [terminalId, asksOpen]);
+  useEffect(() => () => {
+    if (terminalId) setTerminalAsking(terminalId, false);
+  }, [terminalId]);
 
   // ── What it says ──
   const status = workingStatus(view, { term: props.termState, projectPath: props.projectPath, planHeld: reviewHeld, building: props.planState?.kind === "build" });

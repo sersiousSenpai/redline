@@ -3103,9 +3103,21 @@ function App() {
   }, [terminalKinds, termStatuses, liveTermIds]);
   const hookLoudRef = useRef(hookLoud);
   hookLoudRef.current = hookLoud;
-  const termNeedYou = termStatuses.size > 0 ? wallNeedYou : hookLoud.length;
-  const termNeedYouRef = useRef(termNeedYou);
-  termNeedYouRef.current = termNeedYou;
+  const loudCount = termStatuses.size > 0 ? wallNeedYou : hookLoud.length;
+  // The top bar's "N need you" counts the agents blocked on you — a
+  // permission, a question, a dialog — never a finished turn: a build that
+  // finished is not waiting on anyone, and its your-turn kept the count up
+  // (the re-walk's "1 needs you" after the build). ⌘⇧J still walks both.
+  const termNeedYou = useMemo(() => {
+    if (termStatuses.size === 0) return hookLoud.filter((id) => terminalKinds.get(id) === "needs-you").length;
+    let n = 0;
+    for (const [id, status] of termStatuses) if (status.state === "needs-you" && (!liveTermIds || liveTermIds.includes(id))) n++;
+    return n;
+  }, [termStatuses, hookLoud, terminalKinds, liveTermIds]);
+  // ⌘⇧J walks every loud terminal (a your-turn too), so its gate is the
+  // loud count, not the top bar's.
+  const termNeedYouRef = useRef(loudCount);
+  termNeedYouRef.current = loudCount;
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
   // Onboarding tour reveal/restore: the spotlight needs its target on-screen, so

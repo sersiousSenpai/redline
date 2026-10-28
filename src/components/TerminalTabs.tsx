@@ -13,6 +13,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
@@ -70,9 +71,11 @@ import {
   putAck,
   SEEN_AFTER_MS,
   staleAcks,
+  agentGone,
   type AttentionAck,
   type TermState,
 } from "../lib/termState";
+import { getAskingTerminals, subscribeAskingTerminals } from "../lib/openAsks";
 import type { TermAttention, TermProc } from "../types";
 import { iconFor } from "../lib/repoIcon";
 import { useRepoIcons } from "../hooks/useRepoIcons";
@@ -984,6 +987,38 @@ export const TerminalTabs = memo(
   useEffect(() => {
     if (!collapsed) sampleFleetNow();
   }, [tiles, focusedId, collapsed, sampleFleetNow]);
+  // Collapsed (the workbench shows an agent as its Agent tab, no wall on
+  // screen), the fleet poll sleeps — and an agent that died while it said
+  // working or needs-you kept saying so in every row and in the top bar's
+  // count (the re-walk's stale NEEDS YOU). While any terminal still claims
+  // one, the process sample runs on the fleet cadence anyway, so the dead
+  // one is retired (`staleAcks`) and reads exited.
+  const sampleProcsRef = useRef(sampleProcs);
+  sampleProcsRef.current = sampleProcs;
+  const claimsActivity = useMemo(
+    () => tabs.some((t) => {
+      const { kind } = effectiveAttention(attention.get(t.id), acks.get(t.id));
+      return kind === "working" || kind === "needs-you";
+    }),
+    [tabs, attention, acks],
+  );
+  usePoll(
+    async () => {
+      if (procsOutRef.current) return;
+      procsAtRef.current = Date.now();
+      procsOutRef.current = true;
+      await sampleProcsRef.current()
+        .catch(() => {
+          /* keep the last sample */
+        })
+        .finally(() => {
+          procsOutRef.current = false;
+        });
+    },
+    collapsed && claimsActivity ? FLEET_POLL_MS : null,
+    { pauseWhenHidden: true, leading: false },
+    [collapsed, claimsActivity],
+  );
 
   const focusedCwd = focusedId ? liveCwds.get(focusedId) : undefined;
   useEffect(() => {
@@ -1046,6 +1081,9 @@ export const TerminalTabs = memo(
   // What every terminal is doing — one derivation (lib/termState) that the
   // headers, the menu and the footer all read, so no two surfaces can
   // disagree about a terminal.
+  // The cards an Agent pane holds open (a held AskUserQuestion fires no
+  // Notification, so its hooks still say working): they need you too.
+  const asking = useSyncExternalStore(subscribeAskingTerminals, getAskingTerminals);
   const termStates = useMemo(() => {
     const out = new Map<string, TermState>();
     for (const t of tabs) {
@@ -1062,11 +1100,13 @@ export const TerminalTabs = memo(
           fgIsShell: proc?.fgIsShell ?? false,
           ports: proc?.ports ?? [],
           placeholder: !!t.placeholder,
+          asking: asking.has(t.id),
+          agentGone: agentGone(attention.get(t.id), acks.get(t.id)),
         }),
       );
     }
     return out;
-  }, [tabs, attention, acks, procs, heldTerminalIds, exited]);
+  }, [tabs, attention, acks, procs, heldTerminalIds, exited, asking]);
   const statesRef = useRef(termStates);
   statesRef.current = termStates;
   // Keyed on what the host reads, so an OSC title or a cwd tick that moved
@@ -1113,11 +1153,11 @@ export const TerminalTabs = memo(
       ).map((id) => ({
         id,
         state: termStates.get(id) === "needs-you" ? "needs-you" : "your-turn",
-        at: attention.get(id)?.at ?? 0,
+        at: attention.get(id)?.at ?? asking.get(id) ?? 0,
         label: identity.byId.get(id)?.label ?? "terminal",
         text: attentionText(attention.get(id)),
       })),
-    [tabs, termStates, attention, identity],
+    [tabs, termStates, attention, identity, asking],
   );
   const loudRef = useRef(loudTerminals);
   loudRef.current = loudTerminals;
