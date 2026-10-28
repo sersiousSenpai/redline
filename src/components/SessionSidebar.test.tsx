@@ -358,7 +358,7 @@ describe("the grouped sidebar", () => {
     expect(labels).toEqual(["Needs you", "redline"]);
     expect(host.querySelector(".rl-sb-section[data-kind='needs'] .rl-session-row .truncate")!.textContent).toBe("Plan b");
     expect(planRow("Plan b").querySelector(".rl-sb-need")).not.toBeNull();
-    expect(planRow("Plan b").querySelector(".rl-sb-needword")!.textContent).toBe("Question for you");
+    expect(planRow("Plan b").querySelector(".rl-sb-needword")!.textContent).toBe("Needs you");
     expect(planRow("Plan a").querySelector(".rl-spinner")).not.toBeNull();
   });
 

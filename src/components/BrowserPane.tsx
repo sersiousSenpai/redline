@@ -1,3 +1,4 @@
+import { dropListener } from "../lib/dropListener";
 import { loadBrowserWorkspace, saveBrowserWorkspace, noteWorkspaceRevision, type SavedBrowserWorkspace } from "../lib/browserWorkspace";
 import { BrowserAppearanceMenu } from "./BrowserAppearanceMenu";
 import { appearanceCss, normalizeAppearance, siteKey, type BrowserAppearance } from "../lib/browserAppearance";
@@ -111,6 +112,13 @@ const MAX_LIVE_WEBVIEWS = 4;
 // Native webview creations in flight at once. Opening a 3×3 mosaic would
 // otherwise spawn nine WebContent processes in one frame.
 const MAX_CONCURRENT_CREATES = 3;
+/** How long a navigation may go without a document before the page counts
+ *  as one that could not load (a host that does not resolve, a refused
+ *  connection: WebKit draws nothing for either). A slow page that commits
+ *  later clears it on its first state. */
+const NAV_COMMIT_MS = 10_000;
+/** The words a navigation that never committed wears on its cover. */
+const NAV_FAILED = "This page could not be opened. Check the address or try again.";
 // The startup mosaic opens on the browser's FIRST mount in an app session.
 // Module scope, because the lazy pane can remount.
 let startupMosaicApplied = false;
@@ -344,6 +352,10 @@ function BrowserPaneBase({
   const switchTiming = useRef<{ id: string; at: number } | null>(null);
   const [pageErrors, setPageErrors] = useState<Record<string, string>>({});
   const pageErrorsRef = useRef(pageErrors); pageErrorsRef.current = pageErrors;
+  // Navigations waiting to commit, by tab: a page whose document never comes
+  // (a name that does not resolve, a refused connection) posts no state, and
+  // WebKit shows nothing for it — this is how it still reaches the amber dot.
+  const navWatchRef = useRef(new Map<string, number>());
   const nativeEpochRef = useRef(0);
   const nativeMountedRef = useRef(false);
   const surfaceActiveRef = useRef(surfaceActive); surfaceActiveRef.current = surfaceActive;
@@ -1185,6 +1197,9 @@ function BrowserPaneBase({
           }
           setPageErrors((prev) => { if (!prev[tab.id]) return prev; const next = { ...prev }; delete next[tab.id]; return next; });
           wvMapRef.current.set(tab.id, wv);
+          // A view whose page has said nothing yet: watch its address commit
+          // (an adopted one that already has is found at its host and kept).
+          if (!eventPagesRef.current.has(tab.id)) watchCommit(tab.id, tab.url);
           wakeAttemptsRef.current.delete(tab.id); // created → clear retry count
           retryAtRef.current.delete(tab.id);
           setReloading(prev => { const next = new Set(prev); next.delete(tab.id); return next; });
@@ -1479,7 +1494,7 @@ function BrowserPaneBase({
       const tab = tabsRef.current.find(tab => tab.label === payload.label);
       if (tab) forgetNative(tab.id, visibleRef.current && tileIdsRef.current.includes(tab.id));
     });
-    return () => { void subscription.then(stop => stop()); };
+    return () => { void subscription.then(dropListener); };
   }, [forgetNative]);
   useEffect(() => {
     const subscription = listen<{ label: string; kind: string; url?: string; title?: string; fullscreen?: boolean; value?: unknown }>("browser-page-event", ({ payload: event }) => {
@@ -1495,6 +1510,12 @@ function BrowserPaneBase({
         return;
       }
       eventPagesRef.current.add(tab.id);
+      // A document arrived: whatever was navigating has committed.
+      if (event.kind === "state" && event.url && event.url !== "about:blank") {
+        const watch = navWatchRef.current.get(tab.id);
+        if (watch !== undefined) { window.clearTimeout(watch); navWatchRef.current.delete(tab.id); }
+        if (pageErrorsRef.current[tab.id] === NAV_FAILED) setPageErrors((prev) => { if (prev[tab.id] !== NAV_FAILED) return prev; const next = { ...prev }; delete next[tab.id]; return next; });
+      }
       if (event.kind === "state" && event.url) {
         setReloading(prev => { if (!prev.has(tab.id)) return prev; const next = new Set(prev); next.delete(tab.id); return next; });
         // The transient document created before navigation isn't the tab's page.
@@ -1553,7 +1574,7 @@ function BrowserPaneBase({
         setChatFor(tab.browseId, { open: true, pill: "page" });
       } else if (event.kind === "inspect-error" && pickerRef.current.accept(event.label)) setWorkspaceError(PICKING_ERROR);
     });
-    return () => { void subscription.then((unlisten) => unlisten()).catch(() => {}); };
+    return () => { void subscription.then(dropListener).catch(() => {}); };
   }, []);
 
   useEffect(() => {
@@ -1564,7 +1585,7 @@ function BrowserPaneBase({
       if (!tab) return;
       setTabs((prev) => prev.some((page) => page.browseId === tab.browseId) ? prev : [...prev, tab]);
     });
-    return () => { void subscription.then((unlisten) => unlisten()).catch(() => {}); };
+    return () => { void subscription.then(dropListener).catch(() => {}); };
   }, []);
 
   // Stage two uses a native window rectangle; stage one follows the DOM slot.
@@ -1684,7 +1705,7 @@ function BrowserPaneBase({
     void Window.getCurrent()
       .onResized(onNativeResize)
       .then((un) => {
-        if (resizeSubscriptionCancelled) un(); else unResized = un;
+        if (resizeSubscriptionCancelled) dropListener(un); else unResized = un;
       })
       .catch(() => {});
 
@@ -1696,7 +1717,7 @@ function BrowserPaneBase({
       window.removeEventListener("resize", onWin);
       trailing.forEach(clearTimeout);
       resizeSubscriptionCancelled = true;
-      unResized?.();
+      if (unResized) dropListener(unResized);
       const map = wvMapRef.current;
       pendingTeardown = window.setTimeout(() => {
         pendingTeardown = 0;
@@ -2159,12 +2180,36 @@ function BrowserPaneBase({
     if (!wvMapRef.current.has(id)) return;
     void invoke(command, { label: `browser-${id}` }).catch((e) => setWorkspaceError(String(e)));
   };
+  // File ▸ Print… is App's (it prints the focused pane); a focused browser
+  // pane's page is printed here, on App's word.
   useEffect(() => {
-    const p = listen("menu-print", () => { if (surfaceActiveRef.current) pageOutputRef.current("browser_print"); });
-    return () => {
-      void p.then((un) => un());
-    };
+    const print = () => { if (surfaceActiveRef.current) pageOutputRef.current("browser_print"); };
+    window.addEventListener("redline:browser-print", print);
+    return () => window.removeEventListener("redline:browser-print", print);
   }, []);
+
+  /** Watch `url` commit in tab `id`: no document by NAV_COMMIT_MS, and the
+   *  page is still not at `url`'s host, means it could not load — the tab's
+   *  amber dot and the cover's Try again, as for any page that failed. */
+  const watchCommit = (id: string, url: string) => {
+    if (!/^https?:/i.test(url)) return;
+    const prior = navWatchRef.current.get(id);
+    if (prior !== undefined) window.clearTimeout(prior);
+    navWatchRef.current.set(id, window.setTimeout(() => {
+      navWatchRef.current.delete(id);
+      const tab = tabsRef.current.find((page) => page.id === id);
+      if (!nativeMountedRef.current || !tab || tab.url !== url || !wvMapRef.current.has(id)) return;
+      void invoke<string>("browser_eval_result", { label: tab.label, script: "String(location.href)" })
+        .catch(() => "")
+        .then((href) => {
+          let committed = false;
+          try { committed = !!href && href !== "about:blank" && new URL(href).host === new URL(url).host; } catch { /* unparsable: not there */ }
+          if (committed || !nativeMountedRef.current || tabsRef.current.find((page) => page.id === id)?.url !== url) return;
+          setPageErrors((prev) => (prev[id] ? prev : { ...prev, [id]: NAV_FAILED }));
+        });
+    }, NAV_COMMIT_MS));
+  };
+  useEffect(() => () => { for (const t of navWatchRef.current.values()) window.clearTimeout(t); navWatchRef.current.clear(); }, []);
 
   const navigate = (raw: string, id: string = activeIdRef.current) => {
     // Omnibox: a URL-like entry navigates; anything else becomes a web search.
@@ -2176,6 +2221,7 @@ function BrowserPaneBase({
       ),
     );
     if (id === activeIdRef.current) setAddr(url);
+    watchCommit(id, url);
     // No live webview for this tab (suspended, or a prior creation failed)?
     // Recreate it — the fresh webview loads `url` (just written into the tab),
     // so Go/refresh heals a blank, webview-less tab instead of being a silent
@@ -2230,7 +2276,7 @@ function BrowserPaneBase({
       if (url) openTabRef.current(url, { via: "agent" });
     });
     return () => {
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, []);
 
@@ -2290,7 +2336,7 @@ function BrowserPaneBase({
       }
     });
     return () => {
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, []);
 
@@ -2309,7 +2355,7 @@ function BrowserPaneBase({
       }
     });
     return () => {
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, []);
 

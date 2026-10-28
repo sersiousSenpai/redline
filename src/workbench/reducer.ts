@@ -542,8 +542,18 @@ function fillDefaults(
   } else if (agent && (sessionId || launchIdOf(key)) && !filledBefore) {
     // A terminal binding to the set for the first time: an Agent tab joins
     // the strip (not activated: nothing moves under the user). Once.
-    const has = panesOfKind(set, "chat").some(({ pane }) => pane.data.source === "agent" && pane.data.terminalId === agent);
-    if (!has) set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId } }, ids(), undefined, false).set;
+    const chats = panesOfKind(set, "chat");
+    const has = chats.some(({ pane }) => pane.data.source === "agent" && pane.data.terminalId === agent);
+    // A restore or an automatic resume brings the session's agent back in a
+    // fresh PTY: the session's own Agent pane follows it there — the same
+    // tab, now on the new terminal — rather than a second Agent tab per
+    // resume. A fork's pane (no session of its own yet) is not this agent's.
+    const own = !has && sessionId
+      ? chats.find(({ pane }) => pane.data.source === "agent" && pane.data.sessionId === sessionId)?.pane
+      : undefined;
+    if (own && own.data.source === "agent") {
+      set = { ...set, panes: { ...set.panes, [own.id]: { ...own, data: { ...own.data, terminalId: agent } } } };
+    } else if (!has) set = addTab(set, { kind: "chat", data: { source: "agent", terminalId: agent, sessionId } }, ids(), undefined, false).set;
     set = markAgentFilled(set, agent);
   }
   if (!set.activeTabId && set.order.length) set = { ...set, activeTabId: set.order[0] };

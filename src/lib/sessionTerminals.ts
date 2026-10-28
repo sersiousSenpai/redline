@@ -17,6 +17,7 @@
 //!
 //! Everything but `useSessionTerminals` is pure; App owns the state.
 
+import { dropListener } from "./dropListener";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -237,7 +238,7 @@ export function useSessionTerminals(enabled: boolean): {
     const unlisteners: (() => void)[] = [];
     const keep = (p: Promise<() => void>) =>
       void p
-        .then((u) => (gone ? u() : unlisteners.push(u)))
+        .then((u) => (gone ? dropListener(u) : unlisteners.push(u)))
         .catch(() => {});
     const take = (rows: readonly TermAttention[]) => {
       bind(rows);
@@ -259,7 +260,7 @@ export function useSessionTerminals(enabled: boolean): {
       .catch(() => {});
     return () => {
       gone = true;
-      for (const u of unlisteners) u();
+      for (const u of unlisteners) dropListener(u);
     };
   }, [enabled, bind]);
   return { terminals, attention, titles, bind };

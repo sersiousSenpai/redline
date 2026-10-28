@@ -178,6 +178,17 @@ describe("defaults are filled once per set", () => {
     expect(set(s, "plan:s1").agentsFilled).toEqual(["t1", "t2"]);
   });
 
+  it("a resume into a fresh PTY moves the session's Agent pane onto it: one Agent tab, however many resumes", () => {
+    let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
+    const tab = agentTabId(s, "plan:s1");
+    for (const pty of ["t2", "t3", "t4"]) s = reduce(s, { type: "ensureDefaults", key: "plan:s1", defaults: { agentTerminalId: pty } });
+    const agents = agentTabs(s, "plan:s1");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].kind === "chat" && agents[0].data.source === "agent" && agents[0].data.terminalId).toBe("t4");
+    expect(agentTabId(s, "plan:s1")).toBe(tab);
+    expect(set(s, "plan:s1").agentsFilled).toEqual(["t1", "t2", "t3", "t4"]);
+  });
+
   it("a set that empties refills its Plan without the closed agent; a launch refills with its Agent", () => {
     let s = reduce(emptyWorkbench(), { type: "selectSession", key: "plan:s1", defaults: { agentTerminalId: "t1" } });
     s = reduce(s, { type: "closeTab", key: "plan:s1", tabId: agentTabId(s, "plan:s1") });

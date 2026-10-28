@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -22,7 +23,7 @@ export function useFrontDoorConversation() {
     const subscription = listen("companion-retitled", refreshChats);
     return () => {
       generation.current++;
-      void subscription.then(stop => stop()).catch(() => {});
+      void subscription.then(dropListener).catch(() => {});
     };
   }, [refreshChats]);
   return { chatId, setChatId, chats, refreshChats };

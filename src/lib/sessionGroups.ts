@@ -287,9 +287,11 @@ export interface RowStatus {
   detail?: string;
 }
 
+// The one status vocabulary: whatever the agent waits on, the row says
+// "Needs you"; what it waits on is the tooltip's.
 const NEED_STATUS: Record<NeedReason, RowStatus> = {
-  Question: { word: "Question for you", tone: "redline", icon: "dot", detail: "Claude asked you something and is waiting" },
-  Permission: { word: "Needs permission", tone: "redline", icon: "dot", detail: "Claude is waiting for you to allow a tool" },
+  Question: { word: "Needs you", tone: "redline", icon: "dot", detail: "Claude asked you something and is waiting" },
+  Permission: { word: "Needs you", tone: "redline", icon: "dot", detail: "Claude is waiting for you to allow a tool" },
 };
 
 /** Where a row is in its life, in one line. A spinner means something is

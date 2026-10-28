@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -66,7 +67,7 @@ export function MissionCapturePlayer({ missionId, captureId }: { missionId: stri
     const listener = listen<{ missionId: string; captureId?: string }>("mission-capture-changed", ({ payload }) => {
       if (payload.missionId === missionId && (!payload.captureId || payload.captureId === captureId)) void refresh();
     }).catch(() => () => {});
-    return () => { generation.current++; void listener.then(stop => stop()).catch(() => {}); };
+    return () => { generation.current++; void listener.then(dropListener).catch(() => {}); };
   }, [missionId, captureId, refresh]);
   useEffect(() => {
     setIndex(value => Math.min(value, Math.max(0, frames.length - 1)));

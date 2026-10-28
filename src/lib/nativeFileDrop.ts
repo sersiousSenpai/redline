@@ -28,6 +28,7 @@
 // settled, an image dragged out of Preview) arrives as a `drop` with no paths;
 // the native side writes the files and follows up with PROMISED_DROP_EVENT,
 // which is routed exactly the same way.
+import { dropListener } from "./dropListener";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview, type DragDropEvent } from "@tauri-apps/api/webview";
 
@@ -98,7 +99,7 @@ function install() {
   const gen = ++generation;
   const keep = (un: () => void) => {
     if (gen === generation) unlisteners.push(un);
-    else un();
+    else dropListener(un);
   };
   // Deferred a microtask so a missing Tauri runtime (tests) rejects instead
   // of throwing inside the caller's effect.
@@ -115,7 +116,7 @@ function install() {
 function uninstall() {
   generation++;
   hovered = null;
-  for (const un of unlisteners.splice(0)) un();
+  for (const un of unlisteners.splice(0)) dropListener(un);
 }
 
 function onNativeDrag(p: DragDropEvent) {

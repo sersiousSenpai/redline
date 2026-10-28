@@ -9,6 +9,7 @@
 // offers whatever the speaking engine. Their own chunk, loaded when Voice
 // settings opens on a Mac that can run them. Everything they do goes through
 // the one `tts_studio` command (tts_studio.rs).
+import { dropListener } from "../lib/dropListener";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -158,7 +159,7 @@ function useStudioSetup(changed: (ended?: Setup) => void) {
     const onRemoved = () => hear.current();
     window.addEventListener(REMOVED, onRemoved);
     return () => {
-      for (const p of subs) void p.then((un) => un());
+      for (const p of subs) void p.then(dropListener);
       window.removeEventListener(REMOVED, onRemoved);
     };
   }, []);

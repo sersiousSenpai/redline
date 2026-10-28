@@ -899,3 +899,22 @@ describe("the design's pane (RLPaneBrowser)", () => {
     expect(mocks.views.size).toBe(0);
   });
 });
+
+it("a page that never commits (a host that does not resolve) needs you: the amber dot, not silence; a late document clears it", async () => {
+  const timeouts = vi.spyOn(window, "setTimeout");
+  const original = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) => command === "browser_eval_result" && args.script === "String(location.href)"
+    ? Promise.resolve("about:blank") : original(command, args));
+  await mount();
+  // t-two posts its document; t-one never does.
+  await event("browser-page-event", { label: "browser-t-two", kind: "state", url: "https://two.test/", title: "two" });
+  const watches = timeouts.mock.calls.filter(([, delay]) => delay === 10_000).map(([fn]) => fn as () => void);
+  expect(watches.length).toBeGreaterThan(0);
+  await act(async () => { for (const fire of watches) fire(); });
+  await settle();
+  expect(host.querySelector('[data-tab-id="t-one"]')?.getAttribute("data-status")).toBe("needs");
+  expect(host.querySelector('[data-tab-id="t-two"]')?.getAttribute("data-status")).not.toBe("needs");
+  // The document comes after all: the page is back.
+  await event("browser-page-event", { label: "browser-t-one", kind: "state", url: "https://one.test/", title: "one" });
+  expect(host.querySelector('[data-tab-id="t-one"]')?.getAttribute("data-status")).not.toBe("needs");
+});

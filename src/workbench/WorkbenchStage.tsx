@@ -213,7 +213,9 @@ const TabBody = memo(function TabBody({ tab, panes, active, visible, renderPane,
     }
     const frame = requestAnimationFrame(() => {
       const held = document.activeElement;
-      const stray = !held || held === document.body || !!held.closest("[inert], [data-hidden]");
+      // An element no longer drawn (inside a layer gone display:none, like a
+      // hidden terminal's textarea) is a stray caret too.
+      const stray = !held || held === document.body || !!held.closest("[inert], [data-hidden]") || undrawn(held);
       if (!stray) return;
       body.querySelector<HTMLElement>(".rl-wb-pane[data-focused]")?.focus({ preventScroll: true });
     });
@@ -296,6 +298,15 @@ function LayoutView({ node, path, tab, panes, active, visible, renderPane, onFoc
       ))}
     </div>
   );
+}
+
+/** `el` sits under a `display: none` ancestor (or is one): focused, it is
+ *  a caret nobody can see. Walked only on a tab's show. */
+function undrawn(el: Element): boolean {
+  for (let at: Element | null = el; at && at !== document.body; at = at.parentElement) {
+    if (getComputedStyle(at).display === "none") return true;
+  }
+  return false;
 }
 
 /** The narrowest share a pane of the tile keeps while its divider drags. A

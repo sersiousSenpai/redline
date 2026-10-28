@@ -22,6 +22,7 @@
 //! `invoke`/`listen` so the mount ordering and self-heal are unit-testable
 //! without rendering; `useAgentTurn` is a thin subscription wrapper.
 
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
@@ -342,7 +343,7 @@ export class AgentTurnController<M extends TurnMessage> {
       ),
     ]);
     if (!this.alive) {
-      for (const un of unlistens) un();
+      for (const un of unlistens) dropListener(un);
       return;
     }
     this.unlistens = unlistens;
@@ -353,7 +354,7 @@ export class AgentTurnController<M extends TurnMessage> {
   detach(): void {
     this.alive = false;
     this.notifyFrame.cancel();
-    this.unlistens?.forEach((un) => un());
+    this.unlistens?.forEach(dropListener);
     this.unlistens = null;
     if (this.healTimer != null) clearInterval(this.healTimer);
     this.healTimer = null;

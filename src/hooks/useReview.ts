@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -199,7 +200,7 @@ export function useReview(visible = true) {
     });
     return () => {
       alive = false;
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [refreshAnnotations]);
 
@@ -235,8 +236,8 @@ export function useReview(visible = true) {
     });
     return () => {
       alive = false;
-      void reqP.then((un) => un());
-      void relP.then((un) => un());
+      void reqP.then(dropListener);
+      void relP.then(dropListener);
     };
   }, [setRepo, setSource, setActiveReviewId]);
 
@@ -357,7 +358,7 @@ export function useReview(visible = true) {
     });
     return () => {
       alive = false;
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [refreshQuestions]);
 

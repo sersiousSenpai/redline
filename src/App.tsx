@@ -1,3 +1,4 @@
+import { dropListener } from "./lib/dropListener";
 import { useQueuedChatPlans } from "./hooks/useQueuedChatPlans";
 import type { ChatPlanReceipt, ChatPlanRequest, ChatWorkbenchComposer } from "./components/ChatRoom";
 import { CONTINUE_EVENT, continuationKey, continuationOrigin, prepareCompanionContinuation, type ContinuationMessage, type ContinueRequest, type ContinueDestination } from "./lib/conversationContinuation";
@@ -727,7 +728,7 @@ function App() {
   }), []);
   useEffect(() => {
     const subscriptions = ["fork-delta", "fork-done", "fork-error", "fork-cancelled"].map(event => listen<{sessionId: string; commentId: string}>(event, message => reportMonochatActivity(`${message.payload.sessionId}:${message.payload.commentId}`, event === "fork-delta")));
-    return () => { subscriptions.forEach(subscription => { void subscription.then(stop => stop()); }); };
+    return () => { subscriptions.forEach(subscription => { void subscription.then(dropListener); }); };
   }, [reportMonochatActivity]);
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   // The selected session: the workbench's active set (`StageView.activeId`),
@@ -2010,8 +2011,8 @@ function App() {
     );
     return () => {
       alive = false;
-      void done.then((un) => un());
-      void err.then((un) => un());
+      void done.then(dropListener);
+      void err.then(dropListener);
     };
   }, [drafterDraftId]);
   // Persist the open document: the TipTap fidelity source AND the markdown
@@ -2205,7 +2206,7 @@ function App() {
     });
     return () => {
       alive = false;
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [tellReview]);
   // Over once you go to the review surface, or once the agent stops
@@ -2461,6 +2462,9 @@ function App() {
     const subs = [
       listen("menu-new-tab", () => openDoorTabRef.current()),
       listen("menu-close-tab", closeFromInside),
+      // File ▸ Print… (⌘⌥P): the focused pane — its page when it is a
+      // browser, else the plan or the file it shows.
+      listen("menu-print", () => printFocusedRef.current()),
       listen("menu-close-window", () => void getCurrentWindow().close()),
       listen("menu-reopen-tab", () => tabs({ type: "reopenClosed" })),
       // ⌘1–9 through the menu record the switch like every other path.
@@ -2548,7 +2552,7 @@ function App() {
     window.addEventListener("keydown", onSplitKey);
     void invoke("set_workbench_menu", { enabled: true }).catch(() => {});
     return () => {
-      for (const p of subs) void p.then((un) => un());
+      for (const p of subs) void p.then(dropListener);
       window.removeEventListener("redline:workbench-tab-cycle", fromPage);
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keydown", onZoomKey, true);
@@ -2565,7 +2569,7 @@ function App() {
       void import("./lib/browserOutput").then((m) => setToast(m.downloadToast(e.payload)));
     });
     return () => {
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [setToast]);
 
@@ -2670,7 +2674,7 @@ function App() {
       noteFlowLaunch({ type: "arrived", launchId: launch.launchId });
     });
     return () => {
-      void unlisten.then((u) => u());
+      void unlisten.then(dropListener);
     };
   }, [bindSessionTerminals, noteFlowLaunch]);
   // The sidebar's launch rows: `launches`, with `activeLaunchId`.
@@ -3516,6 +3520,37 @@ function App() {
   }, [activeTermId, selectFolder, setActiveFile]);
 
   const documentRef = useRef<HTMLElement | null>(null);
+  // File ▸ Print… on the focused pane. A browser pane prints its page
+  // (BrowserPane); a plan prints its document and a file its text, through
+  // the app's own print panel (lib/printPane); anything else says so.
+  const printFocused = () => {
+    const { set, tab } = activePanes(wb.getState());
+    const pane = set && tab ? set.panes[tab.focusedPaneId] : undefined;
+    if (pane?.kind === "browser") {
+      window.dispatchEvent(new Event("redline:browser-print"));
+      return;
+    }
+    void import("./lib/printPane").then(async (m) => {
+      try {
+        if (pane?.kind === "file") {
+          const text = await m.readPrintableFile(pane.data.path);
+          if (text === null) { setToast("This file can't be printed from here", 4000); return; }
+          await m.printPane({ kind: "file", path: pane.data.path, text });
+          return;
+        }
+        const element = documentRef.current;
+        if (pane?.kind === "plan" && element) {
+          await m.printPane({ kind: "plan", element });
+          return;
+        }
+        setToast("Print works on a plan, a file or a web page — focus one first", 4000);
+      } catch (err) {
+        setToast(`Print failed: ${err}`, 6000);
+      }
+    });
+  };
+  const printFocusedRef = useRef(printFocused);
+  printFocusedRef.current = printFocused;
   const sidebarRef = useRef<HTMLElement | null>(null);
   // When both side panes are dragged so wide that the document column is
   // squeezed to a sliver, the two dividers' chevrons collide. We replace them
@@ -4367,9 +4402,9 @@ function App() {
     );
     const tutorialUnlisten = listen("menu-open-tutorial", () => setTourOpen(true));
     return () => {
-      void readmeUnlisten.then((u) => u());
-      void feedbackUnlisten.then((u) => u());
-      void tutorialUnlisten.then((u) => u());
+      void readmeUnlisten.then(dropListener);
+      void feedbackUnlisten.then(dropListener);
+      void tutorialUnlisten.then(dropListener);
     };
   }, []);
 
@@ -4691,15 +4726,15 @@ function App() {
       },
     );
     return () => {
-      void planUnlisten.then((u) => u());
-      void detachedUnlisten.then((u) => u());
-      void bindFailedUnlisten.then((u) => u());
-      void commentsUnlisten.then((u) => u());
-      void statusUnlisten.then((u) => u());
-      void runStateUnlisten.then((u) => u());
-      void passedThroughUnlisten.then((u) => u());
-      void modeUnlisten.then((u) => u());
-      void decisionUnlisten.then((u) => u());
+      void planUnlisten.then(dropListener);
+      void detachedUnlisten.then(dropListener);
+      void bindFailedUnlisten.then(dropListener);
+      void commentsUnlisten.then(dropListener);
+      void statusUnlisten.then(dropListener);
+      void runStateUnlisten.then(dropListener);
+      void passedThroughUnlisten.then(dropListener);
+      void modeUnlisten.then(dropListener);
+      void decisionUnlisten.then(dropListener);
     };
   }, [activeId, selectSessions]);
 
@@ -4743,7 +4778,7 @@ function App() {
     })();
     return () => {
       cancelled = true;
-      unlisten?.();
+      if (unlisten) dropListener(unlisten);
     };
   }, []);
 
@@ -7114,7 +7149,7 @@ function App() {
       },
     );
     return () => {
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, []);
 
@@ -8620,7 +8655,7 @@ function App() {
     const unlisten = listen("menu-quick-open", () => openQuickOpen());
     return () => {
       window.removeEventListener("keydown", onKey, true);
-      void unlisten.then((off) => off());
+      void unlisten.then(dropListener);
     };
   }, [openQuickOpen]);
   // A Changes row: that file's diff, in the Review pane over the working tree.

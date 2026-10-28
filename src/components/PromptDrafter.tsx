@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { createPortal } from "react-dom";
 import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
@@ -511,9 +512,9 @@ function PromptDrafterBase({
       .catch((e) => console.warn("draft_turn_status failed", e));
     return () => {
       alive = false;
-      void done.then((un) => un());
-      void err.then((un) => un());
-      void cancelled.then((un) => un());
+      void done.then(dropListener);
+      void err.then(dropListener);
+      void cancelled.then(dropListener);
     };
   }, [draftId]);
 
@@ -599,7 +600,7 @@ function PromptDrafterBase({
     });
     return () => {
       alive = false;
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [editor, draftId, landSuggestion]);
 

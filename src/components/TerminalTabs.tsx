@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import {
   forwardRef,
   lazy,
@@ -733,7 +734,7 @@ export const TerminalTabs = memo(
       setAttention((prev) => mergeAttention(prev, [e.payload]));
     })
       .then((u) => {
-        if (gone) u();
+        if (gone) dropListener(u);
         else unlisten = u;
       })
       .catch(() => {});
@@ -751,7 +752,7 @@ export const TerminalTabs = memo(
       });
     return () => {
       gone = true;
-      unlisten?.();
+      if (unlisten) dropListener(unlisten);
     };
   }, []);
 
@@ -1742,13 +1743,13 @@ export const TerminalTabs = memo(
         setShowCloseConfirm(true);
       })
       .then((u) => {
-        if (disposed) u();
+        if (disposed) dropListener(u);
         else unlisten = u;
       });
 
     return () => {
       disposed = true;
-      unlisten?.();
+      if (unlisten) dropListener(unlisten);
     };
   }, []);
 

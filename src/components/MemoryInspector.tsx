@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -202,7 +203,7 @@ function LakeTab() {
   useEffect(() => {
     void load();
     const un = listen("ledger-changed", () => void load());
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, [load]);
 
   // Prompts that have already been compacted/forgotten — their body is a gist.
@@ -578,7 +579,7 @@ function CatalogTab() {
   useEffect(() => {
     void load();
     const un = listen("classmem-changed", () => void load());
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, [load]);
 
   const openNode = useCallback(async (id: string) => {

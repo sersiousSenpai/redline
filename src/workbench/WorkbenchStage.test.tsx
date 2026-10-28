@@ -66,6 +66,25 @@ describe("focus follows the tab", () => {
   });
 });
 
+describe("a caret nobody can see", () => {
+  it("a focus held in an undrawn layer (a hidden terminal's textarea) is stray: the shown tab's pane takes the caret", async () => {
+    await act(async () => store.dispatch({ type: "openTab", pane: { kind: "servers", data: {} }, tabId: "t2" }));
+    await act(async () => root.render(<WorkbenchStage store={store} renderPane={renderPane} onNewTab={() => {}} />));
+    await act(async () => store.dispatch({ type: "selectTab", tabId: "t1" }));
+    await act(async () => store.dispatch({ type: "selectTab", tabId: "t2" }));
+    const layer = document.createElement("div");
+    const textarea = document.createElement("textarea");
+    layer.append(textarea);
+    document.body.append(layer);
+    textarea.focus();
+    layer.style.display = "none";
+    await act(async () => store.dispatch({ type: "selectTab", tabId: "t1" }));
+    await act(async () => { await new Promise((done) => requestAnimationFrame(() => done(null))); });
+    expect(document.activeElement).not.toBe(textarea);
+    layer.remove();
+  });
+});
+
 describe("the tile's divider", () => {
   const split = async () => {
     await act(async () => store.dispatch({ type: "splitPane", paneId: "p1", direction: "row", pane: { kind: "servers", data: {} }, newPaneId: "sv" }));

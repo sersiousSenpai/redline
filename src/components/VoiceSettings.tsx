@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -239,13 +240,13 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     let un: UnlistenFn | undefined;
     void listen<KokoroSetup>("kokoro-setup", (e) => setProgress(e.payload)).then(
       (u) => {
-        if (disposed) u();
+        if (disposed) dropListener(u);
         else un = u;
       },
     );
     return () => {
       disposed = true;
-      un?.();
+      if (un) dropListener(un);
     };
   }, []);
 
@@ -256,12 +257,12 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
     void listen<KokoroSetup>("whisper-setup", (e) =>
       setWhisperProgress(e.payload),
     ).then((u) => {
-      if (disposed) u();
+      if (disposed) dropListener(u);
       else un = u;
     });
     return () => {
       disposed = true;
-      un?.();
+      if (un) dropListener(un);
     };
   }, []);
 
@@ -1119,7 +1120,7 @@ function TurnModelSetting() {
     );
     return () => {
       alive = false;
-      for (const p of subs) void p.then((un) => un());
+      for (const p of subs) void p.then(dropListener);
     };
   }, []);
 

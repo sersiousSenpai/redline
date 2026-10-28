@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import {
   Fragment,
   memo,
@@ -1597,7 +1598,7 @@ function VoicePanelBase({
     let disposed = false;
     const unlisteners: UnlistenFn[] = [];
     const add = (u: UnlistenFn) => {
-      if (disposed) u();
+      if (disposed) dropListener(u);
       else unlisteners.push(u);
     };
     const mine = (e: { sessionId: string }) => e.sessionId === sessionId;
@@ -1757,7 +1758,7 @@ function VoicePanelBase({
     void wire();
     return () => {
       disposed = true;
-      for (const u of unlisteners) u();
+      for (const u of unlisteners) dropListener(u);
     };
   }, [sessionId]);
 
@@ -1793,7 +1794,7 @@ function VoicePanelBase({
     });
     return () => {
       alive = false;
-      void p.then((un) => un());
+      void p.then(dropListener);
     };
   }, [sessionId]);
 

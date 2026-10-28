@@ -7,6 +7,7 @@
 //! (BC-41). What the action did is not here: the backend writes that onto
 //! the turn as a step of its own, so it outlives this listener.
 
+import { dropListener } from "../lib/dropListener";
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { PageAction } from "../lib/browserChat/transcript";
@@ -93,7 +94,7 @@ export function usePageActions(): { running: ReadonlyMap<string, RunningPageActi
     ];
     return () => {
       for (const timer of [...finished.values(), ...ended.values()]) window.clearTimeout(timer);
-      for (const subscription of subscriptions) void subscription.then((stop) => stop()).catch(() => {});
+      for (const subscription of subscriptions) void subscription.then(dropListener).catch(() => {});
     };
   }, []);
   return { running, acting };

@@ -6,6 +6,7 @@
 // chat), a live strip (dev servers, pages the agent is working on, research
 // missions), then two columns: Pick back up (this workspace's pages, task
 // lists, recently closed) and Reading, by subject. No thumbnail grid.
+import { dropListener } from "../lib/dropListener";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -92,7 +93,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
       listen<{ missionId?: string }>("mission-delta", ({ payload }) => { if (current && payload?.missionId) mark(payload.missionId, true); }),
       ...["mission-done", "mission-error", "mission-cancelled"].map((name) => listen<{ missionId?: string }>(name, ({ payload }) => { if (current && payload?.missionId) mark(payload.missionId, false); })),
     ];
-    return () => { current = false; subscriptions.forEach((p) => void p.then((un) => un()).catch(() => {})); };
+    return () => { current = false; subscriptions.forEach((p) => void p.then(dropListener).catch(() => {})); };
   }, [missionIds]);
 
   const webTabs = tabs.filter((tab) => /^https?:\/\//i.test(tab.url));

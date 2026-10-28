@@ -106,6 +106,16 @@ export const TerminalLayer = memo(forwardRef<TerminalTabsHandle, TerminalLayerPr
   const layerRef = useRef<HTMLDivElement | null>(null);
   const targetRef = useMemo(() => ({ current: target }), [target]);
   useStageDock(layerRef, targetRef, onScreen);
+  // Leaving the terminals (another tab, another session, the Agent pane's
+  // Chat view) takes the caret with it: xterm's helper textarea, hidden
+  // with the layer, would otherwise keep focus — swallowing keys meant
+  // elsewhere, and carrying macOS's input-source bubble to a stray spot
+  // mid-pane. The tab now shown places its own caret (WorkbenchStage).
+  useLayoutEffect(() => {
+    if (onScreen) return;
+    const held = document.activeElement;
+    if (held instanceof HTMLElement && layerRef.current?.contains(held)) held.blur();
+  }, [onScreen]);
 
   const onWallChange = useCallback(
     (key: string, data: WallData) => store.dispatch({ type: "setWall", paneId: key, data }),

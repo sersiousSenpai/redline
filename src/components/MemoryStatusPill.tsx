@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -166,8 +167,8 @@ export function MemoryStatusPill({
     const unClass = listen("classmem-changed", reload);
     return () => {
       window.clearTimeout(coalesce);
-      void un.then((f) => f());
-      void unClass.then((f) => f());
+      void un.then(dropListener);
+      void unClass.then(dropListener);
     };
   }, [loadNow]);
 

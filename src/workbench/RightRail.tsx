@@ -10,6 +10,7 @@
 //
 // Lazy, with its stylesheet: nothing here is on the boot path.
 
+import { dropListener } from "../lib/dropListener";
 import { memo, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -70,7 +71,7 @@ function useTalkAway(talkKey: string | null | undefined): AwayState | null {
       .catch(() => {});
     return () => {
       alive = false;
-      for (const p of subs) void p.then((un) => un());
+      for (const p of subs) void p.then(dropListener);
     };
   }, [awayKey]);
   return tracked && talkKey && tracked.key === talkKey ? tracked.state : null;

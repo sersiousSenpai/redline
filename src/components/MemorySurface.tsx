@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -323,7 +324,7 @@ function TimelineTab({
   useEffect(() => {
     void load();
     const un = listen("ledger-changed", () => void load());
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, [load]);
 
   const loadMore = useCallback(async () => {
@@ -1425,7 +1426,7 @@ function RunTimeline({ now }: { now: number }) {
   useEffect(() => {
     void load();
     const un = listen("classmem-changed", () => void load());
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, [load]);
 
   const toggle = useCallback(
@@ -1649,7 +1650,7 @@ function CatalogTab() {
       void load();
       if (selected) void openNode(selected);
     });
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, [load, selected, openNode]);
 
   const organize = useCallback(async () => {
@@ -2554,7 +2555,7 @@ function HealthTab({
     };
     load();
     const un = listen("classmem-changed", load);
-    return () => void un.then((f) => f());
+    return () => void un.then(dropListener);
   }, []);
 
   const verify = async () => {
@@ -2863,8 +2864,8 @@ export function MemorySurface({
     const unClass = listen("classmem-changed", reload);
     return () => {
       window.clearTimeout(coalesce);
-      void un.then((f) => f());
-      void unClass.then((f) => f());
+      void un.then(dropListener);
+      void unClass.then(dropListener);
     };
   }, [loadStatus]);
 

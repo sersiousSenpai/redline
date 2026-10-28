@@ -3,6 +3,7 @@
 // every op, on the backend's `git-gui-changed` event, on window focus, and on a
 // 4 s poll while the page is visible. A refresh never overlaps itself: a request
 // that arrives mid-flight queues exactly one follow-up.
+import { dropListener } from "../../lib/dropListener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { GitOpResult, GitRefs, GitWorkingStatus } from "../../lib/git/types";
@@ -94,7 +95,7 @@ export function useGitRepository(repo: string) {
       void refresh();
     }, POLL_MS);
     return () => {
-      void unlisten.then((off) => off()).catch(() => {});
+      void unlisten.then(dropListener).catch(() => {});
       window.removeEventListener("focus", onFocus);
       window.clearInterval(timer);
     };

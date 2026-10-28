@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GripVertical, MapPin, PenLine, MessageSquare, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -171,7 +172,7 @@ export default function Cart({
       },
     );
     return () => {
-      void un.then((f) => f());
+      void un.then(dropListener);
     };
   }, [browseId]);
 

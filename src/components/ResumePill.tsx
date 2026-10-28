@@ -63,6 +63,7 @@ export function ResumePill({ sessionId, className }: { sessionId: string | null 
     <span className={className ? `rl-resume ${className}` : "rl-resume"} data-tone={pill.tone} role="status" title={text} aria-label={text}>
       {pill.tone === "working" ? <Spinner size={10} /> : <i className="rl-resume-dot" aria-hidden />}
       <span className="rl-resume-word">{pill.label}</span>
+      {pill.attempt ? <span className="rl-resume-attempt">attempt {pill.attempt} of {pill.of}</span> : null}
     </span>
   );
 }

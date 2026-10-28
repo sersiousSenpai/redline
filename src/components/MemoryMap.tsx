@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -31,7 +32,7 @@ export function MemoryMapTab({ onFocus, view: retainedView }: { onFocus: (f: Tim
     void load(); let timer: ReturnType<typeof setTimeout>;
     const later = () => { clearTimeout(timer); timer = setTimeout(() => void load(), 800); };
     const unlisteners = [listen("ledger-changed", later), listen("classmem-changed", later)];
-    return () => { ++request.current; clearTimeout(timer); for (const un of unlisteners) void un.then(fn => fn()).catch(() => {}); };
+    return () => { ++request.current; clearTimeout(timer); for (const un of unlisteners) void un.then(dropListener).catch(() => {}); };
   }, [load]);
   useEffect(() => {
     const preference = window.matchMedia?.("(prefers-reduced-motion: reduce)"); if (!preference) return;

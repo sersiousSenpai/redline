@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -562,7 +563,7 @@ function AgentBuilder({
     ];
     return () => {
       alive = false;
-      for (const s of subs) void s.then((un) => un());
+      for (const s of subs) void s.then(dropListener);
     };
   }, [preview]);
 

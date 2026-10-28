@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -683,9 +684,9 @@ export const TerminalView = memo(function TerminalView({
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("input", onInput, true);
       host.removeEventListener("compositionstart", onInput, true);
-      void exitPromise.then((un) => un());
+      void exitPromise.then(dropListener);
       unregisterDrop();
-      void focusPromise.then((un) => un());
+      void focusPromise.then(dropListener);
       void enqueuePtyOp(id, () => invoke("pty_detach", { id, attachmentId }));
       termRef.current = null;
       fitRef.current = null;

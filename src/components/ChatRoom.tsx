@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { ConversationSourceContext } from "./ContinueAs";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -211,7 +212,7 @@ export function ChatRoom({
   const [armedRun, setArmedRun] = useState<ChatPlanRequest | null>(null);
   const [changes, setChanges] = useState<ChatChanges[]>([]);
   const refreshChanges = useCallback(() => { void invoke<ChatChanges[]>("companion_changes", { companionId }).then(rows => setChanges(rows ?? [])).catch(() => {}); }, [companionId]);
-  useEffect(() => { refreshChanges(); const un = listen<{companionId: string; changes: ChatChanges}>("companion-changes", event => { if (event.payload.companionId === companionId) setChanges(rows => [...rows.filter(row => row.messageId !== event.payload.changes.messageId), event.payload.changes]); }); return () => { void un.then(fn => fn()); }; }, [companionId, refreshChanges]);
+  useEffect(() => { refreshChanges(); const un = listen<{companionId: string; changes: ChatChanges}>("companion-changes", event => { if (event.payload.companionId === companionId) setChanges(rows => [...rows.filter(row => row.messageId !== event.payload.changes.messageId), event.payload.changes]); }); return () => { void un.then(dropListener); }; }, [companionId, refreshChanges]);
   const [armedPlan, setArmedPlan] = useState<string | null>(null);
   const [graduations, setGraduations] = useState<{ sessionId: string; title: string }[]>([]);
   useEffect(() => { void invoke<typeof graduations>("companion_graduations", { companionId }).then(value => setGraduations(value ?? [])).catch(() => {}); }, [companionId, receipt?.status]);
@@ -310,7 +311,7 @@ export function ChatRoom({
       },
     );
     return () => {
-      void un.then((f) => f());
+      void un.then(dropListener);
     };
   }, [companionId]);
   useEffect(() => {
@@ -325,7 +326,7 @@ export function ChatRoom({
       () => refreshChats(),
     );
     return () => {
-      void un.then((f) => f());
+      void un.then(dropListener);
     };
   }, [refreshChats]);
 
@@ -364,7 +365,7 @@ export function ChatRoom({
     });
     return () => {
       live = false;
-      void un.then((f) => f());
+      void un.then(dropListener);
     };
   }, [companionId]);
 

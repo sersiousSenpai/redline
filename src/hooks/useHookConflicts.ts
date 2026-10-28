@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { dropListener } from "../lib/dropListener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -65,11 +66,11 @@ export function useHookConflicts(backend: Backend | null, projectPath: string | 
         // created or replaced. Release old watches and attach to its new inode.
         void rewatch();
       }, 80);
-    }).then((off) => { if (disposed) off(); else { unlisten = off; void rewatch(); } })
+    }).then((off) => { if (disposed) dropListener(off); else { unlisten = off; void rewatch(); } })
       .catch((err) => { if (!disposed) setWatchError(String(err)); });
     return () => {
       disposed = true; mounted.current = false; generation.current += 1; watchGeneration += 1;
-      clearTimeout(initial); clearTimeout(timer); unlisten?.();
+      clearTimeout(initial); clearTimeout(timer); if (unlisten) dropListener(unlisten);
       if (watchId) void invoke("unwatch_hook_conflicts", { watchId }).catch(() => {});
     };
   }, [backend, projectPath, ready, refresh]);

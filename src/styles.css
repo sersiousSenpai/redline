@@ -2278,6 +2278,7 @@ p.rl-block-modified {
   text-transform: uppercase;
   white-space: nowrap;
 }
+.rl-resume-attempt { opacity: 0.72; letter-spacing: 0.04em; text-transform: none; }
 .rl-resume[data-tone="working"] { color: var(--color-mode-plan-fg); }
 .rl-resume[data-tone="needs"] { color: var(--color-warning); }
 .rl-resume-dot {
@@ -5317,3 +5318,21 @@ html[data-rl-resizing] [data-rl-pane] {
   color: var(--color-ink);
 }
 .rl-wall-empty button:hover { background: var(--color-rule); }
+
+/* Print (File ▸ Print… on a plan or a file, lib/printPane): the app's own
+   webview prints only the copy in #rl-print-root, as long as it needs to
+   run; on screen the root is never drawn. */
+#rl-print-root { display: none; }
+@media print {
+  html:has(#rl-print-root[data-ready]),
+  body:has(> #rl-print-root[data-ready]) {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+  body:has(> #rl-print-root[data-ready]) > :not(#rl-print-root) { display: none !important; }
+  #rl-print-root[data-ready] { display: block; color: #000; background: #fff; padding: 0; }
+  #rl-print-root[data-kind="plan"] * { color: inherit; background: transparent !important; box-shadow: none !important; }
+  #rl-print-root[data-kind="file"] h1 { font: 600 11pt var(--font-mono, ui-monospace, monospace); margin: 0 0 12pt; }
+  #rl-print-root[data-kind="file"] pre { font: 9pt/1.45 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; word-break: break-word; margin: 0; }
+}
