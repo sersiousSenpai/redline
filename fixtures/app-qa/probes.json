@@ -58,7 +58,27 @@
     "$comment": "The browser surface hides the sidebar (an immersive surface), so no sidebar probe here; its page is a faked webview.",
     "copy": ["Browser"],
     "probes": [
-      { "name": "Browser tab", "css": [".rl-wb-strip [role=tab][title='Browser']"], "expect": { "height": 34 } }
+      { "name": "Browser tab", "css": [".rl-wb-strip [role=tab][title='Browser']"], "expect": { "height": 34 } },
+      { "name": "page strip", "css": [".rb-tab-rail"], "expect": { "width": 40 } },
+      { "name": "page button", "css": [".rb-tab-rail [role=tab][aria-selected=true]"], "expect": { "width": 28, "height": 28 } },
+      { "name": "address bar", "css": [".rb-navigation-row"], "expect": { "height": 40 } },
+      { "name": "back", "css": [".rb-navigation-row [aria-label=Back]"], "expect": { "width": 26, "height": 26 } },
+      { "name": "address field", "css": [".rb-address"], "expect": { "height": 28, "borderRadius": 8 } },
+      { "name": "Page chat", "css": [".rb-chat-toggle"], "expect": { "height": 28 } }
+    ]
+  },
+  "browser-newtab": {
+    "copy": ["A place to pick up", "where you left off.", "Browse", "Agent search", "localhost:5173", "portable-pty resize race", "Every page you read is filed in Memory"],
+    "probes": [
+      { "name": "page strip", "css": [".rb-tab-rail"], "expect": { "width": 40 } },
+      { "name": "address bar", "css": [".rb-navigation-row"], "expect": { "height": 40 } },
+      { "name": "title", "css": [".rb-nt-head h1"], "expect": { "fontSize": 40 } },
+      { "name": "omnibox", "css": [".rb-nt-omnibox"], "expect": { "borderRadius": 18 } },
+      { "name": "Browse verb", "css": [".rb-nt-verb[data-primary]"], "expect": { "height": 30 } },
+      { "name": "live chip", "css": [".rb-nt-live .rb-nt-chip"], "expect": { "height": 30 } },
+      { "name": "row", "css": [".rb-nt-row"], "expect": { "height": 36 } },
+      { "name": "Pick back up", "css": [".rb-nt-section[aria-label='Pick back up']"] },
+      { "name": "Reading, by subject", "css": [".rb-nt-section[aria-label='Reading, by subject']"] }
     ]
   },
   "sidebar": {

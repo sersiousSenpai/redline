@@ -1,6 +1,6 @@
 import { act, useState, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import BrowserTabRail from "./BrowserTabRail";
 import { BrowserChrome } from "./BrowserChrome";
 
@@ -113,4 +113,51 @@ it("falls back to native Copy if clipboard API access fails", async () => {
   await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "c", metaKey: true, bubbles: true, cancelable: true })));
   expect(execCommand).toHaveBeenCalledWith("copy");
   delete (document as unknown as Record<string, unknown>).execCommand;
+});
+
+describe("the address bar per the design", () => {
+  const props = (over: Partial<ComponentProps<typeof BrowserChrome>> = {}): ComponentProps<typeof BrowserChrome> => ({
+    tabs: initial, activeId: "one", address: "https://example.test", onAddress: noop, onAddressFocus: noop, onNavigate: noop,
+    onBack: noop, onForward: noop, onReload: noop, onSelect: noop, onCloseTab: noop, onNewTab: noop, onTabDrag: noop,
+    chatOpen: false, onToggleChat: noop, split: false, onArrange: noop, onMosaics: noop, menuOpen: false, onMenu: noop,
+    onBookmarks: noop, onAppearance: noop, onPreferences: noop, onInspect: noop, onCloseBrowser: noop, ...over,
+  });
+  const render = (over: Partial<ComponentProps<typeof BrowserChrome>> = {}) => act(async () => root.render(<BrowserChrome {...props(over)}/>));
+
+  it("leads the field with a lock on https, a search glyph on the new tab, and marks a dev server", async () => {
+    await render();
+    expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-lock")).toBe(true);
+    expect(host.querySelector(".rb-address-status")).toBeNull();
+    await render({ address: "http://localhost:5173/plan" });
+    expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-globe")).toBe(true);
+    expect(host.querySelector(".rb-address-status")?.textContent).toBe("dev server");
+    await render({ address: "", newTab: true });
+    expect(host.querySelector(".rb-address-icon svg")?.classList.contains("lucide-search")).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Back"]')!.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Forward"]')!.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Reload page"]')!.disabled).toBe(false);
+  });
+
+  it("names the chat Page chat, pressed while it is open", async () => {
+    await render({ chatOpen: true });
+    const chat = host.querySelector<HTMLButtonElement>(".rb-chat-toggle")!;
+    expect(chat.getAttribute("aria-label")).toBe("Page chat");
+    expect(chat.textContent).toBe("Page chat");
+    expect(chat.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("puts Research missions and One discussion across tabs in the page menu", async () => {
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const onResearch = vi.fn(), onToggleLinked = vi.fn();
+    await render({ menuOpen: true, onResearch, linked: true, onToggleLinked });
+    const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Page menu"] button')];
+    const research = items.find((b) => b.textContent === "Research missions…")!;
+    const linked = items.find((b) => b.textContent?.startsWith("One discussion across tabs"))!;
+    expect(linked.getAttribute("role")).toBe("menuitemradio");
+    expect(linked.getAttribute("aria-checked")).toBe("true");
+    await act(async () => research.click()); expect(onResearch).toHaveBeenCalledOnce();
+    await render({ menuOpen: true, onResearch, linked: true, onToggleLinked });
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menu"] button')].find((b) => b.textContent?.startsWith("One discussion"))!.click());
+    expect(onToggleLinked).toHaveBeenCalledOnce();
+  });
 });

@@ -768,6 +768,25 @@ const handlers: Record<string, Handler> = {
   browser_suspend: () => null,
   browser_eval_result: () => "{}",
   mission_set_active: () => null,
+  // The browser's new tab: lately read pages, a task list, one research
+  // mission; a dev server up; three never-capture domains.
+  browser_home_feed: () => ({
+    recent: [
+      { url: "https://docs.rs/portable-pty/latest/portable_pty/trait.MasterPty.html", title: "MasterPty in portable_pty", at: clock.now - 25 * 60_000 },
+      { url: "https://v2.tauri.app/reference/javascript/api/namespacewindow/", title: "Tauri · window resize events", at: clock.now - 2 * 3_600_000 },
+      { url: "https://en.wikipedia.org/wiki/Iterative_closest_point", title: "Iterative closest point", at: clock.now - 5 * 86_400_000 },
+      { url: "https://en.wikipedia.org/wiki/Lidar", title: "Lidar", at: clock.now - 6 * 86_400_000 },
+      { url: "https://arxiv.org/abs/2401.00001", title: "LiDAR-GS: real-time LiDAR re-simulation", at: clock.now - 18 * 86_400_000 },
+    ],
+    frequent: [],
+    tasks: [{ url: "https://docs.rs/portable-pty/latest/portable_pty/", title: "portable_pty", count: 2 }],
+    missions: [{ missionId: "mission-pty", title: "portable-pty resize race" }],
+  }),
+  dev_servers_scan: () => ({
+    running: [{ pid: 4242, port: 5173, extraPorts: [], url: "http://localhost:5173", comm: "node", args: "vite", projectPath: "/Users/qa/redline", projectName: "redline", stack: "Vite", runCommand: "npm run dev", thumbPath: null }],
+    recent: [], others: [],
+  }),
+  shots_get_policy: () => ({ denylist: "# never capture\nmail.google.com\nbank.example\nchat.example", enabled: true }),
 
   // Memory's freshness (the Tools menu's "Memory 2h ago").
   memory_status: () => ({

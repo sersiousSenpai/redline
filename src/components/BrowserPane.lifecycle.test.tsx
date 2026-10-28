@@ -817,3 +817,63 @@ describe("native lifecycle recovery", () => {
     expect(mocks.views.has("browser-t-one")).toBe(false);
   });
 });
+
+describe("the design's pane (RLPaneBrowser)", () => {
+  const activeTab = () => host.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')!;
+  it("Agent search on the new tab opens the search there and sends the query as that tab's own page-chat turn", async () => {
+    linkedModeOn();
+    await mount();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="New tab"]')!.click());
+    await settle();
+    const tabId = activeTab().dataset.tabId!, browseId = tabId.replace(/^t-/, "");
+    const input = host.querySelector<HTMLInputElement>('[aria-label="Address, or something to find"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "portable-pty resize race");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true, cancelable: true })); });
+    await settle();
+    expect(activeTab().dataset.tabId).toBe(tabId);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe("https://www.google.com/search?q=portable-pty%20resize%20race");
+    // Its own thread, not the linked one.
+    expect(conversation()).toBe(browseId);
+    expect(dock.querySelector("[data-seed]")!.getAttribute("data-seed")).toMatch(/^Find the best page for: portable-pty resize race/);
+    expect(dock.querySelector("[data-seed]")!.getAttribute("data-seed-source")).toBe("plan-search");
+  });
+
+  it("remembers a closed page in the strip's Recently closed, and reopening it opens the page again", async () => {
+    vi.stubGlobal("ResizeObserver", class { constructor(private callback: () => void) {} observe() { this.callback(); } disconnect() {} });
+    await mount();
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Recently closed"]')!.disabled).toBe(true);
+    await act(async () => { host.querySelector<HTMLElement>('[data-tab-id="t-two"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true })); });
+    await settle();
+    expect(host.querySelector('[data-tab-id="t-two"]')).toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Recently closed"]')!.click());
+    const item = [...document.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Recently closed"] button')];
+    expect(item.map((b) => b.textContent)).toEqual(["two"]);
+    await act(async () => item[0].click());
+    await settle();
+    expect(host.querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(host.querySelector<HTMLInputElement>('[aria-label="Address or search"]')!.value).toBe("https://two.test");
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Recently closed"]')!.disabled).toBe(true);
+  });
+
+  it("says under the page when the agent is acting on a page on screen, and stops when the action ends", async () => {
+    await mount();
+    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "running", turns: ["x"] });
+    const row = () => host.querySelector<HTMLElement>(".rb-agent-status");
+    expect(row()?.getAttribute("role")).toBe("status");
+    expect(row()?.textContent).toContain("Clicking · tab 2");
+    expect(row()?.textContent).toContain("the agent reads the accessibility tree, not pixels");
+    expect(row()?.querySelector(".rl-spinner")).not.toBeNull();
+    await event("browser-action", { label: "browser-t-two", kind: "click", tab: 2, status: "completed", turns: ["x"] });
+    expect(row()).toBeNull();
+  });
+
+  it("reaches Research missions from the page menu without the page chat", async () => {
+    await mount({ dockSlot: null, dockPill: null });
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Page menu"]')!.click());
+    await act(async () => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) => item.textContent === "Research missions…")!.click());
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("Research missions");
+  });
+});

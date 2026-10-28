@@ -18,6 +18,7 @@
 //!   agent     the Agent tab: the session's conversation, Chat | CLI header
 //!   agent-cli the Agent tab showing its PTY (the CLI radio)
 //!   browser   the door's "Open in the browser" destination with an address
+//!   browser-newtab  the same, then the pane's own New tab: the new-tab page
 //!   sidebar   Places + a project group: at 1440×900 (the whole sidebar) and
 //!             at 900×640 (the narrow pose) unless --size is given
 //!
@@ -52,7 +53,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -79,6 +80,7 @@ const SCENE = {
   agent: { board: "workbench" },
   "agent-cli": { board: "workbench" },
   browser: { board: "workbench" },
+  "browser-newtab": { board: "workbench" },
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   "rail-plan-discussion": { board: "workbench" },
   "rail-plan-talk": { board: "workbench" },
@@ -192,6 +194,7 @@ const DRIVES = {
   ],
   browser: [
     ...AT_HOME,
+    { do: "viewport", width: 1440, height: 900, why: "the door's Destination menu opens only wide" },
     { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
     { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], when: "!document.querySelector('.rl-composer-menu')", why: "a narrow door opens on the first click; the menu on the second" },
     { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
@@ -199,6 +202,20 @@ const DRIVES = {
     { do: "type", text: "https://example.com", why: "type an address" },
     { do: "key", key: "Enter", why: "⏎: the door tab becomes the browser" },
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-strip [role=tab][aria-selected=true] svg.lucide-globe') || !!document.querySelector('.rl-wb-pane [data-browser-pane], .rl-wb-pane .rl-browser, .rl-wb-pane .rl-bp')", timeout: 15000, why: "the active tab is the browser" },
+    { do: "viewport", run: true, why: "back to the run's size" },
+  ],
+  "browser-newtab": [
+    ...AT_HOME,
+    { do: "viewport", width: 1440, height: 900, why: "the door's Destination menu opens only wide" },
+    { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+    { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
+    { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
+    { do: "type", text: "https://example.com", why: "type an address" },
+    { do: "key", key: "Enter", why: "⏎: the door tab becomes the browser" },
+    { do: "waitFor", expr: "!!document.querySelector('.rb-tab-rail [aria-label=\"New tab\"]')", timeout: 15000, why: "the browser pane's strip" },
+    { do: "viewport", run: true, why: "back to the run's size" },
+    { do: "click", css: [".rb-tab-rail [aria-label=\"New tab\"]"], why: "the pane's own New tab" },
+    { do: "waitFor", expr: "!!document.querySelector('.rb-home[data-loaded]')", timeout: 15000, why: "the new-tab page, its history read" },
   ],
   sidebar: [
     ...AT_HOME,
@@ -628,6 +645,12 @@ async function drive(scene) {
         if (step.optional) continue;
         throw new Error(`Drive ${scene}: ${step.why}: timed out`);
       }
+    } else if (step.do === "viewport") {
+      // A drive that only works wide (the door's Destination menu) opens
+      // at 1440×900 and then takes the run's own size: `{ run: true }`.
+      const to = step.run ? run.size : { width: step.width, height: step.height };
+      await cdp.call("Emulation.setDeviceMetricsOverride", { width: to.width, height: to.height, deviceScaleFactor: 1, mobile: false });
+      rec.note = `${to.width}x${to.height}`;
     } else if (step.do === "snapshot") {
       await quiesce(300, 4000);
       const file = shotName(scene, run.theme, run.size, step.name);

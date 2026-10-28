@@ -83,7 +83,7 @@ export default function BrowserHomePage(props: BrowserHomePageProps) {
     <div className="rb-nt-column">
       <header className="rb-nt-head">
         <span className="rb-nt-kicker">{newTabKicker(new Date(now), webTabs.length)}</span>
-        <h1>A place to pick up<br/>where you left off.</h1>
+        <h1>A place to pick up{" "}<br/>where you left off.</h1>
       </header>
       <form className="rb-nt-omnibox" role="search" aria-label="Browse or search" onSubmit={(e) => { e.preventDefault(); submit(false); }}>
         <div className="rb-nt-field"><Globe size={18} aria-hidden/>
