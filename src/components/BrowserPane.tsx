@@ -1525,9 +1525,12 @@ function BrowserPaneBase({
       else if (event.kind === "shortcut" && tileIdsRef.current.includes(tab.id) && visibleRef.current) {
         if (event.value === "location") focusAddressRef.current();
         else if (event.value === "toggle-monochat") window.dispatchEvent(new Event("redline:toggle-monochat"));
-        // The flow shell's ⌘B / ⌘⌥B; nothing listens in the classic shell.
+        // ⌘B / ⌘⌥B from the page: App folds the sidebar / the rail.
         else if (event.value === "toggle-sidebar" || event.value === "toggle-plan-panel") window.dispatchEvent(new Event(`redline:${event.value}`));
         else if (event.value === "open-front-door") window.dispatchEvent(new Event("redline:open-front-door"));
+        // The app's globals pressed in the page (⌘K, ⌘⇧J, ⌘⇧N, ⌘⇧0): App
+        // answers them as it does its own keys.
+        else if (event.value === "palette" || event.value === "needs-you" || event.value === "new-plan" || event.value === "snap-back") window.dispatchEvent(new Event(`redline:${event.value}`));
         else if (event.value === "exit-focus") { if (videoFsRef.current.stage !== "off") videoFsRef.current.dispatch({ type: "exit" }); else { restoreTilesRef.current(); } }
         else if (event.value === "toggle-video-screen") {
           if (videoFsRef.current.stage === "browser") void videoFsRef.current.requestScreen();

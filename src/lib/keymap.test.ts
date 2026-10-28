@@ -5,6 +5,8 @@ import { saveHoldKey } from "../audio/holdKey";
 import {
   CLASSIC_KEYMAP,
   GLOBAL_KEYMAP,
+  PAGE_KEEPS,
+  PAGE_ROUTES,
   REVIEW_KEYMAP,
   WORKBENCH_KEYMAP,
   bindingKeys,
@@ -390,5 +392,17 @@ describe("splits and the zoom (W3 walk fixes)", () => {
     expect(isZoomPaneKey(combo({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
     expect(isFrontDoorKey(cmd({ key: "Enter", code: "Enter", shiftKey: true }))).toBe(false);
     expect(bindingKeys("zoom-pane")).toEqual(["⌘", "⇧", "↩"]);
+  });
+});
+
+describe("with a web page focused", () => {
+  it("every wired chord has a way in from a page, or is the page's to keep", () => {
+    for (const b of CLASSIC_KEYMAP.filter((x) => x.wired)) {
+      const routes = PAGE_ROUTES[b.id];
+      expect(routes?.length || PAGE_KEEPS.includes(b.id), b.id).toBeTruthy();
+    }
+    // ⌘K is the palette there too, never the page's own ⌘K.
+    expect(PAGE_ROUTES.palette).toEqual([{ signal: "palette" }]);
+    expect(Object.keys(PAGE_ROUTES).every((id) => CLASSIC_KEYMAP.some((b) => b.id === id))).toBe(true);
   });
 });

@@ -124,6 +124,48 @@ export function bindingKeys(id: string): string[] | undefined {
   return shellKeymap().find((b) => b.id === id)?.keys;
 }
 
+// ---- With a web page focused --------------------------------------------------
+// An embedded page has the keyboard to itself: no listener of the app's own
+// document hears it. A chord reaches the app from there one of two ways —
+// a native menu item, whose key equivalent fires whatever has focus
+// (src-tauri workbench_menu.rs, and lib.rs's Close), or the page's own
+// script forwarding it as a `shortcut` signal (src-tauri browser_signals.js,
+// allowed by browser_events.rs, re-raised by BrowserPane as a window event).
+// The plan marks the menu rows; every other wired chord is forwarded.
+// `keymap.test.ts` walks this table against those three files.
+
+export type PageRoute = { menu: string } | { signal: string };
+
+/** How each wired binding reaches the app while a web page has focus. */
+export const PAGE_ROUTES: Readonly<Record<string, readonly PageRoute[]>> = {
+  palette: [{ signal: "palette" }],
+  "front-door": [{ signal: "open-front-door" }],
+  "new-plan": [{ signal: "new-plan" }],
+  "snap-back": [{ signal: "snap-back" }],
+  dock: [{ signal: "toggle-monochat" }],
+  "needs-you": [{ signal: "needs-you" }],
+  "new-tab": [{ menu: "wb_new_tab" }],
+  "reopen-tab": [{ menu: "wb_reopen_tab" }],
+  close: [{ menu: "close_tab" }],
+  "close-window": [{ menu: "wb_close_window" }],
+  "tab-n": [{ menu: "wb_tab_1" }, { menu: "wb_last_tab" }],
+  // ⌘⇧[ / ⌘⇧] are menu items; ⌘⌥← / ⌘⌥→ (a menu item carries one key) are
+  // forwarded.
+  "tab-cycle": [{ menu: "wb_prev_tab" }, { menu: "wb_next_tab" }, { signal: "previous-tab" }, { signal: "next-tab" }],
+  "quick-open": [{ menu: "wb_go_to_file" }],
+  // The page keeps ⌘B (bold in a web editor); forwarded only outside a field.
+  sidebar: [{ signal: "toggle-sidebar" }],
+  rail: [{ signal: "toggle-plan-panel" }],
+};
+
+/** Not the app's chords but the browser's own, forwarded from a page all
+ *  the same: ⌃Tab / ⌃⇧Tab cycle its pages. */
+export const PAGE_ONLY_SIGNALS: readonly string[] = ["next-page", "previous-page"];
+
+/** Wired bindings a focused page keeps for itself: splits and the zoom act
+ *  on the workbench's panes, which a page is not. */
+export const PAGE_KEEPS: readonly string[] = ["split", "split-down", "zoom-pane"];
+
 // ---- The two wired matchers -------------------------------------------------
 
 export interface KeyComboInfo {

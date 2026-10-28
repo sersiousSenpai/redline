@@ -2615,7 +2615,22 @@ function App() {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // The same globals pressed in a web page, which this document never
+    // hears: browser_signals.js forwards ⌘K, ⌘⇧N and ⌘⇧0 and BrowserPane
+    // re-raises them here. ⌘K is the palette everywhere, a page's own ⌘K
+    // included; the page chat keeps its own entry (the address bar's Chat).
+    const palette = () => setPaletteOpen((v) => !v);
+    const newPlan = () => openFrontDoorRef.current();
+    const snapBack = () => snapBackRef.current();
+    window.addEventListener("redline:palette", palette);
+    window.addEventListener("redline:new-plan", newPlan);
+    window.addEventListener("redline:snap-back", snapBack);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("redline:palette", palette);
+      window.removeEventListener("redline:new-plan", newPlan);
+      window.removeEventListener("redline:snap-back", snapBack);
+    };
   }, [setDocZoom]);
 
   // ⌘W (File ▸ Close, a native menu item so it reaches the app while a
@@ -2707,14 +2722,21 @@ function App() {
       listen("menu-close-tab", closeFromInside),
       listen("menu-close-window", () => void getCurrentWindow().close()),
       listen("menu-reopen-tab", () => tabs({ type: "reopenClosed" })),
-      listen<number>("menu-tab-index", (e) => tabs({ type: "selectTabIndex", index: e.payload })),
+      // ⌘1–9 through the menu record the switch like every other path.
+      listen<number>("menu-tab-index", (e) => {
+        beginMeasure("wb:tab-switch");
+        tabs({ type: "selectTabIndex", index: e.payload });
+      }),
       listen<number>("menu-tab-cycle", (e) => {
         beginMeasure("wb:tab-switch");
         tabs({ type: "cycleTab", delta: e.payload < 0 ? -1 : 1 });
       }),
     ];
     // A page's ⌘⌥← / ⌘⌥→, forwarded by BrowserPane.
-    const fromPage = (e: Event) => tabs({ type: "cycleTab", delta: (e as CustomEvent<number>).detail < 0 ? -1 : 1 });
+    const fromPage = (e: Event) => {
+      beginMeasure("wb:tab-switch");
+      tabs({ type: "cycleTab", delta: (e as CustomEvent<number>).detail < 0 ? -1 : 1 });
+    };
     window.addEventListener("redline:workbench-tab-cycle", fromPage);
     // The same chords from the keyboard, on `e.code` and in the capture
     // phase, ahead of xterm: the native menu normally takes them first (a
@@ -3635,8 +3657,14 @@ function App() {
       e.stopPropagation();
       jumpToNeedsYou();
     };
+    // ⌘⇧J pressed in a web page, forwarded (browser_signals.js).
+    const fromPage = () => jumpToNeedsYou();
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("redline:needs-you", fromPage);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("redline:needs-you", fromPage);
+    };
   }, [jumpToNeedsYou]);
 
 
