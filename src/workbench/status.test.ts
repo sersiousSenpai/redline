@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { paneStatusOf, worstStatus } from "./status";
+import { paneStatusOf, wallStatus, worstStatus } from "./status";
 
 describe("paneStatusOf", () => {
   it("folds the terminal's eight states into four", () => {
@@ -28,5 +28,14 @@ describe("worstStatus", () => {
     expect(worstStatus(["exited", "exited"])).toBe("exited");
     expect(worstStatus(["exited", "idle"])).toBe("idle");
     expect(worstStatus([])).toBe("idle");
+  });
+
+  it("a wall's dot is the worst of its tiles: needs you over working; all exited is muted; idle says nothing", () => {
+    const states = new Map([["a", { state: "idle" as const }], ["b", { state: "working" as const }], ["c", { state: "needs-you" as const }], ["d", { state: "exited" as const }]]);
+    expect(wallStatus(["a", "b"], states)).toBe("working");
+    expect(wallStatus(["a", "b", "c"], states)).toBe("needs");
+    expect(wallStatus(["d"], states)).toBe("exited");
+    expect(wallStatus(["a"], states)).toBeUndefined();
+    expect(wallStatus(["nope"], states)).toBeUndefined();
   });
 });

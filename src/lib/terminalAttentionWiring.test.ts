@@ -56,4 +56,12 @@ describe("terminal attention wiring", () => {
     expect(app).toContain("onJumpToNeedsYou={jumpToNeedsYou}");
     expect(app).not.toContain("termHasUnseen");
   });
+
+  it("one status vocabulary: the fleet's states reach the tab dots and the sidebar's terminal rows, never a second derivation", () => {
+    expect(app).toContain("onStatesChange={setTermStatuses}");
+    const describe = app.slice(app.indexOf("const describePane = useCallback("), app.indexOf("// The strip's right-hand cluster"));
+    expect(describe).toContain('if (pane.kind === "terminals") return { status: wallStatus(pane.data.tiles, termStatuses) };');
+    const rows = app.slice(app.indexOf("const sidebarTerminals = useMemo("), app.indexOf("// The memoized sidebar and browser pane"));
+    expect(rows).toContain("paneStatusOf(known.state)");
+  });
 });

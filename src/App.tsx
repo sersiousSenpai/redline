@@ -489,7 +489,7 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
-import { paneStatusOf } from "./workbench/status";
+import { paneStatusOf, wallStatus } from "./workbench/status";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
@@ -2991,8 +2991,14 @@ function App() {
   // title and version, and its status in the shared vocabulary (the
   // session's terminal needs you / is working, from `sidebarActivity`).
   const describePane = useCallback((pane: AnyPane) => {
-    // An Agent tab wears its terminal's state, from the CLI's own hooks.
+    // A wall wears the worst of its tiles, in the one vocabulary the fleet
+    // derives (TerminalTabs' `onStatesChange`).
+    if (pane.kind === "terminals") return { status: wallStatus(pane.data.tiles, termStatuses) };
+    // An Agent tab wears its terminal's state: the fleet's derivation once
+    // the layer has reported it, the CLI's own hooks until then.
     if (pane.kind === "chat" && pane.data.source === "agent") {
+      const known = wallStatus([pane.data.terminalId], termStatuses);
+      if (known || termStatuses.has(pane.data.terminalId)) return { status: known };
       const kind = terminalKinds.get(pane.data.terminalId);
       return { status: kind === "needs-you" || kind === "your-turn" ? ("needs" as const) : kind === "working" ? ("working" as const) : undefined };
     }
@@ -3005,7 +3011,7 @@ function App() {
       title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
       status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
-  }, [summaries, flowNeeds, flowWorking, terminalKinds]);
+  }, [summaries, flowNeeds, flowWorking, terminalKinds, termStatuses]);
   // The strip's right-hand cluster: the doc pin as a contextual entry —
   // tile the session's plan beside the surface in this tab, or untile it.
   const stageTile = (() => {

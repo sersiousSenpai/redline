@@ -38,3 +38,16 @@ export function worstStatus(states: readonly PaneStatus[]): PaneStatus {
   if (states.length && states.every((s) => s === "exited")) return "exited";
   return "idle";
 }
+
+/** A wall's status, for its tab's dot: the worst of its tiles' (`states` is
+ *  what TerminalTabs reports). An empty wall, or one not yet reported, says
+ *  nothing. */
+export function wallStatus(tiles: readonly string[], states: ReadonlyMap<string, { state: TermState }>): PaneStatus | undefined {
+  const known = tiles.flatMap((id) => {
+    const s = states.get(id);
+    return s ? [paneStatusOf(s.state)] : [];
+  });
+  if (known.length === 0) return undefined;
+  const worst = worstStatus(known);
+  return worst === "idle" ? undefined : worst;
+}
