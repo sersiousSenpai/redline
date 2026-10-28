@@ -58,7 +58,7 @@ import { usePoll } from "../hooks/usePoll";
 import type { CommentHighlightRange } from "../editor/extensions/CommentHighlights";
 import type { DraftComment } from "../types";
 
-interface PromptDrafterProps {
+export interface PromptDrafterProps {
   /** The draft's durable identity — keys its agents, comments, and memory. */
   draftId: string;
   /** The document to open (Tiptap JSON), or null for a blank one. The host

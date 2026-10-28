@@ -259,9 +259,10 @@ describe("chat context wiring", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
   it("the room reads the pressed chips per send, and forgets a chat whose attachment was lost", () => {
-    const start = app.indexOf("<ChatRoom");
+    // W6: App mounts the room through the chat pane's `CompanionRoom`.
+    const start = app.indexOf("<CompanionRoom");
     expect(start).toBeGreaterThan(-1);
-    expect(app.indexOf("<ChatRoom", start + 1)).toBe(-1);
+    expect(app.indexOf("<CompanionRoom", start + 1)).toBe(-1);
     const mount = app.slice(start, app.indexOf("/>", app.indexOf("onSeedConsumed=", start)));
     expect(mount).toContain('contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}');
     expect(mount).toContain("onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}");
@@ -302,7 +303,7 @@ describe("the composer's sentence stays out of App", () => {
     expect(door).not.toMatch(/\btext=\{/);
     expect(door).not.toContain("onTextChange");
     // The room is told where the sentence lives instead.
-    const room = app.slice(app.indexOf("<ChatRoom"), app.indexOf("harness={", app.indexOf("<ChatRoom")));
+    const room = app.slice(app.indexOf("<CompanionRoom"), app.indexOf("harness={", app.indexOf("<CompanionRoom")));
     expect(room).toContain("composer={{ draftKey: FRONT_DOOR_TEXT_KEY,");
   });
 });
@@ -393,9 +394,15 @@ describe("a companion chat is a pane, and the one room follows it", () => {
     expect(move).toContain('const thread = chatHost.querySelector<HTMLElement>("[data-chat-messages]");');
     expect(move).toContain("kept.thread.scrollTop = kept.end ? kept.thread.scrollHeight : kept.top;");
     expect(app).toMatch(/<div ref=\{setChatDockSlot\}/);
-    expect(app.match(/<ChatRoom\b/g)).toHaveLength(1);
-    expect(app).toContain("</ErrorBoundary></Suspense>, chatHost)}");
-    expect(app).toContain('<SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />');
+    // W6: the room's element is the chat pane module's; App portals it into
+    // the host exactly once, and a companion pane shows the host's slot.
+    const chat = readFileSync(join(process.cwd(), "src/workbench/panes/chat.tsx"), "utf8");
+    expect(app.match(/<ChatRoom\b/g)).toBe(null);
+    expect(chat.match(/<ChatRoom\b/g)).toHaveLength(1);
+    expect(app.match(/<CompanionRoom\b/g)).toHaveLength(1);
+    expect(app).toMatch(/\{chatId && createPortal\(\s*<CompanionRoom\b[\s\S]*?\/>\s*, chatHost\)\}/);
+    expect(app).toContain("<CompanionPane host={chatHost} ctx={ctx} />");
+    expect(chat).toContain('<SingletonSlot host={host} name="conversation" active={ctx.visible} />');
     // The pane on screen is the open conversation.
     expect(app).toContain("if (chatPane && chatPane !== chatId) setChatId(chatPane);");
   });

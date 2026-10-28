@@ -20,12 +20,21 @@ const element = (name: string) => {
 };
 
 describe("the shell keeps its memoized children's props stable", () => {
-  it.each(["SessionSidebar", "BrowserPane", "TerminalLayer"])(
+  it.each(["SessionSidebar", "BrowserBody", "TerminalLayer"])(
     "%s gets no inline closure — its handlers go through useStableHandlers",
     (name) => {
       expect(element(name)).not.toMatch(/=>/);
     },
   );
+
+  it("the browser pane's body hands BrowserPane exactly App's props (W6)", () => {
+    // `BrowserBody` (workbench/panes/browser) only wraps the memoized pane
+    // in its boundary: no prop of its own, so App's stable ones arrive as
+    // they left.
+    const body = read("src/workbench/panes/browser.tsx");
+    expect(body).toContain("<BrowserPane {...props} />");
+    expect(body.match(/<BrowserPane\b/g)).toHaveLength(1);
+  });
 
   it("the browser pane hands its memoized page chat no inline closure or object", () => {
     const pane = read("src/components/BrowserPane.tsx");

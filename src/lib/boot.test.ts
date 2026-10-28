@@ -107,6 +107,7 @@ describe("the animation never gates actionability", () => {
     //   2. `tourActive`      — a coachmark pinned to a moving plate misses
     //   3. the tour's render — same, at the mount site
     //   4. the document plate's "Loading…" — a flash inside parting doors
+    //      (W6: handed to the plan pane's body as `plateMoving`)
     //   5. the conversation island's `clearanceKey` — the island measures its
     //      clearance against the plate, so it re-measures when the doors land
     // Plus the destructuring in App's body. A sixth consumer needs its own
@@ -231,19 +232,56 @@ describe("boot-path JS contract", () => {
     expect(app).not.toMatch(/selectSurface\("runs"\)/);
   });
 
-  it("the heavy surfaces never return to App's static import list", () => {
+  // W6: the pane bodies moved to `src/workbench/panes/*`, one module per
+  // kind. Those modules are static (they replaced JSX that was App's own),
+  // so they are on the boot path too, and each heavy body's lazy boundary
+  // moved into the pane that renders it.
+  const PANES_DIR = join(process.cwd(), "src/workbench/panes");
+  const panes = readdirSync(PANES_DIR)
+    .filter((f) => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f))
+    .map((f) => ({ file: f, src: readFileSync(join(PANES_DIR, f), "utf8") }));
+
+  it("the heavy surfaces never return to the static import list of App or a pane", () => {
     for (const name of LAZY_ONLY) {
-      const staticImport = new RegExp(
-        `^import (?!type\\b)[^;]*from "\\./components/${name}"`,
-        "m",
-      );
-      expect(app.match(staticImport), `${name} is statically imported`).toBe(
-        null,
-      );
-      expect(
-        app.includes(`import("./components/${name}")`),
-        `${name} lost its lazy() import`,
-      ).toBe(true);
+      const fromApp = new RegExp(`^import (?!type\\b)[^;]*from "\\./components/${name}"`, "m");
+      expect(app.match(fromApp), `${name} is statically imported by App`).toBe(null);
+      const fromPane = new RegExp(`^import (?!type\\b)[^;]*from "\\.\\./\\.\\./components/${name}"`, "m");
+      for (const { file, src } of panes) expect(src.match(fromPane), `${name} is statically imported by panes/${file}`).toBe(null);
+      const lazyIn = [
+        ...(app.includes(`import("./components/${name}")`) ? ["App.tsx"] : []),
+        ...panes.filter(({ src }) => src.includes(`import("../../components/${name}")`)).map(({ file }) => `panes/${file}`),
+      ];
+      expect(lazyIn.length, `${name} lost its lazy() import`).toBeGreaterThan(0);
+    }
+  });
+
+  it("App reaches every pane body through its kind's module, and each is where its chunk loads", () => {
+    // One module per kind; App imports the panes, never their bodies.
+    const kinds = ["door", "plan", "chat", "terminals", "file", "browser", "drafter", "review", "servers", "memory"];
+    for (const kind of kinds) {
+      expect(panes.some(({ file }) => file === `${kind}.tsx`), `no panes/${kind}.tsx`).toBe(true);
+      expect(app, `App does not import panes/${kind}`).toContain(`from "./workbench/panes/${kind}"`);
+    }
+    // Where each lazy body's chunk is declared.
+    const LOADS: Record<string, string[]> = {
+      "plan.tsx": ["PlanEditor", "plan/PlanPane", "PlanToc"],
+      "drafter.tsx": ["PromptDrafter", "BookshelfView", "AgentShelf", "DocumentsMenu"],
+      "chat.tsx": ["agent/AgentPane", "ChatRoom"],
+      "browser.tsx": ["BrowserPane"],
+      "file.tsx": ["FileViewer"],
+      "review.tsx": ["ReviewPanel"],
+      "servers.tsx": ["ServersPane"],
+      "memory.tsx": ["MemorySurface"],
+    };
+    for (const [file, names] of Object.entries(LOADS)) {
+      const src = panes.find((p) => p.file === file)!.src;
+      for (const name of names) expect(src, `panes/${file} lazy-loads ${name}`).toContain(`import("../../components/${name}")`);
+    }
+    // The terminal wall's slot rides the terminal layer's chunk.
+    expect(panes.find((p) => p.file === "terminals.tsx")!.src).toContain('import("../TerminalLayer")');
+    // The stage and the strip stay a chunk: no pane imports them statically.
+    for (const { file, src } of panes) {
+      expect(src.match(/^import (?!type\b)[^;]*from "\.\.\/(WorkbenchStage|TabStrip|reducer)"/m), `panes/${file} statically imports the stage`).toBe(null);
     }
   });
 
@@ -262,8 +300,10 @@ describe("boot-path JS contract", () => {
         .filter((m): m is RegExpMatchArray => m !== null)
         .map((m) => `${m[1]}/${m[2]}`);
     expect(statics(app), "App statically imports a pane folder").toEqual([]);
-    expect(app).toContain('import("./components/agent/AgentPane")');
-    expect(app).toContain('import("./components/plan/PlanPane")');
+    const chat = readFileSync(join(process.cwd(), "src/workbench/panes/chat.tsx"), "utf8");
+    const plan = readFileSync(join(process.cwd(), "src/workbench/panes/plan.tsx"), "utf8");
+    expect(chat).toContain('import("../../components/agent/AgentPane")');
+    expect(plan).toContain('import("../../components/plan/PlanPane")');
 
     const offenders: string[] = [];
     const walk = (dir: string) => {

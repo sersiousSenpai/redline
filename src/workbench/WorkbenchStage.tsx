@@ -20,7 +20,6 @@
 import { lazy, memo, Suspense, useCallback, useDeferredValue, useLayoutEffect, useMemo, useRef, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 
 import { ErrorBoundary } from "../components/ErrorBoundary";
-import { PersistentPortalSlot } from "../components/PersistentPortalSlot";
 import { rafCoalesce } from "../lib/raf";
 import { beginResizeSession, endResizeSession } from "../lib/resizeSession";
 import { activeTabOf, isSplit, paneIdsOf, paneTitle, type AnyPane, type LayoutNode, type Tab, type TabSet } from "./model";
@@ -378,32 +377,9 @@ function PaneFallback({ region, error, reset }: { region: string; error: Error; 
   );
 }
 
-/** A singleton's slot: `PersistentPortalSlot`, taking the host only while
- *  the pane is visible, so a slot in a hidden kept tab cannot steal it. The
- *  second visible slot (W5's splits) shows where the body went. */
-export function SingletonSlot({ host, name, active }: { host: HTMLElement; name: string; active: boolean }) {
-  return <PersistentPortalSlot host={host} name={name} active={active} />;
-}
-
-/** What a second pane of a singleton shows while another pane holds the
- *  body: where it is, and a way to bring it here. */
-export function SingletonElsewhere({ what, onBringHere }: { what: string; onBringHere: () => void }) {
-  return (
-    <div className="rl-wb-elsewhere" role="status">
-      <p>Showing {what} in the other pane</p>
-      <button type="button" onClick={onBringHere}>Bring here</button>
-    </div>
-  );
-}
-
-/** A singleton's pane (the plan, the browser), named by its kind: the
- *  holder (`singletonHolder`) shows the slot; another visible pane shows
- *  where the body went, and "Bring here" makes it the holder. */
-export function Singleton({ host, pane, ctx, holder, bring }: { host: HTMLElement; pane: AnyPane; ctx: PaneContext; holder: string | undefined; bring: (paneId: string) => void }) {
-  return ctx.visible && holder !== pane.id
-    ? <SingletonElsewhere what={`the ${pane.kind}`} onBringHere={() => bring(pane.id)} />
-    : <SingletonSlot host={host} name={pane.kind} active={ctx.visible} />;
-}
+// The singleton slots live in `./singleton` (the pane modules read them on
+// the boot path); re-exported for the stage's own readers.
+export { Singleton, SingletonElsewhere, SingletonSlot } from "./singleton";
 
 /** The focused visible pane of the active tab, for App's door/drafter rules. */
 export function focusedPaneOf(set: TabSet | null | undefined): AnyPane | null {

@@ -97,7 +97,7 @@ export interface PlanEditorCollab {
   onProvider?: (handle: CollabProviderHandle | null) => void;
 }
 
-interface PlanEditorProps {
+export interface PlanEditorProps {
   /** Sidecar-augmented markdown from the latest revision. */
   markdown: string;
   sections: Section[];

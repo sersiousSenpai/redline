@@ -134,13 +134,22 @@ describe("AgentPane", () => {
     expect(after.onShowTerminal).toBe(before.onShowTerminal);
   });
 
-  it("App hands it no inline closure or object literal", () => {
-    const app = readFileSync("src/App.tsx", "utf8");
-    const start = app.indexOf("<AgentPane\n");
+  it("its pane hands it no inline closure or object literal, and App feeds that pane stable values", () => {
+    // W6: the element lives in the chat pane module; App hands the pane the
+    // session's facts and the stable handlers.
+    const pane = readFileSync("src/workbench/panes/chat.tsx", "utf8");
+    const start = pane.indexOf("<AgentPane\n");
     expect(start).toBeGreaterThan(-1);
-    const element = app.slice(start, app.indexOf("/>", start));
+    const element = pane.slice(start, pane.indexOf("/>", start));
     expect(element).not.toMatch(/=>|=\{\{|\? \{/);
-    expect(element).toContain("planState={own ? activeAgentPlanState : null}");
-    expect(element).toContain("fallbackModel={own ? activeAgentModel : null}");
+    expect(element).toContain("planState={own ? facts.planState : null}");
+    expect(element).toContain("fallbackModel={own ? facts.fallbackModel : null}");
+    expect(element).toContain("onFork={harness === \"claude\" ? handlers.onFork : null}");
+    const app = readFileSync("src/App.tsx", "utf8");
+    const facts = app.slice(app.indexOf("const agentFacts = {"), app.indexOf("};", app.indexOf("const agentFacts = {")));
+    expect(facts).toContain("planState: activeAgentPlanState,");
+    expect(facts).toContain("fallbackModel: activeAgentModel,");
+    expect(app).toContain("handlers={agentPaneHandlers}");
+    expect(app).toContain("const agentPaneHandlers = useStableHandlers({");
   });
 });

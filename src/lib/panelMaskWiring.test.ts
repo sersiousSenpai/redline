@@ -94,7 +94,10 @@ describe("panel mask wiring", () => {
     expect(app).toContain('railTab !== "discussion" ? railOtherBody : railKind === "drafter" ? (');
     expect(app).toContain("<div ref={setDrafterDiscussionSlot}");
     expect(app).toContain('discussionContext === "plan" && (railKind === "plan" || railKind === "review") && session && planDiscussable');
-    expect(app).toContain("discussionSlot={drafterDiscussionSlot}");
+    // The drafter pane (W6: workbench/panes/drafter) hands the slot on.
+    const pane = readFileSync("src/workbench/panes/drafter.tsx", "utf8");
+    expect(pane).toContain("discussionSlot={drafterDiscussionSlot}");
+    expect(app).toContain('discussionShown={!paneCollapsed && railTab === "discussion" && railKind === "drafter"}');
     expect(drafter).toMatch(/discussionSlot &&\s*createPortal\(/);
     expect(drafter).toContain("{!onShowDiscussion && sidecarOpen && (");
   });

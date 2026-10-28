@@ -84,24 +84,30 @@ describe("size guard", () => {
     expect(offenders, "use `import(\"./editor/adapters/docx/…\")`").toEqual([]);
   });
 
-  it("App.tsx keeps PlanEditor lazy", () => {
-    const app = files.find(({ rel }) => rel === "App.tsx");
-    expect(app).toBeDefined();
-    expect(
-      /const PlanEditor = lazy\(/.test(app!.text),
-      "PlanEditor statically imported would drag Tiptap into the main chunk",
-    ).toBe(true);
-  });
+  // W6: the pane bodies live in `workbench/panes/*`, and each heavy body's
+  // lazy boundary moved with it. Where a component is declared lazy is the
+  // pane module that renders it; App itself must not import it at all.
+  const LAZY_IN_PANE: ReadonlyArray<readonly [name: string, pane: string, why: string]> = [
+    ["PlanEditor", "plan.tsx", "drag Tiptap into the main chunk"],
+    // B1d lazy boundaries: each carries a vendor family the boot path must
+    // not pay for (Tiptap/prosemirror, the markdown→PM parser).
+    ["PromptDrafter", "drafter.tsx", "drag its vendor family into the main chunk"],
+    ["MemorySurface", "memory.tsx", "drag its vendor family into the main chunk"],
+    // No vendor family, just ~10 kB of surface opened on demand, which sat
+    // on the boot path by omission until boot JS reached its ceiling.
+    ["ServersPaneBody", "servers.tsx", "put the Localhost surface on the boot path"],
+  ];
+  for (const [name, pane, why] of LAZY_IN_PANE) {
+    it(`panes/${pane} keeps ${name} lazy, and App never imports it`, () => {
+      const src = files.find(({ rel }) => rel === `workbench/panes/${pane}`)!.text;
+      expect(new RegExp(`const ${name} = lazy\\(`).test(src), `${name} statically imported would ${why}`).toBe(true);
+      const app = files.find(({ rel }) => rel === "App.tsx")!.text;
+      const component = name === "ServersPaneBody" ? "ServersPane" : name;
+      expect(app).not.toMatch(new RegExp(`^import (?!type\\b)[^;]*from "\\./components/${component}"`, "m"));
+    });
+  }
 
-  // B1d lazy boundaries. Each of these surfaces carries a vendor family the
-  // boot path must not pay for (Tiptap/prosemirror, the audio+discussion
-  // stack, the markdown→PM parser + block serializer).
-  for (const name of [
-    "PromptDrafter",
-    "VoicePanel",
-    "ShareSnapshotDialog",
-    "MemorySurface",
-  ]) {
+  for (const name of ["VoicePanel", "ShareSnapshotDialog"]) {
     it(`App.tsx keeps ${name} lazy`, () => {
       const app = files.find(({ rel }) => rel === "App.tsx");
       expect(app).toBeDefined();
@@ -112,21 +118,12 @@ describe("size guard", () => {
     });
   }
 
-  it("App.tsx keeps the Localhost surface lazy", () => {
-    // No vendor family, just ~10 kB of surface opened on demand, which sat on
-    // the boot path by omission until boot JS reached its ceiling.
-    const app = files.find(({ rel }) => rel === "App.tsx")!;
-    expect(app.text).toMatch(/const ServersPane = lazy\(/);
-    expect(app.text).not.toMatch(/import \{ ServersPane \} from/);
-  });
-
   // The markdown-rendering stack. `MarkdownView` value-imports markdown-it,
   // markdown-it-task-lists and highlight.js with its grammars — ~670 kB of source
   // that reached the boot path through ONE chain: App → CommentCard →
   // CommentThread → MarkdownView. These pin the chain's root.
   for (const name of [
     "CommentCard",
-    "ReviewPanel",
     "ReviewDiscussionPane",
     "ReadmeModal",
   ]) {
@@ -139,6 +136,11 @@ describe("size guard", () => {
       ).toBe(true);
     });
   }
+
+  it("panes/review.tsx keeps ReviewPanel lazy — it is the markdown stack's boot path", () => {
+    const review = files.find(({ rel }) => rel === "workbench/panes/review.tsx")!.text;
+    expect(/const ReviewPanel = lazy\(/.test(review), "ReviewPanel statically imported drags markdown-it + highlight.js onto the boot path").toBe(true);
+  });
 
   it("MarkdownView is never a static import of App", () => {
     // Directly, or through any component App still imports statically. The

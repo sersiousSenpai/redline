@@ -237,10 +237,14 @@ describe("drafter mount wiring", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
   it("mounts from resolveDrafterMountDoc, and the keyed remount survives", () => {
-    expect(app).toContain("resolveDrafterMountDoc(");
-    expect(app).toContain("doc={drafterMount.doc}");
+    // W6: the drafter's body is the drafter pane's (workbench/panes).
+    const pane = readFileSync(join(process.cwd(), "src/workbench/panes/drafter.tsx"), "utf8");
+    expect(pane).toContain("resolveDrafterMountDoc(");
+    expect(pane).toContain("doc={drafterMount.doc}");
     // Load-bearing: TipTap captures content at creation.
-    expect(app).toContain("key={drafterDraftId");
+    expect(pane).toContain("key={drafterDraftId");
+    // App hands the pane the cache itself, never a copy of a mount doc.
+    expect(app).toContain("drafterSessionCache={drafterSessionCache}");
   });
 
   it("the persist no longer pushes a mount prop back at the editor", () => {

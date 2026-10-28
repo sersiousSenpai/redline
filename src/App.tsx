@@ -16,8 +16,6 @@ import {
   useState,
 } from "react";
 import type { ReactNode } from "react";
-import { ZoomButton } from "./components/ZoomButton";
-import { DocWidthToggle } from "./components/DocWidthToggle";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,14 +27,6 @@ import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { isClaudeWorking } from "./lib/claudeWorking";
 import { heldPlanByTerminal, heldTerminalIds } from "./lib/heldTerminals";
-// Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
-/** How long a direct run's flight pill stays up: through the launch, not the
- *  run — after this the tile is the status. */
-
-const loadPlanEditor = () => import("./components/PlanEditor");
-const PlanEditor = lazy(() =>
-  loadPlanEditor().then((m) => ({ default: m.PlanEditor })),
-);
 import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
 import { EmptyState } from "./components/EmptyState";
@@ -102,7 +92,6 @@ const AttentionAlerts = lazy(() => import("./components/AttentionAlerts").then(m
 import type { AlertTarget } from "./lib/attentionAlerts";
 import { Header } from "./components/Header";
 import { planBuildState, sessionMode } from "./lib/sessionMode";
-import { Button } from "./components/ui/Button";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
 // only mounts when the share dialog opens.
 const ShareSnapshotDialog = lazy(() =>
@@ -134,7 +123,6 @@ import { DockContextStrip } from "./components/DockContextStrip";
 // chunk loads then (about 5 kB of boot JS, W1).
 const PresenceBar = lazy(() => import("./components/PresenceBar").then((m) => ({ default: m.PresenceBar })));
 import {
-  collabRevisionKey,
   collabRoomBase,
   encodeJoinCode,
   presenceColor,
@@ -193,36 +181,7 @@ const FeedbackPanel = lazy(() => import("./components/plan/FeedbackPanel"));
 const FilesRail = lazy(() => import("./workbench/FilesRail"));
 const QuickOpen = lazy(() => import("./workbench/QuickOpen"));
 const ChangesRail = lazy(() => import("./workbench/ChangesRail"));
-// The table-of-contents rail renders only once opened (about 6 kB, W1).
-const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
-// Lazy: the read-only viewer only mounts once a folder tab opens a file.
-const FileViewer = lazy(() =>
-  import("./components/FileViewer").then((m) => ({ default: m.FileViewer })),
-);
-// The largest unclaimed lever on the boot path (109 KB source). The pane
-// mounts only when the browser surface is selected, and `browserVisible` is
-// already false during the boot choreography — the chunk fetch hides in the
-// same gate.
-const loadBrowserPane = () => import("./components/BrowserPane");
-const BrowserPane = lazy(() =>
-  loadBrowserPane().then((m) => ({ default: m.BrowserPane })),
-);
 import { MenuOverlayProvider } from "./components/menuOverlay";
-// Same Tiptap/ProseMirror stack as PlanEditor — lazy for the same reason. The
-// landing's type-to-start seed keeps buffering in App's window listener until
-// the chunk mounts and consumeSeed runs, so the handoff stays lossless.
-/** The Drafter's chunk, as a promise we can also trigger early.
- *
- *  `lazy()` alone means the FIRST open pays for the fetch+parse while the
- *  spring is already running: the animation measures and flies a Suspense
- *  fallback, then the real editor swaps in mid-flight. That is exactly why the
- *  first trip from the Front Door was janky and every one after it was smooth.
- *  Warmed at idle once the shell has settled (see `warmDrafterChunk` below), so
- *  by the time anyone presses ⏎ the first open is the same as the tenth. */
-const loadPromptDrafter = () => import("./components/PromptDrafter");
-const PromptDrafter = lazy(() =>
-  loadPromptDrafter().then((m) => ({ default: m.PromptDrafter })),
-);
 import type { DrafterSaveState } from "./components/PromptDrafter";
 // Lazy: a settings pane. Its module also feeds MemorySurface (class tree +
 // portability sections), so the chunk is shared with that surface's family.
@@ -231,32 +190,12 @@ const MemoryInspector = lazy(() =>
     default: m.MemoryInspector,
   })),
 );
-// Off the boot path. `MemorySurface` is 85KB and structurally identical to the
-// surfaces already lazy here (the drafter, the voice panel) — it was static
-// only by omission, and boot JS sits at the budget ceiling.
-const loadMemorySurface = () => import("./components/MemorySurface");
-const MemorySurface = lazy(() =>
-  loadMemorySurface().then((m) => ({ default: m.MemorySurface })),
-);
-
-// Off the boot path for the same reason as MemorySurface: the Localhost
-// surface is a pure function of one scan, opened on demand, and static only
-// by omission while boot JS sits at its ceiling.
-const loadServersPane = () => import("./components/ServersPane");
-const ServersPane = lazy(() =>
-  loadServersPane().then((m) => ({ default: m.ServersPane })),
-);
-// Off the boot path, and this one is not optional: boot JS sits at ~99% of the
-// size budget, so a chat room in the boot chunk would fail `size-budget.json`
-// outright. It loads when the door's third destination is taken.
-const loadChatRoom = () => import("./components/ChatRoom");
-const ChatRoom = lazy(() => loadChatRoom().then((m) => ({ default: m.ChatRoom })));
-// Every lazy surface body's chunk, keyed by the surface that mounts it. The
-// boot effect prefetches the LANDING surface's entry the moment
-// `initialSurface` resolves — the doors' choreography covers the fetch, so a
-// lazy landing never blanks behind the parting plates (boot.test.ts pins
-// this). Review and servers are static; document warms the editor a held
-// session would mount.
+// Every lazy surface body's chunk, keyed by the surface that mounts it (the
+// loaders live with their panes, `workbench/panes/*`). The boot effect
+// prefetches the LANDING surface's entry the moment `initialSurface`
+// resolves — the doors' choreography covers the fetch, so a lazy landing
+// never blanks behind the parting plates (boot.test.ts pins this). Document
+// warms the editor a held session would mount.
 const SURFACE_CHUNK_LOADERS: Partial<
   Record<string, () => Promise<unknown>>
 > = {
@@ -288,7 +227,7 @@ const VoicePanel = lazy(() =>
 );
 import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
-import { computeParagraphDiff, type ParagraphDiff } from "./diff";
+import { computeParagraphDiff } from "./diff";
 import { blockIdByAnchorId } from "./editor/sectionMaps";
 import { useTextSelection } from "./hooks/useTextSelection";
 import {
@@ -340,7 +279,6 @@ import { MonochatContext } from "./components/MonochatContext";
 // `import type` is erased, so the handle's type costs nothing.
 const loadTerminalLayer = () => import("./workbench/TerminalLayer");
 const TerminalLayer = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalLayer })));
-const TerminalWallSlot = lazy(() => loadTerminalLayer().then((m) => ({ default: m.TerminalWallSlot })));
 import type { TerminalStatus, TerminalTabsHandle } from "./components/TerminalTabs";
 const CloseWallDialog = lazy(() => import("./workbench/CloseWallDialog").then((m) => ({ default: m.CloseWallDialog })));
 // Which terminal a session runs in, and what its CLI is doing
@@ -353,12 +291,6 @@ import { attentionKinds, reduceLaunches, sidebarActivity, sidebarLaunches, useSe
 // selection shows that menu.
 const loadCommentComposer = () => import("./components/CommentComposer");
 const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
-// The Agent pane: the session's conversation as a centre tab (W2), with
-// its header and the Chat | CLI toggle. Rides the conversation's chunk.
-const AgentPane = lazy(() => import("./components/agent/AgentPane"));
-// The Plan tab's chrome (header, notices, footer) around the one plan body.
-const loadPlanPane = () => import("./components/plan/PlanPane");
-const PlanPane = lazy(loadPlanPane);
 import { FlashOverlay } from "./components/FlashOverlay";
 // ⌘K's palette paints nothing until it opens, so it rides its own chunk,
 // loaded on the first ⌘K.
@@ -370,12 +302,7 @@ import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, i
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
-import {
-  TOC_RAIL_W,
-  TOC_RAIL_W_WIDE,
-  clampTocDrag,
-  snapTocWide,
-} from "./lib/tocRail";
+import { TOC_RAIL_W, TOC_RAIL_W_WIDE } from "./lib/tocRail";
 import {
   defaultWorkspace,
   headerSurfaces,
@@ -454,8 +381,18 @@ import type { PaneContext } from "./workbench/WorkbenchStage";
 // that move it nor the strip that shows it (the doors cover the fetch).
 const loadWorkbenchStage = () => import("./workbench/WorkbenchStage");
 const WorkbenchStage = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.WorkbenchStage })));
-const SingletonSlot = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.SingletonSlot })));
-const Singleton = lazy(() => loadWorkbenchStage().then((m) => ({ default: m.Singleton })));
+// The pane bodies (W6): one module per kind, each lazy where its body was.
+import { AgentPaneView, CompanionPane, CompanionRoom, loadChatRoom } from "./workbench/panes/chat";
+import { BrowserBody, BrowserPaneView, loadBrowserPane } from "./workbench/panes/browser";
+import { DocZoomControl } from "./workbench/panes/docControls";
+import { DoorPane } from "./workbench/panes/door";
+import { DrafterPane, loadPromptDrafter, type DrafterRecovery } from "./workbench/panes/drafter";
+import { FilePane } from "./workbench/panes/file";
+import { MemoryPane, loadMemorySurface } from "./workbench/panes/memory";
+import { PlanBody, PlanContentsRail, PlanPaneView, loadPlanEditor, loadPlanPane } from "./workbench/panes/plan";
+import { ReviewPane } from "./workbench/panes/review";
+import { ServersPane, loadServersPane } from "./workbench/panes/servers";
+import { TerminalsPane } from "./workbench/panes/terminals";
 import { Columns2 } from "lucide-react";
 import { latestDisplayVersion } from "./lib/revisionVersions";
 import { perfProbeOn, setPerfProbe } from "./lib/perfProbeSwitch";
@@ -471,10 +408,8 @@ import {
   drafterModeKey,
   readDrafterShadow,
   resolveDraftOpen,
-  resolveDrafterMountDoc,
   writeDrafterFlush,
   type DrafterSessionEntry,
-  type DrafterShadow,
 } from "./lib/drafterCache";
 import { useBootChoreography } from "./hooks/useBootChoreography";
 /** Toggle the curtain attribute only on a real flip — `setAttribute` with an
@@ -515,12 +450,9 @@ import {
   DOC_PAD_R_NARROW,
   DOC_PAD_R_WIDE,
   docControlPose,
-  docArticleWidth,
   DOC_MEASURE_MIN,
 } from "./lib/docControl";
 import {
-  beginResizeSession,
-  endResizeSession,
   installWindowResizeSession,
   isResizing,
   onResizeSession,
@@ -573,9 +505,6 @@ const commentCardChunk = warmableChunk(() =>
   import("./components/CommentCard").then((m) => ({ default: m.CommentCard })),
 );
 const CommentCard = lazy(commentCardChunk.load);
-/** The code-review surface's whole body, including DiffView and the push
- *  dialog. Reached by opening a review, never on boot. */
-const ReviewPanel = lazy(() => import("./components/ReviewPanel"));
 /** The review's discussion sidecar — a second markdown consumer. */
 const ReviewDiscussionPane = lazy(
   () => import("./components/ReviewDiscussionPane"),
@@ -615,20 +544,6 @@ const DecisionWindowBanner = lazy(() =>
   import("./components/DecisionWindowBanner").then((m) => ({ default: m.DecisionWindowBanner })),
 );
 
-const BookshelfView = lazy(() =>
-  import("./components/BookshelfView").then((m) => ({
-    default: m.BookshelfView,
-  })),
-);
-// Lazy: the agent shelf (harness A3) is the Bookshelf's sibling sheet.
-const AgentShelf = lazy(() =>
-  import("./components/AgentShelf").then((m) => ({
-    default: m.AgentShelf,
-  })),
-);
-// The drafter's documents menu: rendered only in the drafter's body, which
-// is itself lazy, so it rides its own chunk (about 9 kB of boot JS, W1).
-const DocumentsMenu = lazy(() => import("./components/DocumentsMenu").then((m) => ({ default: m.DocumentsMenu })));
 // A confirmation that opens on a gesture, so its own chunk.
 const SendToRedlineDialog = lazy(() => import("./components/SendToRedlineDialog").then((m) => ({ default: m.SendToRedlineDialog })));
 import type { ManualPlanState } from "./components/PlanStateMenu";
@@ -644,7 +559,6 @@ import type {
   NewCommentRequest,
   PlanDecisionWindowEvent,
   PlanReceivedEvent,
-  Revision,
   ReviewSession,
   Section,
   SessionSummary,
@@ -722,29 +636,6 @@ function isDetachError(err: unknown): boolean {
     msg.includes("no plan is currently waiting")
   );
 }
-
-/** An actionable toast. Plain strings stay the common case; this is for the
- *  toasts that report a switch the app chose NOT to make for you, which have to
- *  offer the switch itself. */
-/** The standard per-surface crash-containment fallback (T2.1).
- *
- *  14 of the 21 recorded runtime failures were WKWebView render errors and 12
- *  took the whole app down, because the only boundaries in the tree were the
- *  header, the content area and the root — so a cold or stale lazy chunk in
- *  ONE surface blanked every surface. A boundary sitting directly above each
- *  lazily-loaded surface settles that failure at surface granularity instead,
- *  and names the surface in the `render_crash` friction row it writes
- *  (`ErrorBoundary.componentDidCatch` -> `record_render_crash`).
- *
- *  Deliberately a fallback factory rather than a wrapper component: the
- *  literal `<ErrorBoundary region="…">` stays at each call site, which is what
- *  `src/lib/surfaceBoundaries.test.ts` reads. */
-const surfaceFallback =
-  (region: string) => (err: Error, reset: () => void) => (
-    <div className="flex-1 overflow-hidden flex items-center justify-center">
-      <BoundaryFallback region={region} error={err} reset={reset} />
-    </div>
-  );
 
 // The Front Door's sentence, read and written WITHOUT subscribing to it: the
 // composer owns it, and App touches it only when something is sent, cleared
@@ -1433,13 +1324,7 @@ function App() {
   // A third loading state: the app died between a keystroke and its write, and
   // the user has to choose which copy is the document. Rendered as a card in
   // place of the body — the same shape the "Opening…" gate already is.
-  const [drafterRecovery, setDrafterRecovery] = useState<{
-    forId: string;
-    shadow: DrafterShadow;
-    /** What the database has. Chosen by "Discard". */
-    stored: JSONContent | null;
-    projectPath: string | null;
-  } | null>(null);
+  const [drafterRecovery, setDrafterRecovery] = useState<DrafterRecovery | null>(null);
   // Latest content ever on screen per draft id, for this app run. Written on
   // every persist flush; consulted before the DB on every open. In-session,
   // in-memory ≥ DB always — during the persist retry window the DB is behind,
@@ -9220,9 +9105,171 @@ function App() {
     onInvite: surfaceEnabled(effectiveWorkspace, "collab") ? () => setInviteOpen(true) : null,
     onMove: openMovePlan,
   };
-  // The plan body, built inside the centre's render below and mounted once
-  // in `planHost` after it (siblings render in order).
-  let planBodyNow: ReactNode = null;
+  // ── The centre's panes (W6: `workbench/panes/*`) ──────────────────────────
+  // The plan body: mounted once, in `planHost`, and the drafter's spring
+  // fades it where the door was.
+  const planBody = (
+    <PlanBody
+      docScrollerRef={docScrollerRef}
+      documentRef={documentRef}
+      tocDocked={tocDocked}
+      tocRailW={tocRailW}
+      tocDragging={tocDragging}
+      docSurfaceActive={docSurfaceActive}
+      docWide={docWide}
+      docMeasure={docMeasure}
+      joinedRoom={joinedRoom}
+      collaboratorCollab={collaboratorCollab}
+      collabComments={collabComments}
+      yjsBackend={yjsBackend}
+      joinedActive={joinedActive}
+      leaveJoined={leaveJoined}
+      shellReady={shellReady}
+      plateMoving={bootAnimating}
+      activeId={activeId}
+      sessionReady={sessionReady}
+      isViewingHistorical={isViewingHistorical}
+      viewedRevision={viewedRevision}
+      historicalDiff={historicalDiff}
+      latest={latest}
+      focusedCommentId={focusedCommentId}
+      focusNonce={focusNonce}
+      handleHighlightClick={handleHighlightClick}
+      setViewedVersionNumber={setViewedVersionNumber}
+      sections={sections}
+      latestComments={latestComments}
+      threadRevisions={threadRevisions}
+      addEditorComment={addEditorComment}
+      updateComment={updateComment}
+      deleteComment={deleteComment}
+      planActionsRef={planActionsRef}
+      lockedEditToast={lockedEditToast}
+      ownerCollab={ownerCollab}
+    />
+  );
+  // A door tab converting into review, Localhost or Memory springs out of
+  // the island's box (the drafter has its own spring, the browser none: a
+  // native webview ignores transforms).
+  const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
+    swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
+      ? <SpringSwap from={swapFrom} onArrived={() => { convertedPaneRef.current = null; setSwapFrom(null); }}>{body}</SpringSwap>
+      : body;
+  const openReviewTerminal = (cwd: string | null, command?: string) => {
+    suppressTerminalRevealFocus();
+    void openTerminal(cwd).then(async id => {
+      if (!id) { setToast("Couldn't open a terminal", 6000); return; }
+      if (command) {
+        const result = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: command }]);
+        if (!result.ok) setToast(`Couldn't prepare the command: ${result.reason}`, 6000);
+      }
+    }).catch(error => setToast(`Couldn't open a terminal: ${String(error)}`, 6000));
+  };
+  // What the Agent pane of the open session's own terminal is told.
+  const agentFacts = {
+    activeId,
+    backend: session?.backend ?? null,
+    projectPath: session?.projectPath ?? null,
+    summary: activeAgentSummary,
+    pendingMarks: pendingComments.length,
+    planMarkdown: latest?.rawPlanMarkdown ?? null,
+    planState: activeAgentPlanState,
+    fallbackModel: activeAgentModel,
+  };
+  const renderPane = (pane: AnyPane, ctx: PaneContext): ReactNode => {
+    switch (pane.kind) {
+      case "door":
+        return <DoorPane ctx={ctx} />;
+      case "plan":
+        return (
+          <PlanPaneView
+            pane={pane}
+            ctx={ctx}
+            host={planHost}
+            holder={singletonHolder(wb.getState(), "plan", planHolder)}
+            bring={setPlanHolder}
+            chrome={{ sessionId: activeId, session, latestVersion: latest?.versionNumber ?? null, comments: threadComments, viewing: planViewing, contents: planContents, footer: planFooter, notices: planNotices, planMenu, onShowTerminal: planShowTerminal }}
+          />
+        );
+      case "file":
+        return <FilePane data={pane.data} preview={!!pane.preview} onPin={() => wb.dispatch({ type: "pinPane", paneId: pane.id })} onClose={handleCloseFile} onSaved={toastSaved} />;
+      case "browser":
+        return <BrowserPaneView host={browserHost} pane={pane} ctx={ctx} holder={browserHeld} bring={setBrowserHolder} />;
+      case "chat": {
+        if (pane.data.source === "companion") return <CompanionPane host={chatHost} ctx={ctx} />;
+        const kind = terminalKinds.get(pane.data.terminalId);
+        return (
+          <AgentPaneView
+            data={pane.data}
+            ctx={ctx}
+            facts={agentFacts}
+            launches={flowLaunches}
+            liveTermIds={liveTermIds}
+            termState={kind === "needs-you" ? "needs-you" : kind === "working" ? "working" : null}
+            planOpen={view.visibleKinds.includes("plan")}
+            talking={voiceDocked}
+            onCliView={setCliView}
+            handlers={agentPaneHandlers}
+          />
+        );
+      }
+      case "terminals":
+        return <TerminalsPane paneId={pane.id} ctx={ctx} />;
+      case "drafter":
+        return (
+          <DrafterPane
+            drafterSessionCache={drafterSessionCache}
+            drafterLoaded={drafterLoaded}
+            setDrafterLoaded={setDrafterLoaded}
+            drafterDraftId={drafterDraftId}
+            setDrafterDraftId={setDrafterDraftId}
+            drafterOpenIds={drafterOpenIds}
+            closeDrafterDoc={closeDrafterDoc}
+            drafterShelfOpen={drafterShelfOpen}
+            setDrafterShelfOpen={setDrafterShelfOpen}
+            agentShelfOpen={agentShelfOpen}
+            setAgentShelfOpen={setAgentShelfOpen}
+            drafterProject={drafterProject}
+            drafterProjectPath={drafterProjectPath}
+            setDrafterProjectPath={setDrafterProjectPath}
+            getDrafterLiveMarkdown={getDrafterLiveMarkdown}
+            shelfRunLive={shelfRunLive}
+            setToast={setToast}
+            drafterRecovery={drafterRecovery}
+            setDrafterRecovery={setDrafterRecovery}
+            drafterOpening={drafterOpening}
+            swapFrom={swapFrom}
+            setSwapFrom={setSwapFrom}
+            quietOpen={quietOpen}
+            leaving={planBody}
+            drafterDiscussionSlot={drafterDiscussionSlot}
+            discussionShown={!paneCollapsed && railTab === "discussion" && railKind === "drafter"}
+            showDrafterDiscussion={showDrafterDiscussion}
+            drafterPersist={drafterPersist}
+            projectOptions={projectOptions}
+            launchFromDrafter={launchFromDrafter}
+            readiness={readiness}
+            applyReadinessFix={applyReadinessFix}
+            pendingLaunch={pendingLaunch}
+            setPendingLaunch={setPendingLaunch}
+            drafterSources={drafterSources}
+            attachDrafterFiles={attachDrafterFiles}
+            removeDrafterSource={removeDrafterSource}
+            drafterTemplates={drafterTemplates}
+            useDrafterTemplate={useDrafterTemplate}
+            onExit={() => closeSurfacePane("drafter")}
+            drafterSaveState={drafterSaveState}
+            consumeLandingSeed={consumeLandingSeed}
+            registerDrafterLiveMarkdown={registerDrafterLiveMarkdown}
+          />
+        );
+      case "review":
+        return spring(pane, <ReviewPane review={codeReview} projectOptions={projectOptions} onOpenTerminal={openReviewTerminal} onClose={() => closeSurfacePane("review")} focusPath={reviewFocus} />);
+      case "servers":
+        return spring(pane, <ServersPane scan={devServers.scan} error={devServers.error} onRefresh={devServers.refresh} onStop={devServers.stopServer} onPlanStop={devServers.planStop} projectOptions={projectOptions} onRun={runDevServer} onOpenUrl={openUrlInBrowser} />);
+      case "memory":
+        return spring(pane, <MemoryPane activeSessionId={session?.sessionId ?? null} activeSessionName={session?.projectName ?? null} tabRequest={stageSurface === "memory" ? tabRequest : null} />);
+    }
+  };
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <MonochatContext.Provider value={monochatRouting}>
@@ -9536,820 +9583,56 @@ function App() {
             // outside the plan's scroller: the Plan pane's notices.
             style={{ "--rl-doc-zoom": docZoom, "--rl-toc-docked": tocDocked ? `${tocRailW}px` : "0px" } as React.CSSProperties}
           >
-          {/* Table-of-contents rail (Phase 2). Docked to the left of the
-              document column: the scroller below reserves `TOC_RAIL_W` of left
-              padding while this is open (see `tocDocked`), so the rail sits
-              BESIDE the plan rather than floating over it — responsive when the
-              sidebar narrows the column. Gated by `tocEligible`. */}
-          {(() => {
-            // Under the workbench the rail and its button belong to a Plan
-            // pane on screen; another tab has no document to index.
-            if (!tocEligible || !view.visibleKinds.includes("plan")) return null;
-            return tocOpen ? (
-              <div
-                ref={tocRailRef}
-                className="rl-toc-rail"
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  bottom: 0,
-                  width: `${tocRailW}px`,
-                  zIndex: 20,
-                  display: "flex",
-                  flexDirection: "column",
-                  background: "var(--color-bg-elevated)",
-                  borderRight: "1px solid var(--color-rule)",
-                  boxShadow: "4px 0 16px rgba(0,0,0,0.12)",
-                  transition: tocDragging
-                    ? "none"
-                    : "width 160ms cubic-bezier(0.4,0,0.2,1)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "8px 10px",
-                    borderBottom: "1px solid var(--color-rule)",
-                  }}
-                >
-                  <span
-                    className="font-sans"
-                    style={{
-                      fontSize: "10px",
-                      fontWeight: 700,
-                      letterSpacing: "0.06em",
-                      textTransform: "uppercase",
-                      color: "var(--color-ink-muted)",
-                    }}
-                  >
-                    Contents
-                  </span>
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: "8px" }}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setTocWide(!tocWide)}
-                      title={tocWide ? "Narrow the rail" : "Widen the rail"}
-                      aria-label={
-                        tocWide ? "Narrow the contents rail" : "Widen the contents rail"
-                      }
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        color: "var(--color-ink-muted)",
-                        cursor: "pointer",
-                        fontSize: "12px",
-                        lineHeight: 1,
-                      }}
-                    >
-                      {tocWide ? "⤡" : "⤢"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTocOpen(false)}
-                      title="Hide contents"
-                      aria-label="Hide contents"
-                      style={{
-                        border: "none",
-                        background: "transparent",
-                        color: "var(--color-ink-muted)",
-                        cursor: "pointer",
-                        fontSize: "14px",
-                        lineHeight: 1,
-                      }}
-                    >
-                      ‹
-                    </button>
-                  </div>
-                </div>
-                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                  <Suspense fallback={null}>
-                  <PlanToc
-                    sections={displaySections}
-                    scopeSelector=".doc-article"
-                  />
-                  </Suspense>
-                </div>
-                {/* Drag-to-snap handle on the rail's right edge: transient
-                    width while dragging, release snaps to 230/340 (the width
-                    transition above animates the settle). */}
-                <div
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    const rail = tocRailRef.current;
-                    const scroller = docScrollerRef.current;
-                    if (!rail) return;
-                    (e.currentTarget as HTMLElement).setPointerCapture(
-                      e.pointerId,
-                    );
-                    const left = rail.getBoundingClientRect().left;
-                    setTocDragging(true);
-                    beginResizeSession();
-                    // Written straight onto the two elements that use it. A
-                    // custom property on the doc column would have been tidier
-                    // to read, but it would invalidate style for the entire
-                    // plan document on every frame — which is exactly the cost
-                    // this handle is trying to avoid.
-                    let pending = tocRailW;
-                    const apply = rafCoalesce((px: number) => {
-                      rail.style.width = `${px}px`;
-                      if (scroller) scroller.style.paddingLeft = `${px}px`;
-                    });
-                    const move = (ev: PointerEvent) => {
-                      pending = clampTocDrag(ev.clientX - left);
-                      apply(pending);
-                    };
-                    const up = () => {
-                      apply.cancel();
-                      window.removeEventListener("pointermove", move);
-                      window.removeEventListener("pointerup", up);
-                      const wide = snapTocWide(pending);
-                      setTocDragging(false);
-                      setTocWide(wide);
-                      // The snap often lands back on the width React already
-                      // rendered (drag 230 → 250 → snap 230), in which case its
-                      // style diff writes nothing and the last drag frame would
-                      // stick. Set the resting width explicitly — next frame,
-                      // so the just-restored transition animates the settle.
-                      const rest = wide ? TOC_RAIL_W_WIDE : TOC_RAIL_W;
-                      requestAnimationFrame(() => {
-                        rail.style.width = `${rest}px`;
-                        if (scroller) {
-                          scroller.style.paddingLeft = `${rest}px`;
-                        }
-                      });
-                      endResizeSession();
-                    };
-                    window.addEventListener("pointermove", move);
-                    window.addEventListener("pointerup", up);
-                  }}
-                  title="Drag to resize the contents rail"
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    right: "-3px",
-                    bottom: 0,
-                    width: "6px",
-                    cursor: "col-resize",
-                    zIndex: 21,
-                    touchAction: "none",
-                  }}
-                />
-              </div>
-            ) : (
-              // Sheds "Contents" and stands down to the bare ☰ once the text
-              // column grows out to meet it — see useTextClearance below. The
-              // aria-label is the full name in both forms, so the burger never
-              // becomes an unlabelled glyph to a screen reader. `gap` lives in
-              // .rl-toc-btn rather than here so it can animate closed with the
-              // label; an inline value would outrank the collapsed rule.
-              <button
-                ref={tocBtnRef}
-                type="button"
-                onClick={() => setTocOpen(true)}
-                title="Show contents"
-                aria-label="Show table of contents"
-                className="rl-toc-btn font-sans"
-                style={{
-                  position: "absolute",
-                  top: "10px",
-                  left: "10px",
-                  zIndex: 20,
-                  display: "flex",
-                  alignItems: "center",
-                  padding: "4px 8px",
-                  fontSize: "11px",
-                  fontWeight: 600,
-                  border: "1px solid var(--color-rule)",
-                  borderRadius: "4px",
-                  background: "var(--color-bg-elevated)",
-                  color: "var(--color-ink)",
-                  cursor: "pointer",
-                }}
-              >
-                <span aria-hidden>☰</span>
-                <span className="rl-toc-btn-label">Contents</span>
-              </button>
-            );
-          })()}
-          {(() => {
-            const drafterMount = resolveDrafterMountDoc(
-              drafterSessionCache.current,
-              drafterLoaded,
-              drafterDraftId,
-            );
-            // The shelf is a SHEET over the document, not a replacement for
-            // it. Swapping the whole surface meant opening the shelf hid the
-            // document you were writing — you lost your place to look
-            // something up. Same glass recipe as the launch bar; Esc closes.
-            const drafterShelf = drafterShelfOpen ? (
-              <div
-                className="rl-dl-shelf"
-                data-no-drag="true"
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") setDrafterShelfOpen(false);
-                }}
-              >
-                <Suspense fallback={null}>
-                  <BookshelfView
-                    openDraftId={drafterDraftId}
-                    openIds={drafterOpenIds}
-                    defaultProject={drafterProjectPath}
-                    onOpen={(id) => {
-                      setDrafterDraftId(id);
-                      setDrafterShelfOpen(false);
-                    }}
-                    onCloseDoc={closeDrafterDoc}
-                    onClose={() => setDrafterShelfOpen(false)}
-                  />
-                </Suspense>
-              </div>
-            ) : null;
-            // The agent shelf rides the same sheet recipe: the document stays
-            // mounted underneath, Esc closes. A run closes the sheet so the
-            // user watches the tracked changes land in their document.
-            const agentShelf =
-              agentShelfOpen && drafterDraftId ? (
-                <div
-                  className="rl-dl-shelf"
-                  data-no-drag="true"
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setAgentShelfOpen(false);
-                  }}
-                >
-                  <Suspense fallback={null}>
-                    <AgentShelf
-                      draftId={drafterDraftId}
-                      projectPath={drafterProjectPath}
-                      getLiveMarkdown={getDrafterLiveMarkdown}
-                      onRunStarted={(name) => {
-                        shelfRunLive.current = name;
-                        setAgentShelfOpen(false);
-                        setToast(
-                          `${name} is working — its edits will land as tracked changes.`, 8000,
-                        );
-                      }}
-                      onClose={() => setAgentShelfOpen(false)}
-                    />
-                  </Suspense>
-                </div>
-              ) : null;
-            const drafterBody = drafterRecovery?.forId === drafterDraftId ? (
-              // The crash-recovery choice, as a card rather than a native
-              // confirm. Nothing is destroyed until the user picks.
-              <EmptyState
-                title="Recover unsaved changes?"
-                body={
-                  "This document has edits that didn't reach the database " +
-                  "before Redline last closed. They're still here — pick which " +
-                  "copy is the document."
-                }
-                action={{
-                  label: "Recover them",
-                  onAction: () => {
-                    const r = drafterRecovery;
-                    setDrafterRecovery(null);
-                    setDrafterLoaded({ forId: r.forId, doc: r.shadow.json });
-                    // Land the recovered body now; the shadow clears only once
-                    // the DB write is CONFIRMED.
-                    void persistDraftDoc(
-                      r.forId,
-                      r.shadow.markdown,
-                      r.shadow.json,
-                      r.projectPath,
-                    )
-                      .then(() => clearDrafterShadow(r.forId))
-                      .catch((err) => {
-                        setToast(`Couldn't save the recovered copy: ${err}`, 8000);
-                      });
-                  },
-                }}
-                secondary={{
-                  label: "Discard them",
-                  onAction: () => {
-                    const r = drafterRecovery;
-                    setDrafterRecovery(null);
-                    setDrafterLoaded({ forId: r.forId, doc: r.stored });
-                    clearDrafterShadow(r.forId);
-                  },
-                }}
-              />
-            ) : drafterOpening ||
-              drafterMount === null ||
-              drafterProject?.forId !== drafterDraftId ? (
-              // A body belonging to a DIFFERENT id is the same state as not
-              // loaded at all — the gate makes mounting the wrong body
-              // unrepresentable during a doc switch. The project pick is gated
-              // on the same id for the same reason: it is what the persist
-              // writes, and `upsert_draft` writes `project_path`
-              // unconditionally, so a null must mean "explicitly Home" and
-              // never "I don't know". Waiting here removes "I don't know" from
-              // the reachable states rather than guarding against it downstream.
-              //
-              // The editor is deliberately NOT held back until the spring
-              // lands. Mounting inside the growing container is the point —
-              // the ribbon and page grow with it, which is what "the island
-              // becomes the Drafter" actually looks like. Holding it out meant
-              // an empty box grew and the surface appeared afterwards, which
-              // is a reveal, not an expansion.
-              //
-              // That was only ever unsafe because of the `fill: "backwards"`
-              // bug in SpringSwap, which snapped the surface back to
-              // island-size for a frame at the landing. With the fill correct,
-              // a mid-flight mount rides the transform — and WAAPI transforms
-              // run on the compositor, so even TipTap's expensive first
-              // construction cannot stall the animation.
-              //
-              // Nothing is rendered meanwhile: the growth IS the loading
-              // indicator, and a sentence that appears inside the surface as it
-              // opens and is taken away again is worse than an empty one.
-              swapFrom || quietOpen ? null : (
-                <EmptyState
-                  title="Opening the document…"
-                  body="Reading it from your Bookshelf."
-                />
-              )
-            ) : (
-              // Lazy chunk; fallback matches the doc-loading beat above so a
-              // first open never flashes an empty pane.
-              //
-              // SILENT during a spring. The fallback is a small block of text
-              // at the surface's top-left, and a spring scales the surface up
-              // from the island's box — so that text visibly flew across the
-              // window and grew, then hard-swapped for the editor when the
-              // chunk landed. That was the first-run jank, and only the first
-              // run, because the chunk is cached after. What springs now is an
-              // empty glass surface and the editor fades in behind it.
-              <Suspense
-                fallback={
-                  swapFrom || quietOpen ? null : (
-                    <EmptyState
-                      title="Opening the document…"
-                      body="Reading it from your Bookshelf."
-                    />
-                  )
-                }
-              >
-                <ErrorBoundary region="drafter" fallback={surfaceFallback("drafter")}>
-                  <PromptDrafter
-                    // Remount on the open document so TipTap picks up its content:
-                    // `content` is captured once, at editor creation.
-                    key={drafterDraftId ?? ""}
-                    // Its comment threads live in the rail's Discussion (W4).
-                    discussionSlot={drafterDiscussionSlot}
-                    discussionShown={!paneCollapsed && railTab === "discussion" && railKind === "drafter"}
-                    onShowDiscussion={showDrafterDiscussion}
-                    draftId={drafterDraftId ?? ""}
-                    doc={drafterMount.doc}
-                    onPersist={drafterPersist}
-                    projectOptions={projectOptions}
-                    selectedProject={drafterProjectPath}
-                    onSelectedProjectChange={setDrafterProjectPath}
-                    onLaunch={launchFromDrafter}
-                    readiness={readiness}
-                    onFix={applyReadinessFix}
-                    // ONLY this document's launch. One pending state serves every
-                    // door, so a card keyed to another document (or to the front
-                    // door) would claim a launch that isn't this one's.
-                    pending={
-                      pendingLaunch?.origin === "drafter" &&
-                      pendingLaunch.draftId === drafterDraftId
-                        ? pendingLaunch
-                        : null
-                    }
-                    onDismissPending={() => setPendingLaunch(null)}
-                    sources={drafterSources}
-                    onAttachFiles={attachDrafterFiles}
-                    onRemoveSource={removeDrafterSource}
-                    templates={drafterTemplates}
-                    onUseTemplate={useDrafterTemplate}
-                    onOpenShelf={() => setDrafterShelfOpen(true)}
-                    onOpenAgents={() => setAgentShelfOpen(true)}
-                    // Only when the drafter is living inside the Front Door's
-                    // island; reached by its own route there is nothing to go
-                    // back to.
-                    // Back to the Front Door, which is the Document surface's
-                    // resting state and always has been.
-                    onExit={() => closeSurfacePane("drafter")}
-                    saveState={drafterSaveState}
-                    consumeSeed={consumeLandingSeed}
-                    registerLiveMarkdown={registerDrafterLiveMarkdown}
-                    documentsMenu={
-                      <Suspense fallback={null}>
-                      <DocumentsMenu
-                        openIds={drafterOpenIds}
-                        activeId={drafterDraftId}
-                        defaultProject={drafterProjectPath}
-                        side="above"
-                        onActivate={setDrafterDraftId}
-                        onCloseDoc={closeDrafterDoc}
-                      />
-                      </Suspense>
-                    }
-                  />
-                </ErrorBoundary>
-              </Suspense>
-            );
-            const reviewBody = (
-              <ErrorBoundary region="review pane" fallback={surfaceFallback("review pane")}>
-                <Suspense fallback={null}>
-                  <ReviewPanel
-                    review={codeReview}
-                    projectOptions={projectOptions}
-                    onOpenTerminal={(cwd, command) => {
-                      suppressTerminalRevealFocus();
-                      void openTerminal(cwd).then(async id => {
-                        if (!id) { setToast("Couldn't open a terminal", 6000); return; }
-                        if (command) {
-                          const result = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: command }]);
-                          if (!result.ok) setToast(`Couldn't prepare the command: ${result.reason}`, 6000);
-                        }
-                      }).catch(error => setToast(`Couldn't open a terminal: ${String(error)}`, 6000));
-                    }}
-                    onClose={() => closeSurfacePane("review")}
-                    focusPath={reviewFocus}
-                  />
-                </Suspense>
-              </ErrorBoundary>
-            );
-            const serversBody = (
-              <Suspense fallback={null}>
-                <ServersPane
-                  scan={devServers.scan}
-                  error={devServers.error}
-                  onRefresh={devServers.refresh}
-                  onStop={devServers.stopServer}
-                  onPlanStop={devServers.planStop}
-                  projectOptions={projectOptions}
-                  onRun={runDevServer}
-                  onOpenUrl={openUrlInBrowser}
-                />
-              </Suspense>
-            );
-            const memoryBody = (
-              // fallback={null}: the surface arrives a beat after its plate,
-              // which reads as a settle — a spinner would read as a glitch.
-              // (Also the boundary itself: `lazy` with no Suspense above it
-              // throws to the content-area ErrorBoundary on a cold chunk.)
-              <Suspense fallback={null}>
-                <ErrorBoundary region="memory" fallback={surfaceFallback("memory")}>
-                  <MemorySurface
-                    activeSessionId={session?.sessionId ?? null}
-                    activeSessionName={session?.projectName ?? null}
-                    tabRequest={stageSurface === "memory" ? tabRequest : null}
-                  />
-                </ErrorBoundary>
-              </Suspense>
-            );
-            const planBody = (
-          <div
-            ref={docScrollerRef}
-            className="rl-thin-scroll-y flex-1 overflow-y-auto"
-            style={{
-              paddingLeft: tocDocked ? `${tocRailW}px` : undefined,
-              transition: tocDragging
-                ? "none"
-                : "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
-            }}
-          >
-          <article
-            ref={documentRef}
-            data-tour="editor"
-            className="doc-article mx-auto pl-16 py-10"
-            style={
-              {
-                // Wide view drops the measure entirely and lets the column run
-                // to the pane's edges (`mx-auto` then has nothing to centre);
-                // normal view keeps the 820px reading measure.
-                //
-                // With no document on the plate, neither applies: what is left
-                // there (a loading or revoked notice) centres on its own, and a
-                // wide-view setting left over from a plan must not slide it
-                // sideways. Symmetric, slim gutters instead of the reading ones.
-                ...(docSurfaceActive ? docArticleWidth(docWide, docMeasure) : { maxWidth: "none", paddingRight: "24px" }),
-                paddingLeft: docSurfaceActive ? undefined : "24px",
-                // `--rl-doc-zoom` moved UP one level, to the ancestor every
-                // surface body shares — it was inert in the Drafter from here.
-              } as React.CSSProperties
-            }
-          >
-            {/* Joined (collaborator) view: no local session, no markdown —
-                the body hydrates from the mesh and the editor renders it
-                with full track-changes co-editing. Kept MOUNTED (hidden)
-                while another session is selected: the editor owns the
-                provider, and unmounting it would drop us out of the room. */}
-            {joinedRoom && collaboratorCollab && (
-              <div style={{ display: joinedActive ? undefined : "none" }}>
-                <Suspense fallback={null}>
-                  <ErrorBoundary region="collab plan editor" fallback={surfaceFallback("collab plan editor")}>
-                    <PlanEditor
-                      key={`joined:${collabRevisionKey(joinedRoom.config)}`}
-                      markdown=""
-                      sections={[]}
-                      comments={collabComments}
-                      revisionKey={collabRevisionKey(joinedRoom.config)}
-                      onAddComment={yjsBackend?.addComment}
-                      onUpdateComment={yjsBackend?.updateComment}
-                      onDeleteComment={yjsBackend?.deleteComment}
-                      collab={collaboratorCollab}
-                    />
-                  </ErrorBoundary>
-                </Suspense>
-              </div>
-            )}
-            {joinedActive && joinedRoom?.revoked ? (
-              <EmptyState
-                title="Access revoked"
-                body={
-                  <>
-                    The session owner removed your invite — the live room is
-                    no longer reachable from this instance.{" "}
-                    <Button
-                      variant="ghost"
-                      onClick={leaveJoined}
-                      label="Leave the session"
-                      style={{
-                        display: "inline-flex",
-                        textDecoration: "underline",
-                      }}
-                    />
-                  </>
-                }
-              />
-            ) : joinedActive ? null : !shellReady || (activeId && !sessionReady) ? (
-              // Mid-choreography the plate stays quietly blank — a "Loading…"
-              // flash inside the parting doors reads as a glitch, and the
-              // plate's own fade already covers the wait.
-              bootAnimating ? null : (
-                <EmptyState
-                  title="Loading…"
-                  body="Fetching the latest review session."
-                />
-              )
-            ) : sessionReady ? (
-              isViewingHistorical && viewedRevision ? (
-                <HistoricalRevisionView
-                  sessionId={activeId ?? ""}
-                  revision={viewedRevision}
-                  diff={historicalDiff}
-                  latestVersionNumber={latest?.versionNumber ?? 0}
-                  focusedCommentId={focusedCommentId}
-                  focusNonce={focusNonce}
-                  onHighlightClick={handleHighlightClick}
-                  onBackToLatest={() => setViewedVersionNumber(null)}
-                  // The Plan pane's header says it once, as the version pill.
-                  banner={false}
-                />
-              ) : (
-                <Suspense fallback={null}>
-                  {/* Clean slate: the latest revision renders with no diff
-                      highlights and only its own comments — prior rounds live
-                      on the previous version (revisions navigator). */}
-                  <ErrorBoundary region="plan editor" fallback={surfaceFallback("plan editor")}>
-                    <PlanEditor
-                      markdown={latest?.rawPlanMarkdown ?? ""}
-                      sections={sections}
-                      comments={latestComments}
-                      revisionKey={`${activeId ?? ""}:${
-                        threadRevisions[0]?.versionNumber ?? 0
-                      }:${latest?.versionNumber ?? 0}`}
-                      sessionId={activeId ?? undefined}
-                      onAddComment={addEditorComment}
-                      onUpdateComment={updateComment}
-                      onDeleteComment={deleteComment}
-                      focusedCommentId={focusedCommentId}
-                      focusNonce={focusNonce}
-                      onHighlightClick={handleHighlightClick}
-                      actionsRef={planActionsRef}
-                      onLockedEdit={lockedEditToast}
-                      collab={ownerCollab}
-                    />
-                  </ErrorBoundary>
-                </Suspense>
-              )
-            ) : (
-              // The empty plate shows nothing of its own: the Front Door rests
-              // over it (MonochatIsland's resting pose).
-              null
-            )}
-          </article>
-          </div>
-              );
-            // What the editor mounts with, resolved HERE rather than pushed at
-            // it every 400ms. The session cache is strictly fresher than
-            // `drafterLoaded` by construction, and reading it at the mount site
-            // is what lets the persist stop writing a prop the component
-            // contractually ignores after mount.
-            // Arriving from the Front Door, the drafter springs out of the
-            // box the island occupied, with the door still mounted behind it
-            // and fading — one spring, two separate surfaces, App owning the
-            // transition between them.
-            //
-            // `from` is null for the header and command-palette routes: they
-            // have no island to spring from, so SpringSwap renders the body
-            // untouched.
-            const drafterSurface = (
-              <SpringSwap
-                from={swapFrom}
-                onArrived={() => setSwapFrom(null)}
-                leaving={swapFrom ? planBody : null}
-              >
-                <div className="relative flex h-full min-h-0 flex-col">
-                  {drafterBody}
-                  {drafterShelf}
-                  {agentShelf}
-                </div>
-              </SpringSwap>
-            );
-            // The workbench: the active set's tabs over these same bodies,
-            // each pane in a kind-named boundary (WorkbenchStage). Singleton
-            // bodies (the browser, the companion chat) mount once, in their
-            // portals; a pane shows only their slot.
-            {
-              planBodyNow = planBody;
-              const spring = (pane: AnyPane, body: ReactNode): ReactNode =>
-                swapFrom && convertedPaneRef.current === pane.id && pane.kind !== "drafter" && pane.kind !== "browser"
-                  ? <SpringSwap from={swapFrom} onArrived={() => { convertedPaneRef.current = null; setSwapFrom(null); }}>{body}</SpringSwap>
-                  : body;
-              const renderPane = (pane: AnyPane, ctx: PaneContext): ReactNode => {
-                switch (pane.kind) {
-                  case "door":
-                    // The island lands on this plate while the pane is on
-                    // screen and focused (MonochatIsland reads the attribute).
-                    return <div className="rl-wb-door-plate" data-rl-door-plate={ctx.visible && ctx.focused ? "" : undefined} />;
-                  case "plan": {
-                    // The holder (`singletonHolder`) shows the plan body
-                    // under its chrome — the header (Contents, version,
-                    // marks, ⋯), the notices, the footer's verbs; another
-                    // visible plan pane shows where the body went. The slot
-                    // alone while the chrome's chunk arrives.
-                    const holder = singletonHolder(wb.getState(), "plan", planHolder);
-                    const body = <Singleton host={planHost} pane={pane} ctx={ctx} holder={holder} bring={setPlanHolder} />;
-                    if (ctx.visible && holder !== pane.id) return body;
-                    return (
-                      <Suspense fallback={body}>
-                        <PlanPane
-                          sessionId={activeId}
-                          session={session}
-                          latestVersion={latest?.versionNumber ?? null}
-                          comments={threadComments}
-                          viewing={planViewing}
-                          contents={planContents}
-                          footer={planFooter}
-                          notices={planNotices}
-                          planMenu={planMenu}
-                          onShowTerminal={planShowTerminal}
-                        >
-                          {body}
-                        </PlanPane>
-                      </Suspense>
-                    );
-                  }
-                  case "file":
-                    return (
-                      <Suspense fallback={null}>
-                        <FileViewer path={pane.data.path} line={pane.data.line} lineAt={pane.data.at} onClose={handleCloseFile} onSaved={toastSaved} onEdit={pane.preview ? () => wb.dispatch({ type: "pinPane", paneId: pane.id }) : undefined} />
-                      </Suspense>
-                    );
-                  case "browser":
-                    return <Singleton host={browserHost} pane={pane} ctx={ctx} holder={browserHeld} bring={setBrowserHolder} />;
-                  case "chat": {
-                    if (pane.data.source === "companion") return <SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />;
-                    // The session's own conversation: the agent in its
-                    // terminal, mirrored. Keyed by the terminal, so a launch
-                    // becoming its plan keeps the conversation.
-                    const agentTerminal = pane.data.terminalId;
-                    const agentSession = pane.data.sessionId;
-                    const launch = flowLaunches.find((l) => l.terminalId === agentTerminal) ?? null;
-                    const own = agentSession !== null && agentSession === activeId;
-                    const ownSummary = own ? activeAgentSummary : null;
-                    const harness: "claude" | "codex" = launch?.harness ?? ((own ? session?.backend : ownSummary?.backend) === "codex" ? "codex" : "claude");
-                    const projectPath = launch?.projectPath ?? (own ? session?.projectPath ?? null : null);
-                    return (
-                      <Suspense fallback={null}>
-                        <AgentPane
-                          key={agentTerminal}
-                          terminalId={agentTerminal}
-                          sessionId={agentSession}
-                          harness={harness}
-                          visible={ctx.visible}
-                          cliAvailable={!liveTermIds || liveTermIds.includes(agentTerminal)}
-                          onCliView={setCliView}
-                          onFork={harness === "claude" ? agentPaneHandlers.onFork : null}
-                          planTitle={ownSummary?.planTitle ?? null}
-                          planMarks={own ? pendingComments.length : 0}
-                          // The plan is a tab of this set: open while it is on
-                          // screen, and its card opens it.
-                          planOpen={view.visibleKinds.includes("plan")}
-                          onOpenPlan={agentPaneHandlers.onOpenPlan}
-                          projectPath={projectPath}
-                          planMarkdown={own ? latest?.rawPlanMarkdown ?? null : null}
-                          termState={terminalKinds.get(agentTerminal) === "needs-you" ? "needs-you" : terminalKinds.get(agentTerminal) === "working" ? "working" : null}
-                          talking={voiceDocked}
-                          onTalk={agentPaneHandlers.onTalk}
-                          planState={own ? activeAgentPlanState : null}
-                          fallbackModel={own ? activeAgentModel : null}
-                          fallbackMode={ownSummary?.status === "in_review" ? "plan" : null}
-                        />
-                      </Suspense>
-                    );
-                  }
-                  case "terminals":
-                    // An empty box the one terminal layer is pinned over
-                    // (workbench/TerminalLayer): xterm never moves.
-                    return <Suspense fallback={null}><TerminalWallSlot paneId={pane.id} active={ctx.active} /></Suspense>;
-                  case "drafter":
-                    return drafterSurface;
-                  case "review":
-                    return spring(pane, reviewBody);
-                  case "servers":
-                    return spring(pane, serversBody);
-                  case "memory":
-                    return spring(pane, memoryBody);
-                }
-              };
-              return (
-                <Suspense fallback={null}>
-                  <WorkbenchStage
-                    store={wb}
-                    renderPane={renderPane}
-                    describePane={describePane}
-                    onSplitDragging={setSplitDragging}
-                    onNewTab={openDoorTab}
-                    onCloseTab={closeTabRequest}
-                    right={stageActions}
-                  />
-                </Suspense>
-              );
-            }
-          })()}
-          {/* Floating document zoom + line-width control — pinned to the pane
-              (doesn't scroll with the plan). A document always has it; the only
-              thing that goes without is the folder file viewer, which isn't one.
-
-              It stacks into a narrow column whenever the text would otherwise
-              reach it — always in wide view, where full-bleed text leaves no
-              horizontal gutter to lie in, and on any pane too narrow to seat
-              the row. The vertical gutter is free either way, and standing up
-              is what keeps the way back OUT of wide view on screen: the toggle
-              that undoes the mode lives in here, so this control shrinking is
-              always the right answer and disappearing never is.
-              `column-reverse` so the order still reads + above − with the mode
-              toggle on top. */}
+          {/* The Contents rail docks beside a Plan pane on screen (its button
+              when closed); another tab has no document to index. */}
+          <PlanContentsRail
+            shown={tocEligible && view.visibleKinds.includes("plan")}
+            tocOpen={tocOpen}
+            setTocOpen={setTocOpen}
+            tocWide={tocWide}
+            setTocWide={setTocWide}
+            tocRailW={tocRailW}
+            tocDragging={tocDragging}
+            setTocDragging={setTocDragging}
+            tocRailRef={tocRailRef}
+            tocBtnRef={tocBtnRef}
+            docScrollerRef={docScrollerRef}
+            displaySections={displaySections}
+          />
+          {/* The workbench: the active set's tabs, each pane its body from
+              `workbench/panes/*` in a kind-named boundary (WorkbenchStage).
+              Singleton bodies (the plan, the browser, the companion chat)
+              mount once, in their portals below; a pane shows only a slot. */}
+          <Suspense fallback={null}>
+            <WorkbenchStage
+              store={wb}
+              renderPane={renderPane}
+              describePane={describePane}
+              onSplitDragging={setSplitDragging}
+              onNewTab={openDoorTab}
+              onCloseTab={closeTabRequest}
+              right={stageActions}
+            />
+          </Suspense>
+          {/* Floating document zoom + line-width control over a document on
+              screen — the Plan pane or the drafter, never over an Agent tab
+              or a browser (workbench/panes/docControls). */}
           {(stageSurface === "document" ? docSurfaceActive : drafterOpen) &&
             plateMode !== "file" &&
-            // A document on screen: the Plan pane or the drafter — never over
-            // an Agent tab or a browser.
             (view.visibleKinds.includes("plan") || view.visibleKinds.includes("drafter")) && (
-            <div
-              ref={zoomCtrlRef}
-              className={`rl-doc-zoom absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
-              style={{
-                right: "16px",
-                bottom: "16px",
-                padding: "3px",
-                background: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-rule)",
-                boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-                opacity: 0.92,
-              }}
-            >
-              <ZoomButton label="−" title="Zoom out (⌘−)" onClick={zoomOut} />
-              <button
-                type="button"
-                onClick={zoomReset}
-                title="Reset zoom (⌘0)"
-                className="font-mono"
-                style={{
-                  fontSize: "10px",
-                  // Stacked, the readout sets the whole column's width — so it
-                  // drops the "%" and its reserved room for the three digits it
-                  // actually needs. Every px here is a px of gutter the column
-                  // needs to clear the text, and on the panes that force the
-                  // stack there are few going spare.
-                  minWidth: zoomColumn ? "22px" : "34px",
-                  color: "var(--color-ink-muted)",
-                  background: "transparent",
-                  border: "none",
-                  cursor: "pointer",
-                }}
-              >
-                {Math.round(docZoom * 100)}
-                {zoomColumn ? "" : "%"}
-              </button>
-              <ZoomButton label="+" title="Zoom in (⌘+)" onClick={zoomIn} />
-              <DocWidthToggle
-                wide={docWide}
-                measure={docMeasure}
-                articleRef={documentRef}
-                onToggle={() => setDocWide((w) => !w)}
-                onCommit={({ wide, measure }) => { setDocWide(wide); setDocMeasure(measure); }}
-              />
-            </div>
+            <DocZoomControl
+              zoomCtrlRef={zoomCtrlRef}
+              zoomColumn={zoomColumn}
+              docZoom={docZoom}
+              zoomIn={zoomIn}
+              zoomOut={zoomOut}
+              zoomReset={zoomReset}
+              docWide={docWide}
+              docMeasure={docMeasure}
+              documentRef={documentRef}
+              setDocWide={setDocWide}
+              setDocMeasure={setDocMeasure}
+            />
           )}
           </div>
         </div>
@@ -11037,8 +10320,8 @@ function App() {
       >
         {renderMonochatComposer("door")}
       </MonochatIsland>
-      {chatId && createPortal(<Suspense fallback={null}><ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
-            <ChatRoom
+      {chatId && createPortal(
+            <CompanionRoom
               composer={{ draftKey: FRONT_DOOR_TEXT_KEY, attachments: frontDoorAttachments, onAttachmentsConsumed: () => setFrontDoorAttachments([]), project: frontDoorProject, render: (actions, workbench) => renderMonochatComposer("chat", actions, workbench) }}
               harness={frontDoorBackend}
               modelCatalogs={modelCatalogs}
@@ -11093,15 +10376,13 @@ function App() {
               contextFor={async () => chatAttachment(chatId, await gatherContext("chat"))}
               onContextLost={(why) => forgetSent(chatContextSent.current, chatId, why)}
             />
-</ErrorBoundary></Suspense>, chatHost)}
+, chatHost)}
       {activeId && createPortal(
-        planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBodyNow}</SpringSwap> : planBodyNow,
+        planSwap ? <SpringSwap key={planSwap.launchId} from={planSwap.from} onArrived={() => setPlanSwap(null)}>{planBody}</SpringSwap> : planBody,
         planHost,
       )}
       {browserMounted && createPortal(
-<Suspense fallback={null}>
-              <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
-                <BrowserPane
+                <BrowserBody
                   {...browserHandlers}
                   onPageContext={setBrowserIslandPage}
                   surfaceActive={browserOpen}
@@ -11134,8 +10415,6 @@ function App() {
                   onOpenDockPill={openDockPill}
                   onDockState={setBrowserDock}
                 />
-              </ErrorBoundary>
-              </Suspense>
       , browserHost)}
       {hookConflicts.dialogOpen && (
         <Suspense fallback={null}>
@@ -11242,96 +10521,6 @@ function cssEscape(s: string): string {
     return CSS.escape(s);
   }
   return s.replace(/["\\\n]/g, "\\$&");
-}
-
-/** Read-only render of a prior revision plus a "back to latest" banner.
- *  Used when the reviewer clicks a historical revision in the sidebar to
- *  scroll back and compare against the current plan. Sidecar comments are
- *  stripped so the body reads as clean markdown. */
-/** A previous revision, rendered with the same Tiptap editor as the latest so
- *  formatting matches — read-only (no comment handlers ⇒ `editable: false`)
- *  with that revision's own-era diff highlights and comment cards alive in
- *  the pane (Accept/Reopen work from here; the store mutators search every
- *  revision). Known limitation: the reviewer's live-era ins/del marks aren't
- *  replayed — they were serialized into [edit] comments at submit, and those
- *  cards represent them. */
-function HistoricalRevisionView({
-  sessionId,
-  revision,
-  diff,
-  latestVersionNumber,
-  focusedCommentId,
-  focusNonce,
-  onHighlightClick,
-  onBackToLatest,
-  banner = true,
-}: {
-  sessionId: string;
-  revision: Revision;
-  diff?: ParagraphDiff;
-  latestVersionNumber: number;
-  focusedCommentId: string | null;
-  focusNonce?: number;
-  onHighlightClick: (commentId: string) => void;
-  onBackToLatest: () => void;
-  /** The "Viewing vN · read-only" bar above the text. The flow shell's
-   *  plan header carries it as the version pill instead. */
-  banner?: boolean;
-}) {
-  const when = new Date(revision.receivedAt).toLocaleString();
-  return (
-    <div>
-      {banner && <div
-        className="mb-4 flex items-center justify-between gap-3 rounded border px-3 py-2"
-        style={{
-          borderColor: "var(--color-rule)",
-          background: "var(--color-bg-elevated)",
-          color: "var(--color-ink-muted)",
-          fontSize: "12px",
-        }}
-      >
-        <span>
-          Viewing{" "}
-          <span
-            className="font-mono"
-            style={{ color: "var(--color-ink)", fontWeight: 600 }}
-          >
-            v{revision.versionNumber}
-          </span>{" "}
-          · received {when} · read-only · latest is v{latestVersionNumber}
-        </span>
-        <button
-          type="button"
-          onClick={onBackToLatest}
-          className="rounded px-2 py-0.5 font-medium"
-          style={{
-            background: "var(--color-paper)",
-            border: "1px solid var(--color-rule)",
-            color: "var(--color-ink)",
-            fontSize: "12px",
-            cursor: "pointer",
-          }}
-        >
-          Back to latest
-        </button>
-      </div>}
-      <Suspense fallback={null}>
-        {/* `sessionId` deliberately omitted: the historical doc is in-memory
-            only — no IndexedDB persistence for a read-only view. The `hist`
-            revisionKey namespace can never collide with the live editor's. */}
-        <PlanEditor
-          markdown={revision.rawPlanMarkdown}
-          sections={revision.sections}
-          diff={diff}
-          comments={revision.comments}
-          revisionKey={`${sessionId}:hist:${revision.versionNumber}`}
-          focusedCommentId={focusedCommentId}
-          focusNonce={focusNonce}
-          onHighlightClick={onHighlightClick}
-        />
-      </Suspense>
-    </div>
-  );
 }
 
 /** Strip a single trailing slash so `/a/b/` and `/a/b` compare equal. */
