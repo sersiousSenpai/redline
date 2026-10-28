@@ -72,7 +72,8 @@ describe("Show raw terminal", () => {
     const body = app.slice(start, app.indexOf("\n  };", start));
     // Its session, its wall and its tile: a kept terminal comes back onto a
     // wall, one already on screen is hailed.
-    expect(body).toContain("showTerminal(terminalId)");
+    // The raw PTY, never the Agent tab: that is what this button names.
+    expect(body).toContain("showTerminal(terminalId, false, true)");
     expect(body).not.toContain("openSessionTerminal");
     expect(body).not.toContain("openTerminal(");
   });

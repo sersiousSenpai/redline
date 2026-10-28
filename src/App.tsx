@@ -3503,11 +3503,24 @@ function App() {
     [],
   );
   /** Show a terminal: its session, its wall and its tile (the workbench's
-   *  `revealTerminal`), hailed once that has painted. Flow shows it as its
-   *  session's stage. */
-  const showTerminal = useCallback((id: string, focus = false) => {
+   *  `revealTerminal`), hailed once that has painted. A session's agent
+   *  terminal is its Agent tab (where its questions are), unless the raw
+   *  PTY is what was asked for. */
+  const showTerminal = useCallback((id: string, focus = false, raw = false) => {
     setImmersiveBroken(true);
     setTerminalMounted(true);
+    const state = wb.getState();
+    const owner = state.owners[id];
+    const agent = owner && !raw
+      ? Object.values(state.sets[owner]?.panes ?? {}).find((p): p is Extract<AnyPane, { kind: "chat" }> => p.kind === "chat" && p.data.source === "agent" && p.data.terminalId === id)
+      : undefined;
+    if (owner && agent) {
+      const sid = sessionIdOf(owner);
+      if (sid) setActiveId(sid);
+      else wb.dispatch({ type: "selectSession", key: owner });
+      wb.dispatch({ type: "openSurface", key: owner, kind: "chat", data: agent.data });
+      return;
+    }
     wb.dispatch({ type: "revealTerminal", ptyId: id });
     requestAnimationFrame(() => {
       terminalsRef.current?.hailTerminal(id);
@@ -6777,7 +6790,7 @@ function App() {
   const showRawTerminal = async (terminalId: string | null) => {
     if (!terminalId) return;
     await ensureTerminalReady();
-    showTerminal(terminalId);
+    showTerminal(terminalId, false, true);
   };
 
   // One-click recovery for a detached plan: resume the exact conversation that

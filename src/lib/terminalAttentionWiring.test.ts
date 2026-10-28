@@ -33,6 +33,8 @@ describe("terminal attention wiring", () => {
     const start = app.indexOf("const showTerminal = useCallback(");
     const show = app.slice(start, app.indexOf("}, []);", start));
     expect(show).toContain('wb.dispatch({ type: "revealTerminal", ptyId: id })');
+    // A session's agent terminal is its Agent tab, where its questions are.
+    expect(show).toContain('wb.dispatch({ type: "openSurface", key: owner, kind: "chat", data: agent.data })');
     expect(show).toContain("terminalsRef.current?.hailTerminal(id)");
     expect(show).toContain("if (focus) terminalsRef.current?.focusTerminal(id)");
     // Every "show me that terminal" route goes this one way.
