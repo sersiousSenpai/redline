@@ -660,3 +660,161 @@ button.rl-convo-chip:hover,
   color: var(--color-ink-4);
   text-align: center;
 }
+
+/* ── The Agent pane (AgentPane.tsx): header, Chat | CLI, the work drawer ──
+   The pane header is the workbench's 28px row at the chrome's size; the
+   CLI view hides the thread and the composer and leaves a box the
+   terminal dock is pinned over (lib/stageDock), the header staying put. */
+.rl-agent-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.rl-agent-pane > .rl-convo { flex: 1; min-height: 0; height: auto; }
+.rl-agent-pane[data-view="cli"] > .rl-convo { flex: none; }
+.rl-agent-pane[data-view="cli"] .rl-convo-scroll,
+.rl-agent-pane[data-view="cli"] .rl-convo-dock { display: none; }
+.rl-agent-cli {
+  flex: 1;
+  min-height: 0;
+  background: var(--color-paper);
+}
+.rl-agent-head {
+  box-sizing: border-box;
+  height: 28px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: var(--rl-text-chrome);
+  color: var(--color-ink-4);
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.rl-agent-head-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-ink-2);
+  font-weight: 500;
+}
+.rl-agent-head-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-mode-build-bg, var(--color-fill-2));
+  color: var(--color-mode-build-fg, var(--color-ink));
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+.rl-agent-head-dot { color: var(--color-ink-muted); }
+.rl-agent-head-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rl-agent-head-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-mode-plan-fg);
+}
+.rl-agent-head-spacer { flex: 1; }
+.rl-agent-head-seg {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--color-rule-strong);
+  border-radius: var(--rl-radius-chip);
+  font-size: var(--rl-text-chip);
+}
+.rl-agent-head-seg > button {
+  height: 18px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink-4);
+  font: inherit;
+  cursor: pointer;
+}
+.rl-agent-head-seg > button[aria-checked="true"] {
+  background: var(--color-fill-3, var(--color-fill-2));
+  color: var(--color-ink);
+}
+.rl-agent-head-seg > button:disabled { opacity: .45; cursor: default; }
+.rl-agent-head-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--rl-radius-chip);
+  background: transparent;
+  color: var(--color-ink-4);
+  cursor: pointer;
+}
+.rl-agent-head-btn:hover:not(:disabled) { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-agent-head-btn:disabled { opacity: .4; cursor: default; }
+.rl-agent-head-btn:focus-visible,
+.rl-agent-head-seg > button:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }
+
+/* The work drawer: a quiet head row, then one 26px row per queued send. */
+.rl-work-drawer {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--color-ink-4);
+}
+.rl-convo[data-layout="stage"] .rl-convo-dock > .rl-work-drawer { width: min(720px, calc(100% - 32px)); }
+.rl-work-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+.rl-work-drawer-count { flex: 1; }
+.rl-work-drawer-agent { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.rl-work-drawer-agent code { font-family: var(--font-mono); font-size: 11.5px; color: var(--color-ink-3); }
+.rl-work-drawer-spin { color: var(--color-info); }
+.rl-work-drawer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--rl-radius-chip);
+  background: var(--color-fill-1);
+  color: var(--color-ink-2);
+}
+.rl-work-drawer-n { flex: none; color: var(--color-ink-muted); font-variant-numeric: tabular-nums; }
+.rl-work-drawer-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rl-work-drawer-steer,
+.rl-work-drawer-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.rl-work-drawer-steer { padding: 0 6px; }
+.rl-work-drawer-steer:hover,
+.rl-work-drawer-icon:hover { background: var(--color-fill-2); color: var(--color-ink); }
+.rl-work-drawer-steer:focus-visible,
+.rl-work-drawer-icon:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }

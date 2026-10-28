@@ -54,6 +54,17 @@ export function ptyInterrupt(terminalId: string): Promise<void> {
   return invoke("pty_interrupt", { terminalId });
 }
 
+/** Stop from the Agent pane (its Stop button, Esc in it): the Esc goes to
+ *  the PTY, and the attention daemon is told the same thing the dock tells
+ *  it when Esc is pressed in a terminal tile (`term_attention_interrupted`):
+ *  no hook reports an interrupt, so the terminal's working / needs-you
+ *  would otherwise outlive the turn in every row and dot that reads it.
+ *  One path for both, never a second. */
+export async function interruptTerminal(terminalId: string): Promise<void> {
+  await ptyInterrupt(terminalId);
+  await invoke("term_attention_interrupted", { terminalId }).catch(() => {});
+}
+
 export function answerAsk(askId: string, answer: AskAnswer): Promise<void> {
   return invoke("convo_answer_ask", { askId, answer });
 }

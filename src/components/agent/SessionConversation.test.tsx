@@ -31,6 +31,7 @@ vi.mock("./convo/api", () => ({
     return api.submit;
   }),
   ptyInterrupt: vi.fn(async (terminalId: string) => void log.push(`interrupt ${terminalId}`)),
+  interruptTerminal: vi.fn(async (terminalId: string) => void log.push(`interrupt ${terminalId}`)),
   answerAsk: vi.fn(async () => {}),
   convoSetMode: vi.fn(async () => ({ status: "sent" })),
   convoSetModel: vi.fn(async () => ({ status: "sent" })),
@@ -135,7 +136,7 @@ describe("SessionConversation", () => {
     await render(props());
     await typeAndSend("Wait for me");
     expect(all(".rl-convo-bubble").map((e) => e.textContent)).not.toContain("Wait for me");
-    expect(q(".rl-queue-count")?.textContent).toBe("1 queued");
+    expect(q(".rl-work-drawer-count")?.textContent).toBe("Queued · 1");
   });
 
   it("sends wait while the host says not ready, then go in order when it is", async () => {
@@ -145,11 +146,11 @@ describe("SessionConversation", () => {
     await typeAndSend("one");
     await typeAndSend("two");
     expect(log.filter((l) => l.startsWith("submit"))).toEqual([]);
-    expect(q(".rl-queue-count")?.textContent).toBe("2 queued");
+    expect(q(".rl-work-drawer-count")?.textContent).toBe("Queued · 2");
     await act(async () => api.batches.get("term-1")!({ events: [ev("h2", 60, { kind: "readiness", ready: true, blocker: null })] }));
     for (let i = 0; i < 4; i++) await flush();
     expect(log.filter((l) => l.startsWith("submit"))).toEqual(["submit term-1 one", "submit term-1 two"]);
-    expect(q(".rl-queue-count")).toBeNull();
+    expect(q(".rl-work-drawer-count")).toBeNull();
   });
 
   it("with no terminal yet, sends wait in the queue and nothing subscribes", async () => {
@@ -157,7 +158,7 @@ describe("SessionConversation", () => {
     expect(log).toEqual([]);
     expect(q(".rl-convo-readiness")?.textContent).toMatch(/Not running in a terminal: restore the session to send/);
     await typeAndSend("First thought");
-    expect(q(".rl-queue-count")?.textContent).toBe("1 queued");
+    expect(q(".rl-work-drawer-count")?.textContent).toBe("Queued · 1");
   });
 
   it("a plan past its review reads as where it is, not Plan ready", async () => {
@@ -274,5 +275,75 @@ describe("a question never waits out of sight", () => {
     await act(async () => root.unmount());
     expect(await released()).toEqual([["q1", { kind: "terminal" }], ["q2", { kind: "terminal" }]]);
     root = createRoot(host);
+  });
+});
+
+describe("the work drawer and the pane's keys (W2)", () => {
+  beforeEach(() => {
+    log.length = 0;
+    api.batches.clear();
+    api.snapshot = [];
+    api.submit = { status: "sent" };
+    api.hold = null;
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("Steer types a queued send now; Edit hands its text back to the composer; Remove drops it", async () => {
+    api.snapshot = [BOUND, PROMPT, ev("h1", 15, { kind: "readiness", ready: false, blocker: "dirty_input" })];
+    await render(props());
+    await typeAndSend("one");
+    await typeAndSend("two");
+    await typeAndSend("three");
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["one", "two", "three"]);
+    // Steer the second: it goes to the PTY ahead of the first.
+    await act(async () => (all(".rl-work-drawer-steer")[1] as HTMLButtonElement).click());
+    for (let i = 0; i < 4; i++) await flush();
+    expect(log.filter((l) => l.startsWith("submit"))).toEqual(["submit term-1 two"]);
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["one", "three"]);
+    // Edit the first: back in the box.
+    await act(async () => (q('[aria-label="Edit: one"]') as HTMLButtonElement).click());
+    await flush();
+    expect((q(".rl-convo-field") as HTMLTextAreaElement).value).toBe("one");
+    expect(all(".rl-work-drawer-row .rl-work-drawer-text").map((e) => e.textContent)).toEqual(["three"]);
+    // Remove the last: gone, the box untouched.
+    await act(async () => (q('[aria-label="Remove: three"]') as HTMLButtonElement).click());
+    await flush();
+    expect(q(".rl-work-drawer")).toBeNull();
+    expect((q(".rl-convo-field") as HTMLTextAreaElement).value).toBe("one");
+  });
+
+  it("a running subagent shows in the drawer's head with the shared spinner", async () => {
+    api.snapshot = [BOUND, PROMPT, ev("t2", 20, { kind: "tool_use", toolUseId: "tu2", name: "Task", summary: "explore-fixtures" })];
+    await render(props());
+    expect(q(".rl-work-drawer-agent code")?.textContent).toBe("explore-fixtures");
+    expect(q(".rl-work-drawer-agent .rl-spinner")).not.toBeNull();
+  });
+
+  it("Esc in the pane while a turn runs is Stop, through the terminal's own interrupt path", async () => {
+    api.snapshot = [BOUND, PROMPT, READ];
+    await render(props());
+    await act(async () => q(".rl-convo-field")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(log).toContain("interrupt term-1");
+  });
+
+  it("Esc with nothing running is left alone", async () => {
+    api.snapshot = [BOUND, PROMPT, READ, DONE, ev("e1", 40, { kind: "turn_end" })];
+    await render(props());
+    await act(async () => q(".rl-convo-field")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(log.filter((l) => l.startsWith("interrupt"))).toEqual([]);
+  });
+
+  it("the header render-prop gets the transcript's facts and its actions", async () => {
+    api.snapshot = [BOUND, PROMPT, READ];
+    const seen: unknown[] = [];
+    await render(props({ header: (facts) => { seen.push(facts); return <div data-head>{facts.working ? "working" : "idle"}</div>; } }));
+    expect(q("[data-head]")?.textContent).toBe("working");
+    expect((seen[seen.length - 1] as { boundSessionId: string }).boundSessionId).toBe("s1");
   });
 });

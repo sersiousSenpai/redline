@@ -5409,10 +5409,11 @@ html[data-rl-shell="flow"] .rl-doc-column.rl-plate::after {
   content: none;
 }
 
-/* ⌘J: the terminal dock lies over the stage, showing the session's PTY
-   alone (lib/stageDock pins the insets; TerminalTabs' `solo`). The height
-   `applyLiveLayout` writes is the one thing this overrides. */
-html[data-rl-shell="flow"] .rl-term-dock--stage {
+/* The terminal dock over a pane, showing one PTY alone (lib/stageDock pins
+   the insets; TerminalTabs' `solo`): flow's ⌘J stage view, and the Agent
+   pane's CLI view in the workbench. The height `applyLiveLayout` writes is
+   the one thing this overrides. */
+.rl-term-dock--stage {
   position: absolute;
   z-index: 30;
   height: auto !important;

@@ -19,7 +19,8 @@
 //!   line while it is closed (4d).
 //! - **Sends** are optimistic: the bubble shows at once and the transcript's
 //!   own prompt replaces it. A send the PTY can't take now waits in the
-//!   local queue (`QueueTray`) and goes, in order, when it can.
+//!   local queue (the work drawer, `WorkDrawer`) and goes, in order, when
+//!   it can; Steer types it now, ahead of the rest.
 //! - **A Codex session no second client can read** (`bound.mirrored` false:
 //!   one Redline's launcher didn't start) says so, opens on its terminal
 //!   once, and offers no composer: nothing sent from here could be seen
@@ -33,12 +34,11 @@
 //! is a tinted, bordered card at 88% width; 4b's bubble is a plain fill at
 //! 520px, so it is drawn here too.
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
 import { MarkdownView } from "../MarkdownView";
-import { QueueTray } from "../QueueTray";
 import { Spinner } from "../Spinner";
-import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, ptyInterrupt, ptySubmit } from "./convo/api";
+import { answerAsk, convoExpect, convoPage, convoSubscribe, convoUnsubscribe, interruptTerminal, ptySubmit } from "./convo/api";
 import { questionsToRelease } from "./askRelease";
 import type { ConvoAsk, ConvoAskOutcome, ConvoMode } from "./convo/types";
 import {
@@ -72,7 +72,6 @@ import {
   composerReadiness,
   enqueueSend,
   nextFlush,
-  promoteSend,
   routeSend,
   unqueueSend,
   type QueuedSend,
@@ -80,7 +79,28 @@ import {
 import type { TermState } from "../../lib/termState";
 import { AskCard } from "./AskCard";
 import { SessionComposer } from "./SessionComposer";
+import { WorkDrawer, type DrawerAgent } from "./WorkDrawer";
 import "./conversation.css";
+
+/** What the conversation knows that a header around it wants to say: the
+ *  model and mode the transcript last reported, whether a turn is running
+ *  or waiting on you, whether there are earlier messages to page back to,
+ *  and the CLI session the terminal is bound to. */
+export interface ConvoFacts {
+  model: ModelFact | null;
+  mode: ConvoMode | null;
+  working: boolean;
+  needsYou: boolean;
+  hasOlder: boolean;
+  boundSessionId: string | null;
+}
+
+export interface ConvoActions {
+  /** Page back and scroll to the oldest message shown. */
+  earlier: () => void;
+  /** Stop the running turn (Esc into the PTY). */
+  stop: () => void;
+}
 
 export interface SessionConversationProps {
   /** The session's PTY; null = not launched yet / no terminal. */
@@ -137,6 +157,9 @@ export interface SessionConversationProps {
    *  its open questions go to the terminal, since a held AskUserQuestion
    *  shows nowhere else (components/agent/askRelease). It stays subscribed. */
   hidden?: boolean;
+  /** A header drawn above the thread with what the conversation knows
+   *  (the Agent pane's agent · model · mode row and its Chat | CLI). */
+  header?: (facts: ConvoFacts, actions: ConvoActions) => ReactNode;
 }
 
 /** Terminal-and-session pairs already switched to their terminal: once per
@@ -341,8 +364,21 @@ function SessionConversation(props: SessionConversationProps) {
     // moving is exactly "the head can go now".
   }, [next?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const stop = () => {
-    if (terminalId) void ptyInterrupt(terminalId).catch(() => {});
+  /** Stop: Esc into the PTY, and the attention daemon told (one path with
+   *  the dock's Esc, `interruptTerminal`). */
+  const stop = useCallback(() => {
+    if (terminalId) void interruptTerminal(terminalId).catch(() => {});
+  }, [terminalId]);
+  /** Steer: a queued send goes now, ahead of the rest — the CLI takes
+   *  type-ahead mid-turn and queues it itself. */
+  const steer = (id: string) => {
+    const item = queue.find((q) => q.id === id);
+    if (!item) return;
+    setQueue((q) => q.filter((row) => row.id !== id));
+    void deliver(item.text, item.id).then((sent) => {
+      if (!sent) setQueue((q) => enqueueSend(q, item));
+      kick();
+    });
   };
 
   // ── What it says ──
@@ -382,9 +418,36 @@ function SessionConversation(props: SessionConversationProps) {
       </>
     ) : null;
   const cliQueue = useMemo(() => cliQueued(view), [view]);
+  // Subagents still running in the active turn: `Task` calls without a
+  // result yet, for the work drawer.
+  const agents = useMemo<DrawerAgent[]>(
+    () =>
+      (view.activeTurn?.items ?? [])
+        .filter((item) => item.kind === "tool" && item.name === "Task" && item.status === "running")
+        .map((item) => ({ id: item.id, label: item.kind === "tool" ? item.summary || item.name : "" })),
+    [view.activeTurn],
+  );
+  const needsYou = view.openAsks.length > 0 || props.termState === "needs-you" || props.termState === "your-turn";
+  const earlier = () => {
+    pageOlder();
+    scroller.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  // Esc anywhere in the pane while a turn runs or a question waits: Stop,
+  // the same Esc the terminal would take. Menus and dialogs keep theirs.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape" || e.defaultPrevented || !terminalId) return;
+    if ((e.target as HTMLElement | null)?.closest("[role=menu], [role=dialog], [role=listbox]")) return;
+    if (!working && view.openAsks.length === 0) return;
+    e.preventDefault();
+    stop();
+  };
 
   return (
-    <div className="rl-convo" data-layout={layout}>
+    <div className="rl-convo" data-layout={layout} onKeyDown={onKeyDown}>
+      {props.header?.(
+        { model: view.model ?? props.fallbackModel ?? null, mode: view.mode ?? props.fallbackMode ?? null, working, needsYou, hasOlder: view.hasOlder, boundSessionId: view.bound?.sessionId ?? null },
+        { earlier, stop },
+      )}
       <div ref={scroller} className="rl-convo-scroll rl-thin-scroll-y" onScroll={onScroll}>
         <div className="rl-convo-list" role="log" aria-live="polite" aria-relevant="additions">
           {view.hasOlder && (
@@ -470,14 +533,16 @@ function SessionConversation(props: SessionConversationProps) {
       </div>
       {!terminalOnly && (
         <div className="rl-convo-dock">
-          <QueueTray
-            rows={queue.map((item) => ({ id: item.id, text: item.text }))}
-            onRemove={(id) => {
+          <WorkDrawer
+            queued={queue}
+            agents={agents}
+            onSteer={terminalId ? steer : null}
+            onEdit={(id) => {
               const { queue: rest, text } = unqueueSend(queue, id);
               setQueue(rest);
               if (text) setRestore({ text, nonce: Date.now() });
             }}
-            onPromote={(id) => setQueue((q) => promoteSend(q, id))}
+            onRemove={(id) => setQueue((q) => unqueueSend(q, id).queue)}
           />
           {readiness.message && (
             <p className="rl-convo-readiness" role="status">

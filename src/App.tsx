@@ -15,7 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { ZoomButton } from "./components/ZoomButton";
 import { DocWidthToggle } from "./components/DocWidthToggle";
 import { invoke } from "@tauri-apps/api/core";
@@ -412,6 +412,9 @@ const loadCommentComposer = () => import("./components/CommentComposer");
 const CommentComposer = lazy(() => loadCommentComposer().then((m) => ({ default: m.CommentComposer })));
 const loadFlowStage = () => import("./shell/FlowStage");
 const loadSessionConversation = () => import("./components/agent/SessionConversation");
+// The Agent pane: the session's conversation as a centre tab (W2), with
+// its header and the Chat | CLI toggle. Rides the conversation's chunk.
+const AgentPane = lazy(() => import("./components/agent/AgentPane"));
 const FlowStage = lazy(loadFlowStage);
 const SessionConversation = lazy(loadSessionConversation);
 import { FlashOverlay } from "./components/FlashOverlay";
@@ -514,7 +517,8 @@ import { beginMeasure, endMeasure } from "./workbench/perf";
 import { createWorkbenchStore, useWorkbench } from "./workbench/store";
 import { bootToHome, migrateToWorkbenchOnce, persistWorkbench, readWorkbench } from "./workbench/persist";
 import { kindForSurface, legacyView, type LegacyView } from "./workbench/legacy";
-import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
+import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
 import type { WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
@@ -983,8 +987,11 @@ function App() {
       return;
     }
     setJoinedId(null);
-    wb.dispatch({ type: "selectSession", key: value ? planKey(value) : HOME_KEY });
+    // The session's agent terminal, when known, so its set opens with an
+    // Agent tab beside the plan (the reducer's defaults).
+    wb.dispatch({ type: "selectSession", key: value ? planKey(value) : HOME_KEY, defaults: value ? { agentTerminalId: sessionTerminalsRef.current.get(value) ?? null } : undefined });
   }, []);
+  const sessionTerminalsRef = useRef<ReadonlyMap<string, string>>(new Map());
   // Count of open header dropdowns (theme, mode, alerts, download). Folded into
   // `browserVisible` below so the native browser webview hides while a menu is
   // up — otherwise the OS-composited webview paints over the DOM menu. Header
@@ -2922,6 +2929,11 @@ function App() {
   // engine (`convo-bound`), held plans and arrivals. On the classic shell the
   // hook stays inert, the list empty and the target is never read.
   const flowShell = isFlowShell();
+  // An Agent pane showing its PTY (its CLI view): the terminal dock is
+  // pinned over that pane's box and shows that one terminal alone — the
+  // same attachment the dock already holds, never a second one.
+  const [cliView, setCliView] = useState<CliView | null>(null);
+  const cliBoxRef = useMemo<RefObject<HTMLElement | null>>(() => ({ current: cliView?.el ?? null }), [cliView]);
   // The stage's two chunks are what a session opens onto: warmed once the
   // shell is up, so the first plan or launch doesn't wait on a fetch.
   useEffect(() => {
@@ -2962,6 +2974,7 @@ function App() {
     titles: terminalTitles,
     bind: bindSessionTerminals,
   } = useSessionTerminals(true);
+  sessionTerminalsRef.current = sessionTerminals;
   const terminalKinds = useMemo(() => attentionKinds(terminalAttention), [terminalAttention]);
   // A held plan names the terminal its CLI is waiting in.
   useEffect(() => {
@@ -3016,11 +3029,21 @@ function App() {
     () => sidebarActivity(sessionTerminals, terminalAttention, flowLaunches),
     [sessionTerminals, terminalAttention, flowLaunches],
   );
-  const activeLaunchId = stageTarget.kind === "launch" ? stageTarget.terminalId : null;
+  // The launch on screen: under the workbench the active `launch:` set's
+  // terminal (its Agent tab), in flow the stage's.
+  const wbLaunchId = classicWb ? launchIdOf(wbActiveKey) : null;
+  const activeLaunchId = classicWb
+    ? (wbLaunchId ? flowLaunches.find((l) => l.launchId === wbLaunchId)?.terminalId ?? null : null)
+    : stageTarget.kind === "launch" ? stageTarget.terminalId : null;
   // What the tab strip says about a pane beyond its kind: a plan's own
   // title and version, and its status in the shared vocabulary (the
   // session's terminal needs you / is working, from `sidebarActivity`).
   const describePane = useCallback((pane: AnyPane) => {
+    // An Agent tab wears its terminal's state, from the CLI's own hooks.
+    if (pane.kind === "chat" && pane.data.source === "agent") {
+      const kind = terminalKinds.get(pane.data.terminalId);
+      return { status: kind === "needs-you" || kind === "your-turn" ? ("needs" as const) : kind === "working" ? ("working" as const) : undefined };
+    }
     if (pane.kind !== "plan") return {};
     const summary = summaries.find((x) => x.sessionId === pane.data.sessionId);
     const key = `plan:${pane.data.sessionId}`;
@@ -3030,7 +3053,7 @@ function App() {
       title: pane.titleOverride ? undefined : summary ? `${summary.titleOverride || summary.planTitle || summary.projectName || "Plan"}${version ? ` v${version}` : ""}` : undefined,
       status: flowNeeds[key] ? ("needs" as const) : flowWorking.has(key) ? ("working" as const) : summary?.attachState === "detached" ? ("exited" as const) : undefined,
     };
-  }, [summaries, flowNeeds, flowWorking]);
+  }, [summaries, flowNeeds, flowWorking, terminalKinds]);
   // The strip's right-hand cluster: the doc pin as a contextual entry —
   // tile the session's plan beside the surface in this tab, or untile it.
   const stageTile = (() => {
@@ -3133,7 +3156,10 @@ function App() {
   // On every surface, Tools included: flow never docks a terminal under
   // anything. The wall (⌘J's big sibling, Tools ▸ Terminals) is the one way
   // the dock shows off the stage.
-  const flowDockHidden = flowShell && !termFullscreenPref && !flowTermStage;
+  // …and the same off the stage: an Agent pane's CLI view takes the dock
+  // (W3 moves terminals into the centre for good).
+  const paneCli = cliView && !termFullscreenPref ? cliView : null;
+  const flowDockHidden = (flowShell && !termFullscreenPref && !flowTermStage) || !!paneCli;
   // The Front Door is the plate at REST — no document, no draft, nothing of
   // its own to cover — and that is where the door rests instead of the pill.
   const plateAtRest = mainSurface === "document" && plateMode === "door";
@@ -3420,6 +3446,43 @@ function App() {
   // Live terminal ids. Null until the dock first reports — an absent report
   // must never read as "the terminal is gone".
   const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
+  // A session's terminal, learnt: its set (when it has one) gets an Agent
+  // tab for it — quietly, beside the plan — and loses one for a terminal
+  // that is gone and no longer the session's (a restore into a fresh PTY).
+  useEffect(() => {
+    if (!classicWb) return;
+    const state = wb.getState();
+    for (const [sessionId, terminalId] of sessionTerminals) {
+      const key = planKey(sessionId);
+      const set = state.sets[key];
+      if (!set) continue;
+      wb.dispatch({ type: "ensureDefaults", key, defaults: { agentTerminalId: terminalId } });
+      if (!liveTermIds) continue;
+      for (const pane of Object.values(set.panes)) {
+        if (pane.kind === "chat" && pane.data.source === "agent" && pane.data.terminalId !== terminalId && !liveTermIds.includes(pane.data.terminalId)) {
+          wb.dispatch({ type: "closePane", key, paneId: pane.id });
+        }
+      }
+    }
+  }, [sessionTerminals, liveTermIds]);
+  // Fork (the Agent pane's header): the CLI session continues in a new
+  // terminal of its own, this one left as it is. Claude's `--fork-session`
+  // gives the copy a session id of its own, so a plan it writes is a new
+  // session here. Its conversation opens as an Agent tab beside this one.
+  const forkCliSession = async (cliSessionId: string, projectPath: string | null) => {
+    if (!/^[\w.-]+$/.test(cliSessionId)) return;
+    const id = (await ensureTerminalReady())?.openSessionTerminal(projectPath, { background: true }) ?? null;
+    if (!id) {
+      setToast("Couldn't open a terminal to fork into", 6000);
+      return;
+    }
+    const delivery = await deliverToTerminal(tauriHandoffDeps, id, [{ stage: "launch", data: `claude --resume ${cliSessionId} --fork-session\r` }]);
+    if (!delivery.ok) {
+      setToast(`Couldn't fork the session (${delivery.stage}): ${delivery.reason}`, 6000);
+      return;
+    }
+    wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "agent", terminalId: id, sessionId: null } });
+  };
   // Baseline for tile-driven dock growth (see the effect below).
   const prevTileCountRef = useRef(1);
   const tilesReportedRef = useRef(false);
@@ -3558,6 +3621,10 @@ function App() {
   // Once mounted it is never unmounted: a surface change that took the dock
   // away would kill every PTY in it and lose the scrollback.
   const [terminalMounted, setTerminalMounted] = useState(false);
+  // A pane asking for its PTY wants the dock now, not at the next idle.
+  useEffect(() => {
+    if (cliView) setTerminalMounted(true);
+  }, [cliView]);
   const terminalsRef = useRef<TerminalTabsHandle | null>(null);
   /** Where a dictation with nowhere to type goes (set beside the dock's
    *  contexts below). */
@@ -3934,6 +4001,8 @@ function App() {
   const paneAsideRef = useRef<HTMLElement | null>(null);
   const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
   const termDockRef = useRef<HTMLDivElement | null>(null);
+  // The dock over the Agent pane's CLI box while one shows its PTY.
+  useStageDock(termDockRef, cliBoxRef, !!paneCli);
   // Flow's wall (Tools ▸ Terminals) covers the plate, not the sidebar.
   useStageDock(termDockRef, docColumnRef, flowShell && termFullscreen);
   // The voice dock is not part of `applyLiveLayout` — it lives one level down,
@@ -4913,12 +4982,21 @@ function App() {
         // (D1's "elsewhere"), and the row's pulse carries the news.
         const launchDoor = classicWb && !!payload.launchId && doorLaunchTabRef.current?.launchId === payload.launchId ? doorLaunchTabRef.current : null;
         const wbNow = wb.getState();
+        // The launch's own set (its Agent tab, and the door it came through):
+        // it becomes the plan's set, the door its Plan tab (D1: selected
+        // when the user is on it, inserted quietly when not).
+        const launchSetKey = classicWb && payload.launchId ? launchKey(payload.launchId) : null;
+        const launchSet = launchSetKey && wbNow.sets[launchSetKey] ? launchSetKey : null;
+        const ownLaunch = !!launchSet && wbNow.activeKey === launchSet;
         const ownDoorTab = !!launchDoor && launchDoor.key === wbNow.activeKey && wbNow.sets[launchDoor.key]?.activeTabId === launchDoor.tabId;
-        if (launchDoor && !ownDoorTab) {
+        if (launchSet) {
+          doorLaunchTabRef.current = null;
+          wb.dispatch({ type: "rekeySession", from: launchSet, to: planKey(payload.sessionId) });
+        } else if (launchDoor && !ownDoorTab) {
           retireDoorLaunchTab(payload.launchId);
           wb.dispatch({ type: "ensureDefaults", key: planKey(payload.sessionId) });
         }
-        const writing = !ownDoorTab && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));
+        const writing = !ownDoorTab && !ownLaunch && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));
         const title = list.find((item) => item.sessionId === payload.sessionId)?.planTitle ?? null;
         if (graduated && arrivingLaunch?.chatId) {
           const chatId = arrivingLaunch.chatId;
@@ -4981,8 +5059,15 @@ function App() {
             const from = boxOf(".rl-frontdoor-focus .rl-fd-island");
             if (from) setPlanSwap({ launchId: payload.launchId, from });
             retireDoorLaunchTab(payload.launchId);
+          } else if (ownDoorTab) {
+            const from = boxOf(".rl-frontdoor-focus .rl-fd-island");
+            if (from) setPlanSwap({ launchId: payload.launchId!, from });
           }
           focusIntercepted();
+          // Someone elsewhere comes to the plan itself, not the Agent tab
+          // the set was showing (D1 selects the Plan tab only for the user
+          // already on the set).
+          if (classicWb && !ownLaunch) wb.dispatch({ type: "openSurface", kind: "plan", key: planKey(payload.sessionId) });
           announceDoor(arrivalMessage(title, revision));
           return;
         }
@@ -7313,6 +7398,24 @@ function App() {
       launch: { launchId, terminalId, prompt: trimmed, startedAt, projectPath: req.projectPath, mode: run ? "run" : "plan", harness: choice.backend === "codex" ? "codex" : "claude" },
     });
     if (flowShell && !req.background) selectFlowLaunch(terminalId);
+    // The workbench: the launch is a session from here — a `launch:` set
+    // holding its Agent tab, rekeyed to the plan when it arrives. Asked
+    // for in the foreground it is selected, and the door tab it came
+    // through follows it (it becomes the Plan tab on arrival); a
+    // background launch gets its set without moving anyone.
+    if (classicWb) {
+      const key = launchKey(launchId);
+      if (req.background) wb.dispatch({ type: "ensureDefaults", key, defaults: { agentTerminalId: terminalId } });
+      else {
+        const { key: fromKey, set, tab } = activePanes(wb.getState());
+        const door = tab && set && set.panes[tab.focusedPaneId]?.kind === "door" ? { key: fromKey, tabId: tab.id } : null;
+        wb.dispatch({ type: "selectSession", key, defaults: { agentTerminalId: terminalId } });
+        if (door) {
+          wb.dispatch({ type: "moveTab", from: door.key, to: key, tabId: door.tabId, at: 0, activate: false });
+          doorLaunchTabRef.current = { launchId, key, tabId: door.tabId };
+        }
+      }
+    }
     if (run) {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
@@ -9433,20 +9536,32 @@ function App() {
     },
     // A session's terminal row: the dock's tile, hailed. (Terminal panes in
     // the centre are W3's.)
-    onSelectTerminal: (_sessionId: string, terminalId: string) => {
+    onSelectTerminal: (sessionId: string, terminalId: string) => {
       if (isFlowShell()) {
         flowShowTerminalRef.current(terminalId, "terminal");
+        return;
+      }
+      // The session's agent terminal is its Agent tab: one pane per
+      // terminal, opened again it comes forward.
+      if (sessionTerminals.get(sessionId) === terminalId) {
+        setActiveId(sessionId);
+        wb.dispatch({ type: "openSurface", kind: "chat", key: planKey(sessionId), data: { source: "agent", terminalId, sessionId } });
         return;
       }
       revealTerm();
       terminalsRef.current?.selectTab(terminalId);
       terminalsRef.current?.hailTerminal(terminalId);
     },
-    // A pending launch's row: flow puts its stage on it; classic shows the
-    // terminal it is planning in.
+    // A pending launch's row: its own set (the Agent tab) under the
+    // workbench, the stage in flow.
     onSelectLaunch: (terminalId: string) => {
       if (isFlowShell()) {
         selectFlowLaunch(terminalId);
+        return;
+      }
+      const launch = flowLaunches.find((l) => l.terminalId === terminalId);
+      if (launch) {
+        wb.dispatch({ type: "selectSession", key: launchKey(launch.launchId), defaults: { agentTerminalId: terminalId } });
         return;
       }
       revealTerm();
@@ -11016,10 +11131,55 @@ function App() {
                     );
                   case "browser":
                     return <Singleton host={browserHost} pane={pane} ctx={ctx} holder={browserHeld} bring={setBrowserHolder} />;
-                  case "chat":
-                    return pane.data.source === "companion"
-                      ? <SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />
-                      : <EmptyState title="Agent" body="The agent's conversation arrives in its own tab in the next phase." />;
+                  case "chat": {
+                    if (pane.data.source === "companion") return <SingletonSlot host={chatHost} name="conversation" active={ctx.visible} />;
+                    // The session's own conversation: the agent in its
+                    // terminal, mirrored. Keyed by the terminal, so a launch
+                    // becoming its plan keeps the conversation.
+                    const agentTerminal = pane.data.terminalId;
+                    const agentSession = pane.data.sessionId;
+                    const launch = flowLaunches.find((l) => l.terminalId === agentTerminal) ?? null;
+                    const own = agentSession !== null && agentSession === activeId;
+                    const ownSummary = own ? summaries.find((s) => s.sessionId === agentSession) ?? null : null;
+                    const harness: "claude" | "codex" = launch?.harness ?? ((own ? session?.backend : ownSummary?.backend) === "codex" ? "codex" : "claude");
+                    const ownMode = ownSummary
+                      ? sessionMode({ target: "plan", status: ownSummary.status, held: ownSummary.held, revising: waiting, revisions: ownSummary.revisions, runState: ownSummary.runState })
+                      : null;
+                    const projectPath = launch?.projectPath ?? (own ? session?.projectPath ?? null : null);
+                    return (
+                      <Suspense fallback={null}>
+                        <AgentPane
+                          key={agentTerminal}
+                          terminalId={agentTerminal}
+                          sessionId={agentSession}
+                          harness={harness}
+                          visible={ctx.visible}
+                          cliAvailable={!liveTermIds || liveTermIds.includes(agentTerminal)}
+                          onCliView={setCliView}
+                          onFork={harness === "claude" ? (cliSessionId) => void forkCliSession(cliSessionId, projectPath) : null}
+                          planTitle={ownSummary?.planTitle ?? null}
+                          planMarks={own ? pendingComments.length : 0}
+                          // The plan is a tab of this set: open while it is on
+                          // screen, and its card opens it.
+                          planOpen={wbView.visibleKinds.includes("plan")}
+                          onOpenPlan={() => wb.dispatch({ type: "openSurface", kind: "plan" })}
+                          projectPath={projectPath}
+                          planMarkdown={own ? latest?.rawPlanMarkdown ?? null : null}
+                          termState={terminalKinds.get(agentTerminal) === "needs-you" ? "needs-you" : terminalKinds.get(agentTerminal) === "working" ? "working" : null}
+                          talking={voiceDocked}
+                          onTalk={flowTalk}
+                          planState={ownSummary ? {
+                            label: ownMode?.label ?? "Plan",
+                            kind: ownMode?.kind ?? "plan",
+                            held: ownSummary.held,
+                            toReview: threadComments.filter((c) => c.status === "resolved").length,
+                          } : null}
+                          fallbackModel={own && session?.model ? { model: session.model, effort: session.effort ?? null } : null}
+                          fallbackMode={ownSummary?.status === "in_review" ? "plan" : null}
+                        />
+                      </Suspense>
+                    );
+                  }
                   case "terminals":
                     return <EmptyState title="Terminals" body="Terminal walls move into tabs in a later phase; the dock below still holds them." />;
                   case "drafter":
@@ -11974,7 +12134,7 @@ function App() {
         </div>
         </ErrorBoundary>
 
-        {!termFullscreen && !flowDockHidden && !flowTermStage && (
+        {!termFullscreen && !flowDockHidden && !flowTermStage && !paneCli && (
           <PaneDivider
             orientation="horizontal"
             label="terminal"
@@ -12004,7 +12164,7 @@ function App() {
             // the session's PTY alone (`solo` below).
             // Flow's wall too, over the plate beside the sidebar: the sidebar
             // and the top bar's crumb are its way back.
-            flowTermStage || (flowShell && termFullscreen)
+            flowTermStage || (flowShell && termFullscreen) || paneCli
               ? "rl-term-dock--stage"
               : termFullscreen
               ? "absolute inset-0 z-30"
@@ -12013,11 +12173,11 @@ function App() {
                 // a 2px rounded sliver across the hull.
                 `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
           }
-          data-rl-pane={termFullscreen || flowTermStage ? undefined : ""}
+          data-rl-pane={termFullscreen || flowTermStage || paneCli ? undefined : ""}
           // Folded, the dock's terminals are not rendered at all (styles.css
           // `.rl-term-dock[data-collapsed]`): their layers and layout would
           // otherwise be kept warm behind a 0px fold.
-          data-collapsed={!termFullscreen && !flowTermStage && termCollapsed ? "" : undefined}
+          data-collapsed={!termFullscreen && !flowTermStage && !paneCli && termCollapsed ? "" : undefined}
           // Height is owned by `applyLiveLayout` (it folds in the collapsed
           // state), so the dock tracks the divider without a render — and
           // without touching style for anything else on the page.
@@ -12065,8 +12225,8 @@ function App() {
             onTileCountChange={handleTileCountChange}
             onNeedsYouChange={setTermNeedYou}
             onNeedsYouIdsChange={isFlowShell() ? setFlowNeedsYouTerms : undefined}
-            collapsed={termFullscreen || flowTermStage ? false : termCollapsed}
-            solo={flowTermStage ? stageTerminalId : null}
+            collapsed={termFullscreen || flowTermStage || paneCli ? false : termCollapsed}
+            solo={flowTermStage ? stageTerminalId : paneCli?.terminalId ?? null}
             onActiveTabChange={setActiveTermId}
             onFocusedCwd={handleFocusedCwd}
             heldTerminalIds={heldTermIds}

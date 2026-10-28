@@ -27,7 +27,7 @@ describe("a plan arriving while you are busy flashes", () => {
     // W1: a door tab that sent this very launch is never writing — its ⏎
     // asked for the plan, caret still in the box or not — so the clock and
     // the open door are read behind that one exception.
-    expect(arrival).toContain("const writing = !ownDoorTab && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));");
+    expect(arrival).toContain("const writing = !ownDoorTab && !ownLaunch && (frontDoorOpenRef.current || writingNow(document.activeElement, typedAtRef.current, Date.now()));");
     expect(arrival).toContain("doorLaunchTabRef.current?.launchId === payload.launchId");
     const focus = arrival.slice(arrival.indexOf("const focus = arrivalFocus({"), arrival.indexOf("});", arrival.indexOf("const focus = arrivalFocus({")));
     expect(focus).toContain("viewedVersion: viewedVersionRef.current");
