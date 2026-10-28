@@ -34,6 +34,7 @@
 //! is a tinted, bordered card at 88% width; 4b's bubble is a plain fill at
 //! 520px, so it is drawn here too.
 
+import { fileExists, openFileLink } from "../../lib/fileLinks";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, Check, ChevronDown, FilePenLine, Hammer, X } from "lucide-react";
 import { MarkdownView } from "../MarkdownView";
@@ -829,7 +830,21 @@ function ToolRows({ rows }: { rows: ToolRow[] }) {
             <X size={13} aria-hidden className={row.status === "error" ? "rl-convo-err" : "rl-convo-stopped"} />
           )}
           <span className="rl-convo-tool-verb">{row.verb}</span>
-          {row.target && <span className="rl-convo-tool-target">{row.target}</span>}
+          {row.target &&
+            (row.path ? (
+              // The file this step read or edited opens as a file pane — the
+              // terminal's ⌘-click route, here a plain click (⌘ for a tab).
+              <button
+                type="button"
+                className="rl-convo-tool-target rl-convo-tool-link"
+                title={`Open ${row.path}`}
+                onClick={(e) => void openFileLink({ path: row.path! }, { cwd: null, home: null }, fileExists, e.metaKey ? "tab" : "preview")}
+              >
+                {row.target}
+              </button>
+            ) : (
+              <span className="rl-convo-tool-target">{row.target}</span>
+            ))}
           {row.more > 0 && <span className="rl-convo-tool-verb">and {row.more} more</span>}
           {row.status === "error" && <span className="sr-only">(failed)</span>}
         </div>

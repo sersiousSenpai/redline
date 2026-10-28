@@ -502,6 +502,7 @@ import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
 import { RAIL_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
+import type { OpenFileDetail } from "./lib/fileLinks";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
 // the first frame needs the store and the stored state, not the actions
@@ -9070,6 +9071,20 @@ function App() {
     if (root) setQuickOpenRoot(root);
     else setToast({ message: "No project folder to search here yet.", tone: "info" });
   }, []);
+  // `file:line` links (W4): a terminal's ⌘-click, a conversation's tool
+  // row — every one arrives as this event and opens through `openFile`.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const d = (e as CustomEvent<OpenFileDetail>).detail;
+      if (!d?.path) return;
+      setActiveFile(d.path);
+      wb.dispatch({ type: "openFile", path: d.path, line: d.line, mode: d.mode ?? "preview" });
+    };
+    // lib/fileLinks' OPEN_FILE_EVENT, spelt here so the module stays off the
+    // boot path (fileLinks.test pins the two together).
+    window.addEventListener("redline:open-file", onOpen);
+    return () => window.removeEventListener("redline:open-file", onOpen);
+  }, [setActiveFile]);
   // ⌘P: the native menu's Go to File (menu-quick-open), and the same chord
   // where no menu took it first. Print moved to ⌘⌥P.
   useEffect(() => {

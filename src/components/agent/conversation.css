@@ -818,3 +818,22 @@ button.rl-convo-chip:hover,
 .rl-work-drawer-icon:hover { background: var(--color-fill-2); color: var(--color-ink); }
 .rl-work-drawer-steer:focus-visible,
 .rl-work-drawer-icon:focus-visible { outline: 2px solid var(--color-focus-rim); outline-offset: 1px; }
+
+/* A read or an edit's file opens as a file pane (W4). */
+.rl-convo-tool-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.rl-convo-tool-link:hover {
+  color: var(--color-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.rl-convo-tool-link:focus-visible {
+  outline: 2px solid var(--color-focus-rim);
+  outline-offset: 1px;
+}

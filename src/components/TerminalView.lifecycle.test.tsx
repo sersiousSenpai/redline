@@ -12,7 +12,11 @@ interface FakeTerminal {
   data: (text: string) => void;
   key: () => void;
   write: (data: string | Uint8Array, done?: () => void) => void;
+  lines: string[];
+  links: FakeLinkProvider | null;
 }
+type FakeLink = { text: string; activate(e: MouseEvent): void };
+interface FakeLinkProvider { provideLinks(y: number, cb: (links: FakeLink[] | undefined) => void): void }
 interface FakePty { pid: number; history: string; attachmentId: string; channel: FakeChannel | null }
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -51,6 +55,10 @@ vi.mock("../lib/xtermLoader", () => {
     loadAddon() {}
     open() {}
     onTitleChange() { return { dispose() {} }; }
+    links: FakeLinkProvider | null = null;
+    lines: string[] = [];
+    buffer = { active: { getLine: (i: number) => ({ translateToString: () => this.lines[i] ?? "" }) } };
+    registerLinkProvider(p: FakeLinkProvider) { this.links = p; return { dispose: () => { this.links = null; } }; }
     onData(fn: (text: string) => void) { this.data = fn; return { dispose: () => { this.data = () => {}; } }; }
     onKey(fn: () => void) { this.key = fn; return { dispose: () => { this.key = () => {}; } }; }
     write(data: string | Uint8Array, done?: () => void) {
@@ -422,5 +430,35 @@ describe("a wall swap's per-tile costs stay off the swap's frame", () => {
     expect(pendingTerminalWork()).toBeGreaterThan(0);
     await frame();
     expect(currentTerm().output).toBe("streamed while hidden");
+  });
+});
+
+describe("file:line links (W4)", () => {
+  it("underlines a printed path and opens it on ⌘-click, resolved against the terminal's cwd, only if it exists", async () => {
+    await mount();
+    const ordinary = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === "pty_cwd") return "/repo/app";
+      if (command === "home_dir") return "/Users/me";
+      if (command === "list_dir") return args.path === "/repo/app/src" ? [{ name: "main.ts", path: "/repo/app/src/main.ts", isDir: false }] : [];
+      return ordinary(command, args);
+    });
+    const term = currentTerm();
+    term.lines = ["error src/main.ts:12:3 and src/gone.ts:1"];
+    let links: FakeLink[] | undefined;
+    term.links!.provideLinks(1, (l) => { links = l; });
+    expect(links?.map((l) => l.text)).toEqual(["src/main.ts:12:3", "src/gone.ts:1"]);
+    const opened: unknown[] = [];
+    const on = (e: Event) => opened.push((e as CustomEvent).detail);
+    window.addEventListener("redline:open-file", on);
+    // A plain click is the terminal's.
+    links![0].activate(new MouseEvent("click"));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(opened).toEqual([]);
+    links![0].activate(new MouseEvent("click", { metaKey: true }));
+    links![1].activate(new MouseEvent("click", { metaKey: true }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    window.removeEventListener("redline:open-file", on);
+    expect(opened).toEqual([{ path: "/repo/app/src/main.ts", line: 12, mode: "preview" }]);
   });
 });

@@ -294,3 +294,12 @@ describe("chips", () => {
     expect(effortLabel("low")).toBe("Low");
   });
 });
+
+describe("tool rows that name a file (W4)", () => {
+  it("carry the file's absolute path for a read or an edit, and nothing for a command", () => {
+    const rows = toolRows([tool("1", "Read", "src/a.ts"), tool("2", "Edit", "/repo/b.ts"), tool("3", "Bash", "ls src")], { projectPath: "/repo" });
+    expect(rows.map((r) => r.path ?? null)).toEqual(["/repo/src/a.ts", "/repo/b.ts", null]);
+    // A relative path with no project to resolve it against is no link.
+    expect(toolRows([tool("1", "Read", "src/a.ts")])[0].path).toBeUndefined();
+  });
+});

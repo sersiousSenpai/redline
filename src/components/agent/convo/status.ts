@@ -19,6 +19,7 @@
 //!
 //! A running turn that matches none of these is just *Working*.
 
+import { resolveFileLink } from "../../../lib/fileLinks";
 import { foldSteps, type StepRow } from "../../../lib/replySteps";
 import { formatDuration, type Activity } from "../../../lib/turnMeter";
 import type { TermState } from "../../../lib/termState";
@@ -136,6 +137,9 @@ export interface ToolRow {
   status: "done" | "error" | "stopped";
   /** Every step the row stands for, for its tooltip. */
   steps: string[];
+  /** The file a read or an edit touched, absolute: the row's target opens
+   *  it as a file pane (W4's `file:line` route). */
+  path?: string;
 }
 
 /** The finished tool steps of `items` as rows. Which steps fold is
@@ -154,9 +158,16 @@ export function toolRows(
   const activity: Activity[] = tools.map((tool) => ({ at: tool.at, kind: "tool", label: `${tool.name}(${tool.summary})` }));
   const row = (tool: ToolItem, more = 0, steps: ToolItem[] = [tool]): ToolRow => {
     const phrase = toolPhrase(tool.name, tool.summary, "past", options.projectPath);
+    const words = wordsFor(tool.name);
+    const target = oneLine(tool.summary).trim();
+    const path =
+      words.target === "path" && (words.group === "read" || words.group === "edit") && target && !/\s/.test(target)
+        ? resolveFileLink(target, options.projectPath ?? null)
+        : null;
     return {
       id: tool.id,
       ...phrase,
+      ...(path ? { path } : {}),
       more,
       status: tool.status === "running" ? "stopped" : tool.status,
       steps: steps.map((step) => {

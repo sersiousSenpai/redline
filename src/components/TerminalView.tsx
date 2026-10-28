@@ -17,6 +17,7 @@ import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
 import { isInterruptInput, terminalInputOrigin } from "../lib/terminalInput";
 import { registerFileDropTarget } from "../lib/nativeFileDrop";
 import { revealMayFocus, spawnDeferred, tapPtyOutput } from "../lib/terminalSeams";
+import { fileExists, findFileLinks, homeFolder, openFileLink } from "../lib/fileLinks";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -445,6 +446,32 @@ export const TerminalView = memo(function TerminalView({
     // and listener it owns.
     term.onTitleChange((title) => onTitleRef.current?.(id, title));
 
+    // `file:line` links (W4): a path the terminal printed underlines on hover
+    // and opens as a file pane on ⌘-click, resolved against this terminal's
+    // cwd at the moment of the click (`pty_cwd`) and only if it exists. Plain
+    // clicks stay the terminal's (a TUI's own mouse, a selection).
+    const linkSub = term.registerLinkProvider({
+      provideLinks(y, callback) {
+        const text = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
+        const found = findFileLinks(text);
+        callback(
+          found.length
+            ? found.map((m) => ({
+                range: { start: { x: m.start + 1, y }, end: { x: m.end, y } },
+                text: m.text,
+                decorations: { underline: true, pointerCursor: true },
+                activate: (event: MouseEvent) => {
+                  if (!event.metaKey) return;
+                  void Promise.all([invoke<string | null>("pty_cwd", { id }).catch(() => null), homeFolder()]).then(([liveCwd, home]) =>
+                    openFileLink(m, { cwd: liveCwd ?? cwd, home }, fileExists, event.shiftKey ? "tab" : "preview"),
+                  );
+                },
+              }))
+            : undefined,
+        );
+      },
+    });
+
     // Per-terminal raw-byte output stream. One Channel = one subscriber (this
     // tab) → no N-tab event fan-out, no id filtering, no base64. Bytes arrive
     // as an ArrayBuffer; write them straight to xterm. The write callback is our
@@ -640,6 +667,7 @@ export const TerminalView = memo(function TerminalView({
       cancelTerminalWork(`fit:${id}`);
       schedulerRef.current?.cancel();
       dataSub.dispose();
+      linkSub.dispose();
       keySub.dispose();
       inputOrigin.dispose();
       host.removeEventListener("dragover", swallowDrag);
