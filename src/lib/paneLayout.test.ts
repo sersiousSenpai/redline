@@ -66,6 +66,15 @@ const base: PaneLayoutInput = {
 };
 
 describe("computePaneLayout", () => {
+  it("reserves a collapsed rail's edge strip, and nothing for an open or fullscreen one", () => {
+    const folded = computePaneLayout({ ...base, paneCollapsed: true, paneEdgeW: 40 });
+    expect(folded.paneFlowW).toBe(0);
+    expect(folded.docFlowW).toBe(1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE - 240 - 40);
+    expect(computePaneLayout({ ...base, paneEdgeW: 40 }).docFlowW).toBe(computePaneLayout(base).docFlowW);
+    const full = computePaneLayout({ ...base, paneCollapsed: true, paneFullscreen: true, paneEdgeW: 40 });
+    expect(full.docFlowW).toBe(1440 - DIVIDER_W - 2 * SHELL_EDGE - 240);
+  });
+
   it("passes widths through untouched when the doc has room", () => {
     const l = computePaneLayout(base);
     expect(l.sidebarFlowW).toBe(240);

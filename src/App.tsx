@@ -186,6 +186,9 @@ import {
 import { TEAM_BUILD_ITEMS, teamScaleOf, type Scale } from "./lib/teamBuildItems";
 import type { ScaleConfig, ScaledLaunch } from "./lib/scaledBuild";
 const SidebarTabStrip = lazy(() => import("./components/SidebarTabStrip").then((module) => ({ default: module.SidebarTabStrip })));
+// The right rail's chrome and its collapsed edge strip (W4): one lazy chunk.
+const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RightRail })));
+const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
 // The table-of-contents rail renders only once opened (about 6 kB, W1).
 const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
 // Classic's folder tab only, so its own chunk.
@@ -399,7 +402,7 @@ const CommandPalette = lazy(() => import("./components/CommandPalette").then((m)
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isReopenTabKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
+import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -448,7 +451,6 @@ import {
   isImmersive,
   maskPanels,
   panelMask,
-  platePaneMask,
   panelsMasked,
 } from "./lib/immersive";
 import { boxOf, type SwapRect } from "./lib/springSwap";
@@ -476,7 +478,6 @@ import {
   canonicalLayout,
   computePaneLayout,
   isLayoutAtRest,
-  paneCollapseOnMask,
   voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
@@ -493,6 +494,7 @@ import { paneStatusOf, wallStatus } from "./workbench/status";
 import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, paneIdsOf, planKey, sessionIdOf, singletonHolder, type AnyPane, type PaneInit, type PaneKind, type SessionKey, type WorkbenchState } from "./workbench/model";
 import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
+import { RAIL_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
 import type { WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
@@ -1140,11 +1142,15 @@ function App() {
     "redline.sidebar.collapsed",
     false,
   );
-  const [paneWidth, setPaneWidth] = usePersistedState(
+  // The right rail's width (W4: the Discussion pane became the rail). Read
+  // through the rail's 280–600 px bounds, so a width stored before them is
+  // never drawn outside.
+  const [paneWidthPref, setPaneWidth] = usePersistedState(
     "redline.commentPane.width",
     320,
     { debounceMs: 250 },
   );
+  const paneWidth = clampRailWidth(paneWidthPref);
   const [paneCollapsedPref, setPaneCollapsed] = usePersistedState(
     "redline.commentPane.collapsed",
     false,
@@ -3095,20 +3101,10 @@ function App() {
     docPinned: baseShape.docPinned,
   });
   const pMask = surfaceMask;
-  // A plate with no plan on it hides the pane too.
-  const noPlanPane = platePaneMask({
-    surface: mainSurface,
-    plateMode,
-    brokenPane: panelBreaks.pane,
-  });
-  const combinedPaneMask = pMask.pane || noPlanPane;
-  const previousPaneMask = useRef(false);
-  useLayoutEffect(() => {
-    if (paneCollapseOnMask(previousPaneMask.current, combinedPaneMask)) {
-      setPaneCollapsed(true);
-    }
-    previousPaneMask.current = combinedPaneMask;
-  }, [combinedPaneMask, setPaneCollapsed]);
+  // The right pane is the rail now (W4), and every pane kind has rail tabs:
+  // it is never masked, and a surface never folds it — it stays however the
+  // user left it. The surface mask still says "a surface with no document is
+  // in front", which is what defers an arriving plan to a notice.
   // Only surface masking defers intercepts to a toast. A new plan arriving
   // on the Front Door can select its plan in one batch; it never opens the pane.
   const paneMaskedRef = useRef(pMask.pane);
@@ -3118,7 +3114,7 @@ function App() {
     paneCollapsed,
     paneFullscreen,
     docPinned,
-  } = maskPanels(baseShape, { ...pMask, pane: combinedPaneMask });
+  } = maskPanels(baseShape, { ...pMask, pane: false });
   const panelsAreMasked = panelsMasked(pMask);
   const docVisible = mainSurface === "document" || docPinned;
 
@@ -3160,8 +3156,64 @@ function App() {
   }, [sidebarCollapsed, setSidebarCollapsed]);
   const togglePane = useCallback(() => {
     setPanelBreaks(state => ({ ...state, pane: true }));
+    // Folding a fullscreen rail lands on the edge strip, not on a hidden
+    // fullscreen the next ◨ would resurrect.
+    if (!paneCollapsed) setPaneFullscreen(false);
     setPaneCollapsed(!paneCollapsed);
-  }, [paneCollapsed, setPaneCollapsed]);
+  }, [paneCollapsed, setPaneCollapsed, setPaneFullscreen]);
+  // ---- The right rail (W4) ----------------------------------------------------
+  // The Discussion pane became the rail: one column whose tabs follow the
+  // FOCUSED pane's kind (`workbench/rail.ts`), on the pane's own geometry —
+  // its width, its collapse (now the edge strip of tab icons) and its
+  // fullscreen. The tab last picked is remembered per kind, so a plan and a
+  // browser each come back to the tab they were left on.
+  const [railMemoryStored, setRailMemory] = usePersistedState<RailMemory>(RAIL_MEMORY_KEY, {});
+  const railMemory = useMemo(() => parseRailMemory(railMemoryStored), [railMemoryStored]);
+  const railKind: PaneKind = wbView.focusedKind ?? "door";
+  const railKindRef = useRef(railKind);
+  railKindRef.current = railKind;
+  const railTabs = railTabsFor(railKind);
+  const railTab = railTabFor(railKind, railMemory);
+  const selectRailTab = useCallback(
+    (tab: RailTab) => setRailMemory((stored) => rememberRailTab(parseRailMemory(stored), railKindRef.current, tab)),
+    [setRailMemory],
+  );
+  /** Open the rail on `tab` (an edge-strip icon, ⌘J's Talk). */
+  const openRailTab = useCallback(
+    (tab: RailTab) => {
+      selectRailTab(tab);
+      revealPane();
+    },
+    [selectRailTab, revealPane],
+  );
+  // ⌘B / ⌘⌥B: the sidebar and the rail, caught in the capture phase so a
+  // terminal never sees them. ⌘B is bold in rich text (the plan, the
+  // drafter, CodeMirror), so an editable target keeps it; ⌘⌥B is the rail's
+  // everywhere. A focused web page forwards both as page signals
+  // (browser_signals.js), with the same editable-target rule on its side.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isRailToggleKey(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        togglePane();
+        return;
+      }
+      if (!isSidebarToggleKey(e)) return;
+      if ((e.target as HTMLElement | null)?.isContentEditable) return;
+      e.preventDefault();
+      e.stopPropagation();
+      toggleSidebar();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("redline:toggle-sidebar", toggleSidebar);
+    window.addEventListener("redline:toggle-plan-panel", togglePane);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("redline:toggle-sidebar", toggleSidebar);
+      window.removeEventListener("redline:toggle-plan-panel", togglePane);
+    };
+  }, [toggleSidebar, togglePane]);
 
   // The chrome's hover reveal. The header can't simply vanish — it is the
   // window-drag region and the traffic lights float over it — so immersive
@@ -3937,6 +3989,8 @@ function App() {
         paneWidth: sizes.paneWidth,
         paneCollapsed: f.paneCollapsed,
         paneFullscreen: f.paneFullscreen,
+        // A collapsed rail keeps its edge strip of tab icons in flow.
+        paneEdgeW: RAIL_EDGE_W,
       });
       liveLayoutRef.current = l;
 
@@ -3964,7 +4018,7 @@ function App() {
       setGeom(
         paneAsideRef.current,
         "width",
-        f.paneFullscreen ? "" : `${Math.max(sizes.paneWidth, 240)}px`,
+        f.paneFullscreen ? "" : `${clampRailWidth(sizes.paneWidth)}px`,
       );
       setGeom(
         paneCurtainDivRef.current,
@@ -4209,10 +4263,10 @@ function App() {
   const latchActive = liveFlags.docObscured && !paneFullscreen;
   const reopenDocFromLeft = () => {
     if (!sidebarCollapsed) setSidebarWidth(180);
-    else setPaneWidth(240);
+    else setPaneWidth(RAIL_MIN_W);
   };
   const reopenDocFromRight = () => {
-    if (!paneCollapsed) setPaneWidth(240);
+    if (!paneCollapsed) setPaneWidth(RAIL_MIN_W);
     else setSidebarWidth(180);
   };
 
@@ -4364,11 +4418,12 @@ function App() {
   // the doc's DOC_MIN floor render as curtain overlay (see `layout` above).
   const sidebarMaxW = Math.max(
     180,
-    winWidth - (paneCollapsed ? 0 : paneWidth) - 12,
+    winWidth - (paneCollapsed ? RAIL_EDGE_W : paneWidth) - 12,
   );
-  const paneMaxW = Math.max(
-    240,
-    winWidth - (sidebarCollapsed ? 0 : sidebarWidth) - 12,
+  // The rail's own ceiling (600 px) under the room the sidebar leaves.
+  const paneMaxW = Math.min(
+    RAIL_MAX_W,
+    Math.max(RAIL_MIN_W, winWidth - (sidebarCollapsed ? 0 : sidebarWidth) - 12),
   );
 
   const {
@@ -4398,6 +4453,7 @@ function App() {
     width: paneWidth,
     onWidthChange: setPaneWidth,
     onLiveSize: (w) => applyLiveLayout({ paneWidth: w }),
+    min: RAIL_MIN_W,
     max: paneMaxW,
     // Same for the comment pane on the right edge. Its drag-from-edge expand
     // is the escape hatch that keeps Code Review workable while immersive.
@@ -4414,7 +4470,7 @@ function App() {
     0,
     winWidth -
       (sidebarCollapsed ? 0 : sidebarWidth) -
-      (paneCollapsed || paneFullscreen ? 0 : paneWidth) -
+      (paneFullscreen ? 0 : paneCollapsed ? RAIL_EDGE_W : paneWidth) -
       12 -
       DIVIDER_W,
   );
@@ -8966,6 +9022,33 @@ function App() {
     </Suspense>
   ) : null;
 
+  // The rail's badges: the Discussion tab counts the answers waiting on you
+  // (amber), else the marks riding the next Send. Nothing else is counted
+  // here — a count for a tab that is not shown would mean polling for it.
+  const railWaiting = threadComments.filter((c) => c.status === "resolved").length;
+  const railCounts = useMemo(
+    () => ({ discussion: railWaiting || pendingComments.length }),
+    [railWaiting, pendingComments.length],
+  );
+  const railAttention = useMemo(() => ({ discussion: railWaiting > 0 }), [railWaiting]);
+  // The rail's other tabs. Talk is still the conversation dock's column
+  // beside the pane until the dock's body moves in; Files and Changes land
+  // with their own bodies.
+  const railOtherBody: ReactNode =
+    railTab === "talk" ? (
+      <div className="rl-rail-empty">
+        {dockReachable ? (
+          <button type="button" className="rl-menu-item text-left" onClick={openDock}>
+            Open the conversation beside this pane
+          </button>
+        ) : (
+          "Nothing to talk about on this pane yet."
+        )}
+      </div>
+    ) : (
+      <div className="rl-rail-empty">{railTab === "files" ? "Files" : "Changes"}</div>
+    );
+
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
 
   // The door's one flight pill: its own plan launch or its own run, whichever
@@ -10807,7 +10890,9 @@ function App() {
             dragging={isDragging}
             onToggle={togglePane}
             onPointerDown={startDrag}
-            hideChevron={latchActive || liveFlags.curtainR}
+            // Folded, the edge strip carries the way back open; the divider
+            // keeps only its drag.
+            hideChevron={latchActive || liveFlags.curtainR || paneCollapsed}
           />
         )}
 
@@ -10920,8 +11005,8 @@ function App() {
           data-context={discussionContext}
           className={
             paneFullscreen
-              ? "absolute inset-0 z-30 overflow-y-auto rl-discussion"
-              : "overflow-y-auto shrink-0 rl-discussion rl-pane-aside"
+              ? "absolute inset-0 z-30 overflow-hidden rl-discussion"
+              : "overflow-hidden shrink-0 rl-discussion rl-pane-aside"
           }
           style={
             {
@@ -10941,39 +11026,41 @@ function App() {
             } as React.CSSProperties
           }
         >
-          {/* In fullscreen, mirror the terminal's overlay divider so the
-              top-edge caret is the shrink-back affordance. */}
-          {paneFullscreen && (
-            <div
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                zIndex: 40,
-              }}
-            >
-              <PaneDivider
-                orientation="horizontal"
-                label="comments"
-                collapsed={false}
-                dragging={false}
-                onToggle={() => setPaneFullscreen(false)}
-                onPointerDown={() => {}}
-                fullscreen
-                onExitFullscreen={() => setPaneFullscreen(false)}
-              />
-            </div>
-          )}
+          {/* The rail (W4): its tab strip over the one tab shown. Only that
+              tab's body is mounted, so a tab off screen polls nothing. The
+              strip's ⤢ is the old pane's fullscreen; ◨ folds it to the edge
+              strip. Quiet while the chunk lands, like every lazy plate. */}
+          <Suspense fallback={<div style={{ height: "34px", background: "var(--color-canvas)" }} />}>
+          <RightRail
+            tabs={railTabs}
+            active={railTab}
+            onSelect={selectRailTab}
+            counts={railCounts}
+            attention={railAttention}
+            fullscreen={paneFullscreen}
+            onToggleFullscreen={() => {
+              // Effective-value toggle, same rule as the pane's collapse:
+              // immersive masks fullscreen off, so ⤢ means "go fullscreen".
+              setImmersiveBroken(true);
+              setPanelBreaks(state => ({ ...state, pane: true }));
+              setPaneFullscreen(!paneFullscreen);
+            }}
+            onCollapse={() => {
+              setPaneFullscreen(false);
+              setPaneCollapsed(true);
+            }}
+          >
+          {railTab !== "discussion" ? railOtherBody : (
+          <div className="rl-rail-scroll rl-thin-scroll-y">
+          {(discussionContext === "review" || (reviewOpen && planDiscussionAvailable)) && (
           <div
-            className="rl-chrome-label sticky top-0 z-10 px-4 py-2 border-b flex items-center justify-between"
+            className="rl-chrome-label sticky top-0 z-10 px-4 py-2 border-b flex items-center justify-between gap-2"
             style={{
               borderColor: "var(--color-rule)",
               background: "var(--color-paper)",
             }}
           >
             <span className="flex items-center gap-2">
-              Discussion
               {discussionContext === "review" && (
                 <span className="rl-review-source-chip normal-case" style={{ fontWeight: 500 }}>
                   ⌗ code review
@@ -11022,41 +11109,9 @@ function App() {
                     {isViewingHistorical ? "on this version" : "total"}
                   </span>
                 )}
-              <button
-                type="button"
-                onClick={() => {
-                  // Effective-value toggle, same rule as the pane's collapse:
-                  // immersive masks fullscreen off, so ⤢ means "go fullscreen".
-                  setImmersiveBroken(true);
-                  setPanelBreaks(state => ({ ...state, pane: true }));
-                  setPaneFullscreen(!paneFullscreen);
-                }}
-                title={
-                  paneFullscreen
-                    ? "Restore comment pane"
-                    : "Fullscreen comment pane"
-                }
-                aria-label={
-                  paneFullscreen
-                    ? "Restore comment pane"
-                    : "Fullscreen comment pane"
-                }
-                className="flex items-center justify-center rounded"
-                style={{
-                  width: "20px",
-                  height: "20px",
-                  fontSize: "12px",
-                  lineHeight: 1,
-                  background: "var(--color-bg-elevated)",
-                  border: "1px solid var(--color-rule)",
-                  color: "var(--color-ink-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {paneFullscreen ? "⤡" : "⤢"}
-              </button>
             </span>
           </div>
+          )}
           <div className="p-4 flex flex-col gap-3">
             {/* The sidecar pertains to what's on screen: the code review's
                 annotations/questions when the review context is active, else
@@ -11262,8 +11317,19 @@ function App() {
               </>
             )}
           </div>
+          </div>
+          )}
+          </RightRail>
+          </Suspense>
         </aside>
         </div>
+        )}
+        {/* The folded rail: its tabs as icons down a 40px strip (the mic
+            among them), reserved in flow by `computePaneLayout`'s edge. */}
+        {paneCollapsed && (
+          <Suspense fallback={<div className="shrink-0" style={{ width: `${RAIL_EDGE_W}px` }} />}>
+            <RailEdge tabs={railTabs} counts={railCounts} attention={railAttention} onOpen={openRailTab} onExpand={revealPane} />
+          </Suspense>
         )}
         </div>
         </ErrorBoundary>

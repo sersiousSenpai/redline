@@ -30,18 +30,16 @@ describe("panel mask wiring", () => {
     // The arrival-only opener is gone, so it cannot come back under its name.
     expect(app).not.toContain("openPanePref");
   });
-  it("a plan-less plate hides the pane without deferring intercepts or showing a surface hint", () => {
-    // The rule itself is immersive.ts's `platePaneMask` (tested there).
-    expect(app).toMatch(/const noPlanPane = platePaneMask\(\{\s*surface: mainSurface,\s*plateMode,\s*brokenPane: panelBreaks\.pane,\s*\}\);/);
-    expect(app).toContain('const combinedPaneMask = pMask.pane || noPlanPane');
-    expect(app).toContain('maskPanels(baseShape, { ...pMask, pane: combinedPaneMask })');
+  it("the rail is never masked: no surface and no plate face folds it (W4)", () => {
+    // Every pane kind has rail tabs (workbench/rail.ts), so the right pane
+    // stays however the user left it — the surface mask keeps only the
+    // sidebar, and nothing writes the collapse on a surface's rising edge.
+    expect(app).toContain('maskPanels(baseShape, { ...pMask, pane: false })');
+    expect(app).not.toContain('platePaneMask(');
+    expect(app).not.toContain('paneCollapseOnMask(');
+    // The surface mask still defers an arriving plan to a notice.
     expect(app).toContain('paneMaskedRef.current = pMask.pane');
     expect(app).toContain('panelsMasked(pMask)');
-    expect(app).toContain('const previousPaneMask = useRef(false)');
-    expect(app).toMatch(/if \(paneCollapseOnMask\(previousPaneMask.current, combinedPaneMask\)\) \{\s*setPaneCollapsed\(true\)/);
-    const plateChange = app.slice(app.indexOf('const plateMode ='), app.indexOf('const currentDockScope ='));
-    expect(plateChange).toContain('pane: false');
-    expect(plateChange).toContain('[plateMode]');
   });
   it("voice comments expand their card without opening the pane or moving the plan", () => {
     const voice = app.slice(app.indexOf('// When a voice-authored comment'), app.indexOf('// Own-era diff'));

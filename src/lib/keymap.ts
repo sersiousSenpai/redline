@@ -63,8 +63,8 @@ export const GLOBAL_KEYMAP: KeyBinding[] = [
   // and the renderings name the key it chose (`shownKeymap`). One cap for the
   // key: the cheat sheet splits caps at plain spaces.
   { id: "dictate", keys: ["hold", "right\u00a0⌥"], label: "Dictate into the text box, or talk to the plan", group: "Global", wired: false },
-  { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
-  { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
+  { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar (as ⌘B)", group: "Layout", wired: false },
+  { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the rail (as ⌘⌥B)", group: "Layout", wired: false },
   { id: "sidebar-tabs", keys: ["⇧", "↑"], label: "Switch sidebar tabs", group: "Layout", wired: false },
   // Not a chord: on an immersive surface the periphery is hidden and the way
   // back is the top-edge hull rail (or ⌘⇧0, which lands on the document).
@@ -91,6 +91,9 @@ export const WORKBENCH_KEYMAP: KeyBinding[] = [
   { id: "close-window", keys: ["⌘", "⇧", "W"], label: "Close the window", group: "Global", wired: true },
   { id: "tab-n", keys: ["⌘", "1–9"], label: "Tab 1–8, 9 = last", group: "Layout", wired: true },
   { id: "tab-cycle", keys: ["⌘", "⌥", "←/→"], label: "Previous / next tab", group: "Layout", wired: true },
+  // W4: the two side columns. ⌘B is left to rich text, where it is bold.
+  { id: "sidebar", keys: ["⌘", "B"], label: "Show / hide the sidebar", group: "Layout", wired: true },
+  { id: "rail", keys: ["⌘", "⌥", "B"], label: "Show / hide the rail", group: "Layout", wired: true },
 ];
 
 /** The classic shell's registry with the workbench's chords folded in: the
@@ -221,6 +224,17 @@ export function tabCycleKeyOf(e: KeyComboInfo): -1 | 1 | null {
     if (e.code === "BracketRight") return 1;
   }
   return null;
+}
+
+/** ⌘B — the left sidebar. ⌘ only, on the physical key; a rich-text target
+ *  keeps it as bold (the caller checks the target). */
+export function isSidebarToggleKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && !e.altKey && e.code === "KeyB";
+}
+
+/** ⌘⌥B — the right rail. On e.code because ⌥ rewrites e.key ("b" → "∫"). */
+export function isRailToggleKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && e.altKey && e.code === "KeyB";
 }
 
 /** Shift+Enter summons the front door without colliding with modified sends.

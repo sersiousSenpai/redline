@@ -163,6 +163,9 @@ export interface PaneLayoutInput {
   paneWidth: number;
   paneCollapsed: boolean;
   paneFullscreen: boolean;
+  /** What a collapsed right pane still reserves in flow: the rail's edge
+   *  strip of tab icons (W4). Absent, a collapsed pane takes nothing. */
+  paneEdgeW?: number;
 }
 
 export interface PaneLayout {
@@ -190,7 +193,8 @@ export function computePaneLayout(i: PaneLayoutInput): PaneLayout {
   // The sidebar divider always renders; the discussion divider is absent in
   // fullscreen (the pane's top-edge divider replaces it).
   const dividers = DIVIDER_W + (i.paneFullscreen ? 0 : DIVIDER_W);
-  const available = Math.max(0, i.winWidth - dividers - 2 * SHELL_EDGE);
+  const edge = i.paneCollapsed && !i.paneFullscreen ? (i.paneEdgeW ?? 0) : 0;
+  const available = Math.max(0, i.winWidth - dividers - 2 * SHELL_EDGE - edge);
   // Degrade gracefully below tiny window widths.
   const docTarget = Math.min(docMinFor(i.winWidth), available);
   const deficit = Math.max(0, s + p + docTarget - available);

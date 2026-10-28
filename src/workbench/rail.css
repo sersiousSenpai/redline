@@ -1,0 +1,201 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
+
+/* The right rail (W4). Rides RightRail's lazy chunk. Prefix `rl-rail-`;
+   Redline tokens only. The strip matches the stage's tab strip — 34px on
+   the canvas colour, 13px text, 16px icons — and the active tab is a filled
+   pill, the way the frame draws it. Nothing here animates a paint property:
+   the amber count is a static colour. */
+
+.rl-rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  container-type: inline-size;
+  container-name: rl-rail;
+}
+
+.rl-rail-strip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--color-rule);
+  background: var(--color-canvas);
+  color: var(--color-ink-muted);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+.rl-rail-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--rl-radius-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: default;
+}
+.rl-rail-tab:hover {
+  color: var(--color-ink);
+  background: var(--color-hover-wash);
+}
+.rl-rail-tab[aria-selected="true"] {
+  color: var(--color-ink);
+  background: var(--color-bg-elevated);
+}
+.rl-rail-tab:focus-visible,
+.rl-rail-icon:focus-visible,
+.rl-rail-edge-btn:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--color-focus-rim);
+}
+
+/* A narrow rail keeps every tab: the inactive ones fold to their icon. */
+@container rl-rail (max-width: 360px) {
+  .rl-rail-tab:not([aria-selected="true"]) .rl-rail-tab-label {
+    display: none;
+  }
+}
+
+.rl-rail-count {
+  min-width: 16px;
+  height: 15px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 15px;
+  text-align: center;
+  color: var(--color-ink-muted);
+}
+.rl-rail-count[data-attention] {
+  background: color-mix(in srgb, var(--color-warning) 22%, transparent);
+  color: var(--color-warning-text, var(--color-warning));
+}
+
+.rl-rail-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.rl-rail-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rl-radius-control);
+  background: transparent;
+  color: var(--color-ink-muted);
+  cursor: default;
+}
+.rl-rail-icon:hover {
+  color: var(--color-ink);
+  background: var(--color-hover-wash);
+}
+
+.rl-rail-body {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-paper);
+}
+
+/* ── The collapsed rail ─────────────────────────────────────────────────── */
+
+.rl-rail-edge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  width: 40px;
+  box-sizing: border-box;
+  padding: 8px 0;
+  color: var(--color-ink-muted);
+}
+.rl-rail-edge-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rl-radius-control);
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+.rl-rail-edge-btn:hover {
+  color: var(--color-ink);
+  background: var(--color-hover-wash);
+}
+.rl-rail-edge-count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  padding: 0 3px;
+  border-radius: 7px;
+  font: 700 9px/14px var(--font-sans);
+  text-align: center;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink-muted);
+}
+.rl-rail-edge-count[data-attention] {
+  background: var(--color-warning);
+  color: var(--color-on-warning);
+}
+
+/* ── Shared body pieces (the Files and Changes tabs) ───────────────────── */
+
+.rl-rail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--color-rule);
+  font-size: 12px;
+  color: var(--color-ink-muted);
+  min-width: 0;
+}
+.rl-rail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.rl-rail-empty {
+  padding: 16px 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-ink-muted);
+}

@@ -17,7 +17,9 @@ import {
   isNewPlanKey,
   isNewTabKey,
   isPaletteKey,
+  isRailToggleKey,
   isReopenTabKey,
+  isSidebarToggleKey,
   isSnapBackKey,
   shellKeymap,
   shownKeymap,
@@ -323,14 +325,35 @@ describe("the workbench's keys (W1)", () => {
   });
 
   it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
-    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle"]);
+    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail"]);
     expect(WORKBENCH_KEYMAP.every((b) => b.keys[0] === "⌘")).toBe(true);
     const ids = CLASSIC_KEYMAP.map((b) => b.id);
     // The workbench globals follow the palette; its layout rows lead Layout.
     expect(ids.slice(0, 5)).toEqual(["palette", "new-tab", "reopen-tab", "close", "close-window"]);
     const layout = CLASSIC_KEYMAP.filter((b) => b.group === "Layout").map((b) => b.id);
-    expect(layout.slice(0, 2)).toEqual(["tab-n", "tab-cycle"]);
+    expect(layout.slice(0, 4)).toEqual(["tab-n", "tab-cycle", "sidebar", "rail"]);
     expect(bindingKeys("close")).toEqual(["⌘", "W"]);
     expect(bindingKeys("tab-cycle")).toEqual(["⌘", "⌥", "←/→"]);
+  });
+});
+
+describe("the side columns (W4)", () => {
+  const cmd = (over: Parameters<typeof combo>[0]) => combo({ metaKey: true, ...over });
+  it("⌘B is the sidebar and ⌘⌥B the rail, on the physical key", () => {
+    expect(isSidebarToggleKey(cmd({ key: "b", code: "KeyB" }))).toBe(true);
+    expect(isRailToggleKey(cmd({ key: "∫", code: "KeyB", altKey: true }))).toBe(true);
+    // Never both, and ⇧ or Ctrl opts out (Ctrl+B is a terminal's).
+    expect(isRailToggleKey(cmd({ key: "b", code: "KeyB" }))).toBe(false);
+    expect(isSidebarToggleKey(cmd({ key: "∫", code: "KeyB", altKey: true }))).toBe(false);
+    expect(isSidebarToggleKey(cmd({ key: "B", code: "KeyB", shiftKey: true }))).toBe(false);
+    expect(isSidebarToggleKey(combo({ key: "b", code: "KeyB", ctrlKey: true }))).toBe(false);
+    expect(isRailToggleKey(combo({ key: "b", code: "KeyB", ctrlKey: true, altKey: true }))).toBe(false);
+    expect(isSidebarToggleKey(combo({ key: "b", code: "KeyB" }))).toBe(false);
+  });
+  it("hints both, with ⇧← / ⇧→ kept as aliases", () => {
+    expect(bindingKeys("sidebar")).toEqual(["⌘", "B"]);
+    expect(bindingKeys("rail")).toEqual(["⌘", "⌥", "B"]);
+    expect(bindingKeys("pane-sidebar")).toEqual(["⇧", "←"]);
+    expect(bindingKeys("pane-discussion")).toEqual(["⇧", "→"]);
   });
 });
