@@ -632,3 +632,51 @@ describe("replacePane", () => {
     expect(reduce(s, { type: "replacePane", paneId: "nope", pane: { kind: "runs", data: {} } })).toBe(s);
   });
 });
+
+describe("openFile (W4: the Files rail, ⌘P, file:line links)", () => {
+  const focused = (s: WorkbenchState) => {
+    const tab = activeTabOf(set(s))!;
+    return set(s).panes[tab.focusedPaneId];
+  };
+  it("a plain click previews, and the next plain click replaces that preview", () => {
+    let s = home(door());
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "preview" });
+    expect(set(s).order.length).toBe(2);
+    expect(focused(s)).toMatchObject({ kind: "file", preview: true, data: { path: "/a.ts" } });
+    s = reduce(s, { type: "openFile", path: "/b.ts", mode: "preview" });
+    expect(set(s).order.length).toBe(2);
+    expect(focused(s)).toMatchObject({ kind: "file", preview: true, data: { path: "/b.ts" } });
+  });
+  it("clicking the shown file again (or a double-click) pins it; the next preview opens beside it", () => {
+    let s = home(door());
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "preview" });
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "pin" });
+    expect(focused(s).preview).toBeUndefined();
+    s = reduce(s, { type: "openFile", path: "/b.ts", mode: "preview" });
+    expect(set(s).order.length).toBe(3);
+    // A pin of a file that is not open opens it pinned.
+    s = reduce(s, { type: "openFile", path: "/c.ts", mode: "pin" });
+    expect(focused(s)).toMatchObject({ data: { path: "/c.ts" } });
+    expect(focused(s).preview).toBeUndefined();
+  });
+  it("⌘-click opens a pinned tab of its own, next to the current one", () => {
+    let s = home(door(), door(2));
+    s = reduce(s, { type: "selectTab", tabId: "t1" });
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "tab" });
+    expect(set(s).order.indexOf(set(s).activeTabId!)).toBe(1);
+    expect(focused(s).preview).toBeUndefined();
+  });
+  it("a file already open gets focus instead of a second pane, and a line scrolls it every time", () => {
+    let s = home(file("/a.ts"), door());
+    s = reduce(s, { type: "selectTab", tabId: "t2" });
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "preview" });
+    expect(set(s).activeTabId).toBe("t1");
+    expect(set(s).order.length).toBe(2);
+    s = reduce(s, { type: "openFile", path: "/a.ts", mode: "preview", line: 12, at: 1 });
+    expect(focused(s).data).toEqual({ path: "/a.ts", line: 12, at: 1 });
+    const again = reduce(s, { type: "openFile", path: "/a.ts", mode: "preview", line: 12, at: 2 });
+    expect(focused(again).data).toEqual({ path: "/a.ts", line: 12, at: 2 });
+    // Nothing to do is identity.
+    expect(reduce(s, { type: "openFile", path: "/a.ts", mode: "preview" })).toBe(s);
+  });
+});

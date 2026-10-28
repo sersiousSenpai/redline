@@ -32,10 +32,15 @@ describe("size guard", () => {
     const panel = files.find(({ rel }) => rel === "components/ReviewPanel.tsx")!.text;
     expect(panel).toMatch(/const GitRepositoryView = lazy\(\(\) => import\(["']\.\/git\/GitRepositoryView["']\)\)/);
     // Nothing outside the git client may import it statically.
+    // The rail's Files and Changes tabs (W4) read the same git API and rows;
+    // they are lazy chunks of their own, reached from App only through lazy().
+    const RAIL = ["workbench/useRepoStatus.ts", "workbench/useRepoStatus.test.ts", "workbench/ChangesRail.tsx", "workbench/FilesRail.tsx"];
     const offenders = files.filter(({ rel, text }) =>
-      !rel.startsWith("components/git/") && /from\s+["'][^"']*components\/git\/|from\s+["']\.\/git\//.test(text),
+      !rel.startsWith("components/git/") && !RAIL.includes(rel) && /from\s+["'][^"']*components\/git\/|from\s+["']\.\/git\//.test(text),
     ).map(({ rel }) => rel);
     expect(offenders, "the git client loads only through the lazy GitRepositoryView boundary").toEqual([]);
+    const app = files.find(({ rel }) => rel === "App.tsx")!.text;
+    for (const mod of ["useRepoStatus", "ChangesRail", "FilesRail"]) expect(app).not.toMatch(new RegExp(`from\\s+["']\\./workbench/${mod}["']`));
   });
 
   it("keeps the Branches graph lazy inside the git client", () => {

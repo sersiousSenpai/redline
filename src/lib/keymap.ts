@@ -94,6 +94,8 @@ export const WORKBENCH_KEYMAP: KeyBinding[] = [
   // W4: the two side columns. ⌘B is left to rich text, where it is bold.
   { id: "sidebar", keys: ["⌘", "B"], label: "Show / hide the sidebar", group: "Layout", wired: true },
   { id: "rail", keys: ["⌘", "⌥", "B"], label: "Show / hide the rail", group: "Layout", wired: true },
+  // ⌘P is Go to File (a native menu item); Print moved to ⌘⌥P.
+  { id: "quick-open", keys: ["⌘", "P"], label: "Go to a file", group: "Global", wired: true },
 ];
 
 /** The classic shell's registry with the workbench's chords folded in: the
@@ -235,6 +237,11 @@ export function isSidebarToggleKey(e: KeyComboInfo): boolean {
 /** ⌘⌥B — the right rail. On e.code because ⌥ rewrites e.key ("b" → "∫"). */
 export function isRailToggleKey(e: KeyComboInfo): boolean {
   return commandOnly(e) && !e.shiftKey && e.altKey && e.code === "KeyB";
+}
+
+/** ⌘P — go to a file (quick open). ⌘⌥P is Print now. */
+export function isQuickOpenKey(e: KeyComboInfo): boolean {
+  return commandOnly(e) && !e.shiftKey && !e.altKey && e.code === "KeyP";
 }
 
 /** Shift+Enter summons the front door without colliding with modified sends.

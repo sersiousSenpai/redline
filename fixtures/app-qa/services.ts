@@ -870,9 +870,33 @@ const handlers: Record<string, Handler> = {
   },
   // The file tree of a session's repo: a plausible top level.
   list_dir: (a) => {
-    const dir = String(a?.path ?? HOME);
-    return ["docs", "src", "README.md", "package.json"].map((name) => ({ name, path: `${dir}/${name}`, isDir: !name.includes(".") }));
+    const dir = String(a?.path ?? HOME).replace(/\/+$/, "");
+    const names = FILE_TREE[dir.slice(DIN.length)] ?? (dir.startsWith(DIN) ? [] : ["docs", "src", "README.md", "package.json"]);
+    return names.map((name) => ({ name, path: `${dir}/${name}`, isDir: !name.includes(".") }));
   },
+  // The Files and Changes rails (W4): the din repo's working tree.
+  git_gui_status: () => ({
+    branch: "feat/durable-jobs",
+    head: "4f1c2a9e0b",
+    upstream: "origin/feat/durable-jobs",
+    ahead: 2,
+    behind: 0,
+    inProgress: null,
+    staged: [
+      { path: "src/jobs/queue.ts", status: "M" },
+      { path: "src/jobs/lease.ts", status: "A" },
+    ],
+    unstaged: [
+      { path: "src/auth/auth.ts", status: "M" },
+      { path: "src/jobs/retry.ts", status: "?" },
+    ],
+    conflicted: [],
+  }),
+  read_text_file: () => ({ content: FILE_TEXT, isBinary: false, tooLarge: false, size: FILE_TEXT.length }),
+  open_doc: () => ({
+    meta: { lineCount: FILE_TEXT.split("\n").length, size: FILE_TEXT.length, isBinary: false, tooLarge: false, highlightable: false },
+    lines: FILE_TEXT.split("\n").map((text) => ({ text })),
+  }),
   watch_dir: () => null,
   unwatch_dir: () => null,
   activation_status: () => ({ verifying: false, gated: false, gatedMessage: "", runningRelease: null, lastReport: null }),
@@ -1028,3 +1052,32 @@ export const qa: QaHandle = {
     })),
   listening: () => [...state.listeners].filter(([, s]) => s.size).map(([name]) => name),
 };
+
+/** The din repo's tree for `list_dir`, keyed by the path under DIN. */
+const FILE_TREE: Record<string, string[]> = {
+  "": ["docs", "src", "README.md", "package.json"],
+  "/src": ["auth", "jobs", "App.tsx", "main.tsx", "styles.css"],
+  "/src/auth": ["auth.ts", "session.ts", "auth.test.ts"],
+  "/src/jobs": ["lease.ts", "queue.ts", "retry.ts"],
+  "/docs": ["obsidian"],
+  "/docs/obsidian": ["build-log.md", "28 Roadmap.md"],
+};
+
+const FILE_TEXT = [
+  'import { createHmac, timingSafeEqual } from "node:crypto";',
+  'import { Lease } from "../jobs/lease";',
+  "",
+  "/** A bridge token is scoped to one session and one lease. */",
+  "export interface BridgeToken {",
+  "  sessionId: string;",
+  "  leaseId: string;",
+  "  expiresAt: number;",
+  "}",
+  "",
+  "const TTL_MS = 15 * 60 * 1000;",
+  "",
+  "export function verifyToken(token: BridgeToken, lease: Lease | null): boolean {",
+  "  if (!lease || lease.id !== token.leaseId) return false;",
+  "  return token.expiresAt > Date.now();",
+  "}",
+].join("\n");

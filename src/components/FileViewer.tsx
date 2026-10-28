@@ -81,6 +81,8 @@ interface FileViewerProps {
   onClose: () => void;
   /** Called with the saved path after an in-place markdown edit is written. */
   onSaved?: (path: string) => void;
+  /** The user started editing: a preview pane pins (the Files rail's rule). */
+  onEdit?: () => void;
 }
 
 function basename(path: string): string {
@@ -96,7 +98,7 @@ function isMarkdown(path: string): boolean {
 // Read-only viewer for a single file picked from the FileTree. Images render
 // inline; markdown renders rich; everything else shows syntax-highlighted
 // source. Oversized files report why they weren't loaded.
-function FileViewerBase({ path, onClose, onSaved }: FileViewerProps) {
+function FileViewerBase({ path, onClose, onSaved, onEdit }: FileViewerProps) {
   const mime = imageMime(path);
 
   return (
@@ -135,7 +137,7 @@ function FileViewerBase({ path, onClose, onSaved }: FileViewerProps) {
         {mime ? (
           <ImageBody path={path} mime={mime} />
         ) : (
-          <TextBody path={path} onSaved={onSaved} />
+          <TextBody path={path} onSaved={onSaved} onEdit={onEdit} />
         )}
       </div>
     </div>
@@ -209,12 +211,14 @@ function ImageBody({ path, mime }: { path: string; mime: string }) {
 function TextBody({
   path,
   onSaved,
+  onEdit,
 }: {
   path: string;
   onSaved?: (path: string) => void;
+  onEdit?: () => void;
 }) {
-  if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} />;
-  return <CodeBody path={path} onSaved={onSaved} />;
+  if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} onEdit={onEdit} />;
+  return <CodeBody path={path} onSaved={onSaved} onEdit={onEdit} />;
 }
 
 // `save_text_file` matches `read_text_file`'s guard: a file is editable iff
@@ -241,9 +245,11 @@ interface EditPayload {
 function CodeBody({
   path,
   onSaved,
+  onEdit,
 }: {
   path: string;
   onSaved?: (path: string) => void;
+  onEdit?: () => void;
 }) {
   const [swap, dispatch] = useReducer(
     (s: EditSwapState<EditPayload>, e: EditSwapEvent<EditPayload>) =>
@@ -290,6 +296,7 @@ function CodeBody({
 
   const beginEdit = () => {
     if (swap.mode !== "view") return;
+    onEdit?.();
     const seq = ++seqRef.current;
     dispatch({ type: "edit", seq });
     void codeEditorImport()
@@ -380,9 +387,11 @@ function CodeBody({
 function MarkdownBody({
   path,
   onSaved,
+  onEdit,
 }: {
   path: string;
   onSaved?: (path: string) => void;
+  onEdit?: () => void;
 }) {
   const [displayed, setDisplayed] = useState<{ path: string; file: FileContent } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -454,6 +463,7 @@ function MarkdownBody({
   if (file.isBinary) return <Notice>Binary file — no preview.</Notice>;
 
   const beginEdit = () => {
+    onEdit?.();
     setDraft(file.content ?? "");
     setEditing(true);
   };

@@ -152,7 +152,9 @@ export interface PaneDataByKind {
   plan: { sessionId: string; version: number | null };
   chat: ChatData;
   terminals: WallData;
-  file: { path: string; line?: number };
+  /** `at` is a reveal nonce, never persisted: asking for the same line of
+   *  an open file again scrolls to it again. */
+  file: { path: string; line?: number; at?: number };
   browser: { workspace: string };
   drafter: { draftId: string };
   review: { repo: string; source: DiffSource };

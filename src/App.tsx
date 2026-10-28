@@ -191,6 +191,9 @@ const RightRail = lazy(() => import("./workbench/RightRail").then((m) => ({ defa
 const RailEdge = lazy(() => import("./workbench/RightRail").then((m) => ({ default: m.RailEdge })));
 // The rail's Discussion piles (W4): the plan's threads grouped by who owes what.
 const FeedbackPanel = lazy(() => import("./components/plan/FeedbackPanel"));
+// The rail's Files tab and ⌘P quick open (W4).
+const FilesRail = lazy(() => import("./workbench/FilesRail"));
+const QuickOpen = lazy(() => import("./workbench/QuickOpen"));
 // The table-of-contents rail renders only once opened (about 6 kB, W1).
 const PlanToc = lazy(() => import("./components/PlanToc").then((m) => ({ default: m.PlanToc })));
 // Classic's folder tab only, so its own chunk.
@@ -404,7 +407,7 @@ const CommandPalette = lazy(() => import("./components/CommandPalette").then((m)
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeBuildCommand, buildResumeCommand, handoffPrompt } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
+import { isCloseKey, isCloseWindowKey, isDockKey, isNeedsYouKey, isNewPlanKey, isNewTabKey, isPaletteKey, isQuickOpenKey, isRailToggleKey, isReopenTabKey, isSidebarToggleKey, isSnapBackKey, tabCycleKeyOf, tabIndexKeyOf } from "./lib/keymap";
 import { loadDictation } from "./lib/dictationComposer";
 import type { TalkContext } from "./audio/dictationHost";
 import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
@@ -497,7 +500,7 @@ import { HOME_KEY, activeTabOf, isDocumentKind, isSplit, launchIdOf, launchKey, 
 import type { CliView } from "./components/agent/AgentPane";
 import { doorDraftKey } from "./workbench/model";
 import { RAIL_EDGE_W, RAIL_MAX_W, RAIL_MEMORY_KEY, RAIL_MIN_W, clampRailWidth, parseRailMemory, railTabFor, railTabsFor, rememberRailTab, type RailMemory, type RailTab } from "./workbench/rail";
-import type { WorkbenchAction } from "./workbench/reducer";
+import type { OpenFileMode, WorkbenchAction } from "./workbench/reducer";
 import type { PaneContext } from "./workbench/WorkbenchStage";
 // The stage and the reducer ride their own chunk, fetched as the app boots:
 // the first frame needs the store and the stored state, not the actions
@@ -3817,11 +3820,12 @@ function App() {
   // when that terminal lives in the folder (so switching terminals restores
   // each one's own place).
   const handleOpenFile = useCallback(
-    (path: string) => {
+    (path: string, mode: OpenFileMode = "preview") => {
       setActiveFile(path);
       // Under the workbench a file opens as a pane in the current set (the
-      // one already open with that path comes forward).
-      if (classicWb) wb.dispatch({ type: "openSurface", kind: "file", data: { path } });
+      // one already open with that path comes forward): previewed, pinned
+      // or in a tab of its own (W4's Files rail rules).
+      if (classicWb) wb.dispatch({ type: "openFile", path, mode });
       // If a non-document surface fills the center pane, the opened file would
       // load hidden behind it — switch to the document, unless the user has
       // pinned it (the file is already visible in the tile).
@@ -9043,8 +9047,57 @@ function App() {
   // The rail's other tabs. Talk is still the conversation dock's column
   // beside the pane until the dock's body moves in; Files and Changes land
   // with their own bodies.
+  // The Files tab's root: the session's project (or the launch's) — on
+  // Home, the folder picked among the open ones and recent projects.
+  const railLaunch = launchIdOf(wbActiveKey) ? flowLaunches.find((l) => l.launchId === launchIdOf(wbActiveKey)) ?? null : null;
+  const railSessionRoot = activeId ? (session?.sessionId === activeId ? session.projectPath : summaries.find((x) => x.sessionId === activeId)?.projectPath) ?? null : railLaunch?.projectPath ?? null;
+  const railHomeRoots = useMemo(() => {
+    const out: string[] = [];
+    for (const f of openFolders) if (!out.includes(f.path)) out.push(f.path);
+    for (const x of summaries) if (x.projectPath && !out.includes(x.projectPath) && out.length < 12) out.push(x.projectPath);
+    return out;
+  }, [openFolders, summaries]);
+  const [railHomeRootPick, setRailHomeRootPick] = usePersistedState<string | null>("redline.rail.filesRoot", null);
+  const railHomeRoot = railHomeRootPick && railHomeRoots.includes(railHomeRootPick) ? railHomeRootPick : railHomeRoots[0] ?? null;
+  const railFilesRoot = wbActiveKey === HOME_KEY ? railHomeRoot : railSessionRoot;
+  // ⌘P: go to a file under the rail's root.
+  const [quickOpenRoot, setQuickOpenRoot] = useState<string | null>(null);
+  const railFilesRootRef = useRef(railFilesRoot);
+  railFilesRootRef.current = railFilesRoot;
+  const openQuickOpen = useCallback(() => {
+    const root = railFilesRootRef.current;
+    if (root) setQuickOpenRoot(root);
+    else setToast({ message: "No project folder to search here yet.", tone: "info" });
+  }, []);
+  // ⌘P: the native menu's Go to File (menu-quick-open), and the same chord
+  // where no menu took it first. Print moved to ⌘⌥P.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!isQuickOpenKey(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openQuickOpen();
+    };
+    window.addEventListener("keydown", onKey, true);
+    const unlisten = listen("menu-quick-open", () => openQuickOpen());
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      void unlisten.then((off) => off());
+    };
+  }, [openQuickOpen]);
   const railOtherBody: ReactNode =
-    railTab === "talk" ? (
+    railTab === "files" ? (
+      <Suspense fallback={null}>
+        <FilesRail
+          root={railFilesRoot}
+          roots={wbActiveKey === HOME_KEY ? railHomeRoots : undefined}
+          onPickRoot={setRailHomeRootPick}
+          activeFile={activeFile}
+          onOpenFile={handleOpenFile}
+          onQuickOpen={openQuickOpen}
+        />
+      </Suspense>
+    ) : railTab === "talk" ? (
       <div className="rl-rail-empty">
         {dockReachable ? (
           <button type="button" className="rl-menu-item text-left" onClick={openDock}>
@@ -9055,7 +9108,7 @@ function App() {
         )}
       </div>
     ) : (
-      <div className="rl-rail-empty">{railTab === "files" ? "Files" : "Changes"}</div>
+      <div className="rl-rail-empty">Changes</div>
     );
 
   const monochatRouting = useMemo(() => ({ harness: frontDoorBackend, conversationId: chatId, reportActivity: reportMonochatActivity }), [frontDoorBackend, chatId, reportMonochatActivity]);
@@ -10643,7 +10696,7 @@ function App() {
                   case "file":
                     return (
                       <Suspense fallback={null}>
-                        <FileViewer path={pane.data.path} onClose={handleCloseFile} onSaved={toastSaved} />
+                        <FileViewer path={pane.data.path} onClose={handleCloseFile} onSaved={toastSaved} onEdit={pane.preview ? () => wb.dispatch({ type: "pinPane", paneId: pane.id }) : undefined} />
                       </Suspense>
                     );
                   case "browser":
@@ -11835,6 +11888,12 @@ function App() {
       {paletteOpen && (
         <Suspense fallback={null}>
           <CommandPalette open commands={paletteCommands} onClose={() => setPaletteOpen(false)} />
+        </Suspense>
+      )}
+      {/* ⌘P: go to a file under the rail's root (W4). */}
+      {quickOpenRoot && (
+        <Suspense fallback={null}>
+          <QuickOpen root={quickOpenRoot} onOpen={handleOpenFile} onClose={() => setQuickOpenRoot(null)} />
         </Suspense>
       )}
       {/* Onboarding tour: replay from the menu always, or auto-run once on first

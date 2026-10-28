@@ -53,6 +53,10 @@ export interface DefaultsContext {
 
 export type FocusDirection = "left" | "right" | "up" | "down";
 
+/** How the Files rail opens a file: a plain click previews, a second click
+ *  (or a double-click, or an edit) pins, ⌘-click opens a tab of its own. */
+export type OpenFileMode = "preview" | "pin" | "tab";
+
 export type WorkbenchAction =
   | { type: "selectSession"; key: SessionKey; defaults?: DefaultsContext }
   | { type: "rekeySession"; from: SessionKey; to: SessionKey; planTabId?: string }
@@ -87,6 +91,11 @@ export type WorkbenchAction =
   | { type: "closePane"; key?: SessionKey; paneId: string }
   | { type: "replacePreview"; key?: SessionKey; pane: PaneInit; tabId?: string; paneId?: string }
   | { type: "pinPane"; key?: SessionKey; paneId: string }
+  /** The Files rail, ⌘P, a `file:line` link (W4): a file that is open in
+   *  the set comes forward (pinned when asked); otherwise "preview" replaces
+   *  the preview pane, "pin" opens it pinned in its place, "tab" opens a
+   *  new pinned tab. A `line` scrolls there, again on every ask. */
+  | { type: "openFile"; key?: SessionKey; path: string; line?: number; mode: OpenFileMode; at?: number }
   /** A title of the user's own; empty clears it. */
   | { type: "renamePane"; key?: SessionKey; paneId: string; title: string }
   /** The pane becomes something else in place — a door tab converting into
@@ -800,6 +809,37 @@ export function reduce(state: WorkbenchState, action: WorkbenchAction): Workbenc
       const pinned = { ...pane } as AnyPane;
       delete pinned.preview;
       return putSet(state, key, { ...set, panes: { ...set.panes, [action.paneId]: pinned } });
+    }
+
+    case "openFile": {
+      const key = keyOf(state, action.key);
+      const set = setOf(state, key) ?? emptyTabSet();
+      const at = action.at ?? Date.now();
+      const data: PaneDataByKind["file"] = action.line && action.line > 0 ? { path: action.path, line: action.line, at } : { path: action.path };
+      const open = panesOfKind(set, "file").find(({ pane }) => pane.data.path === action.path);
+      if (open) {
+        const { tab, pane } = open;
+        const next = { ...pane, data: action.line && action.line > 0 ? data : pane.data } as AnyPane;
+        if (action.mode !== "preview") delete next.preview;
+        const same = set.activeTabId === tab.id && tab.focusedPaneId === pane.id && next.data === pane.data && !!next.preview === !!pane.preview;
+        if (same) return state;
+        return putSet(state, key, {
+          ...set,
+          activeTabId: tab.id,
+          panes: { ...set.panes, [pane.id]: next },
+          tabs: { ...set.tabs, [tab.id]: { ...tab, focusedPaneId: pane.id } },
+        });
+      }
+      if (action.mode === "tab") {
+        const tab = activeTabOf(set);
+        const { set: next } = addTab(set, { kind: "file", data }, {}, tab ? set.order.indexOf(tab.id) + 1 : undefined);
+        return putSet(state, key, next);
+      }
+      const previewed = reduce(state, { type: "replacePreview", key, pane: { kind: "file", data } });
+      if (action.mode === "preview") return previewed;
+      const pset = setOf(previewed, key);
+      const ptab = pset && activeTabOf(pset);
+      return ptab ? reduce(previewed, { type: "pinPane", key, paneId: ptab.focusedPaneId }) : previewed;
     }
 
     case "renamePane": {

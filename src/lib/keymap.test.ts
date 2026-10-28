@@ -17,6 +17,7 @@ import {
   isNewPlanKey,
   isNewTabKey,
   isPaletteKey,
+  isQuickOpenKey,
   isRailToggleKey,
   isReopenTabKey,
   isSidebarToggleKey,
@@ -325,11 +326,11 @@ describe("the workbench's keys (W1)", () => {
   });
 
   it("the workbench registry: ⌘-only chords, hinted in the classic shell in reading order", () => {
-    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail"]);
+    expect(WORKBENCH_KEYMAP.map((b) => b.id)).toEqual(["new-tab", "reopen-tab", "close", "close-window", "tab-n", "tab-cycle", "sidebar", "rail", "quick-open"]);
     expect(WORKBENCH_KEYMAP.every((b) => b.keys[0] === "⌘")).toBe(true);
     const ids = CLASSIC_KEYMAP.map((b) => b.id);
     // The workbench globals follow the palette; its layout rows lead Layout.
-    expect(ids.slice(0, 5)).toEqual(["palette", "new-tab", "reopen-tab", "close", "close-window"]);
+    expect(ids.slice(0, 6)).toEqual(["palette", "new-tab", "reopen-tab", "close", "close-window", "quick-open"]);
     const layout = CLASSIC_KEYMAP.filter((b) => b.group === "Layout").map((b) => b.id);
     expect(layout.slice(0, 4)).toEqual(["tab-n", "tab-cycle", "sidebar", "rail"]);
     expect(bindingKeys("close")).toEqual(["⌘", "W"]);
@@ -355,5 +356,15 @@ describe("the side columns (W4)", () => {
     expect(bindingKeys("rail")).toEqual(["⌘", "⌥", "B"]);
     expect(bindingKeys("pane-sidebar")).toEqual(["⇧", "←"]);
     expect(bindingKeys("pane-discussion")).toEqual(["⇧", "→"]);
+  });
+});
+
+describe("quick open (W4)", () => {
+  it("⌘P is Go to File; ⌘⌥P (Print), ⌘⇧P and Ctrl+P are not", () => {
+    expect(isQuickOpenKey(combo({ metaKey: true, key: "p", code: "KeyP" }))).toBe(true);
+    expect(isQuickOpenKey(combo({ metaKey: true, altKey: true, key: "π", code: "KeyP" }))).toBe(false);
+    expect(isQuickOpenKey(combo({ metaKey: true, shiftKey: true, key: "P", code: "KeyP" }))).toBe(false);
+    expect(isQuickOpenKey(combo({ ctrlKey: true, key: "p", code: "KeyP" }))).toBe(false);
+    expect(bindingKeys("quick-open")).toEqual(["⌘", "P"]);
   });
 });

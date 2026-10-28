@@ -52,7 +52,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "sidebar", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -80,6 +80,16 @@ const SCENE = {
   "agent-cli": { board: "workbench" },
   browser: { board: "workbench" },
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "rail-plan-discussion": { board: "workbench" },
+  "rail-plan-talk": { board: "workbench" },
+  "rail-plan-files": { board: "workbench" },
+  "rail-plan-changes": { board: "workbench" },
+  "rail-browser-talk": { board: "workbench" },
+  "rail-browser-files": { board: "workbench" },
+  "rail-browser-changes": { board: "workbench" },
+  "rail-folded": { board: "workbench" },
+  "quick-open": { board: "workbench" },
+  "file-pane": { board: "workbench" },
 };
 const sizesFor = (scene) => (sizeFlag ? SIZES : SCENE[scene].sizes ?? SIZES);
 
@@ -107,7 +117,51 @@ const OPEN_AGENT = [
   { do: "click", css: [".rl-wb-strip [role=tab][title='Agent']"], why: "the set's Agent tab" },
   { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-convo')", timeout: 15000, why: "the session's conversation in the Agent pane" },
 ];
+// The right rail (W4): a tab of the rail, by its data attribute.
+const RAIL_TAB = (tab) => [
+  { do: "click", css: [`.rl-rail-tab[data-rail-tab=${tab}]`], why: `the rail's ${tab} tab` },
+  { do: "waitFor", expr: `!!document.querySelector('.rl-rail[data-rail-tab=${tab}]')`, timeout: 8000, why: `the rail shows ${tab}` },
+];
+const OPEN_BROWSER = [
+  ...AT_HOME,
+  { do: "click", css: [".rl-fd-island .rl-composer-chip[aria-label=Destination]", ".rl-composer-chip[aria-label=Destination]"], why: "open the door's destination menu" },
+  { do: "click", within: ".rl-composer-menu", text: "Open in the browser", up: "button", why: "pick Open in the browser" },
+  { do: "click", css: [".rl-fd-island .rl-fd-input", ".rl-fd-input"], why: "put the caret in the door's box" },
+  { do: "type", text: "https://example.com", why: "type an address" },
+  { do: "key", key: "Enter", why: "⏎: the door tab becomes the browser" },
+  { do: "waitFor", expr: "!!document.querySelector('.rl-rail[data-rail-tab=talk]')", timeout: 15000, why: "the browser's rail leads with Talk" },
+];
+const PLAN_FILES = [
+  ...SELECT_PLAN,
+  ...RAIL_TAB("files"),
+  { do: "waitFor", expr: "[...document.querySelectorAll('.rl-rail .rl-file-row')].some(r => r.textContent.includes('src'))", timeout: 8000, why: "the project tree" },
+  { do: "click", within: ".rl-rail", text: "src", up: ".rl-file-row", why: "open src" },
+  { do: "click", within: ".rl-rail", text: "jobs", up: ".rl-file-row", why: "open src/jobs" },
+];
 const DRIVES = {
+  "rail-plan-discussion": [...SELECT_PLAN, { do: "waitFor", expr: "!!document.querySelector('.rl-rail[data-rail-tab=discussion] .rl-fb-pile')", timeout: 8000, why: "the Discussion piles" }],
+  "rail-plan-talk": [...SELECT_PLAN, ...RAIL_TAB("talk")],
+  "rail-plan-files": PLAN_FILES,
+  "rail-plan-changes": [...SELECT_PLAN, ...RAIL_TAB("changes")],
+  "rail-browser-talk": OPEN_BROWSER,
+  "rail-browser-files": [...OPEN_BROWSER, ...RAIL_TAB("files")],
+  "rail-browser-changes": [...OPEN_BROWSER, ...RAIL_TAB("changes")],
+  "rail-folded": [
+    ...SELECT_PLAN,
+    { do: "click", css: [".rl-rail-strip button[aria-label='Hide the rail']"], why: "◨ folds the rail" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-rail-edge')", timeout: 8000, why: "the edge strip" },
+  ],
+  "quick-open": [
+    ...SELECT_PLAN,
+    { do: "key", key: "p", modifiers: 4, why: "⌘P: go to a file" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-qo-row')", timeout: 8000, why: "the folder's files" },
+    { do: "type", text: "queue", why: "type a file name" },
+  ],
+  "file-pane": [
+    ...PLAN_FILES,
+    { do: "click", within: ".rl-rail", text: "queue.ts", up: ".rl-file-row", why: "preview queue.ts" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-strip [role=tab][data-preview]')", timeout: 8000, why: "a preview tab" },
+  ],
   home: AT_HOME,
   "door-tab": [
     ...AT_HOME,
