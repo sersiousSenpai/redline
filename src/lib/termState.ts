@@ -237,16 +237,27 @@ export function loudOldestFirst(
     .sort((a, b) => (attention.get(a)?.at ?? 0) - (attention.get(b)?.at ?? 0));
 }
 
-/** ⌘⇧J's target: the terminal after the focused one in the oldest-first loud
- *  list, wrapping — so repeated presses walk every terminal that needs you
- *  rather than bouncing between the first two. Null when nothing is loud. */
+/** ⌘⇧J's target: of the terminals that need you (oldest transition first),
+ *  the one visited longest ago — never-visited ones first, in that order.
+ *  `visits` is when each was last jumped to, so repeated presses cycle the
+ *  whole list across every session, wherever the focus is: an agent shown
+ *  as its Agent tab never becomes a wall's focused tile, so a walk from the
+ *  focused tile would land on the oldest every time. Null when nothing is
+ *  loud. */
 export function nextNeedsYou(
   loudOldestFirst: readonly string[],
-  focusedId: string | null | undefined,
+  visits: ReadonlyMap<string, number>,
 ): string | null {
-  if (loudOldestFirst.length === 0) return null;
-  const i = focusedId ? loudOldestFirst.indexOf(focusedId) : -1;
-  return loudOldestFirst[(i + 1) % loudOldestFirst.length];
+  let best: string | null = null;
+  let bestAt = Infinity;
+  for (const id of loudOldestFirst) {
+    const at = visits.get(id) ?? -Infinity;
+    if (at < bestAt) {
+      best = id;
+      bestAt = at;
+    }
+  }
+  return best;
 }
 
 /** Record one acknowledgement, returning `prev` itself when it is already

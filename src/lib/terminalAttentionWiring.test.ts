@@ -66,4 +66,13 @@ describe("terminal attention wiring", () => {
     const rows = app.slice(app.indexOf("const sidebarTerminals = useMemo("), app.indexOf("// The memoized sidebar and browser pane"));
     expect(rows).toContain("paneStatusOf(known.state)");
   });
+
+  it("no toast points at a dock that is gone: a build's or a launch's toast shows its terminal", () => {
+    expect(app).not.toMatch(/below ↓|terminal below/);
+    for (const message of ["in this session's Agent tab", "Team build started in a Terminals tab", "Running in its Agent tab", "Planning in its Agent tab"]) {
+      const at = app.indexOf(message);
+      expect(at, message).toBeGreaterThan(-1);
+      expect(app.slice(at, at + 200), message).toMatch(/action: \{ label: "Show", onAction: \(\) => showTerminal\(/);
+    }
+  });
 });

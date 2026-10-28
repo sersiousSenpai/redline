@@ -231,13 +231,19 @@ describe("⌘⇧J order", () => {
     expect(loudOldestFirst(["a", "b", "c", "d"], states, attention)).toEqual(["b", "d", "a"]);
   });
 
-  it("walks the list from the focused terminal, wrapping", () => {
+  it("cycles the whole list by visit, never-visited first, whatever has focus", () => {
     const loud = ["b", "d", "a"];
-    expect(nextNeedsYou(loud, null)).toBe("b");
-    expect(nextNeedsYou(loud, "x")).toBe("b");
-    expect(nextNeedsYou(loud, "b")).toBe("d");
-    expect(nextNeedsYou(loud, "a")).toBe("b");
-    expect(nextNeedsYou(["b"], "b")).toBe("b");
-    expect(nextNeedsYou([], "b")).toBeNull();
+    const visits = new Map<string, number>();
+    let tick = 0;
+    const press = () => {
+      const target = nextNeedsYou(loud, visits);
+      if (target) visits.set(target, ++tick);
+      return target;
+    };
+    expect([press(), press(), press(), press(), press()]).toEqual(["b", "d", "a", "b", "d"]);
+    // A newcomer that has never been visited comes next.
+    loud.push("e");
+    expect(press()).toBe("e");
+    expect(nextNeedsYou([], visits)).toBeNull();
   });
 });

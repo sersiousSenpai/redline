@@ -1821,7 +1821,7 @@ function DrafterLaunchCard({
       )}
       <div className="rl-fd-tools">
         <WorkingIndicator label="Planning" startedAt={pending.startedAt} />
-        <span className="rl-fd-detail">watch it in the terminal below ↓</span>
+        <span className="rl-fd-detail">watch it in its Agent tab</span>
         <div style={{ flex: 1 }} />
         <button
           type="button"

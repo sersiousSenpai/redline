@@ -269,7 +269,7 @@ describe("PromptDrafter — the launch bar", () => {
     await fireLaunch();
     expect(host.querySelector(".ProseMirror")).not.toBeNull();
     expect(editor.isEditable).toBe(true);
-    expect(host.textContent).toContain("watch it in the terminal below");
+    expect(host.textContent).toContain("watch it in its Agent tab");
     // "keep drafting", never "start something else" — nothing was taken away.
     expect(host.textContent).toContain("keep drafting");
     // A relaunch is legal but must cost a deliberate click, not a stray ⌘⇧⏎.

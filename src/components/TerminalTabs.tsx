@@ -266,9 +266,10 @@ export interface TerminalTabsHandle {
    *  stays mounted; one off the wall is `display:none`): where it shows is
    *  the host's call, through the workbench (`revealTerminal`). */
   openSessionTerminal: (cwd: string | null) => string;
-  /** ⌘⇧J: the next terminal that needs you — oldest transition first,
-   *  walking on from the focused tile — or null when nothing does. The host
-   *  selects its session, wall and tile, then hails it. */
+  /** ⌘⇧J: the next terminal that needs you, across every session — the one
+   *  visited longest ago (lib/termState), so each press lands on the next and
+   *  the visit is recorded — or null when nothing does. The host selects its
+   *  session, then its Agent tab or its wall and tile, and hails it. */
   nextNeedsYou: () => string | null;
   /** Hand a terminal's view the caret (a jump to a tile already on screen
    *  has no reveal transition to do it). */
@@ -1538,13 +1539,15 @@ export const TerminalTabs = memo(
   const hintTileRef = useRef(hintTile);
   hintTileRef.current = hintTile;
 
-  // ⌘⇧J: the next terminal that needs you, walking on from the focused
-  // tile. Where it shows is the host's (its session, its wall, its tile).
-  const nextNeedsYouNow = (): string | null =>
-    nextNeedsYou(
-      loudRef.current.map((t) => t.id),
-      tilesRef.current[focusIdxRef.current],
-    ) ?? null;
+  // ⌘⇧J: the next terminal that needs you, by visit (never by which tile
+  // has focus), and the visit recorded.
+  const visitsRef = useRef(new Map<string, number>());
+  const visitSeqRef = useRef(0);
+  const nextNeedsYouNow = (): string | null => {
+    const target = nextNeedsYou(loudRef.current.map((t) => t.id), visitsRef.current);
+    if (target) visitsRef.current.set(target, ++visitSeqRef.current);
+    return target;
+  };
   const nextRef = useRef(nextNeedsYouNow);
   nextRef.current = nextNeedsYouNow;
 

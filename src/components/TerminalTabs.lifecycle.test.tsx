@@ -670,6 +670,17 @@ describe("reach and notify", () => {
     expect(await jump()).toBe(c);
   });
 
+  it("⌘⇧J cycles even when the host never moves tile focus (agents open as their Agent tabs)", async () => {
+    await mount();
+    const a = await open(true);
+    const b = await open(true);
+    await emit(needsYou(a, 5));
+    await emit(needsYou(b, 7));
+    const presses: (string | null)[] = [];
+    for (let i = 0; i < 4; i++) presses.push(handle.current!.nextNeedsYou());
+    expect(presses).toEqual([a, b, a, b]);
+  });
+
   it("notifies once per transition while the window is unfocused, never for what the snapshot already held", async () => {
     mocks.windowFocused = false;
     mocks.attention = [];

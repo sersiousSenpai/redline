@@ -6451,7 +6451,9 @@ function App() {
           return;
         }
         await invoke("mark_plan_build", { sessionId, harness: planHarness, mode: "same" });
-        setToast(`Building with ${agentLabelFor(planHarness)} in the terminal below ↓`);
+        // Out of sight, as this session's conversation: the toast is the way
+        // to it (its Agent tab, else a wall).
+        setToast({ message: `Building with ${agentLabelFor(planHarness)} in this session's Agent tab`, action: { label: "Show", onAction: () => showTerminal(id) } });
       } else {
         const path = await invoke<string>("write_plan_handoff", { sessionId });
         const r = await launchPlan({
@@ -6546,7 +6548,7 @@ function App() {
     const result = await orchestrateHandoff(deps, id, sessionId, launchCmd, prompt);
     if (result.ok) {
       setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
-      setToast("Team build started below ↓ Redline shows you its workflow before any agent starts.");
+      setToast({ message: "Team build started in a Terminals tab. Redline shows you its workflow before any agent starts.", action: { label: "Show", onAction: () => showTerminal(id) } });
     } else await fail(result.stage, result.reason);
   };
   // A pre-flight or a pause is waiting on the user: mount the cards (lazy).
@@ -7223,7 +7225,7 @@ function App() {
       // Its own pill, never the pending plan card.
       setRunFlight({ prompt: trimmed, startedAt, terminalId, restore: req.restore, kind: "run" });
       setLastLaunchProject(req.projectPath!);
-      setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : "Running in the terminal below ↓");
+      setToast(req.background ? { message: "Run started in a background terminal", placement: "top" } : { message: "Running in its Agent tab", action: { label: "Show", onAction: () => showTerminal(terminalId) } });
       return { ok: true, terminalId, launchId };
     }
 
@@ -7235,7 +7237,7 @@ function App() {
     setReadinessNow(startedAt);
     if (launchedPlansRef.current.has(launchId)) setPendingLaunch(pending);
     if (req.projectPath) setLastLaunchProject(req.projectPath);
-    setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : "Launching plan in the terminal below ↓");
+    setToast(req.background ? { message: "Plan started in a background terminal", placement: "top" } : { message: "Planning in its Agent tab", action: { label: "Show", onAction: () => showTerminal(terminalId) } });
     return { ok: true, terminalId, launchId };
   };
 
