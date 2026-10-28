@@ -24,8 +24,13 @@
 //!   agent-cli the Agent tab showing its PTY (the CLI radio)
 //!   browser   the door's "Open in the browser" destination with an address
 //!   browser-newtab  the same, then the pane's own New tab: the new-tab page
-//!   sidebar   Places + a project group: at 1440×900 (the whole sidebar) and
-//!             at 900×640 (the narrow pose) unless --size is given
+//!   sidebar   Places (Home · Browser · Localhost) + a project's Plans and
+//!             Chats groups: at 1440×900 (the whole sidebar) and at 900×640
+//!             (the narrow pose) unless --size is given
+//!   chat      the companion chat from its sidebar row: the compact composer
+//!             centred under the thread, pinned to the pane's bottom (D27)
+//!   sidebar-click  rows open tabs in the set on screen (D29): a plan row, a
+//!             chat row, the plan row again — the strip never switches
 //!
 //! Per scene × theme × size it writes `<scene>.png` — `-<theme>` appended
 //! for a theme other than aurora, `-<w>x<h>` when more than one size runs
@@ -58,7 +63,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -87,6 +92,8 @@ const SCENE = {
   browser: { board: "workbench" },
   "browser-newtab": { board: "workbench" },
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  chat: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
+  "sidebar-click": { board: "workbench" },
   tour: { board: "workbench" },
   "tour-no-wall": { board: "workbench" },
   tile: { board: "workbench" },
@@ -122,15 +129,22 @@ const AT_HOME = [
   { do: "waitFor", expr: "!!document.querySelector('.rl-wb-door-plate')", timeout: 15000, why: "Home's door tab is the active pane" },
   { do: "waitFor", expr: "!!document.querySelector('.rl-fd-island')", timeout: 15000, why: "the Front Door island is on the plate" },
 ];
+const CHAT_ROW = "Review status check";
 const SELECT_PLAN = [
   { do: "click", within: ".rl-sb", text: PLAN_ROW, up: "button", why: "pick the roadmap plan's sidebar row" },
   { do: "waitFor", expr: "!!document.querySelector('.rl-plan-pane h1')", timeout: 15000, why: "the Plan tab shows the plan's h1" },
 ];
+// D29: a row opens its plan as a tab of the set on screen; the session's
+// Agent tab comes along from its terminal's row under it.
 const OPEN_AGENT = [
   ...SELECT_PLAN,
-  { do: "click", css: [".rl-wb-strip [role=tab][title='Agent']"], why: "the set's Agent tab" },
+  { do: "click", css: [".rl-sb .rl-session-row .rl-sb-term-row"], why: "the roadmap's agent terminal, under its row: its Agent tab" },
   { do: "waitFor", expr: "!!document.querySelector('.rl-agent-pane .rl-convo')", timeout: 15000, why: "the session's conversation in the Agent pane" },
 ];
+/** The strip's tab titles, in order, and which one is selected. */
+const STRIP = "[...document.querySelectorAll('.rl-wb-strip [role=tab]')]";
+/** The compact composer sits centred in its pane, pinned to its bottom. */
+const COMPOSER_PLACED = (pane) => `(() => { const box = document.querySelector('.rl-wb-tab-body:not([data-hidden]) ${pane} [data-compact-composer]'); const host = document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-wb-pane:has(${pane})'); if (!box || !host) return false; const b = box.getBoundingClientRect(), h = host.getBoundingClientRect(); return b.width > 0 && b.width <= 721 && Math.abs((b.left + b.right) / 2 - (h.left + h.right) / 2) <= 2 && h.bottom - b.bottom >= 8 && h.bottom - b.bottom <= 24; })()`;
 // The right rail (W4): a tab of the rail, by its data attribute.
 // Below 1100 px the rail is folded (D18): its edge icon opens it on the tab.
 const RAIL_TAB = (tab) => [
@@ -196,7 +210,7 @@ const DRIVES = {
     { do: "waitFor", expr: "document.querySelectorAll('.rl-wb-strip [role=tab]').length >= 2", timeout: 8000, why: "a second tab in the strip" },
   ],
   plan: SELECT_PLAN,
-  agent: OPEN_AGENT,
+  agent: [...OPEN_AGENT, { do: "waitFor", expr: COMPOSER_PLACED(".rl-agent-pane"), timeout: 8000, why: "the compact composer, centred and pinned (D27)" }],
   "agent-cli": [
     ...OPEN_AGENT,
     { do: "click", within: ".rl-agent-head", text: "CLI", up: "[role=radio]", why: "CLI in the header's Chat | CLI segment" },
@@ -230,7 +244,7 @@ const DRIVES = {
   // The first-run tour over a session with its Agent tab (W6): every step
   // that points at a region must find it and light it.
   tour: [
-    ...SELECT_PLAN,
+    ...OPEN_AGENT,
     { do: "key", key: "k", modifiers: 4, why: "⌘K: the palette" },
     { do: "waitFor", expr: "!!document.querySelector('input[placeholder^=\"Type a command\"]')", timeout: 8000, why: "the palette's box" },
     { do: "click", css: ["input[placeholder^=\"Type a command\"]"], why: "the caret in the palette's box" },
@@ -244,7 +258,7 @@ const DRIVES = {
   // A first run with no wall: the terminals step is a centred card, and the
   // tour opens no terminal (no PTY spawned, no Terminals tab left behind).
   "tour-no-wall": [
-    ...SELECT_PLAN,
+    ...OPEN_AGENT,
     { do: "eval", expr: "window.__qaPtysBefore = window.__qa.terminals().length", why: "count the terminals" },
     { do: "emit", event: "menu-open-tutorial", payload: null, why: "Redline → Getting Started" },
     { do: "waitFor", expr: "!!document.querySelector('[data-rl-tour-step]')", timeout: 8000, why: "the tour's first card" },
@@ -290,7 +304,26 @@ const DRIVES = {
   ],
   sidebar: [
     ...AT_HOME,
-    { do: "waitFor", expr: "!!document.querySelector('.rl-sb .rl-sb-places') && !!document.querySelector('.rl-sb .rl-sb-section .rl-sb-label')", timeout: 8000, why: "the Places and a project group" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-sb .rl-sb-places') && !!document.querySelector('.rl-sb .rl-sb-section .rl-sb-label')", timeout: 8000, why: "the Places and a project section" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-place')].map(b => b.dataset.place).join() === 'home,browser,servers'", timeout: 8000, why: "the Places are Home · Browser · Localhost (D30)" },
+    { do: "waitFor", expr: "[...document.querySelectorAll('.rl-sb .rl-sb-section[data-kind=project]')].some(s => [...s.querySelectorAll('.rl-sb-group-label')].map(l => l.textContent).join() === 'Plans,Chats')", timeout: 8000, why: "a project holds Plans and Chats (D31)" },
+  ],
+  chat: [
+    ...AT_HOME,
+    { do: "click", within: ".rl-sb .rl-sb-group[data-group=chats]", text: CHAT_ROW, up: "button", why: "the chat's sidebar row, in its project's Chats" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-chat-room] [data-compact-composer] .rl-fd-input')", timeout: 15000, why: "the chat pane, its compact composer" },
+    { do: "waitFor", expr: COMPOSER_PLACED("[data-chat-room]"), timeout: 8000, why: "centred in the pane at the design's measure, pinned to its bottom" },
+    { do: "waitFor", expr: "!document.querySelector('.rl-monochat-notch, .rl-monochat-float, .rl-statusbar-pill') && !/Working|In review/.test(document.querySelector('.rl-statusbar').textContent)", timeout: 3000, why: "no pill and no status words in the status bar (D27)" },
+  ],
+  "sidebar-click": [
+    ...AT_HOME,
+    { do: "eval", expr: `window.__qaTabsBefore = ${STRIP}.length`, why: "count Home's tabs" },
+    { do: "click", within: ".rl-sb", text: PLAN_ROW, up: "button", why: "the roadmap's row" },
+    { do: "waitFor", expr: `document.querySelector('.rl-wb-stage').dataset.wbKey === 'home' && ${STRIP}.length === window.__qaTabsBefore + 1 && ${STRIP}.some(t => t.getAttribute('aria-selected') === 'true' && /Din roadmap/.test(t.title))`, timeout: 15000, why: "a Plan tab in Home's strip, in front; the strip did not switch" },
+    { do: "click", within: ".rl-sb .rl-sb-group[data-group=chats]", text: CHAT_ROW, up: "button", why: "the chat's row" },
+    { do: "waitFor", expr: `document.querySelector('.rl-wb-stage').dataset.wbKey === 'home' && ${STRIP}.length === window.__qaTabsBefore + 2`, timeout: 15000, why: "its chat tab beside the plan, still Home" },
+    { do: "click", within: ".rl-sb", text: PLAN_ROW, up: "button", why: "the roadmap's row again" },
+    { do: "waitFor", expr: `${STRIP}.length === window.__qaTabsBefore + 2 && ${STRIP}.some(t => t.getAttribute('aria-selected') === 'true' && /Din roadmap/.test(t.title))`, timeout: 8000, why: "its tab comes forward: no second Plan tab" },
   ],
 };
 

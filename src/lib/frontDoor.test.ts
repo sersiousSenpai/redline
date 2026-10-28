@@ -416,11 +416,15 @@ describe("a companion chat is a pane, and the one room follows it", () => {
   });
 
   it("the door's Chat destination and an opened chat become a pane in place, or come forward", () => {
-    const mint = app.slice(app.indexOf("const chatFromFrontDoor = async () => {"), app.indexOf("const openChat = (id: string) => {"));
+    const mint = app.slice(app.indexOf("const chatFromFrontDoor = async () => {"), app.indexOf("const openChat = (id: string"));
     expect(mint).toContain('if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: chat.companionId } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: chat.companionId } });');
     expect(mint).toContain("setFrontDoorOpen(false);");
-    const open = app.slice(app.indexOf("const openChat = (id: string) => {"), app.indexOf("const startChat = useCallback("));
-    expect(open).toContain('if (!convertDoorPane({ kind: "chat", data: { source: "companion", companionId: id } })) wb.dispatch({ type: "openSurface", kind: "chat", data: { source: "companion", companionId: id } });');
+    const open = app.slice(app.indexOf("const openChat = (id: string"), app.indexOf("const startChat = useCallback("));
+    expect(open).not.toBe("");
+    // Picked in a door, the door becomes it; from a sidebar row (D29) it is
+    // a tab of its own in the set on screen.
+    expect(open).toContain("else if (!convertDoorPane(pane)) wb.dispatch({ type: \"openSurface\", kind: \"chat\", data: pane.data });");
+    expect(open).toContain('if (opts.inPlace === false) wb.dispatch({ type: "openInActive", pane });');
     expect(open).toContain("setFrontDoorOpen(false);");
     expect(open).not.toContain("setFrontDoorOpen(true);");
   });

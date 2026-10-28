@@ -542,3 +542,41 @@ describe("boot-path JS contract", () => {
     expect(quiet.length).toBeGreaterThanOrEqual(8);
   });
 });
+
+// Phase U (D27–D31): nothing new rides the boot path but the sidebar's own
+// diff (its lazy chunk) and two small pure helpers in the workbench model.
+describe("boot-path JS contract, phase U", () => {
+  const read = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8");
+  const app = read("src/App.tsx");
+  const staticImport = (src: string, from: string) => new RegExp(`^import (?!type\\b)[^;]*from "${from.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}"`, "m").test(src);
+
+  it("the compact composer rides its hosts' lazy chunks: the chat room and the session conversation", () => {
+    expect(staticImport(app, "./components/CompactComposer")).toBe(false);
+    expect(app).not.toContain("CompactComposer");
+    expect(staticImport(read("src/components/ChatRoom.tsx"), "./CompactComposer")).toBe(true);
+    // The session composer takes the stylesheet only; its module is the
+    // conversation's chunk.
+    expect(read("src/components/agent/SessionComposer.tsx")).toContain('import "../CompactComposer.css";');
+    expect(read("src/workbench/panes/chat.tsx")).toContain('import("../../components/ChatRoom")');
+  });
+
+  it("the footer pill and its card are gone: no card chunk, no pill in the boot island", () => {
+    expect(existsSync(join(process.cwd(), "src/components/MonochatCard.tsx"))).toBe(false);
+    const island = read("src/components/MonochatIsland.tsx");
+    expect(island).not.toMatch(/import\("\.\/MonochatCard"\)|PulseLogo|useNativeOverlayRegion|useHasSharedDraft/);
+    expect(read("src/components/Footer.tsx")).not.toMatch(/Spinner|footerStatus|agentLabelFor|ridesSubmit/);
+  });
+
+  it("the streaming tail's typing state is the shared Spinner, already on ReplyBlock's chunk", () => {
+    expect(staticImport(app, "./components/ReplyBlock")).toBe(false);
+    expect(read("src/components/ReplyBlock.tsx")).toContain('import { Spinner } from "./Spinner";');
+  });
+
+  it("the sidebar's groups and Places stay in its chunk; navigation adds only pure helpers to the model", () => {
+    expect(staticImport(app, "./components/SessionSidebar")).toBe(false);
+    expect(staticImport(app, "./lib/sessionGroups")).toBe(false);
+    // openInActive lives in the reducer (lazy behind the store's loader).
+    expect(staticImport(app, "./workbench/reducer")).toBe(false);
+    expect(read("src/workbench/model.ts")).toMatch(/export function activeSessionOf\(/);
+  });
+});

@@ -21,8 +21,8 @@
     { "name": "status bar live session", "css": [".rl-footer-meta .rl-live-chip"], "expect": { "height": 20 } }
   ],
   "home": {
-    "copy": ["Home", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps"],
-    "absent": ["Runs"],
+    "copy": ["Home", "Browser", "Localhost", "Din backend: Hono + Fly", "Din retrieval plan", "Din roadmap: next steps", "Plans", "Chats"],
+    "absent": ["Runs", "Plan a build"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "door plate", "css": [".rl-wb-door-plate"] },
@@ -37,11 +37,11 @@
     ]
   },
   "plan": {
-    "copy": ["Din roadmap: next steps", "Plan", "Agent"],
+    "$comment": "D29: a row opens its plan as a tab of the set on screen (Home), beside the door; its Agent tab comes from its terminal's row.",
+    "copy": ["Din roadmap: next steps", "Plan"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "Plan tab (titled after the plan)", "css": [".rl-wb-strip [role=tab][title^='Din roadmap: next steps']"], "expect": { "height": 34 } },
-      { "name": "Agent tab", "css": [".rl-wb-strip [role=tab][title='Agent']"], "expect": { "height": 34 } },
       { "name": "plan pane", "css": [".rl-plan-pane"] },
       { "name": "plan title", "within": ".rl-plan-pane", "text": "Din roadmap: next steps", "up": "h1" }
     ]
@@ -54,7 +54,10 @@
       { "name": "agent pane header", "css": [".rl-agent-pane .rl-agent-head"], "expect": { "height": 28 } },
       { "name": "Chat radio", "within": ".rl-agent-head", "text": "Chat", "up": "[role=radio]" },
       { "name": "CLI radio", "within": ".rl-agent-head", "text": "CLI", "up": "[role=radio]" },
-      { "name": "conversation", "css": [".rl-agent-pane .rl-convo"] }
+      { "name": "conversation", "css": [".rl-agent-pane .rl-convo"] },
+      { "name": "compact composer (D27)", "css": [".rl-agent-pane [data-compact-composer]"], "expect": { "maxWidth": 720, "borderRadius": 14, "paddingTop": 14, "paddingLeft": 14 } },
+      { "name": "composer chip", "css": [".rl-agent-pane [data-compact-composer] .rl-convo-chip"], "expect": { "height": 32, "borderRadius": 18 } },
+      { "name": "composer mic", "css": [".rl-agent-pane [data-compact-composer] .rl-convo-mic"], "expect": { "width": 32, "height": 32 } }
     ]
   },
   "agent-cli": {
@@ -91,14 +94,38 @@
     ]
   },
   "sidebar": {
-    "copy": ["Home", "Localhost"],
+    "copy": ["Home", "Browser", "Localhost", "Plans", "Chats"],
     "absent": ["Runs"],
     "probes": [
       { "name": "sidebar", "css": [".rl-sb"] },
       { "name": "Places", "css": [".rl-sb .rl-sb-places"] },
       { "name": "Home place", "within": ".rl-sb-places", "text": "Home", "up": "button, [role=button], a" },
       { "name": "project group label", "css": [".rl-sb .rl-sb-section .rl-sb-label"], "expect": { "fontSize": 11 } },
-      { "name": "session row title", "within": ".rl-sb", "text": "Din roadmap: next steps", "expect": { "fontSize": 13 } }
+      { "name": "session row title", "within": ".rl-sb", "text": "Din roadmap: next steps", "expect": { "fontSize": 13 } },
+      { "name": "Browser place (D30)", "css": [".rl-sb-places .rl-sb-place[data-place=browser]"] },
+      { "name": "Plans group header (D31)", "css": [".rl-sb .rl-sb-group[data-group=plans] .rl-sb-group-head"], "expect": { "height": 22 } },
+      { "name": "Chats group header (D31)", "css": [".rl-sb .rl-sb-group[data-group=chats] .rl-sb-group-head"], "expect": { "height": 22 } },
+      { "name": "group count", "css": [".rl-sb .rl-sb-group-count"] }
+    ]
+  },
+  "chat": {
+    "$comment": "D27: the chat pane's composer is the compact composer, centred under the thread and pinned to the pane's bottom (the drive's waits measure that); the status bar carries no pill and no status words.",
+    "copy": ["Review status check", "What are we working on?"],
+    "absent": ["Plan a build", "Preparing your reply", "Rate limited"],
+    "probes": [
+      { "name": "chat room", "css": ["[data-chat-room]"] },
+      { "name": "compact composer", "css": ["[data-chat-room] [data-compact-composer]"], "expect": { "maxWidth": 720, "borderRadius": 14, "paddingTop": 14, "paddingLeft": 14 } },
+      { "name": "composer field", "css": ["[data-chat-room] [data-compact-composer] .rl-fd-input"], "expect": { "fontSize": 15 } },
+      { "name": "composer menu chip", "css": ["[data-chat-room] [data-compact-composer] .rl-composer-chip"], "expect": { "height": 32 } },
+      { "name": "mode chip", "css": ["[data-chat-room] [data-compact-composer] .rl-chat-mode-picker > button"], "expect": { "height": 32, "borderRadius": 18 } },
+      { "name": "send", "css": ["[data-chat-room] [data-compact-composer] .rl-fd-go"], "expect": { "width": 32, "height": 32 } }
+    ]
+  },
+  "sidebar-click": {
+    "$comment": "D29: rows open tabs in the set on screen; the drive's waits are the checks.",
+    "probes": [
+      { "name": "Plan tab in Home", "css": [".rl-wb-strip [role=tab][title^='Din roadmap: next steps']"], "expect": { "height": 34 } },
+      { "name": "door tab kept", "css": [".rl-wb-strip [role=tab][aria-selected=false]"], "expect": { "height": 34 } }
     ]
   }
 }
