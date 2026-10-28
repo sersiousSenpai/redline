@@ -63,7 +63,7 @@ function flag(name, fallback) {
   return v && !v.startsWith("--") ? v : true;
 }
 const list = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
-const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
+const ALL_SCENES = ["home", "door-tab", "plan", "agent", "agent-cli", "browser", "browser-newtab", "sidebar", "chat", "sidebar-click", "door-recents", "tour", "tour-no-wall", "tile", "drafter", "rail-plan-discussion", "rail-plan-talk", "rail-plan-files", "rail-plan-changes", "rail-browser-talk", "rail-browser-files", "rail-browser-changes", "rail-folded", "quick-open", "file-pane", "rail-file-talk", "rail-home-talk", "plan-split-door"];
 const SCENES = list(flag("scene", ALL_SCENES.join(",")));
 const THEMES = list(flag("theme", "aurora"));
 const sizeFlag = flag("size", null);
@@ -94,6 +94,7 @@ const SCENE = {
   sidebar: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   chat: { board: "workbench", sizes: [{ width: 1440, height: 900 }, { width: 900, height: 640 }] },
   "sidebar-click": { board: "workbench" },
+  "door-recents": { board: "workbench" },
   tour: { board: "workbench" },
   "tour-no-wall": { board: "workbench" },
   tile: { board: "workbench" },
@@ -314,6 +315,20 @@ const DRIVES = {
     { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-chat-room] [data-compact-composer] .rl-fd-input')", timeout: 15000, why: "the chat pane, its compact composer" },
     { do: "waitFor", expr: COMPOSER_PLACED("[data-chat-room]"), timeout: 8000, why: "centred in the pane at the design's measure, pinned to its bottom" },
     { do: "waitFor", expr: "!document.querySelector('.rl-monochat-notch, .rl-monochat-float, .rl-statusbar-pill') && !/Working|In review/.test(document.querySelector('.rl-statusbar').textContent)", timeout: 3000, why: "no pill and no status words in the status bar (D27)" },
+  ],
+  // The door's recents jump back as tabs of the set on screen (D29), as
+  // the sidebar's rows do: a chat chip, then a plan chip.
+  "door-recents": [
+    ...AT_HOME,
+    { do: "eval", expr: `window.__qaTabsBefore = ${STRIP}.length`, why: "count Home's tabs" },
+    { do: "click", css: [".rl-fd-recents .rl-fd-recent-row[data-kind=chat] button"], why: "the door's CHATS chip" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-chat-room]')", timeout: 15000, why: "the chat's room is the pane on screen" },
+    { do: "waitFor", expr: `document.querySelector('.rl-wb-stage').dataset.wbKey === 'home' && ${STRIP}.length === window.__qaTabsBefore + 1 && ${STRIP}.some(t => t.getAttribute('aria-selected') === 'true' && /Chat/.test(t.textContent))`, timeout: 3000, why: "a chat tab of Home's strip, in front (Home's own door stays)" },
+    { do: "emit", event: "menu-new-tab", payload: null, why: "a fresh door tab, as the native menu sends ⌘T" },
+    { do: "waitFor", expr: "!!document.querySelector('.rl-fd-recents:not(.is-hidden) .rl-fd-recent-row[data-kind=plan] button') && !document.querySelector('.rl-wb-tab-body:not([data-hidden]) [data-chat-room]')", timeout: 15000, why: "a door with its recents, the chat behind it" },
+    { do: "click", css: [".rl-fd-recents:not(.is-hidden) .rl-fd-recent-row[data-kind=plan] button"], why: "the door's PLANS chip" },
+    { do: "waitFor", expr: `document.querySelector('.rl-wb-stage').dataset.wbKey === 'home' && !!document.querySelector('.rl-wb-tab-body:not([data-hidden]) .rl-plan-pane h1')`, timeout: 15000, why: "the plan as a tab of Home's strip, on screen" },
+    { do: "waitFor", expr: `${STRIP}.length === window.__qaTabsBefore + 2`, timeout: 3000, why: "the untouched ⌘T door it was picked from stepped aside" },
   ],
   "sidebar-click": [
     ...AT_HOME,

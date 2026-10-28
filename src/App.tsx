@@ -8776,20 +8776,25 @@ function App() {
     () => doorRecents({ plans: summaries, chats, tabs: doorTabs }),
     [summaries, chats, doorTabs],
   );
+  // A recent jumps back the way the sidebar's rows do (D29): as a tab of
+  // the set on screen, or that set's tab for it comes forward — a chat its
+  // room, a plan its Plan tab, a page the browser. A ⌘T door nobody typed
+  // in, which the recent was picked from, steps aside. (The chat chip used
+  // the door's own in-place conversion, a different route from the rows'.)
   const openDoorRecent = (r: DoorRecent) => {
-    if (r.kind === "chat") return openChat(r.id);
+    const before = wb.getState();
+    const from = { key: before.activeKey, tabId: before.sets[before.activeKey]?.activeTabId ?? null };
     tripDoor();
     setFrontDoorOpen(false);
-    if (r.kind === "plan") {
-      selectSessions();
-      setActiveId(r.id);
-      selectSurface("document");
-      return;
+    if (r.kind === "chat") openChat(r.id, { inPlace: false });
+    else if (r.kind === "plan") setActiveId(r.id);
+    else {
+      // By thread. A plan's explicit research link reopens with its answer
+      // (the same as "View result"); any other tab comes back quietly.
+      setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
+      selectSurface("browser");
     }
-    // By thread. A plan's explicit research link reopens with its answer (the
-    // same as "View result"); any other tab comes back quietly, chat closed.
-    setBrowserOpenRequest({ url: r.url ?? "", nonce: Date.now(), focusBrowseId: r.id, quiet: !r.research });
-    selectSurface("browser");
+    closeUntouchedDoor(from.key, from.tabId);
   };
   // On screen in the dock's column — the same room, at column scale.
   const chatDocked = !chatPane && !!chatId && voiceDocked && dockContext?.kind === "companion";
