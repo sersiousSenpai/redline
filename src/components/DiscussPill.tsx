@@ -49,6 +49,7 @@ export function DiscussPill({
   textInset = 0,
   measureKey,
   voiceKey,
+  shift = 0,
 }: {
   onClick: () => void;
   title?: string;
@@ -69,6 +70,10 @@ export function DiscussPill({
   /** The voice key the panel opens on from here: the pill shows a turn left
    *  running only when it is this conversation's. */
   voiceKey?: string;
+  /** Px to slide right of the pane edge: the open Contents rail's width, so
+   *  the pill stands beside the rail instead of over its entries. Every
+   *  stage's edge moves with it. */
+  shift?: number;
 }) {
   const pillRef = useRef<HTMLButtonElement | null>(null);
   const warmRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -127,14 +132,14 @@ export function DiscussPill({
     textRef,
     textInset,
     flag: "rlStowed",
-    deps: [measureKey],
+    deps: [measureKey, shift],
     // Each stage's right edge, from styling constants + the EXPANDED metrics —
     // never live layout of a collapsed pose (that would feed the collapse back
     // in). Stowed is the rotated footprint: as wide as the pill is tall.
     stages: (w, h) => ({
-      full: FULL_LEFT + w,
-      stowed: FULL_LEFT + h,
-      icon: ICON_LEFT + ICON_SIZE,
+      full: shift + FULL_LEFT + w,
+      stowed: shift + FULL_LEFT + h,
+      icon: shift + ICON_LEFT + ICON_SIZE,
     }),
     // The hinge pivot, which only a measured pill can know. Rotating about the
     // bottom-left corner would swing the body down out of the pane, so the
@@ -164,11 +169,15 @@ export function DiscussPill({
         title={label}
         aria-label={label}
         className="rl-discuss-pill absolute flex items-center gap-1.5 rounded-full"
-        /* `left` lives in the stylesheet — the icon stage moves it, and an
-           inline value would out-specific the stage rule. */
+        /* `left` and `padding` live in the stylesheet — the icon stage
+           changes both, and an inline value would out-specific the stage
+           rule (an inline padding left the 26px circle no room for its
+           glyph). */
         style={{
           bottom: `${bottom}px`,
-          padding: "6px 12px",
+          // `translate`, not `left`: the stage rules own `left`, and the
+          // stow's `transform` rotation composes after it.
+          translate: shift ? `${shift}px 0` : undefined,
           fontSize: "13px",
           background: "var(--color-bg-elevated)",
           border: "1px solid var(--color-rule)",

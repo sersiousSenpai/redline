@@ -120,6 +120,21 @@ describe("PlanPane", () => {
     expect(q(".rl-plan-foot")?.textContent).toContain("session for this plan ended");
   });
 
+  it("the ⋯ opens the shared popover: portalled out of the 28px header, fixed, with a height budget, and Escape closes it", async () => {
+    await render(props());
+    const more = q('[aria-label="More plan actions"]') as HTMLButtonElement;
+    await act(async () => more.click());
+    const panel = document.body.querySelector<HTMLElement>(".rl-plan-menu-panel");
+    expect(panel).not.toBeNull();
+    expect(host.contains(panel)).toBe(false);
+    expect(panel!.style.position).toBe("fixed");
+    expect(panel!.style.maxHeight).toMatch(/px$/);
+    expect(panel!.querySelectorAll("[role=menuitem]").length).toBeGreaterThan(0);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+    expect(document.body.querySelector(".rl-plan-menu-panel")).toBeNull();
+  });
+
   it("buildProgress reads a live run's totals", () => {
     expect(buildProgress(null)).toBe(null);
     expect(buildProgress({ totals: { plannedAgents: 11, done: 2, running: 1 } })).toEqual({ step: 3, of: 11 });

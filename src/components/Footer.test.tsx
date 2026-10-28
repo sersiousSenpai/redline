@@ -3,6 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { Footer } from "./Footer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -176,5 +177,26 @@ describe("a review waiting for you", () => {
     expect(opened).toBe(1);
     await mountWith({ reviewNews: "Run report ready", onOpenReviewNews: () => {} });
     expect(chip()?.textContent).toBe("Run report ready → Open");
+  });
+});
+
+describe("one set of plan verbs on screen", () => {
+  it("planVerbs={false} keeps the status and drops Send and Approve & build: the Plan pane's footer carries them", async () => {
+    await act(async () => root.render(createElement(Footer, {
+      comments: [], sessionReady: true, canSubmit: true, canApprove: true, waiting: false, waitingAsk: false,
+      onSubmit: () => {}, onApprove: () => {}, onApproveLater: () => {},
+      termCollapsed: false, termTabCount: 0, onExpandTerminal: () => {},
+      planVerbs: false,
+    })));
+    expect(host.textContent).toContain("no pending comments");
+    expect(host.textContent).not.toContain("Approve & build");
+    expect(host.textContent).not.toContain("Send to");
+    expect(host.querySelector(".rl-footer-actions")).toBeNull();
+  });
+
+  it("App ties it to a Plan pane being on screen", () => {
+    const app = readFileSync("src/App.tsx", "utf8");
+    const footer = app.slice(app.indexOf("<Footer\n"), app.indexOf("/>", app.indexOf("<Footer\n")));
+    expect(footer).toMatch(/planVerbs=\{!\(classicWb && wbView\.visibleKinds\.includes\("plan"\)\)\}/);
   });
 });

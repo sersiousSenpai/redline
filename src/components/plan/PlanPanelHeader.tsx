@@ -18,10 +18,10 @@
 //! header carries it as an icon beside Full screen, since 4c's header has no
 //! room on its left for a second label.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Ellipsis, FileText, List, Maximize2, Minimize2, X } from "lucide-react";
 
-import { MenuSurface } from "../ui/MenuSurface";
+import { Panel, useClickPopover } from "../popover";
 import { VersionPill, type VersionPillProps } from "./VersionPill";
 import "./plan.css";
 
@@ -150,59 +150,58 @@ export function PlanPanelHeader({
   );
 }
 
-/** The ⋯ and its menu, hung under the button's right edge. */
+/** The ⋯ menu's width, px: the placement clamp and the panel share it. */
+const PLAN_MENU_WIDTH = 248;
+
+/** The ⋯ and its menu, hung under the button's right edge.
+ *
+ *  The panel is the shared popover (`useClickPopover` + `Panel`): portalled
+ *  and `position: fixed`, so the 28px pane header neither clips nor
+ *  positions it; placed against the viewport with a `maxHeight` budget, so a
+ *  short window scrolls the rows instead of hanging them off the edge; and
+ *  registered with the menu overlay, so a native browser webview beside the
+ *  plan hides while it is open instead of painting over it. */
 function PlanMenu({ items }: { items: readonly PlanMenuItem[] }) {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLSpanElement>(null);
+  const anchor = useRef<HTMLButtonElement>(null);
+  const { open, close, toggle, panelProps } = useClickPopover(anchor, "right", "below", PLAN_MENU_WIDTH);
   useEffect(() => {
     if (!open) return;
-    wrap.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
-    const away = (e: Event) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      setOpen(false);
-      wrap.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    };
-    document.addEventListener("pointerdown", away, true);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("pointerdown", away, true);
-      document.removeEventListener("keydown", esc);
-    };
+    document.querySelector<HTMLButtonElement>(".rl-plan-menu-panel [role=menuitem]")?.focus({ preventScroll: true });
   }, [open]);
   return (
-    <span ref={wrap} className="rl-plan-menu">
+    <span className="rl-plan-menu">
       <button
+        ref={anchor}
         type="button"
         className="rl-plan-head-btn rl-plan-head-icon-btn"
         aria-label="More plan actions"
         title="Export, share, invite, move"
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
       >
         <Ellipsis aria-hidden size={14} strokeWidth={2} />
       </button>
       {open && (
-        <MenuSurface ariaLabel="Plan actions" className="rl-plan-menu-panel">
-          {items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              role="menuitem"
-              className="rl-plan-menu-item"
-              onClick={() => {
-                setOpen(false);
-                item.onPick();
-              }}
-            >
-              {item.label}
-              {item.detail && <span className="rl-plan-menu-detail">{item.detail}</span>}
-            </button>
-          ))}
-        </MenuSurface>
+        <Panel label="Plan actions" className="rl-plan-menu-panel" {...panelProps}>
+          <div className="rl-plan-menu-list">
+            {items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="menuitem"
+                className="rl-plan-menu-item"
+                onClick={() => {
+                  close();
+                  item.onPick();
+                }}
+              >
+                {item.label}
+                {item.detail && <span className="rl-plan-menu-detail">{item.detail}</span>}
+              </button>
+            ))}
+          </div>
+        </Panel>
       )}
     </span>
   );

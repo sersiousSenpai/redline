@@ -19,6 +19,7 @@
 //! holds its contrast), dismissable where classic's was.
 
 import { X } from "lucide-react";
+import "./plan.css";
 
 import { FixControl } from "../ReadinessStrip";
 import type { ReadinessItem } from "../../lib/readiness";

@@ -65,6 +65,9 @@ interface FooterProps {
   onExpandTerminal: () => void;
   /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
+  /** Draw Send and Approve & build. False while a Plan pane on screen draws
+   *  its own footer verbs: one Approve on screen, never two. */
+  planVerbs?: boolean;
 }
 
 export function Footer({
@@ -91,6 +94,7 @@ export function Footer({
   onOpenReviewNews,
   onExpandTerminal,
   backend,
+  planVerbs = true,
 }: FooterProps) {
   const author = agentLabelFor(backend);
   // What the next Send carries — an unpromoted research comment doesn't.
@@ -298,7 +302,7 @@ export function Footer({
           </>
         )}
       </span>
-      <span data-tour="footer" className="rl-footer-actions flex items-center gap-2">
+      {planVerbs && <span data-tour="footer" className="rl-footer-actions flex items-center gap-2">
         <Button
           size="sm"
           onClick={onSubmit}
@@ -350,7 +354,7 @@ export function Footer({
             }}
           />
         )}
-      </span>
+      </span>}
     </footer>
   );
 }

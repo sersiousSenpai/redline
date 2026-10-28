@@ -9767,7 +9767,9 @@ function App() {
           <div
             className="rl-surface-pane flex-1 min-h-0 min-w-0 overflow-hidden flex flex-col relative"
             data-main-surface={mainSurface}
-            style={{ "--rl-doc-zoom": docZoom } as React.CSSProperties}
+            // The docked Contents rail's width, for what sits beside it
+            // outside the plan's scroller: the Plan pane's notices.
+            style={{ "--rl-doc-zoom": docZoom, "--rl-toc-docked": tocDocked ? `${tocRailW}px` : "0px" } as React.CSSProperties}
           >
           {/* Table-of-contents rail (Phase 2). Docked to the left of the
               document column: the scroller below reserves `TOC_RAIL_W` of left
@@ -10635,6 +10637,9 @@ function App() {
               is up. Stands up out of the article's way when the pane gets too
               narrow to hold both; 64 is the article's pl-16. */}
           {mainSurface === "document" &&
+            // Under the workbench, only over a Plan pane on screen: an Agent
+            // tab has its own composer and no document to discuss.
+            (!classicWb || wbView.visibleKinds.includes("plan")) &&
             // Not on the Front Door. The door is one composed gesture — a
             // sentence and three destinations, one of which IS a conversation
             // — and a floating pill offering a fourth way to the same place
@@ -10656,6 +10661,7 @@ function App() {
                 textInset={64}
                 measureKey={`${docWide}:${docMeasure}`}
                 voiceKey={dockContext?.key}
+                shift={tocDocked && plateMode === "plan" ? tocRailW : 0}
               />
             )}
           {/* Floating document zoom + line-width control — pinned to the pane
@@ -11406,6 +11412,9 @@ function App() {
         onOpenReviewNews={() => selectSurface("review")}
         onExpandTerminal={revealTerm}
         backend={session?.backend ?? null}
+        // A Plan pane on screen carries the verbs in its own footer; this
+        // bar keeps the status (W6 slims it to that).
+        planVerbs={!(classicWb && wbView.visibleKinds.includes("plan"))}
       />
       </ChromeSlot></Suspense>
       </ErrorBoundary>
